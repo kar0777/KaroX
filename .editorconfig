@@ -1,0 +1,22 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.ps1]
+charset = utf-8-bom
+end_of_line = crlf
+
+[*.cmd]
+end_of_line = crlf
+
+# macOS / Linux shell-скрипты: LF, без BOM (POSIX).
+[*.{sh,command}]
+charset = utf-8
+end_of_line = lf
+
+[*.md]
+trim_trailing_whitespace = false

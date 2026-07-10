@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+# Smoke-test образ для проверки POSIX-пути RepoPilot Bridge.
+# Linux/amd64 с /bin/sh — близко к macOS по семантике оболочки, позволяет
+# прогнать doctor.sh без реального Mac. Не покрывает brew/paths/pbcopy/Tailscale.
+#
+# Сборка и запуск автоматизированы в scripts/smoke-test.sh.
+
+FROM python:3.12-slim
+
+# git + curl нужны doctor.sh; bash уже есть в образе.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Рабочий каталог внутри контейнера.
+WORKDIR /opt/repopilot
+
+# Копируем сервер и bash-обвязку. install.sh копируем, чтобы можно было
+# проверить его синтаксис (bash -n), но НЕ запускаем его — в контейнере нет brew.
+COPY server/ ./server/
+COPY doctor.sh ./doctor.sh
+COPY install.sh ./install.sh
+COPY requirements.txt ./requirements.txt
+
+# Устанавливаем Python-зависимости в системный python (без venv, чтобы
+# doctor.sh использовал тот же интерпретатель через REPOPILOT_PYTHON).
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Линта: проверяем синтаксис всех bash-скриптов и py-файла ещё на этапе сборки.
+RUN bash -n /opt/repopilot/doctor.sh \
+    && bash -n /opt/repopilot/install.sh \
+    && python -m py_compile /opt/repopilot/server/repo_tools.py
+
+# doctor.sh запускается через entrypoint с системным python3.
+ENV REPOPILOT_PYTHON=/usr/local/bin/python3
+ENV REPOPILOT_RUNTIME=/tmp/repopilot-runtime
+
+CMD ["bash", "/opt/repopilot/doctor.sh"]

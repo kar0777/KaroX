@@ -1,0 +1,18 @@
+# Runtime
+.venv/
+__pycache__/
+*.pyc
+
+# Local state
+logs/
+runs/
+*.log
+cloudflared.log
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
