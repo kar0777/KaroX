@@ -43,7 +43,11 @@ has_command() { command -v "$1" >/dev/null 2>&1; }
 
 ask_yes() {
     local text="$1" default_yes="${2:-1}" suffix
-    if [ "$default_yes" = 1 ]; then suffix="Д/н"; else suffix="д/Н"; fi
+    if [ "$(get_selected_language)" = ru ]; then
+        if [ "$default_yes" = 1 ]; then suffix="Д/н"; else suffix="д/Н"; fi
+    else
+        if [ "$default_yes" = 1 ]; then suffix="Y/n"; else suffix="y/N"; fi
+    fi
     printf '%s [%s] ' "$text" "$suffix" >&2
     local answer
     read -r answer
@@ -96,17 +100,17 @@ ensure_installed() {
         missing+=("Git")
     fi
     if ! has_command curl; then
-        missing+=("curl (нужен для проверки готовности сервера и doctor)")
+        missing+=("$(l "curl (required for server readiness and doctor)" "curl (нужен для проверки готовности сервера и doctor)")")
     fi
     if [ "${#missing[@]}" -gt 0 ]; then
-        log_warn "Не хватает компонентов:"
+        log_warn "$(l "Missing components:" "Не хватает компонентов:")"
         for m in "${missing[@]}"; do echo " - $m"; done
-        if ask_yes "Запустить install.sh сейчас?" 1; then
+        if ask_yes "$(l "Run install.sh now?" "Запустить install.sh сейчас?")" 1; then
             bash "$SCRIPT_DIR/install.sh"
-            find_python_runtime || { log_error "Python всё ещё не найден после install.sh"; exit 1; }
-            has_command curl || { log_error "curl не найден. Установите: brew install curl (macOS) / apt install curl (Linux)."; exit 1; }
+            find_python_runtime || { log_error "$(l "Python is still missing after install.sh" "Python всё ещё не найден после install.sh")"; exit 1; }
+            has_command curl || { log_error "$(l "curl was not found. Install it with: brew install curl (macOS) / apt install curl (Linux)." "curl не найден. Установите: brew install curl (macOS) / apt install curl (Linux).")"; exit 1; }
         else
-            log_error "Настройка отменена."
+            log_error "$(l "Setup cancelled." "Настройка отменена.")"
             exit 1
         fi
     fi
@@ -180,7 +184,7 @@ ai_client_label() {
     case "$c" in
         letaido) printf 'letaido.com' ;;
         promptql) printf 'prompt.ql.app' ;;
-        *) printf 'Сторонний сервис' ;;
+        *) l "Other client" "Сторонний сервис" ;;
     esac
 }
 
@@ -193,6 +197,9 @@ normalize_language() {
 }
 
 get_selected_language() {
+    case "${KAROX_LANGUAGE:-}" in
+        en|ru) printf '%s' "$KAROX_LANGUAGE"; return 0 ;;
+    esac
     load_settings | json_py "import json,sys; print(json.loads(sys.stdin.read() or '{}').get('language','en'))" 2>/dev/null || printf 'en'
 }
 
@@ -290,7 +297,7 @@ ensure_git_repo() {
     path="${path//\"/}"
     path="${path//\'/}"
     if [ ! -d "$path" ]; then
-        log_error "Папка не найдена: $path"
+        log_error "$(l "Folder not found:" "Папка не найдена:") $path"
         return 1
     fi
     path="$(cd "$path" && pwd)"
@@ -299,16 +306,16 @@ ensure_git_repo() {
         return 0
     fi
     echo ""
-    log_warn "В этой папке нет Git-репозитория: $path"
-    echo "KaroX использует Git для diff, веток и безопасного commit."
-    if ! ask_yes "Инициализировать Git в этой папке сейчас?" 1; then
+    log_warn "$(l "This folder is not a Git repository:" "В этой папке нет Git-репозитория:") $path"
+    echo "$(l "KaroX uses Git for diffs, branches, and safe commits." "KaroX использует Git для diff, веток и безопасного commit.")"
+    if ! ask_yes "$(l "Initialize Git in this folder now?" "Инициализировать Git в этой папке сейчас?")" 1; then
         return 1
     fi
     git -C "$path" init >/dev/null 2>&1 || { log_error "git init failed"; return 1; }
     git -C "$path" config user.email "repopilot@example.local" >/dev/null 2>&1
     git -C "$path" config user.name "Star For KaroX" >/dev/null 2>&1
     git -C "$path" commit --allow-empty -m "chore: initialize repository for RepoPilot" >/dev/null 2>&1 || { log_error "empty commit failed"; return 1; }
-    log_success "Git-репозиторий инициализирован."
+    log_success "$(l "Git repository initialized." "Git-репозиторий инициализирован.")"
     printf '%s' "$path"
 }
 
@@ -377,7 +384,7 @@ assert_session_isolation() {
     local port="$1" key="$2" expected_repo="$3" expected_branch="$4" expected_mode="$5"
     local health session
     health="$(api_get "$port" /health "$key")"
-    [ -z "$health" ] && { log_error "Новая сессия не отвечает на /health"; return 1; }
+    [ -z "$health" ] && { log_error "$(l "The new session did not answer /health" "Новая сессия не отвечает на /health")"; return 1; }
     local actual_repo
     actual_repo="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('repoRoot',''))" <<< "$health" 2>/dev/null || true)"
     if [ -n "$actual_repo" ]; then
@@ -385,21 +392,21 @@ assert_session_isolation() {
         r1="$(cd "$actual_repo" 2>/dev/null && pwd || echo "$actual_repo")"
         r2="$(cd "$expected_repo" 2>/dev/null && pwd || echo "$expected_repo")"
         if [ "$r1" != "$r2" ]; then
-            log_error "Новая сессия отвечает не тем проектом. Ожидался: $expected_repo, получен: $actual_repo"
+            log_error "$(l "The new session returned the wrong project. Expected:" "Новая сессия отвечает не тем проектом. Ожидался:") $expected_repo, $(l "received:" "получен:") $actual_repo"
             return 1
         fi
     fi
     session="$(api_get "$port" /session "$key")"
-    [ -z "$session" ] && { log_error "Новая сессия не отвечает на /session"; return 1; }
+    [ -z "$session" ] && { log_error "$(l "The new session did not answer /session" "Новая сессия не отвечает на /session")"; return 1; }
     local actual_branch actual_mode
     actual_branch="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('branch',''))" <<< "$session" 2>/dev/null || true)"
     actual_mode="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('mode',''))" <<< "$session" 2>/dev/null || true)"
     if [ -n "$actual_branch" ] && [ "$actual_branch" != "$expected_branch" ]; then
-        log_error "Новая сессия отвечает не той веткой. Ожидалась: $expected_branch, получена: $actual_branch"
+        log_error "$(l "The new session returned the wrong branch. Expected:" "Новая сессия отвечает не той веткой. Ожидалась:") $expected_branch, $(l "received:" "получена:") $actual_branch"
         return 1
     fi
     if [ -n "$actual_mode" ] && [ "$actual_mode" != "$expected_mode" ]; then
-        log_error "Новая сессия отвечает не тем режимом. Ожидался: $expected_mode, получен: $actual_mode"
+        log_error "$(l "The new session returned the wrong mode. Expected:" "Новая сессия отвечает не тем режимом. Ожидался:") $expected_mode, $(l "received:" "получен:") $actual_mode"
         return 1
     fi
     printf '{"repoRoot":"%s","branch":"%s","mode":"%s"}' "$actual_repo" "$actual_branch" "$actual_mode"
@@ -459,11 +466,11 @@ start_tunnel() {
     local provider="$1" local_port="$2" out_log="$3" err_log="$4" exe
     provider="$(normalize_tunnel_provider "$provider")"
     if [ "$provider" = tailscale ]; then
-        exe="$(find_tailscale)" || { log_error "tailscale не найден"; return 1; }
+        exe="$(find_tailscale)" || { log_error "$(l "tailscale was not found" "tailscale не найден")"; return 1; }
         nohup "$exe" funnel --yes "http://127.0.0.1:$local_port" >"$out_log" 2>"$err_log" &
         printf '%s' "$!"
     else
-        exe="$(find_cloudflared)" || { log_error "cloudflared не найден"; return 1; }
+        exe="$(find_cloudflared)" || { log_error "$(l "cloudflared was not found" "cloudflared не найден")"; return 1; }
         nohup "$exe" tunnel --url "http://localhost:$local_port" >"$out_log" 2>"$err_log" &
         printf '%s' "$!"
     fi
@@ -842,7 +849,7 @@ new_branch() {
     local repo="$1" prefix="$2" stamp branch
     stamp="$(date +%Y%m%d-%H%M%S)"
     branch="promptql/${prefix}-${stamp}"
-    git -C "$repo" switch -c "$branch" >/dev/null 2>&1 || { log_error "Не удалось создать ветку $branch"; return 1; }
+    git -C "$repo" switch -c "$branch" >/dev/null 2>&1 || { log_error "$(l "Could not create branch" "Не удалось создать ветку") $branch"; return 1; }
     printf '%s' "$branch"
 }
 
@@ -993,7 +1000,7 @@ gen_session_id() {
 
 start_new_session() {
     local mode_choice repo session_title
-    mode_choice="$(select_mode)" || { log_error "Неверный режим"; return 1; }
+    mode_choice="$(select_mode)" || { log_error "$(l "Invalid access profile" "Неверный режим")"; return 1; }
     repo="$(select_repo)" || return 1
 
     printf '%s: ' "$(l "Session name (history label, not an AI task)" "Название сессии (метка истории, не ТЗ для AI)")" >&2
@@ -1010,8 +1017,8 @@ start_new_session() {
             case "$branch" in
                 promptql/*) ;;
                 *)
-                    log_warn "Текущая ветка не promptql/*: $branch"
-                    if ! ask_yes "Продолжить на этой ветке?" 0; then return 1; fi
+                    log_warn "$(l "Current branch is not promptql/*:" "Текущая ветка не promptql/*:") $branch"
+                    if ! ask_yes "$(l "Continue on this branch?" "Продолжить на этой ветке?")" 0; then return 1; fi
                     ;;
             esac
             ;;
@@ -1030,9 +1037,9 @@ n=sum(1 for s in items if s.get('status')=='running' and os.path.realpath(s.get(
 print(n)" "$repo" 2>/dev/null || echo 0)"
         if [ "$same_count" -gt 0 ]; then
             echo ""
-            log_warn "Этот путь проекта уже открыт в другой активной сессии."
-            log_warn "Для двух параллельных задач в одном проекте нужен отдельный clone/worktree."
-            if ! ask_yes "Всё равно продолжить на этом же пути?" 0; then return 1; fi
+            log_warn "$(l "This project path is already open in another active session." "Этот путь проекта уже открыт в другой активной сессии.")"
+            log_warn "$(l "Parallel tasks in one project require a separate clone/worktree." "Для двух параллельных задач в одном проекте нужен отдельный clone/worktree.")"
+            if ! ask_yes "$(l "Continue on the same path anyway?" "Всё равно продолжить на этом же пути?")" 0; then return 1; fi
         fi
     fi
 
@@ -1062,10 +1069,10 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
     rm -f "$server_out_log" "$server_err_log" "$server_log" "$tunnel_out_log" "$tunnel_err_log" 2>/dev/null || true
 
     header "$(l "Provisioning local workspace" "Запуск локального рабочего пространства")"
-    echo "Проект: $repo"
-    echo "Режим : $mode"
-    echo "Туннель: $(provider_label "$tunnel_provider")"
-    echo "Порт  : $local_port"
+    echo "$(l "Repository" "Проект"): $repo"
+    echo "$(l "Mode" "Режим")      : $mode"
+    echo "$(l "Tunnel" "Туннель")    : $(provider_label "$tunnel_provider")"
+    echo "$(l "Port" "Порт")      : $local_port"
     echo ""
 
     log_info "  ◌ Starting secure local API..."
@@ -1095,8 +1102,8 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
         local tail_text=""
         [ -f "$server_err_log" ] && tail_text="$(tail -n 30 "$server_err_log" 2>/dev/null || true)"
         [ -f "$server_out_log" ] && tail_text="$tail_text$(tail -n 30 "$server_out_log" 2>/dev/null || true)"
-        [ -z "$tail_text" ] && tail_text="Логи пустые."
-        log_error "Локальный API не ответил за 20 секунд."
+        [ -z "$tail_text" ] && tail_text="$(l "Logs are empty." "Логи пустые.")"
+        log_error "$(l "Local API did not respond within 20 seconds." "Локальный API не ответил за 20 секунд.")"
         echo "$tail_text"
         return 1
     fi
@@ -1117,8 +1124,8 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
         fi
         if [ "$tunnel_ok" = 0 ]; then
             echo ""
-            log_warn "$(provider_label tailscale) не готов."
-            if ask_yes "Запустить tailscale up сейчас?" 1; then
+            log_warn "$(provider_label tailscale) $(l "is not ready." "не готов.")"
+            if ask_yes "$(l "Run tailscale up now?" "Запустить tailscale up сейчас?")" 1; then
                 "$ts_exe" up 2>&1 || true
                 if [ -n "$ts_exe" ] && tailscale_ready "$ts_exe"; then tunnel_ok=1; fi
             fi
@@ -1128,7 +1135,7 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
     fi
     if [ "$tunnel_ok" = 0 ]; then
         kill_tree "$server_pid" 2>/dev/null || true
-        log_error "$(provider_label "$tunnel_provider") не готов."
+        log_error "$(provider_label "$tunnel_provider") $(l "is not ready." "не готов.")"
         return 1
     fi
 
@@ -1145,23 +1152,23 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
         local tail_text=""
         [ -f "$tunnel_out_log" ] && tail_text="$(tail -n 30 "$tunnel_out_log" 2>/dev/null || true)"
         [ -f "$tunnel_err_log" ] && tail_text="$tail_text$(tail -n 30 "$tunnel_err_log" 2>/dev/null || true)"
-        [ -z "$tail_text" ] && tail_text="Логи пустые."
+        [ -z "$tail_text" ] && tail_text="$(l "Logs are empty." "Логи пустые.")"
         if [ "$tunnel_provider" = tailscale ]; then
             local enable_url
             enable_url="$(tailscale_funnel_enable_url "$tail_text")"
             if [ -n "$enable_url" ]; then
                 echo ""
-                log_warn "Tailscale просит включить Funnel для этого tailnet."
-                log_info "Ссылка включения: $enable_url"
+                log_warn "$(l "Tailscale requires Funnel to be enabled for this tailnet." "Tailscale просит включить Funnel для этого tailnet.")"
+                log_info "$(l "Enable URL:" "Ссылка включения:") $enable_url"
                 printf '%s' "$enable_url" | copy_to_clipboard >/dev/null 2>&1 || true
-                log_success "Ссылка скопирована в буфер обмена."
+                log_success "$(l "URL copied to the clipboard." "Ссылка скопирована в буфер обмена.")"
                 open_url "$enable_url"
-                log_warn "Подтвердите Funnel в Tailscale и запустите сессию ещё раз."
+                log_warn "$(l "Approve Funnel in Tailscale and start the session again." "Подтвердите Funnel в Tailscale и запустите сессию ещё раз.")"
             else
-                log_warn "Откройте G = настройки, выберите Tailscale Funnel и нажмите L для tailscale up."
+                log_warn "$(l "Open G = Settings, choose Tailscale Funnel, and press L to run tailscale up." "Откройте G = настройки, выберите Tailscale Funnel и нажмите L для tailscale up.")"
             fi
         fi
-        log_error "Не удалось получить URL туннеля. Логи: $tunnel_out_log / $tunnel_err_log"
+        log_error "$(l "Could not obtain the tunnel URL. Logs:" "Не удалось получить URL туннеля. Логи:") $tunnel_out_log / $tunnel_err_log"
         echo "$tail_text"
         return 1
     }
@@ -1174,16 +1181,29 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
     task_prompt="${prompts#*$'\t'}"
 
     local session_info
-    session_info="Репозиторий : $repo
-Режим       : $mode
-Ветка       : $branch
-Сессия      : $session_title
-Session ID  : $session_id
+    if [ "$(get_selected_language)" = ru ]; then
+        session_info="Репозиторий  : $repo
+Режим        : $mode
+Ветка        : $branch
+Сессия       : $session_title
+Session ID   : $session_id
 Локальный API: http://127.0.0.1:$local_port
-Туннель     : $(provider_label "$tunnel_provider")
-URL туннеля : $tunnel_url
-AI-клиент   : $(ai_client_label "$ai_client")
-Provider ID : $provider_id"
+Туннель      : $(provider_label "$tunnel_provider")
+URL туннеля  : $tunnel_url
+AI-клиент    : $(ai_client_label "$ai_client")
+Provider ID  : $provider_id"
+    else
+        session_info="Repository   : $repo
+Mode         : $mode
+Branch       : $branch
+Session      : $session_title
+Session ID   : $session_id
+Local API    : http://127.0.0.1:$local_port
+Tunnel       : $(provider_label "$tunnel_provider")
+Tunnel URL   : $tunnel_url
+AI client    : $(ai_client_label "$ai_client")
+Provider ID  : $provider_id"
+    fi
     write_session_files "$session_dir" "$connect_prompt" "$task_prompt" "$api_key" "$provider_id" "$session_info"
 
     save_session_json "$session_dir" \
@@ -1210,9 +1230,9 @@ Provider ID : $provider_id"
 
     echo ""
     log_success "  ● Workspace is live"
-    echo "URL туннеля : $tunnel_url"
+    echo "$(l "Tunnel URL" "URL туннеля") : $tunnel_url"
     echo "Provider ID : $provider_id"
-    echo "Папка сессии: $session_dir"
+    echo "$(l "Session folder" "Папка сессии"): $session_dir"
     # Возвращаем session_dir для вызывающего меню.
     printf '%s' "$session_dir"
 }
@@ -1222,13 +1242,13 @@ copy_session_file() {
     local session_dir="$1" file_name="$2" message="$3"
     local path="$session_dir/$file_name"
     if [ ! -f "$path" ]; then
-        log_warn "Файл не найден: $path"
+        log_warn "$(l "File not found:" "Файл не найден:") $path"
         return
     fi
     if cat "$path" | copy_to_clipboard >/dev/null 2>&1; then
         log_success "$message"
     else
-        log_warn "Буфер обмена недоступен. Файл: $path"
+        log_warn "$(l "Clipboard unavailable. File:" "Буфер обмена недоступен. Файл:") $path"
         echo "---"
         cat "$path"
     fi
@@ -1236,7 +1256,7 @@ copy_session_file() {
 
 show_log_tail() {
     local session_json="$1"
-    header "Логи сессии"
+    header "$(l "Session logs" "Логи сессии")"
     local server_out server_err tunnel_out tunnel_err
     server_out="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('serverOutLog',''))" <<< "$session_json" 2>/dev/null || true)"
     server_err="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('serverErrLog',''))" <<< "$session_json" 2>/dev/null || true)"
@@ -1249,7 +1269,7 @@ show_log_tail() {
             echo ""
         fi
     done
-    printf 'Enter для возврата: ' >&2
+    printf '%s: ' "$(l "Enter to return" "Enter для возврата")" >&2
     read -r _
 }
 
@@ -1268,7 +1288,7 @@ remove_session_history() {
     server_pid="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('serverPid',0))" <<< "$session_json" 2>/dev/null || echo 0)"
     tunnel_pid="$(json_py "import json,sys; print(json.loads(sys.stdin.read()).get('tunnelPid',0))" <<< "$session_json" 2>/dev/null || echo 0)"
     if proc_alive "$server_pid" || proc_alive "$tunnel_pid"; then
-        log_warn "Сессия ещё запущена или частично активна."
+        log_warn "$(l "The session is still running or partially active." "Сессия ещё запущена или частично активна.")"
         return 1
     fi
     # Безопасность: удаляем только внутри SESSIONS_DIR.
@@ -1276,14 +1296,14 @@ remove_session_history() {
     real_session="$(cd "$session_dir" 2>/dev/null && pwd || echo "")"
     real_root="$(cd "$SESSIONS_DIR" 2>/dev/null && pwd || echo "")"
     if [ -z "$real_session" ] || [ -z "$real_root" ]; then
-        log_error "Папка сессии вне каталога RepoPilot sessions."
+        log_error "$(l "Session folder is outside the RepoPilot sessions directory." "Папка сессии вне каталога RepoPilot sessions.")"
         return 1
     fi
     case "$real_session" in
         "$real_root"|"$real_root"/*) ;;
-        *) log_error "Папка сессии вне каталога RepoPilot sessions: $real_session"; return 1 ;;
+        *) log_error "$(l "Session folder is outside the RepoPilot sessions directory:" "Папка сессии вне каталога RepoPilot sessions:") $real_session"; return 1 ;;
     esac
-    rm -rf "$real_session" 2>/dev/null && log_success "История удалена." || log_error "Не удалось удалить историю."
+    rm -rf "$real_session" 2>/dev/null && log_success "$(l "History deleted." "История удалена.")" || log_error "$(l "Could not delete history." "Не удалось удалить историю.")"
 }
 
 
@@ -1303,6 +1323,18 @@ import json,os
 b=json.loads(os.environ["BRIEF_JSON"]); ru=os.environ.get("KAROX_LANG")=="ru"
 identity=b.get("identity",{}); task=b.get("task",{}); git=b.get("git",{}); p=b.get("permissions",{})
 def l(en,ru_): return ru_ if ru else en
+status_labels={
+ "running":l("RUNNING","ВЫПОЛНЯЕТСЯ"),
+ "completed":l("COMPLETED","ЗАВЕРШЕНА"),
+ "finished":l("FINISHED","ЗАВЕРШЕНА"),
+ "waiting_for_task":l("WAITING FOR TASK","ОЖИДАЕТ ЗАДАЧУ"),
+}
+mode_labels={
+ "read_only":l("OBSERVE · read only","НАБЛЮДЕНИЕ · только чтение"),
+ "autopilot":l("BUILD · isolated branch","СБОРКА · отдельная ветка"),
+ "worktree_write":l("RESUME · current branch","ПРОДОЛЖЕНИЕ · текущая ветка"),
+ "full":l("ADVANCED · full repository access","РАСШИРЕННЫЙ · полный доступ"),
+}
 def section(s): print("\n  ┌─ "+s.upper()+" "+"─"*max(2,54-len(s)))
 def kv(k,v): print(f"  │  {k:<16} {v}")
 actions={
@@ -1312,11 +1344,12 @@ actions={
  "inspect_project_context_then_execute_task":l("Inspect context, then execute the task","Изучите контекст, затем выполняйте задачу"),
 }
 section(l("Current mission","Текущая миссия"))
-kv(l("Task","Задача"),task.get("status"))
+kv(l("Task","Задача"),status_labels.get(str(task.get("status")),l("WAITING FOR TASK","ОЖИДАЕТ ЗАДАЧУ")))
 kv(l("Repository","Репозиторий"),os.path.basename(identity.get("repoRoot","").rstrip("/\\")))
 kv(l("Branch","Ветка"),identity.get("branch"))
-kv(l("Access","Доступ"),identity.get("mode"))
-kv(l("Working tree","Рабочее дерево"),l("CLEAN","ЧИСТО") if git.get("clean") else f"{git.get('changedCount')} "+l("changed paths","изменений"))
+kv(l("Access","Доступ"),mode_labels.get(str(identity.get("mode")),identity.get("mode")))
+working_tree=("ЧИСТО" if ru else "CLEAN") if git.get("clean") else ((f"ПРОВЕРИТЬ {git.get('changedCount')} изменений") if ru else (f"REVIEW {git.get('changedCount')} changed paths"))
+kv(l("Working tree","Рабочее дерево"),working_tree)
 kv("Commit",l("allowed via /git/commit","разрешён через /git/commit") if p.get("commitAllowed") else l("blocked","заблокирован"))
 kv("Push",l("allowed","разрешён") if p.get("pushAllowed") else l("blocked by policy","заблокирован политикой"))
 section(l("Next move","Следующий шаг"))

@@ -26,7 +26,9 @@ function Resolve-ServerDir($root) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw "repo_tools.py не найден. Проверенные папки: $($candidates -join ', ')"
+    $language = ([string]$env:KAROX_LANGUAGE).Trim().ToLowerInvariant()
+    $prefix = if ($language -eq "ru") { "repo_tools.py не найден. Проверенные папки: " } else { "repo_tools.py was not found. Checked: " }
+    throw ($prefix + ($candidates -join ', '))
 }
 
 $ServerDir = Resolve-ServerDir $Root
@@ -36,7 +38,11 @@ New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SessionsDir | Out-Null
 
 function Ask-Yes($text, $defaultYes = $true) {
-    $suffix = if ($defaultYes) { "Д/н" } else { "д/Н" }
+    $suffix = if ((Get-SelectedLanguage) -eq "ru") {
+        if ($defaultYes) { "Д/н" } else { "д/Н" }
+    } else {
+        if ($defaultYes) { "Y/n" } else { "y/N" }
+    }
     $answer = Read-Host "$text [$suffix]"
     if (!$answer) { return $defaultYes }
     return $answer -match "^[ДдYy]"
@@ -59,11 +65,11 @@ function Refresh-Path {
 function Install-WingetPackage($id, $name) {
     Refresh-Path
     if (!(Has-Command "winget")) {
-        Write-Host "winget не найден. Установите App Installer из Microsoft Store и повторите установку." -ForegroundColor Red
+        Write-Host (L "winget was not found. Install App Installer from Microsoft Store and retry." "winget не найден. Установите App Installer из Microsoft Store и повторите установку.") -ForegroundColor Red
         return $false
     }
 
-    Write-Host "Устанавливаю $name через winget..." -ForegroundColor Yellow
+    Write-Host ((L "Installing via winget: " "Устанавливаю через winget: ") + $name) -ForegroundColor Yellow
     & winget install -e --id $id --accept-source-agreements --accept-package-agreements
     $ok = ($LASTEXITCODE -eq 0)
     Refresh-Path
@@ -82,7 +88,7 @@ function Find-Cloudflared {
         "$env:ProgramFiles\Cloudflare\cloudflared.exe"
     )
     foreach ($p in $known) { if (Test-Path $p) { return $p } }
-    throw "cloudflared не найден. Запустите install.ps1 ещё раз или перезапустите PowerShell."
+    throw (L "cloudflared was not found. Run install.ps1 again or restart PowerShell." "cloudflared не найден. Запустите install.ps1 ещё раз или перезапустите PowerShell.")
 }
 
 function Find-Tailscale {
@@ -100,7 +106,7 @@ function Find-Tailscale {
     )
     foreach ($p in $known) { if ($p -and (Test-Path $p)) { return $p } }
 
-    throw "tailscale не найден. Установите Tailscale, войдите в аккаунт и выберите Tailscale Funnel в настройках KaroX ещё раз."
+    throw (L "tailscale was not found. Install Tailscale, sign in, and select Tailscale Funnel in KaroX settings again." "tailscale не найден. Установите Tailscale, войдите в аккаунт и выберите Tailscale Funnel в настройках KaroX ещё раз.")
 }
 
 function Normalize-TunnelProvider($provider) {
@@ -126,7 +132,7 @@ function Get-AiClientLabel($client) {
     $client = Normalize-AiClient $client
     if ($client -eq "letaido") { return "letaido.com" }
     if ($client -eq "promptql") { return "prompt.ql.app" }
-    return "Сторонний сервис"
+    return (L "Other client" "Сторонний сервис")
 }
 
 
@@ -137,6 +143,8 @@ function Normalize-Language($language) {
 }
 
 function Get-SelectedLanguage {
+    $override = ([string]$env:KAROX_LANGUAGE).Trim().ToLowerInvariant()
+    if ($override -in @("en", "ru")) { return $override }
     $settings = Load-Settings
     return (Normalize-Language $settings.language)
 }
@@ -240,11 +248,11 @@ function Ensure-Installed {
     if (!(Get-Command git -ErrorAction SilentlyContinue)) { $missing += "Git" }
 
     if ($missing.Count -gt 0) {
-        Write-Host "Не хватает компонентов:" -ForegroundColor Yellow
+        Write-Host (L "Missing components:" "Не хватает компонентов:") -ForegroundColor Yellow
         foreach ($m in $missing) { Write-Host " - $m" }
-        if (Ask-Yes "Запустить install.ps1 сейчас?" $true) {
+        if (Ask-Yes (L "Run install.ps1 now?" "Запустить install.ps1 сейчас?") $true) {
             powershell -ExecutionPolicy Bypass -File (Join-Path $Root "install.ps1")
-        } else { throw "Настройка отменена." }
+        } else { throw (L "Setup cancelled." "Настройка отменена.") }
     }
 }
 
@@ -275,7 +283,7 @@ function Save-Repo($path) {
 function Ensure-GitRepo($path) {
     $path = $path.Trim().Trim([char]34)
     if (!(Test-Path -LiteralPath $path)) {
-        throw "Папка не найдена: $path"
+        throw ((L "Folder not found: " "Папка не найдена: ") + $path)
     }
 
     $path = (Resolve-Path -LiteralPath $path).Path
@@ -284,21 +292,21 @@ function Ensure-GitRepo($path) {
     }
 
     Write-Host ""
-    Write-Host "В этой папке нет Git-репозитория: $path" -ForegroundColor Yellow
-    Write-Host "KaroX использует Git для diff, веток и безопасного commit."
-    if (!(Ask-Yes "Инициализировать Git в этой папке сейчас?" $true)) {
-        throw "Папка не является git-репозиторием: $path"
+    Write-Host ((L "This folder is not a Git repository: " "В этой папке нет Git-репозитория: ") + $path) -ForegroundColor Yellow
+    Write-Host (L "KaroX uses Git for diffs, branches, and safe commits." "KaroX использует Git для diff, веток и безопасного commit.")
+    if (!(Ask-Yes (L "Initialize Git in this folder now?" "Инициализировать Git в этой папке сейчас?") $true)) {
+        throw ((L "Folder is not a Git repository: " "Папка не является git-репозиторием: ") + $path)
     }
 
     & git -C $path init | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось выполнить git init в папке: $path" }
+    if ($LASTEXITCODE -ne 0) { throw ((L "Could not run git init in: " "Не удалось выполнить git init в папке: ") + $path) }
 
     & git -C $path config user.email "repopilot@example.local" | Out-Null
     & git -C $path config user.name "Star For KaroX" | Out-Null
     & git -C $path commit --allow-empty -m "chore: initialize repository for RepoPilot" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось создать стартовый empty commit в: $path" }
+    if ($LASTEXITCODE -ne 0) { throw ((L "Could not create the initial empty commit in: " "Не удалось создать стартовый empty commit в: ") + $path) }
 
-    Write-Host "Git-репозиторий инициализирован." -ForegroundColor Green
+    Write-Host (L "Git repository initialized." "Git-репозиторий инициализирован.") -ForegroundColor Green
     return $path
 }
 
@@ -362,8 +370,8 @@ function Wait-ServerPidFile($pidFile, $runnerPid, $logPaths) {
         }
         if ($runnerPid -and !(Test-ProcessAlive $runnerPid)) {
             $tail = Get-LogTailText $logPaths
-            if (!$tail) { $tail = "Логи пустые." }
-            throw "Локальный API не смог запуститься. Runner завершился раньше времени.`n$tail"
+            if (!$tail) { $tail = L "Logs are empty." "Логи пустые." }
+            throw ((L "Local API failed to start. The runner exited early." "Локальный API не смог запуститься. Runner завершился раньше времени.") + "`n" + $tail)
         }
     }
     return $null
@@ -375,13 +383,13 @@ function Wait-LocalApiProcess($apiKey, $port, $serverPid, $runnerPid, $logPaths)
         Start-Sleep -Milliseconds 500
         if ($serverPid -and !(Test-ProcessAlive $serverPid)) {
             $tail = Get-LogTailText $logPaths
-            if (!$tail) { $tail = "Логи пустые." }
-            throw "Локальный API завершился до готовности.`n$tail"
+            if (!$tail) { $tail = L "Logs are empty." "Логи пустые." }
+            throw ((L "Local API exited before becoming ready." "Локальный API завершился до готовности.") + "`n" + $tail)
         }
         if ($runnerPid -and !(Test-ProcessAlive $runnerPid) -and !$serverPid) {
             $tail = Get-LogTailText $logPaths
-            if (!$tail) { $tail = "Логи пустые." }
-            throw "Локальный API runner завершился до готовности.`n$tail"
+            if (!$tail) { $tail = L "Logs are empty." "Логи пустые." }
+            throw ((L "Local API runner exited before becoming ready." "Локальный API runner завершился до готовности.") + "`n" + $tail)
         }
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/health" -Headers $headers -TimeoutSec 3
@@ -474,26 +482,26 @@ function Invoke-SessionApi($apiKey, $port, $path) {
 function Assert-SessionIsolation($apiKey, $port, $expectedRepo, $expectedBranch, $expectedMode) {
     $health = Invoke-SessionApi $apiKey $port "/health"
     if (!$health.ok) {
-        throw "Новая сессия не отвечает на /health: $($health.error)"
+        throw ((L "The new session did not answer /health: " "Новая сессия не отвечает на /health: ") + $health.error)
     }
 
     $actualRepo = [string]$health.value.repoRoot
     if ($actualRepo -and ((Resolve-Path -LiteralPath $actualRepo).Path -ne (Resolve-Path -LiteralPath $expectedRepo).Path)) {
-        throw "Новая сессия отвечает не тем проектом. Ожидался: $expectedRepo, получен: $actualRepo"
+        throw ((L "The new session returned the wrong project. Expected: " "Новая сессия отвечает не тем проектом. Ожидался: ") + $expectedRepo + (L ", received: " ", получен: ") + $actualRepo)
     }
 
     $session = Invoke-SessionApi $apiKey $port "/session"
     if (!$session.ok) {
-        throw "Новая сессия не отвечает на /session: $($session.error)"
+        throw ((L "The new session did not answer /session: " "Новая сессия не отвечает на /session: ") + $session.error)
     }
 
     $actualBranch = [string]$session.value.branch
     $actualMode = [string]$session.value.mode
     if ($actualBranch -and $actualBranch -ne $expectedBranch) {
-        throw "Новая сессия отвечает не той веткой. Ожидалась: $expectedBranch, получена: $actualBranch"
+        throw ((L "The new session returned the wrong branch. Expected: " "Новая сессия отвечает не той веткой. Ожидалась: ") + $expectedBranch + (L ", received: " ", получена: ") + $actualBranch)
     }
     if ($actualMode -and $actualMode -ne $expectedMode) {
-        throw "Новая сессия отвечает не тем режимом. Ожидался: $expectedMode, получен: $actualMode"
+        throw ((L "The new session returned the wrong mode. Expected: " "Новая сессия отвечает не тем режимом. Ожидался: ") + $expectedMode + (L ", received: " ", получен: ") + $actualMode)
     }
 
     return [pscustomobject]@{
@@ -524,22 +532,22 @@ function Invoke-TailscaleFunnelEnableFlow($enableUrl) {
     if (!$enableUrl) { return }
 
     Write-Host ""
-    Write-Host "Tailscale просит включить Funnel для этого tailnet." -ForegroundColor Yellow
-    Write-Host "Ссылка включения:" -ForegroundColor Cyan
+    Write-Host (L "Tailscale requires Funnel to be enabled for this tailnet." "Tailscale просит включить Funnel для этого tailnet.") -ForegroundColor Yellow
+    Write-Host (L "Enable URL:" "Ссылка включения:") -ForegroundColor Cyan
     Write-Host $enableUrl -ForegroundColor White
 
     try {
         Set-Clipboard -Value $enableUrl
-        Write-Host "Ссылка скопирована в буфер обмена." -ForegroundColor Green
+        Write-Host (L "URL copied to the clipboard." "Ссылка скопирована в буфер обмена.") -ForegroundColor Green
     } catch {
-        Write-Host "Не удалось скопировать ссылку в буфер: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host ((L "Could not copy the URL: " "Не удалось скопировать ссылку в буфер: ") + $_.Exception.Message) -ForegroundColor Yellow
     }
 
     try {
         Start-Process $enableUrl | Out-Null
-        Write-Host "Открыл ссылку в браузере. Подтвердите Funnel и запустите сессию ещё раз." -ForegroundColor Green
+        Write-Host (L "Opened the URL in your browser. Approve Funnel and start the session again." "Открыл ссылку в браузере. Подтвердите Funnel и запустите сессию ещё раз.") -ForegroundColor Green
     } catch {
-        Write-Host "Не удалось открыть браузер автоматически. Откройте ссылку вручную." -ForegroundColor Yellow
+        Write-Host (L "Could not open the browser automatically. Open the URL manually." "Не удалось открыть браузер автоматически. Откройте ссылку вручную.") -ForegroundColor Yellow
     }
 }
 
@@ -579,15 +587,15 @@ function Test-TailscaleReady($tailscaleExe) {
 function Invoke-TailscaleUp {
     $ts = Find-Tailscale
     Write-Host ""
-    Write-Host "Запускаю Tailscale login/up в текущем окне..." -ForegroundColor Cyan
-    Write-Host "Если Tailscale откроет браузер, войдите в аккаунт и вернитесь сюда." -ForegroundColor Yellow
+    Write-Host (L "Starting Tailscale login/up in this window..." "Запускаю Tailscale login/up в текущем окне...") -ForegroundColor Cyan
+    Write-Host (L "If Tailscale opens a browser, sign in and return here." "Если Tailscale откроет браузер, войдите в аккаунт и вернитесь сюда.") -ForegroundColor Yellow
     & $ts up
     $ok = ($LASTEXITCODE -eq 0)
     if ($ok -and (Test-TailscaleReady $ts)) {
-        Write-Host "Tailscale подключён." -ForegroundColor Green
+        Write-Host (L "Tailscale connected." "Tailscale подключён.") -ForegroundColor Green
         return $true
     }
-    Write-Host "Tailscale пока не готов. Проверьте окно логина или выполните проверку ещё раз." -ForegroundColor Yellow
+    Write-Host (L "Tailscale is not ready yet. Check the login window or run the check again." "Tailscale пока не готов. Проверьте окно логина или выполните проверку ещё раз.") -ForegroundColor Yellow
     return $false
 }
 
@@ -602,7 +610,7 @@ function Start-Tunnel($provider, $localPort, $tunnelOutLog, $tunnelErrLog) {
     if ($provider -eq "tailscale") {
         $ts = Find-Tailscale
         if (!(Test-TailscaleReady $ts)) {
-            throw "Tailscale не готов. Откройте Tailscale, войдите в аккаунт и убедитесь, что `tailscale status` работает."
+            throw (L "Tailscale is not ready. Open Tailscale, sign in, and verify that `tailscale status` works." "Tailscale не готов. Откройте Tailscale, войдите в аккаунт и убедитесь, что `tailscale status` работает.")
         }
 
         return Start-Process -FilePath $ts `
@@ -648,7 +656,7 @@ function New-Branch($repo, $prefix) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $branch = "promptql/$prefix-$stamp"
     & git -C $repo switch -c $branch
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось создать ветку $branch" }
+    if ($LASTEXITCODE -ne 0) { throw ((L "Could not create branch " "Не удалось создать ветку ") + $branch) }
     return $branch
 }
 
@@ -1036,9 +1044,9 @@ function Test-TunnelProviderStatus($provider) {
         try {
             $ts = Find-Tailscale
             if (Test-TailscaleReady $ts) {
-                return [pscustomobject]@{ ok = $true; text = "Tailscale найден и отвечает на status." }
+                return [pscustomobject]@{ ok = $true; text = (L "Tailscale was found and responds to status." "Tailscale найден и отвечает на status.") }
             }
-            return [pscustomobject]@{ ok = $false; text = "Tailscale найден, но не готов. Войдите в аккаунт и проверьте tailscale status." }
+            return [pscustomobject]@{ ok = $false; text = (L "Tailscale was found but is not ready. Sign in and check tailscale status." "Tailscale найден, но не готов. Войдите в аккаунт и проверьте tailscale status.") }
         } catch {
             return [pscustomobject]@{ ok = $false; text = $_.Exception.Message }
         }
@@ -1046,7 +1054,7 @@ function Test-TunnelProviderStatus($provider) {
 
     try {
         $cf = Find-Cloudflared
-        return [pscustomobject]@{ ok = $true; text = "cloudflared найден: $cf" }
+        return [pscustomobject]@{ ok = $true; text = ((L "cloudflared found: " "cloudflared найден: ") + $cf) }
     } catch {
         return [pscustomobject]@{ ok = $false; text = $_.Exception.Message }
     }
@@ -1302,8 +1310,8 @@ function Start-NewSession {
         "3" {
             $mode = "autopilot"; $commitAllowed = "true"
             if (-not $branch.StartsWith("promptql/")) {
-                Write-Host "Текущая ветка не promptql/*: $branch" -ForegroundColor Yellow
-                if (!(Ask-Yes "Продолжить на этой ветке?" $false)) { return $null }
+                Write-Host ((L "Current branch is not promptql/*: " "Текущая ветка не promptql/*: ") + $branch) -ForegroundColor Yellow
+                if (!(Ask-Yes (L "Continue on this branch?" "Продолжить на этой ветке?") $false)) { return $null }
             }
         }
         "4" { $mode = "full"; $commitAllowed = "true"; $branchPrefix = "full" }
@@ -1312,12 +1320,12 @@ function Start-NewSession {
     $sameRepoSessions = @(Get-RunningSessionsForRepo $repo)
     if ($sameRepoSessions.Count -gt 0 -and $mode -ne "read_only") {
         Write-Host ""
-        Write-Host "Этот путь проекта уже открыт в другой активной сессии:" -ForegroundColor Yellow
+        Write-Host (L "This project path is already open in another active session:" "Этот путь проекта уже открыт в другой активной сессии:") -ForegroundColor Yellow
         foreach ($s in $sameRepoSessions) {
             Write-Host " - $($s.id) | $($s.mode) | $($s.branch) | $($s.tunnelUrl)" -ForegroundColor Yellow
         }
-        Write-Host "Для двух параллельных задач в одном проекте нужен отдельный clone/worktree. Иначе сессии будут менять одну и ту же ветку и файлы." -ForegroundColor Yellow
-        if (!(Ask-Yes "Всё равно продолжить на этом же пути?" $false)) { return $null }
+        Write-Host (L "Parallel tasks in one project require a separate clone/worktree; otherwise sessions modify the same branch and files." "Для двух параллельных задач в одном проекте нужен отдельный clone/worktree. Иначе сессии будут менять одну и ту же ветку и файлы.") -ForegroundColor Yellow
+        if (!(Ask-Yes (L "Continue on the same path anyway?" "Всё равно продолжить на этом же пути?") $false)) { return $null }
     }
 
     if ($branchPrefix) {
@@ -1389,23 +1397,23 @@ function Start-NewSession {
     if (!(Wait-LocalApiProcess $apiKey $localPort $serverPid $null $serverLogPaths)) {
         Stop-Pid $serverPid
         $tail = Get-LogTailText $serverLogPaths
-        if (!$tail) { $tail = "Логи пустые." }
-        throw "Локальный API не ответил за 20 секунд.`n$tail"
+        if (!$tail) { $tail = L "Logs are empty." "Логи пустые." }
+        throw ((L "Local API did not respond within 20 seconds." "Локальный API не ответил за 20 секунд.") + "`n" + $tail)
     }
 
     $isolation = Assert-SessionIsolation $apiKey $localPort $repo $branch $mode
     $tunnelStatus = Test-TunnelProviderStatus $tunnelProvider
     if (!$tunnelStatus.ok -and $tunnelProvider -eq "tailscale") {
         Write-Host ""
-        Write-Host "$tunnelProviderLabel не готов: $($tunnelStatus.text)" -ForegroundColor Yellow
-        if (Ask-Yes "Запустить tailscale up сейчас?" $true) {
+        Write-Host ($tunnelProviderLabel + (L " is not ready: " " не готов: ") + $tunnelStatus.text) -ForegroundColor Yellow
+        if (Ask-Yes (L "Run tailscale up now?" "Запустить tailscale up сейчас?") $true) {
             Invoke-TailscaleUp | Out-Null
             $tunnelStatus = Test-TunnelProviderStatus $tunnelProvider
         }
     }
     if (!$tunnelStatus.ok) {
         Stop-Pid $serverPid
-        throw "$tunnelProviderLabel не готов: $($tunnelStatus.text)"
+        throw ($tunnelProviderLabel + (L " is not ready: " " не готов: ") + $tunnelStatus.text)
     }
 
     Write-Host "  ◌ Opening $tunnelProviderLabel..." -ForegroundColor Cyan
@@ -1416,35 +1424,50 @@ function Start-NewSession {
         Stop-Pid $tunnelProc.Id
         Stop-Pid $serverPid
         $tail = Get-LogTailText @($tunnelOutLog, $tunnelErrLog)
-        if (!$tail) { $tail = "Логи пустые." }
+        if (!$tail) { $tail = L "Logs are empty." "Логи пустые." }
         if ($tunnelProvider -eq "tailscale") {
             $enableUrl = Get-TailscaleFunnelEnableUrlFromLogs @($tunnelOutLog, $tunnelErrLog)
             if ($enableUrl) {
                 Invoke-TailscaleFunnelEnableFlow $enableUrl
-                $tail += "`n`nTailscale Funnel не включён в вашем tailnet. RepoPilot скопировал ссылку включения и попытался открыть её в браузере: $enableUrl`nПодтвердите Funnel в Tailscale и запустите сессию ещё раз."
+                $tail += "`n`n" + (L "Tailscale Funnel is not enabled for this tailnet. KaroX copied the enable URL and tried to open it in your browser: " "Tailscale Funnel не включён в вашем tailnet. KaroX скопировал ссылку включения и попытался открыть её в браузере: ") + $enableUrl + "`n" + (L "Approve Funnel in Tailscale and start the session again." "Подтвердите Funnel в Tailscale и запустите сессию ещё раз.")
             } else {
-                $tail += "`n`nПодсказка: откройте G = настройки, выберите Tailscale Funnel и нажмите L, чтобы выполнить tailscale up. Если Funnel требует разрешения, подтвердите его в Tailscale и запустите сессию ещё раз."
+                $tail += "`n`n" + (L "Tip: open G = Settings, choose Tailscale Funnel, and press L to run tailscale up. If Funnel needs approval, approve it in Tailscale and start the session again." "Подсказка: откройте G = настройки, выберите Tailscale Funnel и нажмите L, чтобы выполнить tailscale up. Если Funnel требует разрешения, подтвердите его в Tailscale и запустите сессию ещё раз.")
             }
         }
-        throw "Не удалось получить URL туннеля $tunnelProviderLabel. Логи: $tunnelOutLog / $tunnelErrLog`n$tail"
+        throw ((L "Could not obtain the tunnel URL for " "Не удалось получить URL туннеля ") + $tunnelProviderLabel + (L ". Logs: " ". Логи: ") + "$tunnelOutLog / $tunnelErrLog`n$tail")
     }
 
     $providerId = Get-ProviderIdFromUrl $tunnelUrl $tunnelProvider $sessionId
     $prompts = Build-Prompts $providerId $tunnelUrl $mode $branch $sessionTitle $commitAllowed $tunnelProvider $aiClient
 
     $aiClientLabel = Get-AiClientLabel $aiClient
-    $sessionInfo = @"
-Репозиторий : $repo
-Режим       : $mode
-Ветка       : $branch
-Сессия      : $sessionTitle
-Session ID  : $sessionId
+    $sessionInfo = if ((Get-SelectedLanguage) -eq "ru") {
+@"
+Репозиторий  : $repo
+Режим        : $mode
+Ветка        : $branch
+Сессия       : $sessionTitle
+Session ID   : $sessionId
 Локальный API: http://127.0.0.1:$localPort
-Туннель     : $tunnelProviderLabel
-URL туннеля : $tunnelUrl
-AI-клиент   : $aiClientLabel
-Provider ID : $providerId
+Туннель      : $tunnelProviderLabel
+URL туннеля  : $tunnelUrl
+AI-клиент    : $aiClientLabel
+Provider ID  : $providerId
 "@
+    } else {
+@"
+Repository   : $repo
+Mode         : $mode
+Branch       : $branch
+Session      : $sessionTitle
+Session ID   : $sessionId
+Local API    : http://127.0.0.1:$localPort
+Tunnel       : $tunnelProviderLabel
+Tunnel URL   : $tunnelUrl
+AI client    : $aiClientLabel
+Provider ID  : $providerId
+"@
+    }
     Write-SessionFiles $sessionDir $prompts.connect $prompts.task $apiKey $providerId $sessionInfo
 
     $session = [ordered]@{
@@ -1476,16 +1499,16 @@ Provider ID : $providerId
 
     Write-Host ""
     Write-Host "  ● Workspace is live" -ForegroundColor Green
-    Write-Host "URL туннеля : $tunnelUrl"
-    Write-Host "Provider ID : $providerId"
-    Write-Host "Папка сессии: $sessionDir"
+    Write-Host ((L "Tunnel URL    : " "URL туннеля : ") + $tunnelUrl)
+    Write-Host ("Provider ID   : " + $providerId)
+    Write-Host ((L "Session folder: " "Папка сессии: ") + $sessionDir)
     return (Load-SessionJson $sessionDir)
 }
 
 function Copy-SessionFile($session, $fileName, $message) {
     $path = Join-Path $session.sessionDir $fileName
     if (!(Test-Path -LiteralPath $path)) {
-        Write-Host "Файл не найден: $path" -ForegroundColor Yellow
+        Write-Host ((L "File not found: " "Файл не найден: ") + $path) -ForegroundColor Yellow
         return
     }
     Get-Content -Raw -LiteralPath $path | Set-Clipboard
@@ -1493,7 +1516,7 @@ function Copy-SessionFile($session, $fileName, $message) {
 }
 
 function Show-LogTail($session) {
-    Header "Логи сессии"
+    Header (L "Session logs" "Логи сессии")
     $paths = @($session.serverOutLog, $session.serverErrLog)
     if ($session.serverRunnerOutLog) { $paths += $session.serverRunnerOutLog }
     if ($session.serverRunnerErrLog) { $paths += $session.serverRunnerErrLog }
@@ -1505,14 +1528,14 @@ function Show-LogTail($session) {
             Write-Host ""
         }
     }
-    Read-Host "Enter для возврата" | Out-Null
+    Read-Host (L "Enter to return" "Enter для возврата") | Out-Null
 }
 
 function Stop-Session($session) {
     Stop-Pid $session.tunnelPid
     Stop-Pid $session.serverPid
     Stop-Pid $session.serverRunnerPid
-    Write-Host "Сессия остановлена: $($session.id)" -ForegroundColor Yellow
+    Write-Host ((L "Session stopped: " "Сессия остановлена: ") + $session.id) -ForegroundColor Yellow
 }
 
 function Resolve-SessionDirForDelete($session) {
@@ -1523,7 +1546,7 @@ function Resolve-SessionDirForDelete($session) {
     $target = (Resolve-Path -LiteralPath $session.sessionDir).Path
     $rootPrefix = $root + [System.IO.Path]::DirectorySeparatorChar
     if ($target -eq $root -or !$target.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Папка сессии вне каталога RepoPilot sessions: $target"
+        throw ((L "Session folder is outside the RepoPilot sessions directory: " "Папка сессии вне каталога RepoPilot sessions: ") + $target)
     }
     return $target
 }
@@ -1536,7 +1559,7 @@ function Remove-SessionHistory($session) {
             ok = $false
             id = [string]$session.id
             deleted = $false
-            reason = "Сессия ещё запущена или частично активна"
+            reason = (L "The session is still running or partially active" "Сессия ещё запущена или частично активна")
         }
     }
 
@@ -1547,7 +1570,7 @@ function Remove-SessionHistory($session) {
                 ok = $true
                 id = [string]$session.id
                 deleted = $false
-                reason = "Папка истории уже отсутствует"
+                reason = (L "History folder is already absent" "Папка истории уже отсутствует")
             }
         }
 
@@ -1599,11 +1622,29 @@ function Show-MissionBrief($session) {
     $brief = $result.value
     $identity = $brief.identity; $task = $brief.task; $git = $brief.git; $permissions = $brief.permissions
     UI-Section (L "Current mission" "Текущая миссия")
-    UI-KeyValue (L "Task" "Задача") $task.status $(if ($task.status -eq "running") { "Green" } else { "Yellow" })
+    $taskStatus = switch ([string]$task.status) {
+        "running" { L "RUNNING" "ВЫПОЛНЯЕТСЯ" }
+        "completed" { L "COMPLETED" "ЗАВЕРШЕНА" }
+        "finished" { L "FINISHED" "ЗАВЕРШЕНА" }
+        default { L "WAITING FOR TASK" "ОЖИДАЕТ ЗАДАЧУ" }
+    }
+    UI-KeyValue (L "Task" "Задача") $taskStatus $(if ($task.status -eq "running") { "Green" } else { "Yellow" })
     UI-KeyValue (L "Repository" "Репозиторий") (Get-RepoLabel $identity.repoRoot)
     UI-KeyValue (L "Branch" "Ветка") $identity.branch "Cyan"
-    UI-KeyValue (L "Access" "Доступ") $identity.mode
-    UI-KeyValue (L "Working tree" "Рабочее дерево") $(if ($git.clean) { L "CLEAN" "ЧИСТО" } else { (L "REVIEW " "ПРОВЕРИТЬ ") + $git.changedCount + (L " changed paths" " изменений") }) $(if ($git.clean) { "Green" } else { "Yellow" })
+    $accessMode = switch ([string]$identity.mode) {
+        "read_only" { L "OBSERVE · read only" "НАБЛЮДЕНИЕ · только чтение" }
+        "autopilot" { L "BUILD · isolated branch" "СБОРКА · отдельная ветка" }
+        "worktree_write" { L "RESUME · current branch" "ПРОДОЛЖЕНИЕ · текущая ветка" }
+        "full" { L "ADVANCED · full repository access" "РАСШИРЕННЫЙ · полный доступ" }
+        default { [string]$identity.mode }
+    }
+    UI-KeyValue (L "Access" "Доступ") $accessMode
+    $workingTree = if ($git.clean) {
+        if ((Get-SelectedLanguage) -eq "ru") { "ЧИСТО" } else { "CLEAN" }
+    } else {
+        if ((Get-SelectedLanguage) -eq "ru") { "ПРОВЕРИТЬ $($git.changedCount) изменений" } else { "REVIEW $($git.changedCount) changed paths" }
+    }
+    UI-KeyValue (L "Working tree" "Рабочее дерево") $workingTree $(if ($git.clean) { "Green" } else { "Yellow" })
     UI-KeyValue (L "Commit" "Commit") $(if ($permissions.commitAllowed) { L "allowed via /git/commit" "разрешён через /git/commit" } else { L "blocked" "заблокирован" })
     UI-KeyValue (L "Push" "Push") $(if ($permissions.pushAllowed) { L "allowed" "разрешён" } else { L "blocked by policy" "заблокирован политикой" }) $(if ($permissions.pushAllowed) { "Yellow" } else { "Green" })
     UI-Section (L "Next move" "Следующий шаг")
