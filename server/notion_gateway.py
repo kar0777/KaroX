@@ -7,15 +7,18 @@ same per-session key protects both interfaces.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from typing import Any, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from mcp_host_security import is_allowed_mcp_host
 from repo_tools import app as karox_app
 
 
@@ -33,8 +36,22 @@ def _extract_token(request: Any) -> str:
 
 class McpAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Any, call_next: Any):
+        host = request.headers.get("host", "")
+        if not is_allowed_mcp_host(host):
+            return JSONResponse(
+                {
+                    "error": "invalid_host",
+                    "hint": "Use the current KaroX Cloudflare Tunnel or Tailscale Funnel URL.",
+                },
+                status_code=421,
+            )
+
         supplied = _extract_token(request)
-        if supplied != API_KEY:
+        valid = bool(supplied) and hmac.compare_digest(
+            supplied.encode("utf-8", errors="ignore"),
+            API_KEY.encode("utf-8", errors="ignore"),
+        )
+        if not valid:
             return JSONResponse(
                 {"error": "unauthorized", "hint": "Use the current KaroX session key as a Bearer token."},
                 status_code=401,
@@ -42,7 +59,13 @@ class McpAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-mcp = FastMCP("KaroX Notion Provider")
+# FastMCP enables a localhost-only Host allowlist automatically when its host is
+# 127.0.0.1. KaroX is intentionally bound to localhost but published through an
+# authenticated tunnel, so KaroX performs the tunnel-aware Host validation above.
+mcp = FastMCP(
+    "KaroX Notion Provider",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 async def _call(
