@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import codecs
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -11,9 +13,34 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from patch_notion_provider import patch_ps, patch_sh  # noqa: E402
 
 
+def run_patcher(platform: str, source: Path, output: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "patch_notion_provider.py"),
+            "--platform",
+            platform,
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--root",
+            str(ROOT),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"patcher failed for {platform}:\n{result.stdout}\n{result.stderr}")
+
+
 def main() -> int:
-    ps = (ROOT / "start.core.ps1").read_text(encoding="utf-8-sig")
-    sh = (ROOT / "start.core.sh").read_text(encoding="utf-8-sig")
+    ps_source = ROOT / "start.core.ps1"
+    sh_source = ROOT / "start.core.sh"
+    ps = ps_source.read_text(encoding="utf-8-sig")
+    sh = sh_source.read_text(encoding="utf-8-sig")
     ps_out = patch_ps(ps, str(ROOT))
     sh_out = patch_sh(sh, str(ROOT))
 
@@ -21,6 +48,7 @@ def main() -> int:
     assert 'server URL: $tunnelUrl/mcp' in ps_out
     assert '"app_entry:app"' in ps_out
     assert '"notion_entry:app"' in ps_out
+    assert "Нативная командная AI-среда" in ps_out
     assert "printf notion" in sh_out
     assert '$tunnel_url/mcp' in sh_out
     assert 'server_app="app_entry:app"' in sh_out
@@ -38,12 +66,25 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         generated_ps = Path(temp) / "generated.ps1"
         generated_sh = Path(temp) / "generated.sh"
-        generated_ps.write_text(ps_out, encoding="utf-8")
-        generated_sh.write_text(sh_out, encoding="utf-8")
+        run_patcher("powershell", ps_source, generated_ps)
+        run_patcher("shell", sh_source, generated_sh)
+
+        ps_bytes = generated_ps.read_bytes()
+        sh_bytes = generated_sh.read_bytes()
+        assert ps_bytes.startswith(codecs.BOM_UTF8), "PowerShell output must contain a UTF-8 BOM for Windows PowerShell 5.1"
+        assert not sh_bytes.startswith(codecs.BOM_UTF8), "Shell output must remain plain UTF-8 without a BOM"
+
+        generated_ps_text = generated_ps.read_text(encoding="utf-8-sig")
+        generated_sh_text = generated_sh.read_text(encoding="utf-8")
+        assert "Нативная командная AI-среда" in generated_ps_text
+        assert "Д/н" in generated_ps_text
+        assert "РќР°С‚РёРІРЅ" not in generated_ps_text
+        assert 'server URL: $tunnelUrl/mcp' in generated_ps_text
+        assert "printf notion" in generated_sh_text
         assert generated_ps.stat().st_size > 1000
         assert generated_sh.stat().st_size > 1000
 
-    print("KaroX provider source checks passed")
+    print("KaroX provider source and encoding checks passed")
     return 0
 
 
