@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.11.0
+
+### Notion Custom Agent provider
+
+- Added Notion as a first-class KaroX AI target over protected Streamable HTTP MCP.
+- Added preflight, context, file, command, Git review, safe commit, and completion-report tools.
+- Added `karox notion` setup, diagnostics, status, and documentation commands.
+- Pinned public one-command installers to the stable `v3.11.0` tag.
+- Added automated release archives, checksums, and bilingual release documentation.
+
 ## Public GitHub release
 
 - Established `https://github.com/kar0777/KaroX` as the canonical public repository.
