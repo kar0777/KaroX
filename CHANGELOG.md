@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.12.0
+
+### ★ KaroX v3.12.0 — Control Center & Reliability
+
+- Added a browser-based **KaroX Control Center** for live repository, task, Git and Mission Control visibility.
+- Added the unified commands `karox version`, `status`, `doctor`, `update`, `support` and `dashboard` on Windows, macOS and Linux.
+- Added stable-channel self-update with `karox update` and a lightweight update notice.
+- Added redacted support bundles that exclude source code and actively scan for leaked session keys.
+- Routed ordinary OpenAPI sessions and Notion MCP sessions through the same hardened runtime.
+- Added constant-time key comparison and temporary throttling after repeated authentication failures.
+- Added request IDs, request-body limits, secure response headers and safer internal-error responses.
+- Added bounded, rotating and redacted audit logs.
+- Added authenticated `/meta`, `/capabilities` and `/security/status` endpoints.
+- Added cached launcher generation to reduce repeated startup work.
+- Expanded CI to validate the product on Windows, macOS and Linux.
+- constant-time credential comparison;
+- 30-failure-per-minute temporary client throttling;
+- a configurable 30 MB request-body limit;
+
 ## 3.11.0
 
 ### Notion Custom Agent provider
