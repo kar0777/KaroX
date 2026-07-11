@@ -25,7 +25,11 @@ def main() -> int:
         "start.core.ps1",
         "start.core.sh",
         "scripts/patch_notion_provider.py",
+        "scripts/karox_admin.py",
+        "server/repo_tools.py",
+        "server/app_entry.py",
         "server/notion_gateway.py",
+        "server/notion_entry.py",
         "NOTION.md",
     ):
         path = root / rel
@@ -38,11 +42,21 @@ def main() -> int:
         sh = (root / "start.core.sh").read_text(encoding="utf-8-sig")
         ps_out = patch_ps(ps, str(root))
         sh_out = patch_sh(sh, str(root))
-        checks.append({"name": "PowerShell provider patch", "ok": "Notion Custom Agent" in ps_out and "notion_gateway:app" in ps_out})
-        checks.append({"name": "POSIX provider patch", "ok": "Notion Custom Agent" in sh_out and "notion_gateway:app" in sh_out})
+        checks.append({
+            "name": "PowerShell provider patch",
+            "ok": "Notion Custom Agent" in ps_out and "app_entry:app" in ps_out and "notion_entry:app" in ps_out,
+        })
+        checks.append({
+            "name": "POSIX provider patch",
+            "ok": "Notion Custom Agent" in sh_out and "app_entry:app" in sh_out and "notion_entry:app" in sh_out,
+        })
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "generated.ps1").write_text(ps_out, encoding="utf-8")
-            Path(tmp, "generated.sh").write_text(sh_out, encoding="utf-8")
+            generated_ps = Path(tmp, "generated.ps1")
+            generated_sh = Path(tmp, "generated.sh")
+            generated_ps.write_text(ps_out, encoding="utf-8")
+            generated_sh.write_text(sh_out, encoding="utf-8")
+            checks.append({"name": "Generated PowerShell launcher", "ok": generated_ps.stat().st_size > 1000})
+            checks.append({"name": "Generated POSIX launcher", "ok": generated_sh.stat().st_size > 1000})
     except (OSError, RuntimeError) as exc:
         checks.append({"name": "Provider patch generation", "ok": False, "error": str(exc)})
 
