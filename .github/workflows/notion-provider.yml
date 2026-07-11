@@ -47,6 +47,8 @@ jobs:
           scripts/patch_notion_provider.py
           scripts/notion_doctor.py
           scripts/karox_admin.py
+          scripts/karox_cli.py
+          scripts/sitecustomize.py
           scripts/support_bundle.py
           scripts/test_notion_provider.py
           scripts/test_admin_cli.py
@@ -65,7 +67,7 @@ jobs:
         run: python scripts/notion_doctor.py --root .
 
       - name: Run product doctor
-        run: python scripts/karox_admin.py doctor --json > product-doctor.json
+        run: python scripts/karox_cli.py doctor --json > product-doctor.json
 
       - name: Validate POSIX scripts
         run: bash -n bootstrap.sh install.sh start.sh start.core.sh
@@ -74,10 +76,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(tr -d '[:space:]' < VERSION)" = "3.12.0"
-          test -f RELEASE_NOTES_v3.12.0.md
-          grep -F 'v3.12.0' bootstrap.ps1
-          grep -F 'v3.12.0' bootstrap.sh
+          VERSION_VALUE="$(tr -d '[:space:]' < VERSION)"
+          test -n "$VERSION_VALUE"
+          test -f "RELEASE_NOTES_v${VERSION_VALUE}.md"
+          grep -F "v${VERSION_VALUE}" bootstrap.ps1
+          grep -F "v${VERSION_VALUE}" bootstrap.sh
           grep -F 'REF_KIND="tags"' bootstrap.sh
           grep -F 'KAROX_NO_START' bootstrap.ps1
           grep -F 'KAROX_NO_START' bootstrap.sh
@@ -103,11 +106,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION_VALUE="$(tr -d '[:space:]' < VERSION)"
+          TAG="v${VERSION_VALUE}"
           mkdir -p dist-test
-          git archive --format=zip --prefix=KaroX-v3.12.0/ -o dist-test/KaroX-v3.12.0.zip HEAD
-          git archive --format=tar.gz --prefix=KaroX-v3.12.0/ -o dist-test/KaroX-v3.12.0.tar.gz HEAD
-          test -s dist-test/KaroX-v3.12.0.zip
-          test -s dist-test/KaroX-v3.12.0.tar.gz
+          git archive --format=zip --prefix="KaroX-${TAG}/" -o "dist-test/KaroX-${TAG}.zip" HEAD
+          git archive --format=tar.gz --prefix="KaroX-${TAG}/" -o "dist-test/KaroX-${TAG}.tar.gz" HEAD
+          test -s "dist-test/KaroX-${TAG}.zip"
+          test -s "dist-test/KaroX-${TAG}.tar.gz"
 
       - name: Upload diagnostics
         if: always()
