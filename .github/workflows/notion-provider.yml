@@ -7,10 +7,17 @@ on:
       - "start.sh"
       - "start.core.ps1"
       - "start.core.sh"
+      - "bootstrap.ps1"
+      - "bootstrap.sh"
+      - "install.ps1"
+      - "install.sh"
       - "server/notion_gateway.py"
       - "scripts/*notion*.py"
       - "requirements.txt"
+      - "VERSION"
+      - "RELEASE_NOTES_v*.md"
       - ".github/workflows/notion-provider.yml"
+      - ".github/workflows/release.yml"
   push:
     branches:
       - agent/notion-provider
@@ -19,18 +26,71 @@ jobs:
   source-contracts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -r requirements.txt
-      - run: python -m py_compile server/notion_gateway.py scripts/patch_notion_provider.py scripts/notion_doctor.py scripts/test_notion_provider.py
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile provider modules
+        run: python -m py_compile server/notion_gateway.py scripts/patch_notion_provider.py scripts/notion_doctor.py scripts/test_notion_provider.py
+
       - name: Test provider transformations
-        run: python scripts/test_notion_provider.py > notion-test.log 2>&1
+        run: python scripts/test_notion_provider.py | tee notion-test.log
+
+      - name: Run Notion provider doctor
+        run: python scripts/notion_doctor.py --root .
+
+      - name: Validate POSIX scripts
+        run: bash -n bootstrap.sh install.sh start.sh start.core.sh
+
+      - name: Validate stable release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '[:space:]' < VERSION)" = "3.11.0"
+          test -f RELEASE_NOTES_v3.11.0.md
+          grep -F 'v3.11.0' bootstrap.ps1
+          grep -F 'v3.11.0' bootstrap.sh
+          grep -F 'REF_KIND="tags"' bootstrap.sh
+          grep -F 'karox notion' README.md
+          grep -F 'karox notion' README_RU.md
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in @('bootstrap.ps1', 'install.ps1', 'start.ps1', 'start.core.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Error "$file has parser errors: $($errors | Out-String)"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Test release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-test
+          git archive --format=zip --prefix=KaroX-v3.11.0/ -o dist-test/KaroX-v3.11.0.zip HEAD
+          git archive --format=tar.gz --prefix=KaroX-v3.11.0/ -o dist-test/KaroX-v3.11.0.tar.gz HEAD
+          test -s dist-test/KaroX-v3.11.0.zip
+          test -s dist-test/KaroX-v3.11.0.tar.gz
+
       - name: Upload provider diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: notion-provider-diagnostics
-          path: notion-test.log
-      - run: python scripts/notion_doctor.py --root .
+          path: |
+            notion-test.log
+            dist-test/
