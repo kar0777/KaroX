@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-PATCHER_VERSION = "3.12.0"
+PATCHER_VERSION = "3.12.1"
 
 
 def one(source: str, old: str, new: str, name: str) -> str:
@@ -184,15 +184,27 @@ def main() -> int:
         + patched
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_encoding = "utf-8-sig" if args.platform == "powershell" else "utf-8"
     reused = False
     if args.output.is_file():
         try:
-            reused = args.output.read_text(encoding="utf-8") == rendered
-        except OSError:
+            reused = args.output.read_text(encoding=output_encoding) == rendered
+        except (OSError, UnicodeError):
             reused = False
     if not reused:
-        args.output.write_text(rendered, encoding="utf-8", newline="\n")
-    print(json.dumps({"ok": True, "output": str(args.output), "coreSha256": digest, "patcherVersion": PATCHER_VERSION, "reused": reused}))
+        args.output.write_text(rendered, encoding=output_encoding, newline="\n")
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "output": str(args.output),
+                "coreSha256": digest,
+                "patcherVersion": PATCHER_VERSION,
+                "encoding": output_encoding,
+                "reused": reused,
+            }
+        )
+    )
     return 0
 
 
