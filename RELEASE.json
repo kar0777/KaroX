@@ -1,0 +1,13 @@
+{
+  "status": "published",
+  "version": "3.11.0",
+  "tag": "v3.11.0",
+  "name": "★ KaroX v3.11.0 — Notion Custom Agent provider",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.11.0",
+  "publishedAt": "2026-07-11T13:42:42Z",
+  "assets": [
+    "KaroX-v3.11.0-SHA256SUMS.txt",
+    "KaroX-v3.11.0.tar.gz",
+    "KaroX-v3.11.0.zip"
+  ]
+}
