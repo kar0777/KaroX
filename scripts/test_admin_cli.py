@@ -84,7 +84,7 @@ def main() -> int:
             assert "[REDACTED" in combined
             summary = json.loads(archive.read("summary.json"))
             assert summary["privacy"]["sourceCodeIncluded"] is False
-            assert summary["privacy"]["knownSessionSecretsRedacted"] == 1
+            assert summary["privacy"]["knownValuesRemoved"] == 1
 
         report = admin.doctor_report(include_update=False)
         assert report["version"] != "unknown"
