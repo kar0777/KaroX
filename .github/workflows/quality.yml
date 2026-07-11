@@ -66,11 +66,13 @@ jobs:
         run: python scripts/test_app_entry.py 2>&1 | tee runtime-test.log
 
       - name: Smoke-test CLI metadata
-        run: |
-          python scripts/karox_admin.py version --json
-          python scripts/karox_admin.py status --json
-          python scripts/karox_admin.py doctor --json
         shell: bash
+        run: |
+          {
+            python scripts/karox_admin.py version --json
+            python scripts/karox_admin.py status --json
+            python scripts/karox_admin.py doctor --json
+          } 2>&1 | tee smoke-test.log
 
       - name: Validate POSIX syntax
         if: runner.os != 'Windows'
@@ -101,4 +103,5 @@ jobs:
             provider-test.log
             admin-test.log
             runtime-test.log
+            smoke-test.log
           if-no-files-found: ignore
