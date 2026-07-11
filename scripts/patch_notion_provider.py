@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-PATCHER_VERSION = "3.12.0"
+PATCHER_VERSION = "3.12.1"
 
 
 def one(source: str, old: str, new: str, name: str) -> str:
@@ -113,14 +113,14 @@ def patch_sh(source: str, root: str) -> str:
     )
     source = one(
         source,
-        "        letaido) printf 'letaido' ;;",
-        "        notion|notion-ai|notion_agent) printf 'notion' ;;\n        letaido) printf 'letaido' ;;",
+        "        letaido) printf 'letaido' ;;;",
+        "        notion|notion-ai|notion_agent) printf 'notion' ;;;\n        letaido) printf 'letaido' ;;;",
         "sh normalize",
     )
     source = one(
         source,
-        "        letaido) printf 'letaido.com' ;;",
-        "        notion) printf 'Notion Custom Agent' ;;\n        letaido) printf 'letaido.com' ;;",
+        "        letaido) printf 'letaido.com' ;;;",
+        "        notion) printf 'Notion Custom Agent' ;;;\n        letaido) printf 'letaido.com' ;;;",
         "sh label",
     )
     source = one(
@@ -141,19 +141,19 @@ def patch_sh(source: str, root: str) -> str:
     source = one(source, '    ui_choice 3 LETAIDO.COM', '    ui_choice 4 LETAIDO.COM', "sh letaido number")
     source = one(
         source,
-        'case "$choice" in 1) printf promptql ;; 2) printf other ;; 3) printf letaido ;; *) return 1 ;; esac',
-        'case "$choice" in 1) printf promptql ;; 2) printf notion ;; 3) printf other ;; 4) printf letaido ;; *) return 1 ;; esac',
+        'case "$choice" in 1) printf promptql ;;; 2) printf other ;;; 3) printf letaido ;;; *) return 1 ;;; esac',
+        'case "$choice" in 1) printf promptql ;;; 2) printf notion ;;; 3) printf other ;;; 4) printf letaido ;;; *) return 1 ;;; esac',
         "sh choices",
     )
     source = source.replace(
         '            letaido)\n                intro="Я запустил Star For KaroX',
-        '            notion)\n                intro="Я запустил KaroX для Notion Custom Agent. Добавь MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token из клавиши K. Сначала вызови karox_preflight и дождись ТЗ." ;;\n'
+        '            notion)\n                intro="Я запустил KaroX для Notion Custom Agent. Добавь MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token из клавиши K. Сначала вызови karox_preflight и дождись ТЗ." ;;;\n'
         '            letaido)\n                intro="Я запустил Star For KaroX',
         1,
     )
     source = source.replace(
         '            letaido)\n                intro="I started Star For KaroX',
-        '            notion)\n                intro="I started KaroX for a Notion Custom Agent. Add MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token copied with K. Call karox_preflight first and wait for the task." ;;\n'
+        '            notion)\n                intro="I started KaroX for a Notion Custom Agent. Add MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token copied with K. Call karox_preflight first and wait for the task." ;;;\n'
         '            letaido)\n                intro="I started Star For KaroX',
         1,
     )
@@ -184,15 +184,27 @@ def main() -> int:
         + patched
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_encoding = "utf-8-sig" if args.platform == "powershell" else "utf-8"
     reused = False
     if args.output.is_file():
         try:
-            reused = args.output.read_text(encoding="utf-8") == rendered
-        except OSError:
+            reused = args.output.read_text(encoding=output_encoding) == rendered
+        except (OSError, UnicodeError):
             reused = False
     if not reused:
-        args.output.write_text(rendered, encoding="utf-8", newline="\n")
-    print(json.dumps({"ok": True, "output": str(args.output), "coreSha256": digest, "patcherVersion": PATCHER_VERSION, "reused": reused}))
+        args.output.write_text(rendered, encoding=output_encoding, newline="\n")
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "output": str(args.output),
+                "coreSha256": digest,
+                "patcherVersion": PATCHER_VERSION,
+                "encoding": output_encoding,
+                "reused": reused,
+            }
+        )
+    )
     return 0
 
 
