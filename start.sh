@@ -10,6 +10,7 @@ VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 PATCHER="$SCRIPT_DIR/scripts/patch_notion_provider.py"
 NOTION_DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
 ADMIN="$SCRIPT_DIR/scripts/karox_admin.py"
+SUPPORT="$SCRIPT_DIR/scripts/support_bundle.py"
 CORE="$SCRIPT_DIR/start.core.sh"
 GENERATED_DIR="$RUNTIME_DIR/generated"
 GENERATED="$GENERATED_DIR/start.notion.generated.sh"
@@ -29,7 +30,11 @@ case "$FIRST" in
   help|--help|-h)
     exec "$PYTHON_EXE" "$ADMIN" --help
     ;;
-  version|status|doctor|update|support|dashboard)
+  support)
+    shift
+    exec "$PYTHON_EXE" "$SUPPORT" "$@"
+    ;;
+  version|status|doctor|update|dashboard)
     shift
     exec "$PYTHON_EXE" "$ADMIN" "$FIRST" "$@"
     ;;
@@ -56,6 +61,7 @@ fi
 [ -f "$CORE" ] || { echo "start.core.sh is missing. Reinstall or update KaroX." >&2; exit 1; }
 [ -f "$PATCHER" ] || { echo "Notion provider patcher is missing. Reinstall or update KaroX." >&2; exit 1; }
 [ -f "$ADMIN" ] || { echo "KaroX admin CLI is missing. Reinstall or update KaroX." >&2; exit 1; }
+[ -f "$SUPPORT" ] || { echo "KaroX support bundle module is missing. Reinstall or update KaroX." >&2; exit 1; }
 
 if [ "${KAROX_UPDATE_NOTICE:-1}" != "0" ]; then
   "$PYTHON_EXE" "$ADMIN" notice 2>/dev/null || true
