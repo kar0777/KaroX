@@ -76,6 +76,24 @@ jobs:
             python scripts/karox_cli.py doctor --json
           } 2>&1 | tee smoke-test.log
 
+      - name: Validate generated launcher in Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          python scripts/patch_notion_provider.py --platform powershell --source start.core.ps1 --output generated.windows.ps1 --root .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'generated.windows.ps1'))
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+            throw 'Generated PowerShell launcher is missing the UTF-8 BOM.'
+          }
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'generated.windows.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            Write-Error ($errors | Out-String)
+            exit 1
+          }
+
       - name: Validate POSIX syntax
         if: runner.os != 'Windows'
         run: bash -n bootstrap.sh install.sh start.sh start.core.sh
@@ -106,4 +124,5 @@ jobs:
             admin-test.log
             runtime-test.log
             smoke-test.log
+            generated.windows.ps1
           if-no-files-found: ignore
