@@ -42,6 +42,7 @@ jobs:
           python -m py_compile
           server/repo_tools.py
           server/app_entry.py
+          server/mcp_host_security.py
           server/notion_gateway.py
           server/notion_entry.py
           scripts/patch_notion_provider.py
@@ -51,11 +52,15 @@ jobs:
           scripts/sitecustomize.py
           scripts/support_bundle.py
           scripts/test_notion_provider.py
+          scripts/test_mcp_host_security.py
           scripts/test_admin_cli.py
           scripts/test_app_entry.py
 
       - name: Test provider transformations
         run: python scripts/test_notion_provider.py | tee notion-test.log
+
+      - name: Test MCP tunnel host security
+        run: python scripts/test_mcp_host_security.py | tee mcp-host-test.log
 
       - name: Test admin CLI
         run: python scripts/test_admin_cli.py | tee admin-test.log
@@ -121,6 +126,7 @@ jobs:
           name: karox-product-diagnostics
           path: |
             notion-test.log
+            mcp-host-test.log
             admin-test.log
             runtime-test.log
             product-doctor.json
