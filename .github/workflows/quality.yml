@@ -54,13 +54,16 @@ jobs:
           scripts/test_app_entry.py
 
       - name: Test provider generation
-        run: python scripts/test_notion_provider.py
+        shell: bash
+        run: python scripts/test_notion_provider.py 2>&1 | tee provider-test.log
 
       - name: Test admin CLI and redaction
-        run: python scripts/test_admin_cli.py
+        shell: bash
+        run: python scripts/test_admin_cli.py 2>&1 | tee admin-test.log
 
       - name: Test hardened API runtime
-        run: python scripts/test_app_entry.py
+        shell: bash
+        run: python scripts/test_app_entry.py 2>&1 | tee runtime-test.log
 
       - name: Smoke-test CLI metadata
         run: |
@@ -88,3 +91,14 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+      - name: Upload matrix diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            provider-test.log
+            admin-test.log
+            runtime-test.log
+          if-no-files-found: ignore
