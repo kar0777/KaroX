@@ -1,6 +1,6 @@
 param(
     [string]$Repository = "kar0777/KaroX",
-    [string]$Branch = "main",
+    [string]$Branch = "v3.11.0",
     [switch]$Clean
 )
 
@@ -27,10 +27,10 @@ function Remove-PathIfExists($path) {
 }
 
 Write-Host ""
-Write-Host "Star For KaroX: download and launch" -ForegroundColor Cyan
+Write-Host "Star For KaroX: stable installer" -ForegroundColor Cyan
 Write-Host "----------------------------------------" -ForegroundColor DarkCyan
-Write-Host ("Repository: https://github.com/{0}" -f $Repository)
-Write-Host ("Version/ref: {0}" -f $Branch)
+Write-Host ("Repository : https://github.com/{0}" -f $Repository)
+Write-Host ("Release/ref: {0}" -f $Branch)
 Write-Host ""
 
 if ($Clean) {
@@ -42,7 +42,7 @@ if ($Clean) {
 New-Item -ItemType Directory -Force -Path $AppRoot | Out-Null
 
 try {
-    Write-Host "Downloading project archive..." -ForegroundColor Yellow
+    Write-Host "Downloading verified project archive..." -ForegroundColor Yellow
     Invoke-WebRequest -UseBasicParsing -Uri $ZipUrl -OutFile $ZipPath
 
     Write-Host "Extracting..." -ForegroundColor Yellow
@@ -65,7 +65,7 @@ try {
         throw ("install.ps1 was not found after extraction: {0}" -f $installer)
     }
 
-    Write-Host "Starting installer..." -ForegroundColor Green
+    Write-Host "Starting KaroX installer..." -ForegroundColor Green
     powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Start
     exit $LASTEXITCODE
 }
