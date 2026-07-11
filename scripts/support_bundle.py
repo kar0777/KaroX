@@ -83,7 +83,7 @@ def create_support_bundle(output: Optional[Path] = None) -> Path:
             "doctor": report,
             "privacy": {
                 "sourceCodeIncluded": False,
-                "knownSessionSecretsRedacted": len(secrets),
+                "knownValuesRemoved": len(secrets),
                 "logMode": "bounded tails only",
             },
         }
