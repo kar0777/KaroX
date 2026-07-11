@@ -48,6 +48,7 @@ jobs:
           scripts/patch_notion_provider.py
           scripts/notion_doctor.py
           scripts/karox_admin.py
+          scripts/support_bundle.py
           scripts/test_notion_provider.py
           scripts/test_admin_cli.py
           scripts/test_app_entry.py
