@@ -7,14 +7,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from patch_notion_provider import patch_powershell, patch_shell  # noqa: E402
+from patch_notion_provider import patch_ps, patch_sh  # noqa: E402
 
 
 def main() -> int:
     ps = (ROOT / "start.core.ps1").read_text(encoding="utf-8-sig")
     sh = (ROOT / "start.core.sh").read_text(encoding="utf-8-sig")
-    ps_out = patch_powershell(ps, str(ROOT))
-    sh_out = patch_shell(sh, str(ROOT))
+    ps_out = patch_ps(ps, str(ROOT))
+    sh_out = patch_sh(sh, str(ROOT))
     assert 'return "notion"' in ps_out
     assert 'server URL: $tunnelUrl/mcp' in ps_out
     assert 'notion_gateway:app' in ps_out
