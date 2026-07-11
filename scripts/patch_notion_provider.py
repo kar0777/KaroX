@@ -7,7 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
-PATCHER_VERSION = "3.12.1"
+PATCHER_VERSION = "3.12.2"
+UTF8_BOM = b"\xef\xbb\xbf"
 
 
 def one(source: str, old: str, new: str, name: str) -> str:
@@ -184,11 +185,14 @@ def main() -> int:
         + patched
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    output_encoding = "utf-8-sig" if args.platform == "powershell" else "utf-8"
+    is_powershell = args.platform == "powershell"
+    output_encoding = "utf-8-sig" if is_powershell else "utf-8"
     reused = False
     if args.output.is_file():
         try:
-            reused = args.output.read_text(encoding=output_encoding) == rendered
+            existing_bytes = args.output.read_bytes()
+            bom_is_correct = existing_bytes.startswith(UTF8_BOM) if is_powershell else not existing_bytes.startswith(UTF8_BOM)
+            reused = bom_is_correct and existing_bytes.decode(output_encoding) == rendered
         except (OSError, UnicodeError):
             reused = False
     if not reused:
