@@ -13,7 +13,7 @@ set -u
 
 REPO_OWNER="kar0777"
 REPO_NAME="KaroX"
-REF="${KAROX_BOOTSTRAP_REF:-${REPOPILOT_BOOTSTRAP_BRANCH:-v3.11.0}}"
+REF="${KAROX_BOOTSTRAP_REF:-${REPOPILOT_BOOTSTRAP_BRANCH:-v3.12.0}}"
 INSTALL_ROOT="${REPOPILOT_INSTALL_ROOT:-$HOME/.local/share/RepoPilotBridge}"
 SOURCE_DIR="$INSTALL_ROOT/source"
 
@@ -88,6 +88,11 @@ fi
 
 log_success "KaroX files are ready: $SOURCE_DIR"
 echo ""
-log_info "Starting install.sh --start ..."
-bash "$SOURCE_DIR/install.sh" --start
+if [ "${KAROX_NO_START:-0}" = "1" ]; then
+    log_info "Updating KaroX without opening Flight Deck..."
+    bash "$SOURCE_DIR/install.sh"
+else
+    log_info "Starting install.sh --start ..."
+    bash "$SOURCE_DIR/install.sh" --start
+fi
 exit $?

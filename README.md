@@ -6,20 +6,21 @@
 
 **KaroX turns a local Git repository into a secure workspace for PromptQL, Notion Custom Agents, and other AI clients.**
 
-[![Release](https://img.shields.io/badge/release-v3.11.0-7C3AED)](https://github.com/kar0777/KaroX/releases/latest)
+[![Release](https://img.shields.io/badge/release-v3.12.0-7C3AED)](https://github.com/kar0777/KaroX/releases/latest)
 [![Notion](https://img.shields.io/badge/Notion-Custom%20Agent-000000?logo=notion)](NOTION.md)
 [![Windows](https://img.shields.io/badge/Windows-PowerShell-0078D4?logo=windows)](#install-in-one-command)
 [![macOS](https://img.shields.io/badge/macOS-Bash-000000?logo=apple)](#install-in-one-command)
 [![Linux](https://img.shields.io/badge/Linux-Bash-FCC624?logo=linux&logoColor=black)](#install-in-one-command)
-[![CI](https://github.com/kar0777/KaroX/actions/workflows/notion-provider.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/notion-provider.yml)
+[![Quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/quality.yml)
+[![CodeQL](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml)
 
-[Quick start](QUICKSTART.md) · [Notion setup](NOTION.md) · [Русская версия](README_RU.md) · [Security](SECURITY.md) · [Troubleshooting](TROUBLESHOOTING.md)
+[Quick start](QUICKSTART.md) · [Product guide](PRODUCT_GUIDE.md) · [Notion setup](NOTION.md) · [Русская версия](README_RU.md) · [Security](SECURITY.md)
 
 </div>
 
 ## Install in one command
 
-The command installs the latest stable KaroX release, all Python dependencies, the `karox` command, and the platform launcher. Run the same command again to update.
+The command installs the latest stable KaroX release, all Python dependencies, the `karox` command, and the platform launcher. Run the same command again to reinstall or upgrade.
 
 ### Windows
 
@@ -33,17 +34,55 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash
 ```
 
-Then launch normally:
+Launch Project Flight Deck:
 
 ```bash
 karox
 ```
 
-Or launch directly with the Notion provider selected:
+Or start directly with Notion selected:
 
 ```bash
 karox notion
 ```
+
+## New in KaroX 3.12
+
+- **Control Center:** open a live browser dashboard with `karox dashboard`.
+- **Stable self-update:** check or install releases with `karox update`.
+- **Unified diagnostics:** use `karox doctor` on Windows, macOS, and Linux.
+- **Safe support bundles:** create a source-free redacted ZIP with `karox support`.
+- **Hardened runtime:** constant-time authentication, request limits, secure headers, request IDs, safe errors, rotating redacted logs, and temporary failed-auth throttling.
+- **Cross-platform quality:** Windows, macOS, and Linux are tested with Python 3.10 and 3.12, alongside CodeQL.
+
+## Product commands
+
+| Command | Purpose |
+|---|---|
+| `karox` | Open Project Flight Deck |
+| `karox version` | Show the installed version |
+| `karox status` | Inspect saved and live sessions |
+| `karox doctor` | Run fast product diagnostics |
+| `karox doctor --deep` | Run the full endpoint/security harness |
+| `karox update --check` | Check the stable release channel |
+| `karox update` | Install the newest stable release |
+| `karox support` | Create a redacted support ZIP |
+| `karox dashboard` | Open Control Center for a live session |
+| `karox notion` | Start directly with the Notion target |
+
+JSON output is available for `version`, `status`, and `doctor`. See the [complete product guide](PRODUCT_GUIDE.md).
+
+## Control Center
+
+Every live session exposes:
+
+```text
+https://<current-session-host>/control
+```
+
+Run `karox dashboard` to open the correct session automatically. Paste the session key copied with `K` into the page. It stays in the current browser tab through `sessionStorage`, is never placed in the URL, and can be removed with **Forget key**.
+
+Control Center shows the repository, branch, access mode, task state, changed files, Git status, capabilities, and current Mission Control brief.
 
 ## Notion Custom Agent in three steps
 
@@ -62,7 +101,7 @@ The Notion agent receives purpose-built tools for repository context, file opera
 - **Context before action:** Mission Control gives the agent a fresh, secret-free operating brief.
 - **Safe Git workflow:** branch validation, generated-file cleanup, reviewed commits, and a hard no-push policy.
 - **Provider-ready:** native handoffs for PromptQL and Notion, plus generic OpenAPI and letaido compatibility.
-- **Daily-use UX:** bilingual adaptive Flight Deck, session history, diagnostics, and one-command updates.
+- **Operational visibility:** session status, Control Center, request IDs, diagnostics, update checks, and support bundles.
 
 ## Supported AI targets
 
@@ -105,35 +144,24 @@ KaroX starts the repository-scoped API and opens it through Cloudflare Tunnel or
 
 Run `V` before handoff. KaroX checks `/session`, `/health`, `/git/status`, and `/context/brief`, then verifies the exact repository and branch.
 
-## Notion diagnostics
-
-```bash
-karox notion doctor
-```
-
-Other provider helpers:
-
-```bash
-karox notion install
-karox notion status
-karox notion docs
-```
-
 ## Safety contract
 
-- every endpoint requires the session-specific key;
+- every protected endpoint requires the session-specific key;
 - repository access cannot leave the selected `repoRoot`;
 - secret paths and traversal are blocked;
 - Observe remains read-only;
 - dangerous commands and publishing operations are blocked;
 - large output can be captured to a generated file;
 - commits are created only through the guarded KaroX endpoint;
+- audit logs rotate and sensitive values are redacted;
+- support bundles contain no source code and scan for known session secrets;
 - KaroX never runs `git push`.
 
 HTTP endpoints remain backward compatible. `repopilot` remains available as a compatibility alias.
 
 ## Documentation
 
+- [Full product guide](PRODUCT_GUIDE.md)
 - [Quick start / Быстрый старт](QUICKSTART.md)
 - [Notion Custom Agent provider](NOTION.md)
 - [PromptQL connection](examples/promptql-connect.md)
