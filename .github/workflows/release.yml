@@ -1,0 +1,161 @@
+name: Publish stable release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+      - "RELEASE_NOTES_v*.md"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: karox-stable-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="v${VERSION}"
+          NOTES="RELEASE_NOTES_${TAG}.md"
+          test -n "$VERSION"
+          test -f "$NOTES"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+
+      - name: Check whether tag exists
+        id: tag
+        shell: bash
+        run: |
+          if git show-ref --tags --verify --quiet "refs/tags/${{ steps.meta.outputs.tag }}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare version and changelog
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          server = Path("server/repo_tools.py")
+          source = server.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'^VERSION\s*=\s*"\d+\.\d+\.\d+"',
+              f'VERSION = "{version}"',
+              source,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit("Could not update server/repo_tools.py VERSION")
+          server.write_text(updated, encoding="utf-8")
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text(encoding="utf-8")
+          heading = f"## {version}"
+          if heading not in text:
+              entry = f"""## {version}\n\n### Notion Custom Agent provider\n\n- Added Notion as a first-class KaroX AI target over protected Streamable HTTP MCP.\n- Added preflight, context, file, command, Git review, safe commit, and completion-report tools.\n- Added `karox notion` setup, diagnostics, status, and documentation commands.\n- Pinned public one-command installers to the stable `v{version}` tag.\n- Added automated release archives, checksums, and bilingual release documentation.\n\n"""
+              prefix = "# Changelog\n\n"
+              if not text.startswith(prefix):
+                  raise SystemExit("Unexpected CHANGELOG.md header")
+              text = prefix + entry + text[len(prefix):]
+              changelog.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Commit release metadata
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "KaroX Release Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add server/repo_tools.py CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "release: KaroX ${{ steps.meta.outputs.tag }}"
+            git push origin HEAD:main
+          fi
+
+      - name: Create and push tag
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -a "${{ steps.meta.outputs.tag }}" -m "KaroX ${{ steps.meta.outputs.tag }}"
+          git push origin "${{ steps.meta.outputs.tag }}"
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          mkdir -p dist
+          git archive --format=zip --prefix="KaroX-${TAG}/" -o "dist/KaroX-${TAG}.zip" "$TAG"
+          git archive --format=tar.gz --prefix="KaroX-${TAG}/" -o "dist/KaroX-${TAG}.tar.gz" "$TAG"
+          (cd dist && sha256sum "KaroX-${TAG}.zip" "KaroX-${TAG}.tar.gz" > "KaroX-${TAG}-SHA256SUMS.txt")
+
+      - name: Publish or refresh GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          NOTES="${{ steps.meta.outputs.notes }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "★ KaroX ${TAG} — Notion Custom Agent provider" --notes-file "$NOTES" --latest
+          else
+            gh release create "$TAG" --verify-tag --title "★ KaroX ${TAG} — Notion Custom Agent provider" --notes-file "$NOTES" --latest
+          fi
+          gh release upload "$TAG" dist/* --clobber
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo "## ★ KaroX ${{ steps.meta.outputs.tag }}"
+            echo
+            echo "Release published with ZIP, TAR.GZ, and SHA-256 checksums."
+            echo
+            echo "### Windows"
+            echo '```powershell'
+            echo 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.ps1 | iex"'
+            echo '```'
+            echo
+            echo "### macOS / Linux"
+            echo '```bash'
+            echo 'curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
