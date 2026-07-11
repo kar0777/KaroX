@@ -1,13 +1,13 @@
 {
   "status": "published",
-  "version": "3.12.2",
-  "tag": "v3.12.2",
-  "name": "★ KaroX v3.12.2 — Legacy Launcher Migration Hotfix",
-  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.12.2",
-  "publishedAt": "2026-07-11T16:17:02Z",
+  "version": "3.12.3",
+  "tag": "v3.12.3",
+  "name": "★ KaroX v3.12.3 — Notion MCP 421 Connection Hotfix",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.12.3",
+  "publishedAt": "2026-07-11T16:48:58Z",
   "assets": [
-    "KaroX-v3.12.2-SHA256SUMS.txt",
-    "KaroX-v3.12.2.tar.gz",
-    "KaroX-v3.12.2.zip"
+    "KaroX-v3.12.3-SHA256SUMS.txt",
+    "KaroX-v3.12.3.tar.gz",
+    "KaroX-v3.12.3.zip"
   ]
 }
