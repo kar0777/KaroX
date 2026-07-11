@@ -141,13 +141,62 @@ jobs:
           fi
           gh release upload "$TAG" dist/* --clobber
 
+      - name: Verify release and record published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json tagName,name,url,publishedAt,assets > release-view.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release = json.loads(Path("release-view.json").read_text(encoding="utf-8"))
+          tag = os.environ["TAG"]
+          expected = {
+              f"KaroX-{tag}.zip",
+              f"KaroX-{tag}.tar.gz",
+              f"KaroX-{tag}-SHA256SUMS.txt",
+          }
+          assets = sorted(item["name"] for item in release.get("assets", []))
+          missing = expected.difference(assets)
+          if release.get("tagName") != tag:
+              raise SystemExit(f"Unexpected release tag: {release.get('tagName')}")
+          if missing:
+              raise SystemExit(f"Release assets are missing: {sorted(missing)}")
+          marker = {
+              "status": "published",
+              "version": os.environ["VERSION"],
+              "tag": tag,
+              "name": release.get("name"),
+              "url": release.get("url"),
+              "publishedAt": release.get("publishedAt"),
+              "assets": assets,
+          }
+          Path("RELEASE.json").write_text(
+              json.dumps(marker, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          git config user.name "KaroX Release Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add RELEASE.json
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: record published $TAG assets"
+            git push origin HEAD:main
+          fi
+
       - name: Publish summary
         shell: bash
         run: |
           {
             echo "## ★ KaroX ${{ steps.meta.outputs.tag }}"
             echo
-            echo "Release published with ZIP, TAR.GZ, and SHA-256 checksums."
+            echo "Release published and verified with ZIP, TAR.GZ, and SHA-256 checksums."
             echo
             echo "### Windows"
             echo '```powershell'
