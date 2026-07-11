@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.12.3
+
+### ★ KaroX v3.12.3 — Notion MCP 421 Connection Hotfix
+
+- Replaced the SDK's localhost-only Host allowlist with a KaroX tunnel-aware validator.
+- Allowed only localhost, `*.trycloudflare.com`, `*.ts.net`, and exact hosts explicitly listed in `KAROX_MCP_ALLOWED_HOSTS`.
+- Kept the per-session Bearer token mandatory for every MCP request.
+- Switched MCP token comparison to constant-time comparison.
+- Added cross-platform regression tests for allowed and rejected Host headers.
+- Added a provider contract that verifies the SDK localhost-only protection is not accidentally re-enabled.
+
 ## 3.12.2
 
 ### ★ KaroX v3.12.2 — Legacy Launcher Migration Hotfix
