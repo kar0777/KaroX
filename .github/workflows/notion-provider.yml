@@ -53,6 +53,7 @@ jobs:
           scripts/support_bundle.py
           scripts/test_notion_provider.py
           scripts/test_mcp_host_security.py
+          scripts/test_notion_mcp_transport.py
           scripts/test_admin_cli.py
           scripts/test_app_entry.py
 
@@ -61,6 +62,9 @@ jobs:
 
       - name: Test MCP tunnel host security
         run: python scripts/test_mcp_host_security.py | tee mcp-host-test.log
+
+      - name: Test Notion MCP transport middleware
+        run: python scripts/test_notion_mcp_transport.py | tee mcp-transport-test.log
 
       - name: Test admin CLI
         run: python scripts/test_admin_cli.py | tee admin-test.log
@@ -127,6 +131,7 @@ jobs:
           path: |
             notion-test.log
             mcp-host-test.log
+            mcp-transport-test.log
             admin-test.log
             runtime-test.log
             product-doctor.json
