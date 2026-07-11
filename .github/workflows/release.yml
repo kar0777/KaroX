@@ -41,9 +41,12 @@ jobs:
           NOTES="RELEASE_NOTES_${TAG}.md"
           test -n "$VERSION"
           test -f "$NOTES"
+          TITLE="$(sed -n '1s/^# //p' "$NOTES")"
+          if [ -z "$TITLE" ]; then TITLE="★ KaroX ${TAG}"; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Fetch tags
         run: git fetch --force --tags origin
@@ -62,6 +65,7 @@ jobs:
         if: steps.tag.outputs.exists == 'false'
         env:
           VERSION: ${{ steps.meta.outputs.version }}
+          NOTES: ${{ steps.meta.outputs.notes }}
         shell: bash
         run: |
           python - <<'PY'
@@ -70,6 +74,9 @@ jobs:
           from pathlib import Path
 
           version = os.environ["VERSION"]
+          notes_path = Path(os.environ["NOTES"])
+          notes = notes_path.read_text(encoding="utf-8")
+
           server = Path("server/repo_tools.py")
           source = server.read_text(encoding="utf-8")
           updated, count = re.subn(
@@ -87,12 +94,14 @@ jobs:
           text = changelog.read_text(encoding="utf-8")
           heading = f"## {version}"
           if heading not in text:
-              entry = f"""## {version}\n\n### Notion Custom Agent provider\n\n- Added Notion as a first-class KaroX AI target over protected Streamable HTTP MCP.\n- Added preflight, context, file, command, Git review, safe commit, and completion-report tools.\n- Added `karox notion` setup, diagnostics, status, and documentation commands.\n- Pinned public one-command installers to the stable `v{version}` tag.\n- Added automated release archives, checksums, and bilingual release documentation.\n\n"""
+              title = next((line[2:].strip() for line in notes.splitlines() if line.startswith("# ")), f"KaroX {version}")
+              bullets = [line.strip() for line in notes.splitlines() if line.startswith("- ")][:14]
+              body = "\n".join(bullets) or "- See the release notes for full details."
+              entry = f"## {version}\n\n### {title}\n\n{body}\n\n"
               prefix = "# Changelog\n\n"
               if not text.startswith(prefix):
                   raise SystemExit("Unexpected CHANGELOG.md header")
-              text = prefix + entry + text[len(prefix):]
-              changelog.write_text(text, encoding="utf-8")
+              changelog.write_text(prefix + entry + text[len(prefix):], encoding="utf-8")
           PY
 
       - name: Commit release metadata
@@ -129,15 +138,16 @@ jobs:
       - name: Publish or refresh GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.title }}
         shell: bash
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.tag }}"
           NOTES="${{ steps.meta.outputs.notes }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "★ KaroX ${TAG} — Notion Custom Agent provider" --notes-file "$NOTES" --latest
+            gh release edit "$TAG" --title "$RELEASE_TITLE" --notes-file "$NOTES" --latest
           else
-            gh release create "$TAG" --verify-tag --title "★ KaroX ${TAG} — Notion Custom Agent provider" --notes-file "$NOTES" --latest
+            gh release create "$TAG" --verify-tag --title "$RELEASE_TITLE" --notes-file "$NOTES" --latest
           fi
           gh release upload "$TAG" dist/* --clobber
 
@@ -194,7 +204,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## ★ KaroX ${{ steps.meta.outputs.tag }}"
+            echo "## ${{ steps.meta.outputs.title }}"
             echo
             echo "Release published and verified with ZIP, TAR.GZ, and SHA-256 checksums."
             echo
