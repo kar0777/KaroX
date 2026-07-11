@@ -4,29 +4,37 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
 
-def load_admin(root: Path, temp: Path):
+def load_modules(root: Path, temp: Path):
     os.environ["HOME"] = str(temp / "home")
     os.environ["APPDATA"] = str(temp / "appdata")
     os.environ["LOCALAPPDATA"] = str(temp / "localappdata")
     os.environ["XDG_CONFIG_HOME"] = str(temp / "xdg-config")
     os.environ["XDG_DATA_HOME"] = str(temp / "xdg-data")
-    spec = importlib.util.spec_from_file_location("karox_admin_tested", root / "scripts" / "karox_admin.py")
+    scripts = root / "scripts"
+    sys.path.insert(0, str(scripts))
+    spec = importlib.util.spec_from_file_location("karox_admin", scripts / "karox_admin.py")
     assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    admin = importlib.util.module_from_spec(spec)
+    sys.modules["karox_admin"] = admin
+    spec.loader.exec_module(admin)
+    support_spec = importlib.util.spec_from_file_location("support_bundle_tested", scripts / "support_bundle.py")
+    assert support_spec and support_spec.loader
+    support = importlib.util.module_from_spec(support_spec)
+    support_spec.loader.exec_module(support)
+    return admin, support
 
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="karox-admin-test-") as raw_temp:
         temp = Path(raw_temp)
-        admin = load_admin(root, temp)
+        admin, support = load_modules(root, temp)
 
         assert admin.semver("v3.12.0") > admin.semver("3.11.9")
         assert admin.redact({"apiKey": "secret"})["apiKey"] == "[REDACTED]"
@@ -64,7 +72,7 @@ def main() -> int:
         )
 
         output = temp / "support.zip"
-        generated = admin.create_support_bundle(output)
+        generated = support.create_support_bundle(output)
         assert generated == output
         assert output.is_file()
         with zipfile.ZipFile(output, "r") as archive:
@@ -73,7 +81,10 @@ def main() -> int:
             assert "config/settings.redacted.json" in names
             combined = "\n".join(archive.read(name).decode("utf-8", errors="ignore") for name in names)
             assert secret not in combined
-            assert "[REDACTED]" in combined
+            assert "[REDACTED" in combined
+            summary = json.loads(archive.read("summary.json"))
+            assert summary["privacy"]["sourceCodeIncluded"] is False
+            assert summary["privacy"]["knownSessionSecretsRedacted"] == 1
 
         report = admin.doctor_report(include_update=False)
         assert report["version"] != "unknown"
@@ -82,7 +93,7 @@ def main() -> int:
         assert status and status[0]["id"] == "session-test"
         assert "apiKey" not in status[0]
 
-    print("KaroX admin CLI tests passed")
+    print("KaroX admin CLI and support redaction tests passed")
     return 0
 
 
