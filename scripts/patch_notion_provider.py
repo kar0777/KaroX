@@ -113,14 +113,14 @@ def patch_sh(source: str, root: str) -> str:
     )
     source = one(
         source,
-        "        letaido) printf 'letaido' ;;;",
-        "        notion|notion-ai|notion_agent) printf 'notion' ;;;\n        letaido) printf 'letaido' ;;;",
+        "        letaido) printf 'letaido' ;;",
+        "        notion|notion-ai|notion_agent) printf 'notion' ;;\n        letaido) printf 'letaido' ;;",
         "sh normalize",
     )
     source = one(
         source,
-        "        letaido) printf 'letaido.com' ;;;",
-        "        notion) printf 'Notion Custom Agent' ;;;\n        letaido) printf 'letaido.com' ;;;",
+        "        letaido) printf 'letaido.com' ;;",
+        "        notion) printf 'Notion Custom Agent' ;;\n        letaido) printf 'letaido.com' ;;",
         "sh label",
     )
     source = one(
@@ -141,19 +141,19 @@ def patch_sh(source: str, root: str) -> str:
     source = one(source, '    ui_choice 3 LETAIDO.COM', '    ui_choice 4 LETAIDO.COM', "sh letaido number")
     source = one(
         source,
-        'case "$choice" in 1) printf promptql ;;; 2) printf other ;;; 3) printf letaido ;;; *) return 1 ;;; esac',
-        'case "$choice" in 1) printf promptql ;;; 2) printf notion ;;; 3) printf other ;;; 4) printf letaido ;;; *) return 1 ;;; esac',
+        'case "$choice" in 1) printf promptql ;; 2) printf other ;; 3) printf letaido ;; *) return 1 ;; esac',
+        'case "$choice" in 1) printf promptql ;; 2) printf notion ;; 3) printf other ;; 4) printf letaido ;; *) return 1 ;; esac',
         "sh choices",
     )
     source = source.replace(
         '            letaido)\n                intro="Я запустил Star For KaroX',
-        '            notion)\n                intro="Я запустил KaroX для Notion Custom Agent. Добавь MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token из клавиши K. Сначала вызови karox_preflight и дождись ТЗ." ;;;\n'
+        '            notion)\n                intro="Я запустил KaroX для Notion Custom Agent. Добавь MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token из клавиши K. Сначала вызови karox_preflight и дождись ТЗ." ;;\n'
         '            letaido)\n                intro="Я запустил Star For KaroX',
         1,
     )
     source = source.replace(
         '            letaido)\n                intro="I started Star For KaroX',
-        '            notion)\n                intro="I started KaroX for a Notion Custom Agent. Add MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token copied with K. Call karox_preflight first and wait for the task." ;;;\n'
+        '            notion)\n                intro="I started KaroX for a Notion Custom Agent. Add MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token copied with K. Call karox_preflight first and wait for the task." ;;\n'
         '            letaido)\n                intro="I started Star For KaroX',
         1,
     )
