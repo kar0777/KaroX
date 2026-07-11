@@ -28,6 +28,7 @@ def main() -> int:
         "scripts/karox_admin.py",
         "server/repo_tools.py",
         "server/app_entry.py",
+        "server/mcp_host_security.py",
         "server/notion_gateway.py",
         "server/notion_entry.py",
         "NOTION.md",
@@ -59,6 +60,25 @@ def main() -> int:
             checks.append({"name": "Generated POSIX launcher", "ok": generated_sh.stat().st_size > 1000})
     except (OSError, RuntimeError) as exc:
         checks.append({"name": "Provider patch generation", "ok": False, "error": str(exc)})
+
+    try:
+        gateway = (root / "server" / "notion_gateway.py").read_text(encoding="utf-8")
+        host_security = (root / "server" / "mcp_host_security.py").read_text(encoding="utf-8")
+        checks.append({
+            "name": "Tunnel-aware MCP Host validation",
+            "ok": (
+                "is_allowed_mcp_host(host)" in gateway
+                and "enable_dns_rebinding_protection=False" in gateway
+                and ".trycloudflare.com" in host_security
+                and ".ts.net" in host_security
+            ),
+        })
+        checks.append({
+            "name": "MCP Bearer token remains mandatory",
+            "ok": "hmac.compare_digest" in gateway and "status_code=401" in gateway,
+        })
+    except OSError as exc:
+        checks.append({"name": "MCP Host security", "ok": False, "error": str(exc)})
 
     ok = all(bool(item.get("ok")) for item in checks)
     print("KaroX Notion provider doctor")
