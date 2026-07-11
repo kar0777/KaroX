@@ -1,0 +1,29 @@
+name: Notion provider
+
+on:
+  pull_request:
+    paths:
+      - "start.ps1"
+      - "start.sh"
+      - "start.core.ps1"
+      - "start.core.sh"
+      - "server/notion_gateway.py"
+      - "scripts/*notion*.py"
+      - "requirements.txt"
+      - ".github/workflows/notion-provider.yml"
+  push:
+    branches:
+      - agent/notion-provider
+
+jobs:
+  source-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m py_compile server/notion_gateway.py scripts/patch_notion_provider.py scripts/notion_doctor.py scripts/test_notion_provider.py
+      - run: python scripts/test_notion_provider.py
+      - run: python scripts/notion_doctor.py --root .
