@@ -73,7 +73,7 @@ def main() -> int:
 
         output = temp / "support.zip"
         generated = support.create_support_bundle(output)
-        assert generated == output
+        assert generated == output.resolve()
         assert output.is_file()
         with zipfile.ZipFile(output, "r") as archive:
             names = set(archive.namelist())
