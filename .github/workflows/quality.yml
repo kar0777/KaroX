@@ -48,6 +48,8 @@ jobs:
           scripts/patch_notion_provider.py
           scripts/notion_doctor.py
           scripts/karox_admin.py
+          scripts/karox_cli.py
+          scripts/sitecustomize.py
           scripts/support_bundle.py
           scripts/test_notion_provider.py
           scripts/test_admin_cli.py
@@ -65,13 +67,13 @@ jobs:
         shell: bash
         run: python scripts/test_app_entry.py 2>&1 | tee runtime-test.log
 
-      - name: Smoke-test CLI metadata
+      - name: Smoke-test public CLI metadata
         shell: bash
         run: |
           {
-            python scripts/karox_admin.py version --json
-            python scripts/karox_admin.py status --json
-            python scripts/karox_admin.py doctor --json
+            python scripts/karox_cli.py version --json
+            python scripts/karox_cli.py status --json
+            python scripts/karox_cli.py doctor --json
           } 2>&1 | tee smoke-test.log
 
       - name: Validate POSIX syntax
