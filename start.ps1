@@ -3,7 +3,8 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
 $PythonExe = Join-Path $RuntimeDir ".venv\Scripts\python.exe"
 $Patcher = Join-Path $Root "scripts\patch_notion_provider.py"
-$Doctor = Join-Path $Root "scripts\notion_doctor.py"
+$NotionDoctor = Join-Path $Root "scripts\notion_doctor.py"
+$Admin = Join-Path $Root "scripts\karox_admin.py"
 $Core = Join-Path $Root "start.core.ps1"
 $GeneratedDir = Join-Path $RuntimeDir "generated"
 $Generated = Join-Path $GeneratedDir "start.notion.generated.ps1"
@@ -17,21 +18,43 @@ function Find-KaroXPython {
     throw "Python was not found. Run install.ps1 first."
 }
 
+function Get-TailArguments($items, $startIndex) {
+    if ($items.Count -le $startIndex) { return @() }
+    return @($items[$startIndex..($items.Count - 1)])
+}
+
 $python = Find-KaroXPython
 $arguments = @($args)
 $forceNotion = $false
+$first = if ($arguments.Count -gt 0) { ([string]$arguments[0]).ToLowerInvariant() } else { "" }
 
-if ($arguments.Count -gt 0 -and ([string]$arguments[0]).ToLowerInvariant() -eq "notion") {
+if ($first -in @("--version", "-v")) {
+    & $python $Admin version
+    exit $LASTEXITCODE
+}
+
+if ($first -in @("help", "--help", "-h")) {
+    & $python $Admin --help
+    exit $LASTEXITCODE
+}
+
+if ($first -in @("version", "status", "doctor", "update", "support", "dashboard")) {
+    $adminArgs = Get-TailArguments $arguments 1
+    & $python $Admin $first @adminArgs
+    exit $LASTEXITCODE
+}
+
+if ($first -eq "notion") {
     $forceNotion = $true
     $subcommand = if ($arguments.Count -gt 1) { ([string]$arguments[1]).ToLowerInvariant() } else { "" }
     if ($subcommand -eq "install" -or $subcommand -eq "update") {
         & $python -m pip install -r (Join-Path $Root "requirements.txt")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        & $python $Doctor --root $Root
+        & $python $NotionDoctor --root $Root
         exit $LASTEXITCODE
     }
     if ($subcommand -eq "doctor" -or $subcommand -eq "status") {
-        & $python $Doctor --root $Root
+        & $python $NotionDoctor --root $Root
         exit $LASTEXITCODE
     }
     if ($subcommand -eq "docs") {
@@ -42,10 +65,15 @@ if ($arguments.Count -gt 0 -and ([string]$arguments[0]).ToLowerInvariant() -eq "
 
 if (!(Test-Path -LiteralPath $Core)) { throw "start.core.ps1 is missing. Reinstall or update KaroX." }
 if (!(Test-Path -LiteralPath $Patcher)) { throw "Notion provider patcher is missing. Reinstall or update KaroX." }
+if (!(Test-Path -LiteralPath $Admin)) { throw "KaroX admin CLI is missing. Reinstall or update KaroX." }
+
+if ($env:KAROX_UPDATE_NOTICE -ne "0") {
+    try { & $python $Admin notice 2>$null } catch {}
+}
 
 New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
 & $python $Patcher --platform powershell --source $Core --output $Generated --root $Root | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Could not generate the Notion-enabled KaroX launcher. Run: karox notion doctor" }
+if ($LASTEXITCODE -ne 0) { throw "Could not generate the KaroX launcher. Run: karox doctor" }
 
 $previousRoot = $env:KAROX_SOURCE_ROOT
 $previousClient = $env:KAROX_FORCE_AI_CLIENT
