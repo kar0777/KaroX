@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from patch_notion_provider import patch_powershell, patch_shell
+from patch_notion_provider import patch_ps, patch_sh
 
 
 def check_module(name: str) -> dict[str, object]:
@@ -36,8 +36,8 @@ def main() -> int:
     try:
         ps = (root / "start.core.ps1").read_text(encoding="utf-8-sig")
         sh = (root / "start.core.sh").read_text(encoding="utf-8-sig")
-        ps_out = patch_powershell(ps, str(root))
-        sh_out = patch_shell(sh, str(root))
+        ps_out = patch_ps(ps, str(root))
+        sh_out = patch_sh(sh, str(root))
         checks.append({"name": "PowerShell provider patch", "ok": "Notion Custom Agent" in ps_out and "notion_gateway:app" in ps_out})
         checks.append({"name": "POSIX provider patch", "ok": "Notion Custom Agent" in sh_out and "notion_gateway:app" in sh_out})
         with tempfile.TemporaryDirectory() as tmp:
