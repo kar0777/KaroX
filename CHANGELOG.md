@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.12.2
+
+### ★ KaroX v3.12.2 — Legacy Launcher Migration Hotfix
+
+- Detects cached PowerShell launchers that contain valid UTF-8 text but are missing the UTF-8 BOM.
+- Rewrites those legacy files automatically instead of incorrectly treating them as reusable.
+- Preserves normal caching once the launcher has the correct encoding.
+- Adds a regression test that recreates the exact v3.12.0 cache state, runs the new patcher, and verifies that the BOM is restored.
+
 ## 3.12.1
 
 ### ★ KaroX v3.12.1 — Windows PowerShell Encoding Hotfix
