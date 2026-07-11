@@ -8,7 +8,8 @@ case "$(uname -s)" in
 esac
 VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 PATCHER="$SCRIPT_DIR/scripts/patch_notion_provider.py"
-DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
+NOTION_DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
+ADMIN="$SCRIPT_DIR/scripts/karox_admin.py"
 CORE="$SCRIPT_DIR/start.core.sh"
 GENERATED_DIR="$RUNTIME_DIR/generated"
 GENERATED="$GENERATED_DIR/start.notion.generated.sh"
@@ -19,16 +20,31 @@ find_python() {
 }
 
 PYTHON_EXE="$(find_python)" || { echo "Python was not found. Run install.sh first." >&2; exit 1; }
+FIRST="${1:-}"
+
+case "$FIRST" in
+  --version|-v)
+    exec "$PYTHON_EXE" "$ADMIN" version
+    ;;
+  help|--help|-h)
+    exec "$PYTHON_EXE" "$ADMIN" --help
+    ;;
+  version|status|doctor|update|support|dashboard)
+    shift
+    exec "$PYTHON_EXE" "$ADMIN" "$FIRST" "$@"
+    ;;
+esac
+
 FORCE_NOTION=0
-if [ "${1:-}" = "notion" ]; then
+if [ "$FIRST" = "notion" ]; then
   FORCE_NOTION=1
   case "${2:-}" in
     install|update)
       "$PYTHON_EXE" -m pip install -r "$SCRIPT_DIR/requirements.txt"
-      exec "$PYTHON_EXE" "$DOCTOR" --root "$SCRIPT_DIR"
+      exec "$PYTHON_EXE" "$NOTION_DOCTOR" --root "$SCRIPT_DIR"
       ;;
     doctor|status)
-      exec "$PYTHON_EXE" "$DOCTOR" --root "$SCRIPT_DIR"
+      exec "$PYTHON_EXE" "$NOTION_DOCTOR" --root "$SCRIPT_DIR"
       ;;
     docs)
       printf '%s\n' "$SCRIPT_DIR/NOTION.md"
@@ -39,6 +55,12 @@ fi
 
 [ -f "$CORE" ] || { echo "start.core.sh is missing. Reinstall or update KaroX." >&2; exit 1; }
 [ -f "$PATCHER" ] || { echo "Notion provider patcher is missing. Reinstall or update KaroX." >&2; exit 1; }
+[ -f "$ADMIN" ] || { echo "KaroX admin CLI is missing. Reinstall or update KaroX." >&2; exit 1; }
+
+if [ "${KAROX_UPDATE_NOTICE:-1}" != "0" ]; then
+  "$PYTHON_EXE" "$ADMIN" notice 2>/dev/null || true
+fi
+
 mkdir -p "$GENERATED_DIR"
 "$PYTHON_EXE" "$PATCHER" --platform shell --source "$CORE" --output "$GENERATED" --root "$SCRIPT_DIR" >/dev/null
 chmod +x "$GENERATED"
