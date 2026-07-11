@@ -1,6 +1,6 @@
 param(
     [string]$Repository = "kar0777/KaroX",
-    [string]$Branch = "v3.11.0",
+    [string]$Branch = "v3.12.0",
     [switch]$Clean
 )
 
@@ -65,8 +65,13 @@ try {
         throw ("install.ps1 was not found after extraction: {0}" -f $installer)
     }
 
-    Write-Host "Starting KaroX installer..." -ForegroundColor Green
-    powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Start
+    if ($env:KAROX_NO_START -eq "1") {
+        Write-Host "Updating KaroX without opening Flight Deck..." -ForegroundColor Green
+        powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+    } else {
+        Write-Host "Starting KaroX installer..." -ForegroundColor Green
+        powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Start
+    }
     exit $LASTEXITCODE
 }
 finally {
