@@ -43,6 +43,7 @@ jobs:
           python -m py_compile
           server/repo_tools.py
           server/app_entry.py
+          server/mcp_host_security.py
           server/notion_gateway.py
           server/notion_entry.py
           scripts/patch_notion_provider.py
@@ -52,12 +53,22 @@ jobs:
           scripts/sitecustomize.py
           scripts/support_bundle.py
           scripts/test_notion_provider.py
+          scripts/test_mcp_host_security.py
+          scripts/test_notion_mcp_transport.py
           scripts/test_admin_cli.py
           scripts/test_app_entry.py
 
       - name: Test provider generation
         shell: bash
         run: python scripts/test_notion_provider.py 2>&1 | tee provider-test.log
+
+      - name: Test MCP tunnel host security
+        shell: bash
+        run: python scripts/test_mcp_host_security.py 2>&1 | tee mcp-host-test.log
+
+      - name: Test Notion MCP transport middleware
+        shell: bash
+        run: python scripts/test_notion_mcp_transport.py 2>&1 | tee mcp-transport-test.log
 
       - name: Test admin CLI and redaction
         shell: bash
@@ -121,6 +132,8 @@ jobs:
           name: quality-${{ matrix.os }}-py${{ matrix.python }}
           path: |
             provider-test.log
+            mcp-host-test.log
+            mcp-transport-test.log
             admin-test.log
             runtime-test.log
             smoke-test.log
