@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import codecs
+import json
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from patch_notion_provider import patch_ps, patch_sh  # noqa: E402
 
 
-def run_patcher(platform: str, source: Path, output: Path) -> None:
+def run_patcher(platform: str, source: Path, output: Path) -> dict[str, object]:
     result = subprocess.run(
         [
             sys.executable,
@@ -34,6 +35,7 @@ def run_patcher(platform: str, source: Path, output: Path) -> None:
     )
     if result.returncode != 0:
         raise AssertionError(f"patcher failed for {platform}:\n{result.stdout}\n{result.stderr}")
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 def main() -> int:
@@ -66,8 +68,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         generated_ps = Path(temp) / "generated.ps1"
         generated_sh = Path(temp) / "generated.sh"
-        run_patcher("powershell", ps_source, generated_ps)
-        run_patcher("shell", sh_source, generated_sh)
+        first_ps = run_patcher("powershell", ps_source, generated_ps)
+        first_sh = run_patcher("shell", sh_source, generated_sh)
+        assert first_ps["reused"] is False
+        assert first_sh["reused"] is False
 
         ps_bytes = generated_ps.read_bytes()
         sh_bytes = generated_sh.read_bytes()
@@ -81,10 +85,20 @@ def main() -> int:
         assert "РќР°С‚РёРІРЅ" not in generated_ps_text
         assert 'server URL: $tunnelUrl/mcp' in generated_ps_text
         assert "printf notion" in generated_sh_text
+
+        # Simulate the exact v3.12.0 cache: valid UTF-8 text, but no BOM.
+        generated_ps.write_text(generated_ps_text, encoding="utf-8", newline="\n")
+        assert not generated_ps.read_bytes().startswith(codecs.BOM_UTF8)
+        migrated = run_patcher("powershell", ps_source, generated_ps)
+        assert migrated["reused"] is False, "A BOM-less legacy launcher must be rewritten"
+        assert generated_ps.read_bytes().startswith(codecs.BOM_UTF8), "Migration must restore the BOM"
+
+        reused = run_patcher("powershell", ps_source, generated_ps)
+        assert reused["reused"] is True, "A correctly encoded launcher should be reused"
         assert generated_ps.stat().st_size > 1000
         assert generated_sh.stat().st_size > 1000
 
-    print("KaroX provider source and encoding checks passed")
+    print("KaroX provider source, encoding and cache-migration checks passed")
     return 0
 
 
