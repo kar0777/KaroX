@@ -9,7 +9,7 @@ esac
 VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 PATCHER="$SCRIPT_DIR/scripts/patch_notion_provider.py"
 NOTION_DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
-ADMIN="$SCRIPT_DIR/scripts/karox_admin.py"
+ADMIN="$SCRIPT_DIR/scripts/karox_cli.py"
 SUPPORT="$SCRIPT_DIR/scripts/support_bundle.py"
 CORE="$SCRIPT_DIR/start.core.sh"
 GENERATED_DIR="$RUNTIME_DIR/generated"
