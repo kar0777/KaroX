@@ -5,6 +5,7 @@ $PythonExe = Join-Path $RuntimeDir ".venv\Scripts\python.exe"
 $Patcher = Join-Path $Root "scripts\patch_notion_provider.py"
 $NotionDoctor = Join-Path $Root "scripts\notion_doctor.py"
 $Admin = Join-Path $Root "scripts\karox_admin.py"
+$Support = Join-Path $Root "scripts\support_bundle.py"
 $Core = Join-Path $Root "start.core.ps1"
 $GeneratedDir = Join-Path $RuntimeDir "generated"
 $Generated = Join-Path $GeneratedDir "start.notion.generated.ps1"
@@ -38,7 +39,13 @@ if ($first -in @("help", "--help", "-h")) {
     exit $LASTEXITCODE
 }
 
-if ($first -in @("version", "status", "doctor", "update", "support", "dashboard")) {
+if ($first -eq "support") {
+    $supportArgs = Get-TailArguments $arguments 1
+    & $python $Support @supportArgs
+    exit $LASTEXITCODE
+}
+
+if ($first -in @("version", "status", "doctor", "update", "dashboard")) {
     $adminArgs = Get-TailArguments $arguments 1
     & $python $Admin $first @adminArgs
     exit $LASTEXITCODE
@@ -66,6 +73,7 @@ if ($first -eq "notion") {
 if (!(Test-Path -LiteralPath $Core)) { throw "start.core.ps1 is missing. Reinstall or update KaroX." }
 if (!(Test-Path -LiteralPath $Patcher)) { throw "Notion provider patcher is missing. Reinstall or update KaroX." }
 if (!(Test-Path -LiteralPath $Admin)) { throw "KaroX admin CLI is missing. Reinstall or update KaroX." }
+if (!(Test-Path -LiteralPath $Support)) { throw "KaroX support bundle module is missing. Reinstall or update KaroX." }
 
 if ($env:KAROX_UPDATE_NOTICE -ne "0") {
     try { & $python $Admin notice 2>$null } catch {}
