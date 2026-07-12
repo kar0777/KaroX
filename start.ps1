@@ -52,8 +52,8 @@ function Invoke-NotionWizard([string[]]$WizardArgs) {
     if (!(Test-Path -LiteralPath $NotionWizard)) {
         throw "Localized Notion setup wizard is missing. Run: karox update"
     }
-    & $python $NotionWizard @WizardArgs
-    return $LASTEXITCODE
+    & $python $NotionWizard @WizardArgs | Out-Host
+    return [int]$LASTEXITCODE
 }
 
 $python = Find-KaroXPython
