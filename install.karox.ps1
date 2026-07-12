@@ -13,6 +13,7 @@ $ConfigDir = Join-Path $env:APPDATA "KaroX"
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "KaroX"
 $LegacyConfigDir = Join-Path $env:APPDATA "RepoPilotBridge"
 $LegacyRuntimeDir = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
+$LegacyBinDir = Join-Path $LegacyRuntimeDir "bin"
 $AppDir = Join-Path $RuntimeDir "app"
 $BinDir = Join-Path $RuntimeDir "bin"
 $VenvDir = Join-Path $RuntimeDir ".venv"
@@ -59,12 +60,48 @@ function Find-Python {
     return $null
 }
 
-function Ensure-UserPath($path) {
+function Normalize-PathEntry($value) {
+    if ($null -eq $value) { return "" }
+    return ([string]$value).Trim().Trim('"').TrimEnd('\')
+}
+
+function Set-KaroXPath {
+    $newNormalized = Normalize-PathEntry $BinDir
+    $legacyNormalized = Normalize-PathEntry $LegacyBinDir
+
+    $userItems = @()
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (($userPath -split ";") -notcontains $path) {
-        [Environment]::SetEnvironmentVariable("Path", (($userPath.TrimEnd(";")) + ";" + $path).TrimStart(";"), "User")
+    foreach ($entry in @(([string]$userPath) -split ";")) {
+        $normalized = Normalize-PathEntry $entry
+        if (!$normalized) { continue }
+        if ($normalized -ieq $newNormalized -or $normalized -ieq $legacyNormalized) { continue }
+        $userItems += ([string]$entry).Trim()
     }
-    if (($env:Path -split ";") -notcontains $path) { $env:Path = "$path;" + $env:Path }
+    [Environment]::SetEnvironmentVariable("Path", ((@($BinDir) + $userItems) -join ";"), "User")
+
+    $currentItems = @()
+    foreach ($entry in @(([string]$env:Path) -split ";")) {
+        $normalized = Normalize-PathEntry $entry
+        if (!$normalized) { continue }
+        if ($normalized -ieq $newNormalized -or $normalized -ieq $legacyNormalized) { continue }
+        $currentItems += ([string]$entry).Trim()
+    }
+    $env:Path = ((@($BinDir) + $currentItems) -join ";")
+}
+
+function Write-LegacyForwarder {
+    New-Item -ItemType Directory -Force -Path $LegacyBinDir | Out-Null
+    @'
+$ErrorActionPreference = "Stop"
+$target = Join-Path $env:LOCALAPPDATA "KaroX\bin\karox.ps1"
+if (!(Test-Path -LiteralPath $target)) { throw "KaroX compatibility launcher could not find the new installation." }
+& $target @args
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath (Join-Path $LegacyBinDir "karox.ps1") -Encoding UTF8
+    @'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\karox.ps1" %*
+'@ | Set-Content -LiteralPath (Join-Path $LegacyBinDir "karox.cmd") -Encoding ASCII
 }
 
 function Copy-AppFiles {
@@ -120,7 +157,13 @@ for (`$i = 0; `$i -lt 30; `$i++) {
     `$busy = @(Get-CimInstance Win32_Process | Where-Object { `$_.ProcessId -ne `$PID -and `$_.CommandLine -like '*RepoPilotBridge*' })
     if (`$busy.Count -eq 0) {
         Remove-Item -LiteralPath '$legacyConfigEsc' -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath '$legacyRuntimeEsc' -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath '$legacyRuntimeEsc') {
+            Get-ChildItem -LiteralPath '$legacyRuntimeEsc' -Force | Where-Object { `$_.Name -ne 'bin' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            `$legacyBin = Join-Path '$legacyRuntimeEsc' 'bin'
+            if (Test-Path -LiteralPath `$legacyBin) {
+                Get-ChildItem -LiteralPath `$legacyBin -Force | Where-Object { `$_.Name -notin @('karox.cmd','karox.ps1') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
         break
     }
 }
@@ -183,6 +226,13 @@ $env:KAROX_CONFIG_DIR = Join-Path $env:APPDATA "KaroX"
 $env:KAROX_RUNTIME_DIR = $AppRoot
 $Bin = Join-Path $AppRoot "bin"
 $Root = Join-Path $AppRoot "app"
+$LegacyRoot = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
+$LegacyBin = Join-Path $LegacyRoot "bin"
+$legacyNormalized = $LegacyBin.TrimEnd('\')
+$legacyInCurrentPath = @((([string]$env:Path) -split ';') | Where-Object { ([string]$_).Trim().Trim('"').TrimEnd('\') -ieq $legacyNormalized }).Count -gt 0
+if (!$legacyInCurrentPath -and (Test-Path -LiteralPath $LegacyRoot)) {
+    try { Remove-Item -LiteralPath $LegacyRoot -Recurse -Force -ErrorAction Stop } catch {}
+}
 $env:Path = "$Bin;" + $env:Path
 Set-Location -LiteralPath $Root
 & (Join-Path $Root "start.ps1") @args
@@ -200,7 +250,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\ka
 pause
 '@ | Set-Content -LiteralPath $DesktopBat -Encoding ASCII
 
-Ensure-UserPath $BinDir
+Write-LegacyForwarder
+Set-KaroXPath
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Application : $AppDir"
