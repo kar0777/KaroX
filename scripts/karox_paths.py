@@ -18,10 +18,15 @@ def _home() -> Path:
     return Path.home()
 
 
+def _override(name: str) -> Path | None:
+    value = os.environ.get(name, "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def config_dir() -> Path:
-    override = os.environ.get("KAROX_CONFIG_DIR", "").strip()
+    override = _override("KAROX_CONFIG_DIR")
     if override:
-        return Path(override).expanduser()
+        return override
     if os.name == "nt":
         return Path(os.environ.get("APPDATA", _home() / "AppData" / "Roaming")) / APP_NAME
     if sys.platform == "darwin":
@@ -30,15 +35,18 @@ def config_dir() -> Path:
 
 
 def runtime_dir() -> Path:
-    override = os.environ.get("KAROX_RUNTIME_DIR", "").strip()
+    override = _override("KAROX_RUNTIME_DIR")
     if override:
-        return Path(override).expanduser()
+        return override
     if os.name == "nt":
         return Path(os.environ.get("LOCALAPPDATA", _home() / "AppData" / "Local")) / APP_NAME
     return Path(os.environ.get("XDG_DATA_HOME", _home() / ".local" / "share")) / APP_NAME
 
 
 def legacy_config_dir() -> Path:
+    override = _override("KAROX_LEGACY_CONFIG_DIR")
+    if override:
+        return override
     if os.name == "nt":
         return Path(os.environ.get("APPDATA", _home() / "AppData" / "Roaming")) / LEGACY_NAME
     if sys.platform == "darwin":
@@ -47,6 +55,9 @@ def legacy_config_dir() -> Path:
 
 
 def legacy_runtime_dir() -> Path:
+    override = _override("KAROX_LEGACY_RUNTIME_DIR")
+    if override:
+        return override
     if os.name == "nt":
         return Path(os.environ.get("LOCALAPPDATA", _home() / "AppData" / "Local")) / LEGACY_NAME
     return Path(os.environ.get("XDG_DATA_HOME", _home() / ".local" / "share")) / LEGACY_NAME
@@ -112,7 +123,6 @@ def migrate_legacy() -> dict[str, Any]:
 
     copied_config = _copy_missing(old_config, new_config)
     copied_runtime = 0
-    # Preserve user/session state, but do not copy the old app or virtualenv.
     for name in ("sessions", "logs", "cache", "runs", "bin"):
         copied_runtime += _copy_missing(old_runtime / name, new_runtime / name)
     rewritten = _rewrite_text_paths(new_config, old_config, old_runtime, new_config, new_runtime)
@@ -137,15 +147,12 @@ def main() -> int:
     parser.add_argument("command", choices=("show", "migrate"), nargs="?", default="show")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.command == "migrate":
-        payload = migrate_legacy()
-    else:
-        payload = {
-            "configDir": str(config_dir()),
-            "runtimeDir": str(runtime_dir()),
-            "legacyConfigDir": str(legacy_config_dir()),
-            "legacyRuntimeDir": str(legacy_runtime_dir()),
-        }
+    payload = migrate_legacy() if args.command == "migrate" else {
+        "configDir": str(config_dir()),
+        "runtimeDir": str(runtime_dir()),
+        "legacyConfigDir": str(legacy_config_dir()),
+        "legacyRuntimeDir": str(legacy_runtime_dir()),
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     else:
