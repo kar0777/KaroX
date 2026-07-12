@@ -3,9 +3,7 @@ name: Product quality
 on:
   pull_request:
   push:
-    branches:
-      - main
-      - agent/max-product-overhaul
+    branches: [main, agent/max-product-overhaul]
 
 permissions:
   contents: read
@@ -41,28 +39,13 @@ jobs:
       - name: Compile Python sources
         run: >-
           python -m py_compile
-          server/repo_tools.py
-          server/app_entry.py
-          server/mcp_host_security.py
-          server/notion_gateway.py
-          server/notion_entry.py
-          scripts/patch_notion_provider.py
-          scripts/notion_doctor.py
-          scripts/notion_profile.py
-          scripts/tailscale_readiness.py
-          scripts/product_doctor.py
-          scripts/karox_admin.py
-          scripts/karox_cli.py
-          scripts/sitecustomize.py
-          scripts/support_bundle.py
-          scripts/test_notion_provider.py
-          scripts/test_notion_profile.py
-          scripts/test_tailscale_readiness.py
-          scripts/test_product_doctor.py
-          scripts/test_mcp_host_security.py
-          scripts/test_notion_mcp_transport.py
-          scripts/test_admin_cli.py
-          scripts/test_app_entry.py
+          server/repo_tools.py server/app_entry.py server/mcp_host_security.py server/notion_gateway.py server/notion_entry.py
+          scripts/patch_notion_provider.py scripts/notion_doctor.py scripts/notion_profile.py scripts/tailscale_readiness.py
+          scripts/product_doctor.py scripts/karox_admin.py scripts/karox_cli.py scripts/karox_admin_entry.py scripts/karox_paths.py
+          scripts/sitecustomize.py scripts/support_bundle.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py
+          scripts/test_notion_provider.py scripts/test_notion_profile.py scripts/test_tailscale_readiness.py
+          scripts/test_path_migration.py scripts/test_runtime_rebrand.py scripts/test_product_doctor.py
+          scripts/test_mcp_host_security.py scripts/test_notion_mcp_transport.py scripts/test_admin_cli.py scripts/test_app_entry.py
 
       - name: Test provider generation
         shell: bash
@@ -75,6 +58,14 @@ jobs:
       - name: Test Tailscale readiness
         shell: bash
         run: python scripts/test_tailscale_readiness.py 2>&1 | tee tailscale-readiness-test.log
+
+      - name: Test path migration
+        shell: bash
+        run: PYTHONPATH=scripts python scripts/test_path_migration.py 2>&1 | tee path-migration-test.log
+
+      - name: Test installed runtime rebrand
+        shell: bash
+        run: PYTHONPATH=scripts python scripts/test_runtime_rebrand.py 2>&1 | tee runtime-rebrand-test.log
 
       - name: Test installed layout doctor
         shell: bash
@@ -112,47 +103,36 @@ jobs:
           python scripts/patch_notion_provider.py --platform powershell --source start.core.ps1 --output generated.windows.ps1 --root .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'generated.windows.ps1'))
-          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
-            throw 'Generated PowerShell launcher is missing the UTF-8 BOM.'
-          }
-          $tokens = $null
-          $errors = $null
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) { throw 'Generated launcher is missing UTF-8 BOM.' }
+          $tokens = $null; $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'generated.windows.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) {
-            Write-Error ($errors | Out-String)
-            exit 1
-          }
+          if ($errors.Count -gt 0) { Write-Error ($errors | Out-String); exit 1 }
 
       - name: Validate POSIX syntax
         if: runner.os != 'Windows'
-        run: bash -n bootstrap.sh install.sh start.sh start.core.sh
+        run: bash -n bootstrap.sh install.sh install.karox.sh start.sh start.core.sh
 
       - name: Parse PowerShell entrypoints with Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $failed = $false
-          foreach ($file in @('bootstrap.ps1', 'install.ps1', 'start.ps1', 'start.core.ps1', 'doctor.ps1', 'uninstall.ps1')) {
-            $path = (Resolve-Path $file)
-            $tokens = $null
-            $errors = $null
+          $details = New-Object System.Collections.Generic.List[string]
+          foreach ($file in @('bootstrap.ps1','install.ps1','install.karox.ps1','start.ps1','start.core.ps1','doctor.ps1','uninstall.ps1')) {
+            $path = Resolve-Path $file
+            $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) {
               $failed = $true
-              Write-Error "$file has Windows PowerShell 5.1 parser errors: $($errors | Out-String)"
+              $details.Add("===== $file =====")
+              foreach ($error in $errors) {
+                $details.Add("line=$($error.Extent.StartLineNumber) column=$($error.Extent.StartColumnNumber) message=$($error.Message)")
+                $details.Add("text=$($error.Extent.Text)")
+              }
             }
           }
-
-          $startBytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'start.ps1'))
-          $hasUtf8Bom = $startBytes.Length -ge 3 -and $startBytes[0] -eq 0xEF -and $startBytes[1] -eq 0xBB -and $startBytes[2] -eq 0xBF
-          if (!$hasUtf8Bom) {
-            $nonAscii = @($startBytes | Where-Object { $_ -gt 0x7F })
-            if ($nonAscii.Count -gt 0) {
-              $failed = $true
-              Write-Error 'start.ps1 has non-ASCII bytes without a UTF-8 BOM. Windows PowerShell 5.1 may misparse it.'
-            }
-          }
-          if ($failed) { exit 1 }
+          $details | Set-Content -LiteralPath powershell-parser.log -Encoding UTF8
+          if ($failed) { Write-Error ($details -join [Environment]::NewLine); exit 1 }
 
       - name: Upload matrix diagnostics
         if: always()
@@ -163,11 +143,14 @@ jobs:
             provider-test.log
             notion-profile-test.log
             tailscale-readiness-test.log
+            path-migration-test.log
+            runtime-rebrand-test.log
             doctor-layout-test.log
             mcp-host-test.log
             mcp-transport-test.log
             admin-test.log
             runtime-test.log
             smoke-test.log
+            powershell-parser.log
             generated.windows.ps1
           if-no-files-found: ignore
