@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from patch_notion_provider import patch_ps, patch_sh
+from product_doctor import resolve_server_dir
 
 
 def check_module(name: str) -> dict[str, object]:
@@ -21,20 +22,34 @@ def main() -> int:
     root = args.root.resolve()
     checks: list[dict[str, object]] = []
 
+    try:
+        server_dir = resolve_server_dir(root)
+        checks.append({"name": "Resolved server directory", "ok": True, "path": str(server_dir)})
+    except OSError as exc:
+        server_dir = root / "server"
+        checks.append({"name": "Resolved server directory", "ok": False, "error": str(exc)})
+
     for rel in (
         "start.core.ps1",
         "start.core.sh",
         "scripts/patch_notion_provider.py",
+        "scripts/notion_profile.py",
+        "scripts/product_doctor.py",
         "scripts/karox_admin.py",
-        "server/repo_tools.py",
-        "server/app_entry.py",
-        "server/mcp_host_security.py",
-        "server/notion_gateway.py",
-        "server/notion_entry.py",
         "NOTION.md",
     ):
         path = root / rel
         checks.append({"name": rel, "ok": path.is_file()})
+
+    for rel in (
+        "repo_tools.py",
+        "app_entry.py",
+        "mcp_host_security.py",
+        "notion_gateway.py",
+        "notion_entry.py",
+    ):
+        path = server_dir / rel
+        checks.append({"name": f"server/{rel}", "ok": path.is_file(), "path": str(path)})
 
     checks.extend(check_module(name) for name in ("fastapi", "uvicorn", "httpx", "mcp"))
 
@@ -45,11 +60,29 @@ def main() -> int:
         sh_out = patch_sh(sh, str(root))
         checks.append({
             "name": "PowerShell provider patch",
-            "ok": "Notion Custom Agent" in ps_out and "app_entry:app" in ps_out and "notion_entry:app" in ps_out,
+            "ok": all(
+                marker in ps_out
+                for marker in (
+                    "Notion Custom Agent",
+                    "app_entry:app",
+                    "notion_entry:app",
+                    "Get-PersistentNotionProfile",
+                    "karox-notion-stable",
+                )
+            ),
         })
         checks.append({
             "name": "POSIX provider patch",
-            "ok": "Notion Custom Agent" in sh_out and "app_entry:app" in sh_out and "notion_entry:app" in sh_out,
+            "ok": all(
+                marker in sh_out
+                for marker in (
+                    "Notion Custom Agent",
+                    "app_entry:app",
+                    "notion_entry:app",
+                    "persistent_notion_profile_json",
+                    "karox-notion-stable",
+                )
+            ),
         })
         with tempfile.TemporaryDirectory() as tmp:
             generated_ps = Path(tmp, "generated.ps1")
@@ -62,8 +95,8 @@ def main() -> int:
         checks.append({"name": "Provider patch generation", "ok": False, "error": str(exc)})
 
     try:
-        gateway = (root / "server" / "notion_gateway.py").read_text(encoding="utf-8")
-        host_security = (root / "server" / "mcp_host_security.py").read_text(encoding="utf-8")
+        gateway = (server_dir / "notion_gateway.py").read_text(encoding="utf-8")
+        host_security = (server_dir / "mcp_host_security.py").read_text(encoding="utf-8")
         checks.append({
             "name": "Tunnel-aware MCP Host validation",
             "ok": (

@@ -1,6 +1,6 @@
 param(
     [string]$Repository = "kar0777/KaroX",
-    [string]$Branch = "v3.12.3",
+    [string]$Branch = "v3.13.0",
     [switch]$Clean
 )
 

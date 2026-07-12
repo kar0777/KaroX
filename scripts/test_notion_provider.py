@@ -47,12 +47,19 @@ def main() -> int:
     sh_out = patch_sh(sh, str(ROOT))
 
     assert 'return "notion"' in ps_out
-    assert 'server URL: $tunnelUrl/mcp' in ps_out
+    assert 'MCP server URL: $tunnelUrl/mcp' in ps_out
+    assert 'Get-PersistentNotionProfile' in ps_out
+    assert '$tunnelProvider = "tailscale"' in ps_out
+    assert 'karox-notion-stable' in ps_out
     assert '"app_entry:app"' in ps_out
     assert '"notion_entry:app"' in ps_out
     assert "Нативная командная AI-среда" in ps_out
+
     assert "printf notion" in sh_out
     assert '$tunnel_url/mcp' in sh_out
+    assert "persistent_notion_profile_json" in sh_out
+    assert 'tunnel_provider="tailscale"' in sh_out
+    assert 'provider_id="karox-notion-stable"' in sh_out
     assert 'server_app="app_entry:app"' in sh_out
     assert 'server_app="notion_entry:app"' in sh_out
 
@@ -62,6 +69,8 @@ def main() -> int:
         "server/notion_gateway.py",
         "server/notion_entry.py",
         "scripts/karox_admin.py",
+        "scripts/notion_profile.py",
+        "scripts/product_doctor.py",
     ):
         ast.parse((ROOT / relative).read_text(encoding="utf-8"), filename=relative)
 
@@ -83,8 +92,9 @@ def main() -> int:
         assert "Нативная командная AI-среда" in generated_ps_text
         assert "Д/н" in generated_ps_text
         assert "РќР°С‚РёРІРЅ" not in generated_ps_text
-        assert 'server URL: $tunnelUrl/mcp' in generated_ps_text
-        assert "printf notion" in generated_sh_text
+        assert 'MCP server URL: $tunnelUrl/mcp' in generated_ps_text
+        assert 'karox-notion-stable' in generated_ps_text
+        assert "persistent_notion_profile_json" in generated_sh_text
 
         # Simulate the exact v3.12.0 cache: valid UTF-8 text, but no BOM.
         generated_ps.write_text(generated_ps_text, encoding="utf-8", newline="\n")
@@ -98,7 +108,11 @@ def main() -> int:
         assert generated_ps.stat().st_size > 1000
         assert generated_sh.stat().st_size > 1000
 
-    print("KaroX provider source, encoding and cache-migration checks passed")
+        if sys.platform != "win32":
+            syntax = subprocess.run(["bash", "-n", str(generated_sh)], capture_output=True, text=True, check=False)
+            assert syntax.returncode == 0, syntax.stderr
+
+    print("KaroX provider source, persistence, encoding and cache-migration checks passed")
     return 0
 
 

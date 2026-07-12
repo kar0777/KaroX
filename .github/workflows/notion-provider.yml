@@ -11,6 +11,7 @@ on:
       - "bootstrap.sh"
       - "install.ps1"
       - "install.sh"
+      - "doctor.ps1"
       - "server/*.py"
       - "scripts/*.py"
       - "requirements.txt"
@@ -47,11 +48,15 @@ jobs:
           server/notion_entry.py
           scripts/patch_notion_provider.py
           scripts/notion_doctor.py
+          scripts/notion_profile.py
+          scripts/product_doctor.py
           scripts/karox_admin.py
           scripts/karox_cli.py
           scripts/sitecustomize.py
           scripts/support_bundle.py
           scripts/test_notion_provider.py
+          scripts/test_notion_profile.py
+          scripts/test_product_doctor.py
           scripts/test_mcp_host_security.py
           scripts/test_notion_mcp_transport.py
           scripts/test_admin_cli.py
@@ -59,6 +64,12 @@ jobs:
 
       - name: Test provider transformations
         run: python scripts/test_notion_provider.py | tee notion-test.log
+
+      - name: Test persistent Notion profile
+        run: python scripts/test_notion_profile.py | tee notion-profile-test.log
+
+      - name: Test doctor layout resolution
+        run: python scripts/test_product_doctor.py | tee doctor-layout-test.log
 
       - name: Test MCP tunnel host security
         run: python scripts/test_mcp_host_security.py | tee mcp-host-test.log
@@ -76,7 +87,7 @@ jobs:
         run: python scripts/notion_doctor.py --root .
 
       - name: Run product doctor
-        run: python scripts/karox_cli.py doctor --json > product-doctor.json
+        run: python scripts/product_doctor.py --root . --json > product-doctor.json
 
       - name: Validate POSIX scripts
         run: bash -n bootstrap.sh install.sh start.sh start.core.sh
@@ -95,12 +106,13 @@ jobs:
           grep -F 'KAROX_NO_START' bootstrap.sh
           grep -F 'karox dashboard' PRODUCT_GUIDE.md
           grep -F 'karox support' PRODUCT_GUIDE.md
+          grep -F 'karox notion setup' NOTION.md
 
       - name: Parse PowerShell scripts
         shell: pwsh
         run: |
           $failed = $false
-          foreach ($file in @('bootstrap.ps1', 'install.ps1', 'start.ps1', 'start.core.ps1')) {
+          foreach ($file in @('bootstrap.ps1', 'install.ps1', 'start.ps1', 'start.core.ps1', 'doctor.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
@@ -130,6 +142,8 @@ jobs:
           name: karox-product-diagnostics
           path: |
             notion-test.log
+            notion-profile-test.log
+            doctor-layout-test.log
             mcp-host-test.log
             mcp-transport-test.log
             admin-test.log

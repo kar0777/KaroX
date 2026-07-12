@@ -1,42 +1,83 @@
 # KaroX provider for Notion Custom Agents
 
-KaroX can expose the selected local repository to a Notion Custom Agent through a protected Streamable HTTP MCP connection. The existing KaroX OpenAPI interface remains available, while Notion receives a smaller set of purpose-built tools with the same repository, mode, branch, command, secret, and Git guardrails.
+KaroX exposes the selected local repository to a Notion Custom Agent through a protected Streamable HTTP MCP connection. Starting with **v3.13.0**, Notion uses a persistent connection profile: one stable Tailscale Funnel URL and one Bearer credential are reused across KaroX restarts and repository sessions.
 
 ## Requirements
 
-- A Notion workspace with **Custom Agents** and support for custom MCP servers. Availability depends on the Notion plan and workspace rollout.
+- A Notion workspace with **Custom Agents** and support for custom MCP servers.
 - Python and the normal KaroX dependencies.
-- Cloudflare Tunnel or Tailscale Funnel configured in KaroX.
-- Never paste the KaroX session key into a normal Notion chat message. Store it only in the protected connector credential field.
+- Tailscale installed and signed in. KaroX can install it through `winget` on Windows during setup.
+- Never paste the KaroX Bearer credential into a normal chat message. Store it only in Notion's protected token field.
 
-## First setup
+## One-time persistent setup
 
-After updating KaroX, run once:
+After updating KaroX, run:
 
 ```powershell
-karox notion install
+karox notion setup
 ```
 
-On macOS or Linux:
+On Windows this command:
+
+1. creates a persistent Notion credential;
+2. protects it with Windows DPAPI when available;
+3. installs Tailscale through `winget` when necessary;
+4. opens Tailscale login if the device is not connected;
+5. records the stable device `*.ts.net` HTTPS origin;
+6. prints the MCP URL and Bearer token needed for the one-time Notion connection.
+
+On macOS or Linux, install/sign in to Tailscale first and run the same command:
 
 ```bash
-karox notion install
+karox notion setup
 ```
 
-This installs the optional MCP dependencies and runs the provider doctor.
+Then start a repository session:
+
+```powershell
+karox notion
+```
+
+Wait for `LIVE`, then display the same persistent connection values at any time:
+
+```powershell
+karox notion connection
+```
+
+In the Notion Custom Agent add one **Custom MCP server**:
+
+- **Name:** `KaroX`
+- **MCP server URL:** the displayed stable URL ending in `/mcp`
+- **Authentication:** `Bearer token`
+- **Prefix:** `Bearer`
+- **Token:** the displayed persistent credential, entered only in the protected token field
+
+Save the agent. This URL and token remain the same after restarting KaroX or starting a different repository session on the same computer. The KaroX session still needs to be running while Notion is actively using the tools.
 
 ## Daily flow
 
-1. Run `karox` and choose **NOTION**, or run `karox notion` to force the Notion target for this launch.
-2. Create the repository session and wait for `LIVE`.
-3. Press `C` to copy the Notion connection prompt.
-4. In the Notion Custom Agent, add a **Custom MCP server**. Its URL must be the complete tunnel URL ending in `/mcp`.
-5. Select **Bearer token** authentication and keep the prefix as `Bearer`.
-6. Press `K` in KaroX and paste that session key into Notion's protected token field.
-7. Connect the server and save the agent.
-8. After `karox_preflight` succeeds, send the real coding task as a separate message.
+1. Run `karox notion`.
+2. Choose the repository and access profile.
+3. Wait for `LIVE`.
+4. Open the already configured KaroX Developer agent in Notion.
+5. Ask it to call `karox_preflight`.
+6. Send the real task.
 
-Every KaroX session has a different URL and key. Do not reuse an old connection for another active session. Keep the KaroX window open while Notion is connected.
+Do **not** recreate the MCP connection and do not replace the token during normal restarts.
+
+## Connection commands
+
+```text
+karox notion setup             One-time Tailscale/profile setup
+karox notion                   Start a persistent Notion repository session
+karox notion connection        Show the current stable URL and token
+karox notion status            Check Tailscale, profile, and provider files
+karox notion doctor            Run provider diagnostics
+karox notion rotate-key        Deliberately replace the persistent key
+karox notion reset-connection  Delete the persistent profile
+```
+
+`rotate-key` is an explicit security action. After rotating, replace the token once in Notion. Normal updates and restarts do not rotate it.
 
 ## MCP tools
 
@@ -55,58 +96,37 @@ The provider exposes:
 
 ## Security model
 
-- `/mcp` accepts the current session key as `Authorization: Bearer <key>` or `X-API-Key`.
-- MCP requests must use localhost, a `*.trycloudflare.com` Cloudflare Tunnel host, a `*.ts.net` Tailscale Funnel host, or an exact host listed in `KAROX_MCP_ALLOWED_HOSTS`.
-- The session key is compared in constant time and remains mandatory even for an allowed host.
-- MCP tools call the existing KaroX API in-process; they do not bypass its mode or path checks.
-- Observe sessions stay read-only.
-- File access stays inside the selected `repoRoot` and sensitive files remain blocked.
-- Dangerous commands, secret-related paths, publishing commands, and `git push` remain blocked.
-- The generic request tool accepts only relative KaroX paths and cannot call arbitrary external hosts.
-
-For a custom tunnel domain, define its exact hostname before launching KaroX:
-
-```powershell
-$env:KAROX_MCP_ALLOWED_HOSTS = "mcp.example.com"
-karox notion
-```
+- `/mcp` accepts the persistent key as `Authorization: Bearer <key>` or `X-API-Key`.
+- Notion sessions force Tailscale Funnel even when another provider is selected for ordinary KaroX sessions.
+- MCP requests must use localhost, a `*.trycloudflare.com` host, a `*.ts.net` host, or an exact host listed in `KAROX_MCP_ALLOWED_HOSTS`.
+- The credential is compared in constant time and remains mandatory even for an allowed host.
+- On Windows the persistent key is protected with the current user's DPAPI key when pywin32 is available. Other platforms use a profile file restricted to the current user.
+- Starting a new Notion session stops an older active Notion session first so one stable Funnel route cannot point at two repositories.
+- MCP tools call the existing KaroX API in-process and retain all mode, path, command, secret, and Git guardrails.
+- Observe sessions stay read-only and `git push` remains blocked.
 
 ## Troubleshooting
 
+### Doctor reports `server\\repo_tools.py was not found`
+
+Update to v3.13.0 or newer. Older Windows installations could place the server package in `app\\server\\server`; the new doctor resolves both layouts instead of reporting a false failure.
+
 ### `421 Misdirected Request`
 
-Update to KaroX `v3.12.3` or newer, close the old KaroX session, start a new Notion session, and replace both the MCP URL and token in Notion. Versions before `v3.12.3` inherited a localhost-only Host allowlist from the MCP Python SDK and rejected tunnel hostnames before authentication.
+Update to v3.12.3 or newer. Older builds inherited a localhost-only Host allowlist from the MCP SDK and rejected tunnel hostnames before authentication.
 
 ### `401 Unauthorized`
 
-The tunnel is reachable but the token is wrong or belongs to another session. Press `K` in the currently running KaroX window and replace the token in Notion's protected credential field. Do not add `Bearer ` manually inside the token field when Notion already shows the Bearer prefix.
+Run `karox notion connection` and compare the protected token in Notion. Do not include the word `Bearer` inside the token field when Notion already shows the Bearer prefix.
 
 ### Connection timeout or `502/503`
 
-Keep the KaroX session window open, verify that it still shows `LIVE`, and use the newest URL copied with `C`. Quick Cloudflare Tunnel URLs change whenever the session restarts.
+The persistent URL remains valid, but the local KaroX session must be running. Start `karox notion`, wait for `LIVE`, and retry in Notion.
 
-### URL rejected immediately
+### Tailscale Funnel requires approval
 
-Confirm that the complete address ends in `/mcp`, for example:
-
-```text
-https://random-name.trycloudflare.com/mcp
-```
-
-## Diagnostics
-
-```powershell
-karox notion doctor
-```
-
-or:
-
-```bash
-karox notion doctor
-```
-
-The doctor verifies dependencies, preserved core launchers, source patch anchors, the Notion gateway, and MCP host-security files.
+KaroX prints and opens the Tailscale approval URL when the tailnet has not enabled Funnel yet. Approve it once, then restart `karox notion`.
 
 ## Architecture
 
-The large platform managers are preserved as `start.core.ps1` and `start.core.sh`. Thin `start.ps1` and `start.sh` entrypoints generate a reviewed Notion-enabled manager in the KaroX runtime directory. Normal PromptQL, generic OpenAPI, and letaido flows continue to use the same core logic. Only a Notion session switches the Uvicorn target from `app_entry:app` to `notion_entry:app`.
+The large platform managers remain `start.core.ps1` and `start.core.sh`. Thin entrypoints generate reviewed provider-enabled launchers. A persistent local profile supplies the same Notion key on every launch, while Tailscale supplies the same public device hostname. Each new KaroX repository session updates the Funnel route to its current local port without changing the Notion-side connection.
