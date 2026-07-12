@@ -121,18 +121,29 @@ jobs:
         if: runner.os != 'Windows'
         run: bash -n bootstrap.sh install.sh start.sh start.core.sh
 
-      - name: Parse PowerShell entrypoints
+      - name: Parse PowerShell entrypoints with Windows PowerShell 5.1
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $failed = $false
           foreach ($file in @('bootstrap.ps1', 'install.ps1', 'start.ps1', 'start.core.ps1', 'doctor.ps1', 'uninstall.ps1')) {
+            $path = (Resolve-Path $file)
             $tokens = $null
             $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) {
               $failed = $true
-              Write-Error "$file has parser errors: $($errors | Out-String)"
+              Write-Error "$file has Windows PowerShell 5.1 parser errors: $($errors | Out-String)"
+            }
+          }
+
+          $startBytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'start.ps1'))
+          $hasUtf8Bom = $startBytes.Length -ge 3 -and $startBytes[0] -eq 0xEF -and $startBytes[1] -eq 0xBB -and $startBytes[2] -eq 0xBF
+          if (!$hasUtf8Bom) {
+            $nonAscii = @($startBytes | Where-Object { $_ -gt 0x7F })
+            if ($nonAscii.Count -gt 0) {
+              $failed = $true
+              Write-Error 'start.ps1 has non-ASCII bytes without a UTF-8 BOM. Windows PowerShell 5.1 may misparse it.'
             }
           }
           if ($failed) { exit 1 }
