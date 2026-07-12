@@ -1,13 +1,13 @@
 {
   "status": "published",
-  "version": "3.15.0",
-  "tag": "v3.15.0",
-  "name": "KaroX v3.15.0 — Localized Notion setup wizard",
-  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.15.0",
-  "publishedAt": "2026-07-12T10:03:49Z",
+  "version": "3.15.1",
+  "tag": "v3.15.1",
+  "name": "KaroX v3.15.1 — Windows updater directory-lock fix",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.15.1",
+  "publishedAt": "2026-07-12T10:47:03Z",
   "assets": [
-    "KaroX-v3.15.0-SHA256SUMS.txt",
-    "KaroX-v3.15.0.tar.gz",
-    "KaroX-v3.15.0.zip"
+    "KaroX-v3.15.1-SHA256SUMS.txt",
+    "KaroX-v3.15.1.tar.gz",
+    "KaroX-v3.15.1.zip"
   ]
 }
