@@ -4,6 +4,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from patch_native_notion_provider import patch_powershell, patch_shell
+from patch_notion_provider import patch_ps, patch_sh
 from rebrand_runtime import rewrite
 
 
@@ -57,21 +59,37 @@ def main() -> int:
     assert "KaroX\\bin\\karox.ps1" in installer
     assert "Where-Object { `$_.Name -ne 'bin' }" in installer
     assert "$legacyInCurrentPath" in installer
-    # Two occurrences belong to the defensive installer helper. The generated
-    # karox.ps1 launcher must no longer change the caller's working directory.
     assert installer.count("Set-Location -LiteralPath $Root") == 2
 
     ps_launcher = (repo_root / "start.ps1").read_text(encoding="utf-8-sig")
     sh_launcher = (repo_root / "start.sh").read_text(encoding="utf-8")
     wizard_source = (repo_root / "scripts" / "notion_setup_wizard.py").read_text(encoding="utf-8")
     doctor_source = (repo_root / "scripts" / "product_doctor.py").read_text(encoding="utf-8")
+    native_source = (repo_root / "scripts" / "native_notion_provider.py").read_text(encoding="utf-8")
     assert "notion_setup_wizard.py" in ps_launcher
     assert "notion_setup_wizard.py" in sh_launcher
+    assert "patch_native_notion_provider.py" in ps_launcher
+    assert "patch_native_notion_provider.py" in sh_launcher
     assert "Для постоянного адреса Notion" in wizard_source
     assert "Tailscale must be running to give Notion a permanent URL" in wizard_source
     assert "scripts/notion_setup_wizard.py" in doctor_source
+    assert "Built-in Notion provider" in native_source
+    assert "Встроенный провайдер Notion" in native_source
 
-    print("KaroX runtime rebrand, localized Notion wizard, and Windows update lock checks passed")
+    ps_core = (repo_root / "start.core.ps1").read_text(encoding="utf-8-sig")
+    sh_core = (repo_root / "start.core.sh").read_text(encoding="utf-8")
+    generated_ps = patch_powershell(patch_ps(ps_core, str(repo_root)))
+    generated_sh = patch_shell(patch_sh(sh_core, str(repo_root)))
+    for generated in (generated_ps, generated_sh):
+        assert "native_notion_provider.py" in generated
+        assert "NOTION PROVIDER IS LIVE" in generated
+        assert "ПРОВАЙДЕР NOTION ЗАПУЩЕН" in generated
+        assert "COPY URL" in generated
+        assert "COPY TOKEN" in generated
+    assert 'return "tailscale"' in generated_ps
+    assert 'tunnel_provider="tailscale"' in generated_sh or 'printf tailscale' in generated_sh
+
+    print("KaroX native Notion provider, runtime rebrand, and updater checks passed")
     return 0
 
 

@@ -8,6 +8,7 @@ case "$(uname -s)" in
 esac
 VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 PATCHER="$SCRIPT_DIR/scripts/patch_notion_provider.py"
+NATIVE_PATCHER="$SCRIPT_DIR/scripts/patch_native_notion_provider.py"
 NOTION_DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
 NOTION_WIZARD="$SCRIPT_DIR/scripts/notion_setup_wizard.py"
 ADMIN="$SCRIPT_DIR/scripts/karox_admin_entry.py"
@@ -84,7 +85,6 @@ if [ "$FIRST" = "notion" ]; then
       exit 0
       ;;
     "")
-      run_wizard ensure
       ;;
     *)
       echo "Unknown notion command: ${2:-}" >&2
@@ -93,7 +93,7 @@ if [ "$FIRST" = "notion" ]; then
   esac
 fi
 
-for required in "$CORE" "$PATCHER" "$ADMIN" "$SUPPORT" "$NOTION_WIZARD"; do
+for required in "$CORE" "$PATCHER" "$NATIVE_PATCHER" "$ADMIN" "$SUPPORT" "$NOTION_WIZARD"; do
   [ -f "$required" ] || { echo "Required KaroX component is missing: $required. Run: karox update" >&2; exit 1; }
 done
 
@@ -103,6 +103,7 @@ fi
 
 mkdir -p "$GENERATED_DIR"
 "$PYTHON_EXE" "$PATCHER" --platform shell --source "$CORE" --output "$GENERATED" --root "$SCRIPT_DIR" >/dev/null
+"$PYTHON_EXE" "$NATIVE_PATCHER" --platform shell --path "$GENERATED"
 chmod +x "$GENERATED"
 export KAROX_SOURCE_ROOT="$SCRIPT_DIR"
 if [ "$FORCE_NOTION" = 1 ]; then export KAROX_FORCE_AI_CLIENT=notion; fi
