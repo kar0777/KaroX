@@ -51,10 +51,15 @@ def main() -> int:
     installer = (repo_root / "install.karox.ps1").read_text(encoding="utf-8-sig")
     assert "function Set-KaroXPath" in installer
     assert "function Write-LegacyForwarder" in installer
+    assert "function Move-OutOf-AppDirectory" in installer
+    assert "Move-OutOf-AppDirectory\n    if (Test-Path -LiteralPath $AppDir)" in installer
     assert "@($BinDir) + $userItems" in installer
     assert "KaroX\\bin\\karox.ps1" in installer
     assert "Where-Object { `$_.Name -ne 'bin' }" in installer
     assert "$legacyInCurrentPath" in installer
+    # Two occurrences belong to the defensive installer helper. The generated
+    # karox.ps1 launcher must no longer change the caller's working directory.
+    assert installer.count("Set-Location -LiteralPath $Root") == 2
 
     ps_launcher = (repo_root / "start.ps1").read_text(encoding="utf-8-sig")
     sh_launcher = (repo_root / "start.sh").read_text(encoding="utf-8")
@@ -66,7 +71,7 @@ def main() -> int:
     assert "Tailscale must be running to give Notion a permanent URL" in wizard_source
     assert "scripts/notion_setup_wizard.py" in doctor_source
 
-    print("KaroX runtime rebrand, localized Notion wizard, and Windows shim checks passed")
+    print("KaroX runtime rebrand, localized Notion wizard, and Windows update lock checks passed")
     return 0
 
 
