@@ -19,6 +19,7 @@ $VenvDir = Join-Path $RuntimeDir ".venv"
 $PythonExe = Join-Path $VenvDir "Scripts\python.exe"
 $DesktopBat = Join-Path ([Environment]::GetFolderPath("Desktop")) "KaroX.bat"
 $MigrationScript = Join-Path $Root "scripts\karox_paths.py"
+$RebrandScript = Join-Path $Root "scripts\rebrand_runtime.py"
 
 function Refresh-Path {
     $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -50,9 +51,7 @@ function Find-Python {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if (!$cmd) { continue }
         try {
-            if ($name -eq "py") {
-                $resolved = (& py -3 -c "import sys; print(sys.executable)").Trim()
-            } else { $resolved = $cmd.Source }
+            if ($name -eq "py") { $resolved = (& py -3 -c "import sys; print(sys.executable)").Trim() } else { $resolved = $cmd.Source }
             & $resolved -c "import sys,venv; assert sys.version_info >= (3,10)"
             if ($LASTEXITCODE -eq 0) { return $resolved }
         } catch {}
@@ -76,24 +75,37 @@ function Copy-AppFiles {
     }
 }
 
-function Assert-InstallationComplete {
-    $required = @(
-        "start.ps1",
-        "start.core.ps1",
-        "requirements.txt",
+function Repair-RequiredFiles {
+    foreach ($relative in @(
+        "scripts\tailscale_readiness.py",
         "scripts\karox_paths.py",
         "scripts\karox_admin_entry.py",
         "scripts\support_bundle_entry.py",
-        "scripts\notion_profile.py",
-        "scripts\tailscale_readiness.py",
-        "server\repo_tools.py",
-        "server\notion_gateway.py"
+        "scripts\rebrand_runtime.py"
+    )) {
+        $source = Join-Path $Root $relative
+        $target = Join-Path $AppDir $relative
+        if (!(Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $source)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+            Copy-Item -LiteralPath $source -Destination $target -Force
+        }
+    }
+}
+
+function Assert-InstallationComplete {
+    $required = @(
+        "start.ps1", "start.core.ps1", "requirements.txt",
+        "scripts\karox_paths.py", "scripts\karox_admin_entry.py", "scripts\support_bundle_entry.py",
+        "scripts\rebrand_runtime.py", "scripts\notion_profile.py", "scripts\tailscale_readiness.py",
+        "server\repo_tools.py", "server\notion_gateway.py"
     )
     $missing = @()
     foreach ($relative in $required) {
         if (!(Test-Path -LiteralPath (Join-Path $AppDir $relative))) { $missing += $relative }
     }
     if ($missing.Count -gt 0) { throw "Incomplete KaroX installation. Missing: $($missing -join ', ')" }
+    $startText = Get-Content -Raw -LiteralPath (Join-Path $AppDir "start.ps1")
+    if ($startText -match "RepoPilotBridge") { throw "Installed start.ps1 still contains legacy RepoPilotBridge paths." }
 }
 
 function Schedule-LegacyCleanup {
@@ -120,8 +132,8 @@ Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction Silen
 Write-Host ""
 Write-Host "KaroX installer" -ForegroundColor Cyan
 Write-Host "----------------------------------------" -ForegroundColor DarkCyan
-
 New-Item -ItemType Directory -Force -Path $ConfigDir, $RuntimeDir, $BinDir | Out-Null
+
 $BasePython = Find-Python
 if (!$BasePython) {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -150,6 +162,9 @@ if (!(Test-Path -LiteralPath $PythonExe)) { throw "Could not create virtual envi
 if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
 
 Copy-AppFiles
+Repair-RequiredFiles
+& $PythonExe (Join-Path $AppDir "scripts\rebrand_runtime.py") --root $AppDir
+if ($LASTEXITCODE -ne 0) { throw "Could not rewrite installed files to KaroX paths." }
 Assert-InstallationComplete
 
 $legacyCloudflared = Join-Path $LegacyRuntimeDir "bin\cloudflared.exe"
@@ -199,6 +214,5 @@ if ($Start) {
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppDir "start.ps1")
     exit $LASTEXITCODE
 }
-
 & $PythonExe (Join-Path $AppDir "scripts\product_doctor.py") --root $AppDir
 exit $LASTEXITCODE
