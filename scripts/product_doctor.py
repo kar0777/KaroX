@@ -60,8 +60,8 @@ def main() -> int:
     required_root_files = (
         "start.ps1", "start.sh", "start.core.ps1", "start.core.sh", "requirements.txt", "VERSION",
         "scripts/patch_notion_provider.py", "scripts/notion_profile.py", "scripts/tailscale_readiness.py",
-        "scripts/notion_doctor.py", "scripts/karox_paths.py", "scripts/karox_admin_entry.py",
-        "scripts/support_bundle_entry.py", "scripts/rebrand_runtime.py",
+        "scripts/notion_setup_wizard.py", "scripts/notion_doctor.py", "scripts/karox_paths.py",
+        "scripts/karox_admin_entry.py", "scripts/support_bundle_entry.py", "scripts/rebrand_runtime.py",
     )
     for relative in required_root_files:
         path = root / relative
@@ -75,8 +75,8 @@ def main() -> int:
             add(checks, f"compile {name}", ok, detail)
 
     script_files = (
-        "patch_notion_provider.py", "notion_profile.py", "tailscale_readiness.py", "notion_doctor.py",
-        "karox_cli.py", "karox_admin_entry.py", "karox_paths.py", "support_bundle.py",
+        "patch_notion_provider.py", "notion_profile.py", "tailscale_readiness.py", "notion_setup_wizard.py",
+        "notion_doctor.py", "karox_cli.py", "karox_admin_entry.py", "karox_paths.py", "support_bundle.py",
         "support_bundle_entry.py", "rebrand_runtime.py",
     )
     for name in script_files:
