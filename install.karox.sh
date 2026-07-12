@@ -53,7 +53,7 @@ copy_app() {
 }
 
 repair_required() {
-  for rel in scripts/tailscale_readiness.py scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py; do
+  for rel in scripts/tailscale_readiness.py scripts/notion_setup_wizard.py scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py; do
     if [ ! -e "$APP_DIR/$rel" ] && [ -e "$ROOT/$rel" ]; then mkdir -p "$(dirname "$APP_DIR/$rel")"; cp -f "$ROOT/$rel" "$APP_DIR/$rel"; fi
   done
 }
@@ -62,7 +62,7 @@ assert_complete() {
   for rel in \
     start.sh start.core.sh requirements.txt \
     scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py \
-    scripts/notion_profile.py scripts/tailscale_readiness.py \
+    scripts/notion_profile.py scripts/tailscale_readiness.py scripts/notion_setup_wizard.py \
     server/repo_tools.py server/notion_gateway.py; do
     [ -e "$APP_DIR/$rel" ] || { echo "Incomplete KaroX installation. Missing: $rel" >&2; exit 1; }
   done
