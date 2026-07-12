@@ -5,6 +5,7 @@ $PythonExe = Join-Path $RuntimeDir ".venv\Scripts\python.exe"
 $Patcher = Join-Path $Root "scripts\patch_notion_provider.py"
 $NotionDoctor = Join-Path $Root "scripts\notion_doctor.py"
 $NotionProfile = Join-Path $Root "scripts\notion_profile.py"
+$TailscaleReadiness = Join-Path $Root "scripts\tailscale_readiness.py"
 $Admin = Join-Path $Root "scripts\karox_cli.py"
 $Support = Join-Path $Root "scripts\support_bundle.py"
 $Core = Join-Path $Root "start.core.ps1"
@@ -33,7 +34,8 @@ function Find-TailscaleExecutable {
     $known = @(
         "$env:ProgramFiles\Tailscale\tailscale.exe",
         "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe",
-        "$env:LOCALAPPDATA\Microsoft\WinGet\Links\tailscale.exe"
+        "$env:LOCALAPPDATA\Microsoft\WinGet\Links\tailscale.exe",
+        "$env:LOCALAPPDATA\Microsoft\WindowsApps\tailscale.exe"
     )
     foreach ($path in $known) {
         if ($path -and (Test-Path -LiteralPath $path)) { return $path }
@@ -50,6 +52,25 @@ function Invoke-NotionProfileJson([string[]]$ProfileArgs) {
     return (($raw -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
+function Invoke-TailscaleReadinessJson([int]$WaitSeconds = 0) {
+    if (!(Test-Path -LiteralPath $TailscaleReadiness)) {
+        throw "Tailscale readiness module is missing. Run: karox update"
+    }
+    $probeArgs = @("--json")
+    if ($WaitSeconds -gt 0) {
+        $probeArgs = @("--wait", [string]$WaitSeconds, "--interval", "2", "--json")
+    }
+    $raw = & $python $TailscaleReadiness @probeArgs
+    if ($LASTEXITCODE -ne 0) { throw "Tailscale readiness check failed." }
+    return (($raw -join [Environment]::NewLine) | ConvertFrom-Json)
+}
+
+function Save-TailscaleProfileUrl($probe) {
+    if (!$probe.ready -or !$probe.baseUrl) { return $null }
+    Invoke-NotionProfileJson @("set-url", "--url", [string]$probe.baseUrl, "--json") | Out-Null
+    return (Invoke-NotionProfileJson @("connection", "--json", "--show-token"))
+}
+
 function Show-NotionConnection($profile, $showToken = $false) {
     Write-Host ""
     Write-Host "KaroX <-> Notion persistent connection" -ForegroundColor Cyan
@@ -62,6 +83,32 @@ function Show-NotionConnection($profile, $showToken = $false) {
         Write-Host ("Token   : " + [string]$profile.tokenHint)
     }
     Write-Host ""
+}
+
+function Clear-StaleReleaseCache {
+    $cache = Join-Path $RuntimeDir "cache\release-status.json"
+    $versionFile = Join-Path $Root "VERSION"
+    if (!(Test-Path -LiteralPath $cache) -or !(Test-Path -LiteralPath $versionFile)) { return }
+    try {
+        $installedText = (Get-Content -Raw -LiteralPath $versionFile).Trim()
+        $cached = Get-Content -Raw -LiteralPath $cache | ConvertFrom-Json
+        if (!$cached.version) { return }
+        $installed = [version]$installedText
+        $cachedVersion = [version]([string]$cached.version)
+        if ($cachedVersion -lt $installed) {
+            Remove-Item -LiteralPath $cache -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+function Format-TailscaleFailure($probe, $upExitCode) {
+    $parts = @()
+    if ($probe.backendState) { $parts += ("state=" + [string]$probe.backendState) }
+    if ($probe.error) { $parts += [string]$probe.error }
+    if ($upExitCode -ne 0) { $parts += ("tailscale up exit=" + [string]$upExitCode) }
+    if ($probe.authUrl) { $parts += ("login=" + [string]$probe.authUrl) }
+    if ($parts.Count -eq 0) { return "Tailscale did not become ready." }
+    return ($parts -join " | ")
 }
 
 function Setup-PersistentNotionConnection {
@@ -79,15 +126,28 @@ function Setup-PersistentNotionConnection {
         if (!$tailscale) { throw "Tailscale was installed but is not visible yet. Restart PowerShell and run: karox notion setup" }
     }
 
-    $state = Invoke-NotionProfileJson @("sync-tailscale", "--json", "--include-key")
-    if (!$state.tailscale.ready) {
+    $probe = Invoke-TailscaleReadinessJson 3
+    $upExitCode = 0
+    if (!$probe.ready) {
         Write-Host "Opening Tailscale login..." -ForegroundColor Cyan
+        Write-Host "Finish sign-in in the browser or Tailscale app. KaroX will wait up to 120 seconds." -ForegroundColor Yellow
         & $tailscale up
-        if ($LASTEXITCODE -ne 0) { throw "Tailscale login/up did not finish successfully." }
-        $state = Invoke-NotionProfileJson @("sync-tailscale", "--json", "--include-key")
+        $upExitCode = $LASTEXITCODE
+        Write-Host "Waiting for Tailscale and the stable ts.net hostname..." -ForegroundColor Cyan
+        $probe = Invoke-TailscaleReadinessJson 120
     }
-    if (!$state.tailscale.ready -or !$state.mcpUrl) {
-        throw "Tailscale is not ready or MagicDNS did not provide a stable .ts.net hostname."
+
+    if (!$probe.ready -or !$probe.baseUrl) {
+        if ($probe.authUrl) {
+            try { Start-Process ([string]$probe.authUrl) | Out-Null } catch {}
+        }
+        $detail = Format-TailscaleFailure $probe $upExitCode
+        throw ("Tailscale setup did not finish. " + $detail + "`nComplete Tailscale sign-in, wait until the app says Connected, then run: karox notion setup")
+    }
+
+    $state = Save-TailscaleProfileUrl $probe
+    if (!$state -or !$state.mcpUrl) {
+        throw "Tailscale connected, but KaroX could not save the stable .ts.net URL."
     }
 
     Show-NotionConnection $state $true
@@ -96,15 +156,20 @@ function Setup-PersistentNotionConnection {
 }
 
 function Ensure-PersistentNotionReady {
-    $state = Invoke-NotionProfileJson @("sync-tailscale", "--json")
-    if (!$state.tailscale.ready -or !$state.mcpUrl) {
+    $probe = Invoke-TailscaleReadinessJson 5
+    if (!$probe.ready -or !$probe.baseUrl) {
         Setup-PersistentNotionConnection
-        $state = Invoke-NotionProfileJson @("sync-tailscale", "--json")
+        $probe = Invoke-TailscaleReadinessJson 10
     }
-    return $state
+    if (!$probe.ready -or !$probe.baseUrl) {
+        throw "Tailscale is not ready. Run: karox notion setup"
+    }
+    Save-TailscaleProfileUrl $probe | Out-Null
+    return $probe
 }
 
 $python = Find-KaroXPython
+Clear-StaleReleaseCache
 $arguments = @($args)
 $forceNotion = $false
 $first = if ($arguments.Count -gt 0) { ([string]$arguments[0]).ToLowerInvariant() } else { "" }
@@ -166,8 +231,12 @@ if ($first -eq "notion") {
         exit $LASTEXITCODE
     }
     if ($subcommand -eq "status") {
-        $profile = Invoke-NotionProfileJson @("sync-tailscale", "--json")
+        $probe = Invoke-TailscaleReadinessJson 3
+        if ($probe.ready -and $probe.baseUrl) { Save-TailscaleProfileUrl $probe | Out-Null }
+        $profile = Invoke-NotionProfileJson @("connection", "--json")
         Show-NotionConnection $profile $false
+        Write-Host ("Tailscale: " + [string]$probe.backendState + " | " + [string]$probe.dnsName)
+        if (!$probe.ready -and $probe.error) { Write-Host ([string]$probe.error) -ForegroundColor Yellow }
         & $python $NotionDoctor --root $Root
         exit $LASTEXITCODE
     }
@@ -182,6 +251,7 @@ if (!(Test-Path -LiteralPath $Core)) { throw "start.core.ps1 is missing. Reinsta
 if (!(Test-Path -LiteralPath $Patcher)) { throw "Notion provider patcher is missing. Reinstall or update KaroX." }
 if (!(Test-Path -LiteralPath $Admin)) { throw "KaroX admin CLI is missing. Reinstall or update KaroX." }
 if (!(Test-Path -LiteralPath $Support)) { throw "KaroX support bundle module is missing. Reinstall or update KaroX." }
+if (!(Test-Path -LiteralPath $TailscaleReadiness)) { throw "Tailscale readiness module is missing. Reinstall or update KaroX." }
 
 if ($env:KAROX_UPDATE_NOTICE -ne "0") {
     try { & $python $Admin notice 2>$null } catch {}

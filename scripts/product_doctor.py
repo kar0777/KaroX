@@ -72,6 +72,7 @@ def main() -> int:
         "VERSION",
         "scripts/patch_notion_provider.py",
         "scripts/notion_profile.py",
+        "scripts/tailscale_readiness.py",
         "scripts/notion_doctor.py",
     )
     for relative in required_root_files:
@@ -95,6 +96,7 @@ def main() -> int:
     script_files = (
         "patch_notion_provider.py",
         "notion_profile.py",
+        "tailscale_readiness.py",
         "notion_doctor.py",
         "karox_cli.py",
         "support_bundle.py",

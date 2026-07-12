@@ -23,8 +23,11 @@ On Windows this command:
 2. protects it with Windows DPAPI when available;
 3. installs Tailscale through `winget` when necessary;
 4. opens Tailscale login if the device is not connected;
-5. records the stable device `*.ts.net` HTTPS origin;
-6. prints the MCP URL and Bearer token needed for the one-time Notion connection.
+5. waits up to 120 seconds for Tailscale and the stable device `*.ts.net` hostname;
+6. records the stable HTTPS origin;
+7. prints the MCP URL and Bearer token needed for the one-time Notion connection.
+
+KaroX accepts both the direct `Self.DNSName` value and the equivalent `HostName + MagicDNSSuffix` form reported by Tailscale while login is still settling.
 
 On macOS or Linux, install/sign in to Tailscale first and run the same command:
 
@@ -107,9 +110,19 @@ The provider exposes:
 
 ## Troubleshooting
 
-### Doctor reports `server\\repo_tools.py was not found`
+### `Tailscale setup did not finish`
 
-Update to v3.13.0 or newer. Older Windows installations could place the server package in `app\\server\\server`; the new doctor resolves both layouts instead of reporting a false failure.
+Update to v3.13.2 or newer. KaroX now waits for login and reports the exact Tailscale backend state. Complete sign-in in the browser or Tailscale app, wait until it says **Connected**, then run:
+
+```powershell
+karox notion setup
+```
+
+When Tailscale reports `Running` but `Self.DNSName` is temporarily empty, KaroX derives the same stable hostname from `HostName + MagicDNSSuffix`.
+
+### Doctor reports `server\repo_tools.py was not found`
+
+Update to v3.13.0 or newer. Older Windows installations could place the server package in `app\server\server`; the new doctor resolves both layouts instead of reporting a false failure.
 
 ### `421 Misdirected Request`
 

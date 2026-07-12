@@ -10,6 +10,7 @@ VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 PATCHER="$SCRIPT_DIR/scripts/patch_notion_provider.py"
 NOTION_DOCTOR="$SCRIPT_DIR/scripts/notion_doctor.py"
 NOTION_PROFILE="$SCRIPT_DIR/scripts/notion_profile.py"
+TAILSCALE_READINESS="$SCRIPT_DIR/scripts/tailscale_readiness.py"
 ADMIN="$SCRIPT_DIR/scripts/karox_cli.py"
 SUPPORT="$SCRIPT_DIR/scripts/support_bundle.py"
 CORE="$SCRIPT_DIR/start.core.sh"
@@ -40,7 +41,7 @@ show_notion_connection() {
   NOTION_PAYLOAD="$payload" SHOW_TOKEN="$show_token" "$PYTHON_EXE" - <<'PY'
 import json, os
 x=json.loads(os.environ['NOTION_PAYLOAD'])
-print('\nKaroX ↔ Notion persistent connection')
+print('\nKaroX <-> Notion persistent connection')
 print('----------------------------------------')
 print('MCP URL :', x.get('mcpUrl',''))
 print('Auth    : Bearer token')
@@ -54,35 +55,73 @@ notion_json() {
   "$PYTHON_EXE" "$NOTION_PROFILE" "$@"
 }
 
+tailscale_json() {
+  [ -f "$TAILSCALE_READINESS" ] || { echo "Tailscale readiness module is missing. Run: karox update" >&2; return 1; }
+  "$PYTHON_EXE" "$TAILSCALE_READINESS" "$@"
+}
+
+json_ready() {
+  NOTION_PAYLOAD="$1" "$PYTHON_EXE" -c "import json,os,sys; x=json.loads(os.environ['NOTION_PAYLOAD']); sys.exit(0 if x.get('ready') and x.get('baseUrl') else 1)"
+}
+
+save_tailscale_url() {
+  local probe="$1" base_url
+  base_url="$(NOTION_PAYLOAD="$probe" "$PYTHON_EXE" -c "import json,os; print(json.loads(os.environ['NOTION_PAYLOAD']).get('baseUrl',''))")"
+  [ -n "$base_url" ] || return 1
+  notion_json set-url --url "$base_url" --json >/dev/null
+}
+
 setup_persistent_notion() {
   notion_json ensure --json >/dev/null
-  local ts state
+  local ts probe up_exit=0
   ts="$(find_tailscale 2>/dev/null || true)"
   if [ -z "$ts" ]; then
     echo "Tailscale is required for a permanent Notion URL." >&2
     echo "Install Tailscale, sign in, then run: karox notion setup" >&2
     return 1
   fi
-  state="$(notion_json sync-tailscale --json --include-key)"
-  if ! NOTION_PAYLOAD="$state" "$PYTHON_EXE" -c "import json,os,sys; sys.exit(0 if json.loads(os.environ['NOTION_PAYLOAD']).get('tailscale',{}).get('ready') else 1)"; then
+
+  probe="$(tailscale_json --wait 3 --json)"
+  if ! json_ready "$probe"; then
     echo "Opening Tailscale login..."
-    "$ts" up
-    state="$(notion_json sync-tailscale --json --include-key)"
+    echo "Finish sign-in in the browser or Tailscale app. KaroX will wait up to 120 seconds."
+    "$ts" up || up_exit=$?
+    echo "Waiting for Tailscale and the stable ts.net hostname..."
+    probe="$(tailscale_json --wait 120 --interval 2 --json)"
   fi
-  NOTION_PAYLOAD="$state" "$PYTHON_EXE" -c "import json,os,sys; x=json.loads(os.environ['NOTION_PAYLOAD']); sys.exit(0 if x.get('mcpUrl') and x.get('tailscale',{}).get('ready') else 1)" || {
-    echo "Tailscale is not ready or MagicDNS did not provide a stable .ts.net hostname." >&2
+
+  if ! json_ready "$probe"; then
+    NOTION_PAYLOAD="$probe" UP_EXIT="$up_exit" "$PYTHON_EXE" - <<'PY' >&2
+import json, os
+x=json.loads(os.environ['NOTION_PAYLOAD'])
+parts=[]
+if x.get('backendState'): parts.append('state='+str(x['backendState']))
+if x.get('error'): parts.append(str(x['error']))
+if os.environ.get('UP_EXIT') not in ('', '0'): parts.append('tailscale up exit='+os.environ['UP_EXIT'])
+if x.get('authUrl'): parts.append('login='+str(x['authUrl']))
+print('Tailscale setup did not finish. ' + ' | '.join(parts))
+print('Complete Tailscale sign-in, wait until the app says Connected, then run: karox notion setup')
+PY
     return 1
-  }
+  fi
+
+  save_tailscale_url "$probe"
+  local state
+  state="$(notion_json connection --json --show-token)"
   show_notion_connection "$state" 1
   echo "Add this Custom MCP server to Notion once. Future KaroX sessions reuse the same URL and token."
+  echo "After connecting, run: karox notion"
 }
 
 ensure_persistent_notion() {
-  local state
-  state="$(notion_json sync-tailscale --json)"
-  if ! NOTION_PAYLOAD="$state" "$PYTHON_EXE" -c "import json,os,sys; x=json.loads(os.environ['NOTION_PAYLOAD']); sys.exit(0 if x.get('mcpUrl') and x.get('tailscale',{}).get('ready') else 1)"; then
+  local probe
+  probe="$(tailscale_json --wait 5 --json)"
+  if ! json_ready "$probe"; then
     setup_persistent_notion
+    probe="$(tailscale_json --wait 10 --json)"
   fi
+  json_ready "$probe" || { echo "Tailscale is not ready. Run: karox notion setup" >&2; return 1; }
+  save_tailscale_url "$probe"
 }
 
 PYTHON_EXE="$(find_python)" || { echo "Python was not found. Run install.sh first." >&2; exit 1; }
@@ -138,8 +177,11 @@ if [ "$FIRST" = "notion" ]; then
       exec "$PYTHON_EXE" "$NOTION_DOCTOR" --root "$SCRIPT_DIR"
       ;;
     status)
-      payload="$(notion_json sync-tailscale --json)"
+      probe="$(tailscale_json --wait 3 --json)"
+      if json_ready "$probe"; then save_tailscale_url "$probe"; fi
+      payload="$(notion_json connection --json)"
       show_notion_connection "$payload" 0
+      NOTION_PAYLOAD="$probe" "$PYTHON_EXE" -c "import json,os; x=json.loads(os.environ['NOTION_PAYLOAD']); print('Tailscale:', x.get('backendState',''), '|', x.get('dnsName','')); print(x.get('error','') if not x.get('ready') else '')"
       exec "$PYTHON_EXE" "$NOTION_DOCTOR" --root "$SCRIPT_DIR"
       ;;
     docs)
@@ -156,6 +198,7 @@ fi
 [ -f "$PATCHER" ] || { echo "Notion provider patcher is missing. Reinstall or update KaroX." >&2; exit 1; }
 [ -f "$ADMIN" ] || { echo "KaroX admin CLI is missing. Reinstall or update KaroX." >&2; exit 1; }
 [ -f "$SUPPORT" ] || { echo "KaroX support bundle module is missing. Reinstall or update KaroX." >&2; exit 1; }
+[ -f "$TAILSCALE_READINESS" ] || { echo "Tailscale readiness module is missing. Reinstall or update KaroX." >&2; exit 1; }
 
 if [ "${KAROX_UPDATE_NOTICE:-1}" != "0" ]; then
   "$PYTHON_EXE" "$ADMIN" notice 2>/dev/null || true
