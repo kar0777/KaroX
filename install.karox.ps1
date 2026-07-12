@@ -104,7 +104,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\ka
 '@ | Set-Content -LiteralPath (Join-Path $LegacyBinDir "karox.cmd") -Encoding ASCII
 }
 
+function Move-OutOf-AppDirectory {
+    try {
+        $current = [IO.Path]::GetFullPath((Get-Location).Path).TrimEnd('\')
+        $installedApp = [IO.Path]::GetFullPath($AppDir).TrimEnd('\')
+        if ($current -ieq $installedApp -or $current.StartsWith($installedApp + "\", [StringComparison]::OrdinalIgnoreCase)) {
+            Set-Location -LiteralPath $Root
+        }
+    } catch {
+        Set-Location -LiteralPath $Root
+    }
+}
+
 function Copy-AppFiles {
+    Move-OutOf-AppDirectory
     if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__") } | ForEach-Object {
@@ -134,6 +147,7 @@ function Assert-InstallationComplete {
         "start.ps1", "start.core.ps1", "requirements.txt",
         "scripts\karox_paths.py", "scripts\karox_admin_entry.py", "scripts\support_bundle_entry.py",
         "scripts\rebrand_runtime.py", "scripts\notion_profile.py", "scripts\tailscale_readiness.py",
+        "scripts\notion_setup_wizard.py",
         "server\repo_tools.py", "server\notion_gateway.py"
     )
     $missing = @()
@@ -234,7 +248,6 @@ if (!$legacyInCurrentPath -and (Test-Path -LiteralPath $LegacyRoot)) {
     try { Remove-Item -LiteralPath $LegacyRoot -Recurse -Force -ErrorAction Stop } catch {}
 }
 $env:Path = "$Bin;" + $env:Path
-Set-Location -LiteralPath $Root
 & (Join-Path $Root "start.ps1") @args
 exit $LASTEXITCODE
 '@ | Set-Content -LiteralPath $KaroXPs1 -Encoding UTF8
