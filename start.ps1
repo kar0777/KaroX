@@ -52,7 +52,7 @@ function Invoke-NotionProfileJson([string[]]$ProfileArgs) {
 
 function Show-NotionConnection($profile, $showToken = $false) {
     Write-Host ""
-    Write-Host "KaroX ↔ Notion persistent connection" -ForegroundColor Cyan
+    Write-Host "KaroX <-> Notion persistent connection" -ForegroundColor Cyan
     Write-Host "----------------------------------------" -ForegroundColor DarkCyan
     Write-Host ("MCP URL : " + [string]$profile.mcpUrl)
     Write-Host "Auth    : Bearer token"
