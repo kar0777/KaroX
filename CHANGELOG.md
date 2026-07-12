@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.13.1
+
+### KaroX v3.13.1
+
+- `start.ps1` no longer contains a non-ASCII arrow in a BOM-less UTF-8 file;
+- Windows PowerShell 5.1 no longer misreads that byte sequence as a smart quote and reports a missing string terminator;
+- KaroX now starts normally after installing v3.13.x on Windows;
+- the CI matrix parses every PowerShell entrypoint with the actual Windows PowerShell 5.1 engine;
+- CI rejects a BOM-less `start.ps1` when it contains non-ASCII bytes, preventing this regression from returning.
+
 ## 3.13.0
 
 ### ★ KaroX v3.13.0 — Persistent Notion Connection
