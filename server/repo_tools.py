@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field
-VERSION = "3.13.2"
+VERSION = "3.14.0"
 
 def text_env(name: str, default: str = "") -> str:
     encoded = os.environ.get(f"{name}_B64")

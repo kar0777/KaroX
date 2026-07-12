@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.14.0
+
+### KaroX v3.14.0 — Native paths and reliable migration
+
+- Windows installations now use `%LOCALAPPDATA%\KaroX` and `%APPDATA%\KaroX`.
+- macOS/Linux installations now use `KaroX` configuration and runtime directories.
+- Existing settings, repository history, session metadata, logs, and the DPAPI-protected persistent Notion key are migrated automatically.
+- Stored absolute paths are rewritten to the new directories.
+- Legacy directories are cleaned after the old processes have exited.
+- The installer explicitly repairs and verifies `scripts/tailscale_readiness.py` instead of reporting success with an incomplete application.
+- Installed PowerShell, Bash, and Python runtime files are rewritten to KaroX paths before the doctor runs.
+- Admin, support bundle, Notion profile, generated launchers, shortcuts, and command shims all resolve the same canonical directories.
+
 ## 3.13.2
 
 ### KaroX v3.13.2
