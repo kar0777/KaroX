@@ -1,13 +1,13 @@
 {
   "status": "published",
-  "version": "3.12.3",
-  "tag": "v3.12.3",
-  "name": "★ KaroX v3.12.3 — Notion MCP 421 Connection Hotfix",
-  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.12.3",
-  "publishedAt": "2026-07-11T16:48:58Z",
+  "version": "3.13.0",
+  "tag": "v3.13.0",
+  "name": "★ KaroX v3.13.0 — Persistent Notion Connection",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.13.0",
+  "publishedAt": "2026-07-12T07:05:59Z",
   "assets": [
-    "KaroX-v3.12.3-SHA256SUMS.txt",
-    "KaroX-v3.12.3.tar.gz",
-    "KaroX-v3.12.3.zip"
+    "KaroX-v3.13.0-SHA256SUMS.txt",
+    "KaroX-v3.13.0.tar.gz",
+    "KaroX-v3.13.0.zip"
   ]
 }
