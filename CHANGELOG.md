@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.15.1
+
+### KaroX v3.15.1 — Windows updater directory-lock fix
+
+- `karox update` no longer leaves the launcher working directory inside `%LOCALAPPDATA%\KaroX\app`.
+- The Windows installer moves out of the installed app directory before replacing application files.
+- The generated `karox.ps1` launcher preserves the user's current directory.
+- Updating from any ordinary PowerShell directory no longer fails with `Cannot remove ... KaroX\app because it is in use`.
+- The localized Notion setup wizard from v3.15.0 remains included.
+
 ## 3.15.0
 
 ### KaroX v3.15.0 — Localized Notion setup wizard
