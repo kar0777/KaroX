@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.13.0
+
+### ★ KaroX v3.13.0 — Persistent Notion Connection
+
+- Adds `karox notion setup` for one-time persistent configuration.
+- Uses a stable Tailscale Funnel `*.ts.net` URL instead of a new Quick Tunnel URL for each launch.
+- Reuses one persistent Bearer credential across repository sessions and KaroX restarts.
+- Protects the credential with Windows DPAPI when available; other platforms use a current-user-only profile file.
+- Automatically forces Tailscale for Notion while leaving other KaroX providers unchanged.
+- Stops an older Notion session before routing the stable endpoint to a new repository session.
+- Adds `connection`, `status`, `rotate-key`, and `reset-connection` management commands.
+- Replaces the brittle legacy Windows doctor path check.
+- Resolves both `server/repo_tools.py` and the historical installed `server/server/repo_tools.py` layout.
+- Makes the Notion provider doctor use the same resolver.
+- Adds regression coverage for normal and nested layouts.
+- persistent key lifecycle and explicit rotation;
+- stable URL preservation;
+- Windows PowerShell 5.1 generated-launcher parsing;
+
 ## 3.12.3
 
 ### ★ KaroX v3.12.3 — Notion MCP 421 Connection Hotfix
