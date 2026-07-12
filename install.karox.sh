@@ -2,10 +2,7 @@
 set -euo pipefail
 
 DO_START=0
-for arg in "$@"; do
-  case "$arg" in --start|-start) DO_START=1 ;; esac
-done
-
+for arg in "$@"; do case "$arg" in --start|-start) DO_START=1 ;; esac; done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$(uname -s)" in
   Darwin)
@@ -13,22 +10,19 @@ case "$(uname -s)" in
     LEGACY_CONFIG_DIR="$HOME/Library/Application Support/RepoPilotBridge"
     RUNTIME_DIR="$HOME/.local/share/KaroX"
     LEGACY_RUNTIME_DIR="$HOME/.local/share/RepoPilotBridge"
-    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.command"
-    ;;
+    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.command" ;;
   Linux)
     CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/KaroX"
     LEGACY_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/RepoPilotBridge"
     RUNTIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/KaroX"
     LEGACY_RUNTIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/RepoPilotBridge"
-    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.desktop"
-    ;;
+    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.desktop" ;;
   *)
     CONFIG_DIR="$HOME/.config/KaroX"
     LEGACY_CONFIG_DIR="$HOME/.config/RepoPilotBridge"
     RUNTIME_DIR="$HOME/.local/share/KaroX"
     LEGACY_RUNTIME_DIR="$HOME/.local/share/RepoPilotBridge"
-    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.sh"
-    ;;
+    DESKTOP_SHORTCUT="$HOME/Desktop/KaroX.sh" ;;
 esac
 APP_DIR="$RUNTIME_DIR/app"
 BIN_DIR="$RUNTIME_DIR/bin"
@@ -37,6 +31,7 @@ VENV_PYTHON="$VENV_DIR/bin/python"
 LOCAL_BIN="$HOME/.local/bin"
 KAROX_SHIM="$LOCAL_BIN/karox"
 MIGRATION="$ROOT/scripts/karox_paths.py"
+REBRAND="$ROOT/scripts/rebrand_runtime.py"
 
 find_python() {
   for p in python3.13 python3.12 python3 python; do
@@ -57,30 +52,38 @@ copy_app() {
   done
 }
 
+repair_required() {
+  for rel in scripts/tailscale_readiness.py scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py; do
+    if [ ! -e "$APP_DIR/$rel" ] && [ -e "$ROOT/$rel" ]; then mkdir -p "$(dirname "$APP_DIR/$rel")"; cp -f "$ROOT/$rel" "$APP_DIR/$rel"; fi
+  done
+}
+
 assert_complete() {
   for rel in \
     start.sh start.core.sh requirements.txt \
-    scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py \
+    scripts/karox_paths.py scripts/karox_admin_entry.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py \
     scripts/notion_profile.py scripts/tailscale_readiness.py \
     server/repo_tools.py server/notion_gateway.py; do
     [ -e "$APP_DIR/$rel" ] || { echo "Incomplete KaroX installation. Missing: $rel" >&2; exit 1; }
   done
+  ! grep -q 'RepoPilotBridge' "$APP_DIR/start.sh" || { echo 'Installed start.sh still contains legacy paths.' >&2; exit 1; }
 }
 
 printf '\nKaroX installer\n----------------------------------------\n'
 mkdir -p "$CONFIG_DIR" "$RUNTIME_DIR" "$BIN_DIR" "$LOCAL_BIN"
 BASE_PYTHON="$(find_python || true)"
 [ -n "$BASE_PYTHON" ] || { echo 'Python 3.10+ is required.' >&2; exit 1; }
-
 export KAROX_CONFIG_DIR="$CONFIG_DIR"
 export KAROX_RUNTIME_DIR="$RUNTIME_DIR"
-if [ -f "$MIGRATION" ]; then "$BASE_PYTHON" "$MIGRATION" migrate --json >/dev/null; fi
+[ ! -f "$MIGRATION" ] || "$BASE_PYTHON" "$MIGRATION" migrate --json >/dev/null
 
 if [ ! -x "$VENV_PYTHON" ]; then "$BASE_PYTHON" -m venv "$VENV_DIR"; fi
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
 "$VENV_PYTHON" -m pip install -r "$ROOT/requirements.txt" --quiet
 
 copy_app
+repair_required
+"$VENV_PYTHON" "$APP_DIR/scripts/rebrand_runtime.py" --root "$APP_DIR"
 assert_complete
 
 cat > "$KAROX_SHIM" <<'EOF'
@@ -102,12 +105,8 @@ done
 
 case "$(uname -s)" in
   Darwin)
-    cat > "$DESKTOP_SHORTCUT" <<EOF
-#!/usr/bin/env bash
-exec "$KAROX_SHIM"
-EOF
-    chmod +x "$DESKTOP_SHORTCUT"
-    ;;
+    printf '#!/usr/bin/env bash\nexec %q\n' "$KAROX_SHIM" > "$DESKTOP_SHORTCUT"
+    chmod +x "$DESKTOP_SHORTCUT" ;;
   Linux)
     cat > "$DESKTOP_SHORTCUT" <<EOF
 [Desktop Entry]
@@ -120,8 +119,6 @@ EOF
 esac
 
 printf '\nInstallation complete.\nApplication : %s\nRuntime     : %s\nConfig      : %s\nCommand     : karox\n\n' "$APP_DIR" "$RUNTIME_DIR" "$CONFIG_DIR"
-
-# POSIX permits removing files still opened by an old process. State was copied first.
 rm -rf "$LEGACY_CONFIG_DIR" "$LEGACY_RUNTIME_DIR" 2>/dev/null || true
 rm -f "$HOME/.local/bin/repopilot" 2>/dev/null || true
 
