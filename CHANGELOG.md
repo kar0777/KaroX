@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.16.0
+
+### KaroX v3.16.0 — Native Notion Provider
+
+- native Notion provider choice in KaroX;
+- automatic Tailscale startup/readiness flow;
+- automatic stable Funnel selection for Notion;
+- persistent MCP URL and Bearer credential;
+- Russian and English provider UI;
+- LIVE Notion connection card;
+- reusable `N = Notion` action in the session menu;
+- Windows PowerShell 5.1, macOS, Linux, Python 3.10 and 3.12 coverage.
+
 ## 3.15.1
 
 ### KaroX v3.15.1 — Windows updater directory-lock fix
