@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_OWNER="kar0777"
 REPO_NAME="KaroX"
-REF="${KAROX_BOOTSTRAP_REF:-v3.14.0}"
+REF="${KAROX_BOOTSTRAP_REF:-v3.14.1}"
 INSTALL_ROOT="${KAROX_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/KaroX}"
 SOURCE_DIR="$INSTALL_ROOT/source"
 case "$REF" in v[0-9]*.[0-9]*.[0-9]*) REF_KIND="tags" ;; *) REF_KIND="heads" ;; esac

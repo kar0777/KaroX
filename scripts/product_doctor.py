@@ -9,6 +9,10 @@ import py_compile
 from pathlib import Path
 from typing import Any
 
+# Keep the legacy product name split so rebrand_runtime.py cannot rewrite the
+# detector itself while transforming the installed application.
+LEGACY_BRAND = "Repo" + "PilotBridge"
+
 
 def resolve_server_dir(root: Path) -> Path:
     candidates = (root / "server", root / "server" / "server", root)
@@ -17,6 +21,10 @@ def resolve_server_dir(root: Path) -> Path:
             return candidate.resolve()
     checked = ", ".join(str(path) for path in candidates)
     raise FileNotFoundError(f"repo_tools.py was not found. Checked: {checked}")
+
+
+def launcher_uses_legacy_paths(text: str) -> bool:
+    return LEGACY_BRAND in text
 
 
 def add(checks: list[dict[str, Any]], name: str, ok: bool, detail: str = "", *, warning: bool = False) -> None:
@@ -83,7 +91,7 @@ def main() -> int:
     if root.name.lower() == "app" and root.parent.name.lower() == "karox":
         for launcher in (root / "start.ps1", root / "start.sh"):
             text = launcher.read_text(encoding="utf-8-sig", errors="replace") if launcher.is_file() else ""
-            add(checks, f"KaroX-native paths: {launcher.name}", "RepoPilotBridge" not in text, str(launcher))
+            add(checks, f"KaroX-native paths: {launcher.name}", not launcher_uses_legacy_paths(text), str(launcher))
 
     version_path = root / "VERSION"
     version = version_path.read_text(encoding="utf-8-sig").strip() if version_path.is_file() else "unknown"
