@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-PATCHER_VERSION = "3.12.2"
+PATCHER_VERSION = "3.13.0"
 UTF8_BOM = b"\xef\xbb\xbf"
 
 
@@ -25,6 +25,13 @@ def patch_ps(source: str, root: str) -> str:
         '$Root = Split-Path -Parent $MyInvocation.MyCommand.Path',
         f"$Root = if ($env:KAROX_SOURCE_ROOT) {{ $env:KAROX_SOURCE_ROOT }} else {{ '{escaped_root}' }}",
         "ps root",
+    )
+    source = one(
+        source,
+        '$PythonExe = Join-Path $RuntimeDir ".venv\\Scripts\\python.exe"',
+        '$PythonExe = Join-Path $RuntimeDir ".venv\\Scripts\\python.exe"\n'
+        '$NotionProfileScript = Join-Path $Root "scripts\\notion_profile.py"',
+        "ps notion profile path",
     )
     source = one(
         source,
@@ -49,7 +56,7 @@ def patch_ps(source: str, root: str) -> str:
         "ps override",
     )
     old_menu = '''    UI-Choice "1" "PROMPTQL" (L "Native shared AI workspace · recommended" "Нативная командная AI-среда · рекомендуется") "Magenta"\n    UI-Choice "2" (L "OTHER CLIENT" "ДРУГОЙ КЛИЕНТ") (L "Generic OpenAPI connection" "Универсальное OpenAPI-подключение") "Cyan"\n    UI-Choice "3" "LETAIDO.COM" (L "Compatibility mode" "Режим совместимости") "DarkGray"'''
-    new_menu = '''    UI-Choice "1" "PROMPTQL" (L "Native shared AI workspace · recommended" "Нативная командная AI-среда · рекомендуется") "Magenta"\n    UI-Choice "2" "NOTION" (L "Custom Agent over protected MCP" "Custom Agent через защищённый MCP") "Green"\n    UI-Choice "3" (L "OTHER CLIENT" "ДРУГОЙ КЛИЕНТ") (L "Generic OpenAPI connection" "Универсальное OpenAPI-подключение") "Cyan"\n    UI-Choice "4" "LETAIDO.COM" (L "Compatibility mode" "Режим совместимости") "DarkGray"'''
+    new_menu = '''    UI-Choice "1" "PROMPTQL" (L "Native shared AI workspace · recommended" "Нативная командная AI-среда · рекомендуется") "Magenta"\n    UI-Choice "2" "NOTION" (L "Persistent Custom Agent over protected MCP" "Постоянный Custom Agent через защищённый MCP") "Green"\n    UI-Choice "3" (L "OTHER CLIENT" "ДРУГОЙ КЛИЕНТ") (L "Generic OpenAPI connection" "Универсальное OpenAPI-подключение") "Cyan"\n    UI-Choice "4" "LETAIDO.COM" (L "Compatibility mode" "Режим совместимости") "DarkGray"'''
     source = one(source, old_menu, new_menu, "ps menu")
     source = one(
         source,
@@ -71,8 +78,8 @@ def patch_ps(source: str, root: str) -> str:
         '            tunnelUrl = [string]$session.tunnelUrl',
         "ps session",
     )
-    notion_ru = '''        } elseif ($aiClient -eq "notion") {\n            $intro = @"\nЯ запустил KaroX для Notion Custom Agent. Добавь custom MCP server:\n- name: KaroX\n- server URL: $tunnelUrl/mcp\n- transport: Streamable HTTP\n- authorization: Bearer token\n- token: ключ из клавиши K, только в защищённое поле\nНе вставляй ключ в чат. Сначала вызови karox_preflight и дождись отдельного ТЗ.\n"@\n        } elseif ($aiClient -eq "letaido") {'''
-    notion_en = '''        } elseif ($aiClient -eq "notion") {\n            $intro = @"\nI started KaroX for a Notion Custom Agent. Add a custom MCP server:\n- name: KaroX\n- server URL: $tunnelUrl/mcp\n- transport: Streamable HTTP\n- authorization: Bearer token\n- token: the key copied with K, only in the protected field\nNever paste the key into chat. Call karox_preflight first and wait for a separate task.\n"@\n        } elseif ($aiClient -eq "letaido") {'''
+    notion_ru = '''        } elseif ($aiClient -eq "notion") {\n            $intro = @"\nЯ запустил постоянное подключение KaroX для Notion Custom Agent.\n- MCP server URL: $tunnelUrl/mcp\n- transport: Streamable HTTP\n- authorization: Bearer token\n- URL и ключ сохраняются между перезапусками KaroX\nЕсли сервер уже добавлен в Notion, ничего не перенастраивай. Сначала вызови karox_preflight и дождись отдельного ТЗ.\n"@\n        } elseif ($aiClient -eq "letaido") {'''
+    notion_en = '''        } elseif ($aiClient -eq "notion") {\n            $intro = @"\nI started the persistent KaroX connection for a Notion Custom Agent.\n- MCP server URL: $tunnelUrl/mcp\n- transport: Streamable HTTP\n- authorization: Bearer token\n- the URL and token persist across KaroX restarts\nIf the server is already connected in Notion, do not reconfigure it. Call karox_preflight first and wait for a separate task.\n"@\n        } elseif ($aiClient -eq "letaido") {'''
     anchor = '        } elseif ($aiClient -eq "letaido") {'
     first = source.find(anchor)
     if first < 0:
@@ -101,6 +108,60 @@ def patch_ps(source: str, root: str) -> str:
         "ps app var",
     )
     source = one(source, '"repo_tools:app", "--host"', '$serverApp, "--host"', "ps app target")
+
+    helpers = r'''function Get-PersistentNotionProfile {
+    if (!(Test-Path -LiteralPath $NotionProfileScript)) {
+        throw (L "Persistent Notion profile module is missing. Run karox update." "Модуль постоянного подключения Notion отсутствует. Выполните karox update.")
+    }
+    $raw = & $PythonExe $NotionProfileScript ensure --json --include-key
+    if ($LASTEXITCODE -ne 0) { throw (L "Could not load the persistent Notion profile." "Не удалось загрузить постоянный профиль Notion.") }
+    $profile = (($raw -join [Environment]::NewLine) | ConvertFrom-Json)
+    if (!$profile.apiKey) { throw (L "Persistent Notion key is missing." "Постоянный ключ Notion отсутствует.") }
+    return $profile
+}
+
+function Stop-OtherNotionSessions {
+    foreach ($session in @(Get-Sessions)) {
+        if ((Normalize-AiClient $session.aiClient) -eq "notion" -and $session.status -ne "stopped") {
+            Stop-Pid $session.tunnelPid
+            Stop-Pid $session.serverPid
+            Stop-Pid $session.serverRunnerPid
+        }
+    }
+}
+
+'''
+    source = one(source, "function Start-NewSession {", helpers + "function Start-NewSession {", "ps persistent helpers")
+    source = one(
+        source,
+        '    $apiKey = (([guid]::NewGuid().ToString("N")) + ([guid]::NewGuid().ToString("N")))\n'
+        '    $tunnelProvider = Get-SelectedTunnelProvider\n'
+        '    $aiClient = Get-SelectedAiClient',
+        '    $aiClient = Get-SelectedAiClient\n'
+        '    $notionProfile = $null\n'
+        '    if ($aiClient -eq "notion") {\n'
+        '        Stop-OtherNotionSessions\n'
+        '        $notionProfile = Get-PersistentNotionProfile\n'
+        '        $apiKey = [string]$notionProfile.apiKey\n'
+        '        $tunnelProvider = "tailscale"\n'
+        '    } else {\n'
+        '        $apiKey = (([guid]::NewGuid().ToString("N")) + ([guid]::NewGuid().ToString("N")))\n'
+        '        $tunnelProvider = Get-SelectedTunnelProvider\n'
+        '    }',
+        "ps persistent key",
+    )
+    source = one(
+        source,
+        '    $providerId = Get-ProviderIdFromUrl $tunnelUrl $tunnelProvider $sessionId',
+        '    if ($aiClient -eq "notion") {\n'
+        '        & $PythonExe $NotionProfileScript set-url --url $tunnelUrl --json | Out-Null\n'
+        '        if ($LASTEXITCODE -ne 0) { throw (L "Could not save the persistent Notion URL." "Не удалось сохранить постоянный URL Notion.") }\n'
+        '        $providerId = "karox-notion-stable"\n'
+        '    } else {\n'
+        '        $providerId = Get-ProviderIdFromUrl $tunnelUrl $tunnelProvider $sessionId\n'
+        '    }',
+        "ps persistent url",
+    )
     return source
 
 
@@ -109,8 +170,14 @@ def patch_sh(source: str, root: str) -> str:
     source = one(
         source,
         'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
-        f"SCRIPT_DIR=\"${{KAROX_SOURCE_ROOT:-{escaped_root}}}\"",
+        f'SCRIPT_DIR="${{KAROX_SOURCE_ROOT:-{escaped_root}}}"',
         "sh root",
+    )
+    source = one(
+        source,
+        'VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"',
+        'VENV_PYTHON="$RUNTIME_DIR/.venv/bin/python"\nNOTION_PROFILE_SCRIPT="$SCRIPT_DIR/scripts/notion_profile.py"',
+        "sh notion profile path",
     )
     source = one(
         source,
@@ -135,7 +202,7 @@ def patch_sh(source: str, root: str) -> str:
     source = one(
         source,
         '    ui_choice 2 "$(l "OTHER CLIENT" "ДРУГОЙ КЛИЕНТ")"',
-        '    ui_choice 2 NOTION "$(l "Custom Agent over protected MCP" "Custom Agent через защищённый MCP")" "$C_GREEN"\n'
+        '    ui_choice 2 NOTION "$(l "Persistent Custom Agent over protected MCP" "Постоянный Custom Agent через защищённый MCP")" "$C_GREEN"\n'
         '    ui_choice 3 "$(l "OTHER CLIENT" "ДРУГОЙ КЛИЕНТ")"',
         "sh menu",
     )
@@ -148,13 +215,13 @@ def patch_sh(source: str, root: str) -> str:
     )
     source = source.replace(
         '            letaido)\n                intro="Я запустил Star For KaroX',
-        '            notion)\n                intro="Я запустил KaroX для Notion Custom Agent. Добавь MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token из клавиши K. Сначала вызови karox_preflight и дождись ТЗ." ;;\n'
+        '            notion)\n                intro="Я запустил постоянное подключение KaroX для Notion. MCP: $tunnel_url/mcp. URL и Bearer-ключ сохраняются между перезапусками. Если сервер уже добавлен, ничего не меняй; сначала вызови karox_preflight." ;;\n'
         '            letaido)\n                intro="Я запустил Star For KaroX',
         1,
     )
     source = source.replace(
         '            letaido)\n                intro="I started Star For KaroX',
-        '            notion)\n                intro="I started KaroX for a Notion Custom Agent. Add MCP server $tunnel_url/mcp, Streamable HTTP, Bearer token copied with K. Call karox_preflight first and wait for the task." ;;\n'
+        '            notion)\n                intro="I started the persistent KaroX connection for Notion. MCP: $tunnel_url/mcp. The URL and Bearer key persist across restarts. If already connected, change nothing; call karox_preflight first." ;;\n'
         '            letaido)\n                intro="I started Star For KaroX',
         1,
     )
@@ -163,6 +230,53 @@ def patch_sh(source: str, root: str) -> str:
     new_target += '    [ "$ai_client" = notion ] && server_app="notion_entry:app"\n'
     new_target += '    (cd "$SERVER_DIR" && nohup "$PYTHON_EXE" -m uvicorn --app-dir "$SERVER_DIR" \\\n        "$server_app" --host 127.0.0.1 --port "$local_port" \\'
     source = one(source, old_target, new_target, "sh app target")
+
+    helpers = r'''persistent_notion_profile_json() {
+    [ -f "$NOTION_PROFILE_SCRIPT" ] || { log_error "$(l "Persistent Notion profile module is missing. Run karox update." "Модуль постоянного подключения Notion отсутствует. Выполните karox update.")"; return 1; }
+    "$PYTHON_EXE" "$NOTION_PROFILE_SCRIPT" ensure --json --include-key
+}
+
+stop_other_notion_sessions() {
+    while IFS=' ' read -r server_pid tunnel_pid; do
+        [ -n "$server_pid$tunnel_pid" ] || continue
+        kill_tree "$tunnel_pid" "$server_pid" 2>/dev/null || true
+    done < <(get_sessions | "$PYTHON_EXE" -c 'import json,sys
+for s in json.load(sys.stdin):
+    if s.get("aiClient") == "notion" and s.get("status") != "stopped":
+        print(s.get("serverPid",0), s.get("tunnelPid",0))')
+}
+
+'''
+    source = one(source, "start_new_session() {", helpers + "start_new_session() {", "sh persistent helpers")
+    source = one(
+        source,
+        '    api_key="$(gen_api_key)"\n'
+        '    tunnel_provider="$(get_selected_tunnel_provider)"\n'
+        '    ai_client="$(get_selected_ai_client)"',
+        '    ai_client="$(get_selected_ai_client)"\n'
+        '    local notion_profile_json=""\n'
+        '    if [ "$ai_client" = notion ]; then\n'
+        '        stop_other_notion_sessions\n'
+        '        notion_profile_json="$(persistent_notion_profile_json)" || return 1\n'
+        '        api_key="$(NOTION_PROFILE_JSON="$notion_profile_json" "$PYTHON_EXE" -c "import json,os; print(json.loads(os.environ[\'NOTION_PROFILE_JSON\'])[\'apiKey\'])")"\n'
+        '        tunnel_provider="tailscale"\n'
+        '    else\n'
+        '        api_key="$(gen_api_key)"\n'
+        '        tunnel_provider="$(get_selected_tunnel_provider)"\n'
+        '    fi',
+        "sh persistent key",
+    )
+    source = one(
+        source,
+        '    provider_id="$(get_provider_id_from_url "$tunnel_url" "$tunnel_provider" "$session_id")"',
+        '    if [ "$ai_client" = notion ]; then\n'
+        '        "$PYTHON_EXE" "$NOTION_PROFILE_SCRIPT" set-url --url "$tunnel_url" --json >/dev/null || return 1\n'
+        '        provider_id="karox-notion-stable"\n'
+        '    else\n'
+        '        provider_id="$(get_provider_id_from_url "$tunnel_url" "$tunnel_provider" "$session_id")"\n'
+        '    fi',
+        "sh persistent url",
+    )
     return source
 
 
