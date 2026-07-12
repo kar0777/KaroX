@@ -34,6 +34,7 @@ def main() -> int:
         "start.core.sh",
         "scripts/patch_notion_provider.py",
         "scripts/notion_profile.py",
+        "scripts/tailscale_readiness.py",
         "scripts/product_doctor.py",
         "scripts/karox_admin.py",
         "NOTION.md",
