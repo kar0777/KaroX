@@ -37,7 +37,16 @@ def main() -> int:
         assert "RepoPilotBridge" in (root / "scripts" / "karox_paths.py").read_text(encoding="utf-8")
         assert '"Repo" + "PilotBridge"' in (root / "scripts" / "product_doctor.py").read_text(encoding="utf-8")
 
-    print("KaroX runtime rebrand checks passed")
+    repo_root = Path(__file__).resolve().parents[1]
+    installer = (repo_root / "install.karox.ps1").read_text(encoding="utf-8-sig")
+    assert "function Set-KaroXPath" in installer
+    assert "function Write-LegacyForwarder" in installer
+    assert "@($BinDir) + $userItems" in installer
+    assert "KaroX\\bin\\karox.ps1" in installer
+    assert "Where-Object { `$_.Name -ne 'bin' }" in installer
+    assert "$legacyInCurrentPath" in installer
+
+    print("KaroX runtime rebrand and Windows shim migration checks passed")
     return 0
 
 
