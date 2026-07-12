@@ -80,8 +80,7 @@ def main() -> int:
     for module in ("fastapi", "uvicorn", "httpx", "mcp", "pydantic"):
         add(checks, f"Python dependency: {module}", importlib.util.find_spec(module) is not None)
 
-    # Installed applications must already be rewritten to the new brand paths.
-    if root.parent.name.lower() == "karox":
+    if root.name.lower() == "app" and root.parent.name.lower() == "karox":
         for launcher in (root / "start.ps1", root / "start.sh"):
             text = launcher.read_text(encoding="utf-8-sig", errors="replace") if launcher.is_file() else ""
             add(checks, f"KaroX-native paths: {launcher.name}", "RepoPilotBridge" not in text, str(launcher))
