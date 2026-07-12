@@ -27,15 +27,25 @@ def main() -> int:
         (root / "scripts" / "product_doctor.py").write_text(
             'LEGACY_BRAND = "Repo" + "PilotBridge"\n', encoding="utf-8"
         )
+        (root / "scripts" / "notion_setup_wizard.py").write_text(
+            'CONFIG = "RepoPilotBridge"\n'
+            'RU = "Tailscale должен быть запущен"\n'
+            'EN = "Tailscale must be running"\n',
+            encoding="utf-8",
+        )
 
         result = rewrite(root)
 
-        assert result["changedCount"] == 2
+        assert result["changedCount"] == 3
         assert "RepoPilotBridge" not in (root / "start.ps1").read_text(encoding="utf-8")
         assert "scripts\\karox_admin_entry.py" in (root / "start.ps1").read_text(encoding="utf-8")
         assert "RepoPilotBridge" not in (root / "start.sh").read_text(encoding="utf-8")
         assert "RepoPilotBridge" in (root / "scripts" / "karox_paths.py").read_text(encoding="utf-8")
         assert '"Repo" + "PilotBridge"' in (root / "scripts" / "product_doctor.py").read_text(encoding="utf-8")
+        wizard = (root / "scripts" / "notion_setup_wizard.py").read_text(encoding="utf-8")
+        assert 'CONFIG = "KaroX"' in wizard
+        assert "Tailscale должен быть запущен" in wizard
+        assert "Tailscale must be running" in wizard
 
     repo_root = Path(__file__).resolve().parents[1]
     installer = (repo_root / "install.karox.ps1").read_text(encoding="utf-8-sig")
@@ -46,7 +56,17 @@ def main() -> int:
     assert "Where-Object { `$_.Name -ne 'bin' }" in installer
     assert "$legacyInCurrentPath" in installer
 
-    print("KaroX runtime rebrand and Windows shim migration checks passed")
+    ps_launcher = (repo_root / "start.ps1").read_text(encoding="utf-8-sig")
+    sh_launcher = (repo_root / "start.sh").read_text(encoding="utf-8")
+    wizard_source = (repo_root / "scripts" / "notion_setup_wizard.py").read_text(encoding="utf-8")
+    doctor_source = (repo_root / "scripts" / "product_doctor.py").read_text(encoding="utf-8")
+    assert "notion_setup_wizard.py" in ps_launcher
+    assert "notion_setup_wizard.py" in sh_launcher
+    assert "Для постоянного адреса Notion" in wizard_source
+    assert "Tailscale must be running to give Notion a permanent URL" in wizard_source
+    assert "scripts/notion_setup_wizard.py" in doctor_source
+
+    print("KaroX runtime rebrand, localized Notion wizard, and Windows shim checks passed")
     return 0
 
 
