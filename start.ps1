@@ -10,6 +10,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeDir = if ($env:KAROX_RUNTIME_DIR) { $env:KAROX_RUNTIME_DIR } else { Join-Path $env:LOCALAPPDATA "RepoPilotBridge" }
 $PythonExe = Join-Path $RuntimeDir ".venv\Scripts\python.exe"
 $Patcher = Join-Path $Root "scripts\patch_notion_provider.py"
+$NativePatcher = Join-Path $Root "scripts\patch_native_notion_provider.py"
 $NotionDoctor = Join-Path $Root "scripts\notion_doctor.py"
 $NotionWizard = Join-Path $Root "scripts\notion_setup_wizard.py"
 $Admin = Join-Path $Root "scripts\karox_admin_entry.py"
@@ -127,12 +128,9 @@ if ($first -eq "notion") {
     if ($subcommand) {
         throw "Unknown notion command: $subcommand"
     }
-
-    $code = Invoke-NotionWizard @("ensure")
-    if ($code -ne 0) { exit $code }
 }
 
-foreach ($required in @($Core, $Patcher, $Admin, $Support, $NotionWizard)) {
+foreach ($required in @($Core, $Patcher, $NativePatcher, $Admin, $Support, $NotionWizard)) {
     if (!(Test-Path -LiteralPath $required)) {
         throw "Required KaroX component is missing: $required. Run: karox update"
     }
@@ -145,6 +143,8 @@ if ($env:KAROX_UPDATE_NOTICE -ne "0") {
 New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
 & $python $Patcher --platform powershell --source $Core --output $Generated --root $Root | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not generate the KaroX launcher. Run: karox doctor" }
+& $python $NativePatcher --platform powershell --path $Generated
+if ($LASTEXITCODE -ne 0) { throw "Could not integrate the native Notion provider. Run: karox doctor" }
 
 $previousRoot = $env:KAROX_SOURCE_ROOT
 $previousClient = $env:KAROX_FORCE_AI_CLIENT
