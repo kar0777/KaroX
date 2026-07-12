@@ -1,13 +1,13 @@
 {
   "status": "published",
-  "version": "3.14.1",
-  "tag": "v3.14.1",
-  "name": "KaroX v3.14.1 — Doctor rebrand fix",
-  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.14.1",
-  "publishedAt": "2026-07-12T09:07:30Z",
+  "version": "3.14.2",
+  "tag": "v3.14.2",
+  "name": "KaroX v3.14.2 — Windows PATH migration fix",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v3.14.2",
+  "publishedAt": "2026-07-12T09:45:54Z",
   "assets": [
-    "KaroX-v3.14.1-SHA256SUMS.txt",
-    "KaroX-v3.14.1.tar.gz",
-    "KaroX-v3.14.1.zip"
+    "KaroX-v3.14.2-SHA256SUMS.txt",
+    "KaroX-v3.14.2.tar.gz",
+    "KaroX-v3.14.2.zip"
   ]
 }
