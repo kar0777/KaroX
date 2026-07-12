@@ -86,17 +86,26 @@ def _copy_missing(src: Path, dst: Path) -> int:
     return copied
 
 
+def _path_replacements(old: Path, new: Path) -> dict[str, str]:
+    old_text = str(old)
+    new_text = str(new)
+    return {
+        old_text: new_text,
+        old_text.replace("\\", "/"): new_text.replace("\\", "/"),
+        old_text.replace("\\", "\\\\"): new_text.replace("\\", "\\\\"),
+    }
+
+
 def _rewrite_text_paths(root: Path, old_config: Path, old_runtime: Path, new_config: Path, new_runtime: Path) -> int:
     rewritten = 0
     allowed = {".json", ".jsonl", ".txt", ".log", ".md", ".ini", ".cfg"}
     if not root.exists():
         return 0
-    replacements = {
-        str(old_config): str(new_config),
-        str(old_runtime): str(new_runtime),
-        str(old_config).replace("\\", "/"): str(new_config).replace("\\", "/"),
-        str(old_runtime).replace("\\", "/"): str(new_runtime).replace("\\", "/"),
-    }
+    replacements: dict[str, str] = {}
+    replacements.update(_path_replacements(old_config, new_config))
+    replacements.update(_path_replacements(old_runtime, new_runtime))
+    # Longest variants first so escaped JSON strings are handled before plain paths.
+    ordered = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in allowed:
             continue
@@ -105,7 +114,7 @@ def _rewrite_text_paths(root: Path, old_config: Path, old_runtime: Path, new_con
         except (OSError, UnicodeError):
             continue
         updated = original
-        for old, new in replacements.items():
+        for old, new in ordered:
             updated = updated.replace(old, new)
         if updated != original:
             path.write_text(updated, encoding="utf-8")
