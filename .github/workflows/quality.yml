@@ -117,13 +117,22 @@ jobs:
         shell: powershell
         run: |
           $failed = $false
+          $details = New-Object System.Collections.Generic.List[string]
           foreach ($file in @('bootstrap.ps1','install.ps1','install.karox.ps1','start.ps1','start.core.ps1','doctor.ps1','uninstall.ps1')) {
             $path = Resolve-Path $file
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count -gt 0) { $failed = $true; Write-Error "$file parser errors: $($errors | Out-String)" }
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $details.Add("===== $file =====")
+              foreach ($error in $errors) {
+                $details.Add("line=$($error.Extent.StartLineNumber) column=$($error.Extent.StartColumnNumber) message=$($error.Message)")
+                $details.Add("text=$($error.Extent.Text)")
+              }
+            }
           }
-          if ($failed) { exit 1 }
+          $details | Set-Content -LiteralPath powershell-parser.log -Encoding UTF8
+          if ($failed) { Write-Error ($details -join [Environment]::NewLine); exit 1 }
 
       - name: Upload matrix diagnostics
         if: always()
@@ -142,5 +151,6 @@ jobs:
             admin-test.log
             runtime-test.log
             smoke-test.log
+            powershell-parser.log
             generated.windows.ps1
           if-no-files-found: ignore
