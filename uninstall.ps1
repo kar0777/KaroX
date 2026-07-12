@@ -10,7 +10,7 @@ $BinDir = Join-Path $RuntimeDir "bin"
 
 Write-Host "Uninstall KaroX" -ForegroundColor Yellow
 $answer = Read-Host "Remove local settings, sessions and runtime files? [y/N]"
-if ($answer -notmatch "^[YyДд]") { exit 0 }
+if ($answer -notmatch "^[Yy]") { exit 0 }
 
 foreach ($path in @(
     (Join-Path $Desktop "KaroX.bat"),
