@@ -55,7 +55,10 @@ def main() -> int:
     gateway_source = (ROOT / "server" / "notion_gateway.py").read_text(encoding="utf-8")
     assert "TransportSecuritySettings(enable_dns_rebinding_protection=False)" in gateway_source
     assert "is_allowed_mcp_host(host)" in gateway_source
-    assert "status_code=421" in gateway_source
+    assert "invalid_host" in gateway_source
+    assert "_json_response(" in gateway_source and "421," in gateway_source
+    assert "BaseHTTPMiddleware" not in gateway_source
+    assert "async def __call__" in gateway_source
 
     print("KaroX MCP tunnel host security checks passed")
     return 0
