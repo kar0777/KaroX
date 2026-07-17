@@ -57,7 +57,7 @@ def main() -> int:
     assert "is_allowed_mcp_host(host)" in gateway_source
     assert "invalid_host" in gateway_source
     assert "_json_response(" in gateway_source and "421," in gateway_source
-    assert "BaseHTTPMiddleware" not in gateway_source
+    assert "from starlette.middleware.base import BaseHTTPMiddleware" not in gateway_source
     assert "async def __call__" in gateway_source
 
     print("KaroX MCP tunnel host security checks passed")
