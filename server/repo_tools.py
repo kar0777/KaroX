@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field
-VERSION = "3.16.2"
+VERSION = "4.0.0"
 
 def text_env(name: str, default: str = "") -> str:
     encoded = os.environ.get(f"{name}_B64")
@@ -1336,5 +1336,7 @@ def run_allowed(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
     return {"mode": current, "allowedPrefixes": prefixes}
 
 
-
-
+try:
+    import karox4
+except Exception as _karox4_exc:
+    audit("karox4_load_failed", {"error": str(_karox4_exc)})

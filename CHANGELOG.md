@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.0.0
+
+### KaroX v4.0.0 — Universal agent development engine
+
+- Supervisor + watchdog (`scripts/karox_supervisor.py`): 5-second heartbeats and full process-tree restart in under 3 seconds after two failed pings; a JSONL log records every restart.
+- Persistent sessions: branch, task, and session permissions are stored on disk and restored via `karox_session(action="resume")` instead of a fresh `promptql/full-<timestamp>` branch after every restart.
+- Idempotency keys on mutating requests (exec, write, patch, fs ops, commit-hunks): a replay after a dropped connection does not duplicate the mutation.
+- Priority request queue with per-request timeouts answers “busy, queue position N” (503 + `retryable: true`) instead of connection refused under CPU load.
+- `karox_exec` accepts a verbatim argv array — no shell wrapper, quotes survive untouched; optional `cmd`/`powershell`/`bash` shells force UTF-8 (`chcp 65001`), and legacy cp866/cp1251 output is normalized.
+- Async jobs: `karox_job` start/status (CPU/RAM)/tail with follow-until-pattern/signal (kill|int)/list, plus `karox_wait_for` port/http readiness probes.
+- `karox_checks_v2`: command matrix with allow-failure, flaky retries, a summary report, and structured error extraction (javac, kotlin, tsc, eslint, pytest, gradle, gcc) with the first error as a separate field.
+- Binary file IO (`karox_bytes`) and `karox_read_image` returning MCP image content — the agent sees screenshots, textures, and favicons itself.
+- Guarded file operations (`karox_fs`: move/copy/mkdir/opt-in delete_dir/glob), whole unified-diff `karox_apply_patch`, and instant working-tree checkpoints (`karox_checkpoint` create/restore) without commits.
+- `karox_search_v2`: regex, filename search, size/extension limits, and context lines.
+- Full local git cycle (`karox_git2`): branches, stash, filtered log, show, blame, restore, revision diffs, local merge/rebase with a conflict report and auto-abort, and partial commits by hunk. `git push` stays hard-blocked.
+- Secret-scan v2 on write and commit: token regexes plus Shannon entropy, blocking with exact line numbers.
+- Managed dev-servers (`karox_devserver`) with automatic port detection, localhost-only `karox_http_fetch`, and a Playwright headless browser (`karox_browser`: screenshot/dom/console/click/type).
+- Allowlisted package managers (`karox_pkg`) with lockfile-diff reporting; publish/auth commands are hard-blocked like push.
+- Desktop eyes and hands (`karox_screen`): window/region screenshots, short GIF recording, and input that is strictly opt-in per session and confined to the target window.
+- Event notifications (`karox_events`): job exits, dev-server readiness, and failed checks as poll-able events.
+- Persistent REPL sessions (`karox_repl` for python/node) and a generic DAP debug bridge (`karox_dap`).
+- Project map (`karox_project_map`), per-repo persistent memos (`karox_memo`), and an opt-in multi-repo workspace switch (`karox_workspace`).
+- MCP tool calls convert transport failures into structured `retryable: true` results instead of opaque connection errors.
+- Security is not weakened in any phase: all new endpoints require the API key, operate inside the repo sandbox, honor the existing hard-blocks, and are fully covered by the audit log.
+
 ## 3.16.2
 
 ### KaroX v3.16.2 — Process-safe updates and stronger agent workflows
