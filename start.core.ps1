@@ -85,12 +85,36 @@ function Find-Cloudflared {
     $cmd = Get-Command cloudflared -ErrorAction SilentlyContinue
     if ($cmd -and (Test-Path $cmd.Source)) { return $cmd.Source }
     $known = @(
+        "$env:LOCALAPPDATA\KaroX\bin\cloudflared.exe",
         "$env:LOCALAPPDATA\Microsoft\WinGet\Links\cloudflared.exe",
         "$env:LOCALAPPDATA\Microsoft\WindowsApps\cloudflared.exe",
         "$env:ProgramFiles\Cloudflare\cloudflared.exe"
     )
     foreach ($p in $known) { if (Test-Path $p) { return $p } }
-    throw (L "cloudflared was not found. Run install.ps1 again or restart PowerShell." "cloudflared не найден. Запустите install.ps1 ещё раз или перезапустите PowerShell.")
+    throw (L "cloudflared was not found. KaroX can download it automatically: launch again and confirm, or install manually: winget install Cloudflare.cloudflared" "cloudflared не найден. KaroX может скачать его автоматически: запустите ещё раз и подтвердите скачивание, либо установите вручную: winget install Cloudflare.cloudflared")
+}
+
+function Install-Cloudflared {
+    $target = "$env:LOCALAPPDATA\KaroX\bin\cloudflared.exe"
+    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+    $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+    Write-Host ((L "Downloading cloudflared: " "Скачиваю cloudflared: ") + $url) -ForegroundColor Yellow
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing
+        if ((Get-Item -LiteralPath $target).Length -gt 10MB) {
+            Write-Host ((L "cloudflared installed: " "cloudflared установлен: ") + $target) -ForegroundColor Green
+            return $target
+        }
+        Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        Write-Host (L "Downloaded file looks too small, discarded." "Скачанный файл подозрительно мал, удалён.") -ForegroundColor Yellow
+    } catch {
+        Write-Host ((L "Download failed: " "Не удалось скачать: ") + $_.Exception.Message) -ForegroundColor Yellow
+    }
+    if (Install-WingetPackage "Cloudflare.cloudflared" "cloudflared") {
+        try { return Find-Cloudflared } catch {}
+    }
+    return $null
 }
 
 function Find-Tailscale {
@@ -1423,6 +1447,14 @@ function Start-NewSession {
         Write-Host ($tunnelProviderLabel + (L " is not ready: " " не готов: ") + $tunnelStatus.text) -ForegroundColor Yellow
         if (Ask-Yes (L "Run tailscale up now?" "Запустить tailscale up сейчас?") $true) {
             Invoke-TailscaleUp | Out-Null
+            $tunnelStatus = Test-TunnelProviderStatus $tunnelProvider
+        }
+    }
+    if (!$tunnelStatus.ok -and $tunnelProvider -ne "tailscale") {
+        Write-Host ""
+        Write-Host ($tunnelProviderLabel + (L " is not ready: " " не готов: ") + $tunnelStatus.text) -ForegroundColor Yellow
+        if (Ask-Yes (L "Download cloudflared automatically from github.com/cloudflare/cloudflared?" "Скачать cloudflared автоматически с github.com/cloudflare/cloudflared?") $true) {
+            Install-Cloudflared | Out-Null
             $tunnelStatus = Test-TunnelProviderStatus $tunnelProvider
         }
     }

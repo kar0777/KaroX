@@ -230,6 +230,22 @@ if (!(Test-Path -LiteralPath $newCloudflared) -and (Test-Path -LiteralPath $lega
     Copy-Item -LiteralPath $legacyCloudflared -Destination $newCloudflared -Force
 }
 
+$cloudflaredOnPath = Get-Command cloudflared -ErrorAction SilentlyContinue
+if (!(Test-Path -LiteralPath $newCloudflared) -and !$cloudflaredOnPath) {
+    $answer = Read-Host "cloudflared (Cloudflare Tunnel) was not found. Download it automatically from github.com/cloudflare/cloudflared (~60 MB)? [Y/n]"
+    if (!$answer -or $answer -match "^[Yy]") {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $newCloudflared -UseBasicParsing
+            Write-Host "cloudflared: $newCloudflared" -ForegroundColor Green
+        } catch {
+            Write-Host "cloudflared download failed: $($_.Exception.Message). KaroX will offer to download it again on first launch." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Skipped. KaroX will offer to download cloudflared on first launch." -ForegroundColor Yellow
+    }
+}
+
 $KaroXPs1 = Join-Path $BinDir "karox.ps1"
 $KaroXCmd = Join-Path $BinDir "karox.cmd"
 @'

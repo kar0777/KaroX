@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.1.2
+
+### KaroX v4.1.2 — cloudflared auto-install
+
+- Fresh installs no longer dead-end on "cloudflared was not found": `install.ps1` now offers to download the official cloudflared binary from github.com/cloudflare/cloudflared into `%LOCALAPPDATA%\KaroX\bin` (Y/n prompt, Enter = yes, no winget and no admin rights required). Previously the installer only copied cloudflared from a legacy RepoPilotBridge install, so on a clean machine the Cloudflare Tunnel could never start.
+- The launcher offers the same one-key download when Cloudflare Tunnel is selected but cloudflared is missing (previously it failed with advice to rerun install.ps1, which never installed cloudflared). If the direct download fails, `winget install Cloudflare.cloudflared` is used as a fallback.
+- `Find-Cloudflared` also checks `%LOCALAPPDATA%\KaroX\bin`, and the error message now points to the automatic download and the manual winget command instead of the dead-end advice.
+
 ## 4.1.1
 
 ### KaroX v4.1.1 — Reliable updates + deduplicated tool list
