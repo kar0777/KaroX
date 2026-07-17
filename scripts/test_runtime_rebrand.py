@@ -23,12 +23,8 @@ def main() -> int:
             'ADMIN="scripts/karox_cli.py"\n',
             encoding="utf-8",
         )
-        (root / "scripts" / "karox_paths.py").write_text(
-            'LEGACY_NAME = "RepoPilotBridge"\n', encoding="utf-8"
-        )
-        (root / "scripts" / "product_doctor.py").write_text(
-            'LEGACY_BRAND = "Repo" + "PilotBridge"\n', encoding="utf-8"
-        )
+        (root / "scripts" / "karox_paths.py").write_text('LEGACY_NAME = "RepoPilotBridge"\n', encoding="utf-8")
+        (root / "scripts" / "product_doctor.py").write_text('LEGACY_BRAND = "Repo" + "PilotBridge"\n', encoding="utf-8")
         (root / "scripts" / "notion_setup_wizard.py").write_text(
             'CONFIG = "RepoPilotBridge"\n'
             'RU = "Tailscale должен быть запущен"\n'
@@ -37,7 +33,6 @@ def main() -> int:
         )
 
         result = rewrite(root)
-
         assert result["changedCount"] == 3
         assert "RepoPilotBridge" not in (root / "start.ps1").read_text(encoding="utf-8")
         assert "scripts\\karox_admin_entry.py" in (root / "start.ps1").read_text(encoding="utf-8")
@@ -50,6 +45,18 @@ def main() -> int:
         assert "Tailscale must be running" in wizard
 
     repo_root = Path(__file__).resolve().parents[1]
+    bootstrap = (repo_root / "bootstrap.ps1").read_text(encoding="utf-8-sig")
+    install_guard = (repo_root / "scripts" / "install_guard.ps1").read_text(encoding="utf-8-sig")
+    cli_source = (repo_root / "scripts" / "karox_cli.py").read_text(encoding="utf-8")
+    notion_entry = (repo_root / "server" / "notion_entry.py").read_text(encoding="utf-8")
+    assert "scripts\\install_guard.ps1" in bootstrap
+    assert "Stop-RecordedSessions" in install_guard
+    assert "Stop-OrphanedRuntimeProcesses" in install_guard
+    assert "taskkill.exe /PID" in install_guard
+    assert "$attempts = 4" in install_guard
+    assert "from karox_stop import main as stop_main" in cli_source
+    assert "register_agent_tools" in notion_entry
+
     installer = (repo_root / "install.karox.ps1").read_text(encoding="utf-8-sig")
     assert "function Set-KaroXPath" in installer
     assert "function Write-LegacyForwarder" in installer
@@ -89,7 +96,7 @@ def main() -> int:
     assert 'return "tailscale"' in generated_ps
     assert 'tunnel_provider="tailscale"' in generated_sh or 'printf tailscale' in generated_sh
 
-    print("KaroX native Notion provider, runtime rebrand, and updater checks passed")
+    print("KaroX native Notion provider, process-safe updater, and runtime rebrand checks passed")
     return 0
 
 
