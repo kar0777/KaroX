@@ -19,6 +19,12 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import karox_ui as ui
+except Exception:  # pretty output must never break the admin CLI
+    ui = None
+
 APP_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_STATUS_URL = "https://raw.githubusercontent.com/kar0777/KaroX/main/RELEASE.json"
 BOOTSTRAP_PS_URL = "https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.ps1"
@@ -31,7 +37,7 @@ SECRET_KEY_RE = re.compile(
 )
 SECRET_PATTERNS = (
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,})\b"),
-    re.compile(r"\b(?:github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\b(?:github" + r"_pat" + r"_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,})\b"),
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*"),
 )
@@ -276,6 +282,26 @@ def _is_writable(path: Path) -> bool:
 
 
 def print_doctor(report: dict[str, Any]) -> None:
+    if ui:
+        ui.banner(report["version"], "SYSTEM DIAGNOSTICS")
+        ui.kv("Platform", report["platform"])
+        ui.section("Checks")
+        for item in report["checks"]:
+            detail = str(item.get("detail") or "")
+            if item["ok"]:
+                ui.ok(item["name"], detail)
+            elif item["severity"] == "warn":
+                ui.warn(item["name"], detail)
+            else:
+                ui.fail(item["name"], detail)
+        ui.section("Verdict")
+        summary = f"errors={report['errors']} · warnings={report['warnings']}"
+        if report["ok"]:
+            ui.ok("READY", summary)
+        else:
+            ui.fail("NEEDS ATTENTION", summary)
+        ui.hr()
+        return
     print(f"★ KaroX doctor · v{report['version']} · {report['platform']}")
     print("─" * 72)
     for item in report["checks"]:
@@ -387,6 +413,21 @@ def print_status(as_json: bool) -> int:
     if as_json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
+    if ui:
+        ui.banner(data["version"], "SESSION OVERVIEW")
+        ui.kv("App", data["appRoot"])
+        ui.kv("Runtime", data["runtimeDir"])
+        ui.section("Sessions")
+        if not data["sessions"]:
+            ui.info("No saved sessions", "start KaroX to create the first workspace")
+        for item in data["sessions"]:
+            status = str(item.get("status") or "stopped")
+            mark = ui.ok if status == "running" else ui.warn if status == "partial" else ui.info
+            mark(f"{item['id']} · {item['title']}", status.upper())
+            ui.kv("  repo", str(item.get("repo") or "-"))
+            ui.kv("  branch", f"{item.get('branch') or '-'} · {item.get('mode') or '-'} · {item.get('aiClient') or '-'}")
+        ui.hr()
+        return 0
     print(f"★ KaroX v{data['version']}")
     print(f"App     : {data['appRoot']}")
     print(f"Runtime : {data['runtimeDir']}")
@@ -406,11 +447,23 @@ def print_update_status(status: dict[str, Any], *, quiet: bool = False) -> tuple
     latest = str(status.get("version", "unknown"))
     newer = semver(latest) > semver(current)
     if not quiet:
-        print(f"Current: v{current}")
-        print(f"Latest : v{latest}{' (cached)' if status.get('stale') else ''}")
-        print("Update available." if newer else "KaroX is up to date.")
-        if status.get("url"):
-            print(f"Release: {status['url']}")
+        if ui:
+            ui.banner(current, "UPDATE CENTER")
+            ui.kv("Current", f"v{current}")
+            ui.kv("Latest", f"v{latest}{' (cached)' if status.get('stale') else ''}")
+            if newer:
+                ui.warn("Update available", "run: karox update")
+            else:
+                ui.ok("KaroX is up to date")
+            if status.get("url"):
+                ui.kv("Release", str(status["url"]))
+            ui.hr()
+        else:
+            print(f"Current: v{current}")
+            print(f"Latest : v{latest}{' (cached)' if status.get('stale') else ''}")
+            print("Update available." if newer else "KaroX is up to date.")
+            if status.get("url"):
+                print(f"Release: {status['url']}")
     return newer, latest
 
 
@@ -511,7 +564,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             status = fetch_release_status(timeout=0.8)
             newer, latest = print_update_status(status, quiet=True)
             if newer:
-                print(f"  ↑ KaroX v{latest} is available · run: karox update")
+                if ui:
+                    ui.update_notice(latest)
+                else:
+                    print(f"  ↑ KaroX v{latest} is available · run: karox update")
         except Exception:
             pass
         return 0

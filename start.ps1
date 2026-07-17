@@ -140,6 +140,13 @@ if ($env:KAROX_UPDATE_NOTICE -ne "0") {
     try { & $python $Admin notice 2>$null } catch {}
 }
 
+if ($env:KAROX_AUTO_DEPS -ne "0") {
+    $AutoDeps = Join-Path $Root "scripts\karox_autodeps.py"
+    if (Test-Path -LiteralPath $AutoDeps) {
+        try { & $python $AutoDeps } catch {}
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
 & $python $Patcher --platform powershell --source $Core --output $Generated --root $Root | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not generate the KaroX launcher. Run: karox doctor" }

@@ -7,6 +7,8 @@ try {
 } catch {}
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$KaroXVersion = ""
+try { $KaroXVersion = (Get-Content -Raw -LiteralPath (Join-Path $Root "VERSION") -ErrorAction Stop).Trim() } catch {}
 $ConfigDir = Join-Path $env:APPDATA "RepoPilotBridge"
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
 $ReposFile = Join-Path $ConfigDir "repos.json"
@@ -677,6 +679,7 @@ function Stop-Pid($processId) {
 
 function Stop-Old {
     Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -like "*karox_supervisor.py*" -or
         $_.CommandLine -like "*repo_tools:app*" -or
         $_.CommandLine -like "*cloudflared*tunnel*--url*localhost*" -or
         $_.CommandLine -like "*RepoPilotBridge*sessions*run-server.ps1*" -or
@@ -705,6 +708,7 @@ function Show-KaroXIntro {
     Write-Host ""
     Write-Host "                         ★" -ForegroundColor Yellow
     Write-Host "                 STAR FOR KAROX" -ForegroundColor Magenta
+    if ($KaroXVersion) { Write-Host ("                     v" + $KaroXVersion) -ForegroundColor DarkMagenta }
     Write-Host ("              " + (L "local code, guided safely" "локальный код под безопасным управлением")) -ForegroundColor DarkGray
     Write-Host ""
     if ($interactive) { Start-Sleep -Milliseconds 450 }
@@ -847,6 +851,7 @@ function Header($subtitle = "") {
     Write-Host ""
     Write-Host "  ◆ " -NoNewline -ForegroundColor Magenta
     Write-Host "KAROX" -NoNewline -ForegroundColor White
+    if ($KaroXVersion) { Write-Host (" v" + $KaroXVersion) -NoNewline -ForegroundColor DarkMagenta }
     Write-Host "  /  PROJECT FLIGHT DECK" -ForegroundColor DarkGray
     Write-Host ("  " + ("━" * ($width - 2))) -ForegroundColor DarkMagenta
     if ($subtitle) {
@@ -1379,11 +1384,21 @@ function Start-NewSession {
 
     Write-Host "  ◌ Starting secure local API..." -ForegroundColor Magenta
     $serverLogPaths = @($serverErrLog, $serverOutLog)
+    $SupervisorScript = Join-Path $Root "scripts\karox_supervisor.py"
+    $serverPidFile = Join-Path $sessionDir "server.pid"
+    $watchdogEnabled = ($env:KAROX_NO_WATCHDOG -ne "1") -and (Test-Path -LiteralPath $SupervisorScript)
+    if ($watchdogEnabled) {
+        Write-Host ("  ◌ " + (L "Watchdog: auto-restart guard is on" "Watchdog: авто-рестарт при сбое включён")) -ForegroundColor DarkMagenta
+    }
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = if ($previousPythonPath) { "$ServerDir$([System.IO.Path]::PathSeparator)$previousPythonPath" } else { $ServerDir }
+        $uvicornArgs = @("-m", "uvicorn", "--app-dir", $ServerDir, "repo_tools:app", "--host", "127.0.0.1", "--port", "$localPort")
+        $serverArgs = if ($watchdogEnabled) {
+            @($SupervisorScript, "--port", "$localPort", "--pid-file", $serverPidFile, "--log", (Join-Path $sessionLogsDir "supervisor.jsonl"), "--", $PythonExe) + $uvicornArgs
+        } else { $uvicornArgs }
         $serverProc = Start-Process -FilePath $PythonExe `
-            -ArgumentList @("-m", "uvicorn", "--app-dir", $ServerDir, "repo_tools:app", "--host", "127.0.0.1", "--port", "$localPort") `
+            -ArgumentList $serverArgs `
             -WorkingDirectory $ServerDir `
             -RedirectStandardOutput $serverOutLog `
             -RedirectStandardError $serverErrLog `
@@ -1484,6 +1499,7 @@ Provider ID  : $providerId
         providerId = $providerId
         apiKey = $apiKey
         commitAllowed = ($commitAllowed -eq "true")
+        watchdog = $watchdogEnabled
         verifiedRepoRoot = $isolation.repoRoot
         verifiedBranch = $isolation.branch
         verifiedMode = $isolation.mode
@@ -1531,10 +1547,23 @@ function Show-LogTail($session) {
     Read-Host (L "Enter to return" "Enter для возврата") | Out-Null
 }
 
+function Stop-ServerChild($session) {
+    if (!$session -or !$session.sessionDir) { return }
+    $pidFile = Join-Path ([string]$session.sessionDir) "server.pid"
+    if (!(Test-Path -LiteralPath $pidFile)) { return }
+    $raw = ""
+    try { $raw = (Get-Content -Raw -LiteralPath $pidFile -ErrorAction Stop).Trim() } catch {}
+    if ($raw -match "^\d+$") {
+        & taskkill /PID $raw /T /F 2>$null | Out-Null
+    }
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-Session($session) {
     Stop-Pid $session.tunnelPid
     Stop-Pid $session.serverPid
     Stop-Pid $session.serverRunnerPid
+    Stop-ServerChild $session
     Write-Host ((L "Session stopped: " "Сессия остановлена: ") + $session.id) -ForegroundColor Yellow
 }
 
@@ -1604,6 +1633,7 @@ function Stop-AllSessions {
         Stop-Pid $session.tunnelPid
         Stop-Pid $session.serverPid
         Stop-Pid $session.serverRunnerPid
+        Stop-ServerChild $session
     }
     Stop-Old
 }

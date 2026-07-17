@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.1.0
+
+### KaroX v4.1.0 — Out-of-the-box launch + console redesign
+
+- Zero-setup launch: `start.ps1` runs `scripts/karox_autodeps.py`, which auto-installs the optional playwright/pillow/mss packages and headless Chromium on the first start after an install or update (cached per version; opt out with `KAROX_AUTO_DEPS=0`).
+- Watchdog by default: the local API server is started under `scripts/karox_supervisor.py` automatically, so crashes and hangs recover without any manual commands (opt out with `KAROX_NO_WATCHDOG=1`).
+- Supervisor v2: new `--pid-file` exports the real server PID after every (re)start; the API key is read from `REPO_TOOLS_API_KEY`/`KAROX_API_KEY` environment variables instead of the command line; guaranteed child-tree cleanup on exit.
+- Tree-safe shutdown: `Stop-Session`/`Stop-AllSessions` also terminate the supervised uvicorn child via the session `server.pid`, and `Stop-Old` matches supervisor processes.
+- Console redesign: new shared UI kit `scripts/karox_ui.py` (star banner, sections, key-value rows, ✓/!/× status marks, automatic color detection honoring NO_COLOR/KAROX_NO_COLOR); `karox status`, `karox doctor`, `karox update --check`, and the update notice share the new look; the PowerShell launcher shows the installed version in the intro and header.
+- Linux/macOS note: auto-deps and the default watchdog wrap are wired into the Windows launcher in this release; on bash run `scripts/karox_autodeps.py` and `scripts/karox_supervisor.py` manually for now.
+
 ## 4.0.0
 
 ### KaroX v4.0.0 — Universal agent development engine
