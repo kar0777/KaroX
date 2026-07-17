@@ -28,6 +28,9 @@ def load_modules(root: Path, temp: Path):
     assert support_spec and support_spec.loader
     support = importlib.util.module_from_spec(support_spec)
     support_spec.loader.exec_module(support)
+    # Source files deliberately retain the legacy path so rebrand tests can verify
+    # migration. Point the standalone stop module at that same temporary runtime.
+    os.environ["KAROX_RUNTIME_DIR"] = str(admin.RUNTIME_DIR)
     stop_spec = importlib.util.spec_from_file_location("karox_stop_tested", scripts / "karox_stop.py")
     assert stop_spec and stop_spec.loader
     stop = importlib.util.module_from_spec(stop_spec)
