@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -27,14 +28,21 @@ def load_modules(root: Path, temp: Path):
     assert support_spec and support_spec.loader
     support = importlib.util.module_from_spec(support_spec)
     support_spec.loader.exec_module(support)
-    return admin, support
+    # Source files deliberately retain the legacy path so rebrand tests can verify
+    # migration. Point the standalone stop module at that same temporary runtime.
+    os.environ["KAROX_RUNTIME_DIR"] = str(admin.RUNTIME_DIR)
+    stop_spec = importlib.util.spec_from_file_location("karox_stop_tested", scripts / "karox_stop.py")
+    assert stop_spec and stop_spec.loader
+    stop = importlib.util.module_from_spec(stop_spec)
+    stop_spec.loader.exec_module(stop)
+    return admin, support, stop
 
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="karox-admin-test-") as raw_temp:
         temp = Path(raw_temp)
-        admin, support = load_modules(root, temp)
+        admin, support, stop = load_modules(root, temp)
 
         assert admin.semver("v3.12.0") > admin.semver("3.11.9")
         assert admin.redact({"apiKey": "secret"})["apiKey"] == "[REDACTED]"
@@ -49,23 +57,20 @@ def main() -> int:
         logs_dir = session_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         secret = "this-is-a-super-secret-session-key-1234567890"
-        (session_dir / "session.json").write_text(
-            json.dumps(
-                {
-                    "id": "session-test",
-                    "title": "Test session",
-                    "repo": str(temp / "repo"),
-                    "branch": "promptql/test",
-                    "mode": "autopilot",
-                    "aiClient": "notion",
-                    "tunnelUrl": "https://example.trycloudflare.com",
-                    "apiKey": secret,
-                    "serverPid": 0,
-                    "tunnelPid": 0,
-                }
-            ),
-            encoding="utf-8",
-        )
+        session_file = session_dir / "session.json"
+        session_data = {
+            "id": "session-test",
+            "title": "Test session",
+            "repo": str(temp / "repo"),
+            "branch": "promptql/test",
+            "mode": "autopilot",
+            "aiClient": "notion",
+            "tunnelUrl": "https://example.trycloudflare.com",
+            "apiKey": secret,
+            "serverPid": 0,
+            "tunnelPid": 0,
+        }
+        session_file.write_text(json.dumps(session_data), encoding="utf-8")
         (logs_dir / "repo-tools.jsonl").write_text(
             json.dumps({"authorization": f"Bearer {secret}", "message": secret}),
             encoding="utf-8",
@@ -93,7 +98,32 @@ def main() -> int:
         assert status and status[0]["id"] == "session-test"
         assert "apiKey" not in status[0]
 
-    print("KaroX admin CLI and support redaction tests passed")
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+                str(stop.APP_DIR / "server" / "repo_tools.py"),
+                "uvicorn",
+                "repo_tools:app",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            session_data["serverPid"] = child.pid
+            session_file.write_text(json.dumps(session_data), encoding="utf-8")
+            assert stop.is_karox_process(child.pid, "server")
+            stopped = stop.stop_sessions("session-test")
+            assert stopped["ok"], stopped
+            child.wait(timeout=10)
+            assert child.returncode is not None
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    print("KaroX admin CLI, safe stop, and support redaction tests passed")
     return 0
 
 

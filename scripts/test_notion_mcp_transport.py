@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -19,21 +20,13 @@ HOST = "stable-device.example.ts.net"
 
 
 def auth_headers(**extra: str) -> dict[str, str]:
-    headers = {
-        "Host": HOST,
-        "Authorization": f"Bearer {TOKEN}",
-    }
+    headers = {"Host": HOST, "Authorization": f"Bearer {TOKEN}"}
     headers.update(extra)
     return headers
 
 
 def rpc_headers() -> dict[str, str]:
-    return auth_headers(
-        **{
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        }
-    )
+    return auth_headers(**{"Accept": "application/json, text/event-stream", "Content-Type": "application/json"})
 
 
 def initialize_payload(request_id: int = 1) -> dict[str, object]:
@@ -49,17 +42,34 @@ def initialize_payload(request_id: int = 1) -> dict[str, object]:
     }
 
 
+def tool_call(client: TestClient, protocol: str, request_id: int, name: str, arguments: dict[str, object]):
+    return client.post(
+        "/mcp",
+        headers={**rpc_headers(), "MCP-Protocol-Version": protocol},
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        follow_redirects=False,
+    )
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as temp:
         temp_path = Path(temp)
+        sample = temp_path / "sample.txt"
+        sample.write_text("alpha\nbeta marker\ngamma\n", encoding="utf-8")
         os.environ["REPO_ROOT"] = str(temp_path)
         os.environ["REPO_TOOLS_API_KEY"] = TOKEN
-        os.environ["REPO_TOOLS_MODE"] = "read_only"
+        os.environ["REPO_TOOLS_MODE"] = "full"
         os.environ["REPO_TOOLS_HOME"] = str(temp_path / "home")
         os.environ["REPO_TOOLS_LOG_FILE"] = str(temp_path / "home" / "audit.jsonl")
         os.environ["REPO_TOOLS_RUNS_DIR"] = str(temp_path / "runs")
 
         import notion_gateway  # noqa: PLC0415
+        import notion_entry  # noqa: PLC0415
 
         async def probe(request):
             return JSONResponse({"ok": True, "path": request.url.path})
@@ -67,70 +77,82 @@ def main() -> int:
         raw_app = Starlette(routes=[Route("/mcp", probe, methods=["POST"])])
         app = notion_gateway.McpAuthMiddleware(raw_app)
 
-        # Unit-level middleware checks. The body channel must pass through untouched,
-        # /mcp/ must not redirect, and auth/host failures must stay explicit.
         with TestClient(app) as client:
             allowed = client.post("/mcp", headers=auth_headers())
             assert allowed.status_code == 200, allowed.text
-
             trailing = client.post("/mcp/", headers=auth_headers(), follow_redirects=False)
             assert trailing.status_code == 200, trailing.text
             assert trailing.json()["path"] == "/mcp"
-
             get_probe = client.get("/mcp", headers=auth_headers())
             assert get_probe.status_code == 405, get_probe.text
             assert get_probe.headers.get("allow") == "POST, DELETE"
-
-            bad_host = client.post(
-                "/mcp",
-                headers={"Host": "attacker.example", "Authorization": f"Bearer {TOKEN}"},
-            )
+            bad_host = client.post("/mcp", headers={"Host": "attacker.example", "Authorization": f"Bearer {TOKEN}"})
             assert bad_host.status_code == 421, bad_host.text
-
-            bad_token = client.post(
-                "/mcp",
-                headers={"Host": HOST, "Authorization": "Bearer wrong-key"},
-            )
+            bad_token = client.post("/mcp", headers={"Host": HOST, "Authorization": "Bearer wrong-key"})
             assert bad_token.status_code == 401, bad_token.text
 
-        # End-to-end FastMCP checks. This reproduces the real initialize/list/call
-        # flow that BaseHTTPMiddleware used to break with ClosedResourceError.
-        with TestClient(notion_gateway.app) as client:
+        with TestClient(notion_entry.app) as client:
             initialized = client.post(
-                "/mcp",
-                headers=rpc_headers(),
-                json=initialize_payload(),
-                follow_redirects=False,
+                "/mcp", headers=rpc_headers(), json=initialize_payload(), follow_redirects=False
             )
             assert initialized.status_code == 200, initialized.text
             assert initialized.headers["content-type"].startswith("application/json")
             assert initialized.headers.get("cache-control") == "no-store"
-            init_result = initialized.json()["result"]
-            protocol_version = str(init_result["protocolVersion"])
+            protocol = str(initialized.json()["result"]["protocolVersion"])
 
             tools = client.post(
                 "/mcp",
-                headers={**rpc_headers(), "MCP-Protocol-Version": protocol_version},
+                headers={**rpc_headers(), "MCP-Protocol-Version": protocol},
                 json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
                 follow_redirects=False,
             )
             assert tools.status_code == 200, tools.text
             names = {item["name"] for item in tools.json()["result"]["tools"]}
-            assert {"karox_ping", "karox_preflight", "karox_run"}.issubset(names)
+            assert {
+                "karox_ping",
+                "karox_preflight",
+                "karox_run",
+                "karox_list_dir",
+                "karox_search",
+                "karox_read_file_range",
+                "karox_read_files",
+                "karox_apply_edits",
+                "karox_run_checks",
+            }.issubset(names)
 
-            ping = client.post(
-                "/mcp/",
-                headers={**rpc_headers(), "MCP-Protocol-Version": protocol_version},
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {"name": "karox_ping", "arguments": {}},
-                },
-                follow_redirects=False,
-            )
+            ping = tool_call(client, protocol, 3, "karox_ping", {})
             assert ping.status_code == 200, ping.text
             assert ping.json()["result"]["isError"] is False, ping.text
+
+            listed = tool_call(client, protocol, 4, "karox_list_dir", {"path": "", "max_entries": 20})
+            assert listed.status_code == 200, listed.text
+            assert listed.json()["result"]["isError"] is False, listed.text
+
+            searched = tool_call(client, protocol, 5, "karox_search", {"query": "marker", "glob": "*.txt"})
+            assert searched.status_code == 200, searched.text
+            assert searched.json()["result"]["isError"] is False, searched.text
+
+            ranged = tool_call(
+                client,
+                protocol,
+                6,
+                "karox_read_file_range",
+                {"path": "sample.txt", "start_line": 2, "end_line": 2},
+            )
+            assert ranged.status_code == 200, ranged.text
+            assert ranged.json()["result"]["isError"] is False, ranged.text
+
+            edit_payload = json.dumps([{"old": "beta marker", "new": "beta changed", "count": 1}])
+            edited = tool_call(
+                client,
+                protocol,
+                7,
+                "karox_apply_edits",
+                {"path": "sample.txt", "edits_json": edit_payload},
+            )
+            assert edited.status_code == 200, edited.text
+            assert edited.json()["result"]["isError"] is False, edited.text
+            assert "beta changed" in sample.read_text(encoding="utf-8")
 
         security = notion_gateway.mcp.settings.transport_security
         assert security is not None
@@ -138,7 +160,7 @@ def main() -> int:
         assert notion_gateway.mcp.settings.stateless_http is True
         assert notion_gateway.mcp.settings.json_response is True
 
-    print("KaroX Notion MCP raw-ASGI, stateless JSON transport checks passed")
+    print("KaroX Notion MCP transport and extended agent workflow checks passed")
     return 0
 
 

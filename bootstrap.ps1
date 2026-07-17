@@ -46,12 +46,12 @@ try {
     }
 
     $installer = Join-Path $SourceDir "install.karox.ps1"
+    $guard = Join-Path $SourceDir "scripts\install_guard.ps1"
     if (!(Test-Path -LiteralPath $installer)) { throw "install.karox.ps1 was not found after extraction." }
-    if ($env:KAROX_NO_START -eq "1") {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $installer
-    } else {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Start
-    }
+    if (!(Test-Path -LiteralPath $guard)) { throw "scripts\install_guard.ps1 was not found after extraction." }
+    $guardArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guard, "-Installer", $installer)
+    if ($env:KAROX_NO_START -ne "1") { $guardArgs += "-Start" }
+    & powershell @guardArgs
     exit $LASTEXITCODE
 }
 finally {

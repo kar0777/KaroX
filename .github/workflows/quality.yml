@@ -40,9 +40,10 @@ jobs:
         run: >-
           python -m py_compile
           server/repo_tools.py server/app_entry.py server/mcp_host_security.py server/notion_gateway.py server/notion_entry.py
+          server/notion_agent_tools.py
           scripts/patch_notion_provider.py scripts/patch_native_notion_provider.py scripts/notion_doctor.py scripts/notion_profile.py
           scripts/native_notion_provider.py scripts/notion_setup_wizard.py scripts/tailscale_readiness.py
-          scripts/product_doctor.py scripts/karox_admin.py scripts/karox_cli.py scripts/karox_admin_entry.py scripts/karox_paths.py
+          scripts/product_doctor.py scripts/karox_admin.py scripts/karox_cli.py scripts/karox_stop.py scripts/karox_admin_entry.py scripts/karox_paths.py
           scripts/sitecustomize.py scripts/support_bundle.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py
           scripts/test_notion_provider.py scripts/test_notion_profile.py scripts/test_tailscale_readiness.py
           scripts/test_path_migration.py scripts/test_runtime_rebrand.py scripts/test_product_doctor.py
@@ -98,6 +99,7 @@ jobs:
           {
             python scripts/karox_cli.py version --json
             python scripts/karox_cli.py status --json
+            python scripts/karox_cli.py stop --json
             python scripts/karox_cli.py doctor --json
           } 2>&1 | tee smoke-test.log
 
@@ -123,7 +125,7 @@ jobs:
         run: |
           $failed = $false
           $details = New-Object System.Collections.Generic.List[string]
-          foreach ($file in @('bootstrap.ps1','install.ps1','install.karox.ps1','start.ps1','start.core.ps1','doctor.ps1','uninstall.ps1')) {
+          foreach ($file in @('bootstrap.ps1','install.ps1','install.karox.ps1','start.ps1','start.core.ps1','doctor.ps1','uninstall.ps1','scripts/install_guard.ps1')) {
             $path = Resolve-Path $file
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
