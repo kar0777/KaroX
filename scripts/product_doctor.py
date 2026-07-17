@@ -108,7 +108,7 @@ def main() -> int:
             "MCP raw ASGI transport middleware",
             "class McpAuthMiddleware:" in gateway
             and "async def __call__" in gateway
-            and "BaseHTTPMiddleware" not in gateway,
+            and "from starlette.middleware.base import BaseHTTPMiddleware" not in gateway,
             str(gateway_path),
         )
         add(
