@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import json
 import py_compile
@@ -39,6 +40,13 @@ def compile_file(path: Path) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def dependency_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a KaroX installation.")
     parser.add_argument("--root", type=Path, required=True)
@@ -60,8 +68,9 @@ def main() -> int:
     required_root_files = (
         "start.ps1", "start.sh", "start.core.ps1", "start.core.sh", "requirements.txt", "VERSION",
         "scripts/patch_notion_provider.py", "scripts/notion_profile.py", "scripts/tailscale_readiness.py",
-        "scripts/notion_setup_wizard.py", "scripts/notion_doctor.py", "scripts/karox_paths.py",
-        "scripts/karox_admin_entry.py", "scripts/support_bundle_entry.py", "scripts/rebrand_runtime.py",
+        "scripts/notion_setup_wizard.py", "scripts/native_notion_provider.py", "scripts/notion_doctor.py",
+        "scripts/test_notion_mcp_transport.py", "scripts/karox_paths.py", "scripts/karox_admin_entry.py",
+        "scripts/support_bundle_entry.py", "scripts/rebrand_runtime.py",
     )
     for relative in required_root_files:
         path = root / relative
@@ -76,8 +85,9 @@ def main() -> int:
 
     script_files = (
         "patch_notion_provider.py", "notion_profile.py", "tailscale_readiness.py", "notion_setup_wizard.py",
-        "notion_doctor.py", "karox_cli.py", "karox_admin_entry.py", "karox_paths.py", "support_bundle.py",
-        "support_bundle_entry.py", "rebrand_runtime.py",
+        "native_notion_provider.py", "notion_doctor.py", "karox_cli.py", "karox_admin_entry.py",
+        "karox_paths.py", "support_bundle.py", "support_bundle_entry.py", "rebrand_runtime.py",
+        "test_notion_mcp_transport.py",
     )
     for name in script_files:
         path = root / "scripts" / name
@@ -86,7 +96,33 @@ def main() -> int:
             add(checks, f"compile scripts/{name}", ok, detail)
 
     for module in ("fastapi", "uvicorn", "httpx", "mcp", "pydantic"):
-        add(checks, f"Python dependency: {module}", importlib.util.find_spec(module) is not None)
+        available = importlib.util.find_spec(module) is not None
+        detail = dependency_version(module) if available else "not installed"
+        add(checks, f"Python dependency: {module}", available, detail)
+
+    gateway_path = server_dir / "notion_gateway.py"
+    if gateway_path.is_file():
+        gateway = gateway_path.read_text(encoding="utf-8", errors="replace")
+        add(
+            checks,
+            "MCP raw ASGI transport middleware",
+            "class McpAuthMiddleware:" in gateway
+            and "async def __call__" in gateway
+            and "from starlette.middleware.base import BaseHTTPMiddleware" not in gateway,
+            str(gateway_path),
+        )
+        add(
+            checks,
+            "MCP stateless JSON mode",
+            "stateless_http=True" in gateway and "json_response=True" in gateway,
+            str(gateway_path),
+        )
+        add(
+            checks,
+            "MCP trailing-slash compatibility",
+            'scope["path"] = _MCP_PATH' in gateway,
+            str(gateway_path),
+        )
 
     if root.name.lower() == "app" and root.parent.name.lower() == "karox":
         for launcher in (root / "start.ps1", root / "start.sh"):

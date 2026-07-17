@@ -10,60 +10,160 @@ from __future__ import annotations
 import hmac
 import json
 import os
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mcp_host_security import is_allowed_mcp_host
 from repo_tools import app as karox_app
 
 
 API_KEY = os.environ["REPO_TOOLS_API_KEY"]
+_MCP_PATH = "/mcp"
+_MCP_RESPONSE_HEADERS = (
+    (b"cache-control", b"no-store"),
+    (b"x-accel-buffering", b"no"),
+)
 
 
-def _extract_token(request: Any) -> str:
-    auth = request.headers.get("authorization", "").strip()
+def _scope_headers(scope: Scope) -> dict[str, str]:
+    """Decode request headers without consuming the ASGI receive channel."""
+    headers: dict[str, str] = {}
+    for raw_name, raw_value in scope.get("headers", []):
+        name = raw_name.decode("latin-1").lower()
+        value = raw_value.decode("latin-1").strip()
+        if name in headers:
+            headers[name] = f"{headers[name]}, {value}"
+        else:
+            headers[name] = value
+    return headers
+
+
+def _extract_token(headers: Mapping[str, str]) -> str:
+    auth = headers.get("authorization", "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     if auth:
         return auth
-    return request.headers.get("x-api-key", "").strip()
+    return headers.get("x-api-key", "").strip()
 
 
-class McpAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Any, call_next: Any):
-        host = request.headers.get("host", "")
+async def _json_response(send: Send, status: int, payload: dict[str, Any], *, allow: str = "") -> None:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json; charset=utf-8"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        *_MCP_RESPONSE_HEADERS,
+    ]
+    if allow:
+        headers.append((b"allow", allow.encode("ascii")))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+class McpAuthMiddleware:
+    """Raw ASGI auth/host middleware that preserves Streamable HTTP channels.
+
+    Starlette's BaseHTTPMiddleware wraps the ASGI receive/send streams and is
+    incompatible with FastMCP's Streamable HTTP transport. This middleware never
+    reads the request body and forwards the original channels unchanged.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+        is_mcp = path in {_MCP_PATH, f"{_MCP_PATH}/"}
+        if not is_mcp:
+            await self.app(scope, receive, send)
+            return
+
+        # Accept both /mcp and /mcp/ without a 307 redirect. Some MCP clients do
+        # not resend Authorization headers reliably across redirects.
+        if path.endswith("/"):
+            scope = dict(scope)
+            scope["path"] = _MCP_PATH
+            scope["raw_path"] = _MCP_PATH.encode("ascii")
+
+        headers = _scope_headers(scope)
+        host = headers.get("host", "")
+        if not host:
+            server = scope.get("server")
+            if server:
+                host = str(server[0])
         if not is_allowed_mcp_host(host):
-            return JSONResponse(
+            await _json_response(
+                send,
+                421,
                 {
                     "error": "invalid_host",
                     "hint": "Use the current KaroX Cloudflare Tunnel or Tailscale Funnel URL.",
                 },
-                status_code=421,
             )
+            return
 
-        supplied = _extract_token(request)
+        supplied = _extract_token(headers)
         valid = bool(supplied) and hmac.compare_digest(
             supplied.encode("utf-8", errors="ignore"),
             API_KEY.encode("utf-8", errors="ignore"),
         )
         if not valid:
-            return JSONResponse(
-                {"error": "unauthorized", "hint": "Use the current KaroX session key as a Bearer token."},
-                status_code=401,
+            await _json_response(
+                send,
+                401,
+                {
+                    "error": "unauthorized",
+                    "hint": "Use the current KaroX session key as a Bearer token.",
+                },
             )
-        return await call_next(request)
+            return
+
+        # KaroX runs the recommended stateless JSON Streamable HTTP mode. A GET
+        # probe therefore has no event stream to attach to; return the spec-friendly
+        # 405 so clients can immediately fall back to POST instead of reporting an
+        # opaque SSE/fetch failure.
+        if str(scope.get("method", "GET")).upper() in {"GET", "HEAD"}:
+            await _json_response(
+                send,
+                405,
+                {
+                    "error": "method_not_allowed",
+                    "hint": "This MCP endpoint uses Streamable HTTP POST requests.",
+                },
+                allow="POST, DELETE",
+            )
+            return
+
+        async def send_with_transport_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                outgoing = list(message.get("headers", []))
+                existing = {name.lower() for name, _ in outgoing}
+                for name, value in _MCP_RESPONSE_HEADERS:
+                    if name not in existing:
+                        outgoing.append((name, value))
+                message = dict(message)
+                message["headers"] = outgoing
+            await send(message)
+
+        await self.app(scope, receive, send_with_transport_headers)
 
 
-# FastMCP enables a localhost-only Host allowlist automatically when its host is
-# 127.0.0.1. KaroX is intentionally bound to localhost but published through an
-# authenticated tunnel, so KaroX performs the tunnel-aware Host validation above.
+# KaroX tools do not keep per-client server state. Stateless HTTP with JSON
+# responses avoids fragile SSE sessions and is the production configuration
+# recommended by the official MCP Python SDK.
 mcp = FastMCP(
     "KaroX Notion Provider",
+    stateless_http=True,
+    json_response=True,
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
@@ -79,8 +179,19 @@ async def _call(
         return {"ok": False, "status": 400, "error": "Only KaroX API paths are allowed."}
     transport = httpx.ASGITransport(app=karox_app)
     headers = {"X-API-Key": API_KEY}
-    async with httpx.AsyncClient(transport=transport, base_url="http://karox.local") as client:
-        response = await client.request(method.upper(), path, params=params, json=body, headers=headers)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://karox.local") as client:
+            response = await client.request(method.upper(), path, params=params, json=body, headers=headers)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": 503,
+            "error": {
+                "code": "karox_internal_api_unavailable",
+                "type": type(exc).__name__,
+                "message": "The local KaroX API could not complete the request. Check the session logs and retry.",
+            },
+        }
     try:
         payload: Any = response.json()
     except Exception:
@@ -88,6 +199,17 @@ async def _call(
     if response.is_success:
         return {"ok": True, "status": response.status_code, "data": payload}
     return {"ok": False, "status": response.status_code, "error": payload}
+
+
+@mcp.tool()
+async def karox_ping() -> dict[str, Any]:
+    """Check that the MCP transport and the local KaroX API are responding."""
+    health = await _call("GET", "/health")
+    return {
+        "ok": bool(health.get("ok")),
+        "transport": "streamable-http-stateless-json",
+        "health": health,
+    }
 
 
 @mcp.tool()
@@ -174,6 +296,8 @@ async def karox_run(
     Use capture_to_file for builds or tests with large output. Dangerous system,
     credential, publish, and push commands remain blocked by KaroX.
     """
+    timeout_seconds = max(1, min(int(timeout_seconds), 7200))
+    tail = max(1000, min(int(tail), 300000))
     body: dict[str, Any] = {
         "cmd": command,
         "timeoutSeconds": timeout_seconds,
@@ -264,9 +388,9 @@ async def karox_finish_task(status: str = "finished") -> dict[str, Any]:
 
 
 mcp_app = mcp.streamable_http_app()
-mcp_app.add_middleware(McpAuthMiddleware)
 
-# Keep FastMCP as the top-level ASGI app so its lifespan/session manager runs.
-# Its explicit /mcp route wins; every other path falls through to KaroX.
+# Keep FastMCP as the inner top-level Starlette app so its lifespan/session
+# manager runs. Its explicit /mcp route wins; every other path falls through to
+# KaroX. The raw ASGI wrapper preserves Streamable HTTP receive/send channels.
 mcp_app.mount("/", karox_app)
-app = mcp_app
+app = McpAuthMiddleware(mcp_app)

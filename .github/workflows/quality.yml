@@ -40,7 +40,8 @@ jobs:
         run: >-
           python -m py_compile
           server/repo_tools.py server/app_entry.py server/mcp_host_security.py server/notion_gateway.py server/notion_entry.py
-          scripts/patch_notion_provider.py scripts/notion_doctor.py scripts/notion_profile.py scripts/tailscale_readiness.py
+          scripts/patch_notion_provider.py scripts/patch_native_notion_provider.py scripts/notion_doctor.py scripts/notion_profile.py
+          scripts/native_notion_provider.py scripts/notion_setup_wizard.py scripts/tailscale_readiness.py
           scripts/product_doctor.py scripts/karox_admin.py scripts/karox_cli.py scripts/karox_admin_entry.py scripts/karox_paths.py
           scripts/sitecustomize.py scripts/support_bundle.py scripts/support_bundle_entry.py scripts/rebrand_runtime.py
           scripts/test_notion_provider.py scripts/test_notion_profile.py scripts/test_tailscale_readiness.py
@@ -78,6 +79,10 @@ jobs:
       - name: Test Notion MCP transport middleware
         shell: bash
         run: python scripts/test_notion_mcp_transport.py 2>&1 | tee mcp-transport-test.log
+
+      - name: Run Notion provider doctor
+        shell: bash
+        run: python scripts/notion_doctor.py --root . 2>&1 | tee notion-doctor-test.log
 
       - name: Test admin CLI and redaction
         shell: bash
@@ -148,6 +153,7 @@ jobs:
             doctor-layout-test.log
             mcp-host-test.log
             mcp-transport-test.log
+            notion-doctor-test.log
             admin-test.log
             runtime-test.log
             smoke-test.log
