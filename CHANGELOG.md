@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.1.1
+
+### KaroX v4.1.1 — Reliable updates + deduplicated tool list
+
+- Fixed the update chain: `bootstrap.ps1`/`bootstrap.sh` no longer pin a hardcoded release (previously `v3.16.2`, so `karox update` on any older version reinstalled 3.16.2). The bootstrap now resolves the target tag from `RELEASE.json` on `main` (override with `-Branch`/`KAROX_BOOTSTRAP_REF`; falls back to `main`).
+- `karox update` additionally passes the confirmed target tag to the installer via `KAROX_BOOTSTRAP_REF`, so the installed release always matches the version the user accepted.
+- New `bootstrap.ps1 -ResolveOnly` / `bootstrap.sh --resolve-only` print the resolved ref without installing (used by tests and diagnostics).
+- Deduplicated the MCP tool list (45 → 42) with no capability loss: `karox_exec` merged into `karox_run` (`argv_json`/`shell`/`cwd`/`env_json`/`stdin`), `karox_checks_v2` merged into `karox_run_checks` (`checks_json` advanced matrix), `karox_search_v2` merged into `karox_search` (`regex`/`names_only`/`extensions`/`context`/`max_size`).
+
 ## 4.1.0
 
 ### KaroX v4.1.0 — Out-of-the-box launch + console redesign

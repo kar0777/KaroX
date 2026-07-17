@@ -127,8 +127,33 @@ def register(mcp: Any, call: CallKaroX) -> None:
         glob: str = "*",
         max_files: int = 100,
         include_snippets: bool = True,
+        regex: bool = False,
+        names_only: bool = False,
+        extensions: str = "",
+        context: int = 0,
+        max_size: int = 2000000,
     ) -> dict[str, Any]:
-        """Search file contents and optionally return small matching snippets."""
+        """Search file contents and optionally return small matching snippets.
+
+        Advanced flags (regex, names_only, extensions, context) switch to the
+        search v2 engine with context lines around every match.
+        """
+        if regex or names_only or extensions.strip() or context:
+            return await _retrying(
+                call,
+                "GET",
+                "/search/v2",
+                params={
+                    "q": query,
+                    "regex": regex,
+                    "names_only": names_only,
+                    "glob": glob or "*",
+                    "extensions": extensions or None,
+                    "max_size": max_size,
+                    "max_files": max(1, min(int(max_files), 500)),
+                    "context": context,
+                },
+            )
         search = await call(
             "GET",
             "/files/search",
@@ -254,11 +279,24 @@ def register(mcp: Any, call: CallKaroX) -> None:
 
     @mcp.tool()
     async def karox_run_checks(
-        commands_json: str,
+        commands_json: str = "",
         stop_on_failure: bool = True,
         timeout_each_seconds: int = 1800,
+        checks_json: str = "",
     ) -> dict[str, Any]:
-        """Run an ordered build/test/lint checklist and summarize every exit code."""
+        """Run an ordered build/test/lint checklist and summarize every exit code.
+
+        Simple mode: commands_json is a JSON array of command strings.
+        Advanced mode: checks_json is an array like
+        [{"name","cmd"|"argv","shell","allowFailure","retries","timeoutSeconds"}]
+        and runs the v2 matrix with structured error parsing (the summary
+        contains firstError with {tool,file,line,message}).
+        """
+        if checks_json.strip():
+            checks, error = _json_array(checks_json, "checks_json")
+            if error:
+                return error
+            return await _retrying(call, "POST", "/checks/v2", body={"checks": checks, "stopOnFailure": stop_on_failure})
         commands, error = _json_array(commands_json, "commands_json")
         if error:
             return error
@@ -287,41 +325,6 @@ def register(mcp: Any, call: CallKaroX) -> None:
     # ------------------------------------------------------------------
     # KaroX 4.0 tools
     # ------------------------------------------------------------------
-
-    @mcp.tool()
-    async def karox_exec(
-        argv_json: str = "",
-        cmd: str = "",
-        shell: str = "",
-        cwd: str = "",
-        env_json: str = "",
-        stdin: str = "",
-        timeout_seconds: int = 600,
-    ) -> dict[str, Any]:
-        """Execute a command. Prefer argv_json (JSON array, verbatim argv, no shell quoting); or cmd + shell (cmd|powershell|bash|sh)."""
-        body: dict[str, Any] = {"timeoutSeconds": max(1, min(int(timeout_seconds), 21600))}
-        if argv_json.strip():
-            argv, error = _json_array(argv_json, "argv_json")
-            if error:
-                return error
-            body["argv"] = argv
-        if cmd:
-            body["cmd"] = cmd
-        if shell:
-            body["shell"] = shell
-        if cwd:
-            body["cwd"] = cwd
-        if stdin:
-            body["stdin"] = stdin
-        if env_json.strip():
-            try:
-                env = json.loads(env_json)
-            except json.JSONDecodeError as exc:
-                return {"ok": False, "status": 400, "error": f"Invalid env_json: {exc}"}
-            if not isinstance(env, dict):
-                return {"ok": False, "status": 400, "error": "env_json must decode to an object"}
-            body["env"] = env
-        return await _retrying(call, "POST", "/exec", body=body)
 
     @mcp.tool()
     async def karox_job(
@@ -379,18 +382,6 @@ def register(mcp: Any, call: CallKaroX) -> None:
         return {"ok": False, "status": 400, "error": "kind must be port or http"}
 
     @mcp.tool()
-    async def karox_checks_v2(checks_json: str, stop_on_failure: bool = True) -> dict[str, Any]:
-        """Check matrix with allowFailure/retries and structured error parsing.
-
-        checks_json: [{"name","cmd"|"argv","shell","allowFailure","retries","timeoutSeconds"}].
-        The summary contains firstError with {tool,file,line,message}.
-        """
-        checks, error = _json_array(checks_json, "checks_json")
-        if error:
-            return error
-        return await _retrying(call, "POST", "/checks/v2", body={"checks": checks, "stopOnFailure": stop_on_failure})
-
-    @mcp.tool()
     async def karox_bytes(action: str, path: str, offset: int = 0, length: int = 1000000, content_base64: str = "", append: bool = False) -> dict[str, Any]:
         """Binary file IO: action="read" returns a base64 chunk with sha256; action="write" writes content_base64."""
         if action == "read":
@@ -435,34 +426,6 @@ def register(mcp: Any, call: CallKaroX) -> None:
         if action == "restore":
             return await _retrying(call, "POST", "/checkpoint/restore", body={"checkpointId": checkpoint_id, "deleteNewFiles": delete_new_files})
         return {"ok": False, "status": 400, "error": "action must be create, list or restore"}
-
-    @mcp.tool()
-    async def karox_search_v2(
-        query: str,
-        regex: bool = False,
-        names_only: bool = False,
-        glob: str = "*",
-        extensions: str = "",
-        max_size: int = 2000000,
-        max_files: int = 100,
-        context: int = 0,
-    ) -> dict[str, Any]:
-        """Search v2: regex, filename search, extension/size limits, and context lines around matches."""
-        return await _retrying(
-            call,
-            "GET",
-            "/search/v2",
-            params={
-                "q": query,
-                "regex": regex,
-                "names_only": names_only,
-                "glob": glob,
-                "extensions": extensions or None,
-                "max_size": max_size,
-                "max_files": max_files,
-                "context": context,
-            },
-        )
 
     @mcp.tool()
     async def karox_git2(action: str, params_json: str = "{}") -> dict[str, Any]:

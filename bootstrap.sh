@@ -3,7 +3,25 @@ set -euo pipefail
 
 REPO_OWNER="kar0777"
 REPO_NAME="KaroX"
-REF="${KAROX_BOOTSTRAP_REF:-v3.16.2}"
+REF="${KAROX_BOOTSTRAP_REF:-}"
+RESOLVE_ONLY=0
+if [ "${1:-}" = "--resolve-only" ]; then RESOLVE_ONLY=1; fi
+
+if [ -z "$REF" ] && command -v curl >/dev/null 2>&1; then
+  release_json="$(curl -fsSL --max-time 15 "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/RELEASE.json" 2>/dev/null || true)"
+  REF="$(printf '%s' "$release_json" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -z "$REF" ]; then
+    version="$(printf '%s' "$release_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    if [ -n "$version" ]; then REF="v$version"; fi
+  fi
+fi
+if [ -z "$REF" ]; then REF="main"; fi
+
+if [ "$RESOLVE_ONLY" = 1 ]; then
+  printf '%s\n' "$REF"
+  exit 0
+fi
+
 INSTALL_ROOT="${KAROX_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/KaroX}"
 SOURCE_DIR="$INSTALL_ROOT/source"
 case "$REF" in v[0-9]*.[0-9]*.[0-9]*) REF_KIND="tags" ;; *) REF_KIND="heads" ;; esac

@@ -1,11 +1,29 @@
 param(
     [string]$Repository = "kar0777/KaroX",
-    [string]$Branch = "v3.16.2",
-    [switch]$Clean
+    [string]$Branch = "",
+    [switch]$Clean,
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = "Stop"
 try { chcp.com 65001 > $null; [Console]::InputEncoding = [Text.Encoding]::UTF8; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
+if (-not $Branch -and $env:KAROX_BOOTSTRAP_REF) { $Branch = $env:KAROX_BOOTSTRAP_REF }
+if (-not $Branch) {
+    try {
+        $releaseStatus = Invoke-RestMethod -UseBasicParsing -Uri "https://raw.githubusercontent.com/$Repository/main/RELEASE.json" -TimeoutSec 15
+        if ($releaseStatus.tag) { $Branch = [string]$releaseStatus.tag }
+        elseif ($releaseStatus.version) { $Branch = "v" + [string]$releaseStatus.version }
+    } catch {
+        Write-Host "Could not resolve the latest release from RELEASE.json: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+if (-not $Branch) { $Branch = "main" }
+
+if ($ResolveOnly) {
+    Write-Output $Branch
+    exit 0
+}
 
 $AppRoot = Join-Path $env:LOCALAPPDATA "KaroX"
 $ConfigDir = Join-Path $env:APPDATA "KaroX"

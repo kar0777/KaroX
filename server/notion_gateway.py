@@ -285,17 +285,55 @@ async def karox_delete_file(path: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def karox_run(
-    command: str,
+    command: str = "",
     timeout_seconds: int = 7200,
     capture_to_file: bool = False,
     output_file: str = "",
     tail: int = 60000,
+    argv_json: str = "",
+    shell: str = "",
+    cwd: str = "",
+    env_json: str = "",
+    stdin: str = "",
 ) -> dict[str, Any]:
     """Run a development command under KaroX command and mode guardrails.
 
-    Use capture_to_file for builds or tests with large output. Dangerous system,
-    credential, publish, and push commands remain blocked by KaroX.
+    Classic mode: pass a shell string via command; use capture_to_file for
+    builds or tests with large output. Exact mode: pass argv_json (JSON array,
+    verbatim argv, no shell quoting) with optional shell (cmd|powershell|bash|sh),
+    cwd, env_json, and stdin. Dangerous system, credential, publish, and push
+    commands remain blocked by KaroX.
     """
+    advanced = bool(argv_json.strip() or shell or cwd or env_json.strip() or stdin)
+    if advanced:
+        exec_body: dict[str, Any] = {"timeoutSeconds": max(1, min(int(timeout_seconds), 21600))}
+        if argv_json.strip():
+            try:
+                argv = json.loads(argv_json)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "status": 400, "error": f"Invalid argv_json: {exc}"}
+            if not isinstance(argv, list):
+                return {"ok": False, "status": 400, "error": "argv_json must decode to an array"}
+            exec_body["argv"] = argv
+        if command:
+            exec_body["cmd"] = command
+        if shell:
+            exec_body["shell"] = shell
+        if cwd:
+            exec_body["cwd"] = cwd
+        if stdin:
+            exec_body["stdin"] = stdin
+        if env_json.strip():
+            try:
+                env = json.loads(env_json)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "status": 400, "error": f"Invalid env_json: {exc}"}
+            if not isinstance(env, dict):
+                return {"ok": False, "status": 400, "error": "env_json must decode to an object"}
+            exec_body["env"] = env
+        return await _call("POST", "/exec", body=exec_body)
+    if not command.strip():
+        return {"ok": False, "status": 400, "error": "Provide command or argv_json"}
     timeout_seconds = max(1, min(int(timeout_seconds), 7200))
     tail = max(1000, min(int(tail), 300000))
     body: dict[str, Any] = {

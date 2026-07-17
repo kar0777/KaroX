@@ -486,6 +486,11 @@ def apply_update(yes: bool) -> int:
             script.write_bytes(response.read())
         env = os.environ.copy()
         env["KAROX_NO_START"] = "1"
+        target = str(status.get("tag") or "").strip()
+        if not target and latest and latest != "unknown":
+            target = f"v{latest}"
+        if target:
+            env["KAROX_BOOTSTRAP_REF"] = target
         if os.name == "nt":
             command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
         else:
