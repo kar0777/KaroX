@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -113,6 +114,9 @@ def main() -> int:
         try:
             session_data["serverPid"] = child.pid
             session_file.write_text(json.dumps(session_data), encoding="utf-8")
+            deadline = time.time() + 8
+            while time.time() < deadline and not stop.is_karox_process(child.pid, "server"):
+                time.sleep(0.1)
             assert stop.is_karox_process(child.pid, "server")
             stopped = stop.stop_sessions("session-test")
             assert stopped["ok"], stopped
