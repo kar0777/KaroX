@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.1.3
+
+### ★ KaroX v4.1.3 — Tailscale without dead ends + parallel sessions
+
+- Pressing `T` now opens the Tailscale desktop app on Windows, runs `tailscale up`, detects the authentication URL, and opens the sign-in page.
+- Every new session gets an explicit tunnel choice; the global provider setting is now only the default.
+- KaroX detects an active Tailscale Funnel session before launching another one and offers Cloudflare for the additional session, avoiding the single port 443 listener conflict.
+- Windows and POSIX launchers share the same behavior and updated `T` guidance.
+- Added tunnel/session regression coverage to the cross-platform quality workflow.
+
 ## 4.1.2
 
 ### KaroX v4.1.2 — cloudflared auto-install

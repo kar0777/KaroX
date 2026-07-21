@@ -48,6 +48,7 @@ jobs:
           scripts/test_notion_provider.py scripts/test_notion_profile.py scripts/test_tailscale_readiness.py
           scripts/test_path_migration.py scripts/test_runtime_rebrand.py scripts/test_product_doctor.py
           scripts/test_mcp_host_security.py scripts/test_notion_mcp_transport.py scripts/test_admin_cli.py scripts/test_app_entry.py
+          scripts/test_tunnel_session_flow.py
 
       - name: Test provider generation
         shell: bash
@@ -60,6 +61,10 @@ jobs:
       - name: Test Tailscale readiness
         shell: bash
         run: python scripts/test_tailscale_readiness.py 2>&1 | tee tailscale-readiness-test.log
+
+      - name: Test tunnel selection and parallel-session guard
+        shell: bash
+        run: python scripts/test_tunnel_session_flow.py 2>&1 | tee tunnel-session-test.log
 
       - name: Test path migration
         shell: bash
