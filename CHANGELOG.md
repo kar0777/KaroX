@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.1.4
+
+### ★ KaroX v4.1.4 — Safe atomic updates
+
+- Builds and validates a complete staging application before touching the installed `app`.
+- Preserves the previous application for rollback and restores interrupted swaps automatically.
+- Stops `app_entry:app`, watchdog, and other processes that actually hold installed application files.
+- Runs the updater outside the application process being replaced.
+- Fixes the Notion launcher patcher contract broken by the v4.1.3 per-session tunnel flow.
+- Adds a non-destructive `-ValidateOnly` installer path and regression coverage.
+
 ## 4.1.3
 
 ### ★ KaroX v4.1.3 — Tailscale without dead ends + parallel sessions

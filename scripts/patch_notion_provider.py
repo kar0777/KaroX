@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-PATCHER_VERSION = "3.13.0"
+PATCHER_VERSION = "3.13.1"
 UTF8_BOM = b"\xef\xbb\xbf"
 
 
@@ -134,8 +134,9 @@ function Stop-OtherNotionSessions {
     source = one(source, "function Start-NewSession {", helpers + "function Start-NewSession {", "ps persistent helpers")
     source = one(
         source,
+        '    $tunnelProvider = Select-SessionTunnelProvider (Get-SelectedTunnelProvider)\n'
+        '    if (!$tunnelProvider) { return $null }\n'
         '    $apiKey = (([guid]::NewGuid().ToString("N")) + ([guid]::NewGuid().ToString("N")))\n'
-        '    $tunnelProvider = Get-SelectedTunnelProvider\n'
         '    $aiClient = Get-SelectedAiClient',
         '    $aiClient = Get-SelectedAiClient\n'
         '    $notionProfile = $null\n'
@@ -145,8 +146,9 @@ function Stop-OtherNotionSessions {
         '        $apiKey = [string]$notionProfile.apiKey\n'
         '        $tunnelProvider = "tailscale"\n'
         '    } else {\n'
+        '        $tunnelProvider = Select-SessionTunnelProvider (Get-SelectedTunnelProvider)\n'
+        '        if (!$tunnelProvider) { return $null }\n'
         '        $apiKey = (([guid]::NewGuid().ToString("N")) + ([guid]::NewGuid().ToString("N")))\n'
-        '        $tunnelProvider = Get-SelectedTunnelProvider\n'
         '    }',
         "ps persistent key",
     )
@@ -250,8 +252,8 @@ for s in json.load(sys.stdin):
     source = one(source, "start_new_session() {", helpers + "start_new_session() {", "sh persistent helpers")
     source = one(
         source,
+        '    tunnel_provider="$(select_session_tunnel_provider "$(get_selected_tunnel_provider)")" || return 1\n'
         '    api_key="$(gen_api_key)"\n'
-        '    tunnel_provider="$(get_selected_tunnel_provider)"\n'
         '    ai_client="$(get_selected_ai_client)"',
         '    ai_client="$(get_selected_ai_client)"\n'
         '    local notion_profile_json=""\n'
@@ -261,8 +263,8 @@ for s in json.load(sys.stdin):
         '        api_key="$(NOTION_PROFILE_JSON="$notion_profile_json" "$PYTHON_EXE" -c "import json,os; print(json.loads(os.environ[\'NOTION_PROFILE_JSON\'])[\'apiKey\'])")"\n'
         '        tunnel_provider="tailscale"\n'
         '    else\n'
+        '        tunnel_provider="$(select_session_tunnel_provider "$(get_selected_tunnel_provider)")" || return 1\n'
         '        api_key="$(gen_api_key)"\n'
-        '        tunnel_provider="$(get_selected_tunnel_provider)"\n'
         '    fi',
         "sh persistent key",
     )

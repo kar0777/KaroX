@@ -479,24 +479,28 @@ def apply_update(yes: bool) -> int:
             return 0
     url = BOOTSTRAP_PS_URL if os.name == "nt" else BOOTSTRAP_SH_URL
     suffix = ".ps1" if os.name == "nt" else ".sh"
-    with tempfile.TemporaryDirectory(prefix="karox-update-") as tmp:
-        script = Path(tmp) / f"bootstrap{suffix}"
-        request = urllib.request.Request(url, headers={"User-Agent": f"KaroX/{read_version()} updater"})
-        with urllib.request.urlopen(request, timeout=15) as response:
-            script.write_bytes(response.read())
-        env = os.environ.copy()
-        env["KAROX_NO_START"] = "1"
-        target = str(status.get("tag") or "").strip()
-        if not target and latest and latest != "unknown":
-            target = f"v{latest}"
-        if target:
-            env["KAROX_BOOTSTRAP_REF"] = target
-        if os.name == "nt":
-            command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-        else:
-            command = ["bash", str(script)]
-        print("Starting verified stable-channel installer…")
-        return subprocess.call(command, env=env)
+    update_dir = Path(tempfile.mkdtemp(prefix="karox-update-"))
+    script = update_dir / f"bootstrap{suffix}"
+    request = urllib.request.Request(url, headers={"User-Agent": f"KaroX/{read_version()} updater"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        script.write_bytes(response.read())
+    env = os.environ.copy()
+    env["KAROX_NO_START"] = "1"
+    env["KAROX_UPDATE_PARENT_PID"] = str(os.getpid())
+    target = str(status.get("tag") or "").strip()
+    if not target and latest and latest != "unknown":
+        target = f"v{latest}"
+    if target:
+        env["KAROX_BOOTSTRAP_REF"] = target
+    if os.name == "nt":
+        command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(command, env=env, creationflags=creationflags)
+    else:
+        command = ["bash", str(script)]
+        subprocess.Popen(command, env=env, start_new_session=True)
+    print("Updater started in a separate process. KaroX will close this command before replacing application files.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:

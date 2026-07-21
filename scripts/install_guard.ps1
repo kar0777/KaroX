@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "KaroX"
 $AppDir = Join-Path $RuntimeDir "app"
 $SessionsDir = Join-Path $RuntimeDir "sessions"
+$UpdateParentPid = 0
+[int]::TryParse([string]$env:KAROX_UPDATE_PARENT_PID, [ref]$UpdateParentPid) | Out-Null
 
 function Get-CommandLine([int]$ProcessId) {
     try {
@@ -20,7 +22,7 @@ function Test-KaroXRoleProcess([int]$ProcessId, [string]$Role) {
     if (!$command) { return $false }
     switch ($Role) {
         "server" {
-            return ($command -match "uvicorn" -and $command -match "repo_tools:app|notion_entry:app|notion_gateway")
+            return (($command -match "uvicorn" -and $command -match "repo_tools:app|app_entry:app|notion_entry:app|notion_gateway") -or $command -match "karox_supervisor\.py")
         }
         "tunnel" {
             return (($command -match "cloudflared" -and $command -match "tunnel") -or ($command -match "tailscale" -and $command -match "funnel"))
@@ -74,7 +76,7 @@ function Stop-OrphanedRuntimeProcesses {
         if ($ancestorIds.Contains($id)) { continue }
         $command = ([string]$process.CommandLine).ToLowerInvariant().Replace("\", "/")
         if (!$command) { continue }
-        $isServer = $command -match "uvicorn" -and $command -match "repo_tools:app|notion_entry:app|notion_gateway"
+        $isServer = ($command -match "uvicorn" -and $command -match "repo_tools:app|app_entry:app|notion_entry:app|notion_gateway") -or $command -match "karox_supervisor\.py"
         $isTunnel = ($command -match "cloudflared" -and $command -match "tunnel") -or ($command -match "tailscale" -and $command -match "funnel")
         $isSessionRunner = $command -match "run-server|run-tunnel" -and $command -match "karox|repopilotbridge"
         if ($isServer -or $isTunnel -or $isSessionRunner) {
@@ -83,15 +85,32 @@ function Stop-OrphanedRuntimeProcesses {
     }
 }
 
+function Wait-UpdateParentExit {
+    if ($UpdateParentPid -le 0 -or $UpdateParentPid -eq $PID) { return }
+    for ($i = 0; $i -lt 80; $i++) {
+        if (!(Get-Process -Id $UpdateParentPid -ErrorAction SilentlyContinue)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "The old KaroX updater process did not exit. The installed application was not changed."
+}
+
 function Wait-AppReleased {
-    for ($i = 0; $i -lt 30; $i++) {
+    $appNeedle = ([IO.Path]::GetFullPath($AppDir).TrimEnd('\').ToLowerInvariant()).Replace("\", "/")
+    for ($i = 0; $i -lt 40; $i++) {
         $busy = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            if ([int]$_.ProcessId -eq $PID) { return $false }
             $command = ([string]$_.CommandLine).ToLowerInvariant().Replace("\", "/")
-            $command -match "uvicorn" -and $command -match "repo_tools:app|notion_entry:app|notion_gateway"
+            $command -and $command.Contains($appNeedle)
         })
         if ($busy.Count -eq 0) { return }
+        foreach ($process in $busy) { Stop-ProcessTree ([int]$process.ProcessId) "app-lock" }
         Start-Sleep -Milliseconds 500
     }
+    $remaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $command = ([string]$_.CommandLine).ToLowerInvariant().Replace("\", "/")
+        $command -and $command.Contains($appNeedle)
+    })
+    if ($remaining.Count -gt 0) { throw "KaroX application files are still in use. The installed application was not changed." }
 }
 
 function Stop-KaroXForUpdate {
@@ -101,6 +120,7 @@ function Stop-KaroXForUpdate {
 }
 
 if (!(Test-Path -LiteralPath $Installer)) { throw "KaroX installer was not found: $Installer" }
+Wait-UpdateParentExit
 Stop-KaroXForUpdate
 
 $attempts = 4
