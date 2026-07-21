@@ -610,18 +610,41 @@ function Test-TailscaleReady($tailscaleExe) {
     }
 }
 
+function Start-TailscaleDesktopApp {
+    $candidates = @(
+        "$env:ProgramFiles\Tailscale\tailscale-ipn.exe",
+        "${env:ProgramFiles(x86)}\Tailscale\tailscale-ipn.exe",
+        "$env:LOCALAPPDATA\Tailscale\tailscale-ipn.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            try { Start-Process -FilePath $candidate | Out-Null; return $true } catch { }
+        }
+    }
+    return $false
+}
+
 function Invoke-TailscaleUp {
     $ts = Find-Tailscale
+    $appStarted = Start-TailscaleDesktopApp
     Write-Host ""
     Write-Host (L "Starting Tailscale login/up in this window..." "Запускаю Tailscale login/up в текущем окне...") -ForegroundColor Cyan
-    Write-Host (L "If Tailscale opens a browser, sign in and return here." "Если Tailscale откроет браузер, войдите в аккаунт и вернитесь сюда.") -ForegroundColor Yellow
-    & $ts up
-    $ok = ($LASTEXITCODE -eq 0)
+    if ($appStarted) { Write-Host (L "Tailscale desktop app opened." "Приложение Tailscale открыто.") -ForegroundColor DarkCyan }
+    Write-Host (L "If sign-in is required, KaroX will open the login page." "Если нужен вход, KaroX откроет страницу авторизации.") -ForegroundColor Yellow
+    $upOutput = @(& $ts up 2>&1)
+    $exitCode = $LASTEXITCODE
+    foreach ($line in $upOutput) { Write-Host ([string]$line) }
+    $loginUrl = [regex]::Match(($upOutput -join "`n"), "https://login\.tailscale\.com/[^\s]+").Value.TrimEnd('.', ',', ';', ')')
+    if ($loginUrl) {
+        try { Start-Process $loginUrl | Out-Null } catch { }
+        Write-Host ((L "Login page opened: " "Страница входа открыта: ") + $loginUrl) -ForegroundColor Cyan
+    }
+    $ok = ($exitCode -eq 0)
     if ($ok -and (Test-TailscaleReady $ts)) {
         Write-Host (L "Tailscale connected." "Tailscale подключён.") -ForegroundColor Green
         return $true
     }
-    Write-Host (L "Tailscale is not ready yet. Check the login window or run the check again." "Tailscale пока не готов. Проверьте окно логина или выполните проверку ещё раз.") -ForegroundColor Yellow
+    Write-Host (L "Tailscale is not ready yet. Complete sign-in in the app or browser, then refresh." "Tailscale пока не готов. Завершите вход в приложении или браузере, затем обновите состояние.") -ForegroundColor Yellow
     return $false
 }
 
@@ -900,6 +923,30 @@ function Get-RunningSessionsForRepo($repo) {
     })
 }
 
+function Get-RunningTailscaleSessions {
+    return @(Get-Sessions | Where-Object { $_.status -eq "running" -and $_.tunnelProvider -eq "tailscale" })
+}
+
+function Select-SessionTunnelProvider($defaultProvider) {
+    $defaultProvider = Normalize-TunnelProvider $defaultProvider
+    Header (L "Session tunnel" "Туннель сессии")
+    UI-Notice "info" (L "Choose a tunnel for this session" "Выберите туннель для этой сессии") (L "The global setting is only the default; every new session can use another provider." "Глобальная настройка — только значение по умолчанию; каждая новая сессия может использовать другой провайдер.")
+    UI-Choice "1" "CLOUDFLARE" (L "Supports multiple simultaneous sessions" "Поддерживает несколько одновременных сессий") "Cyan"
+    UI-Choice "2" "TAILSCALE" (L "One Funnel listener per device" "Один Funnel listener на устройство") "Magenta"
+    Write-Host ((L "  Enter keeps default: " "  Enter оставляет по умолчанию: ") + (Get-ProviderLabel $defaultProvider)) -ForegroundColor DarkGray
+    $choice = ([string](Read-Host ("  › " + (L "Tunnel" "Туннель")))).Trim()
+    $selected = if ($choice -eq "1") { "cloudflare" } elseif ($choice -eq "2") { "tailscale" } else { $defaultProvider }
+    if ($selected -eq "tailscale") {
+        $active = @(Get-RunningTailscaleSessions)
+        if ($active.Count -gt 0) {
+            UI-Notice "warn" (L "Tailscale Funnel is already in use" "Tailscale Funnel уже используется") (L "Tailscale exposes one HTTPS listener on port 443. A second Funnel would replace or conflict with the active session." "Tailscale предоставляет один HTTPS listener на порту 443. Второй Funnel заменит активную сессию или вызовет конфликт.")
+            if (Ask-Yes (L "Use Cloudflare Tunnel for this additional session?" "Использовать Cloudflare Tunnel для этой дополнительной сессии?") $true) { return "cloudflare" }
+            return $null
+        }
+    }
+    return $selected
+}
+
 function Save-SessionJson($sessionDir, $session) {
     $session | ConvertTo-Json -Depth 20 | Set-Content -Path (Join-Path $sessionDir "session.json") -Encoding UTF8
 }
@@ -1139,7 +1186,7 @@ function Show-Settings {
         UI-Choice "2" "TAILSCALE" (L "Private identity-aware funnel" "Приватный туннель с проверкой личности") "Magenta"
         UI-Choice "A" (L "AI TARGET" "AI-КЛИЕНТ") (L "Change the connection destination" "Изменить место подключения") "White"
         UI-Choice "L" (L "LANGUAGE" "ЯЗЫК") (L "Switch English / Русский" "Переключить English / Русский") "White"
-        if ($provider -eq "tailscale") { UI-Choice "T" (L "TAILSCALE LOGIN" "ВХОД TAILSCALE") (L "Login or start the CLI" "Войти или запустить CLI") "Yellow" }
+        if ($provider -eq "tailscale") { UI-Choice "T" (L "OPEN TAILSCALE" "ОТКРЫТЬ TAILSCALE") (L "Open the app or sign-in page" "Открыть приложение или страницу входа") "Yellow" }
         if ($provider -eq "tailscale" -and !$status.ok) { UI-Choice "I" (L "INSTALL" "УСТАНОВИТЬ") "Tailscale" "Yellow" }
         Write-Host ("  │  [R] " + (L "Refresh health" "Обновить состояние") + "   [B] " + (L "Back" "Назад")) -ForegroundColor DarkGray
         Write-Host ""
@@ -1361,8 +1408,9 @@ function Start-NewSession {
         $branch = New-Branch $repo $branchPrefix
     }
 
+    $tunnelProvider = Select-SessionTunnelProvider (Get-SelectedTunnelProvider)
+    if (!$tunnelProvider) { return $null }
     $apiKey = (([guid]::NewGuid().ToString("N")) + ([guid]::NewGuid().ToString("N")))
-    $tunnelProvider = Get-SelectedTunnelProvider
     $aiClient = Get-SelectedAiClient
     $tunnelProviderLabel = Get-ProviderLabel $tunnelProvider
     $tunnelLogStem = Get-ProviderLogStem $tunnelProvider
@@ -1478,7 +1526,7 @@ function Start-NewSession {
                 Invoke-TailscaleFunnelEnableFlow $enableUrl
                 $tail += "`n`n" + (L "Tailscale Funnel is not enabled for this tailnet. KaroX copied the enable URL and tried to open it in your browser: " "Tailscale Funnel не включён в вашем tailnet. KaroX скопировал ссылку включения и попытался открыть её в браузере: ") + $enableUrl + "`n" + (L "Approve Funnel in Tailscale and start the session again." "Подтвердите Funnel в Tailscale и запустите сессию ещё раз.")
             } else {
-                $tail += "`n`n" + (L "Tip: open G = Settings, choose Tailscale Funnel, and press L to run tailscale up. If Funnel needs approval, approve it in Tailscale and start the session again." "Подсказка: откройте G = настройки, выберите Tailscale Funnel и нажмите L, чтобы выполнить tailscale up. Если Funnel требует разрешения, подтвердите его в Tailscale и запустите сессию ещё раз.")
+                $tail += "`n`n" + (L "Tip: open G = Settings, choose Tailscale Funnel, and press T to open Tailscale and sign in. If Funnel needs approval, approve it in Tailscale and start the session again." "Подсказка: откройте G = настройки, выберите Tailscale Funnel и нажмите T, чтобы открыть Tailscale и войти. Если Funnel требует разрешения, подтвердите его в Tailscale и запустите сессию ещё раз.")
             }
         }
         throw ((L "Could not obtain the tunnel URL for " "Не удалось получить URL туннеля ") + $tunnelProviderLabel + (L ". Logs: " ". Логи: ") + "$tunnelOutLog / $tunnelErrLog`n$tail")

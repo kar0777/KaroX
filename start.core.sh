@@ -998,6 +998,28 @@ gen_session_id() {
     printf '%s-%s' "$(date +%Y%m%d-%H%M%S)" "$("$PYTHON_EXE" -c "import uuid; print(uuid.uuid4().hex[:6])")"
 }
 
+select_session_tunnel_provider() {
+    local default_provider selected active_count choice
+    default_provider="$(normalize_tunnel_provider "$1")"
+    {
+        header "$(l "Session tunnel" "Туннель сессии")"
+        ui_notice info "$(l "Choose a tunnel for this session" "Выберите туннель для этой сессии")" "$(l "The global setting is only the default; every new session can use another provider." "Глобальная настройка — только значение по умолчанию; каждая новая сессия может использовать другой провайдер.")"
+        ui_choice 1 CLOUDFLARE "$(l "Supports multiple simultaneous sessions" "Поддерживает несколько одновременных сессий")" "$C_CYAN"
+        ui_choice 2 TAILSCALE "$(l "One Funnel listener per device" "Один Funnel listener на устройство")" "$C_MAGENTA"
+    } >&2
+    printf '  %s: %s\n  › %s: ' "$(l "Enter keeps default" "Enter оставляет по умолчанию")" "$(provider_label "$default_provider")" "$(l "Tunnel" "Туннель")" >&2
+    read -r choice
+    case "$choice" in 1) selected=cloudflare ;; 2) selected=tailscale ;; *) selected="$default_provider" ;; esac
+    if [ "$selected" = tailscale ]; then
+        active_count="$(get_sessions | "$PYTHON_EXE" -c "import json,sys; items=json.loads(sys.stdin.read() or '[]'); print(sum(1 for s in items if s.get('status')=='running' and s.get('tunnelProvider')=='tailscale'))" 2>/dev/null || echo 0)"
+        if [ "$active_count" -gt 0 ]; then
+            ui_notice warn "$(l "Tailscale Funnel is already in use" "Tailscale Funnel уже используется")" "$(l "Tailscale exposes one HTTPS listener on port 443; a second Funnel would conflict." "Tailscale предоставляет один HTTPS listener на порту 443; второй Funnel вызовет конфликт.")"
+            if ask_yes "$(l "Use Cloudflare Tunnel for this additional session?" "Использовать Cloudflare Tunnel для этой дополнительной сессии?")" 1; then selected=cloudflare; else return 1; fi
+        fi
+    fi
+    printf '%s' "$selected"
+}
+
 start_new_session() {
     local mode_choice repo session_title
     mode_choice="$(select_mode)" || { log_error "$(l "Invalid access profile" "Неверный режим")"; return 1; }
@@ -1050,8 +1072,8 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
     local api_key tunnel_provider tunnel_log_stem session_id session_dir ai_client
     local session_logs_dir runs_dir server_out_log server_err_log server_log
     local tunnel_out_log tunnel_err_log local_port
+    tunnel_provider="$(select_session_tunnel_provider "$(get_selected_tunnel_provider)")" || return 1
     api_key="$(gen_api_key)"
-    tunnel_provider="$(get_selected_tunnel_provider)"
     ai_client="$(get_selected_ai_client)"
     if [ "$tunnel_provider" = tailscale ]; then tunnel_log_stem="tailscale"; else tunnel_log_stem="cloudflared"; fi
     session_id="$(gen_session_id)"
@@ -1165,7 +1187,7 @@ print(n)" "$repo" 2>/dev/null || echo 0)"
                 open_url "$enable_url"
                 log_warn "$(l "Approve Funnel in Tailscale and start the session again." "Подтвердите Funnel в Tailscale и запустите сессию ещё раз.")"
             else
-                log_warn "$(l "Open G = Settings, choose Tailscale Funnel, and press L to run tailscale up." "Откройте G = настройки, выберите Tailscale Funnel и нажмите L для tailscale up.")"
+                log_warn "$(l "Open G = Settings, choose Tailscale Funnel, and press T to open Tailscale and sign in." "Откройте G = настройки, выберите Tailscale Funnel и нажмите T, чтобы открыть Tailscale и войти.")"
             fi
         fi
         log_error "$(l "Could not obtain the tunnel URL. Logs:" "Не удалось получить URL туннеля. Логи:") $tunnel_out_log / $tunnel_err_log"
@@ -1474,7 +1496,7 @@ show_settings() {
         ui_choice 2 TAILSCALE "$(l "Private identity-aware funnel" "Приватный туннель с проверкой личности")" "$C_MAGENTA"
         ui_choice A "$(l "AI TARGET" "AI-КЛИЕНТ")" "$(l "Change connection destination" "Изменить место подключения")" "$C_RESET"
         ui_choice L "$(l "LANGUAGE" "ЯЗЫК")" "$(l "Switch English / Русский" "Переключить English / Русский")" "$C_RESET"
-        [ "$provider" = tailscale ] && ui_choice T "$(l "TAILSCALE LOGIN" "ВХОД TAILSCALE")" "$(l "Login or start CLI" "Войти или запустить CLI")" "$C_YELLOW"
+        [ "$provider" = tailscale ] && ui_choice T "$(l "OPEN TAILSCALE" "ОТКРЫТЬ TAILSCALE")" "$(l "Open the app or sign-in page" "Открыть приложение или страницу входа")" "$C_YELLOW"
         printf '%s  │  [R] %s   [B] %s%s\n\n' "$C_DARK" "$(l "Refresh" "Обновить")" "$(l "Back" "Назад")" "$C_RESET"
         printf '  › %s: ' "$(l "Action" "Действие")" >&2
         local x; read -r x
@@ -1483,7 +1505,14 @@ show_settings() {
             2) save_settings tailscale ;;
             [Aa]) local picked; picked="$(select_ai_client)" && save_settings "" "$picked" ;;
             [Ll]) local picked_lang; picked_lang="$(select_language)" && save_settings "" "" "$picked_lang" ;;
-            [Tt]) [ "$provider" = tailscale ] && "$(find_tailscale)" up || true ;;
+            [Tt])
+                if [ "$provider" = tailscale ]; then
+                    local ts_output login_url
+                    case "$(uname -s 2>/dev/null || true)" in Darwin*) open -g -a Tailscale >/dev/null 2>&1 || true ;; esac
+                    ts_output="$("$(find_tailscale)" up 2>&1 | tee /dev/stderr)" || true
+                    login_url="$(printf '%s' "$ts_output" | grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' | head -n1 | tr -d '.,;)')"
+                    [ -n "$login_url" ] && open_url "$login_url"
+                fi ;;
             [Rr]) continue ;;
             [Bb]) return ;;
         esac
