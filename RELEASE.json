@@ -1,13 +1,13 @@
 {
   "status": "published",
-  "version": "4.1.2",
-  "tag": "v4.1.2",
-  "name": "KaroX v4.1.2 — cloudflared устанавливается сам",
-  "url": "https://github.com/kar0777/KaroX/releases/tag/v4.1.2",
-  "publishedAt": "2026-07-17T12:08:08Z",
+  "version": "4.1.3",
+  "tag": "v4.1.3",
+  "name": "★ KaroX v4.1.3 — Tailscale без тупиков и параллельные сессии",
+  "url": "https://github.com/kar0777/KaroX/releases/tag/v4.1.3",
+  "publishedAt": "2026-07-21T11:09:58Z",
   "assets": [
-    "KaroX-v4.1.2-SHA256SUMS.txt",
-    "KaroX-v4.1.2.tar.gz",
-    "KaroX-v4.1.2.zip"
+    "KaroX-v4.1.3-SHA256SUMS.txt",
+    "KaroX-v4.1.3.tar.gz",
+    "KaroX-v4.1.3.zip"
   ]
 }
