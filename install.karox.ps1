@@ -1,4 +1,4 @@
-param([switch]$Start)
+param([switch]$Start, [switch]$ValidateOnly)
 
 $ErrorActionPreference = "Stop"
 try {
@@ -15,6 +15,8 @@ $LegacyConfigDir = Join-Path $env:APPDATA "RepoPilotBridge"
 $LegacyRuntimeDir = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
 $LegacyBinDir = Join-Path $LegacyRuntimeDir "bin"
 $AppDir = Join-Path $RuntimeDir "app"
+$StagingAppDir = Join-Path $RuntimeDir ("app.new-" + [guid]::NewGuid().ToString("N"))
+$RollbackAppDir = Join-Path $RuntimeDir "app.previous"
 $BinDir = Join-Path $RuntimeDir "bin"
 $VenvDir = Join-Path $RuntimeDir ".venv"
 $PythonExe = Join-Path $VenvDir "Scripts\python.exe"
@@ -116,16 +118,22 @@ function Move-OutOf-AppDirectory {
     }
 }
 
-function Copy-AppFiles {
-    Move-OutOf-AppDirectory
-    if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-    Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__") } | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $AppDir $_.Name) -Recurse -Force
+function Recover-PendingRollback {
+    if (!(Test-Path -LiteralPath $AppDir) -and (Test-Path -LiteralPath $RollbackAppDir)) {
+        Rename-Item -LiteralPath $RollbackAppDir -NewName (Split-Path -Leaf $AppDir) -ErrorAction Stop
     }
 }
 
-function Repair-RequiredFiles {
+function Copy-AppFiles($targetDir) {
+    Move-OutOf-AppDirectory
+    if (Test-Path -LiteralPath $targetDir) { Remove-Item -LiteralPath $targetDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__") } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $targetDir $_.Name) -Recurse -Force
+    }
+}
+
+function Repair-RequiredFiles($targetDir) {
     foreach ($relative in @(
         "scripts\tailscale_readiness.py",
         "scripts\karox_paths.py",
@@ -134,7 +142,7 @@ function Repair-RequiredFiles {
         "scripts\rebrand_runtime.py"
     )) {
         $source = Join-Path $Root $relative
-        $target = Join-Path $AppDir $relative
+        $target = Join-Path $targetDir $relative
         if (!(Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $source)) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
             Copy-Item -LiteralPath $source -Destination $target -Force
@@ -142,21 +150,69 @@ function Repair-RequiredFiles {
     }
 }
 
-function Assert-InstallationComplete {
+function Assert-InstallationComplete($targetDir) {
     $required = @(
-        "start.ps1", "start.core.ps1", "requirements.txt",
+        "start.ps1", "start.core.ps1", "start.core.sh", "requirements.txt",
         "scripts\karox_paths.py", "scripts\karox_admin_entry.py", "scripts\support_bundle_entry.py",
         "scripts\rebrand_runtime.py", "scripts\notion_profile.py", "scripts\tailscale_readiness.py",
-        "scripts\notion_setup_wizard.py",
-        "server\repo_tools.py", "server\notion_gateway.py"
+        "scripts\notion_setup_wizard.py", "scripts\patch_notion_provider.py",
+        "scripts\patch_native_notion_provider.py", "scripts\native_notion_provider.py",
+        "scripts\product_doctor.py", "scripts\karox_supervisor.py",
+        "server\repo_tools.py", "server\app_entry.py", "server\notion_gateway.py", "server\notion_entry.py"
     )
     $missing = @()
     foreach ($relative in $required) {
-        if (!(Test-Path -LiteralPath (Join-Path $AppDir $relative))) { $missing += $relative }
+        if (!(Test-Path -LiteralPath (Join-Path $targetDir $relative))) { $missing += $relative }
     }
     if ($missing.Count -gt 0) { throw "Incomplete KaroX installation. Missing: $($missing -join ', ')" }
-    $startText = Get-Content -Raw -LiteralPath (Join-Path $AppDir "start.ps1")
+    $startText = Get-Content -Raw -LiteralPath (Join-Path $targetDir "start.ps1")
     if ($startText -match "RepoPilotBridge") { throw "Installed start.ps1 still contains legacy RepoPilotBridge paths." }
+}
+
+function Test-StagedLaunchers($targetDir) {
+    $validationDir = Join-Path $targetDir "generated\installer-validation"
+    New-Item -ItemType Directory -Force -Path $validationDir | Out-Null
+    $psOutput = Join-Path $validationDir "start.generated.ps1"
+    $shOutput = Join-Path $validationDir "start.generated.sh"
+    & $PythonExe (Join-Path $targetDir "scripts\patch_notion_provider.py") --platform powershell --source (Join-Path $targetDir "start.core.ps1") --output $psOutput --root $targetDir | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Staged PowerShell launcher generation failed. The current installation was not changed." }
+    & $PythonExe (Join-Path $targetDir "scripts\patch_native_notion_provider.py") --platform powershell --path $psOutput | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Staged native Notion integration failed. The current installation was not changed." }
+    $tokens = $null; $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($psOutput, [ref]$tokens, [ref]$errors) | Out-Null
+    if ($errors.Count -gt 0) { throw "Staged PowerShell launcher is invalid. The current installation was not changed." }
+    & $PythonExe (Join-Path $targetDir "scripts\patch_notion_provider.py") --platform shell --source (Join-Path $targetDir "start.core.sh") --output $shOutput --root $targetDir | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Staged POSIX launcher generation failed. The current installation was not changed." }
+    Remove-Item -LiteralPath $validationDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Prepare-StagedApp {
+    Copy-AppFiles $StagingAppDir
+    Repair-RequiredFiles $StagingAppDir
+    & $PythonExe (Join-Path $StagingAppDir "scripts\rebrand_runtime.py") --root $StagingAppDir
+    if ($LASTEXITCODE -ne 0) { throw "Could not rewrite staged files to KaroX paths. The current installation was not changed." }
+    Assert-InstallationComplete $StagingAppDir
+    Test-StagedLaunchers $StagingAppDir
+    & $PythonExe (Join-Path $StagingAppDir "scripts\product_doctor.py") --root $StagingAppDir
+    if ($LASTEXITCODE -ne 0) { throw "Staged KaroX diagnostics failed. The current installation was not changed." }
+}
+
+function Promote-StagedApp {
+    Move-OutOf-AppDirectory
+    $movedCurrent = $false
+    try {
+        if (Test-Path -LiteralPath $RollbackAppDir) { Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force }
+        if (Test-Path -LiteralPath $AppDir) {
+            Rename-Item -LiteralPath $AppDir -NewName (Split-Path -Leaf $RollbackAppDir) -ErrorAction Stop
+            $movedCurrent = $true
+        }
+        Rename-Item -LiteralPath $StagingAppDir -NewName (Split-Path -Leaf $AppDir) -ErrorAction Stop
+    } catch {
+        if (!(Test-Path -LiteralPath $AppDir) -and $movedCurrent -and (Test-Path -LiteralPath $RollbackAppDir)) {
+            Rename-Item -LiteralPath $RollbackAppDir -NewName (Split-Path -Leaf $AppDir) -ErrorAction SilentlyContinue
+        }
+        throw "Could not activate the prepared KaroX update. The previous installation was preserved. $($_.Exception.Message)"
+    }
 }
 
 function Schedule-LegacyCleanup {
@@ -214,15 +270,24 @@ if (!(Test-Path -LiteralPath $PythonExe)) {
     & $BasePython -m venv $VenvDir
 }
 if (!(Test-Path -LiteralPath $PythonExe)) { throw "Could not create virtual environment." }
-& $PythonExe -m pip install --upgrade pip
-& $PythonExe -m pip install -r (Join-Path $Root "requirements.txt")
-if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
+if (!$ValidateOnly) {
+    & $PythonExe -m pip install --upgrade pip
+    & $PythonExe -m pip install -r (Join-Path $Root "requirements.txt")
+    if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
+}
 
-Copy-AppFiles
-Repair-RequiredFiles
-& $PythonExe (Join-Path $AppDir "scripts\rebrand_runtime.py") --root $AppDir
-if ($LASTEXITCODE -ne 0) { throw "Could not rewrite installed files to KaroX paths." }
-Assert-InstallationComplete
+Recover-PendingRollback
+try {
+    Prepare-StagedApp
+} catch {
+    if (Test-Path -LiteralPath $StagingAppDir) { Remove-Item -LiteralPath $StagingAppDir -Recurse -Force -ErrorAction SilentlyContinue }
+    throw
+}
+if ($ValidateOnly) {
+    Remove-Item -LiteralPath $StagingAppDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Staged KaroX installation validation passed. Current installation was not changed." -ForegroundColor Green
+    exit 0
+}
 
 $legacyCloudflared = Join-Path $LegacyRuntimeDir "bin\cloudflared.exe"
 $newCloudflared = Join-Path $BinDir "cloudflared.exe"
@@ -281,6 +346,14 @@ pause
 
 Write-LegacyForwarder
 Set-KaroXPath
+
+try {
+    Promote-StagedApp
+} catch {
+    if (Test-Path -LiteralPath $StagingAppDir) { Remove-Item -LiteralPath $StagingAppDir -Recurse -Force -ErrorAction SilentlyContinue }
+    throw
+}
+
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Application : $AppDir"
@@ -292,7 +365,15 @@ Schedule-LegacyCleanup
 
 if ($Start) {
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppDir "start.ps1")
-    exit $LASTEXITCODE
+    $startCode = $LASTEXITCODE
+    if ($startCode -eq 0 -and (Test-Path -LiteralPath $RollbackAppDir)) {
+        Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    exit $startCode
 }
 & $PythonExe (Join-Path $AppDir "scripts\product_doctor.py") --root $AppDir
-exit $LASTEXITCODE
+$doctorCode = $LASTEXITCODE
+if ($doctorCode -eq 0 -and (Test-Path -LiteralPath $RollbackAppDir)) {
+    Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+exit $doctorCode
