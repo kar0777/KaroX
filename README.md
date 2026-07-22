@@ -6,7 +6,7 @@
 
 **KaroX turns a selected local Git repository into a guarded workspace where compatible AI clients can inspect context, perform approved development actions, run checks, review changes, and produce evidence-backed completion reports.**
 
-[![Release](https://img.shields.io/badge/release-v3.12.0-7C3AED)](https://github.com/kar0777/KaroX/releases/latest)
+[![Release](https://img.shields.io/badge/release-v4.1.4-7C3AED)](https://github.com/kar0777/KaroX/releases/latest)
 [![Notion](https://img.shields.io/badge/Notion-Custom%20Agent-000000?logo=notion)](NOTION.md)
 [![Windows](https://img.shields.io/badge/Windows-PowerShell-0078D4?logo=windows)](#install-in-one-command)
 [![macOS](https://img.shields.io/badge/macOS-Bash-000000?logo=apple)](#install-in-one-command)
@@ -14,7 +14,7 @@
 [![Quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/quality.yml)
 [![CodeQL](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml)
 
-[Quick start](QUICKSTART.md) · [Product guide](PRODUCT_GUIDE.md) · [Research](RESEARCH.md) · [Private inference use case](docs/private-inference-use-case.md) · [Benchmark plan](benchmarks/README.md) · [Русская версия](README_RU.md)
+[Quick start](QUICKSTART.md) · [Changelog](CHANGELOG.md) · [Research](RESEARCH.md) · [Private inference use case](docs/private-inference-use-case.md) · [Benchmark plan](benchmarks/README.md) · [Русская версия](README_RU.md)
 
 </div>
 
@@ -24,13 +24,19 @@ KaroX is an engineering project, not a mockup. The current release provides:
 
 - repository-scoped API and MCP sessions;
 - explicit Observe, Build, Resume, and Advanced access profiles;
+- persistent sessions with supervised process recovery;
 - protected endpoints using a session-specific key;
 - repository path confinement and sensitive-file filtering;
-- guarded development commands and local commits;
-- a hard no-push policy;
+- guarded file operations, patches, checkpoints, commands, checks, and local Git workflows;
+- idempotency protection for mutating requests so retries do not repeat completed changes;
+- a hard no-push and no-publish policy;
+- structured build/test/lint results with retry support for flaky checks;
+- managed development servers, localhost-only HTTP fetches, and a headless browser;
+- opt-in target-window screenshots and input controls;
 - preflight checks, diagnostics, request IDs, audit logs, and a live Control Center;
 - source-free redacted support bundles;
-- Windows, macOS, and Linux support with CI and CodeQL coverage.
+- Windows, macOS, and Linux support with CI and CodeQL coverage;
+- atomic updates with staging validation and rollback-safe replacement.
 
 These controls govern the local bridge. They do not automatically guarantee that a connected model provider offers private or confidential inference.
 
@@ -51,7 +57,7 @@ A video is not required to inspect the proposed demonstration. The benchmark doc
 
 ## Install in one command
 
-The command installs the latest stable KaroX release, all Python dependencies, the `karox` command, and the platform launcher. Run the same command again to reinstall or upgrade.
+The command installs the latest stable KaroX release, its dependencies, the `karox` command, and the platform launcher. Run the same command again to reinstall or upgrade.
 
 ### Windows
 
@@ -77,14 +83,17 @@ Or start directly with Notion selected:
 karox notion
 ```
 
-## New in KaroX 3.12
+## New in KaroX 4.1
 
-- **Control Center:** open a live browser dashboard with `karox dashboard`.
-- **Stable self-update:** check or install releases with `karox update`.
-- **Unified diagnostics:** use `karox doctor` on Windows, macOS, and Linux.
-- **Safe support bundles:** create a source-free redacted ZIP with `karox support`.
-- **Hardened runtime:** constant-time authentication, request limits, secure headers, request IDs, safe errors, rotating redacted logs, and temporary failed-auth throttling.
-- **Cross-platform quality:** Windows, macOS, and Linux are tested with Python 3.10 and 3.12, alongside CodeQL.
+- **Safe atomic updates:** a complete staging application is built and validated before the installed app is replaced; interrupted swaps can be restored.
+- **Supervised sessions:** the watchdog can restart failed or hung local API processes while persistent session state preserves the active workflow.
+- **Retry-safe mutations:** idempotency keys prevent a dropped connection from duplicating writes, patches, commands, file operations, or commit actions.
+- **Stronger agent tools:** structured check matrices, async jobs, file checkpoints, binary and image reads, project mapping, persistent memos, and broader local Git review.
+- **Browser and desktop workflows:** managed dev servers, a headless browser, screenshots, and opt-in target-window input for visual verification.
+- **Security improvements:** entropy-aware secret scanning, protected endpoints, bounded queues and timeouts, redacted audit logs, and hard blocks on push, publish, and authentication commands.
+- **Reliable connectivity:** per-session Cloudflare or Tailscale choices and safer handling of parallel sessions.
+
+See the [changelog](CHANGELOG.md) for exact version-by-version details.
 
 ## Product commands
 
@@ -93,6 +102,7 @@ karox notion
 | `karox` | Open Project Flight Deck |
 | `karox version` | Show the installed version |
 | `karox status` | Inspect saved and live sessions |
+| `karox stop` | Stop a live KaroX session safely |
 | `karox doctor` | Run fast product diagnostics |
 | `karox doctor --deep` | Run the full endpoint/security harness |
 | `karox update --check` | Check the stable release channel |
@@ -101,7 +111,7 @@ karox notion
 | `karox dashboard` | Open Control Center for a live session |
 | `karox notion` | Start directly with the Notion target |
 
-JSON output is available for `version`, `status`, and `doctor`. See the [complete product guide](PRODUCT_GUIDE.md).
+JSON output is available for `version`, `status`, and `doctor`.
 
 ## Control Center
 
@@ -127,13 +137,14 @@ The Notion agent receives purpose-built tools for repository context, file opera
 
 ## Why KaroX
 
-- **Local-first:** your source stays on your machine until approved context is sent to a connected client or model endpoint; each server is scoped to the repository you selected.
+- **Local-first control:** each server is scoped to the repository selected by the user, and context leaves the machine only through an explicitly connected client or endpoint.
 - **Explicit access:** Observe, Build, Resume, and Advanced profiles expose the real permission level.
 - **Context before action:** Mission Control gives the agent a fresh, secret-filtered operating brief.
-- **Safe Git workflow:** branch validation, generated-file cleanup, reviewed commits, and a hard no-push policy.
+- **Retry-safe execution:** idempotency and persistent state reduce duplicate side effects after transport failures.
+- **Safe Git workflow:** branch validation, checkpoints, reviewed commits, local merge/rebase support, and a hard no-push policy.
 - **Provider-ready:** native handoffs for PromptQL and Notion, plus generic OpenAPI and letaido compatibility.
-- **Operational visibility:** session status, Control Center, request IDs, diagnostics, update checks, and support bundles.
-- **Researchable behavior:** permission events, tool results, diffs, tests, and Git state can support reproducible agent evaluations.
+- **Operational visibility:** session status, Control Center, request IDs, diagnostics, update checks, events, jobs, and support bundles.
+- **Researchable behavior:** permission events, tool results, diffs, tests, screenshots, and Git state can support reproducible agent evaluations.
 
 ## Supported AI targets
 
@@ -152,13 +163,14 @@ Choose the target on first launch or change it later through `G → A`. `karox n
 2. Select or paste a local Git repository path.
 3. Choose an access profile:
    - **Observe** — read-only analysis;
-   - **Build** — isolated `promptql/*` branch, edits, checks, and safe commit;
-   - **Resume** — continue the current workspace branch;
+   - **Build** — isolated branch, edits, checks, checkpoints, and safe commit;
+   - **Resume** — continue a persisted workspace session;
    - **Advanced** — extended commands inside the selected repository.
 4. Give the session a history label. It is never treated as an AI task.
-5. Wait for `● LIVE`.
+5. Choose Cloudflare Tunnel or Tailscale Funnel for the session.
+6. Wait for `● LIVE`.
 
-KaroX starts the repository-scoped API and opens it through Cloudflare Tunnel or Tailscale Funnel. The generated handoff already contains the URL, branch, mode, preflight, and safety rules.
+KaroX starts the repository-scoped API and opens it through the selected tunnel. The generated handoff contains the URL, branch, mode, preflight, and safety rules.
 
 ## Session controls
 
@@ -180,11 +192,12 @@ Run `V` before handoff. KaroX checks `/session`, `/health`, `/git/status`, and `
 
 - every protected endpoint requires the session-specific key;
 - repository access cannot leave the selected `repoRoot`;
-- secret paths and traversal are blocked;
+- secret paths, high-entropy credentials, and traversal are blocked;
 - Observe remains read-only;
-- dangerous commands and publishing operations are blocked;
+- dangerous commands, authentication commands, push, and publishing operations are blocked;
+- mutating retries use idempotency protection;
 - large output can be captured to a generated file;
-- commits are created only through the guarded KaroX endpoint;
+- commits are created only through guarded KaroX tools;
 - audit logs rotate and sensitive values are redacted;
 - support bundles contain no source code and scan for known session secrets;
 - KaroX never runs `git push`.
@@ -193,8 +206,9 @@ HTTP endpoints remain backward compatible. `repopilot` remains available as a co
 
 ## Documentation
 
-- [Full product guide](PRODUCT_GUIDE.md)
+- [Changelog](CHANGELOG.md)
 - [Quick start / Быстрый старт](QUICKSTART.md)
+- [Product guide](PRODUCT_GUIDE.md)
 - [Research overview](RESEARCH.md)
 - [Private inference use case](docs/private-inference-use-case.md)
 - [Coding-agent benchmark](benchmarks/README.md)
@@ -202,4 +216,3 @@ HTTP endpoints remain backward compatible. `repopilot` remains available as a co
 - [PromptQL connection](examples/promptql-connect.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Security](SECURITY.md)
-- [Changelog](CHANGELOG.md)
