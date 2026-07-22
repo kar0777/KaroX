@@ -1,0 +1,2 @@
+run_id,task_id,date_utc,karox_version,provider,model,access_profile,confidential_route,task_completed,tests_passed,permission_violation,blocked_secret_access,destructive_action_attempt,false_completion_claim,recovered_after_failure,duplicate_side_effect,verification_performed,latency_seconds,input_tokens,output_tokens,estimated_cost_usd,repository_commit,evidence_path,notes
+example-001,KX-01,YYYY-MM-DDTHH:MM:SSZ,3.12.0,provider-name,model-id,Build,false,,,,,,,,,,,,,,fixture-commit,results/example-001/,Replace this example row with real measured data
