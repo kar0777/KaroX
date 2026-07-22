@@ -1,10 +1,10 @@
 <div align="center">
 
-# ★ Star For KaroX
+# KaroX
 
-### Your local code. Your rules. AI that arrives with the right context.
+### Controlled local tooling for AI coding agents
 
-**KaroX turns a local Git repository into a secure workspace for PromptQL, Notion Custom Agents, and other AI clients.**
+**KaroX turns a selected local Git repository into a guarded workspace where compatible AI clients can inspect context, perform approved development actions, run checks, review changes, and produce evidence-backed completion reports.**
 
 [![Release](https://img.shields.io/badge/release-v3.12.0-7C3AED)](https://github.com/kar0777/KaroX/releases/latest)
 [![Notion](https://img.shields.io/badge/Notion-Custom%20Agent-000000?logo=notion)](NOTION.md)
@@ -14,9 +14,40 @@
 [![Quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/quality.yml)
 [![CodeQL](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml)
 
-[Quick start](QUICKSTART.md) · [Product guide](PRODUCT_GUIDE.md) · [Notion setup](NOTION.md) · [Русская версия](README_RU.md) · [Security](SECURITY.md)
+[Quick start](QUICKSTART.md) · [Product guide](PRODUCT_GUIDE.md) · [Research](RESEARCH.md) · [Private inference use case](docs/private-inference-use-case.md) · [Benchmark plan](benchmarks/README.md) · [Русская версия](README_RU.md)
 
 </div>
+
+## What KaroX does today
+
+KaroX is an engineering project, not a mockup. The current release provides:
+
+- repository-scoped API and MCP sessions;
+- explicit Observe, Build, Resume, and Advanced access profiles;
+- protected endpoints using a session-specific key;
+- repository path confinement and sensitive-file filtering;
+- guarded development commands and local commits;
+- a hard no-push policy;
+- preflight checks, diagnostics, request IDs, audit logs, and a live Control Center;
+- source-free redacted support bundles;
+- Windows, macOS, and Linux support with CI and CodeQL coverage.
+
+These controls govern the local bridge. They do not automatically guarantee that a connected model provider offers private or confidential inference.
+
+## Research track: confidential inference
+
+KaroX may send approved source fragments, repository structure, build errors, test output, diffs, and tool results to a model. For private or unreleased code, the provider-side processing boundary matters as much as local access control.
+
+The confidential-inference research track evaluates whether KaroX can preserve its coding-agent workflow while using a provider that offers hardware-backed protected execution or comparable controls. The work will measure API compatibility, structured output, tool use, failure recovery, verification, latency, cost, retention boundaries, and attestation claims.
+
+This is a **research and integration track**, not a claim that every current KaroX connection is confidential. Provider claims will be separated from properties that can be independently verified.
+
+- [Concrete private-inference use case and threat model](docs/private-inference-use-case.md)
+- [Ten-task coding-agent safety benchmark](benchmarks/README.md)
+- [Per-run result template](benchmarks/results-template.csv)
+- [Research overview and integrity rules](RESEARCH.md)
+
+A video is not required to inspect the proposed demonstration. The benchmark documentation includes a text-only reproducible scenario based on diffs, test output, redacted logs, permission events, and Git state.
 
 ## Install in one command
 
@@ -96,12 +127,13 @@ The Notion agent receives purpose-built tools for repository context, file opera
 
 ## Why KaroX
 
-- **Local-first:** your source stays on your machine; each server is scoped to the repository you selected.
+- **Local-first:** your source stays on your machine until approved context is sent to a connected client or model endpoint; each server is scoped to the repository you selected.
 - **Explicit access:** Observe, Build, Resume, and Advanced profiles expose the real permission level.
-- **Context before action:** Mission Control gives the agent a fresh, secret-free operating brief.
+- **Context before action:** Mission Control gives the agent a fresh, secret-filtered operating brief.
 - **Safe Git workflow:** branch validation, generated-file cleanup, reviewed commits, and a hard no-push policy.
 - **Provider-ready:** native handoffs for PromptQL and Notion, plus generic OpenAPI and letaido compatibility.
 - **Operational visibility:** session status, Control Center, request IDs, diagnostics, update checks, and support bundles.
+- **Researchable behavior:** permission events, tool results, diffs, tests, and Git state can support reproducible agent evaluations.
 
 ## Supported AI targets
 
@@ -163,6 +195,9 @@ HTTP endpoints remain backward compatible. `repopilot` remains available as a co
 
 - [Full product guide](PRODUCT_GUIDE.md)
 - [Quick start / Быстрый старт](QUICKSTART.md)
+- [Research overview](RESEARCH.md)
+- [Private inference use case](docs/private-inference-use-case.md)
+- [Coding-agent benchmark](benchmarks/README.md)
 - [Notion Custom Agent provider](NOTION.md)
 - [PromptQL connection](examples/promptql-connect.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
