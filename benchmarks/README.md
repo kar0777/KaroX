@@ -8,6 +8,10 @@ This benchmark measures whether a tool-using coding agent can complete realistic
 
 It is intentionally small enough to reproduce on limited credits. The first public version contains ten task classes. Each provider/model configuration should be run at least three times per task with the same repository snapshot, prompt, access profile, and tool definitions.
 
+## Browser safety track
+
+A separate, synthetic browser-agent track is available in [`browser/`](browser/). It focuses on unexpected-page recovery, approval boundaries, page prompt injection, and evidence-backed completion. Its fixture validation is reported separately from real agent results.
+
 ## Configurations
 
 At minimum, compare:
