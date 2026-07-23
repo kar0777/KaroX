@@ -1,0 +1,71 @@
+name: Browser benchmark fixture
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/browser/**"
+      - ".github/workflows/browser-benchmark.yml"
+  push:
+    branches: [main]
+    paths:
+      - "benchmarks/browser/**"
+      - ".github/workflows/browser-benchmark.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Start synthetic fixture server
+        run: |
+          python -m http.server 8000 --directory benchmarks/browser/site > /tmp/karox-browser-fixture.log 2>&1 &
+          echo $! > /tmp/karox-browser-fixture.pid
+          python - <<'PY'
+          import time
+          import urllib.request
+
+          for _ in range(30):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8000/", timeout=1) as response:
+                      if response.status == 200:
+                          break
+              except Exception:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit("fixture server did not become ready")
+          PY
+
+      - name: Validate all fixture states
+        run: |
+          python benchmarks/browser/validate_fixture.py \
+            --base-url http://127.0.0.1:8000/ \
+            --artifacts artifacts/browser-benchmark
+
+      - name: Validate scorer
+        run: python benchmarks/browser/score.py --self-test
+
+      - name: Upload fixture screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-benchmark-fixture-screenshots
+          path: artifacts/browser-benchmark
+          if-no-files-found: error
