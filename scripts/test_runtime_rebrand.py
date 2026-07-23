@@ -61,7 +61,12 @@ def main() -> int:
     assert "function Set-KaroXPath" in installer
     assert "function Write-LegacyForwarder" in installer
     assert "function Move-OutOf-AppDirectory" in installer
-    assert "Move-OutOf-AppDirectory\n    if (Test-Path -LiteralPath $AppDir)" in installer
+    promote_start = installer.index("function Promote-StagedApp")
+    promote_end = installer.index("function Schedule-LegacyCleanup", promote_start)
+    promote_body = installer[promote_start:promote_end]
+    move_out = promote_body.index("Move-OutOf-AppDirectory")
+    activate = promote_body.index("if (Test-Path -LiteralPath $AppDir)")
+    assert move_out < activate
     assert "@($BinDir) + $userItems" in installer
     assert "KaroX\\bin\\karox.ps1" in installer
     assert "Where-Object { `$_.Name -ne 'bin' }" in installer

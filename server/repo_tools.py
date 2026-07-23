@@ -33,7 +33,10 @@ def text_env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 REPO_ROOT = Path(text_env("REPO_ROOT")).resolve()
-API_KEY = os.environ["REPO_TOOLS_API_KEY"]
+# Importing the module is useful for schema generation and test discovery.  An
+# absent key must therefore not crash the import, but it must also never make an
+# unauthenticated request valid (see ``check_auth`` below).
+API_KEY = os.environ.get("REPO_TOOLS_API_KEY", "")
 INITIAL_MODE = os.environ.get("REPO_TOOLS_MODE", "read_only").lower()
 INITIAL_BRANCH = os.environ.get("REPO_TOOLS_BRANCH", "")
 INITIAL_SESSION_TITLE = text_env("REPO_TOOLS_SESSION_TITLE", os.environ.get("REPO_TOOLS_TASK", ""))
@@ -316,7 +319,7 @@ def normalize_supplied_api_key(value: Optional[str]) -> str:
 
 def check_auth(x_api_key: Optional[str]):
     supplied = normalize_supplied_api_key(x_api_key)
-    if supplied != API_KEY:
+    if not API_KEY or not supplied or supplied != API_KEY:
         audit("auth_failed", {
             "hasCredential": bool(supplied),
             "credentialLength": len(supplied),

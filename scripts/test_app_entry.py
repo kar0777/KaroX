@@ -16,6 +16,38 @@ def main() -> int:
         repo.mkdir()
         subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
 
+        # Schema tooling and test discovery must be able to import the app
+        # without a configured credential.  The resulting server must still
+        # fail closed: an empty configured key never authorizes a request.
+        keyless_env = os.environ.copy()
+        keyless_env.pop("REPO_TOOLS_API_KEY", None)
+        keyless_env.update(
+            {
+                "PYTHONPATH": str(root / "server"),
+                "REPO_ROOT": str(repo),
+                "REPO_TOOLS_HOME": str(temp / "keyless-runtime"),
+                "REPO_TOOLS_LOG_FILE": str(temp / "keyless-runtime" / "audit.jsonl"),
+                "REPO_TOOLS_RUNS_DIR": str(repo / ".promptql" / "keyless-runs"),
+            }
+        )
+        keyless_probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from fastapi.testclient import TestClient; "
+                    "import app_entry, repo_tools; "
+                    "assert repo_tools.API_KEY == ''; "
+                    "response = TestClient(app_entry.app, raise_server_exceptions=False).get('/capabilities'); "
+                    "assert response.status_code == 401, response.text"
+                ),
+            ],
+            env=keyless_env,
+            capture_output=True,
+            text=True,
+        )
+        assert keyless_probe.returncode == 0, keyless_probe.stderr
+
         os.environ["REPO_ROOT"] = str(repo)
         os.environ["REPO_TOOLS_API_KEY"] = "test-session-key-abcdefghijklmnopqrstuvwxyz"
         os.environ["REPO_TOOLS_MODE"] = "read_only"
