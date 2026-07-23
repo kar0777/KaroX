@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import json
+import math
+import unittest
+from typing import Iterator
+from unittest.mock import patch
+
+import httpx
+
+from _support import SRC  # noqa: F401
+from karox.providers import (
+    ModelEventKind,
+    ModelMessage,
+    ModelRequest,
+    OpenAIChatCompletionsProvider,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderTool,
+    ToolCall,
+)
+
+
+def sse_response(
+    events: list[object],
+    *,
+    done: bool = True,
+    status: int = 200,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    records = []
+    for event in events:
+        data = event if isinstance(event, str) else json.dumps(event)
+        records.append(f"data: {data}\n\n")
+    if done:
+        records.append("data: [DONE]\n\n")
+    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    response_headers = {"Content-Type": "text/event-stream", **(headers or {})}
+    return httpx.Response(
+        status,
+        request=request,
+        content="".join(records).encode("utf-8"),
+        headers=response_headers,
+    )
+
+
+def error_response(status: int, body: str, **headers: str) -> httpx.Response:
+    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx.Response(
+        status,
+        request=request,
+        text=body,
+        headers=headers,
+    )
+
+
+class FakeStreamContext:
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+
+    def __enter__(self) -> httpx.Response:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        assert isinstance(self.outcome, httpx.Response)
+        return self.outcome
+
+    def __exit__(self, *args: object) -> None:
+        if isinstance(self.outcome, httpx.Response):
+            self.outcome.close()
+        return None
+
+
+class FakeClient:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[dict[str, object]] = []
+
+    def __enter__(self) -> "FakeClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def stream(self, method: str, url: str, **kwargs: object) -> FakeStreamContext:
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return FakeStreamContext(self.outcomes.pop(0))
+
+
+class InterruptedStream(httpx.SyncByteStream):
+    def __init__(self, request: httpx.Request) -> None:
+        self.request = request
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b'data: {"id":"partial","choices":[{"delta":{"content":"part"}}]}\n\n'
+        raise httpx.ReadError("stream broke", request=self.request)
+
+
+class OpenAIChatCompletionsProviderTests(unittest.TestCase):
+    def request(self, *, deadline_seconds: float = 2.0) -> ModelRequest:
+        return ModelRequest(
+            model="test-model",
+            messages=(
+                ModelMessage("system", "bounded"),
+                ModelMessage(
+                    "assistant",
+                    None,
+                    (ToolCall("old-call", "repo_read_file", '{"path":"a.txt"}'),),
+                ),
+                ModelMessage("tool", '{"ok":true}', tool_call_id="old-call"),
+            ),
+            tools=(
+                ProviderTool(
+                    "repo_read_file",
+                    "Read a file",
+                    {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                ),
+            ),
+            temperature=0.2,
+            max_output_tokens=123,
+            deadline_seconds=deadline_seconds,
+        )
+
+    @staticmethod
+    def fragmented_events() -> list[object]:
+        return [
+            {
+                "id": "response-1",
+                "choices": [{"delta": {"content": "work"}, "finish_reason": None}],
+            },
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "ing",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "repo_write_",
+                                        "arguments": '{"path":"a.txt",',
+                                    },
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call-2",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "git_",
+                                        "arguments": "{",
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "response-1",
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "1",
+                                    "function": {
+                                        "name": "file",
+                                        "arguments": '"content":"after"}',
+                                    },
+                                },
+                                {
+                                    "index": 1,
+                                    "function": {
+                                        "name": "status",
+                                        "arguments": "}",
+                                    },
+                                },
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "response-1",
+                "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+            },
+            {
+                "id": "response-1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "ignored_boolean": True,
+                    "ignored_negative": -1,
+                },
+            },
+        ]
+
+    def test_normalizes_streamed_request_tools_content_calls_and_usage(self) -> None:
+        client = FakeClient([sse_response(self.fragmented_events())])
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1/",
+            credential=lambda: "harmless-test-key",
+            headers={"X-Tenant": "local"},
+            query={"api-version": "2026-01-01"},
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(
+            client.calls[0]["url"],
+            "https://provider.example/v1/chat/completions?api-version=2026-01-01",
+        )
+        self.assertEqual(client.calls[0]["method"], "POST")
+        headers = client.calls[0]["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer harmless-test-key")
+        self.assertEqual(headers["Accept"], "text/event-stream")
+        payload = client.calls[0]["json"]
+        self.assertIs(payload["stream"], True)
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
+        self.assertEqual(payload["messages"][1]["tool_calls"][0]["id"], "old-call")
+        self.assertEqual(payload["messages"][2]["tool_call_id"], "old-call")
+        self.assertEqual(payload["tools"][0]["function"]["name"], "repo_read_file")
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertEqual(payload["max_tokens"], 123)
+        self.assertEqual(result.content, "working")
+        self.assertEqual(result.response_id, "response-1")
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.transport_attempts, 1)
+        self.assertEqual(result.usage, {"prompt_tokens": 10, "completion_tokens": 4})
+        self.assertEqual(
+            result.tool_calls,
+            (
+                ToolCall(
+                    "call-1",
+                    "repo_write_file",
+                    '{"path":"a.txt","content":"after"}',
+                ),
+                ToolCall("call-2", "git_status", "{}"),
+            ),
+        )
+
+    def test_stream_exposes_normalized_delta_and_completion_events(self) -> None:
+        client = FakeClient([sse_response(self.fragmented_events())])
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            events = list(provider.stream(self.request()))
+
+        self.assertEqual(events[0].kind, ModelEventKind.TEXT_DELTA)
+        deltas = [
+            item.tool_call_delta
+            for item in events
+            if item.kind == ModelEventKind.TOOL_CALL_DELTA
+        ]
+        self.assertEqual([item.index for item in deltas if item is not None], [0, 1, 0, 1])
+        self.assertEqual(events[-2].kind, ModelEventKind.USAGE)
+        self.assertEqual(events[-1].kind, ModelEventKind.COMPLETION)
+        self.assertEqual(events[-1].finish_reason, "tool_calls")
+
+    def test_retries_only_transport_errors_before_response(self) -> None:
+        request = httpx.Request("POST", "https://provider.example")
+        client = FakeClient(
+            [
+                httpx.ConnectError("temporary", request=request),
+                sse_response(
+                    [
+                        {
+                            "choices": [
+                                {"delta": {"content": "done"}, "finish_reason": "stop"}
+                            ]
+                        }
+                    ]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1",
+            max_transport_retries=1,
+            retry_backoff_seconds=0,
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+        self.assertEqual(result.content, "done")
+        self.assertEqual(result.transport_attempts, 2)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_retry_respects_request_deadline(self) -> None:
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        request = httpx.Request("POST", "https://provider.example")
+        client = FakeClient([httpx.ConnectError(f"failed {secret}", request=request)])
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1",
+            max_transport_retries=2,
+            retry_backoff_seconds=1,
+        )
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            patch("karox.providers.time.monotonic", return_value=100.0),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(self.request(deadline_seconds=0.05))
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.TRANSPORT)
+        self.assertIn("deadline", raised.exception.safe_message)
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_classifies_http_errors_without_exposing_response_body(self) -> None:
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        cases = {
+            401: ProviderErrorKind.AUTHENTICATION,
+            403: ProviderErrorKind.PERMISSION,
+            404: ProviderErrorKind.MODEL_UNAVAILABLE,
+            422: ProviderErrorKind.INVALID_REQUEST,
+            429: ProviderErrorKind.RATE_LIMIT,
+            503: ProviderErrorKind.PROVIDER_INTERNAL,
+        }
+        for status, kind in cases.items():
+            with self.subTest(status=status):
+                client = FakeClient(
+                    [
+                        error_response(
+                            status,
+                            json.dumps({"error": secret}),
+                            **{"Retry-After": "2.5"},
+                        )
+                    ]
+                )
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                with (
+                    patch("karox.providers.httpx.Client", return_value=client),
+                    self.assertRaises(ProviderError) as raised,
+                ):
+                    provider.complete(self.request())
+                self.assertEqual(raised.exception.kind, kind)
+                self.assertEqual(raised.exception.status_code, status)
+                self.assertNotIn(secret, str(raised.exception))
+                if status == 429:
+                    self.assertEqual(raised.exception.retry_after, 2.5)
+
+    def test_rejects_malformed_sse_json_and_event_schema(self) -> None:
+        malformed = (
+            "not-json",
+            [],
+            {},
+            {"choices": "invalid"},
+            {"choices": [{"delta": {"content": 42}}]},
+            {
+                "choices": [
+                    {"delta": {"tool_calls": [{"index": True, "function": {}}]}}
+                ]
+            },
+            {"choices": [], "usage": []},
+        )
+        for event in malformed:
+            with self.subTest(event=event):
+                client = FakeClient([sse_response([event])])
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                with (
+                    patch("karox.providers.httpx.Client", return_value=client),
+                    self.assertRaises(ProviderError) as raised,
+                ):
+                    provider.complete(self.request())
+                self.assertEqual(
+                    raised.exception.kind, ProviderErrorKind.MALFORMED_RESPONSE
+                )
+
+    def test_missing_done_is_interrupted_transport_and_is_not_retried(self) -> None:
+        client = FakeClient(
+            [
+                sse_response(
+                    [{"choices": [{"delta": {}, "finish_reason": "stop"}]}],
+                    done=False,
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=3
+        )
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(self.request())
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.TRANSPORT)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_read_error_after_first_event_is_not_retried(self) -> None:
+        request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+        interrupted = httpx.Response(
+            200,
+            request=request,
+            headers={"Content-Type": "text/event-stream"},
+            stream=InterruptedStream(request),
+        )
+        client = FakeClient([interrupted])
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=3
+        )
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(self.request())
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.TRANSPORT)
+        self.assertIn("interrupted", raised.exception.safe_message)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_ignores_non_finite_retry_after(self) -> None:
+        for raw_value in ("nan", "inf", "-inf"):
+            with self.subTest(raw_value=raw_value):
+                item = error_response(429, "rate limited", **{"Retry-After": raw_value})
+                error = OpenAIChatCompletionsProvider._http_error(item)
+                self.assertIsNone(error.retry_after)
+                self.assertFalse(
+                    error.retry_after is not None and math.isfinite(error.retry_after)
+                )
+
+    def test_validates_numeric_configuration_types(self) -> None:
+        invalid = (
+            {"timeout_seconds": True},
+            {"timeout_seconds": "1"},
+            {"max_transport_retries": True},
+            {"max_transport_retries": 1.5},
+            {"retry_backoff_seconds": False},
+            {"retry_backoff_seconds": "0.1"},
+        )
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                OpenAIChatCompletionsProvider(
+                    "https://provider.example/v1", **options  # type: ignore[arg-type]
+                )
+
+    def test_credentials_require_https_or_an_http_loopback_endpoint(self) -> None:
+        credential = lambda: "harmless-test-key"
+        for base_url in (
+            "http://localhost:8080/v1",
+            "http://127.42.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                provider = OpenAIChatCompletionsProvider(
+                    base_url, credential=credential
+                )
+                self.assertEqual(
+                    provider._request_headers()["Authorization"],
+                    "Bearer harmless-test-key",
+                )
+
+        for base_url in (
+            "http://provider.example/v1",
+            "http://localhost.example/v1",
+        ):
+            with self.subTest(base_url=base_url), self.assertRaisesRegex(
+                ValueError, "HTTPS or a loopback"
+            ):
+                OpenAIChatCompletionsProvider(base_url, credential=credential)
+
+        provider = OpenAIChatCompletionsProvider("http://provider.example/v1")
+        self.assertEqual(
+            provider.endpoint, "http://provider.example/v1/chat/completions"
+        )
+
+    def test_validates_credential_header_query_and_accessor_boundaries(self) -> None:
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        with self.assertRaisesRegex(ValueError, "without credentials"):
+            OpenAIChatCompletionsProvider("https://user:pass@provider.example/v1")
+        with self.assertRaisesRegex(ValueError, "query cannot contain credentials"):
+            OpenAIChatCompletionsProvider(
+                "https://provider.example/v1", query={"api_key": "value"}
+            )
+        with self.assertRaisesRegex(ValueError, "headers cannot contain credentials"):
+            OpenAIChatCompletionsProvider(
+                "https://provider.example/v1", headers={"Authorization": "value"}
+            )
+        with self.assertRaisesRegex(ValueError, "headers cannot contain credentials"):
+            OpenAIChatCompletionsProvider(
+                "https://provider.example/v1", headers={"X-Trace": secret}
+            )
+
+        def fail() -> str:
+            raise RuntimeError(f"accessor leaked {secret}")
+
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", credential=fail
+        )
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(self.request())
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.AUTHENTICATION)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(secret, raised.exception.safe_message)
+
+
+if __name__ == "__main__":
+    unittest.main()

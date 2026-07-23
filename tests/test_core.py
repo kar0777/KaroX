@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _support import SRC, initialize_git_repository
 from karox.core import CoreError, CoreRuntime, InvalidCommand, InvalidPath
@@ -181,6 +183,63 @@ class CoreRuntimeTests(unittest.TestCase):
         with self.assertRaises(IdempotencyConflict):
             self.execute_mutation(conflict)
 
+    def test_file_hashes_are_byte_accurate_and_noop_writes_are_not_changes(self) -> None:
+        raw = b"first\r\nsecond\r\n"
+        (self.repository / "sample.txt").write_bytes(raw)
+        read = self.runtime.execute(
+            self.command("repo.read_file", {"path": "sample.txt"})
+        )
+        digest = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(read.data["sha256"], digest)
+        self.assertEqual(read.data["bytes"], len(raw))
+
+        noop = self.execute_mutation(
+            self.command(
+                "repo.write_file",
+                {"path": "sample.txt", "content": raw.decode("utf-8")},
+                key="noop-write",
+            )
+        )
+        self.assertFalse(noop.data["changed"])
+        self.assertEqual(noop.data["previous_sha256"], digest)
+        self.assertEqual(noop.data["sha256"], digest)
+        self.assertEqual(self.sessions.load("session").changed_files, [])
+
+        changed = self.execute_mutation(
+            self.command(
+                "repo.write_file",
+                {"path": "sample.txt", "content": "changed\n"},
+                key="changed-write",
+            )
+        )
+        self.assertTrue(changed.data["changed"])
+        self.assertEqual(changed.data["previous_sha256"], digest)
+        self.assertEqual(self.sessions.load("session").changed_files, ["sample.txt"])
+
+    def test_git_status_and_diff_are_evidence_backed_and_fail_closed(self) -> None:
+        status = self.runtime.execute(self.command("git.status", {}))
+        diff = self.runtime.execute(self.command("git.diff", {}))
+        self.assertTrue(status.ok)
+        self.assertTrue(diff.ok)
+        self.assertEqual(status.evidence[0].kind, "git_status")
+        self.assertEqual(diff.evidence[0].kind, "git_diff")
+        self.assertEqual(status.evidence[0].artifact_sha256, status.data["sha256"])
+        self.assertEqual(diff.evidence[0].artifact_sha256, diff.data["sha256"])
+
+        failed_result = {
+            "argv": ["git", "status", "--short", "--branch"],
+            "exit_code": 128,
+            "stdout": "",
+            "stderr": "not a repository",
+            "timed_out": False,
+            "duration_ms": 1.0,
+        }
+        with patch.object(self.runtime, "_run", return_value=failed_result):
+            failed = self.runtime.execute(self.command("git.status", {}))
+        self.assertFalse(failed.ok)
+        self.assertEqual(failed.evidence[0].exit_code, 128)
+        self.assertIn("Failed", failed.evidence[0].summary)
+
     def test_failed_and_timed_out_checks_are_evidence_backed(self) -> None:
         failed = self.execute_mutation(
             self.command(
@@ -207,6 +266,19 @@ class CoreRuntimeTests(unittest.TestCase):
         self.assertTrue(timed_out.data["timed_out"])
         checks = self.sessions.load("session").checks
         self.assertEqual([item["ok"] for item in checks], [False, False])
+
+    def test_process_output_limit_is_measured_in_utf8_bytes(self) -> None:
+        self.runtime.MAX_OUTPUT_BYTES = 5
+        with patch("karox.core.subprocess.run") as run:
+            run.return_value.stdout = "a🙂🙂"
+            run.return_value.stderr = "ééé"
+            run.return_value.returncode = 0
+            result = self.runtime._run(["harmless-check"], 1.0)
+
+        self.assertEqual(result["stdout"], "🙂")
+        self.assertEqual(result["stderr"], "éé")
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")), 5)
+        self.assertLessEqual(len(result["stderr"].encode("utf-8")), 5)
 
     def test_non_finite_check_timeouts_are_rejected_without_pending_intent(self) -> None:
         for index, timeout in enumerate((float("nan"), float("inf"), float("-inf"))):

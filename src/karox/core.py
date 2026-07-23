@@ -229,9 +229,10 @@ class CoreRuntime:
             )
             raise
         evidence = list(data.pop("_evidence", []))
+        process_result = command.name in {"checks.run", "git.status", "git.diff"}
         result = CoreResult(
             ok=not (
-                command.name == "checks.run"
+                process_result
                 and (data.get("timed_out") or data.get("exit_code") != 0)
             ),
             command=command.name,
@@ -315,7 +316,11 @@ class CoreRuntime:
         record.evidence.extend(item.to_dict() for item in result.evidence)
         if command.name == "repo.write_file":
             path = result.data.get("path")
-            if isinstance(path, str) and path not in record.changed_files:
+            if (
+                result.data.get("changed") is True
+                and isinstance(path, str)
+                and path not in record.changed_files
+            ):
                 record.changed_files.append(path)
         if command.name == "checks.run":
             record.checks.append(
@@ -400,20 +405,49 @@ class CoreRuntime:
         if size > self.MAX_FILE_BYTES:
             raise CoreError(f"file is larger than {self.MAX_FILE_BYTES} bytes")
         try:
-            content = path.read_text(encoding="utf-8")
+            raw_content = path.read_bytes()
+            content = raw_content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CoreError("repo.read_file supports UTF-8 text only") from exc
         return {
             "path": path.relative_to(self.repository).as_posix(),
-            "content": content,
+            "content": str(redact(content)),
             "bytes": size,
-            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "sha256": hashlib.sha256(raw_content).hexdigest(),
         }
 
     def _write_file(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
         relative, encoded, path = self._prepare_write(arguments)
+        digest = hashlib.sha256(encoded).hexdigest()
+        previous_digest: Optional[str] = None
+        changed = True
+        if path.exists():
+            if not path.is_file():
+                raise CoreError("repo.write_file target is not a regular file")
+            previous_digest = self._file_sha256(path)
+            changed = previous_digest != digest or path.stat().st_size != len(encoded)
+        if not changed:
+            return {
+                "path": path.relative_to(self.repository).as_posix(),
+                "bytes": len(encoded),
+                "changed": False,
+                "previous_sha256": previous_digest,
+                "sha256": digest,
+                "_evidence": [
+                    EvidenceRecord(
+                        kind="file_write",
+                        summary=f"No change to {relative}",
+                        artifact_sha256=digest,
+                        metadata={
+                            "path": relative,
+                            "bytes": len(encoded),
+                            "changed": False,
+                        },
+                    )
+                ],
+            }
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
@@ -427,20 +461,33 @@ class CoreRuntime:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
-        digest = hashlib.sha256(encoded).hexdigest()
         return {
             "path": path.relative_to(self.repository).as_posix(),
             "bytes": len(encoded),
+            "changed": True,
+            "previous_sha256": previous_digest,
             "sha256": digest,
             "_evidence": [
                 EvidenceRecord(
                     kind="file_write",
                     summary=f"Wrote {relative}",
                     artifact_sha256=digest,
-                    metadata={"path": relative, "bytes": len(encoded)},
+                    metadata={
+                        "path": relative,
+                        "bytes": len(encoded),
+                        "changed": True,
+                    },
                 )
             ],
         }
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _prepare_write(
         self, arguments: Dict[str, Any]
@@ -551,23 +598,38 @@ class CoreRuntime:
         except subprocess.TimeoutExpired as exc:
             completed = None
             timed_out = True
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            stdout = self._process_output_text(exc.stdout)
+            stderr = self._process_output_text(exc.stderr)
         if completed is not None:
-            stdout, stderr = completed.stdout, completed.stderr
+            stdout = self._process_output_text(completed.stdout)
+            stderr = self._process_output_text(completed.stderr)
             exit_code: Optional[int] = completed.returncode
         else:
             exit_code = None
-        stdout = stdout[-self.MAX_OUTPUT_BYTES :]
-        stderr = stderr[-self.MAX_OUTPUT_BYTES :]
+        stdout = self._truncate_output(str(redact(stdout)))
+        stderr = self._truncate_output(str(redact(stderr)))
         return {
             "argv": redact(argv),
             "exit_code": exit_code,
-            "stdout": redact(stdout),
-            "stderr": redact(stderr),
+            "stdout": stdout,
+            "stderr": stderr,
             "timed_out": timed_out,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+
+    @staticmethod
+    def _process_output_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return ""
+
+    def _truncate_output(self, value: str) -> str:
+        encoded = value.encode("utf-8")
+        if len(encoded) <= self.MAX_OUTPUT_BYTES:
+            return value
+        return encoded[-self.MAX_OUTPUT_BYTES :].decode("utf-8", errors="ignore")
 
     def _run_check(
         self, arguments: Dict[str, Any], deadline_seconds: float
@@ -598,18 +660,31 @@ class CoreRuntime:
             raise InvalidCommand("timeout_seconds must be positive")
         return argv, min(timeout, deadline_seconds)
 
-    def _git(self, arguments: List[str]) -> Dict[str, Any]:
-        result = self._run(["git", *arguments], 60.0)
-        if result["timed_out"]:
-            raise CoreError("Git command timed out")
-        return result
+    def _git(self, arguments: List[str], deadline_seconds: float) -> Dict[str, Any]:
+        return self._run(["git", *arguments], min(60.0, deadline_seconds))
+
+    @staticmethod
+    def _git_evidence(kind: str, result: Dict[str, Any]) -> EvidenceRecord:
+        digest = hashlib.sha256(result["stdout"].encode("utf-8")).hexdigest()
+        result["sha256"] = digest
+        return EvidenceRecord(
+            kind=kind,
+            summary=("Read" if result["exit_code"] == 0 else "Failed to read")
+            + f" {kind.replace('_', ' ')}",
+            command=result["argv"],
+            exit_code=result["exit_code"],
+            artifact_sha256=digest,
+            metadata={"timed_out": result["timed_out"]},
+        )
 
     def _git_status(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
         if arguments:
             raise InvalidCommand("git.status takes no arguments")
-        return self._git(["status", "--short", "--branch"])
+        result = self._git(["status", "--short", "--branch"], deadline_seconds)
+        result["_evidence"] = [self._git_evidence("git_status", result)]
+        return result
 
     def _git_diff(
         self, arguments: Dict[str, Any], deadline_seconds: float
@@ -620,8 +695,8 @@ class CoreRuntime:
         command = ["diff", "--no-ext-diff"]
         if staged:
             command.append("--cached")
-        result = self._git(command)
-        result["sha256"] = hashlib.sha256(result["stdout"].encode("utf-8")).hexdigest()
+        result = self._git(command, deadline_seconds)
+        result["_evidence"] = [self._git_evidence("git_diff", result)]
         return result
 
     def _audit(self, event: str, data: Dict[str, Any]) -> None:
