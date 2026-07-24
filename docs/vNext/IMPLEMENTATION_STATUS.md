@@ -12,7 +12,7 @@ Base: `main` at `a5c233a`
 | 1 — foundation | Complete | 25 discoverable tests cover Core, policy, sessions, migration, and CLI |
 | 2 — native vertical slice | Complete | 52 tests plus a subprocess CLI E2E cover provider → agent → Core → verification |
 | 3 — providers/credentials | Complete | 99 tests cover adapters, registry, keyring references, routing, fallback, and budgets |
-| 4 — Skills | Not started | — |
+| 4 — Skills | Complete | 119 tests cover secure discovery, lazy loading, permissions, CLI, and Agent integration |
 | 5 — MCP client | Not started | — |
 | 6 — unified handoff | Not started | — |
 | 7 — MCP proxy/bridges | Not started | — |
@@ -309,7 +309,7 @@ Security boundaries, known problems, and migration risks:
 - A single provider response can cross a remaining budget because authoritative
   usage is known only after the response. The response is recorded and its tool
   calls are not executed; later provider calls are blocked.
-- Context compaction, long-term provider health scoring, Skills, MCP client/proxy,
+- Context compaction, long-term provider health scoring, MCP client/proxy,
   unified cross-provider handoff, Packs, and TUI remain pending.
 - Existing Notion behavior and legacy bridge paths were not modified. HyperAgent
   and PromptQL remain experimental.
@@ -326,6 +326,90 @@ Next actions for Phase 4:
    the origin-aware Core boundary.
 5. Add CLI, unit coverage, and a permission-bypass integration/E2E test.
 
+## Phase 4 — Skills
+
+Completed:
+
+- Added deterministic Skill discovery with this precedence: repository
+  `.karox/skills`, `.agents/skills`, `.claude/skills`, explicitly configured
+  directories in declaration order, then the global KaroX directory. Shadowed
+  and rejected candidates produce diagnostics instead of silently replacing a
+  higher-precedence Skill.
+- Kept discovery metadata-only. `skill list` and `skill show` do not read the
+  instruction body or referenced files; `skill load` and an explicitly selected
+  Agent Skill are the only paths that load content.
+- Added strict YAML/frontmatter, semantic-version, known-tool, capability, and
+  reference validation. YAML aliases and duplicate keys are rejected, and
+  falsey values with the wrong type cannot masquerade as empty lists.
+- Confined every Skill to its selected source and rejected linked/reparse-point
+  source directories, Skill directories, manifests, and references. Content is
+  identity-checked before, during, and after reads to detect replacement races.
+- Bound session selections to the Skill source, resolved directory, file
+  identity, version, and metadata SHA-256. Changed metadata invalidates a prior
+  selection and resets permission decisions instead of inheriting stale grants.
+- Added session-scoped `allow`, `ask`, and `deny` decisions for declared
+  capabilities. Only `allow` becomes an origin grant, `deny` remains explicit,
+  and `ask` fails closed until the user records a new decision. Every grant is
+  still intersected with the active Core access profile.
+- Added `karox skill list/show/load/select/deselect` and integrated one selected
+  Skill into `karox agent run`. Selection changes use session mutation leases.
+- Injected untrusted Skill instructions only into provider-facing requests, not
+  the durable base system history. Assistant/tool records retain Skill origin,
+  and pending calls with missing or mismatched origin are never replayed.
+- Added explicit resource ceilings: 64 KiB metadata, 1 MiB manifest or reference,
+  2 MiB aggregate loaded content, and at most 64 references per Skill.
+- Added unit, CLI integration, and Agent permission-bypass coverage without
+  contacting a paid API or executing Skill-provided setup code.
+
+Changed files in Phase 4:
+
+- `pyproject.toml`
+- `src/karox/agent.py`
+- `src/karox/cli.py`
+- `src/karox/skills.py`
+- `tests/test_agent.py`
+- `tests/test_skill_cli.py`
+- `tests/test_skills.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py" -v` — 119 passed
+- `git diff --check`
+
+Security boundaries, known problems, and migration risks:
+
+- A Skill is an untrusted declarative instruction/reference bundle, not a plugin
+  installer. KaroX does not execute Skill setup scripts, hooks, or arbitrary
+  metadata, so Skills that depend on those behaviors require a future Pack or a
+  documented manual migration.
+- `ask` currently means fail closed until the user updates the session selection;
+  there is no interactive approval prompt or expiring per-call approval token.
+- A granted `process.run` capability remains powerful. Core keeps it
+  repository-bound, shell-free, and environment-restricted, but it is not an
+  operating-system sandbox.
+- Compatible-agent directories are accepted only through the strict KaroX
+  metadata and confinement model. Broader Claude/Codex ecosystem conventions
+  are not implicitly trusted or claimed compatible.
+- Selections are intentionally invalidated when identity or metadata changes.
+  This can require re-selection after legitimate Skill updates, but prevents
+  old grants from silently applying to new content.
+- MCP declarations remain inert metadata in this phase. No Skill can acquire an
+  MCP transport or bypass Core policy before the Phase 5 client exists.
+
+Next actions for Phase 5:
+
+1. Define secret-free MCP server configuration, stable server identity, tool
+   namespacing, and session-scoped selection without changing legacy bridges.
+2. Implement bounded stdio and Streamable HTTP clients with strict protocol,
+   message-size, timeout, cancellation, and HTTPS/loopback credential rules.
+3. Add supervised lifecycle, clean shutdown, classified reconnect behavior,
+   and replay/idempotency boundaries for interrupted calls.
+4. Route MCP calls through origin-aware Core capabilities and explicit
+   server/tool permissions; Skills must not implicitly grant MCP access.
+5. Add deterministic fake stdio/HTTP server tests, CLI integration coverage, and
+   failure-path tests before any opt-in real-server interoperability checks.
+
 ## Commit record
 
 - `4a8278f fix: fail closed when runtime key is missing`
@@ -335,5 +419,7 @@ Next actions for Phase 4:
 - `6f05b61 feat: add native agent vertical slice`
 - `d0dea44 docs: record Phase 2 native vertical slice`
 - `6a3e521 feat: add provider routing and credential management`
+- `ceaee0b docs: record Phase 3 provider routing`
+- `5f497bb feat: add secure lazy skill runtime`
 
 No merge, push, or release has been performed.
