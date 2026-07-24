@@ -14,7 +14,7 @@ Base: `main` at `a5c233a`
 | 3 — providers/credentials | Complete | 99 tests cover adapters, registry, keyring references, routing, fallback, and budgets |
 | 4 — Skills | Complete | 119 tests cover secure discovery, lazy loading, permissions, CLI, and Agent integration |
 | 5 — MCP client | Complete | 163 tests cover registry, credentials, selection, Core integration, and real stdio + Streamable HTTP E2E |
-| 6 — unified handoff | Not started | — |
+| 6 — unified handoff | Complete | 170 tests cover structured handoff, mid-task model switch, locking, and recovery |
 | 7 — MCP proxy/bridges | Not started | — |
 | 8 — Pack SDK | Not started | — |
 | 9 — TUI | Not started | — |
@@ -397,17 +397,94 @@ Security boundaries, known problems, and migration risks:
 - MCP declarations remain inert metadata in this phase. No Skill can acquire an
   MCP transport or bypass Core policy before the Phase 5 client exists.
 
-Next actions for Phase 6:
+Next actions for Phase 7:
 
-1. Add structured handoff document generation that preserves goal, constraints,
-   decisions, changed files, command results, errors, remaining steps, current
-   Git state, active processes, and evidence without copying full chat history.
-2. Exercise model switching mid-task with preserved project state (changed
-   files, Git state, evidence, idempotency) across provider boundaries.
-3. Add native ↔ hosted and hosted A ↔ hosted B handoff paths behind the unified
-   session lease so concurrent mutation stays prevented.
-4. Add session locking and recovery tests for interrupted multi-client flows
-   before any opt-in real-provider handoff verification.
+1. Define explicit per-MCP exposure policy so a hosted client receives only
+   user-selected external MCP servers, never all installed servers.
+2. Add bridge profiles with transport, authentication, tunnel, doctor,
+   handshake test, and honest tested/experimental status without per-site code.
+3. Enforce identity, per-tool permissions, and provider-key/MCP-secret isolation
+   so external clients cannot reach credentials outside their capability set.
+4. Add a KaroX-as-MCP-server namespace/capability boundary so clients see only
+   allowed `karox.*` tools.
+5. Add deterministic fake-bridge and proxy E2E tests before any opt-in real
+   hosted-client interoperability verification.
+
+## Phase 6 — unified session handoff
+
+Completed:
+
+- Added a secret-free, strict-JSON structured handoff document derived from a
+  `SessionRecord`. It carries goal, constraints, summary, decisions,
+  checkpoints, changed files, commands, check results, errors, remaining plan
+  steps, Git state, active processes, a summarized model history, usage,
+  unfinished actions, and evidence -- without copying full chat history,
+  credential references, or secret values.
+- Made the handoff content digest exclude volatile fields (`generated_at`) so
+  two snapshots of identical state compare equal, while any change to a stable
+  field invalidates the digest. The document rejects `Bearer` tokens and
+  `os-keyring:` references before emission.
+- Summarized model history to one-line content previews and tool-call names so
+  the receiving side sees what each model did without replaying full text or
+  tool argument bodies.
+- Added `karox session handoff` and `karox session lock` CLI commands. The
+  handoff command re-validates the session repository binding; the lock command
+  reports the durable mutation lease state (owner, expiry, expired flag).
+- Proved cross-provider handoff end to end: model A changes a file, runs a
+  check, and stops at the step limit; model B (a different model id) resumes the
+  same session, observes the preserved `changed_files`, checks, and evidence,
+  and completes verification without re-mutating. Both models are recorded in
+  the durable provider history and the handoff document.
+- Proved session locking: a second model attempting to run while the first
+  holds the mutation lease is rejected with `SessionBusy`, preventing concurrent
+  mutation. Recovery of pending tool calls already existed from Phase 2 and is
+  exercised by the existing suite.
+
+Changed files in Phase 6:
+
+- `src/karox/cli.py`
+- `src/karox/handoff.py`
+- `tests/test_handoff.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 170 passed (7 new)
+- `python scripts/test_path_migration.py`
+- `python scripts/test_app_entry.py`
+- `python scripts/test_runtime_rebrand.py`
+- `python scripts/test_notion_profile.py`
+- `python scripts/test_notion_provider.py`
+- `python scripts/test_notion_mcp_transport.py`
+- `git diff --check`
+
+End-to-end evidence:
+
+- `ModelSwitchEndToEndTests.test_model_b_resumes_preserved_state_and_completes_verification`
+  runs two distinct `AgentKernel` instances (model A then model B) against one
+  leased session through the real `CoreRuntime`. Model B resumes, observes the
+  real file change and check persisted by model A, completes git status/diff
+  verification, and the session reports `verified`.
+- `SessionLockCliTests.test_lock_reports_unlocked_then_acquired` drives
+  `karox session lock` in a subprocess and confirms the lease visibility.
+- `HandoffDocumentTests` cover the structured fields, secret-free strict-JSON
+  output, stable digest, and compact model-history summarization.
+
+Security boundaries, known problems, and migration risks:
+
+- The handoff document is a read-only snapshot. It is generated from session
+  state and never carries full chat history, credential references, or secret
+  values; the generator rejects `Bearer` and `os-keyring:` markers before
+  emission.
+- `native ↔ hosted` and `hosted A ↔ hosted B` transfer require the Phase 7
+  bridge/proxy layer for hosted clients to consume a handoff document over the
+  wire. This phase proves the in-process session survives a model switch and
+  records locking; hosted wire transfer remains pending.
+- No remote provider was contacted and no external credential was required.
+  Legacy bridge paths and the tested Notion integration were not modified.
+  HyperAgent and PromptQL remain experimental.
+- Context compaction, MCP proxy to hosted clients, Packs, and TUI remain
+  pending.
 
 ## Phase 5 — MCP client
 
@@ -526,5 +603,7 @@ Security boundaries, known problems, and migration risks:
 - `ceaee0b docs: record Phase 3 provider routing`
 - `5f497bb feat: add secure lazy skill runtime`
 - `743ef9f docs: record Phase 4 skill runtime`
+- `555d4ee feat: add bounded MCP client with stdio and streamable HTTP`
+- `dd3318b docs: record Phase 5 MCP client`
 
 No merge, push, or release has been performed.
