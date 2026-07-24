@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from .agent import AgentError, AgentKernel, AgentLimits, AgentReport, SYSTEM_PROMPT
+from .bridge import (
+    BridgeConfigurationError,
+    BridgeCredentialStore,
+    BridgeError,
+    BridgeRegistry,
+)
 from .core import CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .migration import MigrationError, migrate_legacy_metadata
@@ -391,6 +397,46 @@ def _parser() -> argparse.ArgumentParser:
         "doctor", help="verify secure MCP credential storage"
     )
     mcp_credential_doctor.add_argument("--json", action="store_true")
+
+    bridge = commands.add_parser(
+        "bridge", help="manage hosted-client bridge profiles and credentials"
+    )
+    bridge_commands = bridge.add_subparsers(dest="bridge_command", required=True)
+    bridge_list = bridge_commands.add_parser("list", help="list bridge profiles")
+    bridge_list.add_argument("--json", action="store_true")
+    bridge_show = bridge_commands.add_parser("show", help="show a bridge profile")
+    bridge_show.add_argument("name")
+    bridge_show.add_argument("--json", action="store_true")
+    bridge_doctor = bridge_commands.add_parser(
+        "doctor", help="verify secure bridge credential storage"
+    )
+    bridge_doctor.add_argument("--json", action="store_true")
+    bridge_credential = bridge_commands.add_parser(
+        "credential", help="manage bridge secrets in the OS keyring"
+    )
+    bridge_credentials = bridge_credential.add_subparsers(
+        dest="bridge_credential_command", required=True
+    )
+    bridge_credential_set = bridge_credentials.add_parser(
+        "set", help="generate and store a bridge credential"
+    )
+    bridge_credential_set.add_argument("name")
+    bridge_credential_set.add_argument("--json", action="store_true")
+    bridge_credential_show = bridge_credentials.add_parser(
+        "show", help="show an opaque reference and fingerprint"
+    )
+    bridge_credential_show.add_argument("name")
+    bridge_credential_show.add_argument("--json", action="store_true")
+    bridge_credential_rotate = bridge_credentials.add_parser(
+        "rotate-key", help="replace a bridge credential"
+    )
+    bridge_credential_rotate.add_argument("name")
+    bridge_credential_rotate.add_argument("--json", action="store_true")
+    bridge_credential_revoke = bridge_credentials.add_parser(
+        "revoke", help="delete a bridge credential"
+    )
+    bridge_credential_revoke.add_argument("name")
+    bridge_credential_revoke.add_argument("--json", action="store_true")
 
     agent = commands.add_parser("agent", help="run the bounded native agent")
     agents = agent.add_subparsers(dest="agent_command", required=True)
@@ -1070,6 +1116,34 @@ def _handle_mcp(args: argparse.Namespace) -> int:
     return _handle_mcp_call(args)
 
 
+def _handle_bridge(args: argparse.Namespace) -> int:
+    if args.bridge_command == "list":
+        payload: Any = [item.to_dict() for item in BridgeRegistry().list()]
+    elif args.bridge_command == "show":
+        payload = BridgeRegistry().get(args.name).to_dict()
+    elif args.bridge_command == "doctor":
+        payload = BridgeCredentialStore().doctor()
+    else:
+        store = BridgeCredentialStore()
+        command = args.bridge_credential_command
+        if command == "set":
+            payload = store.set(args.name)
+        elif command == "show":
+            reference = f"os-keyring:bridge/{args.name}"
+            secret = store.resolve(reference)
+            payload = {
+                "reference": reference,
+                "fingerprint": store.fingerprint(secret),
+                "status": "available",
+            }
+        elif command == "rotate-key":
+            payload = store.rotate(args.name)
+        else:
+            payload = store.delete(args.name)
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -1356,6 +1430,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "mcp":
             return _handle_mcp(args)
 
+        if args.command == "bridge":
+            return _handle_bridge(args)
+
         if args.command == "agent":
             report = _run_agent(args)
             _json(report.to_dict()) if args.json else _print_agent_report(report)
@@ -1414,6 +1491,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except (
         AgentError,
+        BridgeError,
         CredentialError,
         CoreError,
         MigrationError,
