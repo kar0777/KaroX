@@ -15,7 +15,7 @@ Base: `main` at `a5c233a`
 | 4 — Skills | Complete | 119 tests cover secure discovery, lazy loading, permissions, CLI, and Agent integration |
 | 5 — MCP client | Complete | 163 tests cover registry, credentials, selection, Core integration, and real stdio + Streamable HTTP E2E |
 | 6 — unified handoff | Complete | 170 tests cover structured handoff, mid-task model switch, locking, and recovery |
-| 7 — MCP proxy/bridges | Not started | — |
+| 7 — MCP proxy/bridges | Complete | 193 tests cover bridge profiles, dedicated credentials, proxy allowlist, and real stdio proxy E2E |
 | 8 — Pack SDK | Not started | — |
 | 9 — TUI | Not started | — |
 | 10 — benchmark/readiness | Not started | — |
@@ -397,18 +397,94 @@ Security boundaries, known problems, and migration risks:
 - MCP declarations remain inert metadata in this phase. No Skill can acquire an
   MCP transport or bypass Core policy before the Phase 5 client exists.
 
-Next actions for Phase 7:
+Next actions for Phase 8:
 
-1. Define explicit per-MCP exposure policy so a hosted client receives only
-   user-selected external MCP servers, never all installed servers.
-2. Add bridge profiles with transport, authentication, tunnel, doctor,
-   handshake test, and honest tested/experimental status without per-site code.
-3. Enforce identity, per-tool permissions, and provider-key/MCP-secret isolation
-   so external clients cannot reach credentials outside their capability set.
-4. Add a KaroX-as-MCP-server namespace/capability boundary so clients see only
-   allowed `karox.*` tools.
-5. Add deterministic fake-bridge and proxy E2E tests before any opt-in real
-   hosted-client interoperability verification.
+1. Define the Pack manifest format: name, version, compatibility, tools, skills,
+   MCP servers, project detectors, commands, permissions, and health checks.
+2. Add a template generator and minimal sample pack with a test harness.
+3. Implement installation/removal/enable/disable lifecycle and version
+   compatibility checks without letting a Pack bypass Core or session policy.
+4. Add `karox pack create/install/remove/list/inspect/test/doctor/enable/disable`.
+5. Add Pack SDK developer documentation and a sample pack test harness.
+
+## Phase 7 — MCP proxy and bridge layer
+
+Completed:
+
+- Added a declarative bridge profile registry with honest statuses. Notion is
+  `tested` (covered by existing regression scripts), the generic Streamable HTTP
+  client is `protocol_compatible`, PromptQL and HyperAgent are `experimental`
+  because they lack a dedicated product end-to-end test. A `tested` profile
+  requires verified versions; a `planned` profile cannot use stdio.
+- Added a dedicated bridge credential store in a separate `KaroX/bridge`
+  OS-keyring namespace, distinct from provider and MCP secrets. Credentials are
+  high-entropy random tokens, never persisted in plaintext configuration, and
+  support generation, rotation (which revokes the prior value), and revocation.
+  CLI output exposes only an opaque reference and a masked fingerprint.
+- Added the `McpProxy`: a hosted client receives only the explicitly allowlisted
+  session MCP servers, and only the tools with an explicit `allow` permission.
+  The proxy never auto-exposes every installed MCP, and proxy descriptors carry
+  no server command, URL, environment, or credential -- only name, description,
+  input schema, and read-only classification.
+- Enforced a second authorization boundary: the hosted-client origin must be
+  `HOSTED_CLIENT`, and both the hosted-client policy (`MCP_CALL`) and the
+  external-MCP server selection must permit each call. Schema and read-only
+  classification changes are detected at the boundary and fail closed.
+- Added `karox bridge list/show/doctor` and
+  `karox bridge credential set/show/rotate-key/revoke` CLI commands. The
+  existing legacy Notion gateway in `server/` was not modified; this layer is a
+  generalization that reuses the Phase 5 MCP client and the Phase 6 session
+  lease for hosted-client access.
+
+Changed files in Phase 7:
+
+- `src/karox/bridge.py`
+- `src/karox/proxy.py`
+- `src/karox/cli.py`
+- `tests/test_bridge.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 193 passed (23 new, 1 skipped)
+- `python scripts/test_path_migration.py`
+- `python scripts/test_app_entry.py`
+- `python scripts/test_runtime_rebrand.py`
+- `python scripts/test_notion_profile.py`
+- `python scripts/test_notion_provider.py`
+- `python scripts/test_notion_mcp_transport.py`
+- `git diff --check`
+
+End-to-end evidence:
+
+- `McpProxyTests.test_e2e_proxy_executes_read_only_call_through_two_boundaries`
+  drives a real stdio MCP echo server through `McpProxy`: a hosted-client origin
+  with an explicit `MCP_CALL` policy grant calls `echo` and receives its text,
+  with the proxy allowlist limiting exposure to the selected `echo` server only.
+- `McpProxyTests.test_proxy_only_exposes_allowed_servers_and_tools` confirms a
+  `deny`-permitted tool is invisible to the hosted client, and descriptors are
+  secret-free.
+- `McpProxyTests.test_proxy_rejects_server_not_in_allowlist` confirms a second
+  selected server kept out of the proxy allowlist is invisible.
+- `BridgeCliTests` cover `bridge list/show/doctor` with honest status reporting.
+
+Security boundaries, known problems, and migration risks:
+
+- The proxy is an authorization boundary, not a transport server. It exposes
+  descriptors and routes calls through the existing Phase 5 MCP client; the
+  hosted-client wire transport (Streamable HTTP MCP server) remains the
+  legacy Notion gateway until a generalized server is added. This phase proves
+  the proxy authorization and secrets isolation, not hosted wire transport.
+- The OS keyring is required for bridge credential storage. `bridge doctor`
+  reports absence and KaroX fails closed; the bridge-credential tests use an
+  in-memory backend when the keyring is unavailable (the CLI doctor test skips).
+- No remote hosted client was contacted. The legacy Notion gateway and its
+  regression scripts were not modified. HyperAgent and PromptQL remain
+  experimental -- their profiles describe connection expectations but do not
+  claim a working product integration.
+- A KaroX-as-MCP-server namespace/capability boundary (`karox.*` tools) and
+  hosted wire transport remain pending. Context compaction, Packs, and TUI
+  remain pending.
 
 ## Phase 6 — unified session handoff
 
@@ -605,5 +681,7 @@ Security boundaries, known problems, and migration risks:
 - `743ef9f docs: record Phase 4 skill runtime`
 - `555d4ee feat: add bounded MCP client with stdio and streamable HTTP`
 - `dd3318b docs: record Phase 5 MCP client`
+- `3c8f070 feat: add unified session handoff and mid-task model switch`
+- `11b4e0b docs: record Phase 6 unified handoff`
 
 No merge, push, or release has been performed.
