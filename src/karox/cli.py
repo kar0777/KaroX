@@ -476,6 +476,10 @@ def _parser() -> argparse.ArgumentParser:
     pack_disable.add_argument("identity")
     pack_disable.add_argument("--json", action="store_true")
 
+    tui = commands.add_parser("tui", help="run the optional interactive TUI shell")
+    tui.add_argument("--session-id")
+    tui.add_argument("--repository", type=Path, default=Path.cwd())
+
     agent = commands.add_parser("agent", help="run the bounded native agent")
     agents = agent.add_subparsers(dest="agent_command", required=True)
     run = agents.add_parser("run", help="run or resume a native-agent session")
@@ -1503,6 +1507,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "pack":
             return _handle_pack(args)
+
+        if args.command == "tui":
+            from .tui import run_tui
+
+            return run_tui(
+                session_id=args.session_id,
+                repository=str(args.repository.expanduser().resolve()),
+            )
 
         if args.command == "agent":
             report = _run_agent(args)
