@@ -17,7 +17,14 @@ from karox.agent import AgentKernel, AgentLimits, SYSTEM_PROMPT
 from karox.core import CoreRuntime
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
-from karox.providers import ModelMessage, ModelRequest, ModelResponse, ToolCall
+from karox.providers import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    ProviderErrorKind,
+    ToolCall,
+)
 from karox.sessions import SessionStore
 
 
@@ -26,7 +33,7 @@ class QueueProvider:
 
     def __init__(
         self,
-        responses: list[ModelResponse],
+        responses: list[ModelResponse | ProviderError],
         on_complete: Callable[[], None] | None = None,
     ) -> None:
         self.responses = list(responses)
@@ -39,7 +46,10 @@ class QueueProvider:
             self.on_complete()
         if not self.responses:
             raise AssertionError("provider received an unexpected request")
-        return self.responses.pop(0)
+        outcome = self.responses.pop(0)
+        if isinstance(outcome, ProviderError):
+            raise outcome
+        return outcome
 
 
 def call(call_id: str, name: str, arguments: object, *, raw: bool = False) -> ToolCall:
@@ -468,6 +478,11 @@ class AgentKernelTests(unittest.TestCase):
     def test_message_normalization_keeps_tool_results_adjacent(self) -> None:
         history = [
             {
+                "role": "provider_audit",
+                "kind": "route",
+                "route_attempts": [{"provider_id": "ignored"}],
+            },
+            {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
@@ -485,6 +500,167 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(
             [item.tool_call_id for item in messages[1:3]], ["one", "two"]
         )
+
+    def test_routed_response_persists_secret_safe_audit_and_cost_totals(self) -> None:
+        routed_response = ModelResponse(
+            content="not finished",
+            tool_calls=(),
+            finish_reason="stop",
+            usage={"prompt_tokens": 4, "completion_tokens": 2},
+            route_attempts=(
+                {
+                    "route_index": 0,
+                    "provider_id": "private-provider",
+                    "model": "model-a",
+                    "status": "completed",
+                },
+            ),
+            selected_provider="private-provider",
+            selected_model="model-a",
+            cost=0.25,
+            currency="USD",
+            pricing_version="2026-07",
+            cumulative_usage={"prompt_tokens": 14, "completion_tokens": 6},
+            cumulative_cost=1.25,
+        )
+        provider = QueueProvider([routed_response])
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=1, max_seconds=30)
+        ).run("session")
+
+        self.assertEqual(report.reason, "step_limit")
+        record = self.sessions.load("session")
+        audit = next(
+            item
+            for item in record.provider_history
+            if item.get("role") == "provider_audit"
+        )
+        self.assertEqual(audit["selected_provider"], "private-provider")
+        self.assertEqual(audit["selected_model"], "model-a")
+        self.assertEqual(audit["pricing_version"], "2026-07")
+        self.assertEqual(audit["cumulative_usage"]["prompt_tokens"], 14)
+        self.assertEqual(audit["cumulative_cost"], 1.25)
+        self.assertEqual(record.usage["costs"], {"USD": 1.25})
+        self.assertEqual(report.steps, 1)
+        self.assertNotIn(
+            "provider_audit", [message.role for message in provider.requests[0].messages]
+        )
+
+    def test_route_failure_audit_is_durable_and_does_not_count_as_step(self) -> None:
+        provider = QueueProvider(
+            [
+                ProviderError(
+                    ProviderErrorKind.TRANSPORT,
+                    "offline",
+                    route_attempts=(
+                        {
+                            "route_index": 0,
+                            "provider_id": "first",
+                            "model": "model-a",
+                            "status": "failed",
+                            "error_kind": "transport",
+                        },
+                    ),
+                )
+            ]
+        )
+
+        report = self.kernel(provider).run("session")
+
+        self.assertEqual(report.status, "failed")
+        self.assertEqual(report.reason, "provider_error:transport")
+        self.assertEqual(report.steps, 0)
+        record = self.sessions.load("session")
+        audit = next(
+            item
+            for item in record.provider_history
+            if item.get("role") == "provider_audit"
+        )
+        self.assertEqual(audit["kind"], "route_failure")
+        self.assertEqual(audit["route_attempts"][0]["provider_id"], "first")
+        self.assertEqual(AgentKernel._pending_calls(record.provider_history), [])
+
+    def test_post_response_budget_overrun_blocks_and_resolves_tool_calls(self) -> None:
+        blocked = call(
+            "blocked-write",
+            "repo_write_file",
+            {"path": "sample.txt", "content": "must not be written\n"},
+        )
+        provider = QueueProvider(
+            [
+                ModelResponse(
+                    content="attempted write",
+                    tool_calls=(blocked,),
+                    finish_reason="tool_calls",
+                    usage={"prompt_tokens": 8, "completion_tokens": 4},
+                    route_attempts=(
+                        {
+                            "route_index": 0,
+                            "provider_id": "priced",
+                            "model": "model-a",
+                            "status": "completed",
+                        },
+                    ),
+                    selected_provider="priced",
+                    selected_model="model-a",
+                    cost=0.012,
+                    currency="USD",
+                    pricing_version="v1",
+                    cumulative_usage={"prompt_tokens": 8, "completion_tokens": 4},
+                    cumulative_cost=0.012,
+                    budget_exceeded=True,
+                    budget_reason="token_budget,cost_budget",
+                )
+            ]
+        )
+
+        report = self.kernel(provider).run("session")
+
+        self.assertEqual(report.status, "stopped")
+        self.assertEqual(report.phase, "budget")
+        self.assertEqual(
+            report.reason, "budget_exceeded:token_budget,cost_budget"
+        )
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "before\n",
+        )
+        record = self.sessions.load("session")
+        blocked_result = next(
+            item
+            for item in record.provider_history
+            if item.get("tool_call_id") == "blocked-write"
+            and item.get("role") == "tool"
+        )
+        self.assertEqual(blocked_result["error"]["type"], "budget_exceeded")
+        self.assertEqual(AgentKernel._pending_calls(record.provider_history), [])
+
+    def test_preflight_budget_failure_stops_without_failing_session(self) -> None:
+        provider = QueueProvider(
+            [
+                ProviderError(
+                    ProviderErrorKind.BUDGET_EXCEEDED,
+                    "token budget is already exhausted",
+                    route_attempts=(
+                        {
+                            "route_index": 0,
+                            "provider_id": "priced",
+                            "model": "model-a",
+                            "status": "rejected",
+                            "error_kind": "budget_exceeded",
+                        },
+                    ),
+                )
+            ]
+        )
+
+        report = self.kernel(provider).run("session")
+
+        self.assertEqual(report.status, "stopped")
+        self.assertEqual(report.phase, "budget")
+        self.assertEqual(report.reason, "budget_exceeded")
+        self.assertEqual(report.steps, 0)
 
 
 class ScriptedChatHandler(BaseHTTPRequestHandler):

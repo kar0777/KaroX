@@ -18,6 +18,7 @@ from .providers import (
     ModelResponse,
     Provider,
     ProviderError,
+    ProviderErrorKind,
     ProviderTool,
     ToolCall,
 )
@@ -195,6 +196,14 @@ class AgentKernel:
                     response = self.provider.complete(request)
                 except ProviderError as exc:
                     self._record_provider_failure(session_id, lease, exc, steps + 1)
+                    if exc.kind is ProviderErrorKind.BUDGET_EXCEEDED:
+                        return self._finish(
+                            session_id,
+                            lease,
+                            "stopped",
+                            "budget",
+                            "budget_exceeded",
+                        )
                     return self._finish(
                         session_id,
                         lease,
@@ -214,6 +223,25 @@ class AgentKernel:
                 provider_message = (
                     str(redact(response.content)) if response.content is not None else None
                 )
+                if response.budget_exceeded:
+                    for call in response.tool_calls:
+                        self._persist_tool_error(
+                            session_id,
+                            lease,
+                            call,
+                            "budget_exceeded",
+                            "tool execution was blocked after the provider response "
+                            "crossed a configured budget",
+                        )
+                    suffix = response.budget_reason or "budget"
+                    return self._finish(
+                        session_id,
+                        lease,
+                        "stopped",
+                        "budget",
+                        f"budget_exceeded:{suffix}",
+                        provider_message,
+                    )
                 repeated = False
                 for call in response.tool_calls:
                     if self.monotonic() >= deadline:
@@ -308,8 +336,11 @@ class AgentKernel:
             "transport_attempts": response.transport_attempts,
             "usage": dict(response.usage),
         }
+        route_audit = self._route_audit(response)
 
         def update(record: SessionRecord) -> None:
+            if route_audit is not None:
+                record.provider_history.append(dict(redact(route_audit)))
             record.provider_history.append(dict(redact(entry)))
             aggregate = dict(record.usage)
             aggregate["requests"] = int(aggregate.get("requests", 0)) + 1
@@ -318,9 +349,43 @@ class AgentKernel:
             ) + response.transport_attempts
             for name, count in response.usage.items():
                 aggregate[name] = int(aggregate.get(name, 0)) + count
+            if response.currency is not None and response.cumulative_cost is not None:
+                costs = aggregate.get("costs")
+                if not isinstance(costs, dict):
+                    costs = {}
+                costs = dict(costs)
+                costs[response.currency] = response.cumulative_cost
+                aggregate["costs"] = costs
             record.usage = aggregate
 
         self._update_session(session_id, lease, update)
+
+    @staticmethod
+    def _route_audit(response: ModelResponse) -> Optional[Dict[str, Any]]:
+        if not (
+            response.route_attempts
+            or response.selected_provider is not None
+            or response.selected_model is not None
+            or response.cost is not None
+            or response.cumulative_usage
+            or response.cumulative_cost is not None
+            or response.budget_exceeded
+        ):
+            return None
+        return {
+            "role": "provider_audit",
+            "kind": "route",
+            "route_attempts": [dict(item) for item in response.route_attempts],
+            "selected_provider": response.selected_provider,
+            "selected_model": response.selected_model,
+            "cost": response.cost,
+            "currency": response.currency,
+            "pricing_version": response.pricing_version,
+            "cumulative_usage": dict(response.cumulative_usage),
+            "cumulative_cost": response.cumulative_cost,
+            "budget_exceeded": response.budget_exceeded,
+            "budget_reason": response.budget_reason,
+        }
 
     @staticmethod
     def _safe_arguments(raw: str) -> tuple[str, bool]:
@@ -578,6 +643,8 @@ class AgentKernel:
             role = entry.get("role")
             if role == "tool":
                 continue
+            if role not in {"system", "user", "assistant"}:
+                continue
             calls = tuple(
                 ToolCall(
                     call_id=str(item.get("call_id", "")),
@@ -662,7 +729,19 @@ class AgentKernel:
         error: ProviderError,
         step: int,
     ) -> None:
+        route_audit: Optional[Dict[str, Any]] = None
+        if error.route_attempts:
+            route_audit = {
+                "role": "provider_audit",
+                "kind": "route_failure",
+                "route_attempts": [dict(item) for item in error.route_attempts],
+                "error_kind": error.kind.value,
+                "step": step,
+            }
+
         def update(record: SessionRecord) -> None:
+            if route_audit is not None:
+                record.provider_history.append(dict(redact(route_audit)))
             record.failures.append(
                 {
                     "kind": "provider",

@@ -48,7 +48,13 @@ def contains_credential(value: str) -> bool:
 
 def redact(value: Any, key: str = "") -> Any:
     """Return a bounded, recursively redacted representation."""
-    if key and SECRET_NAME.search(key):
+    token_counter = (
+        key.lower().endswith("_tokens")
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+    )
+    if key and SECRET_NAME.search(key) and not token_counter:
         return "[REDACTED]"
     if isinstance(value, dict):
         return {str(k): redact(v, str(k)) for k, v in value.items()}

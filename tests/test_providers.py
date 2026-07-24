@@ -293,6 +293,32 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertEqual(result.transport_attempts, 2)
         self.assertEqual(len(client.calls), 2)
 
+    def test_retry_exhaustion_does_not_expose_exception_text(self) -> None:
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        request = httpx.Request("POST", "https://provider.example")
+        client = FakeClient(
+            [
+                httpx.ConnectError(f"first failure {secret}", request=request),
+                httpx.ConnectError(f"second failure {secret}", request=request),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1",
+            max_transport_retries=1,
+            retry_backoff_seconds=0,
+        )
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(self.request())
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.TRANSPORT)
+        self.assertIn("ConnectError", raised.exception.safe_message)
+        self.assertNotIn(secret, raised.exception.safe_message)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertEqual(len(client.calls), 2)
+
     def test_retry_respects_request_deadline(self) -> None:
         secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
         request = httpx.Request("POST", "https://provider.example")
@@ -370,6 +396,74 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                     provider.complete(self.request())
                 self.assertEqual(
                     raised.exception.kind, ProviderErrorKind.MALFORMED_RESPONSE
+                )
+
+    def test_sse_reader_enforces_resource_bounds(self) -> None:
+        neutral = {"choices": [], "usage": {}}
+        cases = (
+            (
+                "MAX_SSE_LINE_CHARS",
+                8,
+                sse_response([neutral]),
+                "line exceeds",
+            ),
+            (
+                "MAX_SSE_EVENTS",
+                1,
+                sse_response([neutral]),
+                "too many events",
+            ),
+            (
+                "MAX_SSE_TOTAL_CHARS",
+                20,
+                sse_response([neutral]),
+                "stream exceeds",
+            ),
+        )
+        for attribute, limit, item, message in cases:
+            with (
+                self.subTest(attribute=attribute),
+                patch.object(OpenAIChatCompletionsProvider, attribute, limit),
+                self.assertRaisesRegex(ProviderError, message) as raised,
+            ):
+                list(
+                    OpenAIChatCompletionsProvider._stream_events(
+                        item,
+                        1,
+                        float("inf"),
+                    )
+                )
+            self.assertEqual(
+                raised.exception.kind,
+                ProviderErrorKind.MALFORMED_RESPONSE,
+            )
+
+    def test_rejects_invalid_known_usage_values(self) -> None:
+        for value in (True, -1, 1.5, "1"):
+            with self.subTest(value=value):
+                client = FakeClient(
+                    [
+                        sse_response(
+                            [
+                                {
+                                    "choices": [],
+                                    "usage": {"prompt_tokens": value},
+                                }
+                            ]
+                        )
+                    ]
+                )
+                provider = OpenAIChatCompletionsProvider(
+                    "https://provider.example/v1"
+                )
+                with (
+                    patch("karox.providers.httpx.Client", return_value=client),
+                    self.assertRaises(ProviderError) as raised,
+                ):
+                    provider.complete(self.request())
+                self.assertEqual(
+                    raised.exception.kind,
+                    ProviderErrorKind.MALFORMED_RESPONSE,
                 )
 
     def test_missing_done_is_interrupted_transport_and_is_not_retried(self) -> None:

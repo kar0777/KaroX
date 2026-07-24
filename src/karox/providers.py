@@ -37,6 +37,7 @@ class ProviderErrorKind(str, Enum):
     PROVIDER_INTERNAL = "provider_internal"
     CANCELLED = "cancelled"
     MALFORMED_RESPONSE = "malformed_response"
+    BUDGET_EXCEEDED = "budget_exceeded"
 
 
 class ProviderError(RuntimeError):
@@ -49,6 +50,7 @@ class ProviderError(RuntimeError):
         *,
         status_code: Optional[int] = None,
         retry_after: Optional[float] = None,
+        route_attempts: tuple[Dict[str, Any], ...] = (),
     ) -> None:
         safe_message = str(redact(message))[:4000]
         super().__init__(f"{kind.value}: {safe_message}")
@@ -56,6 +58,7 @@ class ProviderError(RuntimeError):
         self.safe_message = safe_message
         self.status_code = status_code
         self.retry_after = retry_after
+        self.route_attempts = tuple(dict(redact(item)) for item in route_attempts)
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,16 @@ class ModelResponse:
     usage: Dict[str, int]
     response_id: Optional[str] = None
     transport_attempts: int = 1
+    route_attempts: tuple[Dict[str, Any], ...] = ()
+    selected_provider: Optional[str] = None
+    selected_model: Optional[str] = None
+    cost: Optional[float] = None
+    currency: Optional[str] = None
+    pricing_version: Optional[str] = None
+    cumulative_usage: Dict[str, int] = field(default_factory=dict)
+    cumulative_cost: Optional[float] = None
+    budget_exceeded: bool = False
+    budget_reason: Optional[str] = None
 
 
 class ModelEventKind(str, Enum):
@@ -205,6 +218,10 @@ class OpenAIChatCompletionsProvider:
     error or malformed response is surfaced once and is never reinterpreted as
     proof that a local mutation should be repeated.
     """
+
+    MAX_SSE_LINE_CHARS = 1_048_576
+    MAX_SSE_EVENTS = 10_000
+    MAX_SSE_TOTAL_CHARS = 16_777_216
 
     def __init__(
         self,
@@ -425,7 +442,7 @@ class OpenAIChatCompletionsProvider:
                 if attempts >= self.max_transport_retries + 1:
                     raise ProviderError(
                         ProviderErrorKind.TRANSPORT,
-                        f"{type(exc).__name__}: {exc}",
+                        f"provider transport failed: {type(exc).__name__}",
                     ) from exc
                 delay = self.retry_backoff_seconds * (2 ** (attempts - 1))
                 if delay:
@@ -511,6 +528,8 @@ class OpenAIChatCompletionsProvider:
         data_lines: list[str] = []
         finish_reason: Optional[str] = None
         response_id: Optional[str] = None
+        event_count = 0
+        total_chars = 0
 
         for line in response.iter_lines():
             if time.monotonic() >= deadline:
@@ -525,9 +544,29 @@ class OpenAIChatCompletionsProvider:
                     "provider SSE stream contained a non-text line",
                     status_code=response.status_code,
                 )
+            if len(line) > cls.MAX_SSE_LINE_CHARS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE line exceeds the size limit",
+                    status_code=response.status_code,
+                )
+            total_chars += len(line) + 1
+            if total_chars > cls.MAX_SSE_TOTAL_CHARS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE stream exceeds the size limit",
+                    status_code=response.status_code,
+                )
             if line == "":
                 if not data_lines:
                     continue
+                event_count += 1
+                if event_count > cls.MAX_SSE_EVENTS:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "provider SSE stream contains too many events",
+                        status_code=response.status_code,
+                    )
                 data = "\n".join(data_lines)
                 data_lines.clear()
                 if data.strip() == "[DONE]":
@@ -562,6 +601,13 @@ class OpenAIChatCompletionsProvider:
                 data_lines.append(value if separator else "")
 
         if data_lines:
+            event_count += 1
+            if event_count > cls.MAX_SSE_EVENTS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE stream contains too many events",
+                    status_code=response.status_code,
+                )
             data = "\n".join(data_lines)
             if data.strip() == "[DONE]":
                 yield ModelEvent(
@@ -605,14 +651,24 @@ class OpenAIChatCompletionsProvider:
             if raw_usage is not None:
                 if not isinstance(raw_usage, dict):
                     raise ValueError("usage must be an object")
-                usage = {
-                    name: raw_count
-                    for name, raw_count in raw_usage.items()
-                    if isinstance(name, str)
-                    and isinstance(raw_count, int)
-                    and not isinstance(raw_count, bool)
-                    and raw_count >= 0
-                }
+                usage: Dict[str, int] = {}
+                for name in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                ):
+                    if name not in raw_usage:
+                        continue
+                    raw_count = raw_usage[name]
+                    if (
+                        isinstance(raw_count, bool)
+                        or not isinstance(raw_count, int)
+                        or raw_count < 0
+                    ):
+                        raise ValueError(
+                            "known usage field must be a non-negative integer"
+                        )
+                    usage[name] = raw_count
                 events.append(
                     ModelEvent(
                         ModelEventKind.USAGE,
