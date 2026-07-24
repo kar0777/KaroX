@@ -13,7 +13,7 @@ Base: `main` at `a5c233a`
 | 2 — native vertical slice | Complete | 52 tests plus a subprocess CLI E2E cover provider → agent → Core → verification |
 | 3 — providers/credentials | Complete | 99 tests cover adapters, registry, keyring references, routing, fallback, and budgets |
 | 4 — Skills | Complete | 119 tests cover secure discovery, lazy loading, permissions, CLI, and Agent integration |
-| 5 — MCP client | Not started | — |
+| 5 — MCP client | Complete | 163 tests cover registry, credentials, selection, Core integration, and real stdio + Streamable HTTP E2E |
 | 6 — unified handoff | Not started | — |
 | 7 — MCP proxy/bridges | Not started | — |
 | 8 — Pack SDK | Not started | — |
@@ -397,18 +397,122 @@ Security boundaries, known problems, and migration risks:
 - MCP declarations remain inert metadata in this phase. No Skill can acquire an
   MCP transport or bypass Core policy before the Phase 5 client exists.
 
-Next actions for Phase 5:
+Next actions for Phase 6:
 
-1. Define secret-free MCP server configuration, stable server identity, tool
-   namespacing, and session-scoped selection without changing legacy bridges.
-2. Implement bounded stdio and Streamable HTTP clients with strict protocol,
-   message-size, timeout, cancellation, and HTTPS/loopback credential rules.
-3. Add supervised lifecycle, clean shutdown, classified reconnect behavior,
-   and replay/idempotency boundaries for interrupted calls.
-4. Route MCP calls through origin-aware Core capabilities and explicit
-   server/tool permissions; Skills must not implicitly grant MCP access.
-5. Add deterministic fake stdio/HTTP server tests, CLI integration coverage, and
-   failure-path tests before any opt-in real-server interoperability checks.
+1. Add structured handoff document generation that preserves goal, constraints,
+   decisions, changed files, command results, errors, remaining steps, current
+   Git state, active processes, and evidence without copying full chat history.
+2. Exercise model switching mid-task with preserved project state (changed
+   files, Git state, evidence, idempotency) across provider boundaries.
+3. Add native ↔ hosted and hosted A ↔ hosted B handoff paths behind the unified
+   session lease so concurrent mutation stays prevented.
+4. Add session locking and recovery tests for interrupted multi-client flows
+   before any opt-in real-provider handoff verification.
+
+## Phase 5 — MCP client
+
+Completed:
+
+- Added a secret-free, atomic MCP server registry with validated server identity,
+  transport, endpoint metadata, per-tool read-only classification, and bounded
+  size/timeout/retry limits. Credential values are forbidden in registry
+  configuration; secret-like environment and header values require an opaque
+  `os-keyring:mcp/<name>` reference.
+- Added an MCP-only credential store backed by the operating-system keyring that
+  resolves secrets only when constructing a request, rejects control characters
+  and oversized values, and never returns a secret value. CLI output exposes only
+  an opaque reference and a masked fingerprint.
+- Implemented bounded stdio and Streamable HTTP clients over the installed MCP
+  SDK: real JSON-RPC initialize / tools list / tool call, strict JSON-Schema
+  validation, schema-digest binding, message and result size limits, timeouts,
+  classified transport/protocol/access/timeout errors, and secret-safe redaction
+  of remote errors and tool descriptions.
+- Limited transport retries to retryable read-only failures before a usable
+  streamed response begins; mutating calls and post-boundary failures are not
+  retried. A mutating call whose outcome is unknown after a transport fault
+  surfaces as `McpUnknownOutcome` rather than a silent success.
+- Bound selected MCP tools onto dynamic Core tools behind the `MCP_CALL`
+  capability. The binding re-reads the registry record at the authorization
+  boundary so an approved tool cannot run against stale command, URL, credential,
+  or transport configuration, and rejects identity, schema, and permission
+  changes before execution.
+- Added `mcp server add/remove/list/show/inspect/doctor`,
+  `mcp session select/deselect/permissions`, `mcp call`, and
+  `mcp credential set/show/delete/doctor` CLI commands, plus MCP selection
+  integration into `karox agent run`. Only explicitly `allow`ed tools are
+  described to the provider; `ask` fails closed until the user updates the
+  session selection.
+- Added an end-to-end test harness using a *real* MCP server built on the
+  installed SDK for both transports: a stdio echo server and a Streamable HTTP
+  echo server with bearer auth, each driven through `McpClient` and
+  `CoreRuntime` rather than a mock.
+
+Changed files in Phase 5:
+
+- `pyproject.toml`
+- `src/karox/agent.py`
+- `src/karox/cli.py`
+- `src/karox/core.py`
+- `src/karox/models.py`
+- `src/karox/policy.py`
+- `src/karox/mcp_client.py`
+- `tests/_mcp_echo_server.py`
+- `tests/_mcp_http_server.py`
+- `tests/test_mcp.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 163 passed (44 new)
+- `python scripts/test_path_migration.py`
+- `python scripts/test_app_entry.py`
+- `python scripts/test_runtime_rebrand.py`
+- `python scripts/test_notion_profile.py`
+- `python scripts/test_notion_provider.py`
+- `python scripts/test_notion_mcp_transport.py`
+- `git diff --check`
+
+End-to-end evidence:
+
+- `StdioMcpEndToEndTests` launches the deterministic stdio echo server as a
+  subprocess; `McpClient` performs a real JSON-RPC handshake, discovers both
+  tools, and the read-only `echo` call returns its text through `CoreRuntime`.
+  The mutating `write_note` call requires a lease and idempotency key and is
+  idempotently replayed on a second identical call.
+- `HttpMcpEndToEndTests` starts a real Uvicorn Streamable HTTP server built on
+  the MCP SDK's `StreamableHTTPSessionManager`; the bearer token is injected
+  from an opaque `McpCredentialStore` reference, never persisted in the
+  registry, and never written to the audit log. A missing credential fails
+  closed at discovery.
+- The servers are deterministic local fakes. This proves the genuine transport
+  and CLI/Core integration without requiring a paid or remote MCP server, but is
+  not evidence of interoperability with every MCP vendor.
+
+Security boundaries, known problems, and migration risks:
+
+- The OS keyring is required for MCP credential storage. `credential doctor`
+  reports absence and KaroX fails closed instead of writing plaintext
+  credentials; the in-memory fake backend is used only by tests where the
+  keyring is unavailable.
+- MCP stdio transport spawns a child process with `child_process_environment()`
+  and the configured, credential-injected environment. It is not an
+  operating-system sandbox; a granted `MCP_CALL` capability lets a configured
+  server run arbitrary code within its process rights.
+- The MCP SDK's stdio transport emits benign `ResourceWarning` messages from
+  unclosed memory streams during subprocess teardown on some platforms. The
+  warnings do not affect test outcomes or leaked file handles after process
+  exit; the suite is run with `-W ignore::ResourceWarning` for deterministic
+  output.
+- External JSON-Schema validation enforces the safe subset understood by Core
+  (types, properties, required, items, additionalProperties). Unknown draft
+  keywords are ignored so a valid remote schema is not rejected merely because
+  Core does not implement every feature, but unknown declared types never become
+  an allow-all rule.
+- No remote, third-party, or paid MCP server was contacted. Legacy bridge paths
+  and the tested Notion integration were not modified. HyperAgent and PromptQL
+  remain experimental.
+- Context compaction, unified cross-provider handoff, MCP proxy to hosted
+  clients, Packs, and TUI remain pending.
 
 ## Commit record
 
@@ -421,5 +525,6 @@ Next actions for Phase 5:
 - `6a3e521 feat: add provider routing and credential management`
 - `ceaee0b docs: record Phase 3 provider routing`
 - `5f497bb feat: add secure lazy skill runtime`
+- `743ef9f docs: record Phase 4 skill runtime`
 
 No merge, push, or release has been performed.

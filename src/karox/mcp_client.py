@@ -612,28 +612,6 @@ def _descriptor(record: McpServerRecord, tool: Any) -> McpToolDescriptor:
     )
 
 
-class _DiscardText:
-    """Deprecated sink retained for API compatibility; use ``DEVNULL`` instead.
-
-    ``anyio.open_process`` and the MCP Windows fallback both require a real
-    file object with ``fileno()`` for ``stderr``, so a bare ``io.TextIOBase``
-    is no longer suitable.  This thin wrapper around ``subprocess.DEVNULL``
-    keeps existing call sites working while routing to the OS null device.
-    """
-
-    def __init__(self) -> None:
-        self._devnull = subprocess.DEVNULL
-
-    def fileno(self) -> int:  # pragma: no cover - thin OS passthrough
-        return self._devnull.fileno()
-
-    def write(self, value: str) -> int:
-        return len(value)
-
-    def flush(self) -> None:
-        pass
-
-
 def _http_client_factory(
     headers: Optional[dict[str, str]] = None,
     timeout: Optional[httpx.Timeout] = None,
