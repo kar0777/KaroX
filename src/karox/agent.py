@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from .core import CoreRuntime, ToolDefinition
-from .models import CoreCommand, CoreResult, Origin
+from .models import CoreCommand, CoreResult, Origin, OriginKind
 from .providers import (
     ModelMessage,
     ModelRequest,
@@ -98,6 +98,7 @@ class AgentReport:
 class _PendingToolCall:
     call: ToolCall
     recoverable: bool
+    origin: Optional[str]
 
 
 class AgentKernel:
@@ -112,16 +113,20 @@ class AgentKernel:
         sessions: SessionStore,
         origin: Origin,
         limits: AgentLimits = AgentLimits(),
+        system_prompt: str = SYSTEM_PROMPT,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("agent model must be a non-empty string")
+        if not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise ValueError("agent system prompt must be a non-empty string")
         self.provider = provider
         self.model = model
         self.core = core
         self.sessions = sessions
         self.origin = origin
         self.limits = limits
+        self.system_prompt = system_prompt
         self.monotonic = monotonic
         definitions = {item.name: item for item in core.tools()}
         missing = set(TOOL_ALIASES.values()).difference(definitions)
@@ -188,7 +193,7 @@ class AgentKernel:
                 self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
                 request = ModelRequest(
                     model=self.model,
-                    messages=tuple(self._messages(record.provider_history)),
+                    messages=tuple(self._request_messages(record.provider_history)),
                     tools=self._provider_tools,
                     deadline_seconds=min(remaining, 3600.0),
                 )
@@ -327,6 +332,7 @@ class AgentKernel:
             )
         entry = {
             "role": "assistant",
+            "origin": self.origin.key,
             "content": redact(response.content) if response.content is not None else None,
             "tool_calls": tool_calls,
             "provider": self.provider.provider_name,
@@ -484,6 +490,7 @@ class AgentKernel:
         )
         entry = {
             "role": "tool",
+            "origin": self.origin.key,
             "content": redact(content),
             "tool_call_id": call.call_id,
             "tool_name": call.name,
@@ -537,6 +544,7 @@ class AgentKernel:
             lease,
             {
                 "role": "tool",
+                "origin": self.origin.key,
                 "content": json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 "tool_call_id": call.call_id,
                 "tool_name": call.name,
@@ -556,6 +564,22 @@ class AgentKernel:
         repeated = False
         for pending in self._pending_calls(history):
             call = pending.call
+            if (
+                pending.origin is not None
+                and pending.origin != self.origin.key
+            ) or (
+                pending.origin is None
+                and self.origin.kind is not OriginKind.NATIVE_AGENT
+            ):
+                self._persist_tool_error(
+                    session_id,
+                    lease,
+                    call,
+                    "origin_mismatch",
+                    "persisted tool call belongs to a different or unknown origin; "
+                    "refusing replay",
+                )
+                continue
             if not pending.recoverable:
                 self._persist_tool_error(
                     session_id,
@@ -576,6 +600,12 @@ class AgentKernel:
         pending_by_id: Dict[str, Deque[int]] = defaultdict(deque)
         for entry in history:
             if entry.get("role") == "assistant":
+                raw_origin = entry.get("origin")
+                origin = (
+                    raw_origin
+                    if isinstance(raw_origin, str) and raw_origin.strip()
+                    else None
+                )
                 for raw in entry.get("tool_calls", []):
                     call_id = str(raw.get("call_id", ""))
                     pending.append(
@@ -588,6 +618,7 @@ class AgentKernel:
                             # Older records did not persist enough information to
                             # prove that redaction left the executable input intact.
                             recoverable=raw.get("recoverable") is True,
+                            origin=origin,
                         ),
                     )
                     pending_by_id[call_id].append(len(pending) - 1)
@@ -674,6 +705,17 @@ class AgentKernel:
                     content=tool_entry.get("content"),
                     tool_call_id=call.call_id,
                 )
+
+    def _request_messages(
+        self, history: Iterable[Dict[str, Any]]
+    ) -> Iterable[ModelMessage]:
+        replaced = False
+        for message in self._messages(history):
+            if not replaced and message.role == "system":
+                replaced = True
+                yield ModelMessage("system", self.system_prompt)
+            else:
+                yield message
 
     @staticmethod
     def _step_count(history: List[Dict[str, Any]]) -> int:

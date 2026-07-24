@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from .agent import AgentError, AgentKernel, AgentLimits, AgentReport
+from .agent import AgentError, AgentKernel, AgentLimits, AgentReport, SYSTEM_PROMPT
 from .core import CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .migration import MigrationError, migrate_legacy_metadata
@@ -44,6 +44,16 @@ from .registry import (
 from .routing import RouteTarget, RoutedProvider, RoutingPolicy
 from .security import redact
 from .sessions import SessionError, SessionRecord, SessionStore
+from .skills import (
+    SkillCatalog,
+    SkillError,
+    SkillMetadata,
+    SkillPermission,
+    configure_skill_policy,
+    skill_selection,
+    skill_system_prompt,
+    validate_selection,
+)
 
 
 def _json(value: Any) -> None:
@@ -196,6 +206,53 @@ def _parser() -> argparse.ArgumentParser:
     model_test.add_argument("model")
     model_test.add_argument("--json", action="store_true")
 
+    skill = commands.add_parser("skill", help="discover and select Skills")
+    skills = skill.add_subparsers(dest="skill_command", required=True)
+
+    def add_skill_source_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--repository", type=Path, default=Path.cwd())
+        command.add_argument(
+            "--skill-dir",
+            type=Path,
+            action="append",
+            default=[],
+            help="additional Skill source directory (repeatable)",
+        )
+
+    skill_list = skills.add_parser("list", help="list discovered Skill metadata")
+    add_skill_source_arguments(skill_list)
+    skill_list.add_argument("--json", action="store_true")
+    skill_show = skills.add_parser("show", help="show Skill metadata")
+    skill_show.add_argument("name")
+    add_skill_source_arguments(skill_show)
+    skill_show.add_argument("--json", action="store_true")
+    skill_load = skills.add_parser("load", help="explicitly load Skill content")
+    skill_load.add_argument("name")
+    add_skill_source_arguments(skill_load)
+    skill_load.add_argument("--json", action="store_true")
+    skill_select = skills.add_parser(
+        "select", help="select a Skill and session permission decisions"
+    )
+    skill_select.add_argument("name")
+    skill_select.add_argument("--session-id", required=True)
+    skill_select.add_argument(
+        "--permission",
+        "--skill-permission",
+        dest="skill_permission",
+        action="append",
+        default=[],
+        help="CAPABILITY=allow|ask|deny (repeatable)",
+    )
+    add_skill_source_arguments(skill_select)
+    skill_select.add_argument("--json", action="store_true")
+    skill_deselect = skills.add_parser(
+        "deselect", help="remove a Skill selection from a session"
+    )
+    skill_deselect.add_argument("name")
+    skill_deselect.add_argument("--session-id", required=True)
+    add_skill_source_arguments(skill_deselect)
+    skill_deselect.add_argument("--json", action="store_true")
+
     agent = commands.add_parser("agent", help="run the bounded native agent")
     agents = agent.add_subparsers(dest="agent_command", required=True)
     run = agents.add_parser("run", help="run or resume a native-agent session")
@@ -208,6 +265,16 @@ def _parser() -> argparse.ArgumentParser:
         help="name of an environment variable containing the provider API key",
     )
     run.add_argument("--session-id")
+    run.add_argument("--skill")
+    run.add_argument(
+        "--skill-dir", type=Path, action="append", default=[]
+    )
+    run.add_argument(
+        "--skill-permission",
+        action="append",
+        default=[],
+        help="CAPABILITY=allow|ask|deny for the active Skill (repeatable)",
+    )
     run.add_argument(
         "--route", action="append", default=[], help="provider/model fallback route"
     )
@@ -299,6 +366,71 @@ def _pricing(args: argparse.Namespace) -> Optional[ModelPricing]:
         args.output_per_million,
         args.pricing_source,
     )
+
+
+def _skill_decisions(values: Sequence[str]) -> dict[Capability, SkillPermission]:
+    pairs = _pairs(values, "Skill permission")
+    result: dict[Capability, SkillPermission] = {}
+    for raw_capability, raw_decision in pairs.items():
+        try:
+            capability = Capability(raw_capability)
+        except ValueError as exc:
+            raise ValueError(
+                f"unknown Skill capability: {raw_capability}"
+            ) from exc
+        try:
+            result[capability] = SkillPermission(raw_decision)
+        except ValueError as exc:
+            raise ValueError(
+                "Skill permission decisions must use allow, ask, or deny"
+            ) from exc
+    return result
+
+
+def _skill_catalog(args: argparse.Namespace) -> SkillCatalog:
+    return SkillCatalog(
+        args.repository,
+        extra_directories=tuple(args.skill_dir),
+    )
+
+
+def _stored_skill(
+    record: SessionRecord, name: str
+) -> Optional[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for item in record.skills:
+        if not isinstance(item, dict):
+            raise SkillError("stored Skill selection must be an object")
+        if item.get("name") == name:
+            matches.append(item)
+    if len(matches) > 1:
+        raise SkillError(f"session contains duplicate Skill selections: {name}")
+    return matches[0] if matches else None
+
+
+def _replace_stored_skill(
+    record: SessionRecord, name: str, selection: Optional[dict[str, Any]]
+) -> bool:
+    existing = _stored_skill(record, name)
+    if existing is None and selection is None:
+        return False
+    retained = [item for item in record.skills if item is not existing]
+    if selection is not None:
+        retained.append(selection)
+    record.skills = retained
+    return True
+
+
+def _compatible_previous_skill(
+    metadata: SkillMetadata, previous: Optional[dict[str, Any]]
+) -> Optional[dict[str, Any]]:
+    if previous is None:
+        return None
+    try:
+        validate_selection(metadata, previous)
+    except SkillError:
+        return None
+    return previous
 
 
 def _emit(value: Any, *, json_output: bool) -> None:
@@ -414,12 +546,80 @@ def _agent_provider(
     return provider, routes[0].model
 
 
+def _handle_skill(args: argparse.Namespace) -> int:
+    repository = args.repository.expanduser().resolve(strict=True)
+    if not repository.is_dir():
+        raise ValueError(f"repository is not a directory: {repository}")
+    command = args.skill_command
+    if command == "deselect":
+        store = SessionStore(session_dir())
+        lease = store.acquire(
+            args.session_id, f"skill-deselect-{os.getpid()}", ttl_seconds=5.0
+        )
+        try:
+            record = store.load(args.session_id)
+            store.validate_repository(record, repository)
+            removed = _replace_stored_skill(record, args.name, None)
+            if removed:
+                store.save(record, record.revision, lease)
+        finally:
+            store.release(lease)
+        payload = {
+            "name": args.name,
+            "session_id": args.session_id,
+            "status": "deselected" if removed else "not_selected",
+        }
+        _emit(payload, json_output=args.json)
+        return 0
+
+    catalog = _skill_catalog(args)
+    if command == "list":
+        payload = {
+            "skills": [item.to_dict() for item in catalog.discover()],
+            "diagnostics": [item.to_dict() for item in catalog.diagnostics],
+        }
+    elif command == "show":
+        payload = {
+            "skill": catalog.get(args.name).to_dict(),
+            "diagnostics": [item.to_dict() for item in catalog.diagnostics],
+        }
+    elif command == "load":
+        payload = {
+            "skill": catalog.load(args.name).to_dict(),
+            "diagnostics": [item.to_dict() for item in catalog.diagnostics],
+        }
+    else:
+        metadata = catalog.get(args.name)
+        decisions = _skill_decisions(args.skill_permission)
+        store = SessionStore(session_dir())
+        selection: dict[str, Any]
+        with store.mutate(
+            args.session_id, f"skill-select-{os.getpid()}", ttl_seconds=5.0
+        ) as record:
+            store.validate_repository(record, repository)
+            previous = _compatible_previous_skill(
+                metadata, _stored_skill(record, metadata.name)
+            )
+            selection = skill_selection(
+                metadata, decisions, previous=previous
+            )
+            _replace_stored_skill(record, metadata.name, selection)
+        payload = {
+            "session_id": args.session_id,
+            "selection": selection,
+            "diagnostics": [item.to_dict() for item in catalog.diagnostics],
+        }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
     limits = AgentLimits(max_steps=args.max_steps, max_seconds=args.max_seconds)
     store = SessionStore(session_dir())
+    record: SessionRecord | None = None
     if args.session_id and store.state_path(args.session_id).exists():
         record = store.load(args.session_id)
         store.validate_repository(record, repository)
@@ -427,9 +627,30 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             raise SessionError("native agent requires a workspace_write session")
         if record.task != str(redact(args.task)):
             raise SessionError("resume task differs from the existing session task")
-        provider, model = _agent_provider(args, record, limits)
+    provider, model = _agent_provider(args, record, limits)
+
+    content = None
+    selection: dict[str, Any] | None = None
+    if args.skill is None:
+        if args.skill_permission:
+            raise ValueError("--skill-permission requires --skill")
     else:
-        provider, model = _agent_provider(args, None, limits)
+        catalog = SkillCatalog(
+            repository, extra_directories=tuple(args.skill_dir)
+        )
+        content = catalog.load(args.skill)
+        decisions = _skill_decisions(args.skill_permission)
+        previous = None
+        if record is not None:
+            previous = _compatible_previous_skill(
+                content.metadata,
+                _stored_skill(record, content.metadata.name),
+            )
+        selection = skill_selection(
+            content.metadata, decisions, previous=previous
+        )
+
+    if record is None:
         record = store.create(
             repository,
             args.task,
@@ -437,10 +658,11 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             session_id=args.session_id,
         )
 
-    origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
+    native_origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
+    origin = native_origin
     policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
     policy.set_grants(
-        origin,
+        native_origin,
         {
             Capability.REPO_READ,
             Capability.REPO_WRITE,
@@ -449,6 +671,22 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             Capability.GIT_READ,
         },
     )
+    system_prompt = SYSTEM_PROMPT
+    if content is not None and selection is not None:
+        origin = configure_skill_policy(
+            policy,
+            content.metadata,
+            selection,
+            parent=native_origin.key,
+        )
+        system_prompt += skill_system_prompt(content)
+        with store.mutate(
+            record.session_id,
+            f"agent-skill-{os.getpid()}",
+            ttl_seconds=5.0,
+        ) as current:
+            store.validate_repository(current, repository)
+            _replace_stored_skill(current, content.metadata.name, selection)
     core = CoreRuntime(
         repository,
         policy,
@@ -462,6 +700,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         sessions=store,
         origin=origin,
         limits=limits,
+        system_prompt=system_prompt,
     ).run(record.session_id)
 
 
@@ -650,6 +889,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "model":
             return _handle_model(args)
 
+        if args.command == "skill":
+            return _handle_skill(args)
+
         if args.command == "agent":
             report = _run_agent(args)
             _json(report.to_dict()) if args.json else _print_agent_report(report)
@@ -690,6 +932,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ProviderError,
         RegistryError,
         SessionError,
+        SkillError,
         OSError,
         ValueError,
     ) as exc:

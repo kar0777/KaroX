@@ -136,6 +136,9 @@ class AgentKernelTests(unittest.TestCase):
         provider: QueueProvider,
         limits: AgentLimits | None = None,
         monotonic: Callable[[], float] | None = None,
+        *,
+        origin: Origin | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> AgentKernel:
         kwargs: dict[str, object] = {}
         if monotonic is not None:
@@ -145,10 +148,161 @@ class AgentKernelTests(unittest.TestCase):
             model="test-model",
             core=self.core,
             sessions=self.sessions,
-            origin=self.origin,
+            origin=origin or self.origin,
             limits=limits or AgentLimits(max_seconds=30),
+            system_prompt=system_prompt,
             **kwargs,
         )
+
+    def test_skill_prompt_is_request_only_and_native_history_stays_stable(self) -> None:
+        enhanced_prompt = SYSTEM_PROMPT + "\nSKILL_INSTRUCTION_TOKEN"
+        provider = QueueProvider([model_response(content="not finished")])
+
+        report = self.kernel(
+            provider,
+            AgentLimits(max_steps=1, max_seconds=30),
+            system_prompt=enhanced_prompt,
+        ).run("session")
+
+        self.assertEqual(report.reason, "step_limit")
+        self.assertEqual(provider.requests[0].messages[0].content, enhanced_prompt)
+        persisted = self.sessions.load("session")
+        self.assertEqual(persisted.provider_history[0]["content"], SYSTEM_PROMPT)
+        self.assertNotIn(
+            "SKILL_INSTRUCTION_TOKEN",
+            json.dumps(persisted.provider_history, ensure_ascii=False),
+        )
+
+    def test_skill_origin_is_persisted_on_assistant_and_tool_records(self) -> None:
+        skill_origin = Origin(
+            OriginKind.SKILL,
+            "bounded@1.0.0",
+            parent=self.origin.key,
+        )
+        self.policy.set_grants(skill_origin, {Capability.REPO_READ})
+        provider = QueueProvider(
+            [
+                model_response(
+                    call("read", "repo_read_file", {"path": "sample.txt"})
+                ),
+                model_response(content="read complete"),
+            ]
+        )
+
+        self.kernel(
+            provider,
+            AgentLimits(max_steps=2, max_seconds=30),
+            origin=skill_origin,
+        ).run("session")
+
+        history = self.sessions.load("session").provider_history
+        generated = [
+            item for item in history if item.get("role") in {"assistant", "tool"}
+        ]
+        self.assertGreaterEqual(len(generated), 3)
+        self.assertTrue(
+            all(item.get("origin") == skill_origin.key for item in generated)
+        )
+
+    def test_pending_call_from_other_origin_is_not_replayed(self) -> None:
+        raw_arguments = json.dumps(
+            {"path": "sample.txt", "content": "must not be replayed\n"},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        lease = self.sessions.acquire("session", "origin-simulation")
+        try:
+            record = self.sessions.load("session")
+            record.provider_history.extend(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": record.task},
+                    {
+                        "role": "assistant",
+                        "origin": self.origin.key,
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "call_id": "foreign-write",
+                                "name": "repo_write_file",
+                                "raw_arguments": raw_arguments,
+                                "recoverable": True,
+                            }
+                        ],
+                        "provider": "test_provider",
+                        "model": "test-model",
+                    },
+                ]
+            )
+            self.sessions.save(record, record.revision, lease)
+        finally:
+            self.sessions.release(lease)
+
+        skill_origin = Origin(
+            OriginKind.SKILL,
+            "bounded@1.0.0",
+            parent=self.origin.key,
+        )
+        self.policy.set_grants(skill_origin, {Capability.REPO_WRITE})
+        provider = QueueProvider([model_response(content="stopping")])
+
+        self.kernel(
+            provider,
+            AgentLimits(max_steps=2, max_seconds=30),
+            origin=skill_origin,
+        ).run("session")
+
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "before\n",
+        )
+        failure = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("tool_call_id") == "foreign-write"
+            and item.get("role") == "tool"
+        )
+        self.assertEqual(failure["error"]["type"], "origin_mismatch")
+        self.assertEqual(failure["origin"], skill_origin.key)
+
+    def test_denied_skill_write_leaves_repository_unchanged(self) -> None:
+        skill_origin = Origin(
+            OriginKind.SKILL,
+            "bounded@1.0.0",
+            parent=self.origin.key,
+        )
+        self.policy.set_denies(skill_origin, {Capability.REPO_WRITE})
+        provider = QueueProvider(
+            [
+                model_response(
+                    call(
+                        "denied-write",
+                        "repo_write_file",
+                        {"path": "sample.txt", "content": "forbidden\n"},
+                    )
+                ),
+                model_response(content="write denied"),
+            ]
+        )
+
+        report = self.kernel(
+            provider,
+            AgentLimits(max_steps=2, max_seconds=30),
+            origin=skill_origin,
+        ).run("session")
+
+        self.assertFalse(report.verified)
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "before\n",
+        )
+        failure = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("tool_call_id") == "denied-write"
+            and item.get("role") == "tool"
+        )
+        self.assertEqual(failure["error"]["type"], "PolicyDenied")
 
     def test_success_requires_durable_write_check_status_and_diff_evidence(self) -> None:
         provider = QueueProvider(self.successful_responses())
