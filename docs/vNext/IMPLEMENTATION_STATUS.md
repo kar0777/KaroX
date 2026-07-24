@@ -17,7 +17,7 @@ Base: `main` at `a5c233a`
 | 6 — unified handoff | Complete | 170 tests cover structured handoff, mid-task model switch, locking, and recovery |
 | 7 — MCP proxy/bridges | Complete | 193 tests cover bridge profiles, dedicated credentials, proxy allowlist, and real stdio proxy E2E |
 | 8 — Pack SDK | Complete | 207 tests cover manifest validation, lifecycle, permissions, path confinement, and CLI E2E |
-| 9 — TUI | Not started | — |
+| 9 — TUI | Complete | 221 tests cover slash→argv translation, loop control, plain-text fallback, and backend delegation |
 | 10 — benchmark/readiness | Not started | — |
 
 ## Phase 0 baseline
@@ -484,7 +484,69 @@ Security boundaries, known problems, and migration risks:
 - No network or external key was required. Legacy bridge paths and the tested
   Notion integration were not modified. HyperAgent and PromptQL remain
   experimental.
-- The TUI and the hybrid runtime benchmark remain pending.
+- The hybrid runtime benchmark remains pending.
+
+## Phase 9 — optional TUI
+
+Completed:
+
+- Added an optional interactive TUI (`karox tui`) that is a thin presentation
+  layer over the already-working CLI backend. The TUI contains no business
+  logic: every slash command is translated into the same `argparse` argv that
+  `karox.cli.main` already handles, so the backend stays fully usable without
+  the TUI (line-mode, non-interactive, JSON, CI).
+- Mapped 15 slash commands (`/help /provider /model /status /plan /diff
+  /tests /checkpoint /cost /context /handoff /bridge /permissions /doctor
+  /exit`) to their underlying CLI argv, with session-aware variants that inject
+  `--session-id`/`--repository` when a session is active and fall back to the
+  list view otherwise.
+- Made rendering degrade gracefully: `rich` is used when importable and falls
+  back to plain text on a minimal install, so the TUI never hard-fails.
+- Honoured the injected input/output streams: `_render_help` writes to the
+  provided output stream (not a fresh stdout console), and the read loop reads
+  from the provided input stream while keeping readline-backed `input()` for
+  the real stdin, so both interactive use and piped/test use work correctly.
+- Treated non-slash input as raw CLI argv for power users, and reported
+  unknown slash commands without calling the backend.
+
+Changed files in Phase 9:
+
+- `src/karox/tui.py`
+- `src/karox/cli.py`
+- `tests/test_tui.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 221 passed (14 new, 1 skipped)
+- `printf '/help\n/bridge list --json\n/exit\n' | python -m karox.cli tui` —
+  renders the KaroX panel and slash-command table, delegates `/bridge list
+  --json` to the backend, and exits cleanly.
+- `git diff --check`
+
+End-to-end evidence:
+
+- `SlashTranslationTests` cover slash→argv translation for known commands,
+  session-aware injection, default-list fallback, doctor pass-through, and
+  unknown-command rejection.
+- `TuiLoopTests` cover `/exit` and EOF returning zero, `/help` handled by the
+  shell, unknown slash commands reported without a backend call, empty-line
+  skipping, and the plain-text fallback path.
+- `BackendDelegationTests` prove the TUI forwards to the real CLI entrypoint
+  (no reimplementation), and that raw non-slash argv is forwarded through the
+  loop.
+
+Security boundaries, known problems, and migration risks:
+
+- The TUI adds no new trust boundary: it only translates and forwards. All
+  authorization continues to happen in the CLI backend, Core policy, and the
+  MCP/bridge layers exactly as in non-interactive use.
+- No secrets, credentials, or new persistent state are introduced. The TUI
+  never holds secrets and delegates any credential operation to the backend.
+- `rich` is an optional dependency; the TUI degrades to plain text without it.
+  No network or external key was required. Legacy paths and the tested Notion
+  integration were not modified.
+- The hybrid runtime benchmark remains pending.
 
 ## Phase 7 — MCP proxy and bridge layer
 
@@ -743,8 +805,7 @@ Security boundaries, known problems, and migration risks:
 - No remote, third-party, or paid MCP server was contacted. Legacy bridge paths
   and the tested Notion integration were not modified. HyperAgent and PromptQL
   remain experimental.
-- Context compaction, unified cross-provider handoff, MCP proxy to hosted
-  clients, Packs, and TUI remain pending.
+- Context compaction and the hybrid runtime benchmark remain pending.
 
 ## Commit record
 
@@ -764,5 +825,7 @@ Security boundaries, known problems, and migration risks:
 - `11b4e0b docs: record Phase 6 unified handoff`
 - `57592ff feat: add MCP proxy and bridge layer for hosted clients`
 - `2d07dda docs: record Phase 7 MCP proxy and bridge layer`
+- `6bdf7e3 feat: add KaroX Pack SDK with manifest and lifecycle`
+- `a640ee2 docs: record Phase 8 Pack SDK`
 
 No merge, push, or release has been performed.
