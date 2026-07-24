@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -54,6 +55,7 @@ from .registry import (
     RegistryError,
 )
 from .routing import RouteTarget, RoutedProvider, RoutingPolicy
+from .handoff import build_handoff, handoff_digest
 from .security import redact
 from .sessions import SessionError, SessionRecord, SessionStore
 from .skills import (
@@ -112,6 +114,17 @@ def _parser() -> argparse.ArgumentParser:
     show = sessions.add_parser("show", help="show one session")
     show.add_argument("session_id")
     show.add_argument("--json", action="store_true")
+    handoff = sessions.add_parser(
+        "handoff", help="emit a secret-free structured handoff document"
+    )
+    handoff.add_argument("session_id")
+    handoff.add_argument("--repository", type=Path, default=Path.cwd())
+    handoff.add_argument("--json", action="store_true")
+    locking = sessions.add_parser(
+        "lock", help="inspect the active session mutation lease"
+    )
+    locking.add_argument("session_id")
+    locking.add_argument("--json", action="store_true")
 
     credential = commands.add_parser(
         "credential", help="manage secrets in the operating-system keyring"
@@ -1370,6 +1383,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         f"{record['session_id']}\t{record['status']}\t"
                         f"{record['access_profile']}\t{record['repository']}"
                     )
+            return 0
+        if args.session_command == "handoff":
+            record = store.load(args.session_id)
+            repository = args.repository.expanduser().resolve(strict=True)
+            store.validate_repository(record, repository)
+            document = build_handoff(record, repository=repository)
+            _json(document) if args.json else _print_mapping(document)
+            return 0
+        if args.session_command == "lock":
+            record = store.load(args.session_id)
+            lease_path = store.lease_path(args.session_id)
+            info: Any = {
+                "session_id": record.session_id,
+                "locked": lease_path.exists(),
+            }
+            if lease_path.exists():
+                try:
+                    raw = json.loads(lease_path.read_text(encoding="utf-8"))
+                    info["owner"] = raw.get("owner")
+                    info["expires_at"] = raw.get("expires_at")
+                    info["expired"] = float(raw.get("expires_at", 0)) < time.time()
+                except (OSError, ValueError):
+                    info["locked"] = False
+            _json(info) if args.json else _print_mapping(info)
             return 0
         record = store.load(args.session_id)
         payload = record.to_dict()
