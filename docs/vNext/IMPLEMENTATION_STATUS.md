@@ -16,7 +16,7 @@ Base: `main` at `a5c233a`
 | 5 — MCP client | Complete | 163 tests cover registry, credentials, selection, Core integration, and real stdio + Streamable HTTP E2E |
 | 6 — unified handoff | Complete | 170 tests cover structured handoff, mid-task model switch, locking, and recovery |
 | 7 — MCP proxy/bridges | Complete | 193 tests cover bridge profiles, dedicated credentials, proxy allowlist, and real stdio proxy E2E |
-| 8 — Pack SDK | Not started | — |
+| 8 — Pack SDK | Complete | 207 tests cover manifest validation, lifecycle, permissions, path confinement, and CLI E2E |
 | 9 — TUI | Not started | — |
 | 10 — benchmark/readiness | Not started | — |
 
@@ -397,15 +397,94 @@ Security boundaries, known problems, and migration risks:
 - MCP declarations remain inert metadata in this phase. No Skill can acquire an
   MCP transport or bypass Core policy before the Phase 5 client exists.
 
-Next actions for Phase 8:
+Next actions for Phase 9:
 
-1. Define the Pack manifest format: name, version, compatibility, tools, skills,
-   MCP servers, project detectors, commands, permissions, and health checks.
-2. Add a template generator and minimal sample pack with a test harness.
-3. Implement installation/removal/enable/disable lifecycle and version
-   compatibility checks without letting a Pack bypass Core or session policy.
-4. Add `karox pack create/install/remove/list/inspect/test/doctor/enable/disable`.
-5. Add Pack SDK developer documentation and a sample pack test harness.
+1. Build a fast, optional TUI over the already-working backend; the backend
+   must remain usable without the TUI (line-mode and non-interactive CLI).
+2. Keep business logic out of the TUI; the TUI only renders state and forwards
+   commands to the existing CLI handlers.
+3. Support the slash-command surface (help, provider, model, status, plan,
+   diff, tests, checkpoint, cost, context, handoff, bridge, permissions,
+   doctor, exit).
+4. Add JSON output for automation, stdin support, and CI mode alongside the TUI.
+5. Add tests that exercise the TUI shell without coupling to a specific
+   terminal library's rendering internals.
+
+## Phase 8 — Pack SDK
+
+Completed:
+
+- Defined a strict `karox-pack.toml` manifest with manifest version, name,
+  semantic version, description, authors, license, KaroX version range,
+  supported platforms, tools, skills, MCP declarations, detectors, commands,
+  templates, tests, health checks, and permissions. Unknown fields are rejected
+  for the current major version; unsupported permissions and platforms are
+  rejected; `network` requires `process.run`.
+- Added a template generator (`karox pack create`) that emits a minimal,
+  testable sample pack (`project-inspector`) with one read-only `repo.read`
+  tool, a Skill, a detector, a test harness marker, and no network or external
+  key. The manifest keeps `[[tools]]` last so all top-level keys parse
+  correctly.
+- Implemented the install/remove/list/inspect/doctor/enable/disable lifecycle:
+  manifest and content-hash validation in staging before atomic activation,
+  namespace collision detection, immutable installed copies, and doctor that
+  verifies installed state without mutating the machine.
+- Enforced permission approval: every elevated `permissions` entry must be
+  explicitly user-approved at install; there is no auto-grant. Tool
+  capabilities are re-authorized by Core policy on every call, not at install.
+- Enforced path confinement: every referenced file must stay inside the Pack
+  directory; traversal references are rejected. Installed Pack copies are
+  immutable; an enabled Pack cannot be removed until disabled.
+- Added `karox pack create/install/remove/list/inspect/doctor/enable/disable`
+  CLI commands.
+
+Changed files in Phase 8:
+
+- `src/karox/packs.py`
+- `src/karox/cli.py`
+- `tests/test_packs.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 207 passed (14 new, 1 skipped)
+- `python scripts/test_path_migration.py`
+- `python scripts/test_app_entry.py`
+- `python scripts/test_runtime_rebrand.py`
+- `python scripts/test_notion_profile.py`
+- `python scripts/test_notion_provider.py`
+- `python scripts/test_notion_mcp_transport.py`
+- `git diff --check`
+
+End-to-end evidence:
+
+- `PackCliTests.test_full_lifecycle` drives `karox pack` in a subprocess
+  through create/install/list/doctor/enable/disable/remove, asserting each
+  step's JSON output and that the installed pack disappears after removal.
+- `PackLifecycleTests` cover the roundtrip, duplicate-install rejection,
+  enabled-pack removal rejection, permission approval with explicit grants,
+  path traversal rejection, and doctor detection of a broken pack.
+- `PackManifestTests` cover the strict schema: unknown fields, unsupported
+  version, bad name/version, network-without-process.run, unsupported
+  permission, and unsupported platform.
+
+Security boundaries, known problems, and migration risks:
+
+- A Pack is a declarative extension, not a plugin installer. KaroX does not
+  run Pack-provided setup scripts or arbitrary code at install; only the
+  declared tool capabilities and elevated permissions are gated, and tool
+  calls are re-authorized by Core policy at execution time.
+- The Pack SDK gates permissions and path confinement but does not yet wire
+  Pack-declared MCP servers into the session; MCP declarations remain metadata
+  until a Pack integration binds them through the Phase 5 MCP client with an
+  explicit per-session approval.
+- Pack tool execution through Core is not yet wired in this phase; the SDK
+  proves the manifest, lifecycle, permissions, and path-confinement contract.
+  Actual tool registration for a Pack remains pending.
+- No network or external key was required. Legacy bridge paths and the tested
+  Notion integration were not modified. HyperAgent and PromptQL remain
+  experimental.
+- The TUI and the hybrid runtime benchmark remain pending.
 
 ## Phase 7 — MCP proxy and bridge layer
 
@@ -683,5 +762,7 @@ Security boundaries, known problems, and migration risks:
 - `dd3318b docs: record Phase 5 MCP client`
 - `3c8f070 feat: add unified session handoff and mid-task model switch`
 - `11b4e0b docs: record Phase 6 unified handoff`
+- `57592ff feat: add MCP proxy and bridge layer for hosted clients`
+- `2d07dda docs: record Phase 7 MCP proxy and bridge layer`
 
 No merge, push, or release has been performed.
