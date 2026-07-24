@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
@@ -46,6 +47,14 @@ success until KaroX confirms that the required evidence is durable."""
 REPAIR_PROMPT = """KaroX cannot verify completion yet. Continue using tools.
 After the latest real file change, run a successful check, then request both
 git_status and git_diff. A narrative answer is not verification."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
+def _strict_json_loads(value: str) -> Any:
+    return json.loads(value, parse_constant=_reject_json_constant)
 
 
 class AgentError(RuntimeError):
@@ -133,9 +142,23 @@ class AgentKernel:
         if missing:
             raise AgentError(f"Core is missing required tools: {sorted(missing)}")
         self._definitions = definitions
+        aliases = dict(TOOL_ALIASES)
+        for core_name in sorted(definitions):
+            if not core_name.startswith("mcp."):
+                continue
+            alias = re.sub(r"[^A-Za-z0-9_]", "_", core_name)
+            current = aliases.get(alias)
+            if current is not None and current != core_name:
+                raise AgentError(
+                    f"provider tool alias collision: {alias} maps to {current} and {core_name}"
+                )
+            aliases[alias] = core_name
+        if len(set(aliases.values())) != len(aliases):
+            raise AgentError("multiple provider aliases map to the same Core tool")
+        self._tool_aliases = aliases
         self._provider_tools = tuple(
             self._provider_tool(alias, definitions[core_name])
-            for alias, core_name in TOOL_ALIASES.items()
+            for alias, core_name in aliases.items()
         )
 
     @staticmethod
@@ -396,7 +419,7 @@ class AgentKernel:
     @staticmethod
     def _safe_arguments(raw: str) -> tuple[str, bool]:
         try:
-            value = json.loads(raw)
+            value = _strict_json_loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
             safe = str(redact(raw))
             return safe, safe == raw
@@ -426,14 +449,14 @@ class AgentKernel:
             action_counts[signature] += 1
             return True
         action_counts[signature] += 1
-        core_name = TOOL_ALIASES.get(call.name)
+        core_name = self._tool_aliases.get(call.name)
         if core_name is None:
             self._persist_tool_error(
                 session_id, lease, call, "unknown_tool", "tool is not available"
             )
             return False
         try:
-            arguments = json.loads(call.raw_arguments)
+            arguments = _strict_json_loads(call.raw_arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("tool arguments must be a JSON object")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -654,8 +677,10 @@ class AgentKernel:
     @staticmethod
     def _action_signature(call: ToolCall) -> str:
         try:
-            value = json.loads(call.raw_arguments)
-            normalized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            value = _strict_json_loads(call.raw_arguments)
+            normalized = json.dumps(
+                value, allow_nan=False, ensure_ascii=False, sort_keys=True
+            )
         except (TypeError, ValueError, json.JSONDecodeError):
             normalized = call.raw_arguments
         return hashlib.sha256(f"{call.name}\0{normalized}".encode("utf-8")).hexdigest()

@@ -15,7 +15,19 @@ from .agent import AgentError, AgentKernel, AgentLimits, AgentReport, SYSTEM_PRO
 from .core import CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .migration import MigrationError, migrate_legacy_metadata
-from .models import AccessProfile, Capability, Origin, OriginKind
+from .mcp_client import (
+    McpAccessDenied,
+    McpClient,
+    McpCredentialStore,
+    McpError,
+    McpRegistry,
+    McpRuntimeBinding,
+    McpServerRecord,
+    McpToolDescriptor,
+    mcp_selection,
+    validate_mcp_selection_registry,
+)
+from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from .paths import (
     config_dir,
     legacy_config_dir,
@@ -253,6 +265,120 @@ def _parser() -> argparse.ArgumentParser:
     add_skill_source_arguments(skill_deselect)
     skill_deselect.add_argument("--json", action="store_true")
 
+    mcp = commands.add_parser("mcp", help="manage external MCP servers and tools")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    mcp_server = mcp_commands.add_parser("server", help="manage MCP servers")
+    mcp_servers = mcp_server.add_subparsers(
+        dest="mcp_server_command", required=True
+    )
+    mcp_server_add = mcp_servers.add_parser("add", help="add or replace a server")
+    mcp_server_add.add_argument("server_id")
+    mcp_server_add.add_argument("--namespace", required=True)
+    mcp_server_add.add_argument(
+        "--transport", choices=("stdio", "streamable_http"), required=True
+    )
+    mcp_server_add.add_argument("--command")
+    mcp_server_add.add_argument("--arg", action="append", default=[])
+    mcp_server_add.add_argument("--url")
+    mcp_server_add.add_argument("--env", action="append", default=[])
+    mcp_server_add.add_argument("--header", action="append", default=[])
+    mcp_server_add.add_argument("--credential-ref")
+    mcp_server_add.add_argument("--credential-target")
+    mcp_server_add.add_argument("--credential-scheme", default="Bearer")
+    mcp_server_add.add_argument("--read-only-tool", action="append", default=[])
+    mcp_server_add.add_argument("--timeout-seconds", type=float, default=30.0)
+    mcp_server_add.add_argument("--max-result-bytes", type=int, default=1_000_000)
+    mcp_server_add.add_argument("--max-message-bytes", type=int, default=1_000_000)
+    mcp_server_add.add_argument("--max-transport-retries", type=int, default=1)
+    mcp_server_add.add_argument("--json", action="store_true")
+    mcp_server_remove = mcp_servers.add_parser("remove", help="remove a server")
+    mcp_server_remove.add_argument("server_id")
+    mcp_server_remove.add_argument("--json", action="store_true")
+    mcp_server_list = mcp_servers.add_parser("list", help="list servers")
+    mcp_server_list.add_argument("--json", action="store_true")
+    mcp_server_show = mcp_servers.add_parser("show", help="show a server")
+    mcp_server_show.add_argument("server_id")
+    mcp_server_show.add_argument("--json", action="store_true")
+    for name, help_text in (
+        ("inspect", "discover and show server tools"),
+        ("doctor", "verify server connectivity and discovery"),
+    ):
+        command = mcp_servers.add_parser(name, help=help_text)
+        command.add_argument("server_id")
+        command.add_argument("--repository", type=Path, default=Path.cwd())
+        command.add_argument("--json", action="store_true")
+
+    mcp_session = mcp_commands.add_parser(
+        "session", help="manage session MCP selections"
+    )
+    mcp_sessions = mcp_session.add_subparsers(
+        dest="mcp_session_command", required=True
+    )
+    mcp_session_select = mcp_sessions.add_parser(
+        "select", help="discover and select a server for a session"
+    )
+    mcp_session_select.add_argument("server_id")
+    mcp_session_select.add_argument("--session-id", required=True)
+    mcp_session_select.add_argument("--repository", type=Path, default=Path.cwd())
+    mcp_session_select.add_argument(
+        "--permission",
+        action="append",
+        default=[],
+        help="REMOTE_TOOL=allow|ask|deny (repeatable)",
+    )
+    mcp_session_select.add_argument("--json", action="store_true")
+    mcp_session_deselect = mcp_sessions.add_parser(
+        "deselect", help="remove a server selection from a session"
+    )
+    mcp_session_deselect.add_argument("server_id")
+    mcp_session_deselect.add_argument("--session-id", required=True)
+    mcp_session_deselect.add_argument("--repository", type=Path, default=Path.cwd())
+    mcp_session_deselect.add_argument("--json", action="store_true")
+    mcp_session_permissions = mcp_sessions.add_parser(
+        "permissions", help="show stored server permissions"
+    )
+    mcp_session_permissions.add_argument("server_id")
+    mcp_session_permissions.add_argument("--session-id", required=True)
+    mcp_session_permissions.add_argument(
+        "--repository", type=Path, default=Path.cwd()
+    )
+    mcp_session_permissions.add_argument("--json", action="store_true")
+
+    mcp_call = mcp_commands.add_parser("call", help="call a selected MCP tool")
+    mcp_call.add_argument("tool", help="fully namespaced mcp.<namespace>.<tool> name")
+    mcp_call.add_argument("--session-id", required=True)
+    mcp_call.add_argument("--repository", type=Path, default=Path.cwd())
+    mcp_call.add_argument("--arguments", default="{}", help="JSON object arguments")
+    mcp_call.add_argument("--idempotency-key")
+    mcp_call.add_argument("--deadline-seconds", type=float, default=120.0)
+    mcp_call.add_argument("--json", action="store_true")
+
+    mcp_credential = mcp_commands.add_parser(
+        "credential", help="manage MCP secrets in the operating-system keyring"
+    )
+    mcp_credentials = mcp_credential.add_subparsers(
+        dest="mcp_credential_command", required=True
+    )
+    mcp_credential_set = mcp_credentials.add_parser("set", help="store a secret")
+    mcp_credential_set.add_argument("name")
+    mcp_credential_set.add_argument("--stdin", action="store_true")
+    mcp_credential_set.add_argument("--json", action="store_true")
+    mcp_credential_show = mcp_credentials.add_parser(
+        "show", help="show an opaque reference and fingerprint"
+    )
+    mcp_credential_show.add_argument("name")
+    mcp_credential_show.add_argument("--json", action="store_true")
+    mcp_credential_delete = mcp_credentials.add_parser(
+        "delete", help="delete a secret"
+    )
+    mcp_credential_delete.add_argument("name")
+    mcp_credential_delete.add_argument("--json", action="store_true")
+    mcp_credential_doctor = mcp_credentials.add_parser(
+        "doctor", help="verify secure MCP credential storage"
+    )
+    mcp_credential_doctor.add_argument("--json", action="store_true")
+
     agent = commands.add_parser("agent", help="run the bounded native agent")
     agents = agent.add_subparsers(dest="agent_command", required=True)
     run = agents.add_parser("run", help="run or resume a native-agent session")
@@ -322,6 +448,10 @@ def _print_agent_report(report: AgentReport) -> None:
 
 def _registry() -> ProviderRegistry:
     return ProviderRegistry(config_dir() / "vnext" / "providers.json")
+
+
+def _mcp_registry() -> McpRegistry:
+    return McpRegistry(config_dir() / "vnext" / "mcp-servers.json")
 
 
 def _pairs(values: Sequence[str], label: str) -> dict[str, str]:
@@ -431,6 +561,123 @@ def _compatible_previous_skill(
     except SkillError:
         return None
     return previous
+
+
+def _stored_mcp(
+    record: SessionRecord, server_id: str
+) -> Optional[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for item in record.mcp_servers:
+        if not isinstance(item, dict):
+            raise McpAccessDenied("stored MCP selection must be an object")
+        if item.get("server_id") == server_id:
+            matches.append(item)
+    if len(matches) > 1:
+        raise McpAccessDenied(
+            f"session contains duplicate MCP selections: {server_id}"
+        )
+    return matches[0] if matches else None
+
+
+def _replace_stored_mcp(
+    record: SessionRecord,
+    server_id: str,
+    selection: Optional[dict[str, Any]],
+) -> bool:
+    existing = _stored_mcp(record, server_id)
+    if existing is None and selection is None:
+        return False
+    retained = [item for item in record.mcp_servers if item is not existing]
+    if selection is not None:
+        retained.append(selection)
+        retained.sort(key=lambda item: str(item.get("server_id", "")))
+    record.mcp_servers = retained
+    return True
+
+
+def _mcp_decisions(values: Sequence[str]) -> dict[str, str]:
+    decisions = _pairs(values, "MCP permission")
+    invalid = {
+        name: decision
+        for name, decision in decisions.items()
+        if decision not in {"allow", "ask", "deny"}
+    }
+    if invalid:
+        raise ValueError("MCP permission decisions must use allow, ask, or deny")
+    return decisions
+
+
+def _mcp_repository(value: Path) -> Path:
+    repository = value.expanduser().resolve(strict=True)
+    if not repository.is_dir():
+        raise ValueError(f"repository is not a directory: {repository}")
+    return repository
+
+
+def _selected_mcp_runtime(
+    record: SessionRecord,
+    repository: Path,
+) -> tuple[Optional[McpRuntimeBinding], list[McpToolDescriptor]]:
+    """Bind immutable registry records after validating every selection first."""
+    if not record.mcp_servers:
+        return None, []
+    registry = _mcp_registry()
+    selections: list[tuple[McpServerRecord, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for raw in record.mcp_servers:
+        if not isinstance(raw, dict):
+            raise McpAccessDenied("stored MCP selection must be an object")
+        server_id = raw.get("server_id")
+        if not isinstance(server_id, str) or not server_id:
+            raise McpAccessDenied("stored MCP selection has no valid server ID")
+        if server_id in seen:
+            raise McpAccessDenied(
+                f"session contains duplicate MCP selections: {server_id}"
+            )
+        seen.add(server_id)
+        server = registry.get(server_id)
+        validate_mcp_selection_registry(server, raw)
+        selections.append((server, raw))
+
+    client = McpClient(registry)
+    descriptors: list[McpToolDescriptor] = []
+    servers: list[McpServerRecord] = []
+    for server, selection in selections:
+        discovered = {
+            item.remote_name: item
+            for item in client.discover_record(server, repository)
+        }
+        selected_tools = selection.get("tools")
+        if not isinstance(selected_tools, dict):
+            raise McpAccessDenied("stored MCP tool permissions are malformed")
+        for remote_name, stored in selected_tools.items():
+            if not isinstance(remote_name, str) or not isinstance(stored, dict):
+                raise McpAccessDenied("stored MCP tool permission is malformed")
+            descriptor = discovered.get(remote_name)
+            if descriptor is None:
+                raise McpAccessDenied(
+                    f"selected MCP tool disappeared: {server.server_id}/{remote_name}"
+                )
+            if (
+                stored.get("name") != descriptor.name
+                or stored.get("schema_digest") != descriptor.schema_digest
+                or stored.get("read_only") is not descriptor.read_only
+            ):
+                raise McpAccessDenied(
+                    f"selected MCP tool changed: {server.server_id}/{remote_name}"
+                )
+            permission = stored.get("permission")
+            if permission not in {"allow", "ask", "deny"}:
+                raise McpAccessDenied(
+                    f"selected MCP tool permission is malformed: "
+                    f"{server.server_id}/{remote_name}"
+                )
+            # Only explicitly allowed tools are described to the provider.
+            # There is no interactive approval path for ask/deny selections.
+            if permission == "allow":
+                descriptors.append(descriptor)
+        servers.append(server)
+    return McpRuntimeBinding(client, repository, descriptors, servers), descriptors
 
 
 def _emit(value: Any, *, json_output: bool) -> None:
@@ -613,6 +860,203 @@ def _handle_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_mcp_server(args: argparse.Namespace) -> int:
+    registry = _mcp_registry()
+    command = args.mcp_server_command
+    if command == "add":
+        record = McpServerRecord(
+            server_id=args.server_id,
+            namespace=args.namespace,
+            transport=args.transport,
+            command=args.command,
+            args=tuple(args.arg),
+            url=args.url,
+            environment=_pairs(args.env, "MCP environment"),
+            headers=_pairs(args.header, "MCP header"),
+            credential_ref=args.credential_ref,
+            credential_target=args.credential_target,
+            credential_scheme=args.credential_scheme,
+            read_only_tools=tuple(args.read_only_tool),
+            timeout_seconds=args.timeout_seconds,
+            max_result_bytes=args.max_result_bytes,
+            max_message_bytes=args.max_message_bytes,
+            max_transport_retries=args.max_transport_retries,
+        )
+        payload: Any = registry.put(record).to_dict()
+    elif command == "remove":
+        removed = registry.remove(args.server_id)
+        payload = {"server_id": removed.server_id, "status": "removed"}
+    elif command == "list":
+        payload = [item.to_dict() for item in registry.list()]
+    elif command == "show":
+        payload = registry.get(args.server_id).to_dict()
+    else:
+        repository = _mcp_repository(args.repository)
+        record = registry.get(args.server_id)
+        tools = McpClient(registry).discover_record(record, repository)
+        payload = {
+            "server": record.to_dict(),
+            "status": "ok",
+            "tool_count": len(tools),
+            "tools": [item.to_dict() for item in tools],
+        }
+        if command == "doctor":
+            payload = {
+                "server_id": record.server_id,
+                "transport": record.transport,
+                "status": "ok",
+                "tool_count": len(tools),
+            }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _handle_mcp_session(args: argparse.Namespace) -> int:
+    repository = _mcp_repository(args.repository)
+    store = SessionStore(session_dir())
+    command = args.mcp_session_command
+    if command == "permissions":
+        record = store.load(args.session_id)
+        store.validate_repository(record, repository)
+        selection = _stored_mcp(record, args.server_id)
+        if selection is None:
+            raise McpAccessDenied(
+                f"MCP server is not selected for this session: {args.server_id}"
+            )
+        _emit(selection, json_output=args.json)
+        return 0
+    if command == "deselect":
+        lease = store.acquire(
+            args.session_id, f"mcp-deselect-{os.getpid()}", ttl_seconds=5.0
+        )
+        try:
+            record = store.load(args.session_id)
+            store.validate_repository(record, repository)
+            removed = _replace_stored_mcp(record, args.server_id, None)
+            if removed:
+                store.save(record, record.revision, lease)
+        finally:
+            store.release(lease)
+        payload = {
+            "server_id": args.server_id,
+            "session_id": args.session_id,
+            "status": "deselected" if removed else "not_selected",
+        }
+        _emit(payload, json_output=args.json)
+        return 0
+
+    registry = _mcp_registry()
+    server = registry.get(args.server_id)
+    tools = McpClient(registry).discover_record(server, repository)
+    decisions = _mcp_decisions(args.permission)
+    with store.mutate(
+        args.session_id, f"mcp-select-{os.getpid()}", ttl_seconds=5.0
+    ) as record:
+        store.validate_repository(record, repository)
+        selection = mcp_selection(
+            server,
+            tools,
+            decisions,
+            previous=_stored_mcp(record, server.server_id),
+        )
+        _replace_stored_mcp(record, server.server_id, selection)
+    payload = {"session_id": args.session_id, "selection": selection}
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _handle_mcp_call(args: argparse.Namespace) -> int:
+    repository = _mcp_repository(args.repository)
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+    try:
+        arguments = json.loads(args.arguments, parse_constant=reject_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        detail = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc)
+        raise ValueError(f"MCP arguments are not valid JSON: {detail}") from exc
+    if not isinstance(arguments, dict):
+        raise ValueError("MCP arguments must be a JSON object")
+    store = SessionStore(session_dir())
+    record = store.load(args.session_id)
+    store.validate_repository(record, repository)
+    binding, descriptors = _selected_mcp_runtime(record, repository)
+    if binding is None:
+        raise McpAccessDenied("session has no selected MCP servers")
+    matches = [item for item in descriptors if item.name == args.tool]
+    if len(matches) != 1:
+        raise McpAccessDenied(f"MCP tool is not selected: {args.tool}")
+    descriptor = matches[0]
+    if descriptor.mutates and not args.idempotency_key:
+        raise ValueError("mutating MCP calls require --idempotency-key")
+    profile = AccessProfile(record.access_profile)
+    policy = CapabilityPolicy(profile)
+    origin = Origin(OriginKind.USER, f"cli-mcp-{record.session_id}")
+    policy.set_grants(origin, {Capability.MCP_CALL})
+    core = CoreRuntime(
+        repository,
+        policy,
+        store,
+        runtime_dir() / "vnext" / "audit.jsonl",
+        mcp_binding=binding,
+    )
+    command = CoreCommand(
+        name=descriptor.name,
+        arguments=arguments,
+        session_id=record.session_id,
+        origin=origin,
+        idempotency_key=args.idempotency_key,
+        deadline_seconds=args.deadline_seconds,
+    )
+    lease = None
+    if descriptor.mutates:
+        lease = store.acquire(
+            record.session_id, f"mcp-call-{os.getpid()}", ttl_seconds=30.0
+        )
+    try:
+        result = core.execute(command, lease=lease)
+    finally:
+        if lease is not None:
+            store.release(lease)
+    _emit(result.to_dict(), json_output=args.json)
+    return 0
+
+
+def _handle_mcp_credential(args: argparse.Namespace) -> int:
+    store = McpCredentialStore()
+    if args.mcp_credential_command == "set":
+        secret = (
+            sys.stdin.readline().rstrip("\r\n")
+            if args.stdin
+            else getpass.getpass("MCP credential: ")
+        )
+        payload = store.set(args.name, secret)
+    elif args.mcp_credential_command == "show":
+        reference = f"os-keyring:mcp/{args.name}"
+        secret = store.resolve(reference)
+        payload = {
+            "reference": reference,
+            "fingerprint": store.fingerprint(secret),
+            "status": "available",
+        }
+    elif args.mcp_credential_command == "delete":
+        payload = store.delete(args.name)
+    else:
+        payload = store.doctor()
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _handle_mcp(args: argparse.Namespace) -> int:
+    if args.mcp_command == "server":
+        return _handle_mcp_server(args)
+    if args.mcp_command == "session":
+        return _handle_mcp_session(args)
+    if args.mcp_command == "credential":
+        return _handle_mcp_credential(args)
+    return _handle_mcp_call(args)
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -658,6 +1102,8 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             session_id=args.session_id,
         )
 
+    mcp_binding, _ = _selected_mcp_runtime(record, repository)
+
     native_origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
     origin = native_origin
     policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
@@ -669,6 +1115,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             Capability.PROCESS_RUN,
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
+            Capability.MCP_CALL,
         },
     )
     system_prompt = SYSTEM_PROMPT
@@ -692,6 +1139,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         policy,
         store,
         runtime_dir() / "vnext" / "audit.jsonl",
+        mcp_binding=mcp_binding,
     )
     return AgentKernel(
         provider=provider,
@@ -892,6 +1340,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "skill":
             return _handle_skill(args)
 
+        if args.command == "mcp":
+            return _handle_mcp(args)
+
         if args.command == "agent":
             report = _run_agent(args)
             _json(report.to_dict()) if args.json else _print_agent_report(report)
@@ -929,6 +1380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         CredentialError,
         CoreError,
         MigrationError,
+        McpError,
         ProviderError,
         RegistryError,
         SessionError,

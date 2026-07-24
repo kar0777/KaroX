@@ -40,6 +40,7 @@ class ToolDefinition:
     mutates: bool
     input_schema: Dict[str, Any]
     additional_capabilities: tuple[Capability, ...] = ()
+    external_schema: bool = False
 
 
 class CoreRuntime:
@@ -52,6 +53,7 @@ class CoreRuntime:
         policy: CapabilityPolicy,
         sessions: SessionStore,
         audit_path: Optional[Path] = None,
+        mcp_binding: Optional[Any] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         if not self.repository.is_dir():
@@ -59,6 +61,7 @@ class CoreRuntime:
         self.policy = policy
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
+        self._mcp_binding = mcp_binding
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]
         ] = {
@@ -143,6 +146,17 @@ class CoreRuntime:
                 },
             ),
         }
+        if self._mcp_binding is not None:
+            dynamic = list(self._mcp_binding.definitions())
+            names = [item.name for item in dynamic]
+            if len(names) != len(set(names)):
+                raise CoreError("dynamic MCP tools contain duplicate names")
+            collisions = set(names).intersection(self._definitions)
+            if collisions:
+                raise CoreError(
+                    f"dynamic MCP tools collide with Core tools: {sorted(collisions)}"
+                )
+            self._definitions.update({item.name: item for item in dynamic})
 
     def tools(self) -> List[ToolDefinition]:
         return list(self._definitions.values())
@@ -155,9 +169,21 @@ class CoreRuntime:
     ) -> CoreResult:
         definition = self._definitions.get(command.name)
         handler = self._handlers.get(command.name)
-        if definition is None or handler is None:
+        is_mcp = (
+            definition is not None
+            and handler is None
+            and self._mcp_binding is not None
+            and command.name.startswith("mcp.")
+        )
+        if definition is None or (handler is None and not is_mcp):
             raise InvalidCommand(f"unknown Core command: {command.name}")
         self._validate_arguments(definition, command.arguments)
+        try:
+            input_digest = command.input_digest()
+        except (TypeError, ValueError) as exc:
+            raise InvalidCommand(
+                "Core command arguments must contain strict JSON values"
+            ) from exc
         record = self._load_session(command)
         decision = self.policy.require(
             command.origin, definition.capability, capability_token
@@ -174,7 +200,7 @@ class CoreRuntime:
                 "capability": definition.capability.value,
                 "correlation_id": command.correlation_id,
                 "decision": decision.reason,
-                "input_digest": command.input_digest(),
+                "input_digest": input_digest,
             },
         )
         if definition.mutates:
@@ -197,7 +223,7 @@ class CoreRuntime:
                 record,
                 lease,
                 command.idempotency_key,
-                command.input_digest(),
+                input_digest,
             )
             if replay is not None:
                 result = CoreResult.from_dict(replay)
@@ -214,7 +240,15 @@ class CoreRuntime:
                 )
                 return result
         try:
-            data = handler(dict(command.arguments), float(command.deadline_seconds))
+            if is_mcp:
+                data = self._mcp_binding.execute(
+                    command.name,
+                    dict(command.arguments),
+                    record,
+                )
+            else:
+                assert handler is not None
+                data = handler(dict(command.arguments), float(command.deadline_seconds))
         except Exception as exc:
             self._audit(
                 "core.command.failed",
@@ -278,6 +312,12 @@ class CoreRuntime:
     ) -> None:
         if not isinstance(arguments, dict):
             raise InvalidCommand("Core command arguments must be an object")
+        if definition.external_schema:
+            CoreRuntime._validate_external_schema(
+                definition.input_schema, "arguments"
+            )
+            CoreRuntime._validate_external_value(arguments, definition.input_schema, "arguments")
+            return
         schema = definition.input_schema
         properties = schema.get("properties", {})
         unknown = set(arguments).difference(properties)
@@ -302,6 +342,12 @@ class CoreRuntime:
                 raise InvalidCommand(f"{name} must be number")
             if not isinstance(value, expected):
                 raise InvalidCommand(f"{name} must be {expected_name}")
+            if expected_name == "number" and not math.isfinite(float(value)):
+                if name == "timeout_seconds":
+                    raise InvalidCommand(
+                        "timeout_seconds must be positive and finite"
+                    )
+                raise InvalidCommand(f"{name} must be finite")
             item_type = properties[name].get("items", {}).get("type")
             if item_type and isinstance(value, list):
                 item_kind = kinds.get(item_type)
@@ -309,6 +355,143 @@ class CoreRuntime:
                     isinstance(item, item_kind) for item in value
                 ):
                     raise InvalidCommand(f"{name} items must be {item_type}")
+
+    @staticmethod
+    def _validate_external_schema(schema: Any, label: str) -> None:
+        if not isinstance(schema, dict):
+            raise InvalidCommand(f"{label} schema must be an object")
+        if "type" in schema:
+            declared = schema["type"]
+            if isinstance(declared, str):
+                type_names = [declared]
+            elif (
+                isinstance(declared, list)
+                and declared
+                and all(isinstance(item, str) for item in declared)
+                and len(set(declared)) == len(declared)
+            ):
+                type_names = declared
+            else:
+                raise InvalidCommand(f"{label} schema type is malformed")
+            supported = {
+                "null", "boolean", "integer", "number", "string", "array", "object"
+            }
+            unsupported = set(type_names).difference(supported)
+            if unsupported:
+                raise InvalidCommand(
+                    f"{label} schema uses unsupported types: {sorted(unsupported)}"
+                )
+        if "properties" in schema:
+            properties = schema["properties"]
+            if not isinstance(properties, dict):
+                raise InvalidCommand(f"{label} schema properties must be an object")
+            for name, child in properties.items():
+                if not isinstance(name, str):
+                    raise InvalidCommand(
+                        f"{label} schema property names must be strings"
+                    )
+                CoreRuntime._validate_external_schema(
+                    child, f"{label}.properties[{name!r}]"
+                )
+        if "required" in schema:
+            required = schema["required"]
+            if (
+                not isinstance(required, list)
+                or not all(isinstance(item, str) for item in required)
+                or len(set(required)) != len(required)
+            ):
+                raise InvalidCommand(
+                    f"{label} schema required must contain unique strings"
+                )
+        if "items" in schema:
+            CoreRuntime._validate_external_schema(
+                schema["items"], f"{label}.items"
+            )
+        if "additionalProperties" in schema:
+            additional = schema["additionalProperties"]
+            if not isinstance(additional, bool):
+                CoreRuntime._validate_external_schema(
+                    additional, f"{label}.additionalProperties"
+                )
+
+    @staticmethod
+    def _validate_external_value(value: Any, schema: Any, label: str) -> None:
+        """Enforce the safe JSON-Schema subset understood by Core.
+
+        Unknown keywords are intentionally ignored so a valid remote schema is
+        not rejected merely because Core does not implement every draft feature.
+        """
+        if not isinstance(schema, dict):
+            raise InvalidCommand(f"{label} schema must be an object")
+        declared = schema.get("type")
+        type_names: list[str] = []
+        if "type" in schema:
+            if isinstance(declared, str):
+                type_names = [declared]
+            elif (
+                isinstance(declared, list)
+                and declared
+                and all(isinstance(item, str) for item in declared)
+            ):
+                type_names = declared
+            else:
+                raise InvalidCommand(f"{label} schema type is malformed")
+            supported = {
+                "null", "boolean", "integer", "number", "string", "array", "object"
+            }
+            unsupported = set(type_names).difference(supported)
+            if unsupported:
+                raise InvalidCommand(
+                    f"{label} schema uses unsupported types: {sorted(unsupported)}"
+                )
+            matches = any(
+                CoreRuntime._external_type_matches(value, item) for item in type_names
+            )
+            if not matches:
+                expected = " or ".join(type_names)
+                raise InvalidCommand(f"{label} must be {expected}")
+        if isinstance(value, dict):
+            properties = schema.get("properties")
+            properties = properties if isinstance(properties, dict) else {}
+            required = schema.get("required")
+            if isinstance(required, list) and all(isinstance(item, str) for item in required):
+                missing = set(required).difference(value)
+                if missing:
+                    raise InvalidCommand(f"missing arguments: {sorted(missing)}")
+            if schema.get("additionalProperties") is False:
+                unknown = set(value).difference(properties)
+                if unknown:
+                    raise InvalidCommand(f"unknown arguments: {sorted(unknown)}")
+            additional = schema.get("additionalProperties")
+            for name, item in value.items():
+                child_schema = properties.get(name)
+                if not isinstance(child_schema, dict) and isinstance(additional, dict):
+                    child_schema = additional
+                if isinstance(child_schema, dict):
+                    CoreRuntime._validate_external_value(item, child_schema, name)
+        elif isinstance(value, list):
+            items = schema.get("items")
+            if isinstance(items, dict):
+                for index, item in enumerate(value):
+                    CoreRuntime._validate_external_value(item, items, f"{label}[{index}]")
+
+    @staticmethod
+    def _external_type_matches(value: Any, type_name: str) -> bool:
+        if type_name == "null":
+            return value is None
+        if type_name == "boolean":
+            return isinstance(value, bool)
+        if type_name == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if type_name == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            return not isinstance(value, float) or math.isfinite(value)
+        kinds = {"string": str, "array": list, "object": dict}
+        kind = kinds.get(type_name)
+        # External schemas are an authorization boundary: an unknown declared
+        # type must never turn a mixed-type declaration into an allow-all rule.
+        return False if kind is None else isinstance(value, kind)
 
     def _record_mutation(
         self, record: SessionRecord, command: CoreCommand, result: CoreResult

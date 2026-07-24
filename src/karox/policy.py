@@ -24,6 +24,7 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
             Capability.PROCESS_RUN,
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
+            Capability.MCP_CALL,
         }
     ),
     AccessProfile.ELEVATED: frozenset(

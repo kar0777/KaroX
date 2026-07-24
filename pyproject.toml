@@ -15,7 +15,7 @@ dependencies = [
   "pydantic>=2.7,<3.0",
   "httpx>=0.27,<1.0",
   "keyring>=25,<27",
-  "mcp>=1.27,<2.0",
+  "mcp>=1.19,<2.0",
   "PyYAML>=6.0,<7.0",
 ]
 

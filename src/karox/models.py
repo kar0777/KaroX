@@ -100,6 +100,7 @@ class CoreCommand:
     def input_digest(self) -> str:
         canonical = json.dumps(
             {"name": self.name, "arguments": self.arguments},
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
