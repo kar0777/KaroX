@@ -14,7 +14,30 @@
 [![Quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/quality.yml)
 [![CodeQL](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml)
 
-[Быстрый старт](QUICKSTART.md) · [Полное руководство](PRODUCT_GUIDE.md) · [Подключение Notion](NOTION.md) · [English](README.md) · [Безопасность](SECURITY.md)
+[Быстрый старт](QUICKSTART.md) · [Полное руководство](PRODUCT_GUIDE.md) · [Подключение Notion](NOTION.md) · [Спонсоры](SUPPORTERS_RU.md) · [English](README.md) · [Безопасность](SECURITY.md)
+
+</div>
+
+<div align="center">
+
+## Спонсоры и друзья проекта
+
+KaroX искренне благодарен компаниям и людям, которые предоставили модели, API, облачные и GPU-ресурсы, browser infrastructure и исследовательские инструменты.
+
+<a href="https://routing.run"><img src="https://www.google.com/s2/favicons?sz=128&domain=routing.run" width="40" height="40" alt="routing.run"></a>&nbsp;
+<a href="https://vivgrid.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=vivgrid.com" width="40" height="40" alt="Vivgrid"></a>&nbsp;
+<a href="https://puter.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=puter.com" width="40" height="40" alt="Puter"></a>&nbsp;
+<a href="https://omniakey.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=omniakey.com" width="40" height="40" alt="OmniaKey"></a>&nbsp;
+<a href="https://browser-use.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=browser-use.com" width="40" height="40" alt="Browser Use"></a>&nbsp;
+<a href="https://www.verda.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=verda.com" width="40" height="40" alt="Verda"></a>&nbsp;
+<a href="https://tinfoil.sh"><img src="https://www.google.com/s2/favicons?sz=128&domain=tinfoil.sh" width="40" height="40" alt="Tinfoil"></a>&nbsp;
+<a href="https://fal.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=fal.ai" width="40" height="40" alt="fal"></a>&nbsp;
+<a href="https://tavily.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=tavily.com" width="40" height="40" alt="Tavily"></a>&nbsp;
+<a href="https://cohere.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=cohere.com" width="40" height="40" alt="Cohere"></a>&nbsp;
+<a href="https://chutes.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=chutes.ai" width="40" height="40" alt="Chutes"></a>&nbsp;
+<a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=empiriolabs.ai" width="40" height="40" alt="EmpirioLabs"></a>
+
+[**Прочитать персональные благодарности каждому →**](SUPPORTERS_RU.md)
 
 </div>
 
@@ -168,3 +191,4 @@ HTTP endpoints остаются обратно совместимыми. Ком�
 - [Решение проблем](TROUBLESHOOTING.md)
 - [Безопасность](SECURITY.md)
 - [История изменений](CHANGELOG.md)
+- [Спонсоры и благодарности](SUPPORTERS_RU.md)
