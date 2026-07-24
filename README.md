@@ -14,7 +14,30 @@
 [![Quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/quality.yml)
 [![CodeQL](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml/badge.svg)](https://github.com/kar0777/KaroX/actions/workflows/codeql.yml)
 
-[Quick start](QUICKSTART.md) · [Changelog](CHANGELOG.md) · [Research](RESEARCH.md) · [Private inference use case](docs/private-inference-use-case.md) · [Benchmark plan](benchmarks/README.md) · [Русская версия](README_RU.md)
+[Quick start](QUICKSTART.md) · [Changelog](CHANGELOG.md) · [Research](RESEARCH.md) · [Private inference use case](docs/private-inference-use-case.md) · [Benchmark plan](benchmarks/README.md) · [Supporters](SUPPORTERS.md) · [Русская версия](README_RU.md)
+
+</div>
+
+<div align="center">
+
+## Project supporters
+
+KaroX is deeply grateful to the organizations and people who provided model, API, cloud, GPU, and evaluation support.
+
+<a href="https://routing.run"><img src="https://www.google.com/s2/favicons?sz=128&domain=routing.run" width="40" height="40" alt="routing.run logo"></a>&nbsp;
+<a href="https://vivgrid.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=vivgrid.com" width="40" height="40" alt="Vivgrid logo"></a>&nbsp;
+<a href="https://puter.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=puter.com" width="40" height="40" alt="Puter logo"></a>&nbsp;
+<a href="https://omniakey.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=omniakey.com" width="40" height="40" alt="OmniaKey logo"></a>&nbsp;
+<a href="https://browser-use.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=browser-use.com" width="40" height="40" alt="Browser Use logo"></a>&nbsp;
+<a href="https://www.verda.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=verda.com" width="40" height="40" alt="Verda logo"></a>&nbsp;
+<a href="https://tinfoil.sh"><img src="https://www.google.com/s2/favicons?sz=128&domain=tinfoil.sh" width="40" height="40" alt="Tinfoil logo"></a>&nbsp;
+<a href="https://fal.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=fal.ai" width="40" height="40" alt="fal logo"></a>&nbsp;
+<a href="https://tavily.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=tavily.com" width="40" height="40" alt="Tavily logo"></a>&nbsp;
+<a href="https://cohere.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=cohere.com" width="40" height="40" alt="Cohere logo"></a>&nbsp;
+<a href="https://chutes.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=chutes.ai" width="40" height="40" alt="Chutes logo"></a>&nbsp;
+<a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=empiriolabs.ai" width="40" height="40" alt="EmpirioLabs logo"></a>
+
+[**Read the individual acknowledgements and thank-you notes →**](SUPPORTERS.md)
 
 </div>
 
@@ -216,3 +239,4 @@ HTTP endpoints remain backward compatible. `repopilot` remains available as a co
 - [PromptQL connection](examples/promptql-connect.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Security](SECURITY.md)
+- [Project supporters](SUPPORTERS.md)
