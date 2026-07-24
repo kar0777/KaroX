@@ -1,6 +1,6 @@
 # KaroX vNext Implementation Status
 
-Last updated: 2026-07-23  
+Last updated: 2026-07-24
 Branch: `codex/vnext-hybrid-runtime`  
 Base: `main` at `a5c233a`
 
@@ -11,7 +11,7 @@ Base: `main` at `a5c233a`
 | 0 — audit/design | Complete | Baseline suite passed; required documents reviewed and validated |
 | 1 — foundation | Complete | 25 discoverable tests cover Core, policy, sessions, migration, and CLI |
 | 2 — native vertical slice | Complete | 52 tests plus a subprocess CLI E2E cover provider → agent → Core → verification |
-| 3 — providers/credentials | Not started | — |
+| 3 — providers/credentials | Complete | 99 tests cover adapters, registry, keyring references, routing, fallback, and budgets |
 | 4 — Skills | Not started | — |
 | 5 — MCP client | Not started | — |
 | 6 — unified handoff | Not started | — |
@@ -242,6 +242,90 @@ Next actions for Phase 3:
 5. Exercise representative real providers only when credentials and spending
    authorization are available; keep deterministic fake transports in CI.
 
+## Phase 3 — providers and credentials
+
+Completed:
+
+- Added normalized streaming adapters for OpenAI Responses, Anthropic Messages,
+  and Gemini GenerateContent while retaining the generic OpenAI-compatible Chat
+  Completions path for local and custom endpoints.
+- Hardened SSE parsing with bounded event, line, and stream sizes; strict
+  lifecycle, usage, tool-call identity, and fragment validation; and
+  secret-safe classified transport errors.
+- Added an atomic provider/model registry with validated endpoint metadata,
+  aliases, explicit capability declarations, privacy classes, pricing
+  provenance, and default-model selection. Credential values are forbidden in
+  registry headers, query values, and persisted configuration.
+- Added opaque `os-keyring:provider/...` credential references backed by the
+  operating-system keyring. Plaintext fallback is disabled, values are resolved
+  only when constructing a request, and CLI output never returns a secret.
+- Added provider construction, explicit ordered routing, capability/privacy
+  preflight, narrowly classified fallback, cumulative token/cost accounting,
+  pricing-version attribution, and secret-free route-attempt audit data.
+- Enforced already-exhausted budgets before any provider call and withheld tool
+  execution when a just-completed response crosses a token or cost budget.
+- Added provider, model, and credential management/test commands and integrated
+  routed/default-model operation into `karox agent run`; conflicting direct and
+  routed options fail before session mutation.
+- Kept deterministic fake transports as the CI contract. No paid provider was
+  contacted and no external credential was required.
+
+Changed files in Phase 3:
+
+- `pyproject.toml`
+- `src/karox/agent.py`
+- `src/karox/cli.py`
+- `src/karox/credentials.py`
+- `src/karox/provider_adapters.py`
+- `src/karox/provider_factory.py`
+- `src/karox/providers.py`
+- `src/karox/registry.py`
+- `src/karox/routing.py`
+- `src/karox/security.py`
+- `tests/test_agent.py`
+- `tests/test_credentials.py`
+- `tests/test_provider_adapters.py`
+- `tests/test_provider_cli.py`
+- `tests/test_providers.py`
+- `tests/test_registry.py`
+- `tests/test_routing.py`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests` — 99 passed
+- `git diff --check`
+
+Security boundaries, known problems, and migration risks:
+
+- Real OpenAI, Anthropic, Gemini, and third-party compatible services remain
+  unverified because the phase deliberately used no external keys or paid API
+  calls. `provider test` and `model test` are explicit opt-in live checks.
+- Secure credential availability depends on a working OS keyring backend.
+  `credential doctor` reports absence and KaroX fails closed instead of writing
+  plaintext credentials.
+- Pricing and capability metadata are operator-supplied and provenance-labelled;
+  KaroX does not silently claim that stale or unknown metadata is authoritative.
+- A single provider response can cross a remaining budget because authoritative
+  usage is known only after the response. The response is recorded and its tool
+  calls are not executed; later provider calls are blocked.
+- Context compaction, long-term provider health scoring, Skills, MCP client/proxy,
+  unified cross-provider handoff, Packs, and TUI remain pending.
+- Existing Notion behavior and legacy bridge paths were not modified. HyperAgent
+  and PromptQL remain experimental.
+
+Next actions for Phase 4:
+
+1. Discover Skill metadata from project, compatible-agent, global KaroX, and
+   explicitly configured directories without eagerly reading instructions.
+2. Validate metadata, identities, source precedence, file confinement, and
+   duplicate handling.
+3. Lazily load selected instructions and referenced files without executing
+   setup scripts or arbitrary Skill content.
+4. Enforce `allow`, `ask`, `deny`, and session-only permission decisions through
+   the origin-aware Core boundary.
+5. Add CLI, unit coverage, and a permission-bypass integration/E2E test.
+
 ## Commit record
 
 - `4a8278f fix: fail closed when runtime key is missing`
@@ -249,5 +333,7 @@ Next actions for Phase 3:
 - `353158d feat: add policy-gated core runtime foundation`
 - `3ca96cf docs: record Phase 1 runtime foundation`
 - `6f05b61 feat: add native agent vertical slice`
+- `d0dea44 docs: record Phase 2 native vertical slice`
+- `6a3e521 feat: add provider routing and credential management`
 
 No merge, push, or release has been performed.
