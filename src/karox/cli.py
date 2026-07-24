@@ -35,6 +35,13 @@ from .mcp_client import (
     validate_mcp_selection_registry,
 )
 from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
+from .packs import (
+    PackAccessDenied,
+    PackConfigurationError,
+    PackError,
+    PackRegistry,
+    create_pack_template,
+)
 from .paths import (
     config_dir,
     legacy_config_dir,
@@ -437,6 +444,37 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_credential_revoke.add_argument("name")
     bridge_credential_revoke.add_argument("--json", action="store_true")
+
+    pack = commands.add_parser(
+        "pack", help="manage installable KaroX Packs"
+    )
+    pack_commands = pack.add_subparsers(dest="pack_command", required=True)
+    pack_create = pack_commands.add_parser("create", help="generate a sample pack template")
+    pack_create.add_argument("target", type=Path)
+    pack_create.add_argument("--name", required=True)
+    pack_create.add_argument("--description", required=True)
+    pack_create.add_argument("--json", action="store_true")
+    pack_install = pack_commands.add_parser("install", help="install a pack from a directory")
+    pack_install.add_argument("source", type=Path)
+    pack_install.add_argument("--allow", action="append", default=[])
+    pack_install.add_argument("--json", action="store_true")
+    pack_remove = pack_commands.add_parser("remove", help="remove an installed pack")
+    pack_remove.add_argument("identity")
+    pack_remove.add_argument("--json", action="store_true")
+    pack_list = pack_commands.add_parser("list", help="list installed packs")
+    pack_list.add_argument("--json", action="store_true")
+    pack_inspect = pack_commands.add_parser("inspect", help="show an installed pack")
+    pack_inspect.add_argument("identity")
+    pack_inspect.add_argument("--json", action="store_true")
+    pack_doctor = pack_commands.add_parser("doctor", help="verify an installed pack")
+    pack_doctor.add_argument("identity")
+    pack_doctor.add_argument("--json", action="store_true")
+    pack_enable = pack_commands.add_parser("enable", help="enable a pack")
+    pack_enable.add_argument("identity")
+    pack_enable.add_argument("--json", action="store_true")
+    pack_disable = pack_commands.add_parser("disable", help="disable a pack")
+    pack_disable.add_argument("identity")
+    pack_disable.add_argument("--json", action="store_true")
 
     agent = commands.add_parser("agent", help="run the bounded native agent")
     agents = agent.add_subparsers(dest="agent_command", required=True)
@@ -1144,6 +1182,36 @@ def _handle_bridge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pack_registry() -> PackRegistry:
+    return PackRegistry(runtime_dir() / "vnext" / "packs")
+
+
+def _handle_pack(args: argparse.Namespace) -> int:
+    command = args.pack_command
+    if command == "create":
+        target = create_pack_template(args.target, name=args.name, description=args.description)
+        payload: Any = {"path": str(target), "name": args.name, "status": "created"}
+    else:
+        registry = _pack_registry()
+        if command == "install":
+            pack = registry.install(args.source, approved_permissions=args.allow)
+            payload = pack.to_dict()
+        elif command == "remove":
+            payload = registry.remove(args.identity).to_dict()
+        elif command == "list":
+            payload = [item.to_dict() for item in registry.list()]
+        elif command == "inspect":
+            payload = registry.get(args.identity).to_dict()
+        elif command == "doctor":
+            payload = registry.doctor(args.identity)
+        elif command == "enable":
+            payload = registry.enable(args.identity).to_dict()
+        else:
+            payload = registry.disable(args.identity).to_dict()
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -1433,6 +1501,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "bridge":
             return _handle_bridge(args)
 
+        if args.command == "pack":
+            return _handle_pack(args)
+
         if args.command == "agent":
             report = _run_agent(args)
             _json(report.to_dict()) if args.json else _print_agent_report(report)
@@ -1496,6 +1567,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         CoreError,
         MigrationError,
         McpError,
+        PackError,
         ProviderError,
         RegistryError,
         SessionError,
