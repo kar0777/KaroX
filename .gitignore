@@ -16,3 +16,6 @@ cloudflared.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent tooling scratch
+.zcode/

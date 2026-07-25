@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -216,6 +217,19 @@ class CoreRuntimeTests(unittest.TestCase):
         self.assertEqual(changed.data["previous_sha256"], digest)
         self.assertEqual(self.sessions.load("session").changed_files, ["sample.txt"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not available on Windows")
+    def test_atomic_write_preserves_existing_posix_mode(self) -> None:
+        target = self.repository / "sample.txt"
+        target.chmod(0o755)
+        self.execute_mutation(
+            self.command(
+                "repo.write_file",
+                {"path": "sample.txt", "content": "mode-preserved\n"},
+                key="mode-write",
+            )
+        )
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
     def test_git_status_and_diff_are_evidence_backed_and_fail_closed(self) -> None:
         status = self.runtime.execute(self.command("git.status", {}))
         diff = self.runtime.execute(self.command("git.diff", {}))
@@ -269,11 +283,16 @@ class CoreRuntimeTests(unittest.TestCase):
 
     def test_process_output_limit_is_measured_in_utf8_bytes(self) -> None:
         self.runtime.MAX_OUTPUT_BYTES = 5
-        with patch("karox.core.subprocess.run") as run:
-            run.return_value.stdout = "a🙂🙂"
-            run.return_value.stderr = "ééé"
-            run.return_value.returncode = 0
-            result = self.runtime._run(["harmless-check"], 1.0)
+        result = self.runtime._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; "
+                "sys.stdout.buffer.write(b'a' + bytes.fromhex('f09f9982f09f9982')); "
+                "sys.stderr.buffer.write(bytes.fromhex('c3a9c3a9c3a9'))",
+            ],
+            1.0,
+        )
 
         self.assertEqual(result["stdout"], "🙂")
         self.assertEqual(result["stderr"], "éé")
@@ -334,6 +353,209 @@ class CoreRuntimeTests(unittest.TestCase):
             else:
                 os.environ["HARMLESS_LOOKING_VALUE"] = previous
         self.assertEqual(result.data["stdout"].strip(), "missing")
+
+    # --- repo.search -----------------------------------------------------
+
+    def test_repo_search_finds_literal_with_path_and_line(self) -> None:
+        (self.repository / "searchable.md").write_text(
+            "alpha\nBANANA marker\ngamma\n", encoding="utf-8"
+        )
+        result = self.runtime.execute(
+            self.command("repo.search", {"query": "BANANA"})
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["match_count"], 1)
+        match = result.data["matches"][0]
+        self.assertEqual(match["path"], "searchable.md")
+        self.assertEqual(match["line"], 2)
+        self.assertIn("BANANA", match["text"])
+
+    def test_repo_search_regex_works_and_invalid_regex_rejected(self) -> None:
+        (self.repository / "digits.txt").write_text(
+            "abc 123 def\nno digits here\n", encoding="utf-8"
+        )
+        result = self.runtime.execute(
+            self.command("repo.search", {"query": r"\d+", "regex": True})
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["match_count"], 1)
+        self.assertEqual(result.data["matches"][0]["line"], 1)
+        with self.assertRaisesRegex(InvalidCommand, "invalid regular expression"):
+            self.runtime.execute(
+                self.command("repo.search", {"query": "[", "regex": True})
+            )
+
+    def test_repo_search_case_insensitive_default_and_sensitive_override(self) -> None:
+        (self.repository / "case.txt").write_text("Hello World\n", encoding="utf-8")
+        insensitive = self.runtime.execute(
+            self.command("repo.search", {"query": "hello"})
+        )
+        self.assertEqual(insensitive.data["match_count"], 1)
+        sensitive = self.runtime.execute(
+            self.command("repo.search", {"query": "hello", "case_sensitive": True})
+        )
+        self.assertEqual(sensitive.data["match_count"], 0)
+
+    def test_repo_search_max_results_truncates_output(self) -> None:
+        (self.repository / "many.txt").write_text(
+            "".join(f"match line {i}\n" for i in range(20)),
+            encoding="utf-8",
+        )
+        result = self.runtime.execute(
+            self.command("repo.search", {"query": "match", "max_results": 2})
+        )
+        self.assertEqual(result.data["match_count"], 2)
+        self.assertTrue(result.data["truncated"])
+
+    def test_repo_search_excludes_git_metadata(self) -> None:
+        marker = "UNIQUE_GIT_MARKER_ZZZ"
+        (self.repository / ".git" / "karox_marker.txt").write_text(
+            marker + "\n", encoding="utf-8"
+        )
+        result = self.runtime.execute(
+            self.command("repo.search", {"query": marker})
+        )
+        self.assertEqual(result.data["match_count"], 0)
+        self.assertEqual(result.data["matches"], [])
+
+    # --- git.commit ------------------------------------------------------
+
+    def _elevated_runtime(self) -> tuple[CoreRuntime, str]:
+        self.sessions.create(
+            self.repository,
+            "elevated commit task",
+            AccessProfile.ELEVATED,
+            session_id="elevated",
+        )
+        policy = CapabilityPolicy(AccessProfile.ELEVATED)
+        policy.set_grants(
+            self.origin,
+            {
+                Capability.REPO_READ,
+                Capability.REPO_WRITE,
+                Capability.CHECKS_RUN,
+                Capability.PROCESS_RUN,
+                Capability.GIT_READ,
+                Capability.GIT_COMMIT,
+            },
+        )
+        runtime = CoreRuntime(
+            self.repository,
+            policy,
+            self.sessions,
+            self.root / "audit-elevated.jsonl",
+        )
+        return runtime, "elevated"
+
+    def _execute_on(self, runtime: CoreRuntime, command: CoreCommand):
+        lease = self.sessions.acquire(command.session_id, "test")
+        try:
+            return runtime.execute(command, lease=lease)
+        finally:
+            self.sessions.release(lease)
+
+    def test_git_commit_succeeds_and_records_evidence(self) -> None:
+        runtime, session_id = self._elevated_runtime()
+        (self.repository / "sample.txt").write_text("after\n", encoding="utf-8")
+        result = self._execute_on(
+            runtime,
+            self.command(
+                "git.commit",
+                {"message": "commit sample", "paths": ["sample.txt"]},
+                key="commit-ok",
+                session_id=session_id,
+            ),
+        )
+        self.assertTrue(result.ok)
+        self.assertTrue(result.data["committed"])
+        self.assertTrue(result.data["commit_sha"])
+        self.assertEqual(result.evidence[0].kind, "git_commit")
+        status = runtime._git(["status", "--porcelain"], 60.0)["stdout"]
+        self.assertNotIn("sample.txt", status)
+
+    def test_git_commit_without_changes_fails_closed(self) -> None:
+        runtime, session_id = self._elevated_runtime()
+        first = self._execute_on(
+            runtime,
+            self.command(
+                "git.commit",
+                {"message": "initial", "paths": ["sample.txt"]},
+                key="initial-commit",
+                session_id=session_id,
+            ),
+        )
+        self.assertTrue(first.data["committed"])
+        second = self._execute_on(
+            runtime,
+            self.command(
+                "git.commit",
+                {"message": "no changes", "paths": ["sample.txt"]},
+                key="no-change-commit",
+                session_id=session_id,
+            ),
+        )
+        self.assertFalse(second.ok)
+        self.assertFalse(second.data["committed"])
+
+    def test_git_commit_rejects_path_escape_before_git(self) -> None:
+        runtime, session_id = self._elevated_runtime()
+        with self.assertRaises(InvalidPath):
+            self._execute_on(
+                runtime,
+                self.command(
+                    "git.commit",
+                    {"message": "escape", "paths": ["../secret"]},
+                    key="escape-commit",
+                    session_id=session_id,
+                ),
+            )
+        self.assertNotIn(
+            "escape-commit",
+            self.sessions.load(session_id).idempotency,
+        )
+
+    def test_git_commit_rejects_empty_message(self) -> None:
+        runtime, session_id = self._elevated_runtime()
+        with self.assertRaisesRegex(InvalidCommand, "empty"):
+            self._execute_on(
+                runtime,
+                self.command(
+                    "git.commit",
+                    {"message": "   ", "paths": ["sample.txt"]},
+                    key="empty-message-commit",
+                    session_id=session_id,
+                ),
+            )
+
+    def test_git_commit_replays_safely_without_second_commit(self) -> None:
+        runtime, session_id = self._elevated_runtime()
+        (self.repository / "sample.txt").write_text("replay\n", encoding="utf-8")
+        first = self._execute_on(
+            runtime,
+            self.command(
+                "git.commit",
+                {"message": "replay commit", "paths": ["sample.txt"]},
+                key="replay-commit",
+                session_id=session_id,
+            ),
+        )
+        self.assertTrue(first.ok)
+        self.assertTrue(first.data["committed"])
+        first_sha = first.data["commit_sha"]
+        self.assertTrue(first_sha)
+        second = self._execute_on(
+            runtime,
+            self.command(
+                "git.commit",
+                {"message": "replay commit", "paths": ["sample.txt"]},
+                key="replay-commit",
+                session_id=session_id,
+            ),
+        )
+        self.assertTrue(second.idempotent_replay)
+        self.assertEqual(second.data["commit_sha"], first_sha)
+        count = runtime._git(["rev-list", "--count", "HEAD"], 60.0)["stdout"].strip()
+        self.assertEqual(count, "1")
 
 
 if __name__ == "__main__":

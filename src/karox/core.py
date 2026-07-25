@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -46,6 +47,12 @@ class ToolDefinition:
 class CoreRuntime:
     MAX_FILE_BYTES = 2_000_000
     MAX_OUTPUT_BYTES = 1_000_000
+    MAX_AUDIT_BYTES = 10_000_000
+    MAX_COMMIT_MESSAGE_BYTES = 4_000
+    MAX_COMMIT_PATHS = 100
+    MAX_SEARCH_FILES = 2_000
+    MAX_SEARCH_RESULTS = 200
+    MAX_SEARCH_LINE_BYTES = 2_000
 
     def __init__(
         self,
@@ -54,6 +61,7 @@ class CoreRuntime:
         sessions: SessionStore,
         audit_path: Optional[Path] = None,
         mcp_binding: Optional[Any] = None,
+        verification_commands: Optional[Iterable[Iterable[str]]] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         if not self.repository.is_dir():
@@ -62,6 +70,11 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
+        self._verification_commands = (
+            None
+            if verification_commands is None
+            else frozenset(tuple(item) for item in verification_commands)
+        )
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]
         ] = {
@@ -71,6 +84,8 @@ class CoreRuntime:
             "checks.run": self._run_check,
             "git.status": self._git_status,
             "git.diff": self._git_diff,
+            "repo.search": self._search,
+            "git.commit": self._git_commit,
         }
         self._definitions = {
             "repo.read_file": ToolDefinition(
@@ -145,6 +160,39 @@ class CoreRuntime:
                     "additionalProperties": False,
                 },
             ),
+            "repo.search": ToolDefinition(
+                "repo.search",
+                "Search repository text files for a literal or regular expression.",
+                Capability.REPO_READ,
+                False,
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "pattern": {"type": "string"},
+                        "regex": {"type": "boolean"},
+                        "case_sensitive": {"type": "boolean"},
+                        "max_results": {"type": "number"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            "git.commit": ToolDefinition(
+                "git.commit",
+                "Commit an explicit list of repository paths. Never pushes.",
+                Capability.GIT_COMMIT,
+                True,
+                {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["message", "paths"],
+                    "additionalProperties": False,
+                },
+            ),
         }
         if self._mcp_binding is not None:
             dynamic = list(self._mcp_binding.definitions())
@@ -160,6 +208,10 @@ class CoreRuntime:
 
     def tools(self) -> List[ToolDefinition]:
         return list(self._definitions.values())
+
+    @property
+    def verification_commands(self) -> Optional[frozenset[tuple[str, ...]]]:
+        return self._verification_commands
 
     def execute(
         self,
@@ -263,7 +315,12 @@ class CoreRuntime:
             )
             raise
         evidence = list(data.pop("_evidence", []))
-        process_result = command.name in {"checks.run", "git.status", "git.diff"}
+        process_result = command.name in {
+            "checks.run",
+            "git.status",
+            "git.diff",
+            "git.commit",
+        }
         result = CoreResult(
             ok=not (
                 process_result
@@ -526,6 +583,8 @@ class CoreRuntime:
             self._prepare_write(arguments)
         elif command_name == "checks.run":
             self._prepare_check(arguments, deadline_seconds)
+        elif command_name == "git.commit":
+            self._prepare_commit(arguments)
 
     def safe_path(self, relative: str, for_write: bool = False) -> Path:
         if not isinstance(relative, str) or not relative.strip() or "\x00" in relative:
@@ -605,10 +664,12 @@ class CoreRuntime:
         relative, encoded, path = self._prepare_write(arguments)
         digest = hashlib.sha256(encoded).hexdigest()
         previous_digest: Optional[str] = None
+        previous_mode: Optional[int] = None
         changed = True
         if path.exists():
             if not path.is_file():
                 raise CoreError("repo.write_file target is not a regular file")
+            previous_mode = stat.S_IMODE(path.stat().st_mode)
             previous_digest = self._file_sha256(path)
             changed = previous_digest != digest or path.stat().st_size != len(encoded)
         if not changed:
@@ -637,6 +698,8 @@ class CoreRuntime:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(encoded)
                 handle.flush()
+                if previous_mode is not None and hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), previous_mode)
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
         finally:
@@ -765,40 +828,56 @@ class CoreRuntime:
         timeout = min(max(float(timeout_seconds), 0.1), 3600.0)
         env = child_process_environment()
         started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                argv,
-                cwd=self.repository,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                shell=False,
-            )
-            timed_out = False
-        except subprocess.TimeoutExpired as exc:
-            completed = None
-            timed_out = True
-            stdout = self._process_output_text(exc.stdout)
-            stderr = self._process_output_text(exc.stderr)
-        if completed is not None:
-            stdout = self._process_output_text(completed.stdout)
-            stderr = self._process_output_text(completed.stderr)
-            exit_code: Optional[int] = completed.returncode
-        else:
-            exit_code = None
-        stdout = self._truncate_output(str(redact(stdout)))
-        stderr = self._truncate_output(str(redact(stderr)))
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=self.repository,
+                    env=env,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=timeout,
+                    shell=False,
+                )
+                timed_out = False
+                exit_code: Optional[int] = completed.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = None
+            stdout, stdout_sha256, stdout_truncated = self._bounded_stream(stdout_file)
+            stderr, stderr_sha256, stderr_truncated = self._bounded_stream(stderr_file)
+        stdout = str(redact(stdout))
+        stderr = str(redact(stderr))
         return {
             "argv": redact(argv),
             "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr,
             "timed_out": timed_out,
+            "stdout_sha256": stdout_sha256,
+            "stderr_sha256": stderr_sha256,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+
+    def _bounded_stream(self, handle: Any) -> tuple[str, str, bool]:
+        handle.flush()
+        handle.seek(0)
+        digest = hashlib.sha256()
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        size = handle.tell()
+        handle.seek(max(0, size - self.MAX_OUTPUT_BYTES))
+        tail = handle.read(self.MAX_OUTPUT_BYTES)
+        return (
+            tail.decode("utf-8", errors="ignore"),
+            digest.hexdigest(),
+            size > self.MAX_OUTPUT_BYTES,
+        )
 
     @staticmethod
     def _process_output_text(value: Any) -> str:
@@ -818,7 +897,17 @@ class CoreRuntime:
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
         argv, timeout = self._prepare_check(arguments, deadline_seconds)
+        command = tuple(argv)
+        if (
+            self._verification_commands is not None
+            and command not in self._verification_commands
+        ):
+            raise InvalidCommand("check command is not in the user-approved verification set")
         result = self._run(argv, timeout)
+        result["verification_eligible"] = (
+            self._verification_commands is not None
+            and command in self._verification_commands
+        )
         display_argv = result["argv"]
         result["_evidence"] = [
             EvidenceRecord(
@@ -848,7 +937,9 @@ class CoreRuntime:
 
     @staticmethod
     def _git_evidence(kind: str, result: Dict[str, Any]) -> EvidenceRecord:
-        digest = hashlib.sha256(result["stdout"].encode("utf-8")).hexdigest()
+        digest = result.get("stdout_sha256") or hashlib.sha256(
+            result["stdout"].encode("utf-8")
+        ).hexdigest()
         result["sha256"] = digest
         return EvidenceRecord(
             kind=kind,
@@ -882,10 +973,189 @@ class CoreRuntime:
         result["_evidence"] = [self._git_evidence("git_diff", result)]
         return result
 
+    def _prepare_commit(self, arguments: Dict[str, Any]) -> tuple[str, List[str]]:
+        message = self._required(arguments, "message", str)
+        if not message.strip():
+            raise InvalidCommand("commit message must not be empty")
+        if len(message.encode("utf-8")) > self.MAX_COMMIT_MESSAGE_BYTES:
+            raise InvalidCommand(
+                f"commit message is longer than {self.MAX_COMMIT_MESSAGE_BYTES} bytes"
+            )
+        if any(ord(item) < 32 and item != "\n" for item in message):
+            raise InvalidCommand("commit message contains control characters")
+        if contains_credential(message):
+            raise InvalidCommand("commit message blocked by credential scanner")
+        raw_paths = self._required(arguments, "paths", list)
+        if not raw_paths or len(raw_paths) > self.MAX_COMMIT_PATHS:
+            raise InvalidCommand(
+                f"paths must contain 1-{self.MAX_COMMIT_PATHS} entries"
+            )
+        relatives: List[str] = []
+        for item in raw_paths:
+            if not isinstance(item, str):
+                raise InvalidCommand("paths items must be string")
+            resolved = self.safe_path(item)
+            relative = resolved.relative_to(self.repository).as_posix()
+            if relative in relatives:
+                raise InvalidCommand(f"duplicate commit path: {relative}")
+            relatives.append(relative)
+        return message, relatives
+
+    def _commit_evidence(
+        self,
+        result: Dict[str, Any],
+        relatives: List[str],
+        committed: bool,
+        commit_sha: Optional[str],
+    ) -> EvidenceRecord:
+        return EvidenceRecord(
+            kind="git_commit",
+            summary=("Committed " if committed else "Failed to commit ")
+            + f"{len(relatives)} path(s)",
+            command=result["argv"],
+            exit_code=result["exit_code"],
+            artifact_sha256=commit_sha,
+            metadata={
+                "timed_out": result["timed_out"],
+                "paths": list(relatives),
+                "committed": committed,
+            },
+        )
+
+    def _git_commit(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        message, relatives = self._prepare_commit(arguments)
+        staged = self._git(["add", "--", *relatives], deadline_seconds)
+        if staged["timed_out"] or staged["exit_code"] != 0:
+            staged["paths"] = list(relatives)
+            staged["committed"] = False
+            staged["commit_sha"] = None
+            staged["stage_failed"] = True
+            staged["_evidence"] = [
+                self._commit_evidence(staged, relatives, False, None)
+            ]
+            return staged
+        result = self._git(
+            [
+                "commit",
+                "--no-verify",
+                "--only",
+                "--message",
+                message,
+                "--",
+                *relatives,
+            ],
+            deadline_seconds,
+        )
+        committed = not result["timed_out"] and result["exit_code"] == 0
+        commit_sha: Optional[str] = None
+        if committed:
+            revision = self._git(["rev-parse", "HEAD"], deadline_seconds)
+            if revision["exit_code"] == 0:
+                commit_sha = revision["stdout"].strip() or None
+        result["paths"] = list(relatives)
+        result["committed"] = committed
+        result["commit_sha"] = commit_sha
+        result["stage_failed"] = False
+        result["_evidence"] = [
+            self._commit_evidence(result, relatives, committed, commit_sha)
+        ]
+        return result
+
+    def _search(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        query = self._required(arguments, "query", str)
+        if not query or len(query) > 1_000 or "\x00" in query:
+            raise InvalidCommand("query must contain 1-1000 characters")
+        use_regex = arguments.get("regex", False)
+        if not isinstance(use_regex, bool):
+            raise InvalidCommand("regex must be boolean")
+        case_sensitive = arguments.get("case_sensitive", False)
+        if not isinstance(case_sensitive, bool):
+            raise InvalidCommand("case_sensitive must be boolean")
+        requested = arguments.get("max_results", self.MAX_SEARCH_RESULTS)
+        if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+            raise InvalidCommand("max_results must be number")
+        if not math.isfinite(float(requested)) or float(requested) < 1:
+            raise InvalidCommand("max_results must be a positive number")
+        limit = min(int(requested), self.MAX_SEARCH_RESULTS)
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            matcher = re.compile(query if use_regex else re.escape(query), flags)
+        except re.error as exc:
+            raise InvalidCommand(f"invalid regular expression: {exc}") from exc
+
+        listing = self._list_files(
+            {"pattern": arguments.get("pattern", "**/*")}, deadline_seconds
+        )
+        candidates = listing["files"][: self.MAX_SEARCH_FILES]
+        truncated = bool(listing["truncated"]) or len(listing["files"]) > len(
+            candidates
+        )
+        matches: List[Dict[str, Any]] = []
+        scanned = 0
+        skipped = 0
+        for relative in candidates:
+            if len(matches) >= limit:
+                truncated = True
+                break
+            try:
+                path = self.safe_path(relative)
+                if path.stat().st_size > self.MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                text = path.read_bytes().decode("utf-8")
+            except (InvalidPath, OSError, UnicodeDecodeError):
+                skipped += 1
+                continue
+            scanned += 1
+            for number, line in enumerate(text.splitlines(), start=1):
+                if not matcher.search(line):
+                    continue
+                encoded = line.encode("utf-8")
+                clipped = len(encoded) > self.MAX_SEARCH_LINE_BYTES
+                if clipped:
+                    line = encoded[: self.MAX_SEARCH_LINE_BYTES].decode(
+                        "utf-8", errors="ignore"
+                    )
+                matches.append(
+                    {
+                        "path": relative,
+                        "line": number,
+                        "text": str(redact(line)),
+                        "clipped": clipped,
+                    }
+                )
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+        return {
+            "query": query,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+            "files_scanned": scanned,
+            "files_skipped": skipped,
+            "match_count": len(matches),
+            "matches": matches,
+            "truncated": truncated,
+        }
+
     def _audit(self, event: str, data: Dict[str, Any]) -> None:
         if self.audit_path is None:
             return
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            self.audit_path.exists()
+            and self.audit_path.stat().st_size >= self.MAX_AUDIT_BYTES
+        ):
+            rotated = self.audit_path.with_suffix(self.audit_path.suffix + ".1")
+            try:
+                rotated.unlink()
+            except FileNotFoundError:
+                pass
+            os.replace(self.audit_path, rotated)
         record = {
             "timestamp": time.time(),
             "event": event,
