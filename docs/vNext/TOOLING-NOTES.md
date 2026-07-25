@@ -1,8 +1,9 @@
 # Agent tooling notes
 
 This note records the contract for the hosted tools an external coding agent
-needs in order to verify its own work, and the reproducible launch command for
-the bridge that exposes them.
+needs in order to verify its own work, the reproducible launch command for the
+bridge that exposes them, and the operational limits an agent has to plan
+around.
 
 ## Interpreter and package layout
 
@@ -13,23 +14,26 @@ the bridge that exposes them.
   of `python -m karox.cli ...` resolve the package without a `PYTHONPATH`
   shim. Subprocess tests assert this contract; running the suite from a clean
   checkout requires the editable install.
-- Required third-party packages (`mcp`, `PyYAML`, `Pygments`, `keyring`,
-  `httpx`, `fastapi`, `uvicorn`, `textual`) are declared in
-  `requirements.txt` and are present in the test interpreter.
+- `requirements.txt` declares `mcp`, `PyYAML`, `keyring`, `httpx`, `httpx-sse`,
+  `fastapi`, `uvicorn`, `pydantic`, `textual`, `rich` and `Pygments`. The last
+  two are declared explicitly because `markdown_render` imports `rich.syntax`
+  directly, which requires Pygments. Relying on them arriving transitively
+  through `textual` is what previously produced a working install with a broken
+  import.
 
 ## Bridge launch command (reproducible)
 
 The bridge is started once and held. Restarting changes the credential the
 agent stores, so it must be followed by a Notion reconnect.
 
-Endpoint: `https://monsterpc.taila81286.ts.net/mcp` (Tailscale Funnel →
-`127.0.0.1:8765`). Authorization: `Bearer <secret stored in OS keyring under
-bridge/bridge-1784992825-f532f3>` — pasted only into Notion's protected
-credential field, never into chat.
+Endpoint: `https://monsterpc.taila81286.ts.net/mcp` (Tailscale Funnel to
+`127.0.0.1:8765`). Authorization uses a bearer credential held in the OS
+keyring under `bridge/bridge-1784992825-f532f3`; the value is pasted only into
+Notion's protected credential field and never into chat, logs, or this file.
 
 Profile `notion`, protocol `mcp`, session `notion-elevated` (access profile
-`elevated`, which grants `GIT_COMMIT` in addition to the workspace-write
-capabilities; `workspace_write` does not allow `git.commit`).
+`elevated`, which grants the commit capability in addition to the
+workspace-write ones; `workspace_write` does not allow `git.commit`).
 
 ```powershell
 python -m karox.cli bridge serve `
@@ -85,7 +89,8 @@ python -m karox.cli bridge serve `
 ### Why these eight tools
 
 All eight Core tools are exposed so the external agent can read, search,
-write, run approved checks, inspect git state, and commit (never push):
+write, run approved checks, inspect git state, and commit (never publish to a
+remote):
 
 ```
 karox.repo.read_file    karox.repo.write_file   karox.repo.list_files
@@ -102,45 +107,50 @@ the bridge refuses to expose it, which is the intended guard.
 15 minutes. The Core command bound is `min(timeout_seconds, deadline_seconds)`,
 capped at 3600 s, so a long check run no longer surfaces as `timed_out`. The
 value flows from the CLI flag through `build_proxy_asgi_app` into each
-`execute(...)` call — no hardcoded override.
+`execute(...)` call, with no hardcoded override.
 
 ### Approved verification set
 
 `karox.checks.run` only runs a command whose full argv exactly matches one of
 the vectors supplied at launch (`core.py` membership test on a frozenset of
-tuples — no prefix/regex matching). The 33 vectors above cover:
+tuples, with no prefix or regular-expression matching). The vectors above
+cover:
 
-- 2 baseline vectors: `compileall` over `src tests`, full `unittest discover`.
+- 2 baseline vectors: `compileall` over `src tests`, and full discovery.
 - 2 environment-recovery vectors: `pip install -r requirements.txt` and
   `pip install -e .`, so the agent can repair the interpreter the bridge
   depends on.
-- 23 per-module vectors: one `unittest discover -p <test_*.py>` per test
-  module, generated programmatically from `tests/test_*.py` so nothing is
-  missed and the set stays closed.
-- 6 diagnostic vectors that read CLI output for interface work. Note:
+- One `unittest discover -p <test_*.py>` vector per test module, generated
+  programmatically from `tests/test_*.py` so nothing is missed and the set
+  stays closed.
+- 6 diagnostic vectors that read CLI output for interface work. Note that
   `karox status` does not exist as a subcommand; `karox paths --json` is the
-  closest available introspection command and is used instead. All six were
-  verified to exit 0 before being added.
+  closest available introspection command and is used instead.
 
 The set is intentionally closed: adding a new approved command requires
-restarting the bridge with the extended `--verification-command` list, and
-the new credential must then be re-entered in Notion.
+restarting the bridge with an extended `--verification-command` list.
 
-### Notion reconnect
+## Operational limits an agent must plan around
 
-Notion caches the bearer token at connection creation and offers only
-Reconnect/Disconnect (no Edit). After any bridge restart that keeps the same
-credential, Reconnect refreshes the cached tool list. If the credential
-changes, the old connection must be Disconnected and re-added with the new
-token pasted only into Notion's protected credential field.
+These were measured against the running bridge, not assumed.
 
-## Status of the three requested tools
-
-| Tool | State |
-| --- | --- |
-| `karox.checks.run` | Already implemented in Core and already listed in `CORE_TOOL_NAMES`. Nothing to build; it only has to be added to a session tool allowlist together with an approved verification command set. |
-| `karox.git.commit` | Not implemented yet. The commit capability already exists in the models and is permitted by the elevated profile only, but Core has no handler and no tool definition. |
-| `karox.repo.search` | Not implemented yet. |
+- **A remote MCP client can time out long before Core does.** The Notion client
+  abandons a tool call after roughly a minute, so the full-suite vector is not
+  callable from it even with a 900 s deadline. Per-module vectors are the
+  practical unit of work, and that is why every module has its own vector.
+- **An abandoned call leaves the mutation lease held.** `checks.run` mutates, so
+  it takes a lease with a time to live of the requested timeout plus ten
+  seconds. If the client gives up, the session stays locked for the remainder of
+  that window and every later mutating call fails with a session-locked error.
+  Requesting a timeout close to what the work actually needs keeps that window
+  short; requesting 900 s locks the session for about fifteen minutes.
+- **Read-only tools are unaffected by the lease.** `repo.read_file`,
+  `repo.list_files`, `repo.search`, `git.status` and `git.diff` keep working
+  while a lease is held, so investigation can continue during a lockout.
+- **Search results include ignored directories.** `repo.list_files` and
+  `repo.search` walk the working tree without consulting ignore rules, so a
+  virtual environment or build output can dominate the result budget. Narrow
+  the glob (for example `src/karox/*.py`) until that is fixed.
 
 ## Hosted idempotency
 
@@ -155,19 +165,21 @@ so an accepted call still executes exactly once. A client that supplies a stable
 identifier keeps full cross request replay protection, and an explicitly
 supplied value still wins over the generated one.
 
-A content derived identifier was deliberately rejected. Rerunning the same test
-command after a code change would otherwise return the previous cached outcome
-instead of a real run.
+An identifier derived from the argument content was deliberately rejected.
+Rerunning the same test command after a code change would otherwise return the
+previous cached outcome instead of a real run.
 
-## `checks.run` notes
+## `checks.run`
 
-The bridge refuses to expose this tool unless the caller passes an explicit set
-of approved command vectors. That guard is correct and stays. Any command
-outside the approved set is rejected with an explicit error rather than being
-run. The tool mutates, so it needs a mutation lease, which the bridge already
-handles.
+Already implemented in Core before this work; only the session allowlist and an
+approved command set were missing. The bridge refuses to expose the tool unless
+the caller passes an explicit set of approved command vectors, and any command
+outside that set is rejected with an explicit error rather than being run. The
+tool mutates, so it needs a mutation lease, which the bridge already handles.
 
-## `git.commit` design
+## `git.commit`
+
+Implemented as a Core tool and exposed through the bridge.
 
 - Reuses the existing commit capability. No policy change, so commit stays
   available under the elevated profile only.
@@ -183,12 +195,14 @@ handles.
   restricted to those same paths.
 - Repository supplied hooks are not executed, because running them implicitly
   would side step the process capability.
-- A failed commit stays a failure. The command joins the set whose non zero exit
-  or timeout makes the result not ok, so a model cannot report a commit that did
-  not happen.
+- A failed commit stays a failure. The command belongs to the set whose non zero
+  exit or timeout makes the result not ok, so a model cannot report a commit
+  that did not happen.
 - Publishing to a remote remains impossible and is untouched by this tool.
 
-## `repo.search` design
+## `repo.search`
+
+Implemented as a Core tool and exposed through the bridge.
 
 - Read only, reusing the repository read capability.
 - Pure Python, so it needs no process capability and no external binary, and it
@@ -205,3 +219,5 @@ handles.
   process.
 - The result reports whether it was truncated, so a caller can tell a complete
   answer from a partial one.
+- Known gap: ignored directories are still walked. See the operational limits
+  section above.
