@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 SECRET_NAME = re.compile(
@@ -19,12 +19,14 @@ SECRET_VALUE_PATTERNS = (
 
 _SAFE_CHILD_ENVIRONMENT = frozenset(
     {
+        "APPDATA",
         "CI",
         "COLORTERM",
         "COMSPEC",
         "HOME",
         "LANG",
         "LANGUAGE",
+        "LOCALAPPDATA",
         "NO_COLOR",
         "NUMBER_OF_PROCESSORS",
         "OS",
@@ -46,8 +48,9 @@ def contains_credential(value: str) -> bool:
     return any(pattern.search(value) for pattern in SECRET_VALUE_PATTERNS)
 
 
-def redact(value: Any, key: str = "") -> Any:
+def redact(value: Any, key: str = "", *, secrets: Iterable[str] = ()) -> Any:
     """Return a bounded, recursively redacted representation."""
+    exact = tuple(item for item in secrets if isinstance(item, str) and item)
     token_counter = (
         key.lower().endswith("_tokens")
         and isinstance(value, int)
@@ -57,13 +60,15 @@ def redact(value: Any, key: str = "") -> Any:
     if key and SECRET_NAME.search(key) and not token_counter:
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(k): redact(v, str(k)) for k, v in value.items()}
+        return {str(k): redact(v, str(k), secrets=exact) for k, v in value.items()}
     if isinstance(value, list):
-        return [redact(item) for item in value[:500]]
+        return [redact(item, secrets=exact) for item in value[:500]]
     if isinstance(value, tuple):
-        return [redact(item) for item in value[:500]]
+        return [redact(item, secrets=exact) for item in value[:500]]
     if isinstance(value, str):
         result = value
+        for secret in exact:
+            result = result.replace(secret, "[REDACTED]")
         for pattern in SECRET_VALUE_PATTERNS:
             result = pattern.sub("[REDACTED]", result)
         return result[:1_000_000]

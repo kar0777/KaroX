@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -97,6 +101,67 @@ class SessionStoreTests(unittest.TestCase):
             secret,
             self.store.state_path("redacted-task").read_text(encoding="utf-8"),
         )
+
+    def test_revoke_atomically_fences_an_active_lease(self) -> None:
+        lease = self.store.acquire("sample", "holder")
+        revoked = self.store.revoke("sample")
+        self.assertTrue(revoked.revoked)
+        self.assertEqual(revoked.status, "revoked")
+        with self.assertRaises(SessionBusy):
+            self.store.validate_lease(lease)
+        with self.assertRaisesRegex(SessionError, "revoked"):
+            self.store.acquire("sample", "new-holder")
+
+    def test_cross_process_takeover_save_and_heartbeat_are_serialized(self) -> None:
+        original = self.store.acquire("sample", "expired-owner", ttl_seconds=5)
+        lease_path = self.store.lease_path("sample")
+        payload = json.loads(lease_path.read_text(encoding="utf-8"))
+        payload["expires_at"] = 0
+        lease_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        ready = self.root / "worker.ready"
+        release = self.root / "worker.release"
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(Path(__file__).resolve().parent.parent / "src"), environment.get("PYTHONPATH", "")]
+        )
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "_session_process_worker.py"),
+                str(self.store.root),
+                str(ready),
+                str(release),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+        try:
+            deadline = time.time() + 10
+            while not ready.exists() and worker.poll() is None and time.time() < deadline:
+                time.sleep(0.02)
+            if not ready.exists():
+                stdout, stderr = worker.communicate(timeout=1)
+                self.fail(f"worker did not become ready: {(stdout, stderr)}")
+            with self.assertRaises(SessionBusy):
+                self.store.validate_lease(original)
+            with self.assertRaises(SessionBusy):
+                self.store.acquire("sample", "contender", ttl_seconds=5)
+            self.assertEqual(self.store.load("sample").summary, "saved by worker")
+            release.touch()
+            stdout, stderr = worker.communicate(timeout=10)
+            self.assertEqual(worker.returncode, 0, (stdout, stderr))
+            successor = self.store.acquire("sample", "successor", ttl_seconds=5)
+            self.store.release(successor)
+        finally:
+            release.touch(exist_ok=True)
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=5)
 
 
 if __name__ == "__main__":

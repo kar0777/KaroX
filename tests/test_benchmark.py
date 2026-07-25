@@ -129,6 +129,10 @@ class _Stack:
         else:
             self.core = CoreRuntime(
                 self.repository, self.policy, self.sessions, self.audit_path,
+                verification_commands=[
+                    [sys.executable, "-c", "print('ok')"],
+                    [sys.executable, "-c", "import sys; sys.exit(9)"],
+                ],
             )
 
     def _attach_mcp(self) -> None:
@@ -144,6 +148,10 @@ class _Stack:
         self.core = CoreRuntime(
             self.repository, self.policy, self.sessions, self.audit_path,
             mcp_binding=binding,
+            verification_commands=[
+                [sys.executable, "-c", "print('ok')"],
+                [sys.executable, "-c", "import sys; sys.exit(9)"],
+            ],
         )
         self.mcp = {
             "registry": registry,
@@ -191,6 +199,10 @@ class _Stack:
         clone.core = CoreRuntime(
             clone.repository, clone.policy, clone.sessions, clone.audit_path,
             mcp_binding=binding,
+            verification_commands=[
+                [sys.executable, "-c", "print('ok')"],
+                [sys.executable, "-c", "import sys; sys.exit(9)"],
+            ],
         )
         return clone
 
@@ -309,16 +321,18 @@ class HybridRuntimeBenchmark(unittest.TestCase):
         def body() -> Dict[str, Any]:
             stack = _Stack(session_id="s", with_mcp=True)
             try:
+                policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
                 proxy = McpProxy(
                     stack.mcp["client"], stack.repository,
-                    stack.sessions.load("s"), ["echo"],
+                    stack.sessions, "s", ["echo"],
+                    policy=policy,
                     hosted_origin=stack.hosted_origin,
+                    proxied_origin=Origin(OriginKind.PROXIED_MCP, "bench-proxy"),
+                    audit_path=stack.audit_path,
                 )
-                policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
                 policy.set_grants(stack.hosted_origin, {Capability.MCP_CALL})
-                result = proxy.execute(
-                    "mcp.echo.echo", {"message": "proxied"}, policy=policy,
-                )
+                policy.set_grants(proxy.proxied_origin, {Capability.MCP_CALL})
+                result = proxy.execute("mcp.echo.echo", {"message": "proxied"})
                 self.assertEqual(result["tool"], "mcp.echo.echo")
                 self.assertEqual(
                     result["result"]["content"][0]["text"], "echo: proxied",
@@ -326,9 +340,10 @@ class HybridRuntimeBenchmark(unittest.TestCase):
                 # Second boundary: a policy without MCP_CALL must deny.
                 deny_policy = CapabilityPolicy(AccessProfile.READ_ONLY)
                 with self.assertRaises(PolicyDenied):
-                    proxy.execute(
-                        "mcp.echo.echo", {"message": "x"}, policy=deny_policy,
-                    )
+                    McpProxy(
+                        stack.mcp["client"], stack.repository, stack.sessions, "s", ["echo"],
+                        policy=deny_policy, hosted_origin=stack.hosted_origin,
+                    ).descriptors()
                 # Descriptors are secret-free.
                 for d in proxy.descriptors():
                     blob = json.dumps(d.to_dict())
@@ -584,6 +599,8 @@ class HybridRuntimeBenchmark(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
             )
             self.assertEqual(

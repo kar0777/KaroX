@@ -102,6 +102,10 @@ class AgentKernelTests(unittest.TestCase):
             self.policy,
             self.sessions,
             self.root / "audit.jsonl",
+            verification_commands=[
+                [sys.executable, "-c", "print('ok')"],
+                [sys.executable, "-c", "raise SystemExit(9)"],
+            ],
         )
 
     def tearDown(self) -> None:
@@ -165,7 +169,14 @@ class AgentKernelTests(unittest.TestCase):
         ).run("session")
 
         self.assertEqual(report.reason, "step_limit")
-        self.assertEqual(provider.requests[0].messages[0].content, enhanced_prompt)
+        self.assertEqual(
+            provider.requests[0].messages[0].content,
+            self.kernel(
+                QueueProvider([]),
+                AgentLimits(max_steps=1, max_seconds=30),
+                system_prompt=enhanced_prompt,
+            ).system_prompt,
+        )
         persisted = self.sessions.load("session")
         self.assertEqual(persisted.provider_history[0]["content"], SYSTEM_PROMPT)
         self.assertNotIn(
@@ -629,6 +640,55 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(second.reason, "already_verified")
         self.assertEqual(len(provider.requests), request_count)
 
+    def test_later_failed_check_invalidates_previous_verification_chain(self) -> None:
+        responses = self.successful_responses()
+        responses.insert(
+            3,
+            model_response(
+                call(
+                    "late-failure",
+                    "checks_run",
+                    {"argv": [sys.executable, "-c", "raise SystemExit(9)"]},
+                )
+            ),
+        )
+        report = self.kernel(
+            QueueProvider(responses), AgentLimits(max_steps=5, max_seconds=30)
+        ).run("session")
+        self.assertFalse(report.verified)
+        self.assertEqual([item["ok"] for item in report.checks], [True, False])
+
+    def test_unapproved_noop_check_cannot_verify(self) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call(
+                        "write",
+                        "repo_write_file",
+                        {"path": "sample.txt", "content": "after\n"},
+                    )
+                ),
+                model_response(
+                    call(
+                        "noop",
+                        "checks_run",
+                        {"argv": [sys.executable, "-c", "pass"]},
+                    )
+                ),
+                model_response(content="claimed success"),
+            ]
+        )
+        report = self.kernel(
+            provider, AgentLimits(max_steps=3, max_seconds=30)
+        ).run("session")
+        self.assertFalse(report.verified)
+        failure = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("tool_call_id") == "noop"
+        )
+        self.assertEqual(failure["error"]["type"], "InvalidCommand")
+
     def test_message_normalization_keeps_tool_results_adjacent(self) -> None:
         history = [
             {
@@ -696,6 +756,11 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(audit["cumulative_usage"]["prompt_tokens"], 14)
         self.assertEqual(audit["cumulative_cost"], 1.25)
         self.assertEqual(record.usage["costs"], {"USD": 1.25})
+        assistant = next(
+            item for item in record.provider_history if item.get("role") == "assistant"
+        )
+        self.assertEqual(assistant["provider"], "private-provider")
+        self.assertEqual(assistant["model"], "model-a")
         self.assertEqual(report.steps, 1)
         self.assertNotIn(
             "provider_audit", [message.role for message in provider.requests[0].messages]
@@ -1018,6 +1083,8 @@ class AgentCliEndToEndTests(unittest.TestCase):
                         "cli-e2e",
                         "--max-seconds",
                         "30",
+                        "--verification-command",
+                        json.dumps([sys.executable, "-c", "print('e2e-ok')"]),
                         "--json",
                     ],
                     cwd=repository,
@@ -1025,6 +1092,7 @@ class AgentCliEndToEndTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     timeout=60,
                 )
             finally:
