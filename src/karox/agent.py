@@ -49,6 +49,19 @@ After the latest real file change, run a successful check, then request both
 git_status and git_diff. A narrative answer is not verification."""
 
 
+def _usage_total(usage: Dict[str, Any]) -> int:
+    total = usage.get("total_tokens")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        return total
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+    completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
+    return sum(
+        item
+        for item in (prompt, completion)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+    )
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
@@ -135,7 +148,19 @@ class AgentKernel:
         self.sessions = sessions
         self.origin = origin
         self.limits = limits
-        self.system_prompt = system_prompt
+        approved_checks = core.verification_commands
+        if not approved_checks:
+            raise AgentError(
+                "native agents require at least one user-approved verification command"
+            )
+        rendered_checks = json.dumps(
+            [list(item) for item in sorted(approved_checks)], ensure_ascii=False
+        )
+        self.system_prompt = (
+            system_prompt
+            + "\nOnly these user-approved checks may be executed and used as "
+            + f"verification evidence: {rendered_checks}"
+        )
         self.monotonic = monotonic
         definitions = {item.name: item for item in core.tools()}
         missing = set(TOOL_ALIASES.values()).difference(definitions)
@@ -358,8 +383,8 @@ class AgentKernel:
             "origin": self.origin.key,
             "content": redact(response.content) if response.content is not None else None,
             "tool_calls": tool_calls,
-            "provider": self.provider.provider_name,
-            "model": self.model,
+            "provider": response.selected_provider or self.provider.provider_name,
+            "model": response.selected_model or self.model,
             "finish_reason": response.finish_reason,
             "response_id": response.response_id,
             "transport_attempts": response.transport_attempts,
@@ -376,8 +401,11 @@ class AgentKernel:
             aggregate["transport_attempts"] = int(
                 aggregate.get("transport_attempts", 0)
             ) + response.transport_attempts
+            previous_total = _usage_total(aggregate)
+            addition_total = _usage_total(response.usage)
             for name, count in response.usage.items():
                 aggregate[name] = int(aggregate.get(name, 0)) + count
+            aggregate["total_tokens"] = previous_total + addition_total
             if response.currency is not None and response.cumulative_cost is not None:
                 costs = aggregate.get("costs")
                 if not isinstance(costs, dict):
@@ -385,6 +413,23 @@ class AgentKernel:
                 costs = dict(costs)
                 costs[response.currency] = response.cumulative_cost
                 aggregate["costs"] = costs
+            # Context occupancy is a property of a single request, not of the
+            # session total. The aggregate above sums every request and can
+            # exceed a context window many times over, so it cannot answer "how
+            # full is the context". Record the latest request's prompt size
+            # separately so a caller can report real occupancy instead of
+            # presenting cumulative spend as a share of the window.
+            latest_prompt = response.usage.get(
+                "prompt_tokens", response.usage.get("input_tokens")
+            )
+            if isinstance(latest_prompt, bool) or not isinstance(
+                latest_prompt, (int, float)
+            ):
+                latest_prompt = None
+            aggregate["last_request"] = {
+                "prompt_tokens": None if latest_prompt is None else int(latest_prompt),
+                "model": response.selected_model or self.model,
+            }
             record.usage = aggregate
 
         self._update_session(session_id, lease, update)
@@ -760,18 +805,23 @@ class AgentKernel:
             if entry.get("role") != "tool" or not isinstance(entry.get("result"), dict):
                 continue
             result = entry["result"]
-            if result.get("ok") is not True:
-                continue
             data = result.get("data") if isinstance(result.get("data"), dict) else {}
             core_name = entry.get("core_name")
-            if core_name == "repo.write_file" and data.get("changed") is True:
-                write, check, status, diff = result, None, None, None
+            ok = result.get("ok") is True
+            if core_name == "repo.write_file":
+                if ok and data.get("changed") is True:
+                    write, check, status, diff = result, None, None, None
+                elif not ok:
+                    write, check, status, diff = None, None, None, None
             elif core_name == "checks.run" and write is not None:
-                check, status, diff = result, None, None
+                if ok and data.get("verification_eligible") is True:
+                    check, status, diff = result, None, None
+                else:
+                    check, status, diff = None, None, None
             elif core_name == "git.status" and check is not None:
-                status = result
+                status = result if ok else None
             elif core_name == "git.diff" and check is not None:
-                diff = result
+                diff = result if ok else None
         selected = (write, check, status, diff)
         if any(item is None for item in selected):
             return False

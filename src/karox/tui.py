@@ -3505,18 +3505,32 @@ if _HAS_TEXTUAL:
                 return f"{value / 1_000:.1f}K"
             return str(value)
 
-        def _session_spend(self) -> int:
-            # Cumulative tokens across every request in the session, which the
-            # agent kernel aggregates. Deliberately not presented as context
-            # occupancy: after several requests the total can exceed one context
-            # window, so treating it as a share of the window would misreport it.
+        def _session_usage(self) -> dict:
             if not self.active_session:
-                return 0
+                return {}
             try:
                 record = SessionStore(session_dir()).load(self.active_session)
             except Exception:
-                return 0
-            usage = record.usage if isinstance(record.usage, dict) else {}
+                return {}
+            return record.usage if isinstance(record.usage, dict) else {}
+
+        def _last_prompt_tokens(self) -> Optional[int]:
+            # Prompt size of the most recent request, recorded by the agent
+            # kernel. This is the only figure that describes context occupancy;
+            # the session aggregate below is spend and can exceed the window.
+            latest = self._session_usage().get("last_request")
+            if not isinstance(latest, dict):
+                return None
+            value = latest.get("prompt_tokens")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return max(0, int(value))
+
+        def _session_spend(self) -> int:
+            # Cumulative tokens across every request in the session, which the
+            # agent kernel aggregates. This is spend, not occupancy: after
+            # several requests the total can exceed one context window.
+            usage = self._session_usage()
 
             def _number(value: object) -> int:
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -3539,9 +3553,31 @@ if _HAS_TEXTUAL:
                 return escape(f"{label}: {text['not_configured']}")
             window = getattr(selected, "context_window", None)
             output = getattr(selected, "max_output_tokens", None)
+            occupied = self._last_prompt_tokens()
             parts: list[str] = []
+            colour: Optional[str] = None
             if isinstance(window, int) and window > 0:
-                parts.append(self._format_tokens(window))
+                if occupied is None:
+                    # No request has been sent in this session yet, so occupancy
+                    # is genuinely unknown. Show the declared limit rather than
+                    # an empty gauge, which would read as "context is empty".
+                    parts.append(self._format_tokens(window))
+                else:
+                    share = min(1.0, occupied / window)
+                    glyphs = ("\u25cb", "\u25d4", "\u25d1", "\u25d5", "\u25cf")
+                    index = min(len(glyphs) - 1, int(share * len(glyphs)))
+                    colour = (
+                        "#8fa98a"
+                        if share < 0.6
+                        else "#d4b676"
+                        if share < 0.85
+                        else "#e0a3a3"
+                    )
+                    parts.append(
+                        f"{glyphs[index]} {int(share * 100)}% "
+                        f"{self._format_tokens(occupied)}"
+                        f"/{self._format_tokens(window)}"
+                    )
             else:
                 # The registry holds no declared limit for this model. Saying so
                 # is more useful than an empty field, which reads as "no limit".
@@ -3551,7 +3587,8 @@ if _HAS_TEXTUAL:
             spent = self._session_spend()
             if spent:
                 parts.append(f"{text['spent']} {self._format_tokens(spent)}")
-            return escape(f"{label}: " + " \u00b7 ".join(parts))
+            body = escape(f"{label}: " + " \u00b7 ".join(parts))
+            return f"[{colour}]{body}[/]" if colour else body
 
         def _reset_sponsor_ticker(self) -> None:
             separator = "     •     "
