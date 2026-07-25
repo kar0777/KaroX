@@ -14,13 +14,24 @@ from typing import Any, Optional, Sequence
 
 from .agent import AgentError, AgentKernel, AgentLimits, AgentReport, SYSTEM_PROMPT
 from .bridge import (
-    BridgeConfigurationError,
     BridgeCredentialStore,
     BridgeError,
     BridgeRegistry,
 )
 from .core import CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
+from .ecosystem import (
+    INTEGRATION_PRESETS,
+    TARGET_PRESETS,
+    TOOL_PRESETS,
+    EcosystemRegistry,
+)
+from .hosted_bridge import (
+    CORE_TOOL_NAMES,
+    CompositeHostedBridge,
+    CoreToolBridge,
+    HostedBridgeError,
+)
 from .migration import MigrationError, migrate_legacy_metadata
 from .mcp_client import (
     McpAccessDenied,
@@ -35,9 +46,12 @@ from .mcp_client import (
     validate_mcp_selection_registry,
 )
 from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
+from .promptql_outbound import (
+    PromptQLInvocationError,
+    PromptQLNaturalLanguageClient,
+    load_promptql_target,
+)
 from .packs import (
-    PackAccessDenied,
-    PackConfigurationError,
     PackError,
     PackRegistry,
     create_pack_template,
@@ -50,7 +64,11 @@ from .paths import (
     session_dir,
 )
 from .policy import CapabilityPolicy
+from .openapi_bridge import build_openapi_bridge_app
+from .proxy import McpProxy
+from .proxy_server import build_proxy_asgi_app
 from .provider_factory import ProviderFactory
+from .provider_presets import provider_preset, provider_presets
 from .providers import (
     ModelMessage,
     ModelRequest,
@@ -68,7 +86,7 @@ from .registry import (
     RegistryError,
 )
 from .routing import RouteTarget, RoutedProvider, RoutingPolicy
-from .handoff import build_handoff, handoff_digest
+from .handoff import build_handoff
 from .security import redact
 from .sessions import SessionError, SessionRecord, SessionStore
 from .skills import (
@@ -87,7 +105,27 @@ def _json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _verification_command(value: str) -> tuple[str, ...]:
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "verification command must be a JSON array of strings"
+        ) from exc
+    if (
+        not isinstance(decoded, list)
+        or not decoded
+        or len(decoded) > 100
+        or not all(isinstance(item, str) and item for item in decoded)
+    ):
+        raise ValueError("verification command must contain 1-100 non-empty strings")
+    return tuple(decoded)
+
+
 def _record_summary(record: SessionRecord) -> dict[str, Any]:
+    usage = record.usage if isinstance(record.usage, dict) else {}
+    costs = usage.get("costs")
+    checks = [item for item in record.checks if isinstance(item, dict)]
     return {
         "session_id": record.session_id,
         "repository": record.repository,
@@ -99,6 +137,15 @@ def _record_summary(record: SessionRecord) -> dict[str, Any]:
         "revision": record.revision,
         "updated_at": record.updated_at,
         "revoked": record.revoked,
+        # Deciding which task to resume needs to know what it already did, not
+        # only that it exists. All of this is already in the durable record, so
+        # a caller no longer has to load every session individually to choose.
+        "changed_files": len(record.changed_files),
+        "checks": len(checks),
+        "checks_failed": sum(1 for item in checks if item.get("ok") is False),
+        "requests": usage.get("requests"),
+        "total_tokens": usage.get("total_tokens"),
+        "costs": dict(costs) if isinstance(costs, dict) else {},
     }
 
 
@@ -124,6 +171,9 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--json", action="store_true")
     listing = sessions.add_parser("list", help="list sessions")
     listing.add_argument("--json", action="store_true")
+    revoke = sessions.add_parser("revoke", help="emergency-revoke a session")
+    revoke.add_argument("session_id")
+    revoke.add_argument("--json", action="store_true")
     show = sessions.add_parser("show", help="show one session")
     show.add_argument("session_id")
     show.add_argument("--json", action="store_true")
@@ -142,9 +192,7 @@ def _parser() -> argparse.ArgumentParser:
     credential = commands.add_parser(
         "credential", help="manage secrets in the operating-system keyring"
     )
-    credentials = credential.add_subparsers(
-        dest="credential_command", required=True
-    )
+    credentials = credential.add_subparsers(dest="credential_command", required=True)
     credential_set = credentials.add_parser("set", help="store a provider secret")
     credential_set.add_argument("name")
     credential_set.add_argument(
@@ -173,7 +221,9 @@ def _parser() -> argparse.ArgumentParser:
     provider_add.add_argument("--adapter", choices=sorted(ADAPTER_KINDS), required=True)
     provider_add.add_argument("--base-url", required=True)
     provider_add.add_argument("--credential-ref")
-    provider_add.add_argument("--privacy-class", choices=sorted(PRIVACY_CLASSES), default="public")
+    provider_add.add_argument(
+        "--privacy-class", choices=sorted(PRIVACY_CLASSES), default="public"
+    )
     provider_add.add_argument("--timeout-seconds", type=float, default=60.0)
     provider_add.add_argument("--max-transport-retries", type=int, default=2)
     provider_add.add_argument("--header", action="append", default=[])
@@ -204,6 +254,18 @@ def _parser() -> argparse.ArgumentParser:
     provider_test.add_argument("provider_id")
     provider_test.add_argument("--model")
     provider_test.add_argument("--json", action="store_true")
+    provider_presets_command = providers.add_parser(
+        "presets", help="list native provider presets"
+    )
+    provider_presets_command.add_argument("--json", action="store_true")
+    provider_preset_add = providers.add_parser(
+        "add-preset", help="add a provider from a native preset"
+    )
+    provider_preset_add.add_argument("preset_id")
+    provider_preset_add.add_argument("--provider-id")
+    provider_preset_add.add_argument("--base-url")
+    provider_preset_add.add_argument("--credential-ref")
+    provider_preset_add.add_argument("--json", action="store_true")
 
     model = commands.add_parser("model", help="manage provider models")
     models = model.add_subparsers(dest="model_command", required=True)
@@ -243,6 +305,78 @@ def _parser() -> argparse.ArgumentParser:
     model_test.add_argument("provider_id")
     model_test.add_argument("model")
     model_test.add_argument("--json", action="store_true")
+    model_discover = models.add_parser(
+        "discover", help="discover models from a configured provider"
+    )
+    model_discover.add_argument("--provider", required=True)
+    model_discover.add_argument("--json", action="store_true")
+    model_map = models.add_parser("map", help="map an alias to a provider model")
+    model_map.add_argument("alias", choices=("sol", "fable", "kimi"))
+    model_map.add_argument("model_id")
+    model_map.add_argument("--provider", required=True)
+    model_map.add_argument("--json", action="store_true")
+
+    def add_ecosystem_commands(
+        name: str, help_text: str, *, target: bool = False
+    ) -> None:
+        root = commands.add_parser(name, help=help_text)
+        actions = root.add_subparsers(dest=f"{name}_command", required=True)
+        for action_name, action_help in (
+            ("presets", "list available presets"),
+            ("list", "list configured entries"),
+        ):
+            action = actions.add_parser(action_name, help=action_help)
+            action.add_argument("--json", action="store_true")
+        add = actions.add_parser("add", help="add a disabled preset configuration")
+        add.add_argument("preset_id")
+        add.add_argument("--id")
+        add.add_argument("--json", action="store_true")
+        configure = actions.add_parser(
+            "configure", help="configure non-secret settings"
+        )
+        configure.add_argument("item_id")
+        configure.add_argument("--setting", action="append", default=[])
+        configure.add_argument("--credential-ref")
+        if name == "integration":
+            configure.add_argument("--telemetry-field", action="append", default=[])
+        configure.add_argument("--json", action="store_true")
+        for action_name in ("doctor", "remove"):
+            action = actions.add_parser(action_name)
+            action.add_argument("item_id")
+            action.add_argument("--json", action="store_true")
+        if target:
+            handoff = actions.add_parser(
+                "handoff", help="generate target connection guidance"
+            )
+            handoff.add_argument("item_id")
+            handoff.add_argument("--json", action="store_true")
+            ask = actions.add_parser(
+                "ask",
+                help="invoke a hosted agent target (promptql Natural Language API)",
+            )
+            ask.add_argument("item_id")
+            ask.add_argument("--message", required=True, help="user message to send")
+            ask.add_argument(
+                "--prior-interactions",
+                default=None,
+                help="JSON array of prior interaction objects for multi-turn context",
+            )
+            ask.add_argument(
+                "--deadline-seconds",
+                type=float,
+                default=60.0,
+                help="maximum request duration in seconds",
+            )
+            ask.add_argument("--json", action="store_true")
+        else:
+            for action_name in ("enable", "disable", "status"):
+                action = actions.add_parser(action_name)
+                action.add_argument("item_id")
+                action.add_argument("--json", action="store_true")
+
+    add_ecosystem_commands("target", "manage external agent targets", target=True)
+    add_ecosystem_commands("tool", "manage optional tool providers")
+    add_ecosystem_commands("integration", "manage opt-in CI and observability")
 
     skill = commands.add_parser("skill", help="discover and select Skills")
     skills = skill.add_subparsers(dest="skill_command", required=True)
@@ -295,9 +429,7 @@ def _parser() -> argparse.ArgumentParser:
     mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
 
     mcp_server = mcp_commands.add_parser("server", help="manage MCP servers")
-    mcp_servers = mcp_server.add_subparsers(
-        dest="mcp_server_command", required=True
-    )
+    mcp_servers = mcp_server.add_subparsers(dest="mcp_server_command", required=True)
     mcp_server_add = mcp_servers.add_parser("add", help="add or replace a server")
     mcp_server_add.add_argument("server_id")
     mcp_server_add.add_argument("--namespace", required=True)
@@ -338,9 +470,7 @@ def _parser() -> argparse.ArgumentParser:
     mcp_session = mcp_commands.add_parser(
         "session", help="manage session MCP selections"
     )
-    mcp_sessions = mcp_session.add_subparsers(
-        dest="mcp_session_command", required=True
-    )
+    mcp_sessions = mcp_session.add_subparsers(dest="mcp_session_command", required=True)
     mcp_session_select = mcp_sessions.add_parser(
         "select", help="discover and select a server for a session"
     )
@@ -366,9 +496,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     mcp_session_permissions.add_argument("server_id")
     mcp_session_permissions.add_argument("--session-id", required=True)
-    mcp_session_permissions.add_argument(
-        "--repository", type=Path, default=Path.cwd()
-    )
+    mcp_session_permissions.add_argument("--repository", type=Path, default=Path.cwd())
     mcp_session_permissions.add_argument("--json", action="store_true")
 
     mcp_call = mcp_commands.add_parser("call", help="call a selected MCP tool")
@@ -395,9 +523,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     mcp_credential_show.add_argument("name")
     mcp_credential_show.add_argument("--json", action="store_true")
-    mcp_credential_delete = mcp_credentials.add_parser(
-        "delete", help="delete a secret"
-    )
+    mcp_credential_delete = mcp_credentials.add_parser("delete", help="delete a secret")
     mcp_credential_delete.add_argument("name")
     mcp_credential_delete.add_argument("--json", action="store_true")
     mcp_credential_doctor = mcp_credentials.add_parser(
@@ -418,6 +544,48 @@ def _parser() -> argparse.ArgumentParser:
         "doctor", help="verify secure bridge credential storage"
     )
     bridge_doctor.add_argument("--json", action="store_true")
+    bridge_serve = bridge_commands.add_parser(
+        "serve", help="serve selected Core/MCP tools over authenticated HTTP"
+    )
+    bridge_serve.add_argument("--repository", type=Path, required=True)
+    bridge_serve.add_argument("--session-id", required=True)
+    bridge_serve.add_argument(
+        "--profile",
+        choices=("generic-streamable-http", "promptql", "notion", "hyperagent"),
+        default="generic-streamable-http",
+    )
+    bridge_serve.add_argument(
+        "--protocol",
+        choices=("mcp", "openapi"),
+        help="defaults to openapi for PromptQL and mcp for other profiles",
+    )
+    bridge_serve.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        choices=tuple(sorted(CORE_TOOL_NAMES)),
+        help="built-in KaroX Core tool to expose (repeatable)",
+    )
+    bridge_serve.add_argument(
+        "--server",
+        action="append",
+        default=[],
+        help="selected external MCP server to proxy (repeatable)",
+    )
+    bridge_serve.add_argument(
+        "--verification-command",
+        action="append",
+        default=[],
+        help=(
+            "user-approved checks.run command as a JSON array; required when "
+            "karox.checks.run is exposed"
+        ),
+    )
+    bridge_serve.add_argument("--credential", required=True)
+    bridge_serve.add_argument("--host", default="127.0.0.1")
+    bridge_serve.add_argument("--port", type=int, default=8765)
+    bridge_serve.add_argument("--deadline-seconds", type=float, default=30.0)
+    bridge_serve.add_argument("--allow-network-bind", action="store_true")
     bridge_credential = bridge_commands.add_parser(
         "credential", help="manage bridge secrets in the OS keyring"
     )
@@ -445,16 +613,18 @@ def _parser() -> argparse.ArgumentParser:
     bridge_credential_revoke.add_argument("name")
     bridge_credential_revoke.add_argument("--json", action="store_true")
 
-    pack = commands.add_parser(
-        "pack", help="manage installable KaroX Packs"
-    )
+    pack = commands.add_parser("pack", help="manage installable KaroX Packs")
     pack_commands = pack.add_subparsers(dest="pack_command", required=True)
-    pack_create = pack_commands.add_parser("create", help="generate a sample pack template")
+    pack_create = pack_commands.add_parser(
+        "create", help="generate a sample pack template"
+    )
     pack_create.add_argument("target", type=Path)
     pack_create.add_argument("--name", required=True)
     pack_create.add_argument("--description", required=True)
     pack_create.add_argument("--json", action="store_true")
-    pack_install = pack_commands.add_parser("install", help="install a pack from a directory")
+    pack_install = pack_commands.add_parser(
+        "install", help="install a pack from a directory"
+    )
     pack_install.add_argument("source", type=Path)
     pack_install.add_argument("--allow", action="append", default=[])
     pack_install.add_argument("--json", action="store_true")
@@ -493,9 +663,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--session-id")
     run.add_argument("--skill")
-    run.add_argument(
-        "--skill-dir", type=Path, action="append", default=[]
-    )
+    run.add_argument("--skill-dir", type=Path, action="append", default=[])
     run.add_argument(
         "--skill-permission",
         action="append",
@@ -505,14 +673,18 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--route", action="append", default=[], help="provider/model fallback route"
     )
-    run.add_argument(
-        "--privacy-limit", choices=sorted(PRIVACY_CLASSES), default=None
-    )
+    run.add_argument("--privacy-limit", choices=sorted(PRIVACY_CLASSES), default=None)
     run.add_argument("--max-total-tokens", type=int)
     run.add_argument("--max-cost", type=float)
     run.add_argument("--currency")
     run.add_argument("--max-steps", type=int, default=24)
     run.add_argument("--max-seconds", type=float, default=900.0)
+    run.add_argument(
+        "--verification-command",
+        action="append",
+        required=True,
+        help="user-approved verification command as a JSON array (repeatable)",
+    )
     run.add_argument("--json", action="store_true")
 
     migrate = commands.add_parser(
@@ -526,6 +698,8 @@ def _parser() -> argparse.ArgumentParser:
         help="write sanitized metadata; default is dry-run",
     )
     migrate.add_argument("--json", action="store_true")
+    doctor = commands.add_parser("doctor", help="run aggregate vNext diagnostics")
+    doctor.add_argument("--json", action="store_true")
     return parser
 
 
@@ -606,9 +780,7 @@ def _skill_decisions(values: Sequence[str]) -> dict[Capability, SkillPermission]
         try:
             capability = Capability(raw_capability)
         except ValueError as exc:
-            raise ValueError(
-                f"unknown Skill capability: {raw_capability}"
-            ) from exc
+            raise ValueError(f"unknown Skill capability: {raw_capability}") from exc
         try:
             result[capability] = SkillPermission(raw_decision)
         except ValueError as exc:
@@ -625,9 +797,7 @@ def _skill_catalog(args: argparse.Namespace) -> SkillCatalog:
     )
 
 
-def _stored_skill(
-    record: SessionRecord, name: str
-) -> Optional[dict[str, Any]]:
+def _stored_skill(record: SessionRecord, name: str) -> Optional[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for item in record.skills:
         if not isinstance(item, dict):
@@ -664,9 +834,7 @@ def _compatible_previous_skill(
     return previous
 
 
-def _stored_mcp(
-    record: SessionRecord, server_id: str
-) -> Optional[dict[str, Any]]:
+def _stored_mcp(record: SessionRecord, server_id: str) -> Optional[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for item in record.mcp_servers:
         if not isinstance(item, dict):
@@ -674,9 +842,7 @@ def _stored_mcp(
         if item.get("server_id") == server_id:
             matches.append(item)
     if len(matches) > 1:
-        raise McpAccessDenied(
-            f"session contains duplicate MCP selections: {server_id}"
-        )
+        raise McpAccessDenied(f"session contains duplicate MCP selections: {server_id}")
     return matches[0] if matches else None
 
 
@@ -804,12 +970,16 @@ def _test_registered_model(
 ) -> dict[str, Any]:
     provider_record = registry.provider(provider_id)
     model_record = registry.model(provider_id, model_or_alias)
-    response = ProviderFactory().create(provider_record).complete(
-        ModelRequest(
-            model=model_record.model_id,
-            messages=(ModelMessage("user", "Reply with exactly OK."),),
-            max_output_tokens=8,
-            deadline_seconds=min(60.0, provider_record.timeout_seconds),
+    response = (
+        ProviderFactory()
+        .create(provider_record)
+        .complete(
+            ModelRequest(
+                model=model_record.model_id,
+                messages=(ModelMessage("user", "Reply with exactly OK."),),
+                max_output_tokens=8,
+                deadline_seconds=min(60.0, provider_record.timeout_seconds),
+            )
         )
     )
     return {
@@ -853,7 +1023,11 @@ def _agent_provider(
                     "provider API key environment variable is not set: "
                     f"{args.api_key_env}"
                 )
-            credential = lambda name=args.api_key_env: os.environ.get(name, "")
+            environment_name = args.api_key_env
+
+            def credential() -> str:
+                return os.environ.get(environment_name, "")
+
         return (
             OpenAIChatCompletionsProvider(
                 args.base_url,
@@ -937,7 +1111,7 @@ def _handle_skill(args: argparse.Namespace) -> int:
             "diagnostics": [item.to_dict() for item in catalog.diagnostics],
         }
     else:
-        metadata = catalog.get(args.name)
+        metadata = catalog.load(args.name).metadata
         decisions = _skill_decisions(args.skill_permission)
         store = SessionStore(session_dir())
         selection: dict[str, Any]
@@ -948,9 +1122,7 @@ def _handle_skill(args: argparse.Namespace) -> int:
             previous = _compatible_previous_skill(
                 metadata, _stored_skill(record, metadata.name)
             )
-            selection = skill_selection(
-                metadata, decisions, previous=previous
-            )
+            selection = skill_selection(metadata, decisions, previous=previous)
             _replace_stored_skill(record, metadata.name, selection)
         payload = {
             "session_id": args.session_id,
@@ -1068,6 +1240,7 @@ def _handle_mcp_session(args: argparse.Namespace) -> int:
 
 def _handle_mcp_call(args: argparse.Namespace) -> int:
     repository = _mcp_repository(args.repository)
+
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
@@ -1112,7 +1285,9 @@ def _handle_mcp_call(args: argparse.Namespace) -> int:
     lease = None
     if descriptor.mutates:
         lease = store.acquire(
-            record.session_id, f"mcp-call-{os.getpid()}", ttl_seconds=30.0
+            record.session_id,
+            f"mcp-call-{os.getpid()}",
+            ttl_seconds=max(30.0, min(3600.0, float(args.deadline_seconds) + 10.0)),
         )
     try:
         result = core.execute(command, lease=lease)
@@ -1159,6 +1334,107 @@ def _handle_mcp(args: argparse.Namespace) -> int:
 
 
 def _handle_bridge(args: argparse.Namespace) -> int:
+    if args.bridge_command == "serve":
+        if (
+            args.host not in {"127.0.0.1", "::1", "localhost"}
+            and not args.allow_network_bind
+        ):
+            raise ValueError("non-loopback bridge bind requires --allow-network-bind")
+        if not 1 <= args.port <= 65_535:
+            raise ValueError("bridge port must be between 1 and 65535")
+        if not args.tool and not args.server:
+            raise ValueError("bridge serve requires at least one --tool or --server")
+        protocol = args.protocol or ("openapi" if args.profile == "promptql" else "mcp")
+        repository = _mcp_repository(args.repository)
+        sessions = SessionStore(session_dir())
+        record = sessions.load(args.session_id)
+        sessions.validate_repository(record, repository)
+        audit_path = runtime_dir() / "vnext" / "audit.jsonl"
+        runtimes: list[Any] = []
+        if args.tool:
+            verification_commands = (
+                [_verification_command(value) for value in args.verification_command]
+                if args.verification_command
+                else None
+            )
+            runtimes.append(
+                CoreToolBridge(
+                    repository,
+                    sessions,
+                    record.session_id,
+                    args.tool,
+                    hosted_origin=Origin(
+                        OriginKind.HOSTED_CLIENT,
+                        f"{args.profile}-core-{record.session_id}",
+                    ),
+                    audit_path=audit_path,
+                    verification_commands=verification_commands,
+                )
+            )
+        elif args.verification_command:
+            raise ValueError("--verification-command requires a Core --tool")
+        if args.server:
+            profile = AccessProfile(record.access_profile)
+            policy = CapabilityPolicy(profile)
+            hosted = Origin(
+                OriginKind.HOSTED_CLIENT,
+                f"{args.profile}-mcp-{record.session_id}",
+            )
+            proxied = Origin(
+                OriginKind.PROXIED_MCP,
+                f"{args.profile}-external-{record.session_id}",
+            )
+            policy.set_grants(hosted, {Capability.MCP_CALL})
+            policy.set_grants(proxied, {Capability.MCP_CALL})
+            runtimes.append(
+                McpProxy(
+                    McpClient(_mcp_registry()),
+                    repository,
+                    sessions,
+                    record.session_id,
+                    args.server,
+                    policy=policy,
+                    hosted_origin=hosted,
+                    proxied_origin=proxied,
+                    audit_path=audit_path,
+                )
+            )
+        bridge_runtime = CompositeHostedBridge(runtimes)
+        bridge_runtime.descriptors()
+        credential_store = BridgeCredentialStore()
+        credential_reference = f"os-keyring:bridge/{args.credential}"
+        credential_store.resolve(credential_reference)
+
+        def credential() -> str:
+            return credential_store.resolve(credential_reference)
+
+        if protocol == "mcp":
+            app = build_proxy_asgi_app(
+                bridge_runtime,
+                credential,
+                deadline_seconds=args.deadline_seconds,
+            )
+        else:
+            app = build_openapi_bridge_app(
+                bridge_runtime,
+                credential,
+                deadline_seconds=args.deadline_seconds,
+                title=f"KaroX {args.profile} bridge",
+            )
+        import uvicorn
+
+        endpoint = "/mcp" if protocol == "mcp" else "/openapi.json"
+        print(
+            f"KaroX bridge: profile={args.profile} protocol={protocol} "
+            f"session={record.session_id}",
+            flush=True,
+        )
+        print(
+            f"Local endpoint: http://{args.host}:{args.port}{endpoint}",
+            flush=True,
+        )
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        return 0
     if args.bridge_command == "list":
         payload: Any = [item.to_dict() for item in BridgeRegistry().list()]
     elif args.bridge_command == "show":
@@ -1186,6 +1462,42 @@ def _handle_bridge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_doctor(args: argparse.Namespace) -> int:
+    checks: dict[str, Any] = {}
+    probes = {
+        "provider_credentials": lambda: CredentialStore().doctor(),
+        "mcp_credentials": lambda: McpCredentialStore().doctor(),
+        "bridge_credentials": lambda: BridgeCredentialStore().doctor(),
+        "sessions": lambda: {
+            "status": "ok",
+            "count": len(SessionStore(session_dir()).list()),
+        },
+        "packs": lambda: {
+            "status": "ok",
+            "count": len(_pack_registry().list()),
+        },
+    }
+    for name, probe in probes.items():
+        try:
+            checks[name] = probe()
+        except Exception as exc:
+            checks[name] = {
+                "status": "unavailable",
+                "error_type": type(exc).__name__,
+                "error": str(redact(str(exc))),
+            }
+    payload = {
+        "status": (
+            "ok"
+            if all(item.get("status") != "unavailable" for item in checks.values())
+            else "degraded"
+        ),
+        "checks": checks,
+    }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _pack_registry() -> PackRegistry:
     return PackRegistry(runtime_dir() / "vnext" / "packs")
 
@@ -1193,7 +1505,9 @@ def _pack_registry() -> PackRegistry:
 def _handle_pack(args: argparse.Namespace) -> int:
     command = args.pack_command
     if command == "create":
-        target = create_pack_template(args.target, name=args.name, description=args.description)
+        target = create_pack_template(
+            args.target, name=args.name, description=args.description
+        )
         payload: Any = {"path": str(target), "name": args.name, "status": "created"}
     else:
         registry = _pack_registry()
@@ -1238,9 +1552,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         if args.skill_permission:
             raise ValueError("--skill-permission requires --skill")
     else:
-        catalog = SkillCatalog(
-            repository, extra_directories=tuple(args.skill_dir)
-        )
+        catalog = SkillCatalog(repository, extra_directories=tuple(args.skill_dir))
         content = catalog.load(args.skill)
         decisions = _skill_decisions(args.skill_permission)
         previous = None
@@ -1249,9 +1561,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                 content.metadata,
                 _stored_skill(record, content.metadata.name),
             )
-        selection = skill_selection(
-            content.metadata, decisions, previous=previous
-        )
+        selection = skill_selection(content.metadata, decisions, previous=previous)
 
     if record is None:
         record = store.create(
@@ -1299,6 +1609,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         store,
         runtime_dir() / "vnext" / "audit.jsonl",
         mcp_binding=mcp_binding,
+        verification_commands=[
+            _verification_command(value) for value in args.verification_command
+        ],
     )
     return AgentKernel(
         provider=provider,
@@ -1338,7 +1651,34 @@ def _handle_credential(args: argparse.Namespace) -> int:
 def _handle_provider(args: argparse.Namespace) -> int:
     registry = _registry()
     command = args.provider_command
-    if command == "add":
+    if command == "presets":
+        payload = [item.to_dict() for item in provider_presets()]
+    elif command == "add-preset":
+        preset = provider_preset(args.preset_id)
+        if not preset.installable:
+            raise ValueError(
+                f"provider preset requires a documented specialized adapter: {preset.display_name}"
+            )
+        base_url = args.base_url or preset.base_url
+        if not base_url:
+            raise ValueError(
+                f"preset {preset.display_name} requires --base-url from the provider documentation"
+            )
+        provider_id = args.provider_id or preset.preset_id
+        record = ProviderRecord(
+            provider_id=provider_id,
+            adapter_kind=str(preset.adapter_kind),
+            base_url=base_url,
+            credential_ref=args.credential_ref,
+            privacy_class=preset.privacy_class,
+        )
+        payload = {
+            **asdict(registry.put_provider(record)),
+            "preset": preset.preset_id,
+            "preset_status": preset.status,
+            "privacy_note": preset.privacy_note,
+        }
+    elif command == "add":
         record = ProviderRecord(
             provider_id=args.provider_id,
             adapter_kind=args.adapter,
@@ -1373,9 +1713,7 @@ def _handle_provider(args: argparse.Namespace) -> int:
                 else current.headers
             ),
             query=(
-                _pairs(args.query, "query")
-                if args.query is not None
-                else current.query
+                _pairs(args.query, "query") if args.query is not None else current.query
             ),
             privacy_class=args.privacy_class or current.privacy_class,
             timeout_seconds=(
@@ -1415,10 +1753,135 @@ def _handle_provider(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ecosystem_registry(kind: str) -> EcosystemRegistry:
+    presets = {
+        "target": TARGET_PRESETS,
+        "tool": TOOL_PRESETS,
+        "integration": INTEGRATION_PRESETS,
+    }[kind]
+    return EcosystemRegistry(config_dir() / "vnext" / f"{kind}s.json", presets)
+
+
+def _handle_ecosystem(args: argparse.Namespace, kind: str) -> int:
+    registry = _ecosystem_registry(kind)
+    presets = registry.presets
+    command = getattr(args, f"{kind}_command")
+    if command == "presets":
+        payload = [asdict(item) for item in presets.values()]
+    elif command == "list":
+        payload = [asdict(item) for item in registry.list()]
+    elif command == "add":
+        payload = asdict(registry.add(args.preset_id, args.id))
+    elif command == "configure":
+        telemetry_fields = (
+            tuple(args.telemetry_field) if kind == "integration" else None
+        )
+        payload = asdict(
+            registry.configure(
+                args.item_id,
+                _pairs(args.setting, "setting"),
+                args.credential_ref,
+                telemetry_fields,
+            )
+        )
+    elif command == "doctor":
+        payload = registry.doctor(args.item_id)
+    elif command == "remove":
+        removed = registry.remove(args.item_id)
+        payload = {"item_id": removed.item_id, "status": "removed"}
+    elif command == "handoff":
+        item = registry.get(args.item_id)
+        preset = presets[item.preset_id]
+        payload = {
+            "item_id": item.item_id,
+            "target": preset.display_name,
+            "status": preset.status,
+            "transports": list(preset.transports),
+            "instructions": (
+                "Run /connect in KaroX and choose the matching MCP/OpenAPI transport. "
+                "Copy only the generated endpoint and one-time credential into the external target."
+            ),
+        }
+    elif command == "ask":
+        if kind != "target":
+            raise ValueError("ask is only available for agent targets")
+        config = load_promptql_target(config_dir(), args.item_id)
+        prior_interactions = None
+        if args.prior_interactions is not None:
+            try:
+                decoded = json.loads(args.prior_interactions)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"--prior-interactions must be a JSON array: {exc.msg}"
+                ) from exc
+            if not isinstance(decoded, list):
+                raise ValueError("--prior-interactions must be a JSON array")
+            prior_interactions = decoded
+        client = PromptQLNaturalLanguageClient.from_config(
+            config, timeout_seconds=args.deadline_seconds
+        )
+        response = client.ask(
+            args.message, prior_interactions=prior_interactions
+        )
+        payload = {
+            "item_id": args.item_id,
+            "assistant_actions": response.assistant_actions,
+            "modified_artifacts": response.modified_artifacts,
+            "raw": response.raw,
+        }
+    elif command == "enable":
+        current = registry.get(args.item_id)
+        preset = presets[current.preset_id]
+        if preset.status == "documentation_required":
+            raise ValueError(
+                f"cannot enable {preset.display_name}: official contract is required"
+            )
+        payload = asdict(registry.enable(args.item_id, True))
+    elif command == "disable":
+        payload = asdict(registry.enable(args.item_id, False))
+    else:
+        item = registry.get(args.item_id)
+        payload = {
+            **asdict(item),
+            "preset_status": presets[item.preset_id].status,
+        }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _handle_model(args: argparse.Namespace) -> int:
     registry = _registry()
     command = args.model_command
-    if command == "add":
+    if command == "discover":
+        provider = registry.provider(args.provider)
+        from .tui import ProviderSetup, _discover_models_result
+
+        result = _discover_models_result(
+            ProviderSetup(
+                provider_id=provider.provider_id,
+                adapter=provider.adapter_kind,
+                base_url=provider.base_url,
+                model_id="",
+            )
+        )
+        if result.base_url != provider.base_url:
+            registry.put_provider(
+                ProviderRecord(
+                    **{
+                        **asdict(provider),
+                        "base_url": result.base_url,
+                    }
+                )
+            )
+        payload = {
+            "provider_id": provider.provider_id,
+            "base_url": result.base_url,
+            "models": [asdict(item) for item in result.models],
+            "saved": False,
+        }
+    elif command == "map":
+        payload = asdict(registry.map_alias(args.provider, args.alias, args.model_id))
+    elif command == "add":
         record = ModelRecord(
             provider_id=args.provider_id,
             model_id=args.model_id,
@@ -1466,7 +1929,17 @@ def _handle_model(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = _parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        from .tui import run_tui
+
+        return run_tui(repository=str(Path.cwd().resolve()))
+
+    # Documented plural spelling; preserve the original singular command.
+    if arguments[0] == "models":
+        arguments[0] = "model"
+
+    args = _parser().parse_args(arguments)
     try:
         if args.command == "paths":
             payload = {
@@ -1496,6 +1969,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "model":
             return _handle_model(args)
 
+        if args.command in {"target", "tool", "integration"}:
+            return _handle_ecosystem(args, args.command)
+
         if args.command == "skill":
             return _handle_skill(args)
 
@@ -1504,6 +1980,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "bridge":
             return _handle_bridge(args)
+
+        if args.command == "doctor":
+            return _handle_doctor(args)
 
         if args.command == "pack":
             return _handle_pack(args)
@@ -1544,6 +2023,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         f"{record['access_profile']}\t{record['repository']}"
                     )
             return 0
+        if args.session_command == "revoke":
+            record = store.revoke(args.session_id)
+            payload = _record_summary(record)
+            _json(payload) if args.json else _print_mapping(payload)
+            return 0
         if args.session_command == "handoff":
             record = store.load(args.session_id)
             repository = args.repository.expanduser().resolve(strict=True)
@@ -1577,9 +2061,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         BridgeError,
         CredentialError,
         CoreError,
+        HostedBridgeError,
         MigrationError,
         McpError,
         PackError,
+        PromptQLInvocationError,
         ProviderError,
         RegistryError,
         SessionError,

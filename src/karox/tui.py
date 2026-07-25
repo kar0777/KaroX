@@ -1193,7 +1193,64 @@ def _inspection_text(label: str, code: int, output: str, language: str) -> str:
             status = str(item.get("status") or item.get("phase") or "unknown")
             task = str(item.get("task") or "").strip()
             task_suffix = f" — {task}" if task else ""
-            lines.append(f"• {session_id}  [{status}]{task_suffix}")
+            marker = "✕" if bool(item.get("revoked")) else "●"
+            lines.append(f"{marker} {session_id}  [{status}]{task_suffix}")
+
+            def _count(name: str) -> Optional[int]:
+                value = item.get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                return int(value)
+
+            # A second line describing what the task actually did, so choosing
+            # which one to resume does not require opening each session in turn.
+            facts: List[str] = []
+            changed = _count("changed_files")
+            if changed:
+                facts.append(
+                    f"{changed} files changed"
+                    if english
+                    else f"изменено файлов: {changed}"
+                )
+            checks = _count("checks")
+            if checks:
+                failed = _count("checks_failed") or 0
+                label = (
+                    f"{checks} checks"
+                    if english
+                    else f"проверок: {checks}"
+                )
+                if failed:
+                    label += (
+                        f", {failed} failed"
+                        if english
+                        else f", упало {failed}"
+                    )
+                facts.append(label)
+            tokens = _count("total_tokens")
+            if tokens:
+                facts.append(
+                    f"{tokens} tokens"
+                    if english
+                    else f"токенов: {tokens}"
+                )
+            costs = item.get("costs")
+            if isinstance(costs, dict):
+                for currency, amount in sorted(costs.items()):
+                    if isinstance(amount, bool) or not isinstance(
+                        amount, (int, float)
+                    ):
+                        continue
+                    facts.append(f"{amount:.2f} {currency}")
+            updated = str(item.get("updated_at") or "").strip()
+            if updated:
+                facts.append(
+                    f"updated {updated}"
+                    if english
+                    else f"обновлена {updated}"
+                )
+            if facts:
+                lines.append("   " + " · ".join(facts))
         return "\n".join(lines)
 
     if label == "/mcp":
