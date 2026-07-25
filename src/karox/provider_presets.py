@@ -288,6 +288,31 @@ _PRESETS = (
         "stable",
         contract_source="https://ai.google.dev/api",
     ),
+    # --- Aggregating gateways ---------------------------------------------
+    # One preset per gateway, not one per provider behind it. A gateway already
+    # normalises hundreds of upstreams to a single OpenAI-compatible contract
+    # and tracks their quotas, so copying its catalogue into this file would
+    # duplicate data that goes stale the moment an upstream changes an endpoint
+    # or a free tier.
+    ProviderPreset(
+        "omniroute",
+        "OmniRoute (local gateway)",
+        "openai_compatible_chat",
+        "http://localhost:20128/v1",
+        "stable",
+        contract_source="https://github.com/diegosouzapw/OmniRoute",
+        privacy_note=(
+            "The gateway runs locally but forwards to whichever upstream is "
+            "enabled in it, so requests still leave the machine unless only "
+            "local upstreams are enabled."
+        ),
+        setup_note=(
+            "Install and start OmniRoute, enable the upstreams you want in its "
+            "dashboard, then point KaroX at this endpoint. Model discovery "
+            "lists whatever the gateway currently exposes, so free tiers stay "
+            "correct without being duplicated here."
+        ),
+    ),
 )
 
 PROVIDER_PRESETS = {item.preset_id: item for item in _PRESETS}
