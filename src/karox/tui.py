@@ -3017,8 +3017,18 @@ if _HAS_TEXTUAL:
                 total = self.virtual_size.height or 0
             except Exception:
                 total = 0
+            # Heights must be strictly increasing so every entry owns at least
+            # one rendered line. Recording the same total for two entries makes
+            # the second one's block [previous, total) empty, and an empty block
+            # can never contain a selection y, so that entry becomes impossible
+            # to select and the search lands on a neighbour instead.
             while len(self._plain_line_end_heights) < len(self._plain_lines):
-                self._plain_line_end_heights.append(total)
+                previous = (
+                    self._plain_line_end_heights[-1]
+                    if self._plain_line_end_heights
+                    else 0
+                )
+                self._plain_line_end_heights.append(max(total, previous + 1))
 
         def _line_at_event(self, event: Any) -> int:
             """Map a mouse event's y onto a widget-relative line index."""
@@ -3123,11 +3133,19 @@ if _HAS_TEXTUAL:
                 end_y = int(getattr(selection.end, "y", 0))
                 if end_y < start_y:
                     start_y, end_y = end_y, start_y
-                heights = self._plain_line_end_heights
                 lines = self._plain_lines
                 n = len(lines)
                 if n == 0:
                     return None
+                # An entry recorded by append_plain whose write has not settled
+                # yet has no height. Without padding, the loops below find no
+                # block containing the selection and fall through to the else
+                # branch, which selects the last entry, so a drag in the middle
+                # of the log copied the end of it. Give every missing entry one
+                # rendered line so it stays selectable and in order.
+                heights = list(self._plain_line_end_heights[:n])
+                while len(heights) < n:
+                    heights.append((heights[-1] if heights else 0) + 1)
                 # Entry i occupies rendered lines [prev, heights[i]) where prev
                 # is heights[i-1] (or 0 for i==0).  Find the first entry whose
                 # block contains start_y, and the last whose block contains
