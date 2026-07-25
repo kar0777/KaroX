@@ -9,18 +9,27 @@ description = "Hybrid local runtime for native and hosted AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
+# Keep this list in step with requirements.txt. The wheel built in CI is what
+# gets installed and smoke-tested, so a dependency that is only listed in
+# requirements.txt produces an install that looks complete and then fails at
+# import time.
 dependencies = [
   "fastapi>=0.115,<1.0",
   "uvicorn[standard]>=0.30,<1.0",
   "pydantic>=2.7,<3.0",
   "httpx>=0.27,<1.0",
+  "httpx-sse>=0.4,<1.0",
   "keyring>=25,<27",
-  "mcp>=1.19,<2.0",
+  "mcp>=1.27,<2.0",
   "PyYAML>=6.0,<7.0",
+  "textual>=0.89,<7.0",
+  "rich>=13.7,<15.0",
+  "Pygments>=2.17,<3.0",
 ]
 
 [project.scripts]
 karox = "karox.cli:main"
+karox-vnext = "karox.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
