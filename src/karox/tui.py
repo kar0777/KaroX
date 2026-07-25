@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -242,9 +242,174 @@ def _unsafe_workspace_reason(path: Path, language: str = "ru") -> Optional[str]:
 _BACKEND_SLASH: Dict[str, List[str]] = {
     "/models": ["model", "list", "--json"],
     "/sessions": ["session", "list", "--json"],
-    "/mcp": ["mcp", "server", "list", "--json"],
+    "/mcp": ["mcp", "status", "--json"],
     "/doctor": ["doctor", "--json"],
 }
+
+_MCP_LIVENESS_TEXT: Dict[str, Tuple[str, str]] = {
+    "live": ("живой", "live"),
+    "failed": ("недоступен", "unreachable"),
+    "not_probed": ("не проверялась", "not probed"),
+}
+
+_MCP_CREDENTIAL_TEXT: Dict[str, Tuple[str, str]] = {
+    "not_required": ("не требуется", "not required"),
+    "present": ("есть", "present"),
+    "missing": ("отсутствует", "missing"),
+    "unreadable": ("не прочитан", "unreadable"),
+}
+
+_MCP_SELECTION_TEXT: Dict[str, Tuple[str, str]] = {
+    "not_selected": (
+        "не выбран в сессии — инструменты агенту не выданы",
+        "not selected in the session — no tools are exposed to the agent",
+    ),
+    "stale": (
+        "выбор устарел после правки сервера — нужен повторный select",
+        "selection is stale after a server change — reselect the server",
+    ),
+}
+
+_MCP_LOCATION_TEXT: Dict[str, Tuple[str, str]] = {
+    "local": ("локальный", "local"),
+    "remote": ("удалённый", "remote"),
+}
+
+
+def _mcp_status_text(payload: Any, english: bool) -> str:
+    """Render the single MCP state screen.
+
+    Reachability and authorization are printed as separate facts on purpose:
+    a live server says nothing about which tools may run, and an allowed tool
+    says nothing about the server being up.  Liveness that was never probed is
+    printed as such instead of being guessed from the configuration.
+    """
+    servers = payload.get("servers") if isinstance(payload, dict) else None
+    if not isinstance(servers, list) or not servers:
+        return (
+            "Внешние MCP-серверы не настроены.\nИспользуйте /connect для подключения сайта или агента."
+            if not english
+            else "No external MCP servers are configured.\nUse /connect to connect a website or agent."
+        )
+    raw_totals = payload.get("totals")
+    totals = raw_totals if isinstance(raw_totals, dict) else {}
+
+    def total(name: str) -> int:
+        value = totals.get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return value
+
+    lines = [
+        (
+            f"MCP: серверов {total('servers')} · выбрано {total('selected')} · "
+            f"живых {total('live')} из проверенных {total('probed')} · "
+            f"инструментов разрешено {total('allowed_tools')}, "
+            f"заблокировано {total('blocked_tools')}"
+        )
+        if not english
+        else (
+            f"MCP: {total('servers')} servers · {total('selected')} selected · "
+            f"{total('live')} live of {total('probed')} probed · "
+            f"{total('allowed_tools')} tools allowed, "
+            f"{total('blocked_tools')} blocked"
+        )
+    ]
+    index = 1 if english else 0
+    for item in servers:
+        if not isinstance(item, dict):
+            continue
+        attention = item.get("attention")
+        icon = "!" if isinstance(attention, list) and attention else "✓"
+        server = str(item.get("server_id") or "?")
+        transport = str(item.get("transport") or "unknown")
+        facts = [
+            part
+            for part in (
+                str(item.get("namespace") or ""),
+                _MCP_LOCATION_TEXT.get(str(item.get("location") or ""), ("", ""))[index],
+                str(item.get("endpoint") or ""),
+            )
+            if part
+        ]
+        header = f"{icon} {server}  [{transport}]"
+        if facts:
+            header += "  " + " · ".join(facts)
+        lines.append(header)
+
+        selection = item.get("selection")
+        selection = selection if isinstance(selection, dict) else {}
+        counts = selection.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+
+        def count(name: str) -> int:
+            value = counts.get(name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                return 0
+            return value
+
+        state = str(selection.get("state") or "not_selected")
+        note = _MCP_SELECTION_TEXT.get(state)
+        if note is not None:
+            lines.append("   " + note[index])
+        else:
+            lines.append(
+                "   "
+                + (
+                    f"инструменты: {count('allowed')} разрешено, "
+                    f"{count('blocked_ask')} ask, {count('blocked_deny')} deny"
+                    if not english
+                    else (
+                        f"tools: {count('allowed')} allowed, "
+                        f"{count('blocked_ask')} ask, {count('blocked_deny')} deny"
+                    )
+                )
+            )
+        if count("blocked_ask"):
+            lines.append(
+                "   "
+                + (
+                    "ask отклоняет вызов без запроса подтверждения — решение меняется вручную в сессии"
+                    if not english
+                    else "ask refuses the call without prompting — the decision is changed by hand in the session"
+                )
+            )
+
+        credential = item.get("credential")
+        credential = credential if isinstance(credential, dict) else {}
+        secret_text = _MCP_CREDENTIAL_TEXT.get(
+            str(credential.get("state") or ""), ("неизвестно", "unknown")
+        )[index]
+        liveness = item.get("liveness")
+        liveness = liveness if isinstance(liveness, dict) else {}
+        liveness_state = str(liveness.get("state") or "")
+        liveness_text = _MCP_LIVENESS_TEXT.get(
+            liveness_state, ("неизвестно", "unknown")
+        )[index]
+        suffix = ""
+        advertised = liveness.get("tool_count")
+        if (
+            liveness_state == "live"
+            and isinstance(advertised, int)
+            and not isinstance(advertised, bool)
+        ):
+            suffix = (
+                f" (сервер объявил инструментов: {advertised})"
+                if not english
+                else f" ({advertised} tools advertised)"
+            )
+        elif liveness_state == "failed":
+            kind = str(liveness.get("failure_kind") or "")
+            suffix = f" ({kind})" if kind else ""
+        lines.append(
+            "   "
+            + (
+                f"ключ: {secret_text} · связь: {liveness_text}{suffix}"
+                if not english
+                else f"key: {secret_text} · reachability: {liveness_text}{suffix}"
+            )
+        )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -1104,11 +1269,18 @@ def _slash_to_argv(
     line: str, session_id: Optional[str], repository: str
 ) -> Optional[List[str]]:
     """Translate safe UI inspection commands; never parse ordinary chat text."""
-    del session_id, repository
+    del repository
     parts = shlex.split(line)
     if not parts:
         return None
-    return list(_BACKEND_SLASH.get(parts[0], ())) or None
+    argv = list(_BACKEND_SLASH.get(parts[0], ()))
+    if not argv:
+        return None
+    if parts[0] == "/mcp" and session_id:
+        # Tool permissions live in the session, so the screen can only report
+        # authorization when a session is open; otherwise it shows setup only.
+        argv.extend(["--session-id", session_id])
+    return argv
 
 
 def _clean_cli_error(output: str) -> str:
@@ -1254,27 +1426,7 @@ def _inspection_text(label: str, code: int, output: str, language: str) -> str:
         return "\n".join(lines)
 
     if label == "/mcp":
-        if not isinstance(payload, list) or not payload:
-            return (
-                "Внешние MCP-серверы не настроены.\nИспользуйте /connect для подключения сайта или агента."
-                if not english
-                else "No external MCP servers are configured.\nUse /connect to connect a website or agent."
-            )
-        heading = (
-            f"MCP-серверы: {len(payload)}"
-            if not english
-            else f"MCP servers: {len(payload)}"
-        )
-        lines = [heading]
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            server = str(item.get("server_id") or item.get("name") or "?")
-            namespace = str(item.get("namespace") or "")
-            transport = str(item.get("transport") or "unknown")
-            extra = f" • {namespace}" if namespace else ""
-            lines.append(f"• {server}  [{transport}]{extra}")
-        return "\n".join(lines)
+        return _mcp_status_text(payload, english)
 
     if label == "/doctor" and isinstance(payload, dict):
         status = str(payload.get("status") or "unknown")

@@ -45,6 +45,12 @@ from .mcp_client import (
     mcp_selection,
     validate_mcp_selection_registry,
 )
+from .mcp_status import (
+    LIVENESS_FAILED,
+    LIVENESS_LIVE,
+    McpLiveness,
+    build_mcp_status,
+)
 from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from .promptql_outbound import (
     PromptQLInvocationError,
@@ -498,6 +504,21 @@ def _parser() -> argparse.ArgumentParser:
     mcp_session_permissions.add_argument("--session-id", required=True)
     mcp_session_permissions.add_argument("--repository", type=Path, default=Path.cwd())
     mcp_session_permissions.add_argument("--json", action="store_true")
+
+    mcp_status = mcp_commands.add_parser(
+        "status", help="one aggregated screen: configured, live, allowed, blocked"
+    )
+    mcp_status.add_argument(
+        "--session-id",
+        help="without it the screen shows configuration only, no authorization",
+    )
+    mcp_status.add_argument("--repository", type=Path, default=Path.cwd())
+    mcp_status.add_argument(
+        "--probe",
+        action="store_true",
+        help="contact every server; without it liveness stays not_probed",
+    )
+    mcp_status.add_argument("--json", action="store_true")
 
     mcp_call = mcp_commands.add_parser("call", help="call a selected MCP tool")
     mcp_call.add_argument("tool", help="fully namespaced mcp.<namespace>.<tool> name")
@@ -1323,6 +1344,60 @@ def _handle_mcp_credential(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_mcp_status(args: argparse.Namespace) -> int:
+    """Join registry, session authorization, and optional probes into one screen.
+
+    Probing is opt-in because it costs a connection per server and can fail;
+    without ``--probe`` liveness is reported as ``not_probed`` rather than
+    guessed from the fact that a server is configured.
+    """
+    registry = _mcp_registry()
+    servers = registry.list()
+    try:
+        credentials: Optional[McpCredentialStore] = McpCredentialStore()
+    except CredentialError:
+        # An unusable keyring is a fact to report, not a reason to fail the screen.
+        credentials = None
+    selections: list[Any] = []
+    if args.session_id:
+        repository = _mcp_repository(args.repository)
+        store = SessionStore(session_dir())
+        session = store.load(args.session_id)
+        store.validate_repository(session, repository)
+        selections = list(session.mcp_servers)
+    liveness: dict[str, McpLiveness] = {}
+    if args.probe:
+        repository = _mcp_repository(args.repository)
+        client = McpClient(registry, credentials)
+        for server in servers:
+            checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                tools = client.discover_record(server, repository)
+            except (McpError, CredentialError) as exc:
+                kind = getattr(exc, "kind", None)
+                liveness[server.server_id] = McpLiveness(
+                    LIVENESS_FAILED,
+                    failure_kind=str(getattr(kind, "value", kind)) if kind else None,
+                    detail=str(exc),
+                    checked_at=checked_at,
+                )
+            else:
+                liveness[server.server_id] = McpLiveness(
+                    LIVENESS_LIVE,
+                    tool_count=len(tools),
+                    checked_at=checked_at,
+                )
+    payload = build_mcp_status(
+        servers,
+        session_id=args.session_id,
+        selections=selections,
+        resolve_credential=credentials.resolve if credentials is not None else None,
+        liveness=liveness,
+    )
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _handle_mcp(args: argparse.Namespace) -> int:
     if args.mcp_command == "server":
         return _handle_mcp_server(args)
@@ -1330,6 +1405,8 @@ def _handle_mcp(args: argparse.Namespace) -> int:
         return _handle_mcp_session(args)
     if args.mcp_command == "credential":
         return _handle_mcp_credential(args)
+    if args.mcp_command == "status":
+        return _handle_mcp_status(args)
     return _handle_mcp_call(args)
 
 
