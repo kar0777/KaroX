@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Protocol, Sequence
 
 from .core import CoreRuntime, ToolDefinition
+from .core_tools import ExtendedCoreRuntime
 from .models import Capability, CoreCommand, Origin, OriginKind
 from .policy import CapabilityPolicy
 from .proxy import ProxyToolDescriptor
@@ -31,12 +32,15 @@ class HostedBridgeAccessDenied(HostedBridgeError, PermissionError):
 
 CORE_TOOL_NAMES: dict[str, str] = {
     "karox.repo.read_file": "repo.read_file",
+    "karox.repo.read_lines": "repo.read_lines",
     "karox.repo.write_file": "repo.write_file",
+    "karox.repo.edit_file": "repo.edit_file",
     "karox.repo.list_files": "repo.list_files",
     "karox.repo.search": "repo.search",
     "karox.checks.run": "checks.run",
     "karox.git.status": "git.status",
     "karox.git.diff": "git.diff",
+    "karox.git.log": "git.log",
     "karox.git.commit": "git.commit",
 }
 
@@ -123,7 +127,7 @@ class CoreToolBridge:
                 )
 
     def _core(self) -> CoreRuntime:
-        return CoreRuntime(
+        return ExtendedCoreRuntime(
             self.repository,
             self.policy,
             self.sessions,
