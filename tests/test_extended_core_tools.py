@@ -260,6 +260,37 @@ class ExtendedCoreToolTests(unittest.TestCase):
         # not claim success, otherwise a model could treat an error as history.
         self.assertFalse(result["ok"])
 
+    # -- git.diff ---------------------------------------------------------
+
+    def test_diff_can_be_limited_to_explicit_paths(self) -> None:
+        (self.repository / "other.txt").write_bytes(b"other\n")
+        _commit_everything(self.repository, "seed both files")
+        (self.repository / "sample.txt").write_bytes(b"changed sample\n")
+        (self.repository / "other.txt").write_bytes(b"changed other\n")
+        bridge = self._bridge("karox.git.diff")
+        everything = bridge.execute("karox.git.diff", {})["data"]
+        self.assertIn("sample.txt", everything["stdout"])
+        self.assertIn("other.txt", everything["stdout"])
+        self.assertEqual(everything["paths"], [])
+        limited = bridge.execute("karox.git.diff", {"paths": ["sample.txt"]})[
+            "data"
+        ]
+        self.assertIn("sample.txt", limited["stdout"])
+        self.assertNotIn("other.txt", limited["stdout"])
+        self.assertEqual(limited["paths"], ["sample.txt"])
+
+    def test_diff_still_accepts_staged_only(self) -> None:
+        # The property was added alongside the existing one, so a caller that
+        # passes only staged must keep working.
+        bridge = self._bridge("karox.git.diff")
+        result = bridge.execute("karox.git.diff", {"staged": True})
+        self.assertIn("--cached", result["data"]["argv"])
+
+    def test_diff_rejects_a_path_outside_the_repository(self) -> None:
+        bridge = self._bridge("karox.git.diff")
+        with self.assertRaises(Exception):
+            bridge.execute("karox.git.diff", {"paths": ["../escape.txt"]})
+
     # -- ignored directories ----------------------------------------------
 
     def _seed_dependency_noise(self) -> None:

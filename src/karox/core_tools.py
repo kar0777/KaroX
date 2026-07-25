@@ -29,6 +29,7 @@ the whole result budget and make search useless in a real checkout.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -86,6 +87,7 @@ class ExtendedCoreRuntime(CoreRuntime):
     MAX_EDIT_OCCURRENCES = 200
     MAX_LOG_ENTRIES = 200
     MAX_LISTED_FILES = 2_000
+    MAX_DIFF_PATHS = 100
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -146,6 +148,28 @@ class ExtendedCoreRuntime(CoreRuntime):
                 f"extended tools collide with existing tools: {sorted(collisions)}"
             )
         self._definitions.update(additional)
+        # git.diff without a path filter returns the whole working tree diff.
+        # In a branch with dozens of touched files that answer is too large to
+        # read and crowds out the change actually under review, so accept an
+        # explicit path list. The property is optional, so existing callers that
+        # pass only `staged` keep working unchanged.
+        self._handlers = dict(self._handlers)
+        self._handlers["git.diff"] = self._git_diff_paths
+        base_diff = self._definitions["git.diff"]
+        self._definitions["git.diff"] = replace(
+            base_diff,
+            description=(
+                "Read the current Git diff, optionally limited to given paths."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "staged": {"type": "boolean"},
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": False,
+            },
+        )
 
     # -- result honesty ---------------------------------------------------
 
@@ -329,6 +353,43 @@ class ExtendedCoreRuntime(CoreRuntime):
         )
         result["limit"] = limit
         result["_evidence"] = [self._git_evidence("git_log", result)]
+        return result
+
+    # -- git.diff ---------------------------------------------------------
+
+    def _git_diff_paths(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        staged = arguments.get("staged", False)
+        if not isinstance(staged, bool):
+            raise InvalidCommand("staged must be boolean")
+        raw_paths = arguments.get("paths", [])
+        if not isinstance(raw_paths, list):
+            raise InvalidCommand("paths must be array")
+        if len(raw_paths) > self.MAX_DIFF_PATHS:
+            raise InvalidCommand(
+                f"paths must contain at most {self.MAX_DIFF_PATHS} entries"
+            )
+        relatives: List[str] = []
+        for item in raw_paths:
+            if not isinstance(item, str):
+                raise InvalidCommand("paths items must be string")
+            # Same confinement as every other path-taking tool: traversal,
+            # absolute paths, links and metadata directories are rejected before
+            # Git is invoked.
+            resolved = self.safe_path(item)
+            relative = resolved.relative_to(self.repository).as_posix()
+            if relative not in relatives:
+                relatives.append(relative)
+        command = ["diff", "--no-ext-diff"]
+        if staged:
+            command.append("--cached")
+        if relatives:
+            command.append("--")
+            command.extend(relatives)
+        result = self._git(command, deadline_seconds)
+        result["paths"] = list(relatives)
+        result["_evidence"] = [self._git_evidence("git_diff", result)]
         return result
 
     # -- repo.list_files --------------------------------------------------
