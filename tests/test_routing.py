@@ -284,6 +284,9 @@ class RoutingTests(_RoutingFixture):
                 ProviderErrorKind.MODEL_UNAVAILABLE,
                 ProviderErrorKind.TRANSPORT,
                 ProviderErrorKind.PROVIDER_INTERNAL,
+                # A rejected payload is deterministic for this endpoint but not
+                # for the next one, so it falls back; see the case below.
+                ProviderErrorKind.INVALID_REQUEST,
             }
         )
         for kind in sorted(non_fallback, key=lambda item: item.value):
@@ -300,6 +303,52 @@ class RoutingTests(_RoutingFixture):
                 self.assertEqual(raised.exception.kind, kind)
                 self.assertEqual(factory.created, ["first"])
                 self.assertEqual(raised.exception.route_attempts[0]["status"], "failed")
+
+    def test_a_payload_one_gateway_rejects_moves_to_the_next_route(self) -> None:
+        # Two endpoints serving the same model disagree about parameter names
+        # and limits often enough that ending the run on route 0 defeats the
+        # point of configuring a fallback.
+        first = self.add_route("first")
+        second = self.add_route("second")
+        providers = {
+            "first": FakeProvider(
+                [ProviderError(ProviderErrorKind.INVALID_REQUEST, "unsupported field")]
+            ),
+            "second": FakeProvider([response()]),
+        }
+        routed, factory = self.routed((first, second), providers)
+
+        result = routed.complete(request())
+
+        self.assertEqual(factory.created, ["first", "second"])
+        self.assertEqual(result.selected_provider, "second")
+        self.assertEqual(
+            [item["status"] for item in result.route_attempts],
+            ["fallback", "completed"],
+        )
+
+    def test_a_rejected_payload_is_never_re_sent_to_the_same_endpoint(self) -> None:
+        # Falling back is a different question from retrying: the identical
+        # request would be rejected identically, so a retry only spends the
+        # caller's deadline.
+        target = self.add_route("only")
+        provider = FakeProvider(
+            [
+                ProviderError(ProviderErrorKind.INVALID_REQUEST, "unsupported field"),
+                response(),
+            ]
+        )
+        routed, _ = self.routed(
+            (target,), {"only": provider}, retry=RetryPolicy(max_attempts=3)
+        )
+
+        with self.assertRaises(ProviderError) as raised:
+            routed.complete(request())
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.INVALID_REQUEST)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual(raised.exception.route_attempts[0].get("retries"), None)
 
     def test_a_rate_limited_route_is_retried_instead_of_ending_the_run(self) -> None:
         target = self.add_route("only")

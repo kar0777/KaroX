@@ -837,6 +837,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        help=(
+            "cap on each answer in tokens; routed models take this from the "
+            "registry, so it is only needed for --base-url endpoints"
+        ),
+    )
+    run.add_argument(
         "--verification-command",
         action="append",
         required=True,
@@ -1268,12 +1277,13 @@ def _test_registered_model(
 
 def _agent_provider(
     args: argparse.Namespace, record: SessionRecord | None, limits: AgentLimits
-) -> tuple[Any, str, int | None]:
-    """Resolve the provider, the model and the model's input window.
+) -> tuple[Any, str, int | None, int | None]:
+    """Resolve the provider, the model, and the model's two token ceilings.
 
-    The window drives history compaction, so it is read from the registry entry
-    that is actually routed to rather than guessed. A direct ``--base-url``
-    endpoint publishes nothing, so it relies on ``--context-window``.
+    The input window drives history compaction and the output ceiling caps each
+    answer, so both are read from the registry entry that is actually routed to
+    rather than guessed. A direct ``--base-url`` endpoint publishes neither, so
+    it relies on ``--context-window`` and ``--max-output-tokens``.
     """
     direct = args.model is not None or args.base_url is not None or args.api_key_env
     if direct:
@@ -1316,6 +1326,7 @@ def _agent_provider(
             ),
             args.model,
             args.context_window,
+            args.max_output_tokens,
         )
 
     registry = _registry()
@@ -1328,17 +1339,27 @@ def _agent_provider(
             )
         routes = (RouteTarget(selected.provider_id, selected.model_id),)
     windows: list[int] = []
+    ceilings: list[int] = []
     for target in routes:
         registry.provider(target.provider_id)
         entry = registry.model(target.provider_id, target.model)
         window = getattr(entry, "context_window", None)
         if isinstance(window, int) and window > 0:
             windows.append(window)
+        ceiling = getattr(entry, "max_output_tokens", None)
+        if isinstance(ceiling, int) and ceiling > 0:
+            ceilings.append(ceiling)
     # A fallback route may have a smaller window than the primary one. Compacting
     # to the smallest keeps a fallback from failing on a history the first model
     # accepted. An unknown window anywhere means the smallest is unknown.
     context_window = (
         min(windows) if windows and len(windows) == len(routes) else None
+    )
+    # The output ceiling is chosen the same way and for the same reason: asking
+    # for more than a fallback model can produce turns a recoverable failure into
+    # a rejected request on the route that was supposed to rescue the run.
+    max_output_tokens = (
+        min(ceilings) if ceilings and len(ceilings) == len(routes) else None
     )
     initial_usage = record.usage if record is not None else {}
     costs = initial_usage.get("costs")
@@ -1356,7 +1377,12 @@ def _agent_provider(
         initial_usage=initial_usage,
         initial_costs=initial_costs,
     )
-    return provider, routes[0].model, args.context_window or context_window
+    return (
+        provider,
+        routes[0].model,
+        args.context_window or context_window,
+        args.max_output_tokens or max_output_tokens,
+    )
 
 
 def _handle_skill(args: argparse.Namespace) -> int:
@@ -1963,7 +1989,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             raise SessionError("native agent requires a workspace_write session")
         if record.task != str(redact(args.task)):
             raise SessionError("resume task differs from the existing session task")
-    provider, model, context_window = _agent_provider(args, record, limits)
+    provider, model, context_window, max_output_tokens = _agent_provider(
+        args, record, limits
+    )
 
     content = None
     selection: dict[str, Any] | None = None
@@ -2059,6 +2087,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         limits=limits,
         system_prompt=system_prompt,
         context=ContextBudget(max_input_tokens=context_window),
+        max_output_tokens=max_output_tokens,
         project_context=project_context,
         require_change=args.expect == "change",
         reasoning_effort=getattr(args, "effort", None),

@@ -158,6 +158,7 @@ class _AgentKernelFixture(unittest.TestCase):
         require_change: bool = False,
         on_event: Callable[[AgentEvent], None] | None = None,
         reasoning_effort: str | None = None,
+        max_output_tokens: object = None,
     ) -> AgentKernel:
         kwargs: dict[str, object] = {}
         if require_change:
@@ -168,6 +169,8 @@ class _AgentKernelFixture(unittest.TestCase):
             kwargs["on_event"] = on_event
         if reasoning_effort is not None:
             kwargs["reasoning_effort"] = reasoning_effort
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
         return AgentKernel(
             provider=provider,
             model="test-model",
@@ -1372,6 +1375,34 @@ class AgentEventChannelTests(_AgentKernelFixture):
         self.assertEqual(
             {item.reasoning_effort for item in provider.requests}, {"xhigh"}
         )
+
+    def test_the_output_ceiling_is_on_the_request_the_kernel_builds(self) -> None:
+        # Leaving it to the routed layer meant a model registered without a
+        # ceiling, or any direct endpoint, was capped by an adapter constant and
+        # a long answer was truncated with only a finish_reason to show for it.
+        provider = QueueProvider(self.successful_responses())
+
+        self.kernel(
+            provider,
+            AgentLimits(max_seconds=30),
+            max_output_tokens=64_000,
+        ).run("session")
+
+        self.assertTrue(provider.requests)
+        self.assertEqual(
+            {item.max_output_tokens for item in provider.requests}, {64_000}
+        )
+
+    def test_an_output_ceiling_that_makes_no_sense_fails_before_a_lease(self) -> None:
+        for value in (0, -1, True):
+            with self.subTest(ceiling=value):
+                with self.assertRaisesRegex(ValueError, "output ceiling"):
+                    self.kernel(
+                        QueueProvider([]),
+                        AgentLimits(max_seconds=30),
+                        max_output_tokens=value,
+                    )
+        self.assertEqual(self.sessions.load("session").provider_history, [])
 
     def test_an_effort_level_that_does_not_exist_fails_before_a_lease(self) -> None:
         # A typo must not get as far as acquiring the session and touching files.

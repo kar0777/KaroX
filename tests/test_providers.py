@@ -632,6 +632,43 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                 # Not the Responses-API nesting, which this endpoint rejects.
                 self.assertNotIn("reasoning", payload)
 
+    def test_reasoning_families_get_the_output_cap_they_accept(self) -> None:
+        # These models reject max_tokens with a 400 rather than ignoring it, and
+        # the provider's error body is never read, so the spelling is chosen from
+        # the model family.
+        cases = (
+            ("gpt-4o", "max_tokens"),
+            ("o1", "max_completion_tokens"),
+            ("o3-mini", "max_completion_tokens"),
+            ("o4-mini-2026-01-01", "max_completion_tokens"),
+            ("gpt-5", "max_completion_tokens"),
+            ("gpt-5.1-codex", "max_completion_tokens"),
+            # A gateway prefix must not hide the family.
+            ("openai/o3", "max_completion_tokens"),
+            ("OpenAI/GPT-5", "max_completion_tokens"),
+            # ...and a name that merely starts with the same letters must not be
+            # mistaken for one.
+            ("olmo-7b", "max_tokens"),
+            ("gpt-5x-community", "max_tokens"),
+        )
+        for model, expected in cases:
+            with self.subTest(model=model):
+                client = FakeClient(
+                    [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+                )
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                asked = replace(self.request(), model=model, max_output_tokens=512)
+                with patch("karox.providers.httpx.Client", return_value=client):
+                    provider.complete(asked)
+                payload = client.calls[0]["json"]
+                self.assertEqual(payload[expected], 512)
+                other = (
+                    "max_tokens"
+                    if expected == "max_completion_tokens"
+                    else "max_completion_tokens"
+                )
+                self.assertNotIn(other, payload)
+
     def test_chat_completions_omits_the_dial_when_none_was_asked(self) -> None:
         client = FakeClient(
             [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]

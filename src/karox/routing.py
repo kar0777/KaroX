@@ -22,11 +22,11 @@ from .registry import ModelRecord, ProviderRecord, ProviderRegistry
 
 
 _PRIVACY_RANK = {"local": 0, "private": 1, "public": 2}
-# Retrying the same route and moving to the next one answer the same question —
-# can another attempt help at all? — so both read one set. Everything outside it
-# (authentication, an invalid request, an exhausted budget) is deterministic:
-# repeating it only spends the caller's deadline.
-_TRANSIENT_ERRORS = frozenset(
+# Re-sending the same request to the same endpoint only helps when the refusal
+# was about timing or capacity. Authentication, a rejected payload and an
+# exhausted budget are all deterministic: repeating them spends the caller's
+# deadline and changes nothing.
+_RETRYABLE_ERRORS = frozenset(
     {
         ProviderErrorKind.RATE_LIMIT,
         ProviderErrorKind.MODEL_UNAVAILABLE,
@@ -34,6 +34,12 @@ _TRANSIENT_ERRORS = frozenset(
         ProviderErrorKind.PROVIDER_INTERNAL,
     }
 )
+# Moving to a different endpoint asks a different question, so it admits one
+# more kind: a payload this gateway rejected. Two endpoints serving the same
+# model disagree about parameter names and limits often enough that a 400 on
+# route 0 is exactly what a fallback route exists for -- and ending the whole
+# run there defeated the point of configuring one.
+_FALLBACK_ERRORS = _RETRYABLE_ERRORS | {ProviderErrorKind.INVALID_REQUEST}
 
 
 class ProviderBuilder(Protocol):
@@ -271,7 +277,7 @@ class RoutedProvider:
     ) -> Optional[float]:
         """Return how long to wait before re-sending, or None to stop trying."""
         policy = self.policy.retry
-        if error.kind not in _TRANSIENT_ERRORS or attempts >= policy.max_attempts:
+        if error.kind not in _RETRYABLE_ERRORS or attempts >= policy.max_attempts:
             return None
         supplied = error.retry_after
         if (
@@ -449,7 +455,7 @@ class RoutedProvider:
             if failure is not None:
                 can_fallback = (
                     not emitted
-                    and failure.kind in _TRANSIENT_ERRORS
+                    and failure.kind in _FALLBACK_ERRORS
                     and index + 1 < len(self.policy.routes)
                 )
                 attempts.append(
@@ -568,7 +574,7 @@ class RoutedProvider:
 
             if failure is not None:
                 can_fallback = (
-                    failure.kind in _TRANSIENT_ERRORS
+                    failure.kind in _FALLBACK_ERRORS
                     and index + 1 < len(self.policy.routes)
                 )
                 attempts.append(

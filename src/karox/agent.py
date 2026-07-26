@@ -364,6 +364,7 @@ class AgentKernel:
         context: ContextBudget = ContextBudget(),
         project_context: Optional[Mapping[str, Any]] = None,
         require_change: bool = False,
+        max_output_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
         on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -396,6 +397,18 @@ class AgentKernel:
                 "reasoning effort must be one of " + ", ".join(sorted(REASONING_EFFORTS))
             )
         self.reasoning_effort = reasoning_effort
+        # The model's own output ceiling, sent on every request. Leaving it unset
+        # here made it something only the routed layer could supply, so a model
+        # registered without one -- or any direct endpoint -- was capped by an
+        # adapter constant instead, and a long answer was cut off mid-sentence
+        # with nothing but a finish_reason to show for it.
+        if max_output_tokens is not None and (
+            not isinstance(max_output_tokens, int)
+            or isinstance(max_output_tokens, bool)
+            or max_output_tokens <= 0
+        ):
+            raise ValueError("agent output ceiling must be a positive integer")
+        self.max_output_tokens = max_output_tokens
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -606,6 +619,7 @@ class AgentKernel:
                     # is exactly the right cache key: the prefix is stable and
                     # is otherwise re-billed at full price on every request.
                     cache_key=f"karox-session-{session_id}",
+                    max_output_tokens=self.max_output_tokens,
                     reasoning_effort=self.reasoning_effort,
                 )
                 try:

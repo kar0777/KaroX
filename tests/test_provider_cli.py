@@ -329,6 +329,7 @@ class ProviderCliTests(unittest.TestCase):
                     tools="true",
                     streaming="true",
                     context_window=8_000 if provider_id == "first" else 4_000,
+                    max_output_tokens=64_000 if provider_id == "first" else 16_000,
                 )
             )
         Factory.created = []
@@ -350,18 +351,22 @@ class ProviderCliTests(unittest.TestCase):
             max_cost=None,
             currency=None,
             context_window=None,
+            max_output_tokens=None,
         )
         with (
             patch("karox.cli._registry", return_value=registry),
             patch("karox.cli.ProviderFactory", Factory),
         ):
-            routed, _, window = _agent_provider(
+            routed, _, window, ceiling = _agent_provider(
                 args, SimpleNamespace(usage={}), AgentLimits()
             )
             # Both routed models declare a window, so compaction targets the
             # smaller one and a fallback cannot receive a history the primary
             # model accepted but it cannot.
             self.assertEqual(window, 4_000)
+            # The output ceiling is narrowed for the same reason: asking for more
+            # than the fallback can produce would get the rescue route rejected.
+            self.assertEqual(ceiling, 16_000)
             result = routed.complete(
                 ModelRequest("ignored", (ModelMessage("user", "work"),))
             )
@@ -371,7 +376,7 @@ class ProviderCliTests(unittest.TestCase):
             Factory.created = []
             args.route = ["first/first/model"]
             args.max_total_tokens = 10
-            exhausted, _, _ = _agent_provider(
+            exhausted, _, _, _ = _agent_provider(
                 args,
                 SimpleNamespace(usage={"total_tokens": 10}),
                 AgentLimits(),

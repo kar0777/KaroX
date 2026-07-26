@@ -41,6 +41,21 @@ _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # idea, and narrows the top of the range where a provider offers fewer levels.
 REASONING_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
+# Chat Completions renamed the output cap for its reasoning families, and those
+# models reject the old spelling with a 400 rather than ignoring it. The
+# provider's error body is deliberately never read -- it can echo the request,
+# credentials included -- so the spelling is chosen from the model family rather
+# than from the rejection text. A gateway that renames the model past this check
+# is covered by routing falling back to another route, not by a wider guess.
+_REASONING_FAMILY = re.compile(r"^(?:o[1-9]\d*|gpt-5)(?:[-._]|$)")
+
+
+def output_token_field(model: str) -> str:
+    """Which field this model wants its output ceiling in."""
+
+    name = model.rsplit("/", 1)[-1].strip().lower()
+    return "max_completion_tokens" if _REASONING_FAMILY.match(name) else "max_tokens"
+
 
 class ProviderErrorKind(str, Enum):
     AUTHENTICATION = "authentication"
@@ -509,7 +524,7 @@ class OpenAIChatCompletionsProvider:
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
-            payload["max_tokens"] = request.max_output_tokens
+            payload[output_token_field(request.model)] = request.max_output_tokens
         if request.cache_key is not None:
             # Caching is automatic on this wire; the key only routes requests
             # that share a prefix to the same cache, which every step of an
