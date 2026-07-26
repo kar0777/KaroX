@@ -7,13 +7,15 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .policy import CapabilityPolicy
@@ -38,6 +40,295 @@ class InvalidCommand(CoreError):
     pass
 
 
+WILDCARD_ARGUMENT = "*"
+
+# Options that hand a program text to the executable instead of a file to work
+# on.  A rule's literal prefix is what the user actually approved; the wildcard
+# tail is not, so it must not be able to turn "run my test suite" into "run
+# whatever you like" by appending an interpreter's own code-execution flag.
+_CODE_EXECUTION_OPTIONS = frozenset(
+    {"-c", "-e", "--code", "--command", "--eval", "--exec", "--execute"}
+)
+# Short options may carry their value in the same token (``python -cCODE``) and
+# may be bundled with other short options (``python -Bc CODE``), so a whole-token
+# comparison alone would let the very flag above straight back in.
+_CODE_EXECUTION_SHORT_LETTERS = frozenset({"c", "e"})
+
+
+def _is_plain_argument(value: str) -> bool:
+    """True when a wildcard tail argument cannot make the child run new code."""
+    if not value.startswith("-"):
+        return True
+    name = value.split("=", 1)[0].lower()
+    if name in _CODE_EXECUTION_OPTIONS:
+        return False
+    if value.startswith("--"):
+        return True
+    return not _CODE_EXECUTION_SHORT_LETTERS.intersection(name[1:])
+
+
+@dataclass(frozen=True)
+class VerificationRule:
+    """One user-approved check command.
+
+    An entry whose last element is ``*`` is a prefix rule: the literal prefix
+    must match position for position and every remaining argument must satisfy
+    :func:`_is_plain_argument`.  Any other entry keeps the exact-argv meaning it
+    had before prefix rules existed.
+    """
+
+    prefix: tuple[str, ...]
+    wildcard: bool
+
+    @classmethod
+    def parse(cls, entry: Iterable[str]) -> "VerificationRule":
+        values = tuple(entry)
+        if not values or not all(
+            isinstance(item, str) and item for item in values
+        ):
+            raise CoreError(
+                "a verification command must contain non-empty strings"
+            )
+        wildcard = values[-1] == WILDCARD_ARGUMENT
+        prefix = values[:-1] if wildcard else values
+        if WILDCARD_ARGUMENT in prefix:
+            raise CoreError(
+                f"{WILDCARD_ARGUMENT!r} is only meaningful as the last argument "
+                "of a verification command"
+            )
+        # Without a literal prefix the rule would approve every executable, which
+        # is the one thing this allowlist exists to prevent.
+        if not prefix:
+            raise CoreError("a verification command must name an executable")
+        return cls(prefix, wildcard)
+
+    def as_tuple(self) -> tuple[str, ...]:
+        return self.prefix + ((WILDCARD_ARGUMENT,) if self.wildcard else ())
+
+    def matches(self, argv: Sequence[str]) -> bool:
+        if not self.wildcard:
+            return tuple(argv) == self.prefix
+        if tuple(argv[: len(self.prefix)]) != self.prefix:
+            return False
+        return all(_is_plain_argument(item) for item in argv[len(self.prefix) :])
+
+
+_WINDOWS_JOB_LIMIT_KILL_ON_CLOSE = 0x2000
+_WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_PROCESS_TERMINATE = 0x0001
+_WINDOWS_PROCESS_SET_QUOTA = 0x0100
+
+
+@lru_cache(maxsize=1)
+def _windows_job_api() -> Optional[tuple[Any, Any]]:
+    """Win32 Job Object entry points, or None where they are unavailable."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimits),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        return kernel32, _ExtendedLimits
+    except Exception:
+        return None
+
+
+def _new_process_group_kwargs() -> Dict[str, Any]:
+    # Windows has no process groups that survive the parent for this purpose, so
+    # containment there comes from the Job Object rather than from spawn flags.
+    return {} if os.name == "nt" else {"start_new_session": True}
+
+
+def _kill_posix_process_group(pid: int) -> None:
+    try:
+        group = os.getpgid(pid)
+    except OSError:
+        return
+    # If the child is not its own group leader then start_new_session did not
+    # take effect and the group is ours, so signalling it would kill KaroX and
+    # everything else sharing the terminal.
+    if group != pid:
+        return
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except OSError:
+        return
+    time.sleep(0.2)
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _kill_windows_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+class ProcessTree:
+    """A spawned child together with the descendants it goes on to create.
+
+    Waiting on a timeout and killing only the direct child leaves the workers of
+    a parallel test run alive, still holding the captured output handle and any
+    file locks they took, so the next check inherits a broken workspace.  This
+    keeps the whole tree reachable so it can be swept in one go.  It bounds
+    cleanup, nothing else: the child still runs with the repository as its
+    working directory and with whatever access the operating system gives it.
+    """
+
+    KILL_GRACE_SECONDS = 5.0
+
+    def __init__(self, process: "subprocess.Popen[bytes]") -> None:
+        self._process = process
+        self._job: Optional[Any] = None
+        api = _windows_job_api()
+        if api is None:
+            return
+        import ctypes
+
+        kernel32, extended_limits = api
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        limits = extended_limits()
+        limits.BasicLimitInformation.LimitFlags = _WINDOWS_JOB_LIMIT_KILL_ON_CLOSE
+        # Assignment can only happen once the process exists, so a child that
+        # spawns before the handle is opened is not covered. That window is a few
+        # microseconds against an interpreter start-up of tens of milliseconds.
+        handle = kernel32.OpenProcess(
+            _WINDOWS_PROCESS_SET_QUOTA | _WINDOWS_PROCESS_TERMINATE,
+            False,
+            process.pid,
+        )
+        assigned = False
+        if handle:
+            assigned = bool(
+                kernel32.SetInformationJobObject(
+                    job,
+                    _WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION,
+                    ctypes.byref(limits),
+                    ctypes.sizeof(limits),
+                )
+            ) and bool(kernel32.AssignProcessToJobObject(job, handle))
+            kernel32.CloseHandle(handle)
+        if assigned:
+            self._job = job
+        else:
+            kernel32.CloseHandle(job)
+
+    def terminate(self) -> None:
+        if self._job is not None:
+            api = _windows_job_api()
+            if api is not None:
+                api[0].TerminateJobObject(self._job, 1)
+        elif os.name == "nt":
+            _kill_windows_process_tree(self._process.pid)
+        else:
+            _kill_posix_process_group(self._process.pid)
+        try:
+            self._process.kill()
+        except OSError:
+            pass
+        try:
+            self._process.wait(timeout=self.KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def close(self) -> None:
+        if self._job is None:
+            return
+        api = _windows_job_api()
+        if api is not None:
+            # The job carries KILL_ON_JOB_CLOSE, so releasing the last handle
+            # also collects anything the finished check left running.
+            api[0].CloseHandle(self._job)
+        self._job = None
+
+
+@dataclass(frozen=True)
+class CapturedStream:
+    text: str
+    sha256: str
+    truncated: bool
+    total_bytes: int
+    elided_bytes: int
+
+
+@dataclass(frozen=True)
+class CheckPlan:
+    argv: List[str]
+    requested_timeout: float
+    effective_timeout: float
+    clamped_by: Optional[str]
+    verification_eligible: bool
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     name: str
@@ -47,6 +338,10 @@ class ToolDefinition:
     input_schema: Dict[str, Any]
     additional_capabilities: tuple[Capability, ...] = ()
     external_schema: bool = False
+    # A mutating tool normally replays its stored outcome for a repeated
+    # idempotency key. A check must not: its answer describes a working tree that
+    # may have changed since, and replaying it reports a stale pass as fresh.
+    replayable: bool = True
 
 
 class CoreRuntime:
@@ -60,6 +355,9 @@ class CoreRuntime:
     MAX_SEARCH_FILES = 2_000
     MAX_SEARCH_RESULTS = 200
     MAX_SEARCH_LINE_BYTES = 2_000
+    MIN_PROCESS_TIMEOUT_SECONDS = 0.1
+    MAX_PROCESS_TIMEOUT_SECONDS = 3600.0
+    DEFAULT_CHECK_TIMEOUT_SECONDS = 120.0
 
     def __init__(
         self,
@@ -77,10 +375,17 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
-        self._verification_commands = (
+        self._verification_rules: Optional[tuple[VerificationRule, ...]] = (
             None
             if verification_commands is None
-            else frozenset(tuple(item) for item in verification_commands)
+            else tuple(
+                VerificationRule.parse(item) for item in verification_commands
+            )
+        )
+        self._verification_commands = (
+            None
+            if self._verification_rules is None
+            else frozenset(rule.as_tuple() for rule in self._verification_rules)
         )
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]
@@ -148,6 +453,7 @@ class CoreRuntime:
                     "additionalProperties": False,
                 },
                 (Capability.PROCESS_RUN,),
+                replayable=False,
             ),
             "git.status": ToolDefinition(
                 "git.status",
@@ -278,26 +584,27 @@ class CoreRuntime:
                 command.arguments,
                 float(command.deadline_seconds),
             )
-            replay = self.sessions.begin_idempotent(
-                record,
-                lease,
-                command.idempotency_key,
-                input_digest,
-            )
-            if replay is not None:
-                result = CoreResult.from_dict(replay)
-                result.idempotent_replay = True
-                self._audit(
-                    "core.command.replayed",
-                    {
-                        "session_id": command.session_id,
-                        "origin": command.origin.key,
-                        "command": command.name,
-                        "correlation_id": command.correlation_id,
-                        "idempotency_key": command.idempotency_key,
-                    },
+            if definition.replayable:
+                replay = self.sessions.begin_idempotent(
+                    record,
+                    lease,
+                    command.idempotency_key,
+                    input_digest,
                 )
-                return result
+                if replay is not None:
+                    result = CoreResult.from_dict(replay)
+                    result.idempotent_replay = True
+                    self._audit(
+                        "core.command.replayed",
+                        {
+                            "session_id": command.session_id,
+                            "origin": command.origin.key,
+                            "command": command.name,
+                            "correlation_id": command.correlation_id,
+                            "idempotency_key": command.idempotency_key,
+                        },
+                    )
+                    return result
         try:
             if is_mcp:
                 data = self._mcp_binding.execute(
@@ -342,12 +649,17 @@ class CoreRuntime:
         if definition.mutates:
             assert lease is not None and command.idempotency_key is not None
             self._record_mutation(record, command, result)
-            self.sessions.complete_idempotent(
-                record,
-                lease,
-                command.idempotency_key,
-                result.to_dict(),
-            )
+            if definition.replayable:
+                self.sessions.complete_idempotent(
+                    record,
+                    lease,
+                    command.idempotency_key,
+                    result.to_dict(),
+                )
+            else:
+                # There is no idempotency entry to complete, but the evidence and
+                # the check log this call just appended still have to reach disk.
+                self.sessions.save(record, record.revision, lease)
         self._audit(
             "core.command.completed",
             {
@@ -577,6 +889,8 @@ class CoreRuntime:
                     "argv": result.data.get("argv", []),
                     "exit_code": result.data.get("exit_code"),
                     "timed_out": result.data.get("timed_out", False),
+                    "effective_timeout": result.data.get("effective_timeout"),
+                    "timeout_clamped_by": result.data.get("timeout_clamped_by"),
                 }
             )
 
@@ -853,89 +1167,119 @@ class CoreRuntime:
         return values
 
     def _run(self, argv: List[str], timeout_seconds: float) -> Dict[str, Any]:
-        timeout = min(max(float(timeout_seconds), 0.1), 3600.0)
+        timeout = min(
+            max(float(timeout_seconds), self.MIN_PROCESS_TIMEOUT_SECONDS),
+            self.MAX_PROCESS_TIMEOUT_SECONDS,
+        )
         env = child_process_environment()
         started = time.perf_counter()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                argv,
+                cwd=self.repository,
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                shell=False,
+                **_new_process_group_kwargs(),
+            )
+            tree = ProcessTree(process)
             try:
-                completed = subprocess.run(
-                    argv,
-                    cwd=self.repository,
-                    env=env,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=timeout,
-                    shell=False,
-                )
-                timed_out = False
-                exit_code: Optional[int] = completed.returncode
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                exit_code = None
-            stdout, stdout_sha256, stdout_truncated = self._bounded_stream(stdout_file)
-            stderr, stderr_sha256, stderr_truncated = self._bounded_stream(stderr_file)
-        stdout = str(redact(stdout))
-        stderr = str(redact(stderr))
+                try:
+                    exit_code: Optional[int] = process.wait(timeout=timeout)
+                    timed_out = False
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    exit_code = None
+                    tree.terminate()
+                except BaseException:
+                    # An interrupt while waiting must not orphan the tree either.
+                    tree.terminate()
+                    raise
+            finally:
+                tree.close()
+            stdout = self._bounded_stream(stdout_file)
+            stderr = self._bounded_stream(stderr_file)
         return {
             "argv": redact(argv),
             "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
+            "stdout": str(redact(stdout.text)),
+            "stderr": str(redact(stderr.text)),
             "timed_out": timed_out,
-            "stdout_sha256": stdout_sha256,
-            "stderr_sha256": stderr_sha256,
-            "stdout_truncated": stdout_truncated,
-            "stderr_truncated": stderr_truncated,
+            "stdout_sha256": stdout.sha256,
+            "stderr_sha256": stderr.sha256,
+            "stdout_truncated": stdout.truncated,
+            "stderr_truncated": stderr.truncated,
+            "stdout_bytes": stdout.total_bytes,
+            "stderr_bytes": stderr.total_bytes,
+            "stdout_elided_bytes": stdout.elided_bytes,
+            "stderr_elided_bytes": stderr.elided_bytes,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 
-    def _bounded_stream(self, handle: Any) -> tuple[str, str, bool]:
+    def _bounded_stream(self, handle: Any) -> CapturedStream:
         handle.flush()
         handle.seek(0)
         digest = hashlib.sha256()
+        size = 0
         while True:
             chunk = handle.read(64 * 1024)
             if not chunk:
                 break
             digest.update(chunk)
-        size = handle.tell()
-        handle.seek(max(0, size - self.MAX_OUTPUT_BYTES))
-        tail = handle.read(self.MAX_OUTPUT_BYTES)
-        return (
-            tail.decode("utf-8", errors="ignore"),
-            digest.hexdigest(),
-            size > self.MAX_OUTPUT_BYTES,
+            size += len(chunk)
+        limit = max(0, int(self.MAX_OUTPUT_BYTES))
+        if size <= limit:
+            handle.seek(0)
+            body = handle.read(size)
+            return CapturedStream(
+                body.decode("utf-8", errors="ignore"),
+                digest.hexdigest(),
+                False,
+                size,
+                0,
+            )
+        # A compiler or a test runner states the root cause first and then repeats
+        # it in a summary, so returning only the tail throws away the half of the
+        # output that explains the failure.
+        head_budget = (limit + 1) // 2
+        tail_budget = limit - head_budget
+        handle.seek(0)
+        head = handle.read(head_budget)
+        tail = b""
+        if tail_budget:
+            handle.seek(size - tail_budget)
+            tail = handle.read(tail_budget)
+        elided = size - head_budget - tail_budget
+        text = (
+            head.decode("utf-8", errors="ignore")
+            + f"\n[karox: {elided} bytes elided from the middle of this stream]\n"
+            + tail.decode("utf-8", errors="ignore")
         )
-
-    @staticmethod
-    def _process_output_text(value: Any) -> str:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return ""
-
-    def _truncate_output(self, value: str) -> str:
-        encoded = value.encode("utf-8")
-        if len(encoded) <= self.MAX_OUTPUT_BYTES:
-            return value
-        return encoded[-self.MAX_OUTPUT_BYTES :].decode("utf-8", errors="ignore")
+        return CapturedStream(text, digest.hexdigest(), True, size, elided)
 
     def _run_check(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
-        argv, timeout = self._prepare_check(arguments, deadline_seconds)
-        command = tuple(argv)
-        if (
-            self._verification_commands is not None
-            and command not in self._verification_commands
-        ):
-            raise InvalidCommand("check command is not in the user-approved verification set")
-        result = self._run(argv, timeout)
-        result["verification_eligible"] = (
-            self._verification_commands is not None
-            and command in self._verification_commands
-        )
+        plan = self._prepare_check(arguments, deadline_seconds)
+        result = self._run(plan.argv, plan.effective_timeout)
+        result["verification_eligible"] = plan.verification_eligible
+        # A caller that asked for ten minutes and silently got the host's deadline
+        # cannot tell a genuine hang from a clamp, so both numbers are reported.
+        result["requested_timeout"] = plan.requested_timeout
+        result["effective_timeout"] = plan.effective_timeout
+        result["timeout_clamped_by"] = plan.clamped_by
+        if result["timed_out"]:
+            detail = (
+                f"the check was stopped after {plan.effective_timeout:g}s and its "
+                "process tree was terminated"
+            )
+            if plan.clamped_by is not None:
+                detail += (
+                    f"; the requested {plan.requested_timeout:g}s was reduced by "
+                    f"{plan.clamped_by}"
+                )
+            result["detail"] = detail
         display_argv = result["argv"]
         result["_evidence"] = [
             EvidenceRecord(
@@ -944,21 +1288,46 @@ class CoreRuntime:
                 + f": {' '.join(display_argv)}",
                 command=display_argv,
                 exit_code=result["exit_code"],
-                metadata={"timed_out": result["timed_out"]},
+                metadata={
+                    "timed_out": result["timed_out"],
+                    "effective_timeout": plan.effective_timeout,
+                    "timeout_clamped_by": plan.clamped_by,
+                },
             )
         ]
         return result
 
     def _prepare_check(
         self, arguments: Dict[str, Any], deadline_seconds: float
-    ) -> tuple[List[str], float]:
+    ) -> CheckPlan:
         raw = self._required(arguments, "argv", list)
         argv = self._validate_process(raw)
-        requested_timeout = arguments.get("timeout_seconds", 120.0)
-        timeout = float(requested_timeout)
-        if not math.isfinite(timeout) or timeout <= 0:
+        eligible = self._verification_rules is not None and any(
+            rule.matches(argv) for rule in self._verification_rules
+        )
+        # Refusing here rather than after the run keeps a rejected command from
+        # reserving a durable idempotency intent that then needs reconciliation.
+        if self._verification_rules is not None and not eligible:
+            raise InvalidCommand(
+                "check command is not in the user-approved verification set"
+            )
+        requested = float(
+            arguments.get("timeout_seconds", self.DEFAULT_CHECK_TIMEOUT_SECONDS)
+        )
+        if not math.isfinite(requested) or requested <= 0:
             raise InvalidCommand("timeout_seconds must be positive")
-        return argv, min(timeout, deadline_seconds)
+        effective = requested
+        clamped_by: Optional[str] = None
+        if effective > float(deadline_seconds):
+            effective = float(deadline_seconds)
+            clamped_by = "request_deadline"
+        if effective > self.MAX_PROCESS_TIMEOUT_SECONDS:
+            effective = self.MAX_PROCESS_TIMEOUT_SECONDS
+            clamped_by = "runtime_maximum"
+        if effective < self.MIN_PROCESS_TIMEOUT_SECONDS:
+            effective = self.MIN_PROCESS_TIMEOUT_SECONDS
+            clamped_by = "runtime_minimum"
+        return CheckPlan(argv, requested, effective, clamped_by, eligible)
 
     def _git(self, arguments: List[str], deadline_seconds: float) -> Dict[str, Any]:
         return self._run(["git", *arguments], min(60.0, deadline_seconds))

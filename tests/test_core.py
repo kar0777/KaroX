@@ -294,10 +294,19 @@ class CoreRuntimeTests(unittest.TestCase):
             1.0,
         )
 
-        self.assertEqual(result["stdout"], "🙂")
-        self.assertEqual(result["stderr"], "éé")
-        self.assertLessEqual(len(result["stdout"].encode("utf-8")), 5)
-        self.assertLessEqual(len(result["stderr"].encode("utf-8")), 5)
+        self.assertEqual(result["stdout_bytes"], 9)
+        self.assertEqual(result["stderr_bytes"], 6)
+        self.assertEqual(result["stdout_elided_bytes"], 4)
+        self.assertEqual(result["stderr_elided_bytes"], 1)
+        # A budget that lands inside a multi-byte character keeps the whole
+        # characters around it instead of raising or emitting a broken one.
+        self.assertEqual(
+            result["stdout"], "a\n[karox: 4 bytes elided from the middle of this stream]\n"
+        )
+        self.assertEqual(
+            result["stderr"],
+            "é\n[karox: 1 bytes elided from the middle of this stream]\né",
+        )
 
     def test_non_finite_check_timeouts_are_rejected_without_pending_intent(self) -> None:
         for index, timeout in enumerate((float("nan"), float("inf"), float("-inf"))):

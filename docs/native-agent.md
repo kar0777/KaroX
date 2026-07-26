@@ -54,9 +54,9 @@ when reproducing a run that must not depend on either.
 ## Environment
 
 The prompt states the repository path, the operating system, the path separator,
-the Git branch, and the exact list of user-approved verification commands. The
-check allowlist is an exact match, so naming it beats letting the model discover
-it by trial.
+the Git branch, and the list of user-approved verification commands exactly as
+approved, including the trailing `*` of any prefix rule. The allowlist is
+deny-by-default, so naming it beats letting the model discover it by trial.
 
 ## Context
 

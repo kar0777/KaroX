@@ -12,7 +12,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import Tool, ToolAnnotations
 from starlette.responses import Response
 
-from .hosted_bridge import HostedToolRuntime
+from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
 
 
 def build_proxy_asgi_app(
@@ -20,7 +20,10 @@ def build_proxy_asgi_app(
     bearer_token: str | Callable[[], str] | None = None,
     *,
     path: str = "/mcp",
-    deadline_seconds: float = 30.0,
+    # This deadline also caps how long checks.run may execute. Thirty seconds is
+    # shorter than the test suite of any real repository, so the default used to
+    # turn every honest verification attempt into a timeout.
+    deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     bearer_authorizer: Optional[Callable[[str], bool]] = None,
     unauthorized_headers: Optional[Mapping[str, str]] = None,
 ) -> Any:

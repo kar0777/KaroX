@@ -45,6 +45,11 @@ CORE_TOOL_NAMES: dict[str, str] = {
 }
 
 
+# A hosted call's deadline is also the ceiling on how long checks.run may take,
+# and no real repository verifies itself in thirty seconds.
+DEFAULT_HOSTED_DEADLINE_SECONDS = 600.0
+
+
 class HostedToolRuntime(Protocol):
     def descriptors(self) -> list[ProxyToolDescriptor]: ...
 
@@ -54,7 +59,7 @@ class HostedToolRuntime(Protocol):
         arguments: dict[str, Any],
         *,
         idempotency_key: Optional[str] = None,
-        deadline_seconds: float = 30.0,
+        deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     ) -> dict[str, Any]: ...
 
 
@@ -182,7 +187,7 @@ class CoreToolBridge:
         arguments: dict[str, Any],
         *,
         idempotency_key: Optional[str] = None,
-        deadline_seconds: float = 30.0,
+        deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     ) -> dict[str, Any]:
         self._record()
         core_name = CORE_TOOL_NAMES.get(tool_name)
@@ -258,7 +263,7 @@ class CompositeHostedBridge:
         arguments: dict[str, Any],
         *,
         idempotency_key: Optional[str] = None,
-        deadline_seconds: float = 30.0,
+        deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     ) -> dict[str, Any]:
         return self._owner(tool_name).execute(
             tool_name,
