@@ -375,7 +375,29 @@ Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Application : $AppDir"
 Write-Host "Runtime     : $RuntimeDir"
 Write-Host "Config      : $ConfigDir"
-Write-Host "Command     : karox"
+
+# "Command: karox" was printed unconditionally, and it is a claim about PATH
+# resolution rather than about this installer. The bin directory is put first in
+# the USER path, but Windows searches the MACHINE path before it -- so an older
+# `karox` left in any machine-wide directory (a pip console script in
+# Python\Scripts is the common one) silently keeps winning, and the user runs a
+# different program than the one just installed. Report what actually resolves.
+$resolved = $null
+try {
+    Refresh-Path
+    $resolved = (Get-Command karox -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+} catch {}
+if (!$resolved) {
+    Write-Host "Command     : karox (available in a new terminal)" -ForegroundColor Yellow
+} elseif ((Normalize-PathEntry (Split-Path -Parent $resolved)) -ieq (Normalize-PathEntry $BinDir)) {
+    Write-Host "Command     : karox" -ForegroundColor Green
+} else {
+    Write-Host "Command     : karox -> $resolved" -ForegroundColor Yellow
+    Write-Host "              This is NOT the launcher just installed:" -ForegroundColor Yellow
+    Write-Host "              $KaroXCmd" -ForegroundColor Yellow
+    Write-Host "              A machine-wide PATH entry takes precedence over the user one." -ForegroundColor Yellow
+    Write-Host "              Remove the shadowing file, or run the full path above." -ForegroundColor Yellow
+}
 Write-Host ""
 Schedule-LegacyCleanup
 

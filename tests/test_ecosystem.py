@@ -197,5 +197,53 @@ class EcosystemTests(unittest.TestCase):
         self.assertNotIn(api_key, encoded)
 
 
+class CliEntryPointTests(unittest.TestCase):
+    """What someone types before they know any subcommand."""
+
+    def test_version_flag_reports_the_runtime_version(self) -> None:
+        """`karox --version` answered with an argparse usage error.
+
+        The subparser was declared `required=True`, so the parser demanded a
+        subcommand before it looked at any flag -- and the first thing anyone
+        types to find out what they have installed is `--version`.
+        """
+        from karox import __version__
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                main(["--version"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue().strip(), f"karox {__version__}")
+
+    def test_no_arguments_opens_the_client_in_the_current_repository(self) -> None:
+        """`karox` on its own is the product's front door.
+
+        It is intercepted before the parser, which requires a subcommand, and it
+        must arrive at the client bound to the directory the user ran it from --
+        every session is scoped to that repository.
+        """
+        with patch("karox.tui.run_tui", return_value=0) as run_tui:
+            self.assertEqual(main([]), 0)
+
+        run_tui.assert_called_once()
+        self.assertEqual(
+            Path(run_tui.call_args.kwargs["repository"]), Path.cwd().resolve()
+        )
+
+    def test_the_documented_plural_spelling_reaches_the_same_command(self) -> None:
+        """README and the client's own /models both use the plural."""
+        listed = io.StringIO()
+        with contextlib.redirect_stdout(listed):
+            self.assertEqual(main(["models", "list"]), 0)
+        plural = listed.getvalue()
+
+        listed = io.StringIO()
+        with contextlib.redirect_stdout(listed):
+            self.assertEqual(main(["model", "list"]), 0)
+        self.assertEqual(plural, listed.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

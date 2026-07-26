@@ -64,6 +64,7 @@ karox paths | session | credential | provider | model | skill | mcp | bridge
 Examples:
 
 ```powershell
+karox --version
 karox doctor
 karox provider list
 karox model list
@@ -71,6 +72,12 @@ karox session list
 karox bridge connect chatgpt-web --repository . --write
 karox bridge connect claude-web --repository . --write
 ```
+
+The installer reports which `karox` the shell will actually resolve. Its launcher
+directory goes first in the user PATH, but Windows searches the machine PATH
+before that, so an older `karox` left machine-wide — a stale pip console script in
+`Python\Scripts` is the usual one — would otherwise keep winning silently. If the
+installer names a different path than its own launcher, remove the shadowing file.
 
 `karox-vnext` remains a compatibility alias and resolves to the same runtime.
 Each `bridge connect` command creates its session and temporary OAuth approval
@@ -108,18 +115,18 @@ extension details are in [providers](docs/providers/README.md),
 
 ## Verification
 
-The suite is 592 tests. The runner is `unittest`, which is what CI executes:
+The suite is 595 tests. The runner is `unittest`, which is what CI executes:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-592 is the number `python -m pytest --collect-only -q tests` reports and the
-number `unittest` reports as `Ran 592 tests`, so it is reproducible from a clean
+595 is the number `python -m pytest --collect-only -q tests` reports and the
+number `unittest` reports as `Ran 595 tests`, so it is reproducible from a clean
 checkout. A pass tally from `python -m pytest -q` is not: pytest counts subtests
 on top of tests, and how many it counts moves between runs, so no such figure is
 published here. Note also that a bare `python -m pytest -q` at the repository
-root collects 597, because it picks up the five legacy checks in
+root collects 600, because it picks up the five legacy checks in
 `scripts/test_karox4_units.py` alongside the vNext suite.
 
 Every count on this page is checked by `python scripts/check_test_count.py`,

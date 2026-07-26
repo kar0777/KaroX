@@ -44,6 +44,7 @@ from .hosted_bridge import (
     CoreToolBridge,
     HostedBridgeError,
 )
+from . import __version__
 from .migration import MigrationError, migrate_legacy_metadata
 from .mcp_client import (
     McpAccessDenied,
@@ -180,6 +181,15 @@ def _record_summary(record: SessionRecord) -> dict[str, Any]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karox", description="KaroX hybrid runtime")
+    # `karox --version` is the first thing anyone types to find out what they have
+    # installed, and it answered with an argparse usage error because the parser
+    # required a subcommand before it looked at any flag.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"karox {__version__}",
+        help="show the installed runtime version and exit",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     paths = commands.add_parser("paths", help="show resolved application paths")
