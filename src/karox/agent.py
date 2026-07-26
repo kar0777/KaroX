@@ -24,6 +24,7 @@ from .providers import (
     ProviderError,
     ProviderErrorKind,
     ProviderTool,
+    REASONING_EFFORTS,
     ToolCall,
     accumulate_response,
 )
@@ -363,6 +364,7 @@ class AgentKernel:
         context: ContextBudget = ContextBudget(),
         project_context: Optional[Mapping[str, Any]] = None,
         require_change: bool = False,
+        reasoning_effort: Optional[str] = None,
         on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -387,6 +389,13 @@ class AgentKernel:
         # re-checksum the whole session file several times a second.
         self._on_event = on_event
         self._step = 0
+        # Validated once here rather than on the first request, so a bad value
+        # fails before a session is leased and a repository is touched.
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(
+                "reasoning effort must be one of " + ", ".join(sorted(REASONING_EFFORTS))
+            )
+        self.reasoning_effort = reasoning_effort
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -597,6 +606,7 @@ class AgentKernel:
                     # is exactly the right cache key: the prefix is stable and
                     # is otherwise re-billed at full price on every request.
                     cache_key=f"karox-session-{session_id}",
+                    reasoning_effort=self.reasoning_effort,
                 )
                 try:
                     response = self._call_provider(request)

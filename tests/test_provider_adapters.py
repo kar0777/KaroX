@@ -687,6 +687,117 @@ class ProviderAdapterTests(unittest.TestCase):
         )
         self.assertNotIn(secret, str(raised.exception))
 
+    def _payload(self, provider: object, records: list[tuple[str | None, object]], **fields):
+        client = FakeClient([response(records)])
+        asked = ModelRequest(
+            model="test-model",
+            messages=(ModelMessage("user", "work"),),
+            deadline_seconds=2,
+            **fields,
+        )
+        with patch("karox.provider_adapters.httpx.Client", return_value=client):
+            provider.complete(asked)  # type: ignore[attr-defined]
+        return client.calls[0]["json"]
+
+    _ANTHROPIC_DONE = [
+        ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+        ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+        ("message_stop", {}),
+    ]
+    _GEMINI_DONE = [
+        (None, {"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}),
+    ]
+    _RESPONSES_DONE = [
+        (None, {"type": "response.created", "response": {"id": "resp-1"}}),
+        (None, {"type": "response.completed", "response": {"id": "resp-1", "usage": {}}}),
+    ]
+
+    def test_each_wire_carries_the_requested_effort_where_it_belongs(self) -> None:
+        # One dial in KaroX, four different spellings on the wire. Each provider
+        # rejects the others' field, so the placement is the whole feature.
+        anthropic = self._payload(
+            AnthropicMessagesProvider("https://provider.example/v1"),
+            self._ANTHROPIC_DONE,
+            reasoning_effort="high",
+        )
+        self.assertEqual(anthropic["output_config"], {"effort": "high"})
+        self.assertNotIn("effort", anthropic)
+
+        responses = self._payload(
+            OpenAIResponsesProvider("https://provider.example/v1"),
+            self._RESPONSES_DONE,
+            reasoning_effort="medium",
+        )
+        self.assertEqual(responses["reasoning"], {"effort": "medium"})
+
+        gemini = self._payload(
+            GeminiGenerateContentProvider("https://provider.example/v1beta"),
+            self._GEMINI_DONE,
+            reasoning_effort="low",
+        )
+        self.assertEqual(
+            gemini["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"}
+        )
+
+    def test_a_level_a_provider_lacks_is_clamped_not_sent_verbatim(self) -> None:
+        # Anthropic accepts all five; the other two top out at "high". Sending
+        # "max" there would be rejected outright, and dropping the dial would
+        # quietly give the caller the default when they asked for the ceiling.
+        cases = (
+            ("xhigh", "high"),
+            ("max", "high"),
+            ("medium", "medium"),
+        )
+        for asked, expected in cases:
+            with self.subTest(effort=asked):
+                anthropic = self._payload(
+                    AnthropicMessagesProvider("https://provider.example/v1"),
+                    self._ANTHROPIC_DONE,
+                    reasoning_effort=asked,
+                )
+                self.assertEqual(anthropic["output_config"], {"effort": asked})
+                responses = self._payload(
+                    OpenAIResponsesProvider("https://provider.example/v1"),
+                    self._RESPONSES_DONE,
+                    reasoning_effort=asked,
+                )
+                self.assertEqual(responses["reasoning"], {"effort": expected})
+                gemini = self._payload(
+                    GeminiGenerateContentProvider("https://provider.example/v1beta"),
+                    self._GEMINI_DONE,
+                    reasoning_effort=asked,
+                )
+                self.assertEqual(
+                    gemini["generationConfig"]["thinkingConfig"],
+                    {"thinkingLevel": expected},
+                )
+
+    def test_no_effort_asked_means_no_field_sent(self) -> None:
+        # The provider's own default must stay in force when nothing is asked.
+        anthropic = self._payload(
+            AnthropicMessagesProvider("https://provider.example/v1"),
+            self._ANTHROPIC_DONE,
+        )
+        self.assertNotIn("output_config", anthropic)
+        responses = self._payload(
+            OpenAIResponsesProvider("https://provider.example/v1"),
+            self._RESPONSES_DONE,
+        )
+        self.assertNotIn("reasoning", responses)
+        gemini = self._payload(
+            GeminiGenerateContentProvider("https://provider.example/v1beta"),
+            self._GEMINI_DONE,
+        )
+        self.assertNotIn("thinkingConfig", gemini.get("generationConfig", {}))
+
+    def test_an_effort_level_that_does_not_exist_is_refused_at_construction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reasoning effort"):
+            ModelRequest(
+                model="test-model",
+                messages=(ModelMessage("user", "work"),),
+                reasoning_effort="maximum",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

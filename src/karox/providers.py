@@ -36,6 +36,11 @@ from .security import contains_credential, redact
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# The reasoning-depth vocabulary KaroX exposes, ordered cheapest to most
+# thorough. Each adapter maps these onto whatever its provider calls the same
+# idea, and narrows the top of the range where a provider offers fewer levels.
+REASONING_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
 
 class ProviderErrorKind(str, Enum):
     AUTHENTICATION = "authentication"
@@ -135,6 +140,10 @@ class ModelRequest:
     # opt-in because a one-shot request would pay the cache-write premium and
     # never read it back.
     cache_key: Optional[str] = None
+    # How hard the model should think before answering. One dial, spelled the
+    # same for every provider, because the caller is choosing an intent -- cheap
+    # and fast, or slow and careful -- not a vendor's parameter name.
+    reasoning_effort: Optional[str] = None
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __post_init__(self) -> None:
@@ -167,6 +176,13 @@ class ModelRequest:
             or len(self.cache_key) > 200
         ):
             raise ValueError("cache key must be 1-200 non-blank characters")
+        if (
+            self.reasoning_effort is not None
+            and self.reasoning_effort not in REASONING_EFFORTS
+        ):
+            raise ValueError(
+                "reasoning effort must be one of " + ", ".join(sorted(REASONING_EFFORTS))
+            )
 
 
 @dataclass(frozen=True)
@@ -499,6 +515,15 @@ class OpenAIChatCompletionsProvider:
             # that share a prefix to the same cache, which every step of an
             # agent loop does.
             payload["prompt_cache_key"] = request.cache_key
+        if request.reasoning_effort is not None:
+            # Chat Completions spells the dial flat, and its scale tops out at
+            # "high", so the two levels above that are clamped rather than sent
+            # as a value the endpoint would reject.
+            payload["reasoning_effort"] = (
+                "high"
+                if request.reasoning_effort in {"xhigh", "max"}
+                else request.reasoning_effort
+            )
         return payload
 
     def _request_headers(self) -> Dict[str, str]:

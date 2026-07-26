@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Iterator
@@ -614,6 +615,32 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.kind, ProviderErrorKind.AUTHENTICATION)
         self.assertNotIn(secret, str(raised.exception))
         self.assertNotIn(secret, raised.exception.safe_message)
+
+    def test_chat_completions_spells_the_effort_dial_flat_and_clamps_it(self) -> None:
+        cases = (("low", "low"), ("high", "high"), ("xhigh", "high"), ("max", "high"))
+        for asked, expected in cases:
+            with self.subTest(effort=asked):
+                client = FakeClient(
+                    [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+                )
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                asked_request = replace(self.request(), reasoning_effort=asked)
+                with patch("karox.providers.httpx.Client", return_value=client):
+                    provider.complete(asked_request)
+                payload = client.calls[0]["json"]
+                self.assertEqual(payload["reasoning_effort"], expected)
+                # Not the Responses-API nesting, which this endpoint rejects.
+                self.assertNotIn("reasoning", payload)
+
+    def test_chat_completions_omits_the_dial_when_none_was_asked(self) -> None:
+        client = FakeClient(
+            [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+        )
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            provider.complete(self.request())
+
+        self.assertNotIn("reasoning_effort", client.calls[0]["json"])
 
 
 if __name__ == "__main__":

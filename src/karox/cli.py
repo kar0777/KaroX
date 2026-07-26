@@ -94,6 +94,7 @@ from .providers import (
     ModelRequest,
     OpenAIChatCompletionsProvider,
     ProviderError,
+    REASONING_EFFORTS,
 )
 from .registry import (
     ADAPTER_KINDS,
@@ -848,6 +849,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "auto: a task that changed nothing succeeds as an evidence-backed "
             "answer; change: refuse to succeed unless a file actually changed"
+        ),
+    )
+    run.add_argument(
+        "--effort",
+        choices=REASONING_EFFORTS,
+        default=None,
+        help=(
+            "how hard the model should think before answering; sent to whichever "
+            "provider serves the run, which may cap it at its own top level"
         ),
     )
     run.add_argument(
@@ -2051,6 +2061,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         context=ContextBudget(max_input_tokens=context_window),
         project_context=project_context,
         require_change=args.expect == "change",
+        reasoning_effort=getattr(args, "effort", None),
         on_event=_stream_progress() if getattr(args, "stream", False) else None,
     ).run(record.session_id)
 

@@ -157,6 +157,7 @@ class _AgentKernelFixture(unittest.TestCase):
         system_prompt: str = SYSTEM_PROMPT,
         require_change: bool = False,
         on_event: Callable[[AgentEvent], None] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AgentKernel:
         kwargs: dict[str, object] = {}
         if require_change:
@@ -165,6 +166,8 @@ class _AgentKernelFixture(unittest.TestCase):
             kwargs["monotonic"] = monotonic
         if on_event is not None:
             kwargs["on_event"] = on_event
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
         return AgentKernel(
             provider=provider,
             model="test-model",
@@ -1355,6 +1358,28 @@ class AgentEventChannelTests(_AgentKernelFixture):
         self.assertEqual(report.reason, "verified")
         # Dropped after the first failure rather than retried on every event.
         self.assertEqual(len(calls), 1)
+
+    def test_the_requested_effort_reaches_every_provider_request(self) -> None:
+        provider = QueueProvider(self.successful_responses())
+
+        self.kernel(
+            provider,
+            AgentLimits(max_seconds=30),
+            reasoning_effort="xhigh",
+        ).run("session")
+
+        self.assertTrue(provider.requests)
+        self.assertEqual(
+            {item.reasoning_effort for item in provider.requests}, {"xhigh"}
+        )
+
+    def test_an_effort_level_that_does_not_exist_fails_before_a_lease(self) -> None:
+        # A typo must not get as far as acquiring the session and touching files.
+        with self.assertRaisesRegex(ValueError, "reasoning effort"):
+            self.kernel(
+                QueueProvider([]), AgentLimits(max_seconds=30), reasoning_effort="ultra"
+            )
+        self.assertEqual(self.sessions.load("session").provider_history, [])
 
     def test_a_provider_without_streaming_still_runs_and_reports(self) -> None:
         # Not every transport streams; the loop must not require it.

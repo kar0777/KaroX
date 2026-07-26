@@ -31,6 +31,28 @@ from .providers import (
 )
 
 
+def _openai_effort(effort: str) -> str:
+    """Map KaroX's five reasoning levels onto the four OpenAI accepts.
+
+    OpenAI's scale tops out at ``high``, so ``xhigh`` and ``max`` land there.
+    Sending a level the endpoint does not know would be rejected outright, and
+    silently dropping the dial would be worse: the caller asked for maximum
+    thinking and would get the default.
+    """
+
+    return "high" if effort in {"xhigh", "max"} else effort
+
+
+def _gemini_thinking_level(effort: str) -> str:
+    """Map the same five levels onto Gemini's thinking levels.
+
+    Gemini names the idea ``thinking_level`` and offers low/medium/high, so the
+    top two KaroX levels are clamped to ``high`` for the same reason.
+    """
+
+    return "high" if effort in {"xhigh", "max"} else effort
+
+
 class _StreamingAdapter:
     """Secret-safe HTTP/SSE transport and normalized response assembly."""
 
@@ -403,6 +425,8 @@ class OpenAIResponsesProvider(_StreamingAdapter):
             # OpenAI caches automatically; the key only routes requests sharing
             # a prefix to the same cache, which an agent loop always does.
             payload["prompt_cache_key"] = request.cache_key
+        if request.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort)}
         return payload
 
     def _events(
@@ -727,6 +751,10 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 for item in request.tools
             ]
             payload["tool_choice"] = {"type": "auto"}
+        if request.reasoning_effort is not None:
+            # Anthropic carries the dial inside output_config, and accepts the
+            # full range KaroX exposes, so nothing is narrowed here.
+            payload["output_config"] = {"effort": request.reasoning_effort}
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         return payload
@@ -1053,6 +1081,10 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
             generation["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             generation["maxOutputTokens"] = request.max_output_tokens
+        if request.reasoning_effort is not None:
+            generation["thinkingConfig"] = {
+                "thinkingLevel": _gemini_thinking_level(request.reasoning_effort)
+            }
         if generation:
             payload["generationConfig"] = generation
         return payload
