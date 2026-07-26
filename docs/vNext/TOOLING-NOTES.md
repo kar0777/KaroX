@@ -160,15 +160,22 @@ python -m karox.cli bridge serve `
 
 ### Approved verification set
 
-`karox.checks.run` only runs a command whose full argv exactly matches one of the
-vectors supplied at launch: a membership test on a frozenset of tuples, with no
-prefix or regular-expression matching. The vectors above cover the two baseline
+`karox.checks.run` only runs a command admitted by one of the vectors supplied at
+launch. A vector is either an exact argv, which matches position for position and
+nothing else, or a prefix rule written with a trailing `*`, which matches the
+literal prefix and then accepts any further arguments that are not an
+interpreter's own code-execution option (`-c`, `-e`, `--eval` and the rest,
+including the bundled and attached-value spellings such as `-cCODE` and `-Bc`).
+There is no regular-expression matching, and the executable is always literal:
+`["python", "-m", "pytest", "*"]` admits `python -m pytest tests/test_core.py -x`
+but not `python3 -m pytest`, not `python -m pip install`, and not
+`python -m pytest -c "import os"`. The vectors above cover the two baseline
 checks, two environment-recovery installs, one discovery vector per test module,
 three screenshot captures, and six read-only CLI diagnostics.
 
-The set is intentionally closed. Adding a command means restarting the bridge
-with an extended list, which is also why a new test module cannot be run until
-the next restart.
+The set is intentionally closed. Adding a vector means restarting the bridge with
+an extended list. A prefix rule is what makes a test module written during the
+session runnable before that restart; with exact vectors only, it is not.
 
 Starting the bridge is itself outside the approved set on purpose. A long-lived
 server is not a bounded check, and an agent should not be able to spawn one.
