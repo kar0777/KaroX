@@ -9,6 +9,12 @@ dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+# Coverage runs in parallel mode, so it leaves one data file per process.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Local state
 logs/

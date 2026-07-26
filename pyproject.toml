@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "karox-runtime"
-version = "5.0.0.dev0"
+# Derived from src/karox/__init__.py, which is the single source of truth for the
+# runtime version. It used to be a second literal here, and a third one inside
+# the quality workflow, so the number a user sees could disagree with the wheel
+# they installed. scripts/check_versions.py keeps every remaining copy honest.
+dynamic = ["version"]
 description = "Hybrid local runtime for native and hosted AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,8 +45,20 @@ dependencies = [
 karox = "karox.cli:main"
 karox-vnext = "karox.cli:main"
 
+# Development-only tooling, declared so CI and a contributor install the same
+# versions instead of each guessing. These are PEP 735 groups: `pip install
+# --group lint` needs no build of this project and pulls nothing at runtime.
+[dependency-groups]
+lint = ["ruff>=0.14,<1.0"]
+typing = ["mypy>=1.13,<2.0", "types-PyYAML>=6.0,<7.0"]
+coverage = ["coverage>=7.6,<9.0"]
+dev = [{ include-group = "lint" }, { include-group = "typing" }, { include-group = "coverage" }]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = { attr = "karox.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -59,6 +75,76 @@ line-length = 100
 # thousand style findings nobody acts on. Widen it by fixing a rule family and
 # adding it here in the same commit.
 select = ["E9", "F"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/karox"]
+# Deliberately the level the code passes today, in the same spirit as the ruff
+# selection above: mypy's defaults over the whole package, plus the extra
+# hygiene flags the tree is already clean under. There is no blanket
+# `ignore_missing_imports` and no global `ignore_errors`; the only exemptions are
+# the named modules in the override below, so a new type error in any other
+# module -- or in a module added later -- fails CI.
+#
+# What is NOT enabled yet: `disallow_untyped_defs` and the rest of `--strict`.
+# Turning them on today reports thousands of findings across a package that is
+# largely, but not fully, annotated, which would make the gate unusable rather
+# than useful. Raise it one flag at a time, fixing the findings in the same
+# commit that enables the flag.
+# `warn_unused_ignores` is deliberately absent: the keyring import in
+# credentials.py carries an ignore that is needed only where keyring is not
+# installed, so the flag's verdict depends on the environment rather than on the
+# code, and it would fail CI while passing for a contributor.
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# The eleven modules below do not pass mypy's defaults yet: 59 findings, mostly
+# a JSON-shaped local rebound between `dict` and `list` in the CLI's report
+# builders. They are excused BY NAME and with a count so the debt is visible and
+# finite. Delete a name when its module is fixed; never add one.
+module = [
+  "karox.agent",
+  "karox.cli",
+  "karox.core",
+  "karox.mcp_client",
+  "karox.oauth_bridge",
+  "karox.openapi_bridge",
+  "karox.packs",
+  "karox.provider_adapters",
+  "karox.sessions",
+  "karox.tui",
+  "karox.web_bridge_launcher",
+]
+ignore_errors = true
+
+[tool.coverage.run]
+source = ["src/karox"]
+branch = true
+# The suite runs threads and multiprocessing workers, so both are declared and
+# the data is written per process and combined afterwards. What this does NOT
+# measure is the plain `subprocess` CLI end-to-end runs: those would need
+# COVERAGE_PROCESS_START and a sitecustomize hook in the child. The reported
+# figure therefore understates the code those tests really execute -- which is
+# the safe direction for a gate, but worth knowing before reading it as truth.
+parallel = true
+concurrency = ["thread", "multiprocessing"]
+
+[tool.coverage.report]
+# The suite measures 75% statement+branch coverage of src/karox today. The gate
+# sits at 70 to leave room for platform-skipped branches on the other CI runners
+# rather than to flatter the number. Treat it as a ratchet: raise it when new
+# tests earn it, and never lower it to make a red run go green.
+fail_under = 70
+skip_covered = false
+show_missing = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.$",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Each test module inserts src on sys.path through this import for its side

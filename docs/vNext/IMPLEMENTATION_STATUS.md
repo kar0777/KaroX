@@ -18,7 +18,7 @@ Base: `main` at `a5c233a`
 | 7 — MCP proxy/bridges | Complete | Built-in Core and external MCP allowlists over authenticated MCP/OpenAPI wire E2E |
 | 8 — Pack SDK | Complete | Strict manifest, declared-file install, compatibility, integrity doctor, and CLI E2E |
 | 9 — TUI | Complete | Full-screen Textual chat/task client, provider onboarding, status view, hosted bridge/tunnel setup, and line-mode fallback |
-| 10 — benchmark/readiness | Complete | Current 420-test pytest suite plus KB-HYBRID-01..10 functional run records |
+| 10 — benchmark/readiness | Complete | Current 536-test suite plus KB-HYBRID-01..10 functional run records |
 | 11 — outbound target ask | Complete | `target ask` CLI/TUI against the verified PromptQL Natural Language API contract, with mocked-HTTP contract tests |
 | 12 — web MCP OAuth | Complete (local contract) | ChatGPT/Claude bridge profiles with OAuth discovery, DCR, PKCE, rotating refresh tokens, replay revocation, and real HTTP/MCP tests; live account runs pending |
 
@@ -74,8 +74,21 @@ Limitations:
 - CI builds/installs that artifact and runs the complete suite on three OSes.
 - Streamable HTTP uses stateless JSON responses, eliminating the AnyIO stream
   leak observed in the stateful SSE test server.
-- Current local evidence is 420 pytest tests / 133 subtests with one
-  environment/platform skip on Windows; a remote matrix result is still pending.
+- Current local evidence is 536 tests with two platform skips on Windows, run as
+  `python -m unittest discover -s tests -p "test_*.py"` — the runner CI uses.
+  536 is what `python -m pytest --collect-only -q tests` reports too; a pytest
+  *pass* tally is deliberately not quoted anywhere, because pytest adds a subtest
+  count whose value moves between runs. A remote matrix result is still pending.
+- Known local flake, not a product defect: under pytest on Windows,
+  `test_core_checks.CheckRunTests.test_a_timeout_caused_by_a_clamp_explains_itself`
+  can fail in teardown when the killed child process still holds the temporary
+  repository directory. The same test passes under `unittest`.
+- Correction to every earlier phase entry below that calls Notion "the only
+  tested hosted bridge": the Notion profile is now `tested_legacy`. Its evidence
+  (`scripts/test_notion_mcp_transport.py`) exercises `server/notion_gateway.py`,
+  which is a different HTTP server from this runtime's bridge, so it never
+  supported a `tested` label here. No bridge profile is `tested` today. The
+  historical entries below are left as written; this bullet is the current fact.
 - Hosted bridge E2E now covers explicit built-in Core tools over real
   Streamable HTTP MCP and OpenAPI wire servers. The OpenAPI path includes
   `/session` and `/context/brief`, mutation idempotency, bearer denial, and
