@@ -568,6 +568,40 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 # The text the agent receives is the whole trace.
                 self.assertEqual(app._expand_pasted_blocks(composer.value), trace)
 
+    async def test_every_tool_of_a_turn_stays_visible(self) -> None:
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._begin_step("call-1", "reading a file")
+                app._finish_step("call-1", "repo.read_file", "ok", failed=False)
+                app._begin_step("call-2", "editing a file")
+                app._finish_step("call-2", "repo.write_file", "ok", failed=False)
+                app._begin_step("call-3", "running checks")
+                await pilot.pause()
+
+                rendered = str(app.query_one("#activity", tui.Static).render())
+
+                # One overwritten line showed the third tool and no evidence
+                # that the first two had happened at all.
+                self.assertIn("repo.read_file", rendered)
+                self.assertIn("repo.write_file", rendered)
+                self.assertIn("running checks", rendered)
+
+    async def test_a_failed_tool_is_not_marked_as_done(self) -> None:
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._begin_step("call-1", "running checks")
+                app._finish_step("call-1", "checks.run", "failed", failed=True)
+                await pilot.pause()
+
+                rendered = str(app.query_one("#activity", tui.Static).render())
+
+                self.assertIn("✕ checks.run", rendered)
+                self.assertNotIn("✓ checks.run", rendered)
+
     async def test_a_single_line_paste_still_goes_in_verbatim(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")

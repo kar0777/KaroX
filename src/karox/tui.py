@@ -3546,6 +3546,9 @@ if _HAS_TEXTUAL:
             Binding("escape", "stop_agent", "Стоп", show=False, priority=True),
             Binding("ctrl+c", "stop_or_copy", "Стоп / Копировать", show=False, priority=True),
         ]
+        # The activity panel is four lines tall, so more than a few steps would
+        # scroll the oldest out of sight anyway.
+        MAX_VISIBLE_STEPS = 6
         CSS = """
         Screen { background: #121212; color: #dcdcdc; }
         #brand { height: auto; padding: 1 2 0 2; background: #181511;
@@ -3615,6 +3618,10 @@ if _HAS_TEXTUAL:
             self._stop_requested = False
             self._history_seen = 0
             self._history_fingerprint: Optional[Tuple[int, int]] = None
+            # One entry per tool call of the current turn, in the order they
+            # started, so the whole turn stays visible instead of each call
+            # overwriting the one before it.
+            self._steps: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
             # Multi-line pastes held aside while the composer shows a short
             # marker for each. Pasting a stack trace or a diff is the most
             # common way a coding agent is handed context, and a one-line widget
@@ -5025,6 +5032,7 @@ if _HAS_TEXTUAL:
             self.active_session = session_id
             self._history_seen = 0
             self._history_fingerprint = None
+            self._steps.clear()
             self.agent_busy = True
             self._stop_requested = False
             self.agent_process = None
@@ -5092,6 +5100,57 @@ if _HAS_TEXTUAL:
             self.copy_to_clipboard(text)
             self.notify(self._label("Скопировано", "Copied"))
 
+        def _begin_step(self, call_id: str, label: str) -> None:
+            if call_id in self._steps:
+                return
+            self._steps[call_id] = {
+                "label": label,
+                "started": time.monotonic(),
+                "line": None,
+            }
+            self._render_steps()
+
+        def _finish_step(
+            self, call_id: str, name: str, detail: str, *, failed: bool
+        ) -> None:
+            step = self._steps.get(call_id)
+            if step is None:
+                # A resumed session replays results whose call the interface
+                # never watched start, so there is nothing to time.
+                self._steps[call_id] = step = {"label": name, "started": None}
+            mark = "✕" if failed else "✓"
+            elapsed = ""
+            started = step.get("started")
+            if isinstance(started, float):
+                seconds = time.monotonic() - started
+                # Below a second the number is mostly the polling interval, and
+                # printing it would present the interface's own latency as the
+                # tool's.
+                if seconds >= 1.0:
+                    elapsed = f" {seconds:.0f}s"
+            step["line"] = (
+                f"{mark} {escape(name)}{elapsed}"
+                + (f"  [dim]{escape(detail)}[/]" if detail else "")
+            )
+            self._render_steps()
+
+        def _render_steps(self) -> None:
+            """Show the whole turn, not only whatever ran last.
+
+            A three-tool turn used to overwrite one line twice, so the user saw
+            the third tool and no evidence that the first two had happened.
+            """
+            while len(self._steps) > self.MAX_VISIBLE_STEPS:
+                self._steps.pop(next(iter(self._steps)))
+            lines = [
+                step["line"]
+                if step.get("line")
+                else f"⟳ {escape(str(step['label']))}…"
+                for step in self._steps.values()
+            ]
+            if lines:
+                self._set_activity("\n".join(lines))
+
         def _poll_agent_history(self) -> None:
             if not self.agent_busy or not self.active_session:
                 return
@@ -5129,17 +5188,12 @@ if _HAS_TEXTUAL:
                     for call in entry.get("tool_calls") or ():
                         if isinstance(call, dict):
                             name = str(call.get("name") or "tool")
-                            labels = {
-                                "repo_list_files": ("просматривает файлы", "listing files"),
-                                "repo_read_file": ("читает файл", "reading a file"),
-                                "repo_write_file": ("изменяет файл", "editing a file"),
-                                "checks_run": ("запускает проверку", "running checks"),
-                                "git_status": ("проверяет изменения", "checking changes"),
-                                "git_diff": ("анализирует diff", "reviewing the diff"),
-                            }
-                            ru, en = labels.get(name, (name, name))
-                            self._set_activity(
-                                self._label(f"⟳ {escape(ru)}…", f"⟳ {escape(en)}…")
+                            ru, en = _TOOL_LABELS.get(
+                                _canonical_tool_name(name), (name, name)
+                            )
+                            self._begin_step(
+                                str(call.get("call_id") or name),
+                                self._label(ru, en),
                             )
                 elif role == "tool":
                     name = str(
@@ -5154,14 +5208,11 @@ if _HAS_TEXTUAL:
                                 if key in data:
                                     details.append(f"{key}={data[key]}")
                         details.insert(0, "ok" if result.get("ok", True) else "failed")
-                    suffix = " • ".join(details)
-                    self._set_activity(
-                        self._label(
-                            f"✓ {escape(name)}"
-                            + (f"  [dim]{escape(suffix)}[/]" if suffix else ""),
-                            f"✓ {escape(name)}"
-                            + (f"  [dim]{escape(suffix)}[/]" if suffix else ""),
-                        )
+                    self._finish_step(
+                        str(entry.get("tool_call_id") or name),
+                        _canonical_tool_name(name),
+                        " • ".join(details),
+                        failed=isinstance(result, dict) and not result.get("ok", True),
                     )
                 # provider_audit intentionally has no visible activity line:
                 # showing "Модель: …" on every turn mixed the model identity
@@ -5380,6 +5431,44 @@ if _HAS_TEXTUAL:
 
         def action_clear_log(self) -> None:
             self.query_one("#conversation", ChatLog).clear()
+
+
+# Core tool names as the audit log and the session record spell them. The model
+# sees the same names with dots replaced by underscores, so a running step and
+# its completion line used to disagree about what had just run.
+_CORE_TOOL_NAMES = (
+    "repo.read_file",
+    "repo.read_lines",
+    "repo.write_file",
+    "repo.edit_file",
+    "repo.list_files",
+    "repo.search",
+    "checks.run",
+    "git.status",
+    "git.diff",
+    "git.log",
+    "git.commit",
+)
+_ALIAS_TO_CORE_TOOL = {name.replace(".", "_"): name for name in _CORE_TOOL_NAMES}
+
+_TOOL_LABELS = {
+    "repo.list_files": ("просматривает файлы", "listing files"),
+    "repo.search": ("ищет по коду", "searching the code"),
+    "repo.read_file": ("читает файл", "reading a file"),
+    "repo.read_lines": ("читает фрагмент", "reading a region"),
+    "repo.write_file": ("изменяет файл", "editing a file"),
+    "repo.edit_file": ("правит файл", "editing a file"),
+    "checks.run": ("запускает проверку", "running checks"),
+    "git.status": ("проверяет изменения", "checking changes"),
+    "git.diff": ("анализирует diff", "reviewing the diff"),
+    "git.log": ("читает историю", "reading history"),
+    "git.commit": ("фиксирует изменения", "committing"),
+}
+
+
+def _canonical_tool_name(name: str) -> str:
+    """Spell a tool the one way, whichever side of the boundary named it."""
+    return _ALIAS_TO_CORE_TOOL.get(name, name)
 
 
 def _line_writer(stream: Any) -> Callable[[str], None]:
