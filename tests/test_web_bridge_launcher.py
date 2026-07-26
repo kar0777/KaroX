@@ -29,7 +29,10 @@ from karox.web_bridge_launcher import (
     _child_options,
     _mirror_child_output,
     _wait_for_bridge,
+    bundled_cloudflared,
+    cloudflared_not_found_message,
     ephemeral_url_warning,
+    find_cloudflared,
     parent_death_hook,
     run_web_bridge,
     start_cloudflare_quick_tunnel,
@@ -309,6 +312,44 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         self.assertEqual(record["tunnel_pid"], 4242)
         self.assertIsNone(record["bridge_pid"])
         self.assertEqual(record["public_url"], "https://small-tree.trycloudflare.com")
+
+
+class CloudflaredLookupTests(unittest.TestCase):
+    """A missing cloudflared has to be diagnosable from the message alone."""
+
+    def test_the_message_names_where_it_looked_and_a_remedy_that_exists_here(
+        self,
+    ) -> None:
+        message = cloudflared_not_found_message()
+        self.assertIn(str(bundled_cloudflared()), message)
+        self.assertIn("PATH", message)
+        # The old wording told every user to rerun the KaroX installer. There is
+        # no KaroX installer to rerun on macOS or Linux, so the remedy has to be
+        # the one that exists on the platform reading it.
+        expected = {
+            "win32": "winget",
+            "darwin": "brew",
+        }.get(sys.platform, "distribution")
+        self.assertIn(expected, message)
+
+    def test_a_wrong_explicit_path_is_reported_as_that_path(self) -> None:
+        # Distinct from "nothing found anywhere": the user gave a path and it is
+        # the path that is wrong, which the old single message never said.
+        message = cloudflared_not_found_message(r"C:\typo\cloudflared.exe")
+        self.assertIn(r"C:\typo\cloudflared.exe", message)
+        self.assertIn("--cloudflared", message)
+        self.assertNotIn("Searched PATH", message)
+
+    def test_the_bundled_path_is_where_the_installer_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": tmp}):
+                bundled = bundled_cloudflared()
+                self.assertEqual(bundled.parent.name, "bin")
+                self.assertEqual(bundled.parent.parent, Path(tmp).resolve())
+                self.assertIsNone(find_cloudflared(str(bundled)))
+                bundled.parent.mkdir(parents=True)
+                bundled.write_bytes(b"binary")
+                self.assertEqual(find_cloudflared(str(bundled)), str(bundled))
 
 
 class BridgeDiagnosticsTests(unittest.TestCase):

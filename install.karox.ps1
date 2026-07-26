@@ -302,18 +302,29 @@ if (!(Test-Path -LiteralPath $newCloudflared) -and (Test-Path -LiteralPath $lega
 }
 
 $cloudflaredOnPath = Get-Command cloudflared -ErrorAction SilentlyContinue
+$cloudflaredRemedy = "Install it later with 'winget install --id Cloudflare.cloudflared', or rerun this installer. 'karox bridge connect' needs it and will name this path if it is missing."
 if (!(Test-Path -LiteralPath $newCloudflared) -and !$cloudflaredOnPath) {
     $answer = Read-Host "cloudflared (Cloudflare Tunnel) was not found. Download it automatically from github.com/cloudflare/cloudflared (~60 MB)? [Y/n]"
     if (!$answer -or $answer -match "^[Yy]") {
+        # Downloaded beside the target and moved only once it is whole: a transfer
+        # interrupted straight onto the target leaves a truncated cloudflared.exe,
+        # which is worse than none -- KaroX would find it and fail to run it.
+        $partial = "$newCloudflared.part"
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $newCloudflared -UseBasicParsing
+            Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $partial -UseBasicParsing
+            $size = (Get-Item -LiteralPath $partial).Length
+            if ($size -lt 10485760) {
+                throw "downloaded file is only $size bytes, which is not the cloudflared binary"
+            }
+            Move-Item -LiteralPath $partial -Destination $newCloudflared -Force
             Write-Host "cloudflared: $newCloudflared" -ForegroundColor Green
         } catch {
-            Write-Host "cloudflared download failed: $($_.Exception.Message). KaroX will offer to download it again on first launch." -ForegroundColor Yellow
+            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            Write-Host "cloudflared download failed: $($_.Exception.Message). $cloudflaredRemedy" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "Skipped. KaroX will offer to download cloudflared on first launch." -ForegroundColor Yellow
+        Write-Host "Skipped. $cloudflaredRemedy" -ForegroundColor Yellow
     }
 }
 

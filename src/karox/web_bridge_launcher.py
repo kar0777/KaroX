@@ -123,6 +123,12 @@ class CloudflareQuickTunnel:
         self.reader.join(timeout=2)
 
 
+def bundled_cloudflared() -> Path:
+    """Where the KaroX installer puts cloudflared when the user accepts it."""
+    executable = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+    return runtime_dir() / "bin" / executable
+
+
 def find_cloudflared(explicit: Optional[str] = None) -> Optional[str]:
     """Resolve cloudflared from an explicit path, PATH, or KaroX runtime bin."""
     if explicit:
@@ -131,9 +137,43 @@ def find_cloudflared(explicit: Optional[str] = None) -> Optional[str]:
     discovered = shutil.which("cloudflared")
     if discovered:
         return discovered
-    executable = "cloudflared.exe" if os.name == "nt" else "cloudflared"
-    bundled = runtime_dir() / "bin" / executable
+    bundled = bundled_cloudflared()
     return str(bundled) if bundled.is_file() else None
+
+
+def cloudflared_install_hint() -> str:
+    """The way to get cloudflared that exists on *this* platform."""
+    if sys.platform == "win32":
+        return (
+            "install it with `winget install --id Cloudflare.cloudflared` or rerun "
+            "the KaroX installer"
+        )
+    if sys.platform == "darwin":
+        return "install it with `brew install cloudflared`"
+    return (
+        "install your distribution's cloudflared package, or take the binary from "
+        "github.com/cloudflare/cloudflared/releases"
+    )
+
+
+def cloudflared_not_found_message(explicit: Optional[str] = None) -> str:
+    """Say what was searched, because "not found" alone is not diagnosable.
+
+    The old wording named neither the paths tried nor a remedy that exists off
+    Windows: it told every user to rerun an installer, and on macOS and Linux
+    there is no KaroX installer to rerun. A report of this failure could not be
+    acted on without reproducing it.
+    """
+    if explicit:
+        return (
+            "cloudflared was not found at the path given with --cloudflared: "
+            f"{explicit}"
+        )
+    return (
+        "cloudflared was not found. Searched PATH and "
+        f"{bundled_cloudflared()}. To fix it, {cloudflared_install_hint()}, "
+        "or pass --cloudflared PATH."
+    )
 
 
 def _creation_flags() -> int:
@@ -421,10 +461,7 @@ def start_cloudflare_quick_tunnel(
     """Start cloudflared, parse its assigned HTTPS origin, and keep draining logs."""
     resolved = find_cloudflared(executable)
     if resolved is None:
-        raise WebBridgeLaunchError(
-            "cloudflared was not found; rerun the KaroX installer or pass "
-            "--cloudflared PATH"
-        )
+        raise WebBridgeLaunchError(cloudflared_not_found_message(executable))
     try:
         process = popen(
             [
