@@ -19,7 +19,6 @@ from karox.core_tools import ExtendedCoreRuntime
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import (
-    ModelMessage,
     ModelRequest,
     ModelResponse,
     ProviderError,

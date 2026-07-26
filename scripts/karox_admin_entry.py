@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from pathlib import Path
 
 import karox_admin as admin
 from karox_paths import config_dir, runtime_dir

@@ -27,13 +27,12 @@ from karox.handoff import build_handoff, handoff_digest
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import (
-    ModelMessage,
     ModelRequest,
     ModelResponse,
     ProviderError,
     ToolCall,
 )
-from karox.sessions import SessionBusy, SessionError, SessionStore
+from karox.sessions import SessionBusy, SessionRecord, SessionStore
 
 
 class QueueProvider:

@@ -20,10 +20,18 @@ import re
 import shutil
 import stat
 import sys
-import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
+
+# tomllib entered the standard library in 3.11, but this package declares 3.10 as
+# its floor and both installers accept it. cli.py imports this module at the top
+# level, so an unconditional `import tomllib` made every karox invocation on 3.10
+# die with an ImportError before argparse ran.
+if sys.version_info >= (3, 11):  # pragma: no cover - selected by interpreter
+    import tomllib
+else:  # pragma: no cover - selected by interpreter
+    import tomli as tomllib
 
 
 PACK_MANIFEST_NAME = "karox-pack.toml"

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from .models import repository_fingerprint
 from .security import redact

@@ -24,7 +24,7 @@ import uvicorn
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 from _mcp_http_server import build_asgi_app, expected_token
 
-from karox.core import CoreError, CoreRuntime, InvalidCommand
+from karox.core import CoreRuntime, InvalidCommand
 from karox.credentials import CredentialError
 from karox.mcp_client import (
     McpAccessDenied,

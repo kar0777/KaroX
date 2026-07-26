@@ -23,11 +23,9 @@ from typing import Optional
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
 from karox.bridge import (
-    BridgeAccessDenied,
     BridgeConfigurationError,
     BridgeCredentialReference,
     BridgeCredentialStore,
-    BridgeError,
     BridgeProfile,
     BridgeRegistry,
     BridgeStatus,
@@ -44,9 +42,9 @@ from karox.mcp_client import (
 )
 from karox.models import AccessProfile, Capability, Origin, OriginKind
 from karox.policy import CapabilityPolicy, PolicyDenied
-from karox.proxy import McpProxy, ProxyAccessDenied, ProxyError
+from karox.proxy import McpProxy, ProxyAccessDenied
 from karox.proxy_server import build_proxy_asgi_app
-from karox.sessions import SessionRecord, SessionStore
+from karox.sessions import SessionStore
 
 
 class _FakeCredentialBackend:

@@ -14,12 +14,10 @@ touching other credential stores.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import secrets
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Iterable, List, Optional
 
 from .credentials import CredentialBackend, CredentialError, KeyringBackend
 

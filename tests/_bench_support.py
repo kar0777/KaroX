@@ -30,7 +30,7 @@ import json
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -41,7 +41,6 @@ from _support import SRC  # noqa: F401 - inserts src on sys.path
 # Scripted provider primitives (identical contract to the agent test suite).  #
 # --------------------------------------------------------------------------- #
 from karox.providers import (
-    ModelMessage,
     ModelRequest,
     ModelResponse,
     ProviderError,

@@ -32,7 +32,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -55,7 +54,6 @@ from karox.agent import AgentKernel, AgentLimits, SYSTEM_PROMPT
 from karox.bridge import (
     BridgeCredentialReference,
     BridgeCredentialStore,
-    BridgeRegistry,
     known_bridge_profiles,
 )
 from karox.core import CoreRuntime
@@ -63,7 +61,7 @@ from karox.handoff import HANDOFF_SCHEMA_VERSION, build_handoff, handoff_digest
 from karox.mcp_client import McpRuntimeBinding, mcp_selection
 from karox.models import AccessProfile, Capability, Origin, OriginKind
 from karox.policy import CapabilityPolicy, PolicyDenied
-from karox.proxy import McpProxy, ProxyAccessDenied
+from karox.proxy import McpProxy
 from karox.sessions import SessionBusy, SessionStore
 
 

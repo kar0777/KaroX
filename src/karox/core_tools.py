@@ -41,7 +41,7 @@ from .core import (
     ToolDefinition,
 )
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
-from .security import contains_credential, redact, redact_content
+from .security import contains_credential, redact_content
 from .sessions import MutationLease, SessionRecord
 
 

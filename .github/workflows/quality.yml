@@ -9,14 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  vnext-runtime:
-    name: vNext artifact · ${{ matrix.os }} · Python 3.12
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+  static-checks:
+    name: Lint and dependency declarations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -26,6 +22,40 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+
+      # Runs on the standard library alone, so it executes before anything is
+      # installed and catches a dependency that is imported but not declared.
+      - name: Check dependency declarations
+        run: python scripts/check_dependencies.py
+
+      - name: Install ruff
+        run: python -m pip install "ruff>=0.14,<1.0"
+
+      - name: Lint
+        run: python -m ruff check src tests scripts
+
+  vnext-runtime:
+    name: vNext artifact · ${{ matrix.os }} · Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 3.10 is the floor declared in pyproject.toml. It was never exercised
+        # here before, so an unconditional 3.11-only import shipped in a release
+        # that claimed to support it and died before argparse ran.
+        python: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - name: Build and install the vNext wheel
@@ -42,6 +72,17 @@ jobs:
           python -c "import karox; assert karox.__version__ == '5.0.0.dev0'"
           karox --help
           karox-vnext --help
+          karox paths --json
+
+      # The suite imports karox from src through tests/_support.py, which shadows
+      # the wheel installed above. Importing the installed package from a
+      # different working directory is the only step here that proves the
+      # artifact itself is complete.
+      - name: Prove the installed wheel imports without the source tree
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}"
+          python -c "import karox.cli, karox.tui, karox.packs, karox.markdown_render; print('installed artifact imports')"
 
       - name: Run the complete vNext suite
         shell: bash

@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from _support import SRC, initialize_git_repository
-from karox.core import CoreError, CoreRuntime, InvalidCommand, InvalidPath
+from _support import initialize_git_repository
+from karox.core import CoreRuntime, InvalidCommand, InvalidPath
 from karox.models import (
     AccessProfile,
     Capability,

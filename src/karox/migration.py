@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 from urllib.parse import urlsplit
 
-from .security import SECRET_VALUE_PATTERNS, contains_credential, redact
+from .security import contains_credential, redact
 
 
 class MigrationError(RuntimeError):
