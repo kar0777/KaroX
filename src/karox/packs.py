@@ -460,6 +460,56 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
             pass
 
 
+# Windows refuses a delete or a rename with a sharing violation for as long as
+# any other process holds a handle on the file, and a virus scanner or the search
+# indexer opening a freshly written pack is enough to cause one. It clears in
+# milliseconds, so the operation is retried rather than reported to the user as a
+# failure they can do nothing about: `karox pack remove` was returning "cannot
+# remove installed pack" for a condition that had already passed.
+_FS_RETRY_SECONDS = 2.0
+_FS_RETRY_DELAY = 0.05
+
+
+def _clear_read_only(target: Path) -> None:
+    """Drop the read-only attribute Windows will not delete through.
+
+    Not transient, but it presents as the same error and costs nothing to undo on
+    a retry we are already making.
+    """
+    entries: Iterable[Path]
+    if target.is_dir():
+        entries = (target, *target.rglob("*"))
+    else:
+        entries = (target,)
+    for entry in entries:
+        try:
+            entry.chmod(entry.stat().st_mode | stat.S_IWRITE)
+        except OSError:
+            pass
+
+
+def _retry_transient_fs(operation: Any, target: Path) -> None:
+    """Run a destructive filesystem operation, tolerating a passing lock."""
+    deadline = time.monotonic() + _FS_RETRY_SECONDS
+    while True:
+        try:
+            operation()
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            _clear_read_only(target)
+            time.sleep(_FS_RETRY_DELAY)
+
+
+def _remove_tree(target: Path) -> None:
+    _retry_transient_fs(lambda: shutil.rmtree(target), target)
+
+
+def _replace_path(source: Path, destination: Path) -> None:
+    _retry_transient_fs(lambda: os.replace(source, destination), source)
+
+
 @contextlib.contextmanager
 def _exclusive_file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
     """Hold an OS-level exclusive lock on ``path`` for the duration of the block.
@@ -662,7 +712,9 @@ class PackRegistry:
         if staged_hashes != hashes:
             shutil.rmtree(staging, ignore_errors=True)
             raise PackConfigurationError("staged Pack content diverged from source")
-        os.replace(staging, install_dir)
+        # Same sharing-violation window as removal: the files were written a
+        # moment ago, which is exactly when a scanner opens them.
+        _replace_path(staging, install_dir)
         pack = InstalledPack(
             manifest.name, manifest.version, str(install_dir),
             manifest_sha, hashes, enabled=False,
@@ -728,7 +780,7 @@ class PackRegistry:
             install_path = Path(pack.install_path)
             if install_path.exists():
                 try:
-                    shutil.rmtree(install_path)
+                    _remove_tree(install_path)
                 except OSError as exc:
                     raise PackConfigurationError(
                         f"cannot remove installed pack {identity}: {exc}"

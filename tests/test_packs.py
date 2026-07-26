@@ -9,14 +9,18 @@ doctor/enable/disable/remove flow is exercised end to end.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _support import SRC, child_environment  # noqa: F401 - inserts src on sys.path
+
+import karox.packs
 
 from karox.packs import (
     PackAccessDenied,
@@ -311,6 +315,76 @@ class PackLifecycleTests(unittest.TestCase):
         )
         manifest = parse_pack_manifest(target / "karox-pack.toml")
         self.assertEqual(manifest.description, 'He said "go"\\now')
+
+
+class PackTransientLockTests(unittest.TestCase):
+    """A passing file lock must not become a user-visible failure.
+
+    Windows refuses a delete or a rename while any other process holds a handle,
+    and a virus scanner or the search indexer opening a freshly installed pack is
+    enough. `karox pack remove` was answering that with "cannot remove installed
+    pack" and exit 2 -- for a condition that had already cleared.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "inspector"
+        create_pack_template(self.source, name="project-inspector", description="Sample pack")
+        self.registry = PackRegistry(self.root / "registry")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_remove_survives_a_lock_that_clears(self) -> None:
+        """Deterministic on every platform: fail the first attempt, then relent."""
+        pack = self.registry.install(self.source)
+        attempts: list[int] = []
+        real_rmtree = shutil.rmtree
+
+        def flaky_rmtree(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise PermissionError(13, "The process cannot access the file")
+            return real_rmtree(target, *args, **kwargs)
+
+        with patch.object(karox.packs.shutil, "rmtree", flaky_rmtree):
+            self.registry.remove(pack.identity)
+
+        self.assertGreaterEqual(len(attempts), 2, "the removal was not retried")
+        self.assertEqual(self.registry.list(), [])
+        self.assertFalse(Path(pack.install_path).exists())
+
+    def test_remove_still_reports_a_lock_that_never_clears(self) -> None:
+        """The retry must not turn a real, persistent failure into silence."""
+        pack = self.registry.install(self.source)
+
+        def always_locked(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise PermissionError(13, "The process cannot access the file")
+
+        with patch.object(karox.packs.shutil, "rmtree", always_locked):
+            with self.assertRaisesRegex(PackConfigurationError, "cannot remove installed pack"):
+                self.registry.remove(pack.identity)
+        # Still installed: a failed removal must not drop the registry entry.
+        self.assertEqual([p.identity for p in self.registry.list()], [pack.identity])
+
+    @unittest.skipUnless(os.name == "nt", "only Windows refuses to delete an open file")
+    def test_remove_survives_a_real_held_handle_on_windows(self) -> None:
+        """The same thing with an actual OS handle rather than a patched call.
+
+        This is the observed failure: a full suite run held a handle on a pack
+        file long enough for `pack remove` to exit 2 with nothing on stdout.
+        """
+        pack = self.registry.install(self.source)
+        held = open(Path(pack.install_path) / "skills" / "SKILL.md", "rb")
+        releaser = threading.Timer(0.4, held.close)
+        releaser.start()
+        try:
+            self.registry.remove(pack.identity)
+        finally:
+            releaser.cancel()
+            held.close()
+        self.assertEqual(self.registry.list(), [])
 
 
 class PackRegistryConcurrencyTests(unittest.TestCase):
