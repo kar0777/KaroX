@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
@@ -12,6 +12,14 @@ from fastapi.responses import JSONResponse
 
 from .core import CoreError
 from .hosted_bridge import HostedBridgeError, HostedToolRuntime
+# Both wires are published through the same tunnel, so they share one host and
+# Origin policy rather than each inventing its own.
+from .proxy_server import (
+    HOST_REJECTION_HINT,
+    normalize_host,
+    origin_is_allowed,
+    resolve_allowed_hosts,
+)
 from .security import redact
 from .sessions import SessionError
 
@@ -48,11 +56,13 @@ def build_openapi_bridge_app(
     *,
     deadline_seconds: float = 30.0,
     title: str = "KaroX Hosted Bridge",
+    allowed_hosts: Optional[Sequence[str]] = None,
 ) -> FastAPI:
     """Expose selected hosted tools as a small importable OpenAPI service."""
     if not 0.1 <= float(deadline_seconds) <= 3600.0:
         raise ValueError("bridge deadline must be between 0.1 and 3600 seconds")
     resolve_token = _token_resolver(bearer_token)
+    allowed = resolve_allowed_hosts(allowed_hosts)
     descriptors = runtime.descriptors()
     by_name = {item.name: item for item in descriptors}
     if len(by_name) != len(descriptors):
@@ -80,7 +90,11 @@ def build_openapi_bridge_app(
             expected = resolve_token()
         except Exception:
             return False
-        return hmac.compare_digest(candidates[0], expected)
+        # compare_digest rejects a non-ASCII str with TypeError, which turned a
+        # bad credential into a 500 instead of a 401.
+        return hmac.compare_digest(
+            candidates[0].encode("utf-8"), expected.encode("utf-8")
+        )
 
     def unauthorized() -> JSONResponse:
         return JSONResponse(
@@ -89,8 +103,26 @@ def build_openapi_bridge_app(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    def rebinding_rejection(request: Request) -> Optional[JSONResponse]:
+        hosts = request.headers.getlist("host")
+        if len(hosts) != 1 or normalize_host(hosts[0]) not in allowed:
+            return JSONResponse(
+                {"ok": False, "error": HOST_REJECTION_HINT}, status_code=421
+            )
+        origins = request.headers.getlist("origin")
+        if len(origins) > 1 or not origin_is_allowed(
+            origins[0] if origins else None, allowed
+        ):
+            return JSONResponse(
+                {"ok": False, "error": "invalid Origin header"}, status_code=421
+            )
+        return None
+
     @app.middleware("http")
     async def bridge_guard(request: Request, call_next: Any) -> Any:
+        rejection = rebinding_rejection(request)
+        if rejection is not None:
+            return rejection
         if request.url.path not in {"/", "/openapi.json"}:
             if not authorized(request):
                 return unauthorized()
