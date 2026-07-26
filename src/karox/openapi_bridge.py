@@ -11,7 +11,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .core import CoreError
-from .hosted_bridge import HostedBridgeError, HostedToolRuntime
+from .hosted_bridge import (
+    DEFAULT_HOSTED_DEADLINE_SECONDS,
+    HostedBridgeError,
+    HostedToolRuntime,
+)
 # Both wires are published through the same tunnel, so they share one host and
 # Origin policy rather than each inventing its own.
 from .proxy_server import (
@@ -54,7 +58,7 @@ def build_openapi_bridge_app(
     runtime: HostedToolRuntime,
     bearer_token: str | Callable[[], str],
     *,
-    deadline_seconds: float = 30.0,
+    deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     title: str = "KaroX Hosted Bridge",
     allowed_hosts: Optional[Sequence[str]] = None,
 ) -> FastAPI:

@@ -29,6 +29,7 @@ the whole result budget and make search useless in a real checkout.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -67,6 +68,8 @@ IGNORED_DIRECTORY_NAMES = frozenset(
 )
 
 _IGNORED_DIRECTORY_SUFFIXES = (".egg-info",)
+
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def is_ignored_path(relative: str) -> bool:
@@ -109,6 +112,21 @@ class ExtendedCoreRuntime(CoreRuntime):
                         "old_string": {"type": "string"},
                         "new_string": {"type": "string"},
                         "expected_occurrences": {"type": "number"},
+                        "expected_sha256": {
+                            "type": "string",
+                            "description": (
+                                "sha256 of the file as it was read. The edit is "
+                                "refused if the file changed since then."
+                            ),
+                        },
+                        "allow_secret_literal": {
+                            "type": "boolean",
+                            "description": (
+                                "Write text that looks like a credential on "
+                                "purpose, such as a secret-scanner fixture or a "
+                                "documentation example. Recorded in the result."
+                            ),
+                        },
                     },
                     "required": ["path", "old_string", "new_string"],
                     "additionalProperties": False,
@@ -235,8 +253,13 @@ class ExtendedCoreRuntime(CoreRuntime):
                 "expected_occurrences must be between 1 and "
                 f"{self.MAX_EDIT_OCCURRENCES}"
             )
-        if contains_credential(new_string):
-            raise CoreError("edit blocked by credential scanner")
+        if contains_credential(new_string) and not self._secret_literal_allowed(
+            arguments
+        ):
+            raise CoreError(
+                "edit blocked by credential scanner; pass allow_secret_literal "
+                "to author a fixture or documentation example on purpose"
+            )
         path = self.safe_path(relative, for_write=True)
         return relative, old_string, new_string, expected, path
 
@@ -252,6 +275,23 @@ class ExtendedCoreRuntime(CoreRuntime):
         if size > self.MAX_FILE_BYTES:
             raise CoreError(f"file is larger than {self.MAX_FILE_BYTES} bytes")
         raw = path.read_bytes()
+        previous_digest = hashlib.sha256(raw).hexdigest()
+        # An edit is written against a file the caller read earlier. Between the
+        # read and the write, a check, a commit, a formatter or a second client
+        # may have rewritten it -- and an exact-string match can still succeed on
+        # the new content, quietly applying the edit to a file the caller never
+        # saw. Naming the digest that was read turns that into a refusal.
+        expected_digest = arguments.get("expected_sha256")
+        if expected_digest is not None:
+            if not isinstance(expected_digest, str) or not _SHA256.fullmatch(
+                expected_digest
+            ):
+                raise InvalidCommand("expected_sha256 must be a sha256 hex digest")
+            if expected_digest.lower() != previous_digest:
+                raise InvalidCommand(
+                    "file changed since it was read: expected "
+                    f"{expected_digest.lower()} but found {previous_digest}"
+                )
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -263,11 +303,17 @@ class ExtendedCoreRuntime(CoreRuntime):
                 f"but found {found}"
             )
         updated = text.replace(old_string, new_string)
-        previous_digest = hashlib.sha256(raw).hexdigest()
         # Reuse the audited atomic writer so permissions, fsync, temporary file
         # cleanup and the size ceiling behave exactly as for repo.write_file.
         result = self._write_file(
-            {"path": relative, "content": updated}, deadline_seconds
+            {
+                "path": relative,
+                "content": updated,
+                # The edit already made this decision; the write must not make
+                # it again and refuse content the caller was allowed to author.
+                "allow_secret_literal": self._secret_literal_allowed(arguments),
+            },
+            deadline_seconds,
         )
         result["replacements"] = found
         result["previous_sha256"] = previous_digest

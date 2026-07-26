@@ -36,6 +36,7 @@ from .ecosystem import (
 )
 from .hosted_bridge import (
     CORE_TOOL_NAMES,
+    DEFAULT_HOSTED_DEADLINE_SECONDS,
     CompositeHostedBridge,
     CoreToolBridge,
     HostedBridgeError,
@@ -651,7 +652,15 @@ def _parser() -> argparse.ArgumentParser:
             "karox.checks.run is exposed"
         ),
     )
-    bridge_connect.add_argument("--deadline-seconds", type=float, default=30.0)
+    bridge_connect.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_HOSTED_DEADLINE_SECONDS,
+        help=(
+            "ceiling on one tool call, including checks.run; thirty seconds is "
+            "shorter than the test suite of any real repository"
+        ),
+    )
     bridge_connect.add_argument(
         "--tunnel-timeout-seconds",
         type=float,
@@ -704,7 +713,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_serve.add_argument("--host", default="127.0.0.1")
     bridge_serve.add_argument("--port", type=int, default=8765)
-    bridge_serve.add_argument("--deadline-seconds", type=float, default=30.0)
+    bridge_serve.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_HOSTED_DEADLINE_SECONDS,
+        help=(
+            "ceiling on one tool call, including checks.run; thirty seconds is "
+            "shorter than the test suite of any real repository"
+        ),
+    )
     bridge_serve.add_argument("--allow-network-bind", action="store_true")
     bridge_credential = bridge_commands.add_parser(
         "credential", help="manage bridge secrets in the OS keyring"

@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .hosted_bridge import HostedToolRuntime
+from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
 from .proxy_server import build_proxy_asgi_app
 
 
@@ -522,7 +522,7 @@ def build_oauth_proxy_asgi_app(
     *,
     public_url: str,
     path: str = "/mcp",
-    deadline_seconds: float = 30.0,
+    deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
 ) -> Any:
     """Expose an MCP bridge with OAuth discovery, DCR, PKCE, and refresh."""
 

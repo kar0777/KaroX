@@ -140,6 +140,51 @@ class ExtendedCoreToolTests(unittest.TestCase):
         self.assertTrue(second["idempotent_replay"])
         self.assertEqual(self._text(), "after\n")
 
+    def test_edit_refuses_a_file_that_changed_since_it_was_read(self) -> None:
+        import hashlib
+
+        bridge = self._bridge("karox.repo.edit_file")
+        read_digest = hashlib.sha256(b"before\n").hexdigest()
+        # Something else rewrote the file between the read and the edit -- a
+        # formatter, a commit, a second client -- and the anchor still matches,
+        # so without the precondition the edit lands on content the caller never
+        # saw.
+        (self.repository / "sample.txt").write_bytes(b"before\nadded line\n")
+
+        with self.assertRaisesRegex(Exception, "changed since it was read"):
+            bridge.execute(
+                "karox.repo.edit_file",
+                {
+                    "path": "sample.txt",
+                    "old_string": "before",
+                    "new_string": "after",
+                    "expected_sha256": read_digest,
+                },
+                idempotency_key="edit-stale",
+            )
+
+        self.assertEqual(self._text(), "before\nadded line\n")
+
+    def test_edit_proceeds_when_the_file_is_the_one_that_was_read(self) -> None:
+        import hashlib
+
+        bridge = self._bridge("karox.repo.edit_file")
+        digest = hashlib.sha256((self.repository / "sample.txt").read_bytes()).hexdigest()
+
+        result = bridge.execute(
+            "karox.repo.edit_file",
+            {
+                "path": "sample.txt",
+                "old_string": "before",
+                "new_string": "after",
+                "expected_sha256": digest.upper(),
+            },
+            idempotency_key="edit-fresh",
+        )
+
+        self.assertTrue(result["data"]["changed"])
+        self.assertEqual(self._text(), "after\n")
+
     def test_edit_refuses_an_occurrence_count_mismatch(self) -> None:
         (self.repository / "twice.txt").write_bytes(b"one\none\n")
         bridge = self._bridge("karox.repo.edit_file")

@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from .bridge import BridgeCredentialStore
+from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS
 from .models import AccessProfile
 from .paths import runtime_dir, session_dir
 from .proxy_server import ALLOWED_HOSTS_ENVIRONMENT
@@ -70,7 +71,7 @@ class WebBridgeConnectConfig:
     public_url: Optional[str] = None
     cloudflared: Optional[str] = None
     tunnel_timeout_seconds: float = 30.0
-    deadline_seconds: float = 30.0
+    deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS
     verification_commands: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:

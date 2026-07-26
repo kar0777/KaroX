@@ -581,6 +581,60 @@ class CoreRuntimeTests(unittest.TestCase):
         self.assertTrue(result.data["secret_like"])
         self.assertFalse(result.data["truncated"])
 
+    def test_a_secret_shaped_fixture_is_refused_until_it_is_asked_for(self) -> None:
+        fixture = 'LEAKED = "ghp_' + "A" * 30 + '"\n'
+
+        with self.assertRaisesRegex(Exception, "allow_secret_literal"):
+            self.execute_mutation(
+                self.command(
+                    "repo.write_file",
+                    {"path": "fixture.py", "content": fixture},
+                    key="fixture-refused",
+                )
+            )
+
+        # The scanner matches the shape of a credential, not one KaroX holds, so
+        # it also refused the fixtures of a secret scanner and any documentation
+        # showing an example key. Saying so on purpose is now possible, and the
+        # write that did it is marked in its result and its evidence.
+        allowed = self.execute_mutation(
+            self.command(
+                "repo.write_file",
+                {
+                    "path": "fixture.py",
+                    "content": fixture,
+                    "allow_secret_literal": True,
+                },
+                key="fixture-allowed",
+            )
+        )
+
+        self.assertTrue(allowed.ok)
+        self.assertTrue(allowed.data["secret_literal_allowed"])
+        self.assertTrue(
+            allowed.evidence[0].metadata["secret_literal_allowed"]
+        )
+        self.assertEqual(
+            (self.repository / "fixture.py").read_text(encoding="utf-8"), fixture
+        )
+
+    def test_an_ordinary_write_is_not_marked_as_an_override(self) -> None:
+        result = self.execute_mutation(
+            self.command(
+                "repo.write_file",
+                {
+                    "path": "plain.py",
+                    "content": "value = 1\n",
+                    "allow_secret_literal": True,
+                },
+                key="plain-write",
+            )
+        )
+
+        # Passing the flag on content the scanner never objected to must not
+        # make the audit trail claim an override that did not happen.
+        self.assertFalse(result.data["secret_literal_allowed"])
+
     def test_read_flags_truncation_instead_of_losing_content_silently(self) -> None:
         limit = CoreRuntime.MAX_READ_CONTENT_CHARS
         source = "source line\n" * ((limit // 12) + 5_000)

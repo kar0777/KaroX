@@ -422,6 +422,15 @@ class CoreRuntime:
                     "properties": {
                         "path": {"type": "string"},
                         "content": {"type": "string"},
+                        "allow_secret_literal": {
+                            "type": "boolean",
+                            "description": (
+                                "Write text that looks like a credential on "
+                                "purpose, such as a secret-scanner fixture or a "
+                                "documentation example. Recorded in the result "
+                                "and the evidence."
+                            ),
+                        },
                     },
                     "required": ["path", "content"],
                     "additionalProperties": False,
@@ -1049,21 +1058,33 @@ class CoreRuntime:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+        # A write that went around the credential scanner says so in both the
+        # result and the durable evidence, so a reviewer can find every one of
+        # them rather than having to infer which writes used the escape hatch.
+        bypassed = self._secret_literal_allowed(arguments) and contains_credential(
+            arguments.get("content", "")
+        )
         return {
             "path": path.relative_to(self.repository).as_posix(),
             "bytes": len(encoded),
             "changed": True,
             "previous_sha256": previous_digest,
             "sha256": digest,
+            "secret_literal_allowed": bypassed,
             "_evidence": [
                 EvidenceRecord(
                     kind="file_write",
-                    summary=f"Wrote {relative}",
+                    summary=(
+                        f"Wrote {relative} with the credential scanner overridden"
+                        if bypassed
+                        else f"Wrote {relative}"
+                    ),
                     artifact_sha256=digest,
                     metadata={
                         "path": relative,
                         "bytes": len(encoded),
                         "changed": True,
+                        "secret_literal_allowed": bypassed,
                     },
                 )
             ],
@@ -1085,10 +1106,34 @@ class CoreRuntime:
         encoded = content.encode("utf-8")
         if len(encoded) > self.MAX_FILE_BYTES:
             raise CoreError(f"content is larger than {self.MAX_FILE_BYTES} bytes")
-        if contains_credential(content):
-            raise CoreError("write blocked by credential scanner")
+        if contains_credential(content) and not self._secret_literal_allowed(
+            arguments
+        ):
+            raise CoreError(
+                "write blocked by credential scanner; pass allow_secret_literal "
+                "to author a fixture or documentation example on purpose"
+            )
         path = self.safe_path(relative, for_write=True)
         return relative, encoded, path
+
+    @staticmethod
+    def _secret_literal_allowed(arguments: Dict[str, Any]) -> bool:
+        """Whether this call deliberately writes token-shaped text.
+
+        The scanner matches the *shape* of a credential, not a credential KaroX
+        holds, so it also refuses the fixtures of a secret scanner, a rotation
+        runbook and any documentation that shows an example key. There was no
+        way to say "yes, on purpose", which made those files unwritable rather
+        than the repository safer.
+
+        The flag has to be passed on the individual call, and the call that used
+        it says so in its result and its evidence, so a reviewer can find every
+        write that went around the scanner instead of inferring it.
+        """
+        value = arguments.get("allow_secret_literal", False)
+        if not isinstance(value, bool):
+            raise InvalidCommand("allow_secret_literal must be true or false")
+        return value
 
     def _list_files(
         self, arguments: Dict[str, Any], deadline_seconds: float
