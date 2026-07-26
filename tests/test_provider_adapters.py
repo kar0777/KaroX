@@ -328,6 +328,150 @@ class ProviderAdapterTests(unittest.TestCase):
 
         self.assertGreater(client.calls[0]["json"]["max_tokens"], 4_096)
 
+    @staticmethod
+    def _turn(index: int) -> tuple[ModelMessage, ModelMessage]:
+        return (
+            ModelMessage(
+                "assistant",
+                None,
+                tool_calls=(ToolCall(f"call-{index}", "repo_read_file", "{}"),),
+            ),
+            ModelMessage("tool", f"result {index}", tool_call_id=f"call-{index}"),
+        )
+
+    def _anthropic_payload(self, requested: ModelRequest) -> dict:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+        client = FakeClient([response(records)])
+        with patch("karox.provider_adapters.httpx.Client", return_value=client):
+            AnthropicMessagesProvider("https://provider.example/v1").complete(requested)
+        return client.calls[0]["json"]
+
+    def test_anthropic_caches_the_static_prefix_and_the_newest_turn(self) -> None:
+        messages = [ModelMessage("system", "rules"), ModelMessage("user", "work")]
+        for index in range(3):
+            messages.extend(self._turn(index))
+
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=tuple(messages),
+                deadline_seconds=2,
+                cache_key="session-a",
+            )
+        )
+
+        # Tools render before the system prompt, so one breakpoint there covers
+        # the entire static part of every request in the session.
+        self.assertEqual(
+            payload["system"],
+            [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}],
+        )
+        blocks = [block for item in payload["messages"] for block in item["content"]]
+        marked = [
+            index for index, block in enumerate(blocks) if "cache_control" in block
+        ]
+        # The newest turn is cached so the next request can read it back.
+        self.assertEqual(marked, [len(blocks) - 1])
+
+    def test_anthropic_cached_prefix_is_byte_stable_as_the_turn_grows(self) -> None:
+        # Caching is a prefix match and fails silently: one moved breakpoint and
+        # every request pays full price with no error anywhere. The breakpoints
+        # in the shared prefix must therefore land on the same blocks in both
+        # requests, and must stay closer together than the twenty-block window
+        # the API looks back through.
+        base = [ModelMessage("system", "rules"), ModelMessage("user", "work")]
+        for index in range(20):
+            base.extend(self._turn(index))
+        grown = list(base)
+        grown.extend(self._turn(20))
+
+        first = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=tuple(base),
+                deadline_seconds=2,
+                cache_key="session-a",
+            )
+        )
+        second = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=tuple(grown),
+                deadline_seconds=2,
+                cache_key="session-a",
+            )
+        )
+
+        def marked(payload: dict) -> list[int]:
+            blocks = [item for message in payload["messages"] for item in message["content"]]
+            return [index for index, block in enumerate(blocks) if "cache_control" in block]
+
+        shared = set(marked(first)) & set(marked(second))
+        self.assertTrue(shared, "the two requests share no cached breakpoint")
+        newest = marked(second)
+        self.assertLessEqual(
+            min(newest[-1] - item for item in newest[:-1] if item < newest[-1]),
+            20,
+            "the newest breakpoint cannot see the previous one",
+        )
+        # The prefix bytes themselves must be identical up to the shared point.
+        limit = max(shared)
+        first_blocks = [item for message in first["messages"] for item in message["content"]]
+        second_blocks = [item for message in second["messages"] for item in message["content"]]
+        self.assertEqual(first_blocks[: limit + 1], second_blocks[: limit + 1])
+
+    def test_anthropic_without_a_cache_key_sends_no_breakpoints(self) -> None:
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=(ModelMessage("system", "rules"), ModelMessage("user", "work")),
+                deadline_seconds=2,
+            )
+        )
+
+        # A one-shot caller would pay the cache-write premium and never read it
+        # back, so caching is asked for rather than assumed.
+        self.assertEqual(payload["system"], "rules")
+        self.assertNotIn(
+            "cache_control",
+            json.dumps(payload["messages"]),
+        )
+
+    def test_anthropic_reports_what_the_cache_saved(self) -> None:
+        records = [
+            (
+                "message_start",
+                {
+                    "message": {
+                        "id": "msg-1",
+                        "usage": {
+                            "input_tokens": 12,
+                            "cache_read_input_tokens": 4_000,
+                            "cache_creation_input_tokens": 30,
+                        },
+                    }
+                },
+            ),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+        client = FakeClient([response(records)])
+
+        with patch("karox.provider_adapters.httpx.Client", return_value=client):
+            result = AnthropicMessagesProvider(
+                "https://provider.example/v1"
+            ).complete(request())
+
+        # input_tokens counts only the uncached remainder, so without these the
+        # reported prompt is 12 tokens when 4,012 were actually sent.
+        self.assertEqual(result.usage["prompt_tokens"], 12)
+        self.assertEqual(result.usage["cache_read_tokens"], 4_000)
+        self.assertEqual(result.usage["cache_write_tokens"], 30)
+
     def test_gemini_keeps_private_thoughts_out_of_the_answer(self) -> None:
         records = [
             (

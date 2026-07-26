@@ -117,6 +117,13 @@ class ModelRequest:
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
     deadline_seconds: float = 120.0
+    # A stable identifier for the conversation this request continues. An agent
+    # loop resends its whole transcript on every step, so the same prefix is
+    # paid for again and again at full price; providers will serve that prefix
+    # from cache at a fraction of the cost, but only when the caller asks. It is
+    # opt-in because a one-shot request would pay the cache-write premium and
+    # never read it back.
+    cache_key: Optional[str] = None
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __post_init__(self) -> None:
@@ -143,6 +150,12 @@ class ModelRequest:
             or self.max_output_tokens <= 0
         ):
             raise ValueError("max output tokens must be a positive integer")
+        if self.cache_key is not None and (
+            not isinstance(self.cache_key, str)
+            or not self.cache_key.strip()
+            or len(self.cache_key) > 200
+        ):
+            raise ValueError("cache key must be 1-200 non-blank characters")
 
 
 @dataclass(frozen=True)
@@ -375,6 +388,11 @@ class OpenAIChatCompletionsProvider:
             payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
+        if request.cache_key is not None:
+            # Caching is automatic on this wire; the key only routes requests
+            # that share a prefix to the same cache, which every step of an
+            # agent loop does.
+            payload["prompt_cache_key"] = request.cache_key
         return payload
 
     def _request_headers(self) -> Dict[str, str]:
@@ -665,14 +683,21 @@ class OpenAIChatCompletionsProvider:
                 if not isinstance(raw_usage, dict):
                     raise ValueError("usage must be an object")
                 usage: Dict[str, int] = {}
-                for name in (
-                    "prompt_tokens",
-                    "completion_tokens",
-                    "total_tokens",
+                # prompt_tokens counts the whole prompt on this wire, but the
+                # cached share of it bills at a tenth of the rate, so a cost
+                # figure computed without it is simply wrong. Caching also
+                # fails silently, and this count is the only evidence it worked.
+                details = raw_usage.get("prompt_tokens_details")
+                detail_source = details if isinstance(details, dict) else {}
+                for name, source, target in (
+                    ("prompt_tokens", raw_usage, "prompt_tokens"),
+                    ("completion_tokens", raw_usage, "completion_tokens"),
+                    ("total_tokens", raw_usage, "total_tokens"),
+                    ("cached_tokens", detail_source, "cache_read_tokens"),
                 ):
-                    if name not in raw_usage:
+                    if name not in source:
                         continue
-                    raw_count = raw_usage[name]
+                    raw_count = source[name]
                     if (
                         isinstance(raw_count, bool)
                         or not isinstance(raw_count, int)
@@ -681,7 +706,7 @@ class OpenAIChatCompletionsProvider:
                         raise ValueError(
                             "known usage field must be a non-negative integer"
                         )
-                    usage[name] = raw_count
+                    usage[target] = raw_count
                 events.append(
                     ModelEvent(
                         ModelEventKind.USAGE,

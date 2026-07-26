@@ -469,6 +469,10 @@ class AgentKernel:
                     messages=tuple(self._request_messages(record.provider_history)),
                     tools=self._provider_tools,
                     deadline_seconds=min(remaining, 3600.0),
+                    # Every step resends the whole transcript, so the session id
+                    # is exactly the right cache key: the prefix is stable and
+                    # is otherwise re-billed at full price on every request.
+                    cache_key=f"karox-session-{session_id}",
                 )
                 try:
                     response = self.provider.complete(request)

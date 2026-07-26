@@ -364,9 +364,17 @@ class _StreamingAdapter:
             raise ValueError("usage must be an object")
         result: Dict[str, int] = {}
         for source, target in names.items():
-            if source not in raw:
+            # A dotted source walks into a nested object: OpenAI reports the
+            # cached share of the prompt under prompt_tokens_details rather than
+            # at the top level, and a missing branch is simply an absent field.
+            value: Any = raw
+            for step in source.split("."):
+                if not isinstance(value, dict) or step not in value:
+                    value = None
+                    break
+                value = value[step]
+            if value is None:
                 continue
-            value = raw[source]
             if (
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -454,6 +462,10 @@ class OpenAIResponsesProvider(_StreamingAdapter):
             payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload["max_output_tokens"] = request.max_output_tokens
+        if request.cache_key is not None:
+            # OpenAI caches automatically; the key only routes requests sharing
+            # a prefix to the same cache, which an agent loop always does.
+            payload["prompt_cache_key"] = request.cache_key
         return payload
 
     def _events(
@@ -585,6 +597,8 @@ class OpenAIResponsesProvider(_StreamingAdapter):
                             "input_tokens": "prompt_tokens",
                             "output_tokens": "completion_tokens",
                             "total_tokens": "total_tokens",
+                            "input_tokens_details.cached_tokens": "cache_read_tokens",
+                            "output_tokens_details.reasoning_tokens": "reasoning_tokens",
                         },
                     )
                 except ValueError as exc:
@@ -699,6 +713,38 @@ class AnthropicMessagesProvider(_StreamingAdapter):
             messages.append({"role": role, "content": blocks})
         return "\n\n".join(system), messages
 
+    @staticmethod
+    def _cache_breakpoints(messages: list[Dict[str, Any]]) -> None:
+        """Mark the blocks Anthropic should cache the prompt up to.
+
+        Caching is a prefix match, so a breakpoint is only useful where the
+        bytes before it will be identical on the next request. Two rules follow.
+
+        Positions are placed on a fixed grid rather than measured back from the
+        end, so a breakpoint written on one turn sits at the same offset on the
+        next and can actually be read. And the gap between consecutive
+        breakpoints stays under the twenty-block window the API looks back
+        through, or a long turn would step over every entry the previous turn
+        wrote and silently miss.
+
+        The last block always gets one so the newest turn is cached for the turn
+        after it. Anthropic allows four breakpoints per request and the system
+        block holds one, leaving three here.
+        """
+        blocks = [
+            block
+            for message in messages
+            for block in message["content"]
+            if isinstance(block, dict)
+        ]
+        if not blocks:
+            return
+        stride = 15
+        grid = [index for index in range(stride, len(blocks) - 1, stride)]
+        chosen = sorted({*grid[-2:], len(blocks) - 1})
+        for index in chosen:
+            blocks[index]["cache_control"] = {"type": "ephemeral"}
+
     def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
         try:
             system, messages = self._messages(request)
@@ -707,6 +753,8 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 ProviderErrorKind.INVALID_REQUEST,
                 "persisted tool arguments are not valid JSON",
             ) from exc
+        if request.cache_key is not None:
+            self._cache_breakpoints(messages)
         payload: Dict[str, Any] = {
             "model": request.model,
             "messages": messages,
@@ -718,7 +766,20 @@ class AnthropicMessagesProvider(_StreamingAdapter):
             "stream": True,
         }
         if system:
-            payload["system"] = system
+            # Tools render before the system prompt, so one breakpoint on the
+            # system block caches the whole static prefix -- the tool table and
+            # the instructions -- which is the largest part that never changes.
+            payload["system"] = (
+                [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                if request.cache_key is not None
+                else system
+            )
         if request.tools:
             payload["tools"] = [
                 {
@@ -759,8 +820,19 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 message_started = True
                 response_id = message["id"]
                 try:
+                    # input_tokens counts only what was NOT served from cache,
+                    # so reporting it alone understates the prompt and hides
+                    # whether caching worked at all. Caching fails silently --
+                    # one changed byte in the prefix and every request pays full
+                    # price with no error -- so the read count is the only
+                    # evidence there is.
                     usage = self._usage(
-                        message.get("usage", {}), {"input_tokens": "prompt_tokens"}
+                        message.get("usage", {}),
+                        {
+                            "input_tokens": "prompt_tokens",
+                            "cache_read_input_tokens": "cache_read_tokens",
+                            "cache_creation_input_tokens": "cache_write_tokens",
+                        },
                     )
                 except ValueError as exc:
                     raise ProviderError(
@@ -1062,6 +1134,11 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                             "promptTokenCount": "prompt_tokens",
                             "candidatesTokenCount": "completion_tokens",
                             "totalTokenCount": "total_tokens",
+                            # Gemini caches implicitly, so the saving happens
+                            # whether or not KaroX asked for it -- but it is
+                            # invisible unless the count is read back.
+                            "cachedContentTokenCount": "cache_read_tokens",
+                            "thoughtsTokenCount": "reasoning_tokens",
                         },
                     )
                 except ValueError as exc:
