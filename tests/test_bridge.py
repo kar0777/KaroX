@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +36,7 @@ from karox.mcp_client import (
     McpClient,
     McpCredentialStore,
     McpRegistry,
+    McpRemoteToolError,
     McpServerRecord,
     McpTransportError,
     mcp_selection,
@@ -45,6 +46,15 @@ from karox.policy import CapabilityPolicy, PolicyDenied
 from karox.proxy import McpProxy, ProxyAccessDenied
 from karox.proxy_server import build_proxy_asgi_app
 from karox.sessions import SessionStore
+from karox.web_bridge_launcher import (
+    WebBridgeConnectConfig,
+    _adopt_child,
+    _child_options,
+    _close_job,
+    _create_child_job,
+    reap_orphaned_web_bridges,
+    write_watchdog,
+)
 
 
 class _FakeCredentialBackend:
@@ -354,17 +364,16 @@ class McpProxyTests(unittest.TestCase):
                 for item in descriptors
                 if item.remote_name == "mcp.echo.write_note"
             )
-            # A mutating call without client _meta now succeeds: the bridge
-            # auto-generates a unique idempotency key so standards-compliant
-            # clients (Notion Custom Agents, etc.) can still run mutating
-            # tools. Only an explicitly supplied invalid key is rejected.
-            mutation_result = wire_client.call_record(
-                wire_record,
-                mutating,
-                {"name": "n", "content": "c"},
-                self.repository,
-            )
-            self.assertFalse(mutation_result["result"]["isError"])
+            # A mutating call without a client-supplied idempotency key fails
+            # closed. Generating one per attempt would make a retried mutation
+            # run a second time, which is exactly what the key exists to stop.
+            with self.assertRaises(McpRemoteToolError):
+                wire_client.call_record(
+                    wire_record,
+                    mutating,
+                    {"name": "n", "content": "c"},
+                    self.repository,
+                )
             result = wire_client.call_record(
                 wire_record, descriptor, {"message": "over-http"}, self.repository
             )
@@ -397,6 +406,84 @@ class McpProxyTests(unittest.TestCase):
             record.revoked = True
         with self.assertRaisesRegex(ProxyAccessDenied, "revoked"):
             proxy.descriptors()
+
+
+class WebBridgeOrphanTests(unittest.TestCase):
+    """The public tunnel must not survive a hard kill of the launcher."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _dead_pid(self) -> int:
+        finished = subprocess.Popen([sys.executable, "-c", "pass"])
+        finished.wait(timeout=30)
+        return finished.pid
+
+    def test_default_access_profile_cannot_write(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web", repository=Path("repo")
+        )
+        self.assertEqual(config.access_profile, AccessProfile.READ_ONLY)
+
+    def test_children_die_with_the_launcher_instead_of_leaking(self) -> None:
+        job = _create_child_job()
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            **_child_options(),
+        )
+        try:
+            if os.name == "nt":
+                self.assertIsNotNone(job)
+                self.assertTrue(_adopt_child(job, child))
+                # Closing the last job handle is what a hard kill of the
+                # launcher does implicitly, so this is the orphan scenario.
+                _close_job(job)
+                # wait() would raise TimeoutExpired if the child were still
+                # sleeping out its full minute, which is the leak being closed.
+                child.wait(timeout=30)
+                self.assertIsNotNone(child.poll())
+            else:
+                self.assertIsNone(job)
+                self.assertEqual(os.getpgid(child.pid), child.pid)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=30)
+
+    def test_watchdog_makes_an_orphan_detectable_and_reapable(self) -> None:
+        credentials = MagicMock()
+        sessions = MagicMock()
+        orphan = self.root / "web-bridge" / "orphan.json"
+        live = self.root / "web-bridge" / "live.json"
+        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+            write_watchdog(
+                orphan,
+                {"session_id": "orphan", "owner_pid": self._dead_pid()},
+            )
+            write_watchdog(
+                live,
+                {"session_id": "live", "owner_pid": os.getpid()},
+            )
+            with (
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.SessionStore",
+                    return_value=sessions,
+                ),
+            ):
+                reaped = reap_orphaned_web_bridges()
+        self.assertEqual(reaped, ("orphan",))
+        credentials.delete.assert_called_once_with("orphan")
+        sessions.revoke.assert_called_once_with("orphan")
+        self.assertFalse(orphan.exists())
+        self.assertTrue(live.exists())
 
 
 class BridgeCliTests(unittest.TestCase):
