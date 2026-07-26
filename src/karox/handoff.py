@@ -14,6 +14,7 @@ import json
 import time
 from typing import Any, Mapping, Optional
 
+from .credentials import CREDENTIAL_REFERENCE_SCHEMES
 from .models import repository_fingerprint
 from .security import redact
 from .sessions import SessionRecord
@@ -186,7 +187,12 @@ def _validated_handoff(document: Mapping[str, Any]) -> dict[str, Any]:
         allow_nan=False,
     )
     json.loads(encoded)  # round-trip validates strict JSON
-    if "Bearer " in encoded or "os-keyring:" in encoded:
+    # Every credential-reference scheme has to be listed here. Adding a scheme
+    # elsewhere and forgetting this line is how a document that promises to
+    # carry no credential reference starts carrying one.
+    if "Bearer " in encoded or any(
+        f"{scheme}:" in encoded for scheme in CREDENTIAL_REFERENCE_SCHEMES
+    ):
         raise ValueError("handoff document must not contain credentials or references")
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     result = dict(document)

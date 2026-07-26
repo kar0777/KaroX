@@ -140,6 +140,26 @@ class ProjectContextTests(unittest.TestCase):
         # stating rather than discovering by trial.
         self.assertIn("Only those commands may run as a check", rendered)
 
+    def test_a_prefix_rule_is_explained_rather_than_shown_raw(self) -> None:
+        rendered = render_environment(
+            self.repository,
+            verification_commands=[["python", "-m", "pytest", "*"]],
+        )
+
+        # Shown without explanation, a model sends the * through as a literal
+        # argument, and with no shell to expand it the approved command fails
+        # every time -- which reads as the allowlist being broken.
+        self.assertIn("python -m pytest *", rendered)
+        self.assertIn("never send the * itself", rendered)
+
+    def test_an_exact_rule_gets_no_prefix_explanation(self) -> None:
+        rendered = render_environment(
+            self.repository,
+            verification_commands=[["python", "-m", "pytest"]],
+        )
+
+        self.assertNotIn("never send the * itself", rendered)
+
     def test_every_known_filename_is_actually_discovered(self) -> None:
         for name in INSTRUCTION_FILENAMES:
             with self.subTest(name=name):

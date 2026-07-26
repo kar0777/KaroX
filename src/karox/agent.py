@@ -348,6 +348,15 @@ class AgentKernel:
             + "\nOnly these user-approved checks may be executed and used as "
             + f"verification evidence: {rendered_checks}"
         )
+        # An entry ending in "*" is a prefix rule. Unexplained, the model sends
+        # the "*" through as a literal argument, and with no shell to expand it
+        # the approved command fails every time.
+        if any(item and item[-1] == "*" for item in approved_checks):
+            self.system_prompt += (
+                '\nAn entry ending in "*" is a prefix: repeat the arguments '
+                "before it exactly, then put your own arguments where the "
+                '"*" is, and never send the "*" itself.'
+            )
         self.monotonic = monotonic
         definitions = {item.name: item for item in core.tools()}
         missing = REQUIRED_TOOLS.difference(definitions)

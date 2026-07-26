@@ -202,5 +202,16 @@ def render_environment(
             "Only those commands may run as a check. Asking for a different one "
             "is refused, so choose from this list rather than inventing a command."
         )
+        # An entry ending in `*` is a prefix rule, and a model that has not been
+        # told so sends the `*` through as a literal argument -- an approved
+        # command that always fails, because there is no shell to expand it.
+        if any(item and item[-1] == "*" for item in approved):
+            lines.append(
+                "An entry ending in * is a prefix: send the arguments before "
+                "the * exactly as written, then append your own arguments in "
+                "place of the *, and never send the * itself. So an approved "
+                "'python -m pytest *' lets you run "
+                "'python -m pytest tests/test_thing.py -x'."
+            )
     lines.append("</environment>")
     return "\n".join(lines)

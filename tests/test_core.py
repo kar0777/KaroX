@@ -296,16 +296,20 @@ class CoreRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["stdout_bytes"], 9)
         self.assertEqual(result["stderr_bytes"], 6)
-        self.assertEqual(result["stdout_elided_bytes"], 4)
-        self.assertEqual(result["stderr_elided_bytes"], 1)
         # A budget that lands inside a multi-byte character keeps the whole
-        # characters around it instead of raising or emitting a broken one.
+        # characters around it instead of raising or emitting a broken one --
+        # and the elided count is taken from what actually came back, so it
+        # includes the bytes the cut discarded. Counting only the budget
+        # shortfall claimed 4 here when 8 of the 9 bytes are really missing,
+        # beside a sha256 that describes the whole stream.
+        self.assertEqual(result["stdout_elided_bytes"], 8)
+        self.assertEqual(result["stderr_elided_bytes"], 2)
         self.assertEqual(
-            result["stdout"], "a\n[karox: 4 bytes elided from the middle of this stream]\n"
+            result["stdout"], "a\n[karox: 8 bytes elided from the middle of this stream]\n"
         )
         self.assertEqual(
             result["stderr"],
-            "é\n[karox: 1 bytes elided from the middle of this stream]\né",
+            "é\n[karox: 2 bytes elided from the middle of this stream]\né",
         )
 
     def test_non_finite_check_timeouts_are_rejected_without_pending_intent(self) -> None:

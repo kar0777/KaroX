@@ -236,6 +236,13 @@ def _parser() -> argparse.ArgumentParser:
     credential_doctor = credentials.add_parser(
         "doctor", help="verify secure credential storage availability"
     )
+    credential_doctor.add_argument(
+        "--reference",
+        help=(
+            "report on one credential reference rather than the keyring; an "
+            "env: reference needs no keyring at all"
+        ),
+    )
     credential_doctor.add_argument("--json", action="store_true")
 
     provider = commands.add_parser("provider", help="manage API providers")
@@ -1773,10 +1780,36 @@ def _handle_bridge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _provider_credential_doctor() -> dict[str, Any]:
+    """Report the credentials the configured providers actually reference.
+
+    Probing the keyring unconditionally reported a headless host as degraded
+    even when every provider authenticates from the environment and every model
+    call works -- a diagnostic that fails on a healthy machine teaches its
+    reader to ignore it.
+    """
+    references = sorted(
+        {
+            record.credential_ref
+            for record in _registry().providers()
+            if record.credential_ref
+        }
+    )
+    store = CredentialStore()
+    if not references:
+        return store.doctor()
+    entries = [store.doctor(reference) for reference in references]
+    degraded = [item for item in entries if item.get("status") != "ok"]
+    return {
+        "status": "unavailable" if degraded else "ok",
+        "credentials": entries,
+    }
+
+
 def _handle_doctor(args: argparse.Namespace) -> int:
     checks: dict[str, Any] = {}
     probes = {
-        "provider_credentials": lambda: CredentialStore().doctor(),
+        "provider_credentials": _provider_credential_doctor,
         "mcp_credentials": lambda: McpCredentialStore().doctor(),
         "bridge_credentials": lambda: BridgeCredentialStore().doctor(),
         "sessions": lambda: {
@@ -1975,7 +2008,7 @@ def _handle_credential(args: argparse.Namespace) -> int:
     elif args.credential_command == "delete":
         payload = store.delete(args.name)
     else:
-        payload = store.doctor()
+        payload = store.doctor(getattr(args, "reference", None))
     _emit(payload, json_output=args.json)
     return 0
 

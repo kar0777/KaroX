@@ -279,17 +279,34 @@ class RoutedProvider:
             and not isinstance(supplied, bool)
             and math.isfinite(float(supplied))
         ):
-            # The provider knows when its own quota resets; guessing shorter
-            # only earns another rejection.
-            delay = max(0.0, float(supplied))
+            # The provider knows when its own quota resets, so its number is
+            # the starting point -- but it is still bounded here. A 429 may
+            # carry Retry-After: 3500, and the sleep is uninterruptible, so
+            # honouring it literally parks a run for an hour with no way to
+            # stop it; past the cap the caller is better served by the router
+            # moving on. A clock skewed forward makes the date form parse to
+            # zero, so the floor keeps a retry from becoming an immediate
+            # re-send of the request that was just rejected.
+            asked = float(supplied)
+            if asked <= 0.0:
+                # A clock skewed forward makes the HTTP-date form parse to zero,
+                # which would turn a retry into an immediate re-send of the
+                # request that was just rejected.
+                asked = float(policy.base_delay_seconds)
+            # Jitter is added on top, never subtracted: waiting less than the
+            # provider asked for only earns another rejection, but every
+            # concurrent run is handed the same number and would otherwise wake
+            # together and re-hit one shared quota in lockstep.
+            delay = min(
+                float(policy.max_delay_seconds),
+                asked * (1.0 + 0.5 * self._jitter()),
+            )
         else:
             window = min(
                 float(policy.max_delay_seconds),
                 float(policy.base_delay_seconds) * 2 ** (attempts - 1),
             )
-            # Jitter keeps concurrent KaroX runs from re-hitting one shared
-            # quota in lockstep; half the window is fixed so a retry always
-            # backs off by something.
+            # Half the window is fixed so a retry always backs off by something.
             delay = window * (0.5 + 0.5 * self._jitter())
         # Sleeping past the caller's deadline turns a recoverable rate limit
         # into a slower, quieter failure than not retrying at all.

@@ -26,6 +26,10 @@ from typing import Callable, Optional, Protocol
 
 KEYRING_SCHEME = "os-keyring"
 ENVIRONMENT_SCHEME = "env"
+# Every scheme that names a credential. Anything that promises to carry no
+# credential reference -- the handoff document above all -- checks against this
+# rather than against a hand-copied literal that a new scheme silently escapes.
+CREDENTIAL_REFERENCE_SCHEMES: tuple[str, ...] = (KEYRING_SCHEME, ENVIRONMENT_SCHEME)
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Pinned to KaroX's own namespace: an attacker who can edit the provider

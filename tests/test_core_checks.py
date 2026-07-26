@@ -87,6 +87,17 @@ class VerificationRuleTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertTrue(rule.matches(argv))
 
+    def test_a_prefix_rule_refuses_the_literal_star_it_was_written_with(
+        self,
+    ) -> None:
+        rule = VerificationRule.parse(PYTEST_RULE)
+
+        # Checks run without a shell, so a literal * reaches the child as a
+        # filename that does not exist. Admitting it gave the model an approved
+        # command that always failed, which reads as the allowlist being broken.
+        self.assertFalse(rule.matches(["python", "-m", "pytest", "*"]))
+        self.assertFalse(rule.matches(["python", "-m", "pytest", "tests", "*"]))
+
     def test_a_prefix_rule_refuses_another_executable_or_another_module(
         self,
     ) -> None:

@@ -168,6 +168,23 @@ class HandoffDocumentTests(unittest.TestCase):
         self.assertNotIn("os-keyring:", serialized)
         self.assertNotIn("Bearer ", serialized)
 
+    def test_every_credential_reference_scheme_aborts_the_handoff(self) -> None:
+        from karox.credentials import CREDENTIAL_REFERENCE_SCHEMES
+
+        for scheme in CREDENTIAL_REFERENCE_SCHEMES:
+            with self.subTest(scheme=scheme):
+                self._populate_session()
+                # The setup command this scheme invites is exactly what ends up
+                # in a task description or a recorded check argv.
+                reference = (
+                    f"karox provider add --credential-ref {scheme}:SOMETHING"
+                )
+                with self.sessions.mutate("s", f"ref-{scheme}") as record:
+                    record.summary = reference
+
+                with self.assertRaisesRegex(ValueError, "credentials or references"):
+                    build_handoff(self._record(), repository=self.repository)
+
     def test_handoff_digest_is_stable_and_verifiable(self) -> None:
         self._populate_session()
         first = build_handoff(self._record(), repository=self.repository)

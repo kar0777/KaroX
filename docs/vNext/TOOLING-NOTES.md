@@ -121,32 +121,9 @@ python -m karox.cli bridge serve `
   --tool karox.git.commit `
   --verification-command '["python", "-m", "compileall", "-q", "src", "tests"]' `
   --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]' `
+  --verification-command '["python", "-m", "pytest", "*"]' `
   --verification-command '["python", "-m", "pip", "install", "-r", "requirements.txt"]' `
   --verification-command '["python", "-m", "pip", "install", "-e", "."]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_agent.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_benchmark.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_bridge.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_core.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_credentials.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_ecosystem.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_extended_core_tools.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_handoff.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_hosted_bridge.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_markdown_render.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_mcp.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_migration_cli.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_packs.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_policy.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_promptql_outbound.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_provider_adapters.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_provider_cli.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_providers.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_registry.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_routing.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_sessions.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_skill_cli.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_skills.py"]' `
-  --verification-command '["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_tui.py"]' `
   --verification-command '["python", "scripts/tui_screenshot.py", "--out", "docs/tools/screenshots/start-ru.svg"]' `
   --verification-command '["python", "scripts/tui_screenshot.py", "--language", "en", "--out", "docs/tools/screenshots/start-en.svg"]' `
   --verification-command '["python", "scripts/tui_screenshot.py", "--keys", "ctrl+b", "--out", "docs/tools/screenshots/bridge.svg"]' `
@@ -163,15 +140,26 @@ python -m karox.cli bridge serve `
 `karox.checks.run` only runs a command admitted by one of the vectors supplied at
 launch. A vector is either an exact argv, which matches position for position and
 nothing else, or a prefix rule written with a trailing `*`, which matches the
-literal prefix and then accepts any further arguments that are not an
-interpreter's own code-execution option (`-c`, `-e`, `--eval` and the rest,
-including the bundled and attached-value spellings such as `-cCODE` and `-Bc`).
-There is no regular-expression matching, and the executable is always literal:
+literal prefix and then accepts further arguments. There is no
+regular-expression matching, and the executable is always literal:
 `["python", "-m", "pytest", "*"]` admits `python -m pytest tests/test_core.py -x`
-but not `python3 -m pytest`, not `python -m pip install`, and not
-`python -m pytest -c "import os"`. The vectors above cover the two baseline
-checks, two environment-recovery installs, one discovery vector per test module,
-three screenshot captures, and six read-only CLI diagnostics.
+but not `python3 -m pytest` and not `python -m pip install`. The vectors above
+cover the two baseline checks, two environment-recovery installs, a discovery
+rule for the test suite, three screenshot captures, and six read-only CLI
+diagnostics.
+
+**What a prefix rule actually grants.** It authorises the named executable with
+arguments of the agent's choosing. There is a filter on the tail that refuses
+the code-execution options of the interpreters KaroX approves by default —
+`-c`, `-e`, `--eval` and the bundled and attached-value spellings such as
+`-cCODE` and `-Bc`, so `python -m pytest *` will not become
+`python -m pytest -c "import os"`. Read that as a guard against an obvious
+mistake, not as a boundary: it is a list of known flags, so a tool with a
+differently spelled equivalent (`node -p`, `php -r`, `sed --expression`) is not
+covered, and no flag list could cover them all. Approving `["node", "*"]` means
+approving node with arbitrary arguments. What holds the line is the literal
+prefix, which always includes the executable — so keep the prefix as long as the
+task allows.
 
 The set is intentionally closed. Adding a vector means restarting the bridge with
 an extended list. A prefix rule is what makes a test module written during the

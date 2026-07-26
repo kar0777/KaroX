@@ -56,7 +56,19 @@ _CODE_EXECUTION_SHORT_LETTERS = frozenset({"c", "e"})
 
 
 def _is_plain_argument(value: str) -> bool:
-    """True when a wildcard tail argument cannot make the child run new code."""
+    """True when a wildcard tail argument is one this rule will admit.
+
+    The filter refuses the code-execution options of the interpreters KaroX
+    actually approves by default. It is a guard, not a boundary: a rule like
+    ``node *`` authorises node with arguments of the caller's choosing, and no
+    flag list can make that mean something narrower. What holds the line is the
+    literal prefix the user approved, which always includes the executable.
+    """
+    if value == WILDCARD_ARGUMENT:
+        # Checks run without a shell, so a literal `*` reaches the child as a
+        # filename that does not exist. Admitting it produced an approved
+        # command that always failed, which read as the allowlist being broken.
+        return False
     if not value.startswith("-"):
         return True
     name = value.split("=", 1)[0].lower()
@@ -305,8 +317,11 @@ class ProcessTree:
             return
         api = _windows_job_api()
         if api is not None:
-            # The job carries KILL_ON_JOB_CLOSE, so releasing the last handle
-            # also collects anything the finished check left running.
+            # Windows only. The job carries KILL_ON_JOB_CLOSE, so releasing the
+            # last handle also collects anything the finished check left
+            # running. POSIX has no equivalent here: a check that succeeds and
+            # deliberately leaves a helper behind keeps it there, and only the
+            # timeout and interrupt paths sweep the group.
             api[0].CloseHandle(self._job)
         self._job = None
 
@@ -1295,11 +1310,17 @@ class CoreRuntime:
         if tail_budget:
             handle.seek(size - tail_budget)
             tail = handle.read(tail_budget)
-        elided = size - head_budget - tail_budget
+        # Decoding each half independently drops any bytes of a character the
+        # cut landed inside, so the count has to be taken from what is actually
+        # returned rather than from the budgets. It sits beside a sha256 of the
+        # whole stream, which makes an approximate number worse than useless.
+        head_text = head.decode("utf-8", errors="ignore")
+        tail_text = tail.decode("utf-8", errors="ignore")
+        elided = size - len(head_text.encode("utf-8")) - len(tail_text.encode("utf-8"))
         text = (
-            head.decode("utf-8", errors="ignore")
+            head_text
             + f"\n[karox: {elided} bytes elided from the middle of this stream]\n"
-            + tail.decode("utf-8", errors="ignore")
+            + tail_text
         )
         return CapturedStream(text, digest.hexdigest(), True, size, elided)
 
@@ -1362,17 +1383,19 @@ class CoreRuntime:
         if not math.isfinite(requested) or requested <= 0:
             raise InvalidCommand("timeout_seconds must be positive")
         effective = requested
-        clamped_by: Optional[str] = None
+        # Every clamp that fired is named, not just the last one. Reporting one
+        # cause when two applied is the same half-truth the silent clamp was.
+        causes: List[str] = []
         if effective > float(deadline_seconds):
             effective = float(deadline_seconds)
-            clamped_by = "request_deadline"
+            causes.append("request_deadline")
         if effective > self.MAX_PROCESS_TIMEOUT_SECONDS:
             effective = self.MAX_PROCESS_TIMEOUT_SECONDS
-            clamped_by = "runtime_maximum"
+            causes.append("runtime_maximum")
         if effective < self.MIN_PROCESS_TIMEOUT_SECONDS:
             effective = self.MIN_PROCESS_TIMEOUT_SECONDS
-            clamped_by = "runtime_minimum"
-        return CheckPlan(argv, requested, effective, clamped_by, eligible)
+            causes.append("runtime_minimum")
+        return CheckPlan(argv, requested, effective, "+".join(causes) or None, eligible)
 
     def _git(self, arguments: List[str], deadline_seconds: float) -> Dict[str, Any]:
         return self._run(["git", *arguments], min(60.0, deadline_seconds))

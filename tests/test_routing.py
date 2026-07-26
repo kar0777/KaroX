@@ -28,7 +28,9 @@ from karox.routing import RetryPolicy, RouteTarget, RoutedProvider, RoutingPolic
 NO_RETRY = RetryPolicy(max_attempts=1)
 
 
-def request(*, tools: bool = False) -> ModelRequest:
+def request(
+    *, tools: bool = False, deadline_seconds: float = 2
+) -> ModelRequest:
     provider_tools = ()
     if tools:
         provider_tools = (ProviderTool("git_status", "status", {"type": "object"}),)
@@ -36,7 +38,7 @@ def request(*, tools: bool = False) -> ModelRequest:
         model="route-alias",
         messages=(ModelMessage("user", "work"),),
         tools=provider_tools,
-        deadline_seconds=2,
+        deadline_seconds=deadline_seconds,
     )
 
 
@@ -293,6 +295,39 @@ class RoutingTests(unittest.TestCase):
             [item["status"] for item in result.route_attempts], ["completed"]
         )
         self.assertEqual(result.route_attempts[0]["retries"], 2)
+
+    def test_an_hour_long_retry_after_does_not_park_the_run(self) -> None:
+        target = self.add_route("only")
+        # A 429 may carry Retry-After: 3500, and the sleep is uninterruptible,
+        # so honouring it literally holds a run for an hour with nothing able to
+        # stop it. Past the cap the caller is better served by moving on.
+        patient = ProviderError(
+            ProviderErrorKind.RATE_LIMIT, "slow down", retry_after=3_500.0
+        )
+        provider = FakeProvider([patient, response()])
+        routed, _ = self.routed((target,), {"only": provider}, retry=RetryPolicy())
+
+        routed.complete(request(deadline_seconds=3_600.0))
+
+        self.assertEqual(len(self.clock.sleeps), 1)
+        self.assertLessEqual(self.clock.sleeps[0], RetryPolicy().max_delay_seconds)
+
+    def test_a_skewed_clock_does_not_turn_a_retry_into_an_instant_resend(
+        self,
+    ) -> None:
+        target = self.add_route("only")
+        # The HTTP-date form of Retry-After parses against the local clock, so a
+        # host running fast reads the deadline as already past and yields zero.
+        skewed = ProviderError(
+            ProviderErrorKind.RATE_LIMIT, "slow down", retry_after=0.0
+        )
+        provider = FakeProvider([skewed, response()])
+        routed, _ = self.routed((target,), {"only": provider}, retry=RetryPolicy())
+
+        routed.complete(request())
+
+        self.assertEqual(len(self.clock.sleeps), 1)
+        self.assertGreaterEqual(self.clock.sleeps[0], RetryPolicy().base_delay_seconds)
 
     def test_an_error_a_retry_cannot_help_is_never_retried(self) -> None:
         target = self.add_route("only")
