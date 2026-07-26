@@ -17,6 +17,7 @@ from karox.providers import (
     ModelRequest,
     ProviderError,
     ProviderErrorKind,
+    ReasoningBlock,
     ToolCall,
 )
 
@@ -789,6 +790,229 @@ class ProviderAdapterTests(unittest.TestCase):
             self._GEMINI_DONE,
         )
         self.assertNotIn("thinkingConfig", gemini.get("generationConfig", {}))
+
+    def test_a_signed_thinking_block_survives_the_stream_whole(self) -> None:
+        # The signature is what the API verifies when the block comes back, so it
+        # has to arrive byte-exact and attached to its own block -- not folded
+        # into the reasoning string shown on screen.
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            (
+                "content_block_start",
+                {"index": 0, "content_block": {"type": "thinking", "thinking": "wei"}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "thinking_delta", "thinking": "ghing"}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "signature_delta", "signature": "Ab-"}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "signature_delta", "signature": "sk-9=="}},
+            ),
+            ("content_block_stop", {"index": 0}),
+            (
+                "content_block_start",
+                {
+                    "index": 1,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "git_status",
+                        "input": {},
+                    },
+                },
+            ),
+            ("content_block_stop", {"index": 1}),
+            ("message_delta", {"delta": {"stop_reason": "tool_use"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+
+        result, _ = self.complete(
+            AnthropicMessagesProvider("https://provider.example/v1"), records
+        )
+
+        self.assertEqual(len(result.reasoning_blocks), 1)
+        block = result.reasoning_blocks[0]
+        self.assertEqual(block.kind, "thinking")
+        self.assertEqual(block.text, "weighing")
+        # Assembled from both fragments in order, and untouched: this value looks
+        # secret-shaped to the display redactor, which is why it never goes
+        # through it.
+        self.assertEqual(block.signature, "Ab-sk-9==")
+        self.assertTrue(block.replayable)
+        # Still kept off the answer, and still on the reasoning channel.
+        self.assertIsNone(result.content)
+        self.assertEqual(result.reasoning, "weighing")
+        self.assertEqual([call.call_id for call in result.tool_calls], ["call-1"])
+
+    def test_a_redacted_thinking_block_keeps_its_opaque_payload(self) -> None:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            (
+                "content_block_start",
+                {
+                    "index": 0,
+                    "content_block": {
+                        "type": "redacted_thinking",
+                        "data": "EncRypTedPayl0ad",
+                        "signature": "sig-1",
+                    },
+                },
+            ),
+            ("content_block_stop", {"index": 0}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+
+        result, _ = self.complete(
+            AnthropicMessagesProvider("https://provider.example/v1"), records
+        )
+
+        self.assertEqual(len(result.reasoning_blocks), 1)
+        block = result.reasoning_blocks[0]
+        self.assertEqual(block.kind, "redacted_thinking")
+        self.assertEqual(block.data, "EncRypTedPayl0ad")
+        self.assertEqual(block.text, "")
+        # There is nothing readable to leak, and nothing to show either.
+        self.assertIsNone(result.reasoning)
+
+    def test_thinking_goes_back_ahead_of_the_tool_call_it_preceded(self) -> None:
+        # The API verifies each signature against the block it signs and refuses a
+        # turn whose thinking was edited or dropped, so this ordering is the
+        # difference between a working tool turn and a rejected one.
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=(
+                    ModelMessage("user", "work"),
+                    ModelMessage(
+                        "assistant",
+                        "on it",
+                        tool_calls=(ToolCall("call-1", "git_status", "{}"),),
+                        reasoning_blocks=(
+                            ReasoningBlock("thinking", text="first", signature="s1"),
+                            ReasoningBlock(
+                                "redacted_thinking", data="opaque", signature="s2"
+                            ),
+                        ),
+                    ),
+                    ModelMessage("tool", "clean", tool_call_id="call-1"),
+                ),
+                deadline_seconds=2,
+            )
+        )
+
+        assistant = payload["messages"][1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(
+            [block["type"] for block in assistant["content"]],
+            ["thinking", "redacted_thinking", "text", "tool_use"],
+        )
+        self.assertEqual(assistant["content"][0]["thinking"], "first")
+        self.assertEqual(assistant["content"][0]["signature"], "s1")
+        # A redacted block carries only its opaque payload back.
+        self.assertEqual(assistant["content"][1], {"type": "redacted_thinking", "data": "opaque"})
+
+    def test_a_cache_breakpoint_never_lands_on_a_thinking_block(self) -> None:
+        # Anthropic does not accept cache_control on a thinking block, so a
+        # breakpoint that landed there would make the whole request invalid.
+        messages = [ModelMessage("system", "rules"), ModelMessage("user", "work")]
+        for index in range(6):
+            messages.append(
+                ModelMessage(
+                    "assistant",
+                    None,
+                    tool_calls=(ToolCall(f"call-{index}", "git_status", "{}"),),
+                    reasoning_blocks=(
+                        ReasoningBlock("thinking", text=f"step {index}", signature="s"),
+                    ),
+                )
+            )
+            messages.append(ModelMessage("tool", f"result {index}", tool_call_id=f"call-{index}"))
+
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=tuple(messages),
+                deadline_seconds=2,
+                cache_key="session-a",
+            )
+        )
+
+        marked = [
+            block
+            for item in payload["messages"]
+            for block in item["content"]
+            if "cache_control" in block
+        ]
+        self.assertTrue(marked)
+        self.assertEqual(
+            [block["type"] for block in marked if block["type"] == "thinking"], []
+        )
+
+        # The case that actually exercises the slide-back: the newest turn always
+        # gets a breakpoint, and here the newest turn's last block is thinking.
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=(
+                    ModelMessage("user", "work"),
+                    ModelMessage(
+                        "assistant",
+                        None,
+                        reasoning_blocks=(
+                            ReasoningBlock("thinking", text="still weighing", signature="s"),
+                        ),
+                    ),
+                ),
+                deadline_seconds=2,
+                cache_key="session-a",
+            )
+        )
+
+        blocks = [
+            block for item in payload["messages"] for block in item["content"]
+        ]
+        self.assertEqual([block["type"] for block in blocks], ["text", "thinking"])
+        self.assertNotIn("cache_control", blocks[1])
+        self.assertIn("cache_control", blocks[0])
+
+    def test_a_block_that_no_longer_matches_its_signature_is_left_out(self) -> None:
+        # Sending an edited block would be rejected outright, so the turn goes
+        # without it rather than failing.
+        payload = self._anthropic_payload(
+            ModelRequest(
+                model="test-model",
+                messages=(
+                    ModelMessage("user", "work"),
+                    ModelMessage(
+                        "assistant",
+                        "on it",
+                        reasoning_blocks=(
+                            ReasoningBlock(
+                                "thinking",
+                                text="[REDACTED]",
+                                signature="s1",
+                                replayable=False,
+                            ),
+                            # A block with no signature cannot be authenticated
+                            # either, whatever its text says.
+                            ReasoningBlock("thinking", text="unsigned"),
+                        ),
+                    ),
+                ),
+                deadline_seconds=2,
+            )
+        )
+
+        assistant = payload["messages"][1]
+        self.assertEqual(
+            [block["type"] for block in assistant["content"]], ["text"]
+        )
 
     def test_an_effort_level_that_does_not_exist_is_refused_at_construction(self) -> None:
         with self.assertRaisesRegex(ValueError, "reasoning effort"):

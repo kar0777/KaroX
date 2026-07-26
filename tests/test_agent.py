@@ -18,6 +18,7 @@ from karox.agent import (
     AgentEventKind,
     AgentKernel,
     AgentLimits,
+    AgentReport,
     ContextBudget,
     SYSTEM_PROMPT,
 )
@@ -32,6 +33,7 @@ from karox.providers import (
     ModelResponse,
     ProviderError,
     ProviderErrorKind,
+    ReasoningBlock,
     ToolCall,
     ToolCallDelta,
 )
@@ -1239,6 +1241,120 @@ class ExtendedToolAgentTests(unittest.TestCase):
         )
 
 
+class ThinkingKernelTests(_AgentKernelFixture):
+    """A signed thinking block has to survive the trip through the session file."""
+
+    def test_a_signed_block_comes_back_on_the_next_request(self) -> None:
+        signed = ReasoningBlock(
+            "thinking", text="weighing the edit", signature="Ab-sk-9=="
+        )
+        provider = QueueProvider(
+            [
+                ModelResponse(
+                    content=None,
+                    tool_calls=(call("status", "git_status", {}),),
+                    finish_reason="tool_calls",
+                    usage={"prompt_tokens": 2, "completion_tokens": 1},
+                    reasoning="weighing the edit",
+                    reasoning_blocks=(signed,),
+                ),
+                model_response(content="done thinking"),
+            ]
+        )
+
+        self.kernel(provider, AgentLimits(max_steps=2, max_seconds=30)).run("session")
+
+        # Persisted alongside the turn it belongs to...
+        entry = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("role") == "assistant" and item.get("reasoning_blocks")
+        )
+        self.assertEqual(
+            entry["reasoning_blocks"],
+            [
+                {
+                    "kind": "thinking",
+                    "text": "weighing the edit",
+                    "data": "",
+                    "signature": "Ab-sk-9==",
+                    "replayable": True,
+                }
+            ],
+        )
+        # ...and the second request carries it back unedited, signature included.
+        self.assertEqual(len(provider.requests), 2)
+        assistant = next(
+            item
+            for item in provider.requests[1].messages
+            if item.role == "assistant" and item.reasoning_blocks
+        )
+        self.assertEqual(assistant.reasoning_blocks, (signed,))
+
+    def test_the_display_redactor_never_touches_a_signature(self) -> None:
+        # The signature is base64url and can contain a token-shaped run, so the
+        # pass that rewrites secret-shaped text would silently invalidate it.
+        provider = QueueProvider(
+            [
+                ModelResponse(
+                    content="ghp_0123456789abcdefghij0123",
+                    tool_calls=(),
+                    finish_reason="stop",
+                    usage={},
+                    reasoning_blocks=(
+                        ReasoningBlock(
+                            "thinking",
+                            text="the token is ghp_0123456789abcdefghij0123",
+                            signature="Bearer sk-0123456789abcdefghij",
+                        ),
+                    ),
+                )
+            ]
+        )
+
+        self.kernel(provider, AgentLimits(max_steps=1, max_seconds=30)).run("session")
+
+        entry = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("role") == "assistant"
+        )
+        # The visible answer is still redacted for display, as before...
+        self.assertNotIn("ghp_0123456789abcdefghij0123", str(entry["content"]))
+        # ...while the block that has to reproduce byte for byte is intact.
+        block = entry["reasoning_blocks"][0]
+        self.assertEqual(block["signature"], "Bearer sk-0123456789abcdefghij")
+        self.assertEqual(
+            block["text"], "the token is ghp_0123456789abcdefghij0123"
+        )
+        self.assertTrue(block["replayable"])
+
+    def test_a_record_with_unusable_reasoning_degrades_instead_of_failing(self) -> None:
+        # A record written by an older version, or damaged, must not produce a
+        # request the provider refuses.
+        kernel = self.kernel(QueueProvider([]), AgentLimits(max_seconds=30))
+        entries = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "work"},
+            {
+                "role": "assistant",
+                "content": "hm",
+                "reasoning_blocks": [
+                    {"kind": "not_a_kind", "text": "x", "signature": "s"},
+                    "not even an object",
+                    {"kind": "thinking", "text": "kept", "signature": "s2"},
+                ],
+            },
+        ]
+
+        messages = list(kernel._request_messages(entries))
+
+        assistant = next(item for item in messages if item.role == "assistant")
+        self.assertEqual(
+            [block.text for block in assistant.reasoning_blocks], ["kept"]
+        )
+
+
 class StreamingQueueProvider(QueueProvider):
     """A provider that hands over its answer in fragments, like a real one."""
 
@@ -1536,6 +1652,135 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertLessEqual(
             kernel._estimated_tokens(compacted), kernel.context.token_ceiling
         )
+
+    def test_the_summary_names_the_evidence_the_run_already_produced(self) -> None:
+        # Verification rests on evidence IDs. A summary that dropped them left the
+        # model unable to say what it had already proved, while the design comment
+        # claimed a summary can never quietly omit evidence.
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=8_000, keep_recent_groups=2)
+        )
+        entries = self.history(12, 3_000)
+        for index, entry in enumerate(entries):
+            if entry.get("role") != "tool":
+                continue
+            entry["result"] = {
+                "ok": True,
+                "data": {
+                    "path": f"file{index}.txt",
+                    # A result that touched several files, not just one.
+                    "files": [f"extra{index}a.txt", {"path": f"extra{index}b.txt"}],
+                },
+                "evidence": [{"kind": "file_read", "evidence_id": f"ev-{index}"}],
+            }
+
+        summary = str(kernel._compact(entries)[2]["content"])
+
+        self.assertIn("Evidence already recorded:", summary)
+        self.assertIn("ev-3", summary)
+        # Every path from a multi-file result, not only the first key.
+        self.assertIn("extra3a.txt", summary)
+        self.assertIn("extra3b.txt", summary)
+
+    def test_a_rewritten_context_is_reported_with_both_token_counts(self) -> None:
+        # Compaction used to be entirely invisible: nothing said the middle of the
+        # conversation had been replaced, so a run that went wrong afterwards
+        # could not be explained.
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=8_000, keep_recent_groups=2)
+        )
+        seen: list[object] = []
+        kernel._on_event = seen.append
+
+        kernel._compact(self.history(12, 3_000))
+
+        self.assertIsNotNone(kernel._last_compaction)
+        detail = kernel._last_compaction
+        assert detail is not None
+        self.assertGreater(detail["before_tokens"], detail["after_tokens"])
+        self.assertLessEqual(detail["after_tokens"], detail["ceiling"])
+        self.assertGreater(detail["turns_summarized"], 0)
+        self.assertTrue(detail["within_ceiling"])
+        self.assertEqual(
+            [item.kind for item in seen], [AgentEventKind.COMPACTED]  # type: ignore[attr-defined]
+        )
+
+    def test_the_reported_token_counts_are_numbers_not_redactions(self) -> None:
+        # The credential-name redactor treats any key containing "token" as a
+        # secret unless it ends in _tokens, so a plausible spelling like
+        # tokens_before comes out of the JSON report as [REDACTED].
+        report = AgentReport(
+            session_id="s",
+            status="stopped",
+            phase="execution",
+            verified=False,
+            reason="step_limit",
+            steps=1,
+            changed_files=(),
+            checks=(),
+            git_state={},
+            evidence=(),
+            usage={},
+            compaction={
+                "count": 1,
+                "before_tokens": 9_000,
+                "after_tokens": 4_000,
+                "turns_summarized": 3,
+                "within_ceiling": True,
+                "ceiling": 4_800,
+            },
+        )
+
+        detail = report.to_dict()["compaction"]
+        self.assertEqual(detail["before_tokens"], 9_000)
+        self.assertEqual(detail["after_tokens"], 4_000)
+
+    def test_a_context_still_over_the_ceiling_says_so(self) -> None:
+        # Keeping the recent floor is the right call, but reporting it as a clean
+        # compaction would be the silent pass this product forbids.
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=2_000, keep_recent_groups=8)
+        )
+
+        kernel._compact(self.history(12, 4_000))
+
+        detail = kernel._last_compaction
+        assert detail is not None
+        self.assertFalse(detail["within_ceiling"])
+        self.assertGreater(detail["after_tokens"], detail["ceiling"])
+
+    def test_replayed_thinking_counts_toward_the_window(self) -> None:
+        # It is sent in full and cannot be clipped without invalidating its
+        # signature, so an estimate that ignored it would let a long thinking
+        # phase push the request past the window while reporting that it fitted.
+        kernel = self.kernel(ContextBudget(max_input_tokens=200_000))
+        entries = self.history(2, 100)
+        without = kernel._estimated_tokens(entries)
+        for entry in entries:
+            if entry.get("role") == "assistant":
+                entry["reasoning_blocks"] = [
+                    {
+                        "kind": "thinking",
+                        "text": "t" * 20_000,
+                        "data": "",
+                        "signature": "s",
+                        "replayable": True,
+                    }
+                ]
+
+        self.assertGreater(kernel._estimated_tokens(entries), without + 1_000)
+
+    def test_a_list_too_long_to_show_says_so_instead_of_ending_early(self) -> None:
+        # Cutting the list at forty read as complete. Whatever the cap is, going
+        # over it has to be visible.
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=4_000, keep_recent_groups=1)
+        )
+        entries = self.history(400, 400)
+
+        summary = str(kernel._compact(entries)[2]["content"])
+
+        self.assertRegex(summary, r"and \d+ more not listed here")
 
     def test_compaction_never_splits_a_tool_call_from_its_result(self) -> None:
         kernel = self.kernel(

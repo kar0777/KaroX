@@ -27,6 +27,7 @@ from .providers import (
     OpenAIChatCompletionsProvider,
     ProviderError,
     ProviderErrorKind,
+    ReasoningBlock,
     ToolCallDelta,
 )
 
@@ -660,6 +661,26 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 continue
             role = "assistant" if message.role == "assistant" else "user"
             blocks: list[Dict[str, Any]] = []
+            # Thinking comes first, in the order the model produced it, and comes
+            # back with the tool calls it preceded: the API verifies each
+            # signature and refuses a turn whose thinking was edited or dropped.
+            # A block whose stored text no longer matches what was signed is left
+            # out rather than sent and rejected.
+            for reasoning in message.reasoning_blocks:
+                if not reasoning.replayable or not reasoning.signature:
+                    continue
+                if reasoning.kind == "redacted_thinking":
+                    blocks.append(
+                        {"type": "redacted_thinking", "data": reasoning.data}
+                    )
+                else:
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": reasoning.text,
+                            "signature": reasoning.signature,
+                        }
+                    )
             if message.content is not None:
                 blocks.append({"type": "text", "text": message.content})
             blocks.extend(
@@ -691,6 +712,12 @@ class AnthropicMessagesProvider(_StreamingAdapter):
         The last block always gets one so the newest turn is cached for the turn
         after it. Anthropic allows four breakpoints per request and the system
         block holds one, leaving three here.
+
+        Spacing is measured over every block, because the lookback window counts
+        every block -- but a breakpoint is only ever written onto one that accepts
+        it. A thinking block does not, so a position that lands on one slides back
+        to the nearest block that does rather than making the whole request
+        invalid.
         """
         blocks = [
             block
@@ -700,10 +727,21 @@ class AnthropicMessagesProvider(_StreamingAdapter):
         ]
         if not blocks:
             return
+
+        def cacheable_at_or_before(position: int) -> int:
+            while position >= 0 and blocks[position].get("type") in _ANTHROPIC_REASONING_BLOCKS:
+                position -= 1
+            return position
+
         stride = 15
         grid = [index for index in range(stride, len(blocks) - 1, stride)]
-        chosen = sorted({*grid[-2:], len(blocks) - 1})
-        for index in chosen:
+        chosen = {*grid[-2:], len(blocks) - 1}
+        resolved = {
+            position
+            for position in (cacheable_at_or_before(index) for index in chosen)
+            if position >= 0
+        }
+        for index in sorted(resolved):
             blocks[index]["cache_control"] = {"type": "ephemeral"}
 
     def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
@@ -767,6 +805,9 @@ class AnthropicMessagesProvider(_StreamingAdapter):
         message_started = False
         block_types: Dict[int, str] = {}
         stopped_blocks: set[int] = set()
+        # Per block index, because a signature belongs to one block rather than to
+        # the concatenated reasoning string.
+        reasoning_parts: Dict[int, Dict[str, Any]] = {}
         for event_name, data in self._sse_records(response, deadline):
             value = self._json_event(data, response.status_code)
             kind = event_name or value.get("type")
@@ -862,7 +903,20 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=initial_text, response_id=response_id, transport_attempts=attempts)
                 elif block_type in _ANTHROPIC_REASONING_BLOCKS:
                     initial_thinking = block.get("thinking", "")
-                    if isinstance(initial_thinking, str) and initial_thinking:
+                    if not isinstance(initial_thinking, str):
+                        initial_thinking = ""
+                    opaque = block.get("data", "")
+                    reasoning_parts[index] = {
+                        "kind": block_type,
+                        "text": [initial_thinking],
+                        # A redacted block's payload is encrypted and arrives
+                        # whole; only readable thinking streams in deltas.
+                        "data": opaque if isinstance(opaque, str) else "",
+                        "signature": block.get("signature", "")
+                        if isinstance(block.get("signature"), str)
+                        else "",
+                    }
+                    if initial_thinking:
                         yield ModelEvent(
                             ModelEventKind.REASONING_DELTA,
                             reasoning_delta=initial_thinking,
@@ -901,6 +955,8 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                     and expected_type in _ANTHROPIC_REASONING_BLOCKS
                     and isinstance(delta.get("thinking"), str)
                 ):
+                    if index in reasoning_parts:
+                        reasoning_parts[index]["text"].append(delta["thinking"])
                     yield ModelEvent(
                         ModelEventKind.REASONING_DELTA,
                         reasoning_delta=delta["thinking"],
@@ -908,10 +964,13 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         transport_attempts=attempts,
                     )
                 elif delta_type == "signature_delta" and expected_type in _ANTHROPIC_REASONING_BLOCKS:
-                    # The signature authenticates a thinking block for replay.
-                    # KaroX does not replay thinking blocks, so it is consumed
-                    # rather than stored: a signature detached from the block it
-                    # signs is useless, and holding it would imply otherwise.
+                    # The signature authenticates the block it arrives inside, and
+                    # the API verifies it when the block comes back with the tool
+                    # result it preceded. It is accumulated verbatim -- never
+                    # re-encoded, never normalized -- because any edit is rejected.
+                    fragment = delta.get("signature")
+                    if index in reasoning_parts and isinstance(fragment, str):
+                        reasoning_parts[index]["signature"] += fragment
                     continue
                 elif expected_type not in {"text", "tool_use"}:
                     # A delta belonging to a block type this adapter does not
@@ -939,6 +998,21 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         "Anthropic content stop references an unknown block",
                     )
                 stopped_blocks.add(index)
+                pending = reasoning_parts.pop(index, None)
+                if pending is not None:
+                    # Both the text and the signature are complete only now, so
+                    # this is the one moment the whole block can be handed over.
+                    yield ModelEvent(
+                        ModelEventKind.REASONING_DELTA,
+                        reasoning_block=ReasoningBlock(
+                            kind=pending["kind"],
+                            text="".join(pending["text"]),
+                            data=pending["data"],
+                            signature=pending["signature"],
+                        ),
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
                 continue
             if kind == "message_delta":
                 if not message_started:

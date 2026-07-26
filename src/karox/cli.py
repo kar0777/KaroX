@@ -948,6 +948,8 @@ def _stream_progress() -> Callable[[AgentEvent], None]:
             text_open[0] = True
         elif event.kind is AgentEventKind.STEP_STARTED:
             write(f"[step {event.step}]")
+        elif event.kind is AgentEventKind.COMPACTED:
+            write(f"[context: {event.summary}]")
         elif event.kind is AgentEventKind.TOOL_STARTED:
             write(f"  -> {event.tool}")
         elif event.kind is AgentEventKind.TOOL_FINISHED:
@@ -995,6 +997,20 @@ def _print_agent_report(report: AgentReport) -> None:
         )
     for skipped in report.project_context.get("skipped") or []:
         print(f"project_instructions_skipped: {skipped}")
+    # A rewritten context changes what the model could see, so it is reported
+    # rather than left to be inferred from a worse answer.
+    if report.compaction:
+        detail = report.compaction
+        print(
+            "context_compaction: {count}x, ~{before} -> ~{after} tokens, "
+            "{turns} turn(s) summarized{note}".format(
+                count=detail.get("count"),
+                before=detail.get("before_tokens"),
+                after=detail.get("after_tokens"),
+                turns=detail.get("turns_summarized"),
+                note="" if detail.get("within_ceiling") else " (still over the ceiling)",
+            )
+        )
     if report.provider_message:
         print(f"provider_message: {report.provider_message}")
 

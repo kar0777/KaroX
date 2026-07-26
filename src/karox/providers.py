@@ -108,6 +108,32 @@ class ProviderTool:
 
 
 @dataclass(frozen=True)
+class ReasoningBlock:
+    """One block of a model's own deliberation, kept whole so it can be returned.
+
+    Anthropic signs each thinking block and verifies the signature when the block
+    comes back with the tool result it preceded, rejecting anything edited. That
+    makes this the one payload KaroX must reproduce byte for byte, which is why
+    the text, the opaque form and the signature travel together rather than being
+    flattened into the reasoning string shown on screen.
+    """
+
+    kind: str
+    text: str = ""
+    # ``redacted_thinking`` carries an encrypted payload with no readable text.
+    data: str = ""
+    signature: str = ""
+    # False when the stored text is no longer what the model produced, so
+    # returning it would be rejected. Kept rather than dropped so the record
+    # still shows the model thought here.
+    replayable: bool = True
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"thinking", "redacted_thinking"}:
+            raise ValueError("reasoning block kind is not one this transport models")
+
+
+@dataclass(frozen=True)
 class ToolCall:
     call_id: str
     name: str
@@ -128,6 +154,9 @@ class ModelMessage:
     content: Optional[str] = None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: Optional[str] = None
+    # The deliberation that preceded this turn's content, in the order the model
+    # produced it. A transport that signs its thinking needs it back.
+    reasoning_blocks: tuple[ReasoningBlock, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role not in {"system", "user", "assistant", "tool"}:
@@ -138,6 +167,8 @@ class ModelMessage:
             raise ValueError("tool messages require a tool call ID")
         if self.role != "assistant" and self.tool_calls:
             raise ValueError("only assistant messages may contain tool calls")
+        if self.role != "assistant" and self.reasoning_blocks:
+            raise ValueError("only assistant messages may carry reasoning blocks")
 
 
 @dataclass(frozen=True)
@@ -221,6 +252,9 @@ class ModelResponse:
     # Whatever reasoning the provider chose to expose, kept apart from
     # ``content`` so it is never mistaken for the model's answer.
     reasoning: Optional[str] = None
+    # The same reasoning still in blocks, with the signatures that authenticate
+    # them. ``reasoning`` is for showing a human; this is for handing back.
+    reasoning_blocks: tuple[ReasoningBlock, ...] = ()
 
 
 class ModelEventKind(str, Enum):
@@ -247,6 +281,10 @@ class ModelEvent:
     kind: ModelEventKind
     text_delta: Optional[str] = None
     reasoning_delta: Optional[str] = None
+    # Emitted once, when a reasoning block closes and its text and signature are
+    # both complete. The deltas above stream the same words to a screen; this is
+    # the whole block, kept so it can be returned to the provider intact.
+    reasoning_block: Optional[ReasoningBlock] = None
     tool_call_delta: Optional[ToolCallDelta] = None
     usage: Dict[str, int] = field(default_factory=dict)
     finish_reason: Optional[str] = None
@@ -275,6 +313,7 @@ def accumulate_response(
 
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    reasoning_blocks: list[ReasoningBlock] = []
     saw_content = False
     call_parts: Dict[int, Dict[str, list[str]]] = {}
     usage: Dict[str, int] = {}
@@ -294,6 +333,8 @@ def accumulate_response(
             content_parts.append(event.text_delta or "")
         elif event.kind == ModelEventKind.REASONING_DELTA:
             reasoning_parts.append(event.reasoning_delta or "")
+            if event.reasoning_block is not None:
+                reasoning_blocks.append(event.reasoning_block)
         elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
             delta = event.tool_call_delta
             if delta is None:
@@ -346,6 +387,7 @@ def accumulate_response(
         response_id=response_id,
         transport_attempts=transport_attempts,
         reasoning=reasoning or None,
+        reasoning_blocks=tuple(reasoning_blocks),
     )
 
 

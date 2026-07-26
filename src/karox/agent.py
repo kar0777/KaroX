@@ -25,6 +25,7 @@ from .providers import (
     ProviderErrorKind,
     ProviderTool,
     REASONING_EFFORTS,
+    ReasoningBlock,
     ToolCall,
     accumulate_response,
 )
@@ -268,9 +269,99 @@ class AgentReport:
     # were refused. Third-party text that steers the agent is never adopted
     # invisibly: if it shaped the run, the run says so.
     project_context: Dict[str, Any] = field(default_factory=dict)
+    # Present only when the model's context was rewritten to fit its window,
+    # with the token counts either side. The same rule: if it shaped the run,
+    # the run says so.
+    compaction: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(redact(asdict(self)))
+
+
+def _joined(items: List[str], *, limit: int = 200, separator: str = ", ") -> str:
+    """Join a list for a summary, saying so when it did not all fit.
+
+    Truncating silently is the failure this product's own rules forbid: a summary
+    that listed forty files out of ninety read as complete. The cap is high enough
+    that reaching it is unusual, and reaching it is now visible.
+    """
+
+    if len(items) <= limit:
+        return separator.join(items)
+    shown = separator.join(items[:limit])
+    return f"{shown} (and {len(items) - limit} more not listed here)"
+
+
+def _summary_paths(data: Any) -> List[str]:
+    """Every repository path a recorded result touched, not just the first."""
+
+    if not isinstance(data, Mapping):
+        return []
+    found: List[str] = []
+    single = data.get("path")
+    if isinstance(single, str) and single:
+        found.append(single)
+    for key in ("paths", "files", "changed_files", "matches", "entries"):
+        value = data.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, str) and item:
+                found.append(item)
+            elif isinstance(item, Mapping):
+                nested = item.get("path")
+                if isinstance(nested, str) and nested:
+                    found.append(nested)
+    return found
+
+
+def _summary_evidence_ids(result: Any) -> List[str]:
+    """The evidence IDs a recorded result produced."""
+
+    if not isinstance(result, Mapping):
+        return []
+    records = result.get("evidence")
+    if not isinstance(records, list):
+        return []
+    found: List[str] = []
+    for item in records:
+        if not isinstance(item, Mapping):
+            continue
+        identifier = item.get("evidence_id") or item.get("id")
+        if isinstance(identifier, str) and identifier:
+            found.append(identifier)
+    return found
+
+
+def _reasoning_blocks(entry: Mapping[str, Any]) -> tuple[ReasoningBlock, ...]:
+    """Rebuild an assistant turn's deliberation from what was persisted.
+
+    A stored block that no longer describes something this transport can return
+    is dropped here rather than at the wire, so a record written by an older
+    version -- or corrupted -- degrades to a turn with no thinking instead of a
+    request the provider refuses.
+    """
+
+    stored = entry.get("reasoning_blocks")
+    if not isinstance(stored, list):
+        return ()
+    blocks: list[ReasoningBlock] = []
+    for item in stored:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind not in {"thinking", "redacted_thinking"}:
+            continue
+        blocks.append(
+            ReasoningBlock(
+                kind=kind,
+                text=str(item.get("text") or ""),
+                data=str(item.get("data") or ""),
+                signature=str(item.get("signature") or ""),
+                replayable=item.get("replayable") is not False,
+            )
+        )
+    return tuple(blocks)
 
 
 class AgentEventKind(str, Enum):
@@ -283,6 +374,8 @@ class AgentEventKind(str, Enum):
     REASONING_DELTA = "reasoning_delta"
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
+    # The middle of the conversation was replaced by a summary to fit the window.
+    COMPACTED = "compacted"
     STEP_FINISHED = "step_finished"
     FINISHED = "finished"
 
@@ -390,6 +483,8 @@ class AgentKernel:
         # re-checksum the whole session file several times a second.
         self._on_event = on_event
         self._step = 0
+        self._compactions = 0
+        self._last_compaction: Optional[Dict[str, Any]] = None
         # Validated once here rather than on the first request, so a bad value
         # fails before a session is leased and a repository is touched.
         if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
@@ -783,6 +878,33 @@ class AgentKernel:
 
         self._update_session(record.session_id, lease, update)
 
+    @staticmethod
+    def _reasoning_entries(response: ModelResponse) -> List[Dict[str, Any]]:
+        """Store the model's deliberation in the form the provider will accept back.
+
+        This is content transport, not display: the same distinction file content
+        already relies on. Known secret values KaroX holds are still removed, but
+        nothing is pattern-rewritten or clamped, because a signed block that no
+        longer matches what was signed is rejected. If a removal did change the
+        bytes, the block is kept for the record and marked unreplayable rather
+        than sent and refused.
+        """
+
+        entries: List[Dict[str, Any]] = []
+        for block in response.reasoning_blocks:
+            text = str(redact_content(block.text))
+            data = str(redact_content(block.data))
+            entries.append(
+                {
+                    "kind": block.kind,
+                    "text": text,
+                    "data": data,
+                    "signature": block.signature,
+                    "replayable": text == block.text and data == block.data,
+                }
+            )
+        return entries
+
     def _persist_assistant(
         self, session_id: str, lease: MutationLease, response: ModelResponse
     ) -> None:
@@ -813,11 +935,20 @@ class AgentKernel:
             "usage": dict(response.usage),
         }
         route_audit = self._route_audit(response)
+        reasoning_blocks = self._reasoning_entries(response)
 
         def update(record: SessionRecord) -> None:
             if route_audit is not None:
                 record.provider_history.append(dict(redact(route_audit)))
-            record.provider_history.append(dict(redact(entry)))
+            stored = dict(redact(entry))
+            if reasoning_blocks:
+                # Attached after the display-redaction pass, never through it. That
+                # pass rewrites secret-shaped text and clamps long strings, which is
+                # right for anything shown to a human and fatal here: a signature is
+                # base64url and can contain a token-shaped run, and a rewritten
+                # block is one the provider refuses.
+                stored["reasoning_blocks"] = reasoning_blocks
+            record.provider_history.append(stored)
             aggregate = dict(record.usage)
             aggregate["requests"] = int(aggregate.get("requests", 0)) + 1
             aggregate["transport_attempts"] = int(
@@ -1234,6 +1365,7 @@ class AgentKernel:
                 content=entry.get("content"),
                 tool_calls=calls,
                 tool_call_id=entry.get("tool_call_id"),
+                reasoning_blocks=_reasoning_blocks(entry) if role == "assistant" else (),
             )
             if role != "assistant":
                 continue
@@ -1284,14 +1416,17 @@ class AgentKernel:
         if not groups:
             return list(history)
         ceiling = self.context.token_ceiling
-        if self._estimated_tokens(history) <= ceiling:
+        before = self._estimated_tokens(history)
+        if before <= ceiling:
             return list(history)
         keep = min(self.context.keep_recent_groups, len(groups))
         for cut in range(1, len(groups) - keep + 1):
             digest = self._context_summary(groups[:cut])
             kept = [entry for group in groups[cut:] for entry in group]
             candidate = head + [digest] + kept
-            if self._estimated_tokens(candidate) <= ceiling:
+            after = self._estimated_tokens(candidate)
+            if after <= ceiling:
+                self._record_compaction(before, after, cut, fitted=True)
                 return candidate
         # Even the floor of recent turns exceeds the ceiling. Keep that floor:
         # clipping in _request_messages still applies, and discarding the most
@@ -1299,10 +1434,47 @@ class AgentKernel:
         older = groups[:-keep]
         if not older:
             return list(history)
-        return (
+        result = (
             head
             + [self._context_summary(older)]
             + [entry for group in groups[-keep:] for entry in group]
+        )
+        self._record_compaction(
+            before, self._estimated_tokens(result), len(older), fitted=False
+        )
+        return result
+
+    def _record_compaction(
+        self, before: int, after: int, turns: int, *, fitted: bool
+    ) -> None:
+        """Say that the model's context was rewritten, and by how much.
+
+        Compaction used to be entirely invisible: nothing in the report, the
+        stream or the record said the middle of the conversation had been
+        replaced, so a run that went wrong afterwards could not be explained.
+        ``fitted`` is False when even the floor of recent turns is over the
+        ceiling -- an honest 'this is still too big' rather than a silent pass.
+        """
+
+        self._compactions += 1
+        # The counts are spelled ``*_tokens`` because that is the one spelling the
+        # credential-name redactor recognises as a counter; anything else
+        # containing "token" comes out of the JSON report as [REDACTED].
+        self._last_compaction = {
+            "count": self._compactions,
+            "before_tokens": before,
+            "after_tokens": after,
+            "turns_summarized": turns,
+            "within_ceiling": fitted,
+            "ceiling": self.context.token_ceiling,
+        }
+        self._emit(
+            AgentEventKind.COMPACTED,
+            summary=(
+                f"summarized {turns} earlier turn(s): ~{before} tokens to ~{after}"
+                + ("" if fitted else ", still over the ceiling")
+            ),
+            ok=fitted,
         )
 
     @staticmethod
@@ -1358,6 +1530,12 @@ class AgentKernel:
                 name = raw.get("name")
                 if isinstance(name, str):
                     characters += len(name)
+            # Replayed deliberation is sent in full and cannot be clipped without
+            # invalidating its signature, so it has to be counted or a long
+            # thinking phase would push the request past the window while this
+            # estimate said it fitted.
+            for block in _reasoning_blocks(entry):
+                characters += len(block.text) + len(block.data)
         return int(characters / float(self.context.chars_per_token)) + 1
 
     def _context_summary(
@@ -1367,6 +1545,7 @@ class AgentKernel:
         tools: Counter[str] = Counter()
         paths: List[str] = []
         failures: List[str] = []
+        evidence: List[str] = []
         for group in groups:
             for entry in group:
                 role = entry.get("role")
@@ -1382,9 +1561,16 @@ class AgentKernel:
                     failures.append(f"{name}: {error.get('type')}")
                 result = entry.get("result")
                 data = result.get("data") if isinstance(result, dict) else None
-                path = data.get("path") if isinstance(data, dict) else None
-                if isinstance(path, str) and path not in paths:
-                    paths.append(path)
+                for path in _summary_paths(data):
+                    if path not in paths:
+                        paths.append(path)
+                # The evidence IDs are the whole point of this product's
+                # verification story. A summary that dropped them left the model
+                # unable to name what it had already proved, and the design
+                # comment above claims exactly that cannot happen.
+                for identifier in _summary_evidence_ids(result):
+                    if identifier not in evidence:
+                        evidence.append(identifier)
         used = ", ".join(f"{name} x{count}" for name, count in sorted(tools.items()))
         lines = [
             "KaroX summarized the earliest turns of this session to stay inside "
@@ -1394,9 +1580,11 @@ class AgentKernel:
             f"Tools used: {used or 'none'}.",
         ]
         if paths:
-            lines.append("Files involved: " + ", ".join(paths[:40]) + ".")
+            lines.append("Files involved: " + _joined(paths) + ".")
+        if evidence:
+            lines.append("Evidence already recorded: " + _joined(evidence) + ".")
         if failures:
-            lines.append("Failures: " + "; ".join(failures[:20]) + ".")
+            lines.append("Failures: " + _joined(failures, separator="; ") + ".")
         if not self.context.window_known:
             lines.append(
                 "The active model does not advertise an input window, so a "
@@ -1601,6 +1789,7 @@ class AgentKernel:
             provider_message=provider_message,
             answer_basis=self._answer_basis(record) if reason == "answer" else (),
             project_context=dict(self.project_context),
+            compaction=dict(self._last_compaction) if self._last_compaction else None,
         )
 
     def _completed(self, record: SessionRecord) -> bool:
