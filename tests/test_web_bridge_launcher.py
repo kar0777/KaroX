@@ -27,6 +27,7 @@ from karox.web_bridge_launcher import (
     WebBridgeLaunchError,
     _bridge_argv,
     _child_options,
+    ephemeral_url_warning,
     parent_death_hook,
     run_web_bridge,
     start_cloudflare_quick_tunnel,
@@ -348,6 +349,39 @@ class ParentDeathTests(unittest.TestCase):
             time.sleep(0.05)
         os.kill(pid, 9)
         self.fail("the child survived a hard kill of its launcher")
+
+
+class EphemeralUrlWarningTests(unittest.TestCase):
+    """A connector pasted with a throwaway URL breaks on the next restart.
+
+    `chatgpt-web` and `claude-web` both declare `persistent_url=True` and nothing
+    read that field, so KaroX printed a Quick Tunnel URL for them exactly as if it
+    were permanent. When the bridge restarted the URL stopped existing and the
+    connector failed on the user's side, with nothing here having warned them.
+    """
+
+    def test_a_web_profile_on_a_quick_tunnel_is_warned_about(self) -> None:
+        for profile in ("chatgpt-web", "claude-web"):
+            with self.subTest(profile=profile):
+                note = ephemeral_url_warning(profile, None)
+                self.assertIsNotNone(note)
+                assert note is not None
+                self.assertIn("temporary", note)
+                self.assertIn("--public-url", note)
+
+    def test_a_declared_origin_is_not_warned_about(self) -> None:
+        """The note tells the user to do this, so it must go quiet once they have."""
+        self.assertIsNone(
+            ephemeral_url_warning("chatgpt-web", "https://mcp.example.com")
+        )
+
+    def test_a_profile_that_never_needed_a_stable_url_is_left_alone(self) -> None:
+        for profile in ("promptql", "notion", "generic-streamable-http"):
+            with self.subTest(profile=profile):
+                self.assertIsNone(ephemeral_url_warning(profile, None))
+
+    def test_an_unknown_profile_does_not_raise(self) -> None:
+        self.assertIsNone(ephemeral_url_warning("not-a-profile", None))
 
 
 if __name__ == "__main__":

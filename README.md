@@ -134,18 +134,18 @@ extension details are in [providers](docs/providers/README.md),
 
 ## Verification
 
-The suite is 607 tests. The runner is `unittest`, which is what CI executes:
+The suite is 611 tests. The runner is `unittest`, which is what CI executes:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-607 is the number `python -m pytest --collect-only -q tests` reports and the
-number `unittest` reports as `Ran 607 tests`, so it is reproducible from a clean
+611 is the number `python -m pytest --collect-only -q tests` reports and the
+number `unittest` reports as `Ran 611 tests`, so it is reproducible from a clean
 checkout. A pass tally from `python -m pytest -q` is not: pytest counts subtests
 on top of tests, and how many it counts moves between runs, so no such figure is
 published here. Note also that a bare `python -m pytest -q` at the repository
-root collects 612, because it picks up the five legacy checks in
+root collects 616, because it picks up the five legacy checks in
 `scripts/test_karox4_units.py` alongside the vNext suite.
 
 Every count on this page is checked by `python scripts/check_test_count.py`,

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
-from .bridge import BridgeCredentialStore
+from .bridge import BridgeCredentialStore, known_bridge_profiles
 from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS
 from .models import AccessProfile
 from .paths import runtime_dir, session_dir
@@ -475,6 +475,33 @@ def write_watchdog(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def ephemeral_url_warning(profile_name: str, public_url: Optional[str]) -> Optional[str]:
+    """Warn when a profile that needs a stable URL is published on a throwaway one.
+
+    ``chatgpt-web`` and ``claude-web`` both declare ``persistent_url=True``, and
+    nothing read that field. A Cloudflare Quick Tunnel hands out a fresh
+    ``*.trycloudflare.com`` name on every start, so the URL a user has just pasted
+    into their connector stops existing the moment the bridge restarts -- and the
+    connector then fails on their side with nothing here to explain why.
+
+    Returns ``None`` when the user supplied their own origin, which is exactly the
+    case the note would be telling them to move to.
+    """
+    if public_url:
+        return None
+    profile = next(
+        (item for item in known_bridge_profiles() if item.name == profile_name), None
+    )
+    if profile is None or not profile.persistent_url:
+        return None
+    return (
+        "\nNote: this is a Cloudflare Quick Tunnel, so the URL above is temporary. "
+        "It changes every time the bridge restarts, and the connector you paste it "
+        "into will stop working when it does. For something you keep, publish a "
+        "stable HTTPS origin and pass --tunnel custom --public-url."
+    )
+
+
 def claim_watchdog(path: Path, payload: dict[str, Any]) -> None:
     """Create a session's watchdog record, refusing to take over another's.
 
@@ -731,6 +758,9 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             print("Add the MCP URL as a custom app in ChatGPT developer mode.")
         else:
             print("Add the MCP URL in Claude Settings > Connectors.")
+        note = ephemeral_url_warning(config.profile, config.public_url)
+        if note:
+            print(note)
         print("Press Ctrl+C to stop the bridge and tunnel.", flush=True)
 
         while True:
