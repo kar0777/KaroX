@@ -125,6 +125,7 @@ from .web_bridge_launcher import (
     WRITE_WEB_TOOLS,
     WebBridgeConnectConfig,
     WebBridgeLaunchError,
+    reap_orphaned_web_bridges,
     run_web_bridge,
 )
 
@@ -607,7 +608,11 @@ def _parser() -> argparse.ArgumentParser:
     bridge_show.add_argument("name")
     bridge_show.add_argument("--json", action="store_true")
     bridge_doctor = bridge_commands.add_parser(
-        "doctor", help="verify secure bridge credential storage"
+        "doctor",
+        help=(
+            "verify secure bridge credential storage and revoke web bridges "
+            "orphaned by a hard kill"
+        ),
     )
     bridge_doctor.add_argument("--json", action="store_true")
     bridge_connect = bridge_commands.add_parser(
@@ -734,6 +739,17 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     bridge_serve.add_argument("--allow-network-bind", action="store_true")
+    bridge_serve.add_argument(
+        "--tls-certfile",
+        help=(
+            "PEM certificate chain; required with --tls-keyfile for a "
+            "non-loopback bind"
+        ),
+    )
+    bridge_serve.add_argument(
+        "--tls-keyfile",
+        help="PEM private key for --tls-certfile",
+    )
     bridge_credential = bridge_commands.add_parser(
         "credential", help="manage bridge secrets in the OS keyring"
     )
@@ -1753,11 +1769,26 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             )
         )
     if args.bridge_command == "serve":
-        if (
-            args.host not in {"127.0.0.1", "::1", "localhost"}
-            and not args.allow_network_bind
-        ):
+        loopback_bind = args.host in {"127.0.0.1", "::1", "localhost"}
+        if not loopback_bind and not args.allow_network_bind:
             raise ValueError("non-loopback bridge bind requires --allow-network-bind")
+        if (args.tls_certfile is None) != (args.tls_keyfile is None):
+            raise ValueError("bridge TLS requires both --tls-certfile and --tls-keyfile")
+        # Off the loopback interface the bridge is reachable by anything that can
+        # route to this host, and the bearer token plus every file it returns
+        # would travel in clear text. --allow-network-bind gates that bind, so it
+        # may not be the whole gate.
+        if not loopback_bind and args.tls_certfile is None:
+            raise ValueError(
+                "non-loopback bridge bind requires TLS: pass --tls-certfile and "
+                "--tls-keyfile, or keep --host on loopback behind a tunnel"
+            )
+        for option, value in (
+            ("--tls-certfile", args.tls_certfile),
+            ("--tls-keyfile", args.tls_keyfile),
+        ):
+            if value is not None and not Path(value).is_file():
+                raise ValueError(f"{option} must point to an existing PEM file")
         if not 1 <= args.port <= 65_535:
             raise ValueError("bridge port must be between 1 and 65535")
         if not args.tool and not args.server:
@@ -1859,23 +1890,38 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         import uvicorn
 
         endpoint = "/mcp" if protocol == "mcp" else "/openapi.json"
+        scheme = "https" if args.tls_certfile else "http"
         print(
             f"KaroX bridge: profile={args.profile} protocol={protocol} "
             f"session={record.session_id}",
             flush=True,
         )
         print(
-            f"Local endpoint: http://{args.host}:{args.port}{endpoint}",
+            f"Local endpoint: {scheme}://{args.host}:{args.port}{endpoint}",
             flush=True,
         )
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="info",
+            ssl_certfile=args.tls_certfile,
+            ssl_keyfile=args.tls_keyfile,
+        )
         return 0
     if args.bridge_command == "list":
         payload: Any = [item.to_dict() for item in BridgeRegistry().list()]
     elif args.bridge_command == "show":
         payload = BridgeRegistry().get(args.name).to_dict()
     elif args.bridge_command == "doctor":
-        payload = BridgeCredentialStore().doctor()
+        # Reaping only on the next connect leaves a survivor of a hard kill
+        # holding a public tunnel until someone happens to start another bridge,
+        # so the diagnostic anyone runs first reaps before it reports.
+        reaped = reap_orphaned_web_bridges()
+        payload = {
+            **BridgeCredentialStore().doctor(),
+            "reaped_web_bridge_sessions": list(reaped),
+        }
     else:
         store = BridgeCredentialStore()
         command = args.bridge_credential_command

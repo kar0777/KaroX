@@ -59,13 +59,18 @@ karox bridge serve `
 ```
 
 PromptQL imports `https://PUBLIC_HOST/openapi.json`. Put the generated bridge
-secret only in the connector's protected Bearer or `X-API-Key` field. The
-authenticated preflight endpoints are `/health`, `/session`, `/context/brief`,
-and `/tools`. Mutating operations require a caller-generated stable
-`X-KaroX-Idempotency-Key` header.
+secret only in the connector's protected Bearer or `X-API-Key` field; the schema
+itself is authenticated, so the credential has to be stored before the import.
+The authenticated endpoints are `/openapi.json`, `/health`, `/session`,
+`/context/brief`, and `/tools`. Only `/` is open, and it carries nothing but the
+service name and the schema URL. Mutating operations require a caller-generated
+stable `X-KaroX-Idempotency-Key` header.
 
 The server binds to loopback by default. A cloud-hosted client needs a separate
-HTTPS tunnel or reverse proxy. Do not publish the raw HTTP port directly.
+HTTPS tunnel or reverse proxy. Do not publish the raw HTTP port directly. A
+non-loopback `--host` requires both `--allow-network-bind` and a TLS pair
+(`--tls-certfile` with `--tls-keyfile`); KaroX refuses to answer a network
+interface in clear text.
 
 ### Streamable HTTP MCP
 
@@ -107,6 +112,13 @@ enter the password there. Press `Ctrl+C` in the CLI to stop the bridge and
 tunnel and remove the temporary credential. Only the safe defaults, tools
 named with `--tool`, and the two write tools requested by `--write` are
 exposed.
+
+If the launcher is killed hard instead (`taskkill /F`, a closed console), the
+children are killed with it by a Windows job object or, on Linux, by
+`PR_SET_PDEATHSIG`. macOS has no equivalent primitive, so there a tunnel can
+outlive its launcher until `karox bridge doctor` — or the next `bridge connect` —
+signals the recorded process group, revokes the session and credential, and
+reports what it reaped.
 
 `cloudflared` is installed by the Windows KaroX installer when accepted, or can
 be selected explicitly with `--cloudflared PATH`. For an existing stable

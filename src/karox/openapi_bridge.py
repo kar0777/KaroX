@@ -10,25 +10,34 @@ from urllib.parse import quote
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .core import CoreError
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
-    HostedBridgeError,
     HostedToolRuntime,
 )
-# Both wires are published through the same tunnel, so they share one host and
-# Origin policy rather than each inventing its own.
+# Both wires are published through the same tunnel to the same agent, so they
+# share one host and Origin policy and one error vocabulary rather than each
+# inventing its own.
 from .proxy_server import (
+    BRIDGE_ERROR_MESSAGES,
     HOST_REJECTION_HINT,
+    bridge_error_code,
     normalize_host,
     origin_is_allowed,
     resolve_allowed_hosts,
 )
-from .security import redact
-from .sessions import SessionError
 
 
 MAX_REQUEST_BYTES = 2_000_000
+# The status each fixed error code answers with. Reflecting the exception text
+# instead used to hand a third-party agent the absolute repository path, and with
+# it the user's home directory and OS account name.
+_ERROR_STATUS: dict[str, int] = {
+    "tool_not_exposed": 404,
+    "not_found": 404,
+    "denied": 403,
+    "invalid_request": 400,
+    "internal": 500,
+}
 
 
 def _token_resolver(value: str | Callable[[], str]) -> Callable[[], str]:
@@ -52,6 +61,18 @@ def _token_resolver(value: str | Callable[[], str]) -> Callable[[], str]:
 
 def _operation_id(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+
+def bridge_error_response(code: str) -> JSONResponse:
+    """Build the only tool-error shape this wire is allowed to send."""
+    return JSONResponse(
+        {
+            "ok": False,
+            "error_code": code,
+            "error": BRIDGE_ERROR_MESSAGES[code],
+        },
+        status_code=_ERROR_STATUS[code],
+    )
 
 
 def build_openapi_bridge_app(
@@ -127,7 +148,11 @@ def build_openapi_bridge_app(
         rejection = rebinding_rejection(request)
         if rejection is not None:
             return rejection
-        if request.url.path not in {"/", "/openapi.json"}:
+        # Only the static discovery document at / is open. The schema names every
+        # exposed tool, its description and its path, which told an anonymous
+        # scanner exactly which mutating tools this repository is publishing; the
+        # client that legitimately imports it already holds the credential.
+        if request.url.path != "/":
             if not authorized(request):
                 return unauthorized()
             raw_length = request.headers.get("content-length")
@@ -187,9 +212,7 @@ def build_openapi_bridge_app(
     async def call_tool(tool_name: str, request: Request) -> Any:
         descriptor = by_name.get(tool_name)
         if descriptor is None:
-            return JSONResponse(
-                {"ok": False, "error": "tool is not exposed"}, status_code=404
-            )
+            return bridge_error_response("tool_not_exposed")
         try:
             arguments = await request.json()
         except Exception:
@@ -220,31 +243,8 @@ def build_openapi_bridge_app(
                 idempotency_key=idempotency_key,
                 deadline_seconds=deadline_seconds,
             )
-        except FileNotFoundError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(redact(str(exc)))}, status_code=404
-            )
-        except PermissionError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(redact(str(exc)))}, status_code=403
-            )
-        except SessionError as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(redact(str(exc)))}, status_code=403
-            )
-        except (CoreError, HostedBridgeError, TypeError, ValueError) as exc:
-            return JSONResponse(
-                {"ok": False, "error": str(redact(str(exc)))}, status_code=400
-            )
         except Exception as exc:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": str(redact(str(exc)))[:1000],
-                    "error_type": type(exc).__name__,
-                },
-                status_code=500,
-            )
+            return bridge_error_response(bridge_error_code(exc))
 
     def custom_openapi() -> dict[str, Any]:
         if app.openapi_schema is not None:

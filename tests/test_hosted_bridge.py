@@ -458,7 +458,11 @@ class HostedBridgeWireTests(unittest.TestCase):
         base = f"http://127.0.0.1:{server.port}"
         try:
             with httpx.Client(base_url=base, timeout=15.0) as client:
-                schema = client.get("/openapi.json")
+                # The schema names every exposed tool and its description, so it
+                # costs the same credential as calling one.
+                self.assertEqual(client.get("/openapi.json").status_code, 401)
+                headers = {"Authorization": "Bearer first-wire-token"}
+                schema = client.get("/openapi.json", headers=headers)
                 self.assertEqual(schema.status_code, 200)
                 paths = schema.json()["paths"]
                 self.assertIn("/tools/karox.repo.read_file", paths)
@@ -468,7 +472,6 @@ class HostedBridgeWireTests(unittest.TestCase):
                     ]
                 )
                 self.assertEqual(client.get("/health").status_code, 401)
-                headers = {"Authorization": "Bearer first-wire-token"}
                 session = client.get("/session", headers=headers)
                 self.assertEqual(session.status_code, 200)
                 self.assertEqual(session.json()["session_id"], "wire")
@@ -788,6 +791,42 @@ class BridgeWireSecurityTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["error_code"], "not_found")
         for fragment in ("/home/user/x", "/home/user", "home", "user"):
             self.assertNotIn(fragment, response.text)
+
+    def test_openapi_failure_never_reflects_a_filesystem_path(self) -> None:
+        secret_path = "/home/user/x"
+        request = {
+            "method": "POST",
+            "path": "/tools/karox.repo.read_file",
+            "headers": [
+                ("host", "127.0.0.1:8765"),
+                ("authorization", f"Bearer {self.token}"),
+                ("content-type", "application/json"),
+            ],
+            "body": b"{}",
+        }
+        (missing,) = _wire_requests(
+            build_openapi_bridge_app(
+                _RaisingRuntime(FileNotFoundError(secret_path)), self.token
+            ),
+            [dict(request)],
+        )
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(missing.json()["error_code"], "not_found")
+
+        (failed,) = _wire_requests(
+            build_openapi_bridge_app(
+                _RaisingRuntime(RuntimeError(f"{secret_path} exploded")), self.token
+            ),
+            [dict(request)],
+        )
+        self.assertEqual(failed.status, 500)
+        self.assertEqual(failed.json()["error_code"], "internal")
+        # error_type named the exception class, which is a second thing the
+        # third-party agent has no business learning about this host.
+        self.assertNotIn("error_type", failed.json())
+        for fragment in ("/home/user/x", "/home/user", "home", "user"):
+            self.assertNotIn(fragment, missing.text)
+            self.assertNotIn(fragment, failed.text)
 
     def test_non_ascii_bearer_credential_is_unauthorized(self) -> None:
         app = build_proxy_asgi_app(self.runtime, self.token)
