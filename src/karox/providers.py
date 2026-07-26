@@ -163,10 +163,17 @@ class ModelResponse:
     cumulative_cost: Optional[float] = None
     budget_exceeded: bool = False
     budget_reason: Optional[str] = None
+    # Whatever reasoning the provider chose to expose, kept apart from
+    # ``content`` so it is never mistaken for the model's answer.
+    reasoning: Optional[str] = None
 
 
 class ModelEventKind(str, Enum):
     TEXT_DELTA = "text_delta"
+    # A model's own reasoning, kept on a separate channel from the answer.
+    # Merging it into TEXT_DELTA would put private deliberation into the
+    # assistant content that KaroX persists and re-sends as the answer.
+    REASONING_DELTA = "reasoning_delta"
     TOOL_CALL_DELTA = "tool_call_delta"
     USAGE = "usage"
     COMPLETION = "completion"
@@ -184,6 +191,7 @@ class ToolCallDelta:
 class ModelEvent:
     kind: ModelEventKind
     text_delta: Optional[str] = None
+    reasoning_delta: Optional[str] = None
     tool_call_delta: Optional[ToolCallDelta] = None
     usage: Dict[str, int] = field(default_factory=dict)
     finish_reason: Optional[str] = None
@@ -456,6 +464,7 @@ class OpenAIChatCompletionsProvider:
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         saw_content = False
         call_parts: Dict[int, Dict[str, list[str]]] = {}
         usage: Dict[str, int] = {}
@@ -469,6 +478,8 @@ class OpenAIChatCompletionsProvider:
             if event.kind == ModelEventKind.TEXT_DELTA:
                 saw_content = True
                 content_parts.append(event.text_delta or "")
+            elif event.kind == ModelEventKind.REASONING_DELTA:
+                reasoning_parts.append(event.reasoning_delta or "")
             elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
                 delta = event.tool_call_delta
                 if delta is None:
@@ -509,6 +520,7 @@ class OpenAIChatCompletionsProvider:
                 ProviderErrorKind.MALFORMED_RESPONSE,
                 f"invalid streamed tool call: {exc}",
             ) from exc
+        reasoning = "".join(reasoning_parts)
         return ModelResponse(
             content="".join(content_parts) if saw_content else None,
             tool_calls=tool_calls,
@@ -516,6 +528,7 @@ class OpenAIChatCompletionsProvider:
             usage=usage,
             response_id=response_id,
             transport_attempts=transport_attempts,
+            reasoning=reasoning or None,
         )
 
     @classmethod
@@ -704,6 +717,23 @@ class OpenAIChatCompletionsProvider:
                         transport_attempts=attempts,
                     )
                 )
+
+            # Reasoning models on the OpenAI-compatible wire put their visible
+            # thinking on a separate key. Dropping it left the user staring at a
+            # blank screen for the whole thinking phase; both spellings are in
+            # use across compatible vendors and gateways.
+            for name in ("reasoning_content", "reasoning"):
+                thought = delta.get(name)
+                if isinstance(thought, str) and thought:
+                    events.append(
+                        ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_delta=thought,
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
+                    )
+                    break
 
             raw_calls = delta.get("tool_calls", [])
             if not isinstance(raw_calls, list):

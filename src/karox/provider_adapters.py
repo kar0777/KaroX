@@ -211,6 +211,7 @@ class _StreamingAdapter:
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         text: list[str] = []
+        reasoning: list[str] = []
         saw_text = False
         calls: Dict[int, Dict[str, list[str]]] = {}
         usage: Dict[str, int] = {}
@@ -224,6 +225,8 @@ class _StreamingAdapter:
             if event.kind == ModelEventKind.TEXT_DELTA:
                 saw_text = True
                 text.append(event.text_delta or "")
+            elif event.kind == ModelEventKind.REASONING_DELTA:
+                reasoning.append(event.reasoning_delta or "")
             elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
                 delta = event.tool_call_delta
                 if delta is None:
@@ -261,6 +264,7 @@ class _StreamingAdapter:
                 ProviderErrorKind.MALFORMED_RESPONSE,
                 f"invalid streamed tool call: {exc}",
             ) from exc
+        joined_reasoning = "".join(reasoning)
         return ModelResponse(
             content="".join(text) if saw_text else None,
             tool_calls=tool_calls,
@@ -268,6 +272,7 @@ class _StreamingAdapter:
             usage=usage,
             response_id=response_id,
             transport_attempts=transport_attempts,
+            reasoning=joined_reasoning or None,
         )
 
     @classmethod
@@ -627,6 +632,17 @@ class OpenAIResponsesProvider(_StreamingAdapter):
         )
 
 
+# Anthropic content blocks that carry the model's own reasoning rather than its
+# answer. ``redacted_thinking`` holds an encrypted payload with no readable text;
+# both are routed to the reasoning channel and neither becomes assistant content.
+_ANTHROPIC_REASONING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+
+# Used only when neither the caller nor the model registry states a ceiling.
+# Chosen to be large enough for a substantial code change rather than to match
+# any one model's maximum, which KaroX cannot know for an unregistered endpoint.
+_ANTHROPIC_DEFAULT_MAX_TOKENS = 32_000
+
+
 class AnthropicMessagesProvider(_StreamingAdapter):
     provider_name = "anthropic_messages"
 
@@ -694,7 +710,11 @@ class AnthropicMessagesProvider(_StreamingAdapter):
         payload: Dict[str, Any] = {
             "model": request.model,
             "messages": messages,
-            "max_tokens": request.max_output_tokens or 4096,
+            # Anthropic requires max_tokens, so a default is unavoidable. 4096
+            # was far below what current models allow and silently truncated a
+            # long refactor; the routed model's registered ceiling is used when
+            # it is known, and this is only the floor for an unregistered model.
+            "max_tokens": request.max_output_tokens or _ANTHROPIC_DEFAULT_MAX_TOKENS,
             "stream": True,
         }
         if system:
@@ -774,11 +794,17 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         "Anthropic content block index is duplicate or invalid",
                     )
                 block_type = block.get("type")
-                if block_type not in {"text", "tool_use"}:
+                if not isinstance(block_type, str) or not block_type:
                     raise ProviderError(
                         ProviderErrorKind.MALFORMED_RESPONSE,
-                        "unsupported Anthropic content block",
+                        "Anthropic content block has no type",
                     )
+                # Anything other than text or a tool call is recorded so its
+                # deltas and its stop event can be accounted for, then ignored.
+                # Refusing unknown block types aborted the turn outright: the
+                # current Anthropic models emit `thinking` blocks, and on the
+                # flagship model thinking is on by default, so the strict list
+                # made that model unusable rather than safe.
                 block_types[index] = block_type
                 if block_type == "text":
                     initial_text = block.get("text", "")
@@ -786,6 +812,15 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic text block is invalid")
                     if initial_text:
                         yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=initial_text, response_id=response_id, transport_attempts=attempts)
+                elif block_type in _ANTHROPIC_REASONING_BLOCKS:
+                    initial_thinking = block.get("thinking", "")
+                    if isinstance(initial_thinking, str) and initial_thinking:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_delta=initial_thinking,
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
                 elif block_type == "tool_use":
                     call_id, name = block.get("id"), block.get("name")
                     if not isinstance(call_id, str) or not isinstance(name, str):
@@ -813,6 +848,28 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                     yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=delta["text"], response_id=response_id, transport_attempts=attempts)
                 elif delta_type == "input_json_delta" and expected_type == "tool_use" and isinstance(delta.get("partial_json"), str):
                     yield ModelEvent(ModelEventKind.TOOL_CALL_DELTA, tool_call_delta=ToolCallDelta(index, arguments_fragment=delta["partial_json"]), response_id=response_id, transport_attempts=attempts)
+                elif (
+                    delta_type == "thinking_delta"
+                    and expected_type in _ANTHROPIC_REASONING_BLOCKS
+                    and isinstance(delta.get("thinking"), str)
+                ):
+                    yield ModelEvent(
+                        ModelEventKind.REASONING_DELTA,
+                        reasoning_delta=delta["thinking"],
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                elif delta_type == "signature_delta" and expected_type in _ANTHROPIC_REASONING_BLOCKS:
+                    # The signature authenticates a thinking block for replay.
+                    # KaroX does not replay thinking blocks, so it is consumed
+                    # rather than stored: a signature detached from the block it
+                    # signs is useless, and holding it would imply otherwise.
+                    continue
+                elif expected_type not in {"text", "tool_use"}:
+                    # A delta belonging to a block type this adapter does not
+                    # model. Ignoring it keeps a new Anthropic block type from
+                    # ending the turn; the block is not part of the answer.
+                    continue
                 else:
                     raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic content delta does not match its block")
                 continue
@@ -875,10 +932,11 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 raise ProviderError(ProviderErrorKind.PROVIDER_INTERNAL, "Anthropic reported a stream error")
             if kind == "ping":
                 continue
-            raise ProviderError(
-                ProviderErrorKind.MALFORMED_RESPONSE,
-                f"unsupported Anthropic event: {kind}",
-            )
+            # Failing closed on content is right; failing closed on protocol
+            # evolution is not. An event type added by the provider after this
+            # code was written carries no content KaroX acts on, so it is
+            # skipped instead of ending an otherwise healthy turn.
+            continue
         raise ProviderError(ProviderErrorKind.TRANSPORT, "Anthropic stream ended before message_stop")
 
 
@@ -1029,7 +1087,18 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                 if "text" in part:
                     if not isinstance(part["text"], str):
                         raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini text part is invalid")
-                    yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=part["text"], response_id=response_id, transport_attempts=attempts)
+                    # A part flagged `thought` is the model's private reasoning,
+                    # not its answer. Treating it as answer text streamed private
+                    # deliberation to the user and persisted it as the response.
+                    if part.get("thought") is True:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_delta=part["text"],
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
+                    else:
+                        yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=part["text"], response_id=response_id, transport_attempts=attempts)
                 if "functionCall" in part:
                     call = part["functionCall"]
                     if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):

@@ -247,7 +247,20 @@ class RoutedProvider:
                 last_rejection = exc
                 continue
 
-            routed_request = replace(request, model=model_record.model_id)
+            # The registry records each model's output ceiling; routing used to
+            # rewrite only the model id, so the ceiling was never sent. The
+            # Anthropic adapter then fell back to its own 4096-token default and
+            # truncated long work mid-answer. An explicit request value still
+            # wins, because the caller is closer to the task than the registry.
+            routed_request = replace(
+                request,
+                model=model_record.model_id,
+                max_output_tokens=(
+                    request.max_output_tokens
+                    if request.max_output_tokens is not None
+                    else model_record.max_output_tokens
+                ),
+            )
             try:
                 response = self._provider(provider_record).complete(routed_request)
             except ProviderError as exc:

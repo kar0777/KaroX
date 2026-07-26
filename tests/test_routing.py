@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,6 +91,7 @@ class RoutingTests(unittest.TestCase):
         streaming: str = "true",
         pricing: ModelPricing | None = None,
         model_id: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> RouteTarget:
         self.registry.put_provider(
             ProviderRecord(
@@ -108,6 +110,7 @@ class RoutingTests(unittest.TestCase):
                 tools=tools,
                 streaming=streaming,
                 pricing=pricing,
+                max_output_tokens=max_output_tokens,
             )
         )
         return RouteTarget(provider_id, "route-alias")
@@ -165,6 +168,27 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(credential(), "secret")  # type: ignore[operator]
         self.assertEqual(events[-1], "resolve")
         self.assertEqual(captured["base_url"], "https://provider.example/v1")
+
+    def test_registered_output_ceiling_reaches_the_provider(self) -> None:
+        target = self.add_route("primary", max_output_tokens=64_000)
+        provider = FakeProvider([response()])
+        routed, _ = self.routed((target,), {"primary": provider})
+
+        routed.complete(request())
+
+        # Routing used to rewrite only the model id, so the registered ceiling
+        # never left the process and the Anthropic adapter capped output at its
+        # own 4096-token default.
+        self.assertEqual(provider.requests[0].max_output_tokens, 64_000)
+
+    def test_an_explicit_request_ceiling_outranks_the_registry(self) -> None:
+        target = self.add_route("primary", max_output_tokens=64_000)
+        provider = FakeProvider([response()])
+        routed, _ = self.routed((target,), {"primary": provider})
+
+        routed.complete(replace(request(), max_output_tokens=1_024))
+
+        self.assertEqual(provider.requests[0].max_output_tokens, 1_024)
 
     def test_fallback_is_limited_to_transient_errors(self) -> None:
         first = self.add_route("first")

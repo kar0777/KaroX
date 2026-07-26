@@ -225,6 +225,137 @@ class ProviderAdapterTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.kind, ProviderErrorKind.MALFORMED_RESPONSE)
 
+    def test_anthropic_streams_thinking_without_ending_the_turn(self) -> None:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {"input_tokens": 4}}}),
+            (
+                "content_block_start",
+                {"index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "thinking_delta", "thinking": "weighing options"}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "signature_delta", "signature": "c2ln"}},
+            ),
+            ("content_block_stop", {"index": 0}),
+            (
+                "content_block_start",
+                {"index": 1, "content_block": {"type": "redacted_thinking", "data": "opaque"}},
+            ),
+            ("content_block_stop", {"index": 1}),
+            (
+                "content_block_start",
+                {"index": 2, "content_block": {"type": "text", "text": ""}},
+            ),
+            ("content_block_delta", {"index": 2, "delta": {"type": "text_delta", "text": "the answer"}}),
+            ("content_block_stop", {"index": 2}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}}),
+            ("message_stop", {}),
+        ]
+
+        result, _ = self.complete(
+            AnthropicMessagesProvider("https://provider.example/v1"), records
+        )
+
+        # Thinking is on by default on the current flagship model, so refusing
+        # these blocks made that model unusable rather than safe.
+        self.assertEqual(result.content, "the answer")
+        self.assertEqual(result.reasoning, "weighing options")
+        self.assertEqual(result.finish_reason, "end_turn")
+
+    def test_anthropic_ignores_block_and_event_types_it_does_not_model(self) -> None:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            ("some_future_event", {"whatever": True}),
+            (
+                "content_block_start",
+                {"index": 0, "content_block": {"type": "future_block", "payload": 1}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "future_delta", "payload": 2}},
+            ),
+            ("content_block_stop", {"index": 0}),
+            (
+                "content_block_start",
+                {"index": 1, "content_block": {"type": "text", "text": "hi"}},
+            ),
+            ("content_block_stop", {"index": 1}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+
+        result, _ = self.complete(
+            AnthropicMessagesProvider("https://provider.example/v1"), records
+        )
+
+        # Failing closed on content is right; failing closed on protocol
+        # evolution just breaks working turns.
+        self.assertEqual(result.content, "hi")
+        self.assertIsNone(result.reasoning)
+
+    def test_anthropic_sends_the_requested_output_ceiling(self) -> None:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+        client = FakeClient([response(records)])
+        requested = ModelRequest(
+            model="test-model",
+            messages=(ModelMessage("user", "work"),),
+            deadline_seconds=2,
+            max_output_tokens=64_000,
+        )
+
+        with patch("karox.provider_adapters.httpx.Client", return_value=client):
+            AnthropicMessagesProvider("https://provider.example/v1").complete(requested)
+
+        self.assertEqual(client.calls[0]["json"]["max_tokens"], 64_000)
+
+    def test_anthropic_default_ceiling_is_not_four_thousand_tokens(self) -> None:
+        records = [
+            ("message_start", {"message": {"id": "msg-1", "usage": {}}}),
+            ("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            ("message_stop", {}),
+        ]
+        client = FakeClient([response(records)])
+
+        with patch("karox.provider_adapters.httpx.Client", return_value=client):
+            AnthropicMessagesProvider("https://provider.example/v1").complete(request())
+
+        self.assertGreater(client.calls[0]["json"]["max_tokens"], 4_096)
+
+    def test_gemini_keeps_private_thoughts_out_of_the_answer(self) -> None:
+        records = [
+            (
+                None,
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {"text": "let me consider", "thought": True},
+                                    {"text": "the answer"},
+                                ]
+                            },
+                            "finishReason": "STOP",
+                        }
+                    ]
+                },
+            ),
+        ]
+
+        result, _ = self.complete(
+            GeminiGenerateContentProvider("https://provider.example/v1"), records
+        )
+
+        self.assertEqual(result.content, "the answer")
+        self.assertEqual(result.reasoning, "let me consider")
+
     def test_anthropic_requires_one_message_start_before_stream_content(self) -> None:
         message_start = (
             "message_start",
