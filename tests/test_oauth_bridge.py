@@ -261,6 +261,49 @@ class OAuthBridgeWireTests(unittest.TestCase):
             )
             self.assertEqual(revoked.status_code, 401)
 
+    def test_the_approval_page_permits_the_return_to_the_registered_client(self) -> None:
+        """`form-action` has to cover the redirect, not just the form's own target.
+
+        The form posts back to /oauth/authorize on this origin, but that handler
+        answers 303 to the client's registered redirect_uri -- and Chromium applies
+        `form-action` to every hop of a form submission's redirect chain. With
+        `'self'` alone, Chrome and Edge refused the return to claude.ai: the OAuth
+        tab went blank and never came back, so the connector could never finish
+        authorizing.
+        """
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            registration = client.post(
+                "/oauth/register",
+                json={
+                    "client_name": "Claude",
+                    "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+                },
+            )
+            self.assertEqual(registration.status_code, 201, registration.text)
+            page = client.get(
+                "/oauth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": registration.json()["client_id"],
+                    "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                    "state": "state-123",
+                    "code_challenge": _pkce("v" * 64),
+                    "code_challenge_method": "S256",
+                    "resource": "https://karox.example/mcp",
+                    "scope": "mcp:tools offline_access",
+                },
+            )
+
+        self.assertEqual(page.status_code, 200, page.text)
+        policy = page.headers["content-security-policy"]
+        self.assertIn("form-action 'self' https://claude.ai;", policy)
+        # Widened for the redirect and nothing else: no scripts, no framing.
+        self.assertIn("default-src 'none'", policy)
+        self.assertIn("base-uri 'none'", policy)
+        self.assertIn("frame-ancestors 'none'", policy)
+        self.assertNotIn("script-src", policy)
+        self.assertNotIn("*", policy)
+
     def test_code_is_bound_to_pkce_client_redirect_and_resource(self) -> None:
         with httpx.Client(base_url=self.base, timeout=15.0) as client:
             client_id, _verifier, code = self._authorize(client)

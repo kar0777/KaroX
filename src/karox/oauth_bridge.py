@@ -84,6 +84,31 @@ def _redirect_uri(value: object) -> str:
     return value
 
 
+def _form_action(client: "_Client") -> str:
+    """Build ``form-action`` covering where the POST's redirect lands.
+
+    The approval form posts back to ``/oauth/authorize`` -- same origin -- but that
+    handler answers 303 to the client's registered ``redirect_uri``, and Chromium
+    applies ``form-action`` to *every hop* of a form submission's redirect chain,
+    not just the first. With ``'self'`` alone, Chrome and Edge silently refused the
+    return to ``claude.ai`` or ``chatgpt.com``: the OAuth tab went blank and never
+    came back, with only a console message to say why.
+
+    Only the origins this client registered are added, and registration already
+    rejects anything but HTTPS unless the host is loopback, so this permits exactly
+    the redirect the protocol is about to perform and nothing else.
+    """
+    origins: list[str] = []
+    for uri in sorted(client.redirect_uris):
+        parts = urlsplit(uri)
+        if not parts.scheme or not parts.netloc:
+            continue
+        origin = f"{parts.scheme}://{parts.netloc}"
+        if origin not in origins:
+            origins.append(origin)
+    return " ".join(["'self'", *origins])
+
+
 def _single(values: Mapping[str, list[str]], name: str, *, required: bool = True) -> str:
     items = values.get(name, [])
     if not items and not required:
@@ -603,7 +628,11 @@ def build_oauth_proxy_asgi_app(
                     _approval_page(service, request_id, client),
                     headers={
                         "Cache-Control": "no-store",
-                        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                        "Content-Security-Policy": (
+                            "default-src 'none'; style-src 'unsafe-inline'; "
+                            f"form-action {_form_action(client)}; "
+                            "base-uri 'none'; frame-ancestors 'none'"
+                        ),
                         "X-Frame-Options": "DENY",
                         "Referrer-Policy": "no-referrer",
                     },

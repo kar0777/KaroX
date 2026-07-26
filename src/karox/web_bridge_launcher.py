@@ -352,6 +352,64 @@ def _stop_process(process: Optional[subprocess.Popen[str]]) -> None:
             pass
 
 
+def _tail_detail(output_tail: deque[str]) -> str:
+    """Format the last thing a child said as a suffix for an error message."""
+    detail = next((line for line in reversed(output_tail) if line), "")
+    return f": {detail}" if detail else ""
+
+
+@dataclass(frozen=True)
+class MirroredChildOutput:
+    """A child's recent output and the thread still draining it."""
+
+    tail: deque[str]
+    reader: threading.Thread
+
+    def detail(self) -> str:
+        """The last line the child printed, as a suffix for an error message.
+
+        The drain thread is joined first. A child that fails on startup exits
+        while its final lines are still in the pipe, so reading the tail straight
+        away reports the reason as absent in exactly the case it is needed.
+        """
+        self.reader.join(timeout=2.0)
+        return _tail_detail(self.tail)
+
+
+def _mirror_child_output(
+    process: subprocess.Popen[str],
+    *,
+    name: str,
+) -> MirroredChildOutput:
+    """Echo a child's merged output to this console and keep its last lines.
+
+    Windows starts these children with ``CREATE_NO_WINDOW``, and a child started
+    that way without redirected handles is given its own hidden console: whatever
+    it prints goes to a window nobody can see. So the traceback explaining that a
+    port was taken, or a dependency was missing, was discarded and the only thing
+    reaching the user was ``exited with code 2``. Draining the pipe is what turns
+    that number back into a reason.
+    """
+    output_tail: deque[str] = deque(maxlen=30)
+
+    def drain() -> None:
+        stream = process.stdout
+        if stream is None:
+            return
+        for raw_line in stream:
+            line = raw_line.rstrip()
+            output_tail.append(line)
+            print(f"[{name}] {line}", flush=True)
+
+    reader = threading.Thread(
+        target=drain,
+        name=f"karox-{name}-output",
+        daemon=True,
+    )
+    reader.start()
+    return MirroredChildOutput(output_tail, reader)
+
+
 def start_cloudflare_quick_tunnel(
     port: int,
     *,
@@ -419,8 +477,7 @@ def start_cloudflare_quick_tunnel(
         code = process.poll()
         _stop_process(process)
         reader.join(timeout=2)
-        detail = next((line for line in reversed(output_tail) if line), "")
-        suffix = f": {detail}" if detail else ""
+        suffix = _tail_detail(output_tail)
         if code is None:
             raise WebBridgeLaunchError(
                 f"cloudflared did not provide a public URL within {timeout_seconds:g}s"
@@ -444,18 +501,23 @@ def _wait_for_bridge(
     port: int,
     *,
     timeout_seconds: float = 15.0,
+    output: Optional[MirroredChildOutput] = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         code = process.poll()
         if code is not None:
-            raise WebBridgeLaunchError(f"KaroX bridge exited with code {code}")
+            suffix = output.detail() if output is not None else ""
+            raise WebBridgeLaunchError(
+                f"KaroX bridge exited with code {code}{suffix}"
+            )
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 return
         except OSError:
             time.sleep(0.05)
-    raise WebBridgeLaunchError("KaroX bridge did not open its local port")
+    suffix = _tail_detail(output.tail) if output is not None else ""
+    raise WebBridgeLaunchError(f"KaroX bridge did not open its local port{suffix}")
 
 
 def watchdog_dir() -> Path:
@@ -666,6 +728,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
 
     tunnel: Optional[CloudflareQuickTunnel] = None
     bridge: Optional[subprocess.Popen[str]] = None
+    bridge_output: Optional[MirroredChildOutput] = None
     credential_created = False
     session_created = False
     sessions: Optional[SessionStore] = None
@@ -729,6 +792,10 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         # The listener cannot guess the tunnel host name, and without it every
         # request through the tunnel looks like a rebound DNS name.
         environment[ALLOWED_HOSTS_ENVIRONMENT] = urlsplit(public_url).hostname or ""
+        # Its output is decoded as UTF-8 below, so it has to be encoded as UTF-8:
+        # a Windows console code page would otherwise turn every non-ASCII path in
+        # a traceback into replacement characters.
+        environment["PYTHONIOENCODING"] = "utf-8"
         try:
             bridge = subprocess.Popen(
                 _bridge_argv(
@@ -738,6 +805,11 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 ),
                 cwd=repository,
                 env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **_child_options(),
             )
         except OSError as exc:
@@ -745,9 +817,10 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 f"cannot start KaroX bridge: {type(exc).__name__}"
             ) from exc
         _adopt_child(job, bridge)
+        bridge_output = _mirror_child_output(bridge, name="bridge")
         watchdog_record["bridge_pid"] = _pid_of(bridge)
         write_watchdog(watchdog, watchdog_record)
-        _wait_for_bridge(bridge, config.port)
+        _wait_for_bridge(bridge, config.port, output=bridge_output)
 
         endpoint = f"{public_url.rstrip('/')}/mcp"
         print(f"KaroX {config.profile} bridge is ready")
@@ -767,7 +840,8 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             bridge_code = bridge.poll()
             if bridge_code is not None:
                 raise WebBridgeLaunchError(
-                    f"KaroX bridge stopped unexpectedly with code {bridge_code}"
+                    "KaroX bridge stopped unexpectedly with code "
+                    f"{bridge_code}{bridge_output.detail()}"
                 )
             if tunnel is not None:
                 tunnel_code = tunnel.process.poll()
@@ -781,6 +855,12 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         return 0
     finally:
         _stop_process(bridge)
+        if bridge_output is not None:
+            # The child is gone, so the drain thread is at end of pipe; joining it
+            # before the handle closes is what keeps that read from failing.
+            bridge_output.reader.join(timeout=2.0)
+        if bridge is not None and bridge.stdout is not None:
+            bridge.stdout.close()
         if tunnel is not None:
             tunnel.stop()
         _close_job(job)

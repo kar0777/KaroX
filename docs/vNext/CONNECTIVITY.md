@@ -74,8 +74,10 @@ interface in clear text.
 
 ### Streamable HTTP MCP
 
-Use the same command with `--protocol mcp`; the endpoint is `/mcp`. MCP
-mutations require `_meta.karoxIdempotencyKey`. `--server SERVER_ID` additionally
+Use the same command with `--protocol mcp`; the endpoint is `/mcp`. An MCP
+mutation may carry `_meta.karoxIdempotencyKey`; a client that cannot send `_meta`
+gets a key derived from the call, and a replay says so in
+`idempotent_replay`. `--server SERVER_ID` additionally
 proxies an external MCP server that was already selected and allowed for the
 session.
 

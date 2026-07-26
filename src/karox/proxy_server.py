@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import os
 from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
@@ -39,17 +41,51 @@ HOST_REJECTION_HINT = (
 # holds the bearer token.
 BRIDGE_ERROR_MESSAGES: dict[str, str] = {
     "tool_not_exposed": "the tool is not exposed by this bridge",
-    "idempotency_key_required": (
-        "mutating calls require a stable _meta.karoxIdempotencyKey"
-    ),
+    # Still reachable on the OpenAPI wire, where the key travels in a header the
+    # client controls. The MCP wire derives one instead, because its web clients
+    # cannot send `_meta` at all.
+    "idempotency_key_required": "mutating calls require a stable idempotency key",
     "idempotency_key_invalid": (
-        "_meta.karoxIdempotencyKey must be a string of 1-256 characters"
+        "the supplied idempotency key must be a string of 1-256 characters"
     ),
     "denied": "the call was denied by the KaroX session policy",
     "not_found": "the requested repository path does not exist",
     "invalid_request": "the call was rejected as invalid",
     "internal": "the tool failed",
 }
+
+
+def derive_idempotency_key(tool_name: str, arguments: Mapping[str, object]) -> str:
+    """Content-address a mutation whose caller cannot name its own retries.
+
+    ChatGPT and Claude speak MCP without ``_meta``, so neither can carry a key of
+    its own. Refusing those calls left ``--write`` advertising two tools that
+    could never run: the connector listed ``repo.write_file``, the model called
+    it, and every call came back as ``idempotency_key_required``.
+
+    Hashing the call gives the property the key exists for. A retry after a lost
+    response repeats the same tool and the same arguments, so it lands on the
+    same key and returns the first outcome instead of writing twice -- which a
+    per-attempt key would not have done.
+
+    The cost is that a deliberate repeat of a byte-identical mutation is also
+    treated as a retry. Both write tools are declarative, so that is close to
+    free: ``repo.write_file`` states the whole content, and ``repo.edit_file``
+    states an exact match plus the number of occurrences it expects, so a real
+    repeat is a no-op or a loud mismatch either way. The remaining case -- the
+    file changed underneath and the same content is written again -- is why the
+    result carries ``idempotent_replay``, so a replay is never reported to the
+    model as a write that just landed.
+    """
+    payload = json.dumps(
+        {"tool": tool_name, "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"derived-{digest}"
 
 
 def normalize_host(value: Optional[str]) -> str:
@@ -260,18 +296,19 @@ def build_proxy_asgi_app(
                 supplied = (
                     extra.get("karoxIdempotencyKey") if isinstance(extra, dict) else None
                 )
-                # A generated per-attempt key would make every retry of the same
-                # mutation a second commit, so a client that cannot supply a
-                # stable key gets no mutating tools rather than silent duplicates.
                 if supplied is None:
-                    return bridge_error_result("idempotency_key_required")
-                if (
+                    # A client that knows its own retries is trusted to say so; one
+                    # that cannot send _meta at all gets a key derived from the
+                    # call, which is stable across exactly those retries.
+                    idempotency_key = derive_idempotency_key(name, arguments)
+                elif (
                     not isinstance(supplied, str)
                     or not supplied
                     or len(supplied) > 256
                 ):
                     return bridge_error_result("idempotency_key_invalid")
-                idempotency_key = supplied
+                else:
+                    idempotency_key = supplied
             return await anyio.to_thread.run_sync(
                 lambda: proxy.execute(
                     name,

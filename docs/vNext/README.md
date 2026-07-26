@@ -32,12 +32,12 @@ Run the suite:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-That reports `Ran 611 tests` with 3 environment/platform skips on Windows, and it
-is the runner CI executes. 611 is also what `python -m pytest --collect-only -q
+That reports `Ran 619 tests` with 3 environment/platform skips on Windows, and it
+is the runner CI executes. 619 is also what `python -m pytest --collect-only -q
 tests` reports, which is why it is the figure quoted here: collection is stable
 run to run, whereas a pytest pass tally is not — pytest adds a subtest count on
 top of the test count and that count moves between runs. A bare `python -m pytest
--q` at the repository root collects 616, because it also picks up the five legacy
+-q` at the repository root collects 624, because it also picks up the five legacy
 checks in `scripts/test_karox4_units.py`.
 
 `python scripts/check_test_count.py` recomputes both figures and fails when any
@@ -76,8 +76,8 @@ karox [paths | session | credential | provider | model | skill | mcp | bridge
 - `mcp` — register/list/inspect/test/credential/credential-doctor external MCP.
 - `bridge serve` exposes explicit built-in Core and/or selected external MCP
   tools over authenticated Streamable HTTP MCP or OpenAPI. MCP mutations use
-  `_meta.karoxIdempotencyKey`; OpenAPI mutations use
-  `X-KaroX-Idempotency-Key`.
+  `_meta.karoxIdempotencyKey`, or a key derived from the call when the client
+  cannot send `_meta`; OpenAPI mutations require `X-KaroX-Idempotency-Key`.
 - `bridge credential` — create, rotate, inspect, and revoke bridge credentials.
 - `pack` — create/install/remove/list/inspect/doctor/enable/disable packs.
 - `session` — list/show/revoke, structured handoff, lock state.

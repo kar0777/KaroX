@@ -39,7 +39,6 @@ from karox.mcp_client import (
     McpClient,
     McpCredentialStore,
     McpRegistry,
-    McpRemoteToolError,
     McpServerRecord,
     McpTransportError,
     mcp_selection,
@@ -406,16 +405,24 @@ class McpProxyTests(unittest.TestCase):
                 for item in descriptors
                 if item.remote_name == "mcp.echo.write_note"
             )
-            # A mutating call without a client-supplied idempotency key fails
-            # closed. Generating one per attempt would make a retried mutation
-            # run a second time, which is exactly what the key exists to stop.
-            with self.assertRaises(McpRemoteToolError):
-                wire_client.call_record(
-                    wire_record,
-                    mutating,
-                    {"name": "n", "content": "c"},
-                    self.repository,
-                )
+            # A mutating call without a client-supplied idempotency key is served
+            # under a key derived from the call itself, so the retry that follows a
+            # lost response is recognised as the same mutation instead of running
+            # it a second time. The proxied tool is a third party's, so the second
+            # attempt has to be visibly a replay and not a fresh success.
+            arguments = {"name": "n", "content": "c"}
+            written = wire_client.call_record(
+                wire_record, mutating, dict(arguments), self.repository
+            )
+            self.assertNotIn(
+                "idempotent_replay", written["result"]["structuredContent"]
+            )
+            replayed = wire_client.call_record(
+                wire_record, mutating, dict(arguments), self.repository
+            )
+            self.assertTrue(
+                replayed["result"]["structuredContent"]["idempotent_replay"]
+            )
             result = wire_client.call_record(
                 wire_record, descriptor, {"message": "over-http"}, self.repository
             )

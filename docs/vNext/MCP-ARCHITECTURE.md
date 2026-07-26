@@ -105,9 +105,11 @@ hosted client
 
 The same allowlist is exposed either as Streamable HTTP MCP (`/mcp`) or as an
 OpenAPI 3.1 connector (`/openapi.json`). OpenAPI exposes authenticated
-`/session` and `/context/brief` preflight endpoints. Mutations require a stable
-idempotency key in MCP request `_meta.karoxIdempotencyKey` or the OpenAPI
-`X-KaroX-Idempotency-Key` header.
+`/session` and `/context/brief` preflight endpoints. Mutations run under a stable
+idempotency key: MCP takes it from request `_meta.karoxIdempotencyKey` and derives
+one from the call when that is absent, and OpenAPI requires the
+`X-KaroX-Idempotency-Key` header. See *Reliability* for what the derived key
+costs.
 
 ## Bridge profiles
 
@@ -157,9 +159,18 @@ all issued OAuth state.
 ## Reliability
 
 Transport reconnect never replays a mutation without the same Core idempotency
-record. Hosted mutations must provide `_meta.karoxIdempotencyKey`; retrying with
-the same key is safe, while omission fails closed. A mutating call with an
-unknown outcome raises `McpUnknownOutcome` instead of being retried.
+record. A hosted mutation may provide `_meta.karoxIdempotencyKey`, and retrying
+with the same key is safe. A client that cannot send `_meta` at all -- which is
+every browser MCP connector, ChatGPT and Claude included -- gets a key derived
+from the tool name and the call's arguments, so its own retry of the same call
+lands on the same key. The cost is that a byte-identical mutation repeated on
+purpose is also treated as a retry, so a replayed result carries
+`idempotent_replay: true` and must not be read as a mutation that just happened.
+A mutating call with an unknown outcome raises `McpUnknownOutcome` instead of
+being retried.
+
+The OpenAPI wire still fails closed: its key travels in a header the client
+controls, so omitting it is a client defect rather than a protocol limit.
 
 Downstream cancellation is transport-dependent and is not implemented or
 verified. Schema changes are visible in the session selection as described under

@@ -25,13 +25,12 @@ from karox.mcp_client import (
     McpClient,
     McpCredentialStore,
     McpRegistry,
-    McpRemoteToolError,
     McpServerRecord,
 )
 from karox.models import AccessProfile
 from karox.openapi_bridge import build_openapi_bridge_app
 from karox.proxy import ProxyToolDescriptor
-from karox.proxy_server import build_proxy_asgi_app
+from karox.proxy_server import build_proxy_asgi_app, derive_idempotency_key
 from karox.sessions import SessionStore
 
 
@@ -548,7 +547,7 @@ class HostedBridgeWireTests(unittest.TestCase):
         finally:
             server.close()
 
-    def test_mutating_mcp_call_without_meta_fails_closed(self) -> None:
+    def test_mutating_mcp_call_without_meta_writes_once_over_two_attempts(self) -> None:
         token = "mcp-no-meta-wire-token"
         server = _WireServer(build_proxy_asgi_app(self.runtime, token))
         backend = _FakeCredentialBackend()
@@ -572,19 +571,33 @@ class HostedBridgeWireTests(unittest.TestCase):
             descriptor = next(
                 item for item in tools if item.remote_name == "karox.repo.write_file"
             )
-            # A client that cannot set _meta.karoxIdempotencyKey gets no
-            # mutating tools: a per-attempt generated key would turn a retried
-            # commit into a second commit.
-            with self.assertRaises(McpRemoteToolError):
-                client.call_record(
-                    record,
-                    descriptor,
-                    {"path": "sample.txt", "content": "no-meta-A\n"},
-                    self.repository,
-                )
+            # This client sends no _meta.karoxIdempotencyKey, which is the only
+            # shape ChatGPT and Claude can send. The call has to land -- and the
+            # attempt after it has to be recognised as the same mutation, not
+            # applied a second time.
+            arguments = {"path": "sample.txt", "content": "no-meta-A\n"}
+            first = client.call_record(
+                record, descriptor, dict(arguments), self.repository
+            )
+            self.assertFalse(
+                first["result"]["structuredContent"]["idempotent_replay"]
+            )
             self.assertEqual(
                 (self.repository / "sample.txt").read_text(encoding="utf-8"),
-                "wire\n",
+                "no-meta-A\n",
+            )
+            (self.repository / "sample.txt").write_text("clobbered\n", encoding="utf-8")
+            second = client.call_record(
+                record, descriptor, dict(arguments), self.repository
+            )
+            self.assertTrue(
+                second["result"]["structuredContent"]["idempotent_replay"]
+            )
+            # The replay did not touch the file, which is precisely why the result
+            # has to say so rather than read as a write that just happened.
+            self.assertEqual(
+                (self.repository / "sample.txt").read_text(encoding="utf-8"),
+                "clobbered\n",
             )
         finally:
             server.close()
@@ -757,24 +770,81 @@ class BridgeWireSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 200, response.text)
         self.assertFalse(_jsonrpc_result(response)["isError"])
 
-    def test_mutating_call_without_meta_key_errors_and_writes_nothing(self) -> None:
+    def test_a_mutating_call_without_meta_is_served_and_deduplicated(self) -> None:
+        # ChatGPT and Claude send no `_meta`, so this is the only shape their write
+        # calls ever have. Refusing it made `--write` advertise tools that could
+        # never run; the key is derived from the call instead.
         app = build_proxy_asgi_app(self.runtime, self.token)
-        (response,) = _wire_requests(
+
+        def write() -> dict[str, Any]:
+            return _tools_call(
+                self.token,
+                "karox.repo.write_file",
+                {"path": "sample.txt", "content": "rebound\n"},
+            )
+
+        # Both attempts go down one connection, because the retry a lost response
+        # produces is the case this has to get right.
+        first, second = _wire_requests(app, [write(), write()])
+        result = _jsonrpc_result(first)
+        self.assertFalse(result["isError"], first.text)
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "rebound\n",
+        )
+        self.assertFalse(result["structuredContent"]["idempotent_replay"])
+        replayed = _jsonrpc_result(second)
+        self.assertFalse(replayed["isError"], second.text)
+        self.assertTrue(replayed["structuredContent"]["idempotent_replay"])
+
+    def test_a_second_distinct_mutation_is_not_mistaken_for_a_retry(self) -> None:
+        app = build_proxy_asgi_app(self.runtime, self.token)
+        responses = _wire_requests(
             app,
             [
                 _tools_call(
                     self.token,
                     "karox.repo.write_file",
-                    {"path": "sample.txt", "content": "rebound\n"},
+                    {"path": "sample.txt", "content": content},
                 )
+                for content in ("first\n", "second\n")
             ],
         )
-        result = _jsonrpc_result(response)
-        self.assertTrue(result["isError"])
-        self.assertIn("idempotency_key_required", result["content"][0]["text"])
+        for response in responses:
+            result = _jsonrpc_result(response)
+            self.assertFalse(result["isError"], response.text)
+            self.assertFalse(result["structuredContent"]["idempotent_replay"])
         self.assertEqual(
             (self.repository / "sample.txt").read_text(encoding="utf-8"),
-            "origin\n",
+            "second\n",
+        )
+
+    def test_a_client_supplied_key_is_still_honoured(self) -> None:
+        app = build_proxy_asgi_app(self.runtime, self.token)
+        accepted, rejected = _wire_requests(
+            app,
+            [
+                _tools_call(
+                    self.token,
+                    "karox.repo.write_file",
+                    {"path": "sample.txt", "content": "named\n"},
+                    meta={"karoxIdempotencyKey": "write-1"},
+                ),
+                # A key that is present but unusable is still an error: deriving
+                # one here would paper over a client bug.
+                _tools_call(
+                    self.token,
+                    "karox.repo.write_file",
+                    {"path": "sample.txt", "content": "named\n"},
+                    meta={"karoxIdempotencyKey": ""},
+                ),
+            ],
+        )
+        self.assertFalse(_jsonrpc_result(accepted)["isError"], accepted.text)
+        result = _jsonrpc_result(rejected)
+        self.assertTrue(result["isError"])
+        self.assertEqual(
+            result["structuredContent"]["error_code"], "idempotency_key_invalid"
         )
 
     def test_tool_failure_never_reflects_a_filesystem_path(self) -> None:
@@ -856,6 +926,39 @@ class BridgeWireSecurityTests(unittest.TestCase):
             ],
         )
         self.assertEqual(openapi_response.status, 401)
+
+
+class DerivedIdempotencyKeyTests(unittest.TestCase):
+    """The derived key is only useful if it is stable across a client's retries."""
+
+    def test_the_same_call_derives_the_same_key_whatever_the_argument_order(
+        self,
+    ) -> None:
+        # A retry is not required to serialize its arguments in the order the first
+        # attempt used, and two keys for one mutation would apply it twice.
+        first = derive_idempotency_key(
+            "karox.repo.write_file", {"path": "a.txt", "content": "x"}
+        )
+        second = derive_idempotency_key(
+            "karox.repo.write_file", {"content": "x", "path": "a.txt"}
+        )
+        self.assertEqual(first, second)
+
+    def test_a_different_call_derives_a_different_key(self) -> None:
+        base = derive_idempotency_key("karox.repo.write_file", {"path": "a.txt"})
+        self.assertNotEqual(
+            base,
+            derive_idempotency_key("karox.repo.write_file", {"path": "b.txt"}),
+        )
+        self.assertNotEqual(
+            base,
+            derive_idempotency_key("karox.repo.edit_file", {"path": "a.txt"}),
+        )
+
+    def test_the_key_fits_the_length_the_wire_accepts(self) -> None:
+        key = derive_idempotency_key("karox.repo.write_file", {"content": "x" * 5000})
+        self.assertLessEqual(len(key), 256)
+        self.assertTrue(key)
 
 
 class BridgeErrorVocabularyTests(unittest.TestCase):

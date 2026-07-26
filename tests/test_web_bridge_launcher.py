@@ -27,6 +27,8 @@ from karox.web_bridge_launcher import (
     WebBridgeLaunchError,
     _bridge_argv,
     _child_options,
+    _mirror_child_output,
+    _wait_for_bridge,
     ephemeral_url_warning,
     parent_death_hook,
     run_web_bridge,
@@ -230,7 +232,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                 patch(
                     "karox.web_bridge_launcher.subprocess.Popen",
                     return_value=bridge,
-                ),
+                ) as popen,
                 patch("karox.web_bridge_launcher._wait_for_bridge"),
             ):
                 with redirect_stdout(io.StringIO()):
@@ -248,6 +250,13 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         credentials.delete.assert_called_once_with(session_id)
         sessions.revoke.assert_called_once_with(session_id)
         tunnel.stop.assert_called_once_with()
+        # Without these the child is handed a hidden Windows console and its
+        # diagnostics are discarded, leaving the user only the exit code above.
+        spawned = popen.call_args.kwargs
+        self.assertEqual(spawned["stdout"], subprocess.PIPE)
+        self.assertEqual(spawned["stderr"], subprocess.STDOUT)
+        self.assertEqual(spawned["encoding"], "utf-8")
+        self.assertEqual(spawned["env"]["PYTHONIOENCODING"], "utf-8")
 
     def test_watchdog_records_the_tunnel_before_the_bridge_is_spawned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,6 +309,81 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         self.assertEqual(record["tunnel_pid"], 4242)
         self.assertIsNone(record["bridge_pid"])
         self.assertEqual(record["public_url"], "https://small-tree.trycloudflare.com")
+
+
+class BridgeDiagnosticsTests(unittest.TestCase):
+    """A bridge that refuses to start has to say why, not just return a number."""
+
+    def test_the_reason_a_bridge_child_exited_reaches_the_user(self) -> None:
+        # A real child, because the defect is a real spawn: on Windows these are
+        # started with CREATE_NO_WINDOW, and without redirected handles that gives
+        # the child its own hidden console and throws away everything it printed.
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('OSError: address already in use\\n');"
+                " sys.exit(2)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_child_options(),
+        )
+        mirrored = io.StringIO()
+        output = None
+        try:
+            with redirect_stdout(mirrored):
+                output = _mirror_child_output(child, name="bridge")
+                with self.assertRaisesRegex(
+                    WebBridgeLaunchError,
+                    r"exited with code 2: OSError: address already in use",
+                ):
+                    # Port 0 is never listening, so the wait can only end on the
+                    # child's exit -- which is the path under test.
+                    _wait_for_bridge(child, 0, timeout_seconds=10.0, output=output)
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+            if output is not None:
+                output.reader.join(timeout=5)
+            assert child.stdout is not None
+            child.stdout.close()
+        self.assertIn(
+            "[bridge] OSError: address already in use",
+            mirrored.getvalue(),
+        )
+
+    def test_a_bridge_that_never_opens_its_port_is_not_waited_on_forever(self) -> None:
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_child_options(),
+        )
+        output = None
+        try:
+            output = _mirror_child_output(child, name="bridge")
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                WebBridgeLaunchError, "did not open its local port"
+            ):
+                _wait_for_bridge(child, 0, timeout_seconds=0.5, output=output)
+            # The drain thread cannot finish while the child lives, so joining it
+            # here would add its own timeout to every failed start.
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+            if output is not None:
+                output.reader.join(timeout=5)
+            assert child.stdout is not None
+            child.stdout.close()
 
 
 class ParentDeathTests(unittest.TestCase):

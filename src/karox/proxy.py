@@ -233,7 +233,13 @@ class McpProxy:
                 self.session_id, f"proxy-{os.getpid()}", ttl_seconds=ttl
             )
         try:
-            return core.execute(command, lease=lease).data
+            result = core.execute(command, lease=lease)
+            if result.idempotent_replay:
+                # `data` is the stored outcome of the first call, so without this
+                # the caller is told a mutation just happened when it was served
+                # from the idempotency record and the working tree was not touched.
+                return {**result.data, "idempotent_replay": True}
+            return result.data
         except McpAccessDenied as exc:
             raise ProxyAccessDenied(str(exc)) from exc
         except McpProtocolError as exc:
