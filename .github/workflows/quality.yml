@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main, agent/max-product-overhaul]
+  # release.yml calls this workflow so publishing cannot begin before the suite
+  # has passed on the commit being released.
+  workflow_call:
 
 permissions:
   contents: read
@@ -29,11 +32,82 @@ jobs:
       - name: Check dependency declarations
         run: python scripts/check_dependencies.py
 
+      - name: Check version sources agree
+        run: python scripts/check_versions.py
+
       - name: Install ruff
-        run: python -m pip install "ruff>=0.14,<1.0"
+        run: python -m pip install --upgrade pip && python -m pip install --group lint
 
       - name: Lint
         run: python -m ruff check src tests scripts
+
+  types:
+    name: Static types (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Runtime dependencies come first: without them mypy reports missing
+      # imports for every third-party package and the real findings drown.
+      - name: Install dependencies and mypy
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install --group typing
+
+      - name: Type-check the runtime
+        run: python -m mypy src/karox
+
+  coverage:
+    name: Suite coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies and coverage
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install --group coverage
+
+      # unittest, not pytest: pytest counts subtests separately, so its pass
+      # tally moves between runs and cannot be used as a gate. The threshold is
+      # the level the suite actually reaches today -- raise it with the coverage
+      # it earns, never lower it to make a run go green.
+      - name: Measure coverage
+        run: |
+          python -m coverage run -m unittest discover -s tests -p "test_*.py"
+          # Parallel mode is on so subprocess children report too, which means
+          # the per-process data files have to be combined before reporting.
+          python -m coverage combine
+          python -m coverage report
+          python -m coverage xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
 
   vnext-runtime:
     name: vNext artifact · ${{ matrix.os }} · Python ${{ matrix.python }}
@@ -66,10 +140,14 @@ jobs:
           python -m pip install --force-reinstall dist/karox_runtime-*.whl
           python -m pip check
 
+      # The expected version is read from the source of truth rather than
+      # repeated here. A literal in this file was one of three disagreeing
+      # copies, and it is the copy nobody remembers to update.
       - name: Smoke-test the installed artifact
         shell: bash
         run: |
-          python -c "import karox; assert karox.__version__ == '5.0.0.dev0'"
+          EXPECTED="$(python scripts/check_versions.py --print runtime)"
+          EXPECTED="$EXPECTED" python -c "import karox, os; assert karox.__version__ == os.environ['EXPECTED'], karox.__version__"
           karox --help
           karox-vnext --help
           karox paths --json

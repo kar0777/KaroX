@@ -18,7 +18,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # This workflow used to tag, archive and publish without ever running a test.
+  # Reusing the quality workflow means the whole suite, the lint gate, the type
+  # gate and the version check all pass on the pushed commit before anything is
+  # published, and a red run cancels the release instead of shipping it.
+  tests:
+    name: Quality gate
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -115,6 +126,24 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "release: KaroX ${{ steps.meta.outputs.tag }}"
             git push origin HEAD:main
+          fi
+
+      # The quality gate ran on the pushed commit; the metadata commit above sits
+      # on top of it. Tagging is only safe while that commit rewrites nothing but
+      # the two generated files, so prove it instead of assuming it.
+      - name: Confirm the tag points at the tested tree
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          untested="$(
+            git diff --name-only "${{ github.sha }}" HEAD \
+              | grep -vx -e 'server/repo_tools.py' -e 'CHANGELOG.md' || true
+          )"
+          if [ -n "$untested" ]; then
+            echo "these files changed after the suite ran and would be tagged untested:"
+            printf '%s\n' "$untested"
+            exit 1
           fi
 
       - name: Create and push tag

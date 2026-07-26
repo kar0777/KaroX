@@ -19,6 +19,26 @@ the operational limits the agent has to plan around.
   transitively through `textual` is what previously produced a working install
   with a broken import, and the wheel built in CI would have reproduced it.
 
+## Development tooling
+
+The checks CI runs are declared as PEP 735 dependency groups in
+`pyproject.toml`, so a contributor installs the same versions CI does:
+
+```bash
+python -m pip install --group dev     # or: --group lint / typing / coverage
+python -m ruff check src tests scripts
+python -m mypy
+python scripts/check_dependencies.py
+python scripts/check_versions.py
+python -m coverage run -m unittest discover -s tests -p "test_*.py"
+python -m coverage report
+```
+
+`python -m pip install --group` needs pip 25.1 or newer; upgrade pip first if the
+flag is unrecognised. `mypy` reads its configuration from `pyproject.toml`, which
+excuses eleven modules by name — that list is the remaining type debt and it only
+ever shrinks.
+
 ## The eleven exposed tools
 
 ```
