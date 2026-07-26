@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
-from karox.agent import AgentLimits
-from karox.cli import _agent_provider, _route, main
+from karox.agent import AgentEvent, AgentEventKind, AgentLimits
+from karox.cli import _agent_provider, _route, _stream_progress, main
 from karox.credentials import CredentialStore
 from karox.providers import (
     ModelMessage,
@@ -381,6 +381,65 @@ class ProviderCliTests(unittest.TestCase):
                     ModelRequest("ignored", (ModelMessage("user", "work"),))
                 )
             self.assertEqual(Factory.created, [])
+
+
+class NarrowStream:
+    """A redirected stream that only accepts the Windows system code page."""
+
+    encoding = "cp1251"
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write(self, text: str) -> None:
+        text.encode(self.encoding)
+        self.written.append(text)
+
+    def flush(self) -> None:
+        return None
+
+
+class StreamProgressTests(unittest.TestCase):
+    """Watching a run must not be able to end it."""
+
+    def test_a_glyph_the_console_cannot_encode_does_not_kill_the_watcher(self) -> None:
+        stream = NarrowStream()
+        with patch("karox.cli.sys.stderr", stream):
+            observe = _stream_progress()
+            observe(
+                AgentEvent(AgentEventKind.STEP_STARTED, 1),
+            )
+            observe(
+                AgentEvent(
+                    AgentEventKind.TEXT_DELTA,
+                    1,
+                    text_delta="готово 日本",
+                )
+            )
+            observe(
+                AgentEvent(
+                    AgentEventKind.TOOL_FINISHED,
+                    1,
+                    tool="repo.write_file",
+                    ok=True,
+                    summary="path=a.txt",
+                    duration_seconds=0.25,
+                )
+            )
+            observe(
+                AgentEvent(
+                    AgentEventKind.FINISHED, 1, reason="verified", status="verified"
+                )
+            )
+
+        joined = "".join(stream.written)
+        self.assertIn("[step 1]", joined)
+        # Cyrillic is representable and survives; what is not gets replaced
+        # rather than raising and taking the run down with it.
+        self.assertIn("готово", joined)
+        self.assertIn("?", joined)
+        self.assertIn("<- repo.write_file ok in 0.25s (path=a.txt)", joined)
+        self.assertIn("[verified: verified]", joined)
 
 
 if __name__ == "__main__":

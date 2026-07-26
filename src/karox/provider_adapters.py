@@ -21,12 +21,12 @@ from .providers import (
     CredentialAccessor,
     ModelEvent,
     ModelEventKind,
+    accumulate_response,
     ModelRequest,
     ModelResponse,
     OpenAIChatCompletionsProvider,
     ProviderError,
     ProviderErrorKind,
-    ToolCall,
     ToolCallDelta,
 )
 
@@ -210,70 +210,7 @@ class _StreamingAdapter:
                     time.sleep(delay)
 
     def complete(self, request: ModelRequest) -> ModelResponse:
-        text: list[str] = []
-        reasoning: list[str] = []
-        saw_text = False
-        calls: Dict[int, Dict[str, list[str]]] = {}
-        usage: Dict[str, int] = {}
-        finish_reason: Optional[str] = None
-        response_id: Optional[str] = None
-        transport_attempts = 1
-        completed = False
-        for event in self.stream(request):
-            transport_attempts = event.transport_attempts
-            response_id = event.response_id or response_id
-            if event.kind == ModelEventKind.TEXT_DELTA:
-                saw_text = True
-                text.append(event.text_delta or "")
-            elif event.kind == ModelEventKind.REASONING_DELTA:
-                reasoning.append(event.reasoning_delta or "")
-            elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
-                delta = event.tool_call_delta
-                if delta is None:
-                    raise ProviderError(
-                        ProviderErrorKind.MALFORMED_RESPONSE,
-                        "tool-call event omitted its delta",
-                    )
-                value = calls.setdefault(
-                    delta.index, {"call_id": [], "name": [], "arguments": []}
-                )
-                value["call_id"].append(delta.call_id_fragment)
-                value["name"].append(delta.name_fragment)
-                value["arguments"].append(delta.arguments_fragment)
-            elif event.kind == ModelEventKind.USAGE:
-                usage.update(event.usage)
-            elif event.kind == ModelEventKind.COMPLETION:
-                completed = True
-                finish_reason = event.finish_reason
-        if not completed:
-            raise ProviderError(
-                ProviderErrorKind.TRANSPORT,
-                "provider stream ended before completion",
-            )
-        try:
-            tool_calls = tuple(
-                ToolCall(
-                    "".join(value["call_id"]),
-                    "".join(value["name"]),
-                    "".join(value["arguments"]),
-                )
-                for _, value in sorted(calls.items())
-            )
-        except (TypeError, ValueError) as exc:
-            raise ProviderError(
-                ProviderErrorKind.MALFORMED_RESPONSE,
-                f"invalid streamed tool call: {exc}",
-            ) from exc
-        joined_reasoning = "".join(reasoning)
-        return ModelResponse(
-            content="".join(text) if saw_text else None,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            usage=usage,
-            response_id=response_id,
-            transport_attempts=transport_attempts,
-            reasoning=joined_reasoning or None,
-        )
+        return accumulate_response(self.stream(request))
 
     @classmethod
     def _sse_records(

@@ -16,7 +16,7 @@ from .providers import (
     Provider,
     ProviderError,
     ProviderErrorKind,
-    ToolCallDelta,
+    accumulate_response,
 )
 from .registry import ModelRecord, ProviderRecord, ProviderRegistry
 
@@ -338,6 +338,194 @@ class RoutedProvider:
             value["status_code"] = error.status_code
         return value
 
+    def _decorate(
+        self,
+        response: ModelResponse,
+        *,
+        attempts: list[Dict[str, Any]],
+        provider_record: ProviderRecord,
+        model_record: ModelRecord,
+    ) -> ModelResponse:
+        """Charge a completed response to the session and stamp what it cost."""
+
+        self._usage = _merge_usage(self._usage, response.usage)
+        cost = None
+        currency = None
+        pricing_version = None
+        cumulative_cost = None
+        if model_record.pricing is not None:
+            cost = model_record.pricing.estimate(response.usage)
+            currency = model_record.pricing.currency
+            pricing_version = model_record.pricing.version
+            self._costs[currency] = round(self._costs.get(currency, 0.0) + cost, 12)
+            cumulative_cost = self._costs[currency]
+
+        exceeded: list[str] = []
+        if (
+            self.policy.max_total_tokens is not None
+            and _usage_total(self._usage) > self.policy.max_total_tokens
+        ):
+            exceeded.append("token_budget")
+        if self.policy.max_cost is not None:
+            assert self.policy.currency is not None
+            if self._costs.get(self.policy.currency, 0.0) > self.policy.max_cost:
+                exceeded.append("cost_budget")
+
+        return replace(
+            response,
+            route_attempts=tuple(attempts),
+            selected_provider=provider_record.provider_id,
+            selected_model=model_record.model_id,
+            cost=cost,
+            currency=currency,
+            pricing_version=pricing_version,
+            cumulative_usage=dict(self._usage),
+            cumulative_cost=cumulative_cost,
+            budget_exceeded=bool(exceeded),
+            budget_reason=",".join(exceeded) or None,
+        )
+
+    def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
+        """Forward the selected route's own events as they arrive.
+
+        Routing, retry and budget accounting are unchanged; what changes is when
+        the caller learns anything. A route may still be retried or fall back,
+        but only while it has emitted nothing — once a delta has reached the
+        caller, re-sending would replay text it has already been shown, so that
+        failure is surfaced instead of papered over. The terminal ``COMPLETION``
+        event carries the fully decorated response, so a streaming consumer sees
+        the same route, cost and budget verdict a blocking one does.
+        """
+
+        self._check_global_budgets()
+        deadline = self._monotonic() + float(request.deadline_seconds)
+        attempts: list[Dict[str, Any]] = []
+        last_rejection: ProviderError | None = None
+        for index, target in enumerate(self.policy.routes):
+            try:
+                provider_record, model_record = self._preflight(target, request)
+            except ProviderError as exc:
+                attempts.append(
+                    self._attempt(index, target, status="rejected", error=exc)
+                )
+                last_rejection = exc
+                continue
+
+            routed_request = self._routed_request(request, model_record)
+            provider: Provider | None = None
+            failure: ProviderError | None = None
+            retries = 0
+            emitted = False
+            collected: list[ModelEvent] = []
+            while True:
+                collected = []
+                try:
+                    if provider is None:
+                        provider = self._provider(provider_record)
+                    for event in provider.stream(routed_request):
+                        collected.append(event)
+                        if event.kind is ModelEventKind.COMPLETION:
+                            # Held back: the caller gets exactly one terminal
+                            # event, the decorated one below, rather than the
+                            # transport's bare completion followed by ours.
+                            continue
+                        emitted = True
+                        yield event
+                except ProviderError as exc:
+                    # A partly delivered turn cannot be retried: the caller has
+                    # already been shown the first half of an answer it would
+                    # then be shown again.
+                    delay = (
+                        None if emitted else self._retry_delay(exc, retries + 1, deadline)
+                    )
+                    if delay is None:
+                        failure = exc
+                        break
+                    retries += 1
+                    self._sleep(delay)
+                    continue
+                break
+
+            if failure is not None:
+                can_fallback = (
+                    not emitted
+                    and failure.kind in _TRANSIENT_ERRORS
+                    and index + 1 < len(self.policy.routes)
+                )
+                attempts.append(
+                    self._attempt(
+                        index,
+                        target,
+                        model_id=model_record.model_id,
+                        status="fallback" if can_fallback else "failed",
+                        error=failure,
+                        retries=retries,
+                    )
+                )
+                if can_fallback:
+                    continue
+                raise ProviderError(
+                    failure.kind,
+                    failure.safe_message,
+                    status_code=failure.status_code,
+                    retry_after=failure.retry_after,
+                    route_attempts=tuple(attempts),
+                ) from failure
+
+            attempts.append(
+                self._attempt(
+                    index,
+                    target,
+                    model_id=model_record.model_id,
+                    status="completed",
+                    retries=retries,
+                )
+            )
+            # Folding the events the route already produced costs nothing and
+            # keeps one definition of what a stream adds up to.
+            response = accumulate_response(iter(collected))
+            decorated = self._decorate(
+                response,
+                attempts=attempts,
+                provider_record=provider_record,
+                model_record=model_record,
+            )
+            yield ModelEvent(
+                ModelEventKind.COMPLETION,
+                finish_reason=decorated.finish_reason,
+                response_id=decorated.response_id,
+                transport_attempts=decorated.transport_attempts,
+                response=decorated,
+            )
+            return
+        if last_rejection is not None:
+            raise ProviderError(
+                last_rejection.kind,
+                last_rejection.safe_message,
+                status_code=last_rejection.status_code,
+                retry_after=last_rejection.retry_after,
+                route_attempts=tuple(attempts),
+            ) from last_rejection
+        raise AssertionError("routing policy unexpectedly had no routes")
+
+    def _routed_request(
+        self, request: ModelRequest, model_record: ModelRecord
+    ) -> ModelRequest:
+        # The registry records each model's output ceiling; routing used to
+        # rewrite only the model id, so the ceiling was never sent. The
+        # Anthropic adapter then fell back to its own 4096-token default and
+        # truncated long work mid-answer. An explicit request value still wins,
+        # because the caller is closer to the task than the registry.
+        return replace(
+            request,
+            model=model_record.model_id,
+            max_output_tokens=(
+                request.max_output_tokens
+                if request.max_output_tokens is not None
+                else model_record.max_output_tokens
+            ),
+        )
+
     def complete(self, request: ModelRequest) -> ModelResponse:
         self._check_global_budgets()
         # One deadline for the whole routed call, retries included: a wait that
@@ -355,20 +543,7 @@ class RoutedProvider:
                 last_rejection = exc
                 continue
 
-            # The registry records each model's output ceiling; routing used to
-            # rewrite only the model id, so the ceiling was never sent. The
-            # Anthropic adapter then fell back to its own 4096-token default and
-            # truncated long work mid-answer. An explicit request value still
-            # wins, because the caller is closer to the task than the registry.
-            routed_request = replace(
-                request,
-                model=model_record.model_id,
-                max_output_tokens=(
-                    request.max_output_tokens
-                    if request.max_output_tokens is not None
-                    else model_record.max_output_tokens
-                ),
-            )
+            routed_request = self._routed_request(request, model_record)
             provider: Provider | None = None
             response: ModelResponse | None = None
             failure: ProviderError | None = None
@@ -426,43 +601,11 @@ class RoutedProvider:
                     retries=retries,
                 )
             )
-            self._usage = _merge_usage(self._usage, response.usage)
-            cost = None
-            currency = None
-            pricing_version = None
-            cumulative_cost = None
-            if model_record.pricing is not None:
-                cost = model_record.pricing.estimate(response.usage)
-                currency = model_record.pricing.currency
-                pricing_version = model_record.pricing.version
-                self._costs[currency] = round(
-                    self._costs.get(currency, 0.0) + cost, 12
-                )
-                cumulative_cost = self._costs[currency]
-
-            exceeded: list[str] = []
-            if (
-                self.policy.max_total_tokens is not None
-                and _usage_total(self._usage) > self.policy.max_total_tokens
-            ):
-                exceeded.append("token_budget")
-            if self.policy.max_cost is not None:
-                assert self.policy.currency is not None
-                if self._costs.get(self.policy.currency, 0.0) > self.policy.max_cost:
-                    exceeded.append("cost_budget")
-
-            return replace(
+            return self._decorate(
                 response,
-                route_attempts=tuple(attempts),
-                selected_provider=provider_record.provider_id,
-                selected_model=model_record.model_id,
-                cost=cost,
-                currency=currency,
-                pricing_version=pricing_version,
-                cumulative_usage=dict(self._usage),
-                cumulative_cost=cumulative_cost,
-                budget_exceeded=bool(exceeded),
-                budget_reason=",".join(exceeded) or None,
+                attempts=attempts,
+                provider_record=provider_record,
+                model_record=model_record,
             )
         if last_rejection is not None:
             raise ProviderError(
@@ -473,45 +616,3 @@ class RoutedProvider:
                 route_attempts=tuple(attempts),
             ) from last_rejection
         raise AssertionError("routing policy unexpectedly had no routes")
-
-    def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
-        """Expose normalized events while preserving routing/budget semantics.
-
-        The router must inspect final usage before tool calls become actionable,
-        so it completes one routed response and then emits normalized events.
-        Concrete adapters still consume their upstream response as a stream.
-        """
-
-        response = self.complete(request)
-        if response.content is not None:
-            yield ModelEvent(
-                ModelEventKind.TEXT_DELTA,
-                text_delta=response.content,
-                response_id=response.response_id,
-                transport_attempts=response.transport_attempts,
-            )
-        for index, call in enumerate(response.tool_calls):
-            yield ModelEvent(
-                ModelEventKind.TOOL_CALL_DELTA,
-                tool_call_delta=ToolCallDelta(
-                    index=index,
-                    call_id_fragment=call.call_id,
-                    name_fragment=call.name,
-                    arguments_fragment=call.raw_arguments,
-                ),
-                response_id=response.response_id,
-                transport_attempts=response.transport_attempts,
-            )
-        if response.usage:
-            yield ModelEvent(
-                ModelEventKind.USAGE,
-                usage=response.usage,
-                response_id=response.response_id,
-                transport_attempts=response.transport_attempts,
-            )
-        yield ModelEvent(
-            ModelEventKind.COMPLETION,
-            finish_reason=response.finish_reason,
-            response_id=response.response_id,
-            transport_attempts=response.transport_attempts,
-        )

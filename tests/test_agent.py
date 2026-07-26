@@ -13,17 +13,27 @@ from pathlib import Path
 from typing import Callable
 
 from _support import SRC, initialize_git_repository
-from karox.agent import AgentKernel, AgentLimits, ContextBudget, SYSTEM_PROMPT
+from karox.agent import (
+    AgentEvent,
+    AgentEventKind,
+    AgentKernel,
+    AgentLimits,
+    ContextBudget,
+    SYSTEM_PROMPT,
+)
 from karox.core import CoreRuntime
 from karox.core_tools import ExtendedCoreRuntime
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import (
+    ModelEvent,
+    ModelEventKind,
     ModelRequest,
     ModelResponse,
     ProviderError,
     ProviderErrorKind,
     ToolCall,
+    ToolCallDelta,
 )
 from karox.sessions import SessionStore
 
@@ -71,7 +81,9 @@ def model_response(
     )
 
 
-class AgentKernelTests(unittest.TestCase):
+class _AgentKernelFixture(unittest.TestCase):
+    """A real git repository, session store and Core, shared by the kernel tests."""
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -144,12 +156,15 @@ class AgentKernelTests(unittest.TestCase):
         origin: Origin | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         require_change: bool = False,
+        on_event: Callable[[AgentEvent], None] | None = None,
     ) -> AgentKernel:
         kwargs: dict[str, object] = {}
         if require_change:
             kwargs["require_change"] = True
         if monotonic is not None:
             kwargs["monotonic"] = monotonic
+        if on_event is not None:
+            kwargs["on_event"] = on_event
         return AgentKernel(
             provider=provider,
             model="test-model",
@@ -161,6 +176,8 @@ class AgentKernelTests(unittest.TestCase):
             **kwargs,
         )
 
+
+class AgentKernelTests(_AgentKernelFixture):
     def test_skill_prompt_is_request_only_and_native_history_stays_stable(self) -> None:
         enhanced_prompt = SYSTEM_PROMPT + "\nSKILL_INSTRUCTION_TOKEN"
         provider = QueueProvider([model_response(content="not finished")])
@@ -1216,6 +1233,146 @@ class ExtendedToolAgentTests(unittest.TestCase):
         )
 
 
+class StreamingQueueProvider(QueueProvider):
+    """A provider that hands over its answer in fragments, like a real one."""
+
+    def stream(self, request: ModelRequest):
+        response = self.complete(request)
+        for index, chunk in enumerate(_fragments(response.content)):
+            yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=chunk)
+            if index == 0 and response.reasoning:
+                yield ModelEvent(
+                    ModelEventKind.REASONING_DELTA,
+                    reasoning_delta=response.reasoning,
+                )
+        for index, item in enumerate(response.tool_calls):
+            yield ModelEvent(
+                ModelEventKind.TOOL_CALL_DELTA,
+                tool_call_delta=ToolCallDelta(
+                    index=index,
+                    call_id_fragment=item.call_id,
+                    name_fragment=item.name,
+                    arguments_fragment=item.raw_arguments,
+                ),
+            )
+        yield ModelEvent(ModelEventKind.USAGE, usage=dict(response.usage))
+        yield ModelEvent(
+            ModelEventKind.COMPLETION, finish_reason=response.finish_reason
+        )
+
+
+def _fragments(content: str | None) -> list[str]:
+    if not content:
+        return []
+    middle = len(content) // 2 or len(content)
+    return [content[:middle], content[middle:]]
+
+
+class AgentEventChannelTests(_AgentKernelFixture):
+    """A run is watchable while it happens, not only once it has exited."""
+
+    def test_watcher_sees_steps_tools_and_deltas_before_the_run_returns(self) -> None:
+        provider = StreamingQueueProvider(self.successful_responses())
+        seen: list[AgentEvent] = []
+
+        report = self.kernel(provider, AgentLimits(max_seconds=30), on_event=seen.append).run(
+            "session"
+        )
+
+        self.assertTrue(report.verified)
+        kinds = [item.kind for item in seen]
+        self.assertEqual(kinds[0], AgentEventKind.STEP_STARTED)
+        self.assertEqual(kinds[-1], AgentEventKind.FINISHED)
+        # Four provider turns, each opened and closed exactly once.
+        self.assertEqual(kinds.count(AgentEventKind.STEP_STARTED), 4)
+        self.assertEqual(kinds.count(AgentEventKind.STEP_FINISHED), 4)
+        self.assertEqual([item.step for item in seen if item.kind is AgentEventKind.STEP_STARTED], [1, 2, 3, 4])
+        # The answer arrived in fragments rather than in one lump at the end.
+        deltas = [
+            item.text_delta for item in seen if item.kind is AgentEventKind.TEXT_DELTA
+        ]
+        self.assertGreater(len(deltas), 1)
+        self.assertIn("verified locally", "".join(deltas))
+        # Tools are named the one canonical dotted way and carry their duration.
+        started = [
+            item for item in seen if item.kind is AgentEventKind.TOOL_STARTED
+        ]
+        finished = [
+            item for item in seen if item.kind is AgentEventKind.TOOL_FINISHED
+        ]
+        self.assertEqual(
+            [item.tool for item in started],
+            ["repo.write_file", "checks.run", "git.status", "git.diff"],
+        )
+        self.assertEqual([item.tool for item in started], [item.tool for item in finished])
+        self.assertTrue(all(item.ok for item in finished))
+        self.assertTrue(
+            all(isinstance(item.duration_seconds, float) for item in finished)
+        )
+        self.assertTrue(all(item.duration_seconds >= 0.0 for item in finished))
+        self.assertIn("sample.txt", finished[0].summary or "")
+        last = seen[-1]
+        self.assertEqual(last.reason, "verified")
+        self.assertEqual(last.status, "verified")
+        self.assertTrue(last.ok)
+
+    def test_a_failed_tool_is_reported_as_failed_with_its_reason(self) -> None:
+        provider = StreamingQueueProvider(
+            [
+                model_response(call("read", "repo_read_file", {"path": "missing.txt"})),
+                model_response(content="could not read it"),
+            ]
+        )
+        seen: list[AgentEvent] = []
+
+        self.kernel(
+            provider, AgentLimits(max_steps=2, max_seconds=30), on_event=seen.append
+        ).run("session")
+
+        finished = [
+            item for item in seen if item.kind is AgentEventKind.TOOL_FINISHED
+        ]
+        self.assertEqual([item.tool for item in finished], ["repo.read_file"])
+        self.assertFalse(finished[0].ok)
+        self.assertTrue(finished[0].summary)
+
+    def test_a_watcher_that_raises_cannot_end_a_leased_session(self) -> None:
+        # The observer is a display concern. A run that has already changed files
+        # must not be abandoned mid-lease because a terminal repaint failed.
+        calls: list[int] = []
+
+        def explode(event: AgentEvent) -> None:
+            calls.append(1)
+            raise RuntimeError("the screen went away")
+
+        report = self.kernel(
+            StreamingQueueProvider(self.successful_responses()),
+            AgentLimits(max_seconds=30),
+            on_event=explode,
+        ).run("session")
+
+        self.assertTrue(report.verified)
+        self.assertEqual(report.reason, "verified")
+        # Dropped after the first failure rather than retried on every event.
+        self.assertEqual(len(calls), 1)
+
+    def test_a_provider_without_streaming_still_runs_and_reports(self) -> None:
+        # Not every transport streams; the loop must not require it.
+        seen: list[AgentEvent] = []
+
+        report = self.kernel(
+            QueueProvider(self.successful_responses()),
+            AgentLimits(max_seconds=30),
+            on_event=seen.append,
+        ).run("session")
+
+        self.assertTrue(report.verified)
+        self.assertEqual(
+            [item.kind for item in seen if item.kind is AgentEventKind.TEXT_DELTA], []
+        )
+        self.assertEqual(seen[-1].kind, AgentEventKind.FINISHED)
+
+
 class ContextCompactionTests(unittest.TestCase):
     """History is bounded before it reaches the provider, not after it fails."""
 
@@ -1400,6 +1557,17 @@ class ScriptedChatHandler(BaseHTTPRequestHandler):
         server = self.server
         server.requests.append(payload)  # type: ignore[attr-defined]
         index = len(server.requests) - 1  # type: ignore[attr-defined]
+        if index >= len(server.responses):  # type: ignore[attr-defined]
+            # Running off the end of the script used to raise inside the handler
+            # and reach the client as an unexplained transport failure. Say what
+            # actually happened instead.
+            body = b'{"error":{"message":"scripted responses exhausted"}}'
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         scripted = server.responses[index]  # type: ignore[attr-defined]
         body = "".join(
             [f"data: {json.dumps(event)}\n\n" for event in scripted]
@@ -1594,10 +1762,15 @@ class AgentCliEndToEndTests(unittest.TestCase):
                         f"http://127.0.0.1:{server.server_port}/v1",
                         "--session-id",
                         "cli-e2e",
+                        # Generous on purpose: this asserts the wiring, not the
+                        # speed of the machine. A budget tight enough for a busy
+                        # CI host to exhaust turns a release gate into a coin
+                        # flip that reports a provider transport error.
                         "--max-seconds",
-                        "30",
+                        "240",
                         "--verification-command",
                         json.dumps([sys.executable, "-c", "print('e2e-ok')"]),
+                        "--stream",
                         "--json",
                     ],
                     cwd=repository,
@@ -1606,7 +1779,7 @@ class AgentCliEndToEndTests(unittest.TestCase):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=60,
+                    timeout=300,
                 )
             finally:
                 server.shutdown()
@@ -1614,6 +1787,19 @@ class AgentCliEndToEndTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            # --stream narrates the run on stderr as it happens; a fifteen-minute
+            # task used to print nothing at all until it exited.
+            progress = completed.stderr
+            self.assertIn("[step 1]", progress)
+            self.assertIn("[step 5]", progress)
+            self.assertIn("-> repo.read_file", progress)
+            self.assertIn("-> checks.run", progress)
+            # The dotted Core name, never the provider alias, on both lines.
+            self.assertNotIn("repo_read_file", progress)
+            self.assertRegex(progress, r"<- repo\.write_file ok in \d+\.\d\ds")
+            self.assertIn("All local evidence is complete.", progress)
+            self.assertIn("[verified: verified]", progress)
+            # ...and stdout is still exactly one JSON document.
             report = json.loads(completed.stdout)
             self.assertTrue(report["verified"])
             self.assertEqual(report["status"], "verified")

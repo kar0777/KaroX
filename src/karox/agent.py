@@ -9,11 +9,14 @@ import re
 import time
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from .core import CoreRuntime, ToolDefinition
 from .models import CoreCommand, CoreResult, Origin, OriginKind
 from .providers import (
+    ModelEvent,
+    ModelEventKind,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -22,6 +25,7 @@ from .providers import (
     ProviderErrorKind,
     ProviderTool,
     ToolCall,
+    accumulate_response,
 )
 from .security import redact, redact_content
 from .sessions import MutationLease, SessionRecord, SessionStore
@@ -268,6 +272,48 @@ class AgentReport:
         return dict(redact(asdict(self)))
 
 
+class AgentEventKind(str, Enum):
+    """What a watcher can be told while a run is still in progress."""
+
+    STEP_STARTED = "step_started"
+    TEXT_DELTA = "text_delta"
+    # The model's own deliberation, on its own channel. Merging it into
+    # TEXT_DELTA would present private reasoning as the answer.
+    REASONING_DELTA = "reasoning_delta"
+    TOOL_STARTED = "tool_started"
+    TOOL_FINISHED = "tool_finished"
+    STEP_FINISHED = "step_finished"
+    FINISHED = "finished"
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """One thing that just happened, safe to show a user verbatim.
+
+    Every free-text field is already redacted, because the whole point of this
+    channel is that it reaches a screen without passing through the audited
+    persistence path first.
+    """
+
+    kind: AgentEventKind
+    step: int
+    text_delta: Optional[str] = None
+    reasoning_delta: Optional[str] = None
+    # The canonical dotted Core name -- ``repo.write_file``, never the provider
+    # alias ``repo_write_file``. One name per tool everywhere it is displayed.
+    tool: Optional[str] = None
+    call_id: Optional[str] = None
+    ok: Optional[bool] = None
+    summary: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    usage: Dict[str, int] = field(default_factory=dict)
+    reason: Optional[str] = None
+    status: Optional[str] = None
+
+
+AgentObserver = Callable[[AgentEvent], None]
+
+
 @dataclass
 class _ActionLedger:
     """How often each identical call has already completed in this session."""
@@ -317,6 +363,7 @@ class AgentKernel:
         context: ContextBudget = ContextBudget(),
         project_context: Optional[Mapping[str, Any]] = None,
         require_change: bool = False,
+        on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
@@ -335,6 +382,11 @@ class AgentKernel:
         # run -- can refuse the answer outcome outright rather than discovering
         # afterwards that the agent talked instead of working.
         self.require_change = bool(require_change)
+        # A run used to be invisible until it exited: a fifteen-minute task
+        # printed nothing, and the only way to watch it was to re-read and
+        # re-checksum the whole session file several times a second.
+        self._on_event = on_event
+        self._step = 0
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -389,6 +441,67 @@ class AgentKernel:
             for alias, core_name in aliases.items()
             if self._may_call(definitions[core_name])
         )
+
+    def _emit(self, kind: AgentEventKind, **fields: Any) -> None:
+        """Tell the watcher, and never let the watcher end the session.
+
+        The observer is a display concern. A leased session that has already
+        changed files must not die because a terminal repaint raised, so a
+        failing observer is dropped for the rest of the run rather than
+        propagating into the loop or being retried on every event.
+        """
+
+        observer = self._on_event
+        if observer is None:
+            return
+        try:
+            observer(AgentEvent(kind, self._step, **fields))
+        except Exception:
+            self._on_event = None
+
+    def _call_provider(self, request: ModelRequest) -> ModelResponse:
+        """Get one response, streaming it to the watcher when both ends can.
+
+        Without an observer there is nothing to stream to, and a provider that
+        only implements ``complete`` has no deltas to give -- in both cases the
+        blocking call is the honest one.
+        """
+
+        stream = getattr(self.provider, "stream", None)
+        if self._on_event is None or stream is None:
+            return self.provider.complete(request)
+
+        def observe(event: ModelEvent) -> None:
+            if event.kind is ModelEventKind.TEXT_DELTA and event.text_delta:
+                self._emit(
+                    AgentEventKind.TEXT_DELTA,
+                    text_delta=str(redact(event.text_delta)),
+                )
+            elif event.kind is ModelEventKind.REASONING_DELTA and event.reasoning_delta:
+                self._emit(
+                    AgentEventKind.REASONING_DELTA,
+                    reasoning_delta=str(redact(event.reasoning_delta)),
+                )
+
+        return accumulate_response(stream(request), observer=observe)
+
+    @staticmethod
+    def _result_summary(result: CoreResult) -> str:
+        """One redacted line describing what a tool actually did."""
+
+        data = result.data if isinstance(result.data, dict) else {}
+        parts: list[str] = []
+        for key in ("path", "changed", "exit_code", "timed_out", "truncated"):
+            value = data.get(key)
+            if key in data and not isinstance(value, (dict, list, tuple)):
+                parts.append(f"{key}={value}")
+        for key in ("matches", "files", "entries"):
+            value = data.get(key)
+            if isinstance(value, (list, tuple)):
+                parts.append(f"{key}={len(value)}")
+        if not parts:
+            parts.append("ok" if result.ok else "failed")
+        return str(redact(", ".join(parts)))
 
     def _may_call(self, definition: ToolDefinition) -> bool:
         """True when this origin holds every capability the tool needs.
@@ -473,6 +586,8 @@ class AgentKernel:
                         self._last_provider_message(record),
                     )
                 self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
+                self._step = steps + 1
+                self._emit(AgentEventKind.STEP_STARTED)
                 request = ModelRequest(
                     model=self.model,
                     messages=tuple(self._request_messages(record.provider_history)),
@@ -484,7 +599,7 @@ class AgentKernel:
                     cache_key=f"karox-session-{session_id}",
                 )
                 try:
-                    response = self.provider.complete(request)
+                    response = self._call_provider(request)
                 except ProviderError as exc:
                     self._record_provider_failure(session_id, lease, exc, steps + 1)
                     if exc.kind is ProviderErrorKind.BUDGET_EXCEEDED:
@@ -548,6 +663,11 @@ class AgentKernel:
                         session_id, lease, call, deadline, ledger
                     ) or repeated
                     self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
+                self._emit(
+                    AgentEventKind.STEP_FINISHED,
+                    usage=dict(response.usage),
+                    reason=response.finish_reason,
+                )
                 if repeated:
                     return self._finish(
                         session_id,
@@ -761,6 +881,24 @@ class AgentKernel:
         ledger: _ActionLedger,
     ) -> bool:
         signature = self._action_signature(call)
+        # One canonical dotted name for the whole life of the call, so the
+        # running line and the finished line cannot disagree about what ran.
+        display = self._tool_aliases.get(call.name, call.name)
+        started = self.monotonic()
+        self._emit(
+            AgentEventKind.TOOL_STARTED, tool=display, call_id=call.call_id
+        )
+
+        def finished(ok: bool, summary: str) -> None:
+            self._emit(
+                AgentEventKind.TOOL_FINISHED,
+                tool=display,
+                call_id=call.call_id,
+                ok=ok,
+                summary=summary,
+                duration_seconds=round(max(0.0, self.monotonic() - started), 3),
+            )
+
         if ledger.counts[signature] >= self.limits.max_identical_actions:
             # A refusal the model can act on beats killing the session. The old
             # behaviour ended the whole run on the second identical call, so a
@@ -776,6 +914,7 @@ class AgentKernel:
             )
             ledger.observe(call.name, signature)
             ledger.refusals += 1
+            finished(False, "identical call, results unchanged")
             return ledger.refusals >= self.limits.max_repeated_action_errors
         ledger.observe(call.name, signature)
         core_name = self._tool_aliases.get(call.name)
@@ -783,6 +922,7 @@ class AgentKernel:
             self._persist_tool_error(
                 session_id, lease, call, "unknown_tool", "tool is not available"
             )
+            finished(False, "tool is not available")
             return False
         try:
             arguments = _strict_json_loads(call.raw_arguments)
@@ -792,12 +932,14 @@ class AgentKernel:
             self._persist_tool_error(
                 session_id, lease, call, "malformed_arguments", str(exc)
             )
+            finished(False, "malformed arguments")
             return False
         remaining = deadline - self.monotonic()
         if remaining < 0.1:
             self._persist_tool_error(
                 session_id, lease, call, "wall_time_limit", "agent deadline expired"
             )
+            finished(False, "agent deadline expired")
             return False
         definition = self._definitions[core_name]
         identity = f"{session_id}\0{call.call_id}\0{core_name}".encode("utf-8")
@@ -822,8 +964,10 @@ class AgentKernel:
                 str(redact(str(exc))),
                 core_name=core_name,
             )
+            finished(False, type(exc).__name__)
             return False
         self._persist_tool_result(session_id, lease, call, core_name, result)
+        finished(bool(result.ok), self._result_summary(result))
         if core_name in MUTATION_TOOLS and result.ok and result.data.get("changed") is True:
             ledger.clear_after_change()
         return False
@@ -1408,6 +1552,16 @@ class AgentKernel:
         reason: str,
         provider_message: Optional[str] = None,
     ) -> AgentReport:
+        # Every terminal path funnels through here, so this is the one place a
+        # watcher can be told the run is over without the emit being forgotten
+        # on some early return.
+        self._emit(
+            AgentEventKind.FINISHED,
+            reason=reason,
+            status=record.status,
+            ok=record.status == "verified" and self._completed(record),
+            usage=dict(record.usage) if isinstance(record.usage, dict) else {},
+        )
         return AgentReport(
             session_id=record.session_id,
             status=record.status,

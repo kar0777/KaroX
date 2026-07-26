@@ -17,7 +17,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Protocol
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    Protocol,
+)
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -212,6 +221,101 @@ class ModelEvent:
     finish_reason: Optional[str] = None
     response_id: Optional[str] = None
     transport_attempts: int = 1
+    # Set only on ``COMPLETION`` by a layer that knows more about the call than
+    # the deltas can carry — which route served it, what it cost, whether a
+    # budget is now spent. A consumer that streams must not have to re-derive
+    # that from the transport, so the authoritative response travels with the
+    # terminal event instead of being available only from ``complete()``.
+    response: Optional[ModelResponse] = None
+
+
+def accumulate_response(
+    events: Iterable[ModelEvent],
+    *,
+    observer: Optional[Callable[[ModelEvent], None]] = None,
+) -> ModelResponse:
+    """Fold a normalized event stream into one response.
+
+    This is the single definition of "what a stream adds up to", shared by
+    every transport so a streaming consumer and a blocking one can never
+    disagree about the same bytes. ``observer`` sees each event as it arrives,
+    which is what makes live output and a final response the same pass.
+    """
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    saw_content = False
+    call_parts: Dict[int, Dict[str, list[str]]] = {}
+    usage: Dict[str, int] = {}
+    finish_reason: Optional[str] = None
+    response_id: Optional[str] = None
+    transport_attempts = 1
+    completed = False
+    decorated: Optional[ModelResponse] = None
+
+    for event in events:
+        if observer is not None:
+            observer(event)
+        transport_attempts = event.transport_attempts
+        response_id = event.response_id or response_id
+        if event.kind == ModelEventKind.TEXT_DELTA:
+            saw_content = True
+            content_parts.append(event.text_delta or "")
+        elif event.kind == ModelEventKind.REASONING_DELTA:
+            reasoning_parts.append(event.reasoning_delta or "")
+        elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
+            delta = event.tool_call_delta
+            if delta is None:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "tool-call event omitted its delta",
+                )
+            parts = call_parts.setdefault(
+                delta.index,
+                {"call_id": [], "name": [], "arguments": []},
+            )
+            parts["call_id"].append(delta.call_id_fragment)
+            parts["name"].append(delta.name_fragment)
+            parts["arguments"].append(delta.arguments_fragment)
+        elif event.kind == ModelEventKind.USAGE:
+            usage.update(event.usage)
+        elif event.kind == ModelEventKind.COMPLETION:
+            completed = True
+            finish_reason = event.finish_reason
+            if event.response is not None:
+                decorated = event.response
+
+    if not completed:
+        raise ProviderError(
+            ProviderErrorKind.TRANSPORT,
+            "provider stream ended before completion",
+        )
+    if decorated is not None:
+        return decorated
+    try:
+        tool_calls = tuple(
+            ToolCall(
+                call_id="".join(parts["call_id"]),
+                name="".join(parts["name"]),
+                raw_arguments="".join(parts["arguments"]),
+            )
+            for _, parts in sorted(call_parts.items())
+        )
+    except (TypeError, ValueError) as exc:
+        raise ProviderError(
+            ProviderErrorKind.MALFORMED_RESPONSE,
+            f"invalid streamed tool call: {exc}",
+        ) from exc
+    reasoning = "".join(reasoning_parts)
+    return ModelResponse(
+        content="".join(content_parts) if saw_content else None,
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+        usage=usage,
+        response_id=response_id,
+        transport_attempts=transport_attempts,
+        reasoning=reasoning or None,
+    )
 
 
 class Provider(Protocol):
@@ -483,73 +587,7 @@ class OpenAIChatCompletionsProvider:
                 continue
 
     def complete(self, request: ModelRequest) -> ModelResponse:
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        saw_content = False
-        call_parts: Dict[int, Dict[str, list[str]]] = {}
-        usage: Dict[str, int] = {}
-        finish_reason: Optional[str] = None
-        response_id: Optional[str] = None
-        transport_attempts = 1
-        completed = False
-
-        for event in self.stream(request):
-            transport_attempts = event.transport_attempts
-            if event.kind == ModelEventKind.TEXT_DELTA:
-                saw_content = True
-                content_parts.append(event.text_delta or "")
-            elif event.kind == ModelEventKind.REASONING_DELTA:
-                reasoning_parts.append(event.reasoning_delta or "")
-            elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
-                delta = event.tool_call_delta
-                if delta is None:
-                    raise ProviderError(
-                        ProviderErrorKind.MALFORMED_RESPONSE,
-                        "tool-call event omitted its delta",
-                    )
-                parts = call_parts.setdefault(
-                    delta.index,
-                    {"call_id": [], "name": [], "arguments": []},
-                )
-                parts["call_id"].append(delta.call_id_fragment)
-                parts["name"].append(delta.name_fragment)
-                parts["arguments"].append(delta.arguments_fragment)
-            elif event.kind == ModelEventKind.USAGE:
-                usage.update(event.usage)
-            elif event.kind == ModelEventKind.COMPLETION:
-                completed = True
-                finish_reason = event.finish_reason
-                response_id = event.response_id
-
-        if not completed:
-            raise ProviderError(
-                ProviderErrorKind.TRANSPORT,
-                "provider stream ended before completion",
-            )
-        try:
-            tool_calls = tuple(
-                ToolCall(
-                    call_id="".join(parts["call_id"]),
-                    name="".join(parts["name"]),
-                    raw_arguments="".join(parts["arguments"]),
-                )
-                for _, parts in sorted(call_parts.items())
-            )
-        except (TypeError, ValueError) as exc:
-            raise ProviderError(
-                ProviderErrorKind.MALFORMED_RESPONSE,
-                f"invalid streamed tool call: {exc}",
-            ) from exc
-        reasoning = "".join(reasoning_parts)
-        return ModelResponse(
-            content="".join(content_parts) if saw_content else None,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            usage=usage,
-            response_id=response_id,
-            transport_attempts=transport_attempts,
-            reasoning=reasoning or None,
-        )
+        return accumulate_response(self.stream(request))
 
     @classmethod
     def _stream_events(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -10,10 +11,12 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from .agent import (
     AgentError,
+    AgentEvent,
+    AgentEventKind,
     AgentKernel,
     AgentLimits,
     AgentReport,
@@ -855,6 +858,15 @@ def _parser() -> argparse.ArgumentParser:
             "useful when reproducing a run that must not depend on them"
         ),
     )
+    run.add_argument(
+        "--stream",
+        action="store_true",
+        help=(
+            "report progress on stderr while the run is still going: each step, "
+            "each tool with how long it took, and the answer as it arrives; "
+            "--json stays one final document on stdout"
+        ),
+    )
     run.add_argument("--json", action="store_true")
 
     migrate = commands.add_parser(
@@ -876,6 +888,59 @@ def _parser() -> argparse.ArgumentParser:
 def _print_mapping(value: dict[str, Any]) -> None:
     for key, item in value.items():
         print(f"{key}: {item}")
+
+
+def _stream_progress() -> Callable[[AgentEvent], None]:
+    """Narrate a run on stderr while it is still happening.
+
+    Progress goes to stderr on purpose: ``--json`` promises one document on
+    stdout, and a run that only speaks at the end is indistinguishable from a
+    hung one.
+    """
+
+    text_open = [False]
+    # Progress is exactly what gets redirected to a file, and on Windows that
+    # stream defaults to the system code page: a model answering in anything but
+    # ASCII would otherwise take the watcher down with UnicodeEncodeError.
+    with contextlib.suppress(Exception):
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+
+    def emit(text: str) -> None:
+        try:
+            sys.stderr.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stderr, "encoding", None) or "ascii"
+            sys.stderr.write(
+                text.encode(encoding, "replace").decode(encoding, "replace")
+            )
+        sys.stderr.flush()
+
+    def write(line: str) -> None:
+        if text_open[0]:
+            emit("\n")
+            text_open[0] = False
+        emit(line + "\n")
+
+    def observe(event: AgentEvent) -> None:
+        if event.kind is AgentEventKind.TEXT_DELTA:
+            # Deltas are fragments, not lines: printed as they arrive they read
+            # as the model typing, which is the whole point of streaming.
+            emit(event.text_delta or "")
+            text_open[0] = True
+        elif event.kind is AgentEventKind.STEP_STARTED:
+            write(f"[step {event.step}]")
+        elif event.kind is AgentEventKind.TOOL_STARTED:
+            write(f"  -> {event.tool}")
+        elif event.kind is AgentEventKind.TOOL_FINISHED:
+            mark = "ok" if event.ok else "failed"
+            write(
+                f"  <- {event.tool} {mark} in {event.duration_seconds:.2f}s"
+                f" ({event.summary})"
+            )
+        elif event.kind is AgentEventKind.FINISHED:
+            write(f"[{event.status}: {event.reason}]")
+
+    return observe
 
 
 def _print_agent_report(report: AgentReport) -> None:
@@ -1986,6 +2051,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         context=ContextBudget(max_input_tokens=context_window),
         project_context=project_context,
         require_change=args.expect == "change",
+        on_event=_stream_progress() if getattr(args, "stream", False) else None,
     ).run(record.session_id)
 
 

@@ -12,12 +12,16 @@ from unittest.mock import patch
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 from karox.provider_factory import ProviderFactory
 from karox.providers import (
+    ModelEvent,
+    ModelEventKind,
     ModelMessage,
     ModelRequest,
     ModelResponse,
     ProviderError,
     ProviderErrorKind,
     ProviderTool,
+    ToolCallDelta,
+    accumulate_response,
 )
 from karox.registry import ModelPricing, ModelRecord, ProviderRecord, ProviderRegistry
 from karox.routing import RetryPolicy, RouteTarget, RoutedProvider, RoutingPolicy
@@ -72,6 +76,26 @@ class FakeProvider:
         return outcome
 
 
+class StreamingFakeProvider:
+    """Yields scripted events, raising a scripted error where it was placed."""
+
+    provider_name = "streaming-fake"
+
+    def __init__(self, script: list[ModelEvent | ProviderError]) -> None:
+        self.script = list(script)
+        self.requests: list[ModelRequest] = []
+
+    def stream(self, model_request: ModelRequest):
+        self.requests.append(model_request)
+        for item in self.script:
+            if isinstance(item, ProviderError):
+                raise item
+            yield item
+
+    def complete(self, model_request: ModelRequest) -> ModelResponse:
+        return accumulate_response(self.stream(model_request))
+
+
 class FakeFactory:
     def __init__(self, providers: dict[str, FakeProvider]) -> None:
         self.providers = providers
@@ -97,7 +121,9 @@ class FakeClock:
         self.now += seconds
 
 
-class RoutingTests(unittest.TestCase):
+class _RoutingFixture(unittest.TestCase):
+    """A registry, a fake clock and helpers for declaring routes."""
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.registry = ProviderRegistry(
@@ -163,6 +189,8 @@ class RoutingTests(unittest.TestCase):
             factory,
         )
 
+
+class RoutingTests(_RoutingFixture):
     def test_factory_maps_adapter_and_resolves_credentials_lazily(self) -> None:
         events: list[str] = []
 
@@ -718,6 +746,154 @@ class RoutingTests(unittest.TestCase):
             [item["status"] for item in raised.exception.route_attempts],
             ["fallback", "failed"],
         )
+
+
+class StreamingRouteTests(_RoutingFixture):
+    """The router forwards a route's own events instead of replaying them."""
+
+    def test_stream_preserves_the_order_the_provider_produced(self) -> None:
+        # A buffered replay emitted every text delta before every tool call, so
+        # a model that narrates between two tool calls came out reordered.
+        emitted = (
+            ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="first "),
+            ModelEvent(
+                ModelEventKind.TOOL_CALL_DELTA,
+                tool_call_delta=ToolCallDelta(0, "call-1", "git_status", "{}"),
+            ),
+            ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="second"),
+            ModelEvent(ModelEventKind.USAGE, usage={"prompt_tokens": 4}),
+            ModelEvent(ModelEventKind.COMPLETION, finish_reason="tool_calls"),
+        )
+        target = self.add_route("only")
+        routed, _ = self.routed(
+            (target,), {"only": StreamingFakeProvider(list(emitted))}
+        )
+
+        events = list(routed.stream(request()))
+
+        # Every upstream event in its original order, then exactly one terminal
+        # event -- the router's own, not the transport's bare completion too.
+        self.assertEqual(
+            [item.kind for item in events],
+            [item.kind for item in emitted[:-1]] + [ModelEventKind.COMPLETION],
+        )
+        self.assertEqual(
+            [item.text_delta for item in events if item.text_delta],
+            ["first ", "second"],
+        )
+
+    def test_the_terminal_event_carries_the_routed_and_priced_response(self) -> None:
+        target = self.add_route(
+            "priced",
+            pricing=ModelPricing("v1", "USD", 1000.0, 2000.0, "fixture"),
+        )
+        routed, _ = self.routed(
+            (target,),
+            {
+                "priced": StreamingFakeProvider(
+                    [
+                        ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="done"),
+                        ModelEvent(
+                            ModelEventKind.USAGE,
+                            usage={"prompt_tokens": 4, "completion_tokens": 2},
+                        ),
+                        ModelEvent(ModelEventKind.COMPLETION, finish_reason="stop"),
+                    ]
+                )
+            },
+        )
+
+        final = list(routed.stream(request()))[-1]
+
+        self.assertEqual(final.kind, ModelEventKind.COMPLETION)
+        assert final.response is not None
+        # A streaming caller learns the same route, cost and budget verdict a
+        # blocking one does, instead of having to ask again.
+        self.assertEqual(final.response.selected_provider, "priced")
+        self.assertEqual(final.response.selected_model, "priced-model")
+        self.assertEqual(final.response.content, "done")
+        self.assertEqual(final.response.currency, "USD")
+        self.assertAlmostEqual(final.response.cost or 0.0, 0.008)
+        self.assertEqual(final.response.pricing_version, "v1")
+
+    def test_a_route_that_dies_before_emitting_anything_still_falls_back(self) -> None:
+        first = self.add_route("first")
+        second = self.add_route("second")
+        routed, _ = self.routed(
+            (first, second),
+            {
+                "first": StreamingFakeProvider(
+                    [ProviderError(ProviderErrorKind.TRANSPORT, "offline")]
+                ),
+                "second": StreamingFakeProvider(
+                    [
+                        ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="ok"),
+                        ModelEvent(ModelEventKind.COMPLETION, finish_reason="stop"),
+                    ]
+                ),
+            },
+        )
+
+        events = list(routed.stream(request()))
+
+        final = events[-1]
+        assert final.response is not None
+        self.assertEqual(final.response.selected_provider, "second")
+        self.assertEqual(
+            [item["status"] for item in final.response.route_attempts],
+            ["fallback", "completed"],
+        )
+
+    def test_a_route_that_dies_mid_answer_is_surfaced_not_replayed(self) -> None:
+        # Falling back here would show the caller the first half of an answer
+        # twice, so the failure is reported instead of being papered over.
+        first = self.add_route("first")
+        second = self.add_route("second")
+        routed, _ = self.routed(
+            (first, second),
+            {
+                "first": StreamingFakeProvider(
+                    [
+                        ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="half "),
+                        ProviderError(ProviderErrorKind.TRANSPORT, "cut off"),
+                    ]
+                ),
+                "second": StreamingFakeProvider(
+                    [
+                        ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="ok"),
+                        ModelEvent(ModelEventKind.COMPLETION, finish_reason="stop"),
+                    ]
+                ),
+            },
+        )
+
+        seen: list[ModelEvent] = []
+        with self.assertRaises(ProviderError) as raised:
+            for event in routed.stream(request()):
+                seen.append(event)
+
+        self.assertEqual([item.text_delta for item in seen], ["half "])
+        self.assertEqual(
+            [item["status"] for item in raised.exception.route_attempts], ["failed"]
+        )
+
+    def test_a_partly_delivered_turn_is_not_retried(self) -> None:
+        target = self.add_route("only")
+        provider = StreamingFakeProvider(
+            [
+                ModelEvent(ModelEventKind.TEXT_DELTA, text_delta="half "),
+                ProviderError(ProviderErrorKind.RATE_LIMIT, "busy"),
+            ]
+        )
+        routed, _ = self.routed(
+            (target,), {"only": provider}, retry=RetryPolicy(max_attempts=3)
+        )
+
+        with self.assertRaises(ProviderError):
+            list(routed.stream(request()))
+
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(self.clock.sleeps, [])
 
 
 if __name__ == "__main__":
