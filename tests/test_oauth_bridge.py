@@ -129,7 +129,10 @@ class OAuthBridgeWireTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.close()
 
-    def _authorize(self, client: httpx.Client) -> tuple[str, str, str]:
+    def _pending_request(
+        self, client: httpx.Client, *, state: str = "state-123"
+    ) -> tuple[str, str]:
+        """Register a client and open an approval page, as any caller may."""
         registration = client.post(
             "/oauth/register",
             json={
@@ -139,8 +142,6 @@ class OAuthBridgeWireTests(unittest.TestCase):
         )
         self.assertEqual(registration.status_code, 201, registration.text)
         client_id = registration.json()["client_id"]
-        verifier = "v" * 64
-        state = "state-123"
         authorization = client.get(
             "/oauth/authorize",
             params={
@@ -148,7 +149,7 @@ class OAuthBridgeWireTests(unittest.TestCase):
                 "client_id": client_id,
                 "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
                 "state": state,
-                "code_challenge": _pkce(verifier),
+                "code_challenge": _pkce("v" * 64),
                 "code_challenge_method": "S256",
                 "resource": "https://karox.example/mcp",
                 "scope": "mcp:tools offline_access",
@@ -159,16 +160,22 @@ class OAuthBridgeWireTests(unittest.TestCase):
             r'name="request_id" value="([^"]+)"', authorization.text
         )
         self.assertIsNotNone(request_id)
+        return client_id, request_id.group(1)
+
+    def _authorize(self, client: httpx.Client) -> tuple[str, str, str]:
+        state = "state-123"
+        client_id, request_id = self._pending_request(client, state=state)
+        verifier = "v" * 64
 
         denied = client.post(
             "/oauth/authorize",
-            data={"request_id": request_id.group(1), "password": "wrong"},
+            data={"request_id": request_id, "password": "wrong"},
         )
         self.assertEqual(denied.status_code, 400)
         approved = client.post(
             "/oauth/authorize",
             data={
-                "request_id": request_id.group(1),
+                "request_id": request_id,
                 "password": "approval-password",
             },
             follow_redirects=False,
@@ -282,6 +289,44 @@ class OAuthBridgeWireTests(unittest.TestCase):
                 },
             )
             self.assertEqual(accepted.status_code, 200, accepted.text)
+
+    def test_non_ascii_approval_password_is_an_ordinary_invalid_request(self) -> None:
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            _client_id, request_id = self._pending_request(client)
+            response = client.post(
+                "/oauth/authorize",
+                data={"request_id": request_id, "password": "é"},
+                follow_redirects=False,
+            )
+        # Reachable with no credential at all: registration and the approval page
+        # are open, so a typed password used to be an unauthenticated 500.
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"], "invalid_request")
+
+    def test_foreign_host_is_rejected_on_the_oauth_endpoints(self) -> None:
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            registration = client.post(
+                "/oauth/register",
+                json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
+                headers={"Host": "rebound.attacker.example"},
+            )
+            token = client.post(
+                "/oauth/token",
+                data={"grant_type": "authorization_code"},
+                headers={"Host": "rebound.attacker.example"},
+            )
+        self.assertEqual(registration.status_code, 421, registration.text)
+        self.assertEqual(token.status_code, 421, token.text)
+
+    def test_the_declared_public_host_reaches_the_mcp_wire(self) -> None:
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            response = client.post(
+                "/mcp", content=b"{}", headers={"Host": "karox.example"}
+            )
+        # 421 here would mean the wire underneath was never told the public host
+        # this very app validated, so every real request through the tunnel would
+        # look like a rebound name.
+        self.assertEqual(response.status_code, 401, response.text)
 
     def test_registration_rejects_duplicate_json_fields(self) -> None:
         with httpx.Client(base_url=self.base, timeout=15.0) as client:

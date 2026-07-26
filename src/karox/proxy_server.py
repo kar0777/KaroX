@@ -148,7 +148,8 @@ def bridge_error_result(code: str) -> CallToolResult:
     )
 
 
-def _error_code(exc: BaseException) -> str:
+def bridge_error_code(exc: BaseException) -> str:
+    """Classify a handler failure into one of the codes callers may be told."""
     if isinstance(exc, FileNotFoundError):
         return "not_found"
     if isinstance(exc, (PermissionError, SessionError)):
@@ -156,6 +157,23 @@ def _error_code(exc: BaseException) -> str:
     if isinstance(exc, (CoreError, HostedBridgeError, TypeError, ValueError)):
         return "invalid_request"
     return "internal"
+
+
+def rebinding_rejection(
+    scope: Mapping[str, Any], allowed: frozenset[str]
+) -> Optional[Response]:
+    """Reject a request whose Host or Origin was not declared for this bridge.
+
+    Every wire published through the same tunnel shares this guard: a name
+    someone else pointed at a loopback listener is the DNS rebinding case no
+    matter which path it lands on.
+    """
+    headers = scope_headers(scope)
+    if normalize_host(headers.get("host")) not in allowed:
+        return Response(HOST_REJECTION_HINT, status_code=421)
+    if not origin_is_allowed(headers.get("origin"), allowed):
+        return Response("invalid Origin header", status_code=421)
+    return None
 
 
 def build_proxy_asgi_app(
@@ -263,7 +281,7 @@ def build_proxy_asgi_app(
                 )
             )
         except Exception as exc:
-            return bridge_error_result(_error_code(exc))
+            return bridge_error_result(bridge_error_code(exc))
 
     # The proxy keeps durable state in SessionStore, not in transport sessions.
     # Stateless JSON responses avoid long-lived SSE streams and their upstream
@@ -274,14 +292,6 @@ def build_proxy_asgi_app(
         stateless=True,
         security_settings=transport_security_settings(allowed),
     )
-
-    def rebinding_response(scope: dict[str, Any]) -> Optional[Response]:
-        headers = scope_headers(scope)
-        if normalize_host(headers.get("host")) not in allowed:
-            return Response(HOST_REJECTION_HINT, status_code=421)
-        if not origin_is_allowed(headers.get("origin"), allowed):
-            return Response("invalid Origin header", status_code=421)
-        return None
 
     async def authorized(scope: dict[str, Any]) -> bool:
         values = [
@@ -329,7 +339,7 @@ def build_proxy_asgi_app(
         if scope_type != "http":
             await Response("not found", status_code=404)(scope, receive, send)
             return
-        rejection = rebinding_response(scope)
+        rejection = rebinding_rejection(scope, allowed)
         if rejection is not None:
             await rejection(scope, receive, send)
             return

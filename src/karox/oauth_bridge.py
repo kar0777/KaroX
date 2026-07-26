@@ -23,7 +23,11 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
-from .proxy_server import build_proxy_asgi_app
+from .proxy_server import (
+    build_proxy_asgi_app,
+    rebinding_rejection,
+    resolve_allowed_hosts,
+)
 
 
 _ACCESS_TTL_SECONDS = 3600
@@ -356,7 +360,11 @@ class OAuthBridgeService:
             pending = self._pending.get(_digest(request_id))
             if pending is None:
                 raise OAuthBridgeError("authorization request expired or is invalid")
-        if not hmac.compare_digest(password, self._secret()):
+        # compare_digest rejects a non-ASCII str with TypeError, which turned a
+        # typed password into an unauthenticated 500 on this open endpoint.
+        if not hmac.compare_digest(
+            password.encode("utf-8"), self._secret().encode("utf-8")
+        ):
             raise OAuthBridgeError("authorization password is incorrect")
         with self._lock:
             pending = self._pending.pop(_digest(request_id), None)
@@ -530,6 +538,10 @@ def build_oauth_proxy_asgi_app(
     metadata_url = (
         f"{service.public_url}/.well-known/oauth-protected-resource{service.path}"
     )
+    # This app already validated the public origin, so the MCP wire underneath it
+    # need not be told the tunnel host name a second time through the environment.
+    public_host = urlsplit(service.public_url).hostname or ""
+    allowed = resolve_allowed_hosts((public_host,))
     mcp_app = build_proxy_asgi_app(
         proxy,
         path=path,
@@ -538,6 +550,7 @@ def build_oauth_proxy_asgi_app(
         unauthorized_headers={
             "WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'
         },
+        allowed_hosts=(public_host,),
     )
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -546,6 +559,13 @@ def build_oauth_proxy_asgi_app(
             return
         if scope.get("type") != "http":
             await Response("not found", status_code=404)(scope, receive, send)
+            return
+        # The OAuth endpoints are mounted beside /mcp on the same public tunnel,
+        # so the rebinding guard has to cover them too: registration and the
+        # approval page are reachable without any credential.
+        rejection = rebinding_rejection(scope, allowed)
+        if rejection is not None:
+            await rejection(scope, receive, send)
             return
         request = Request(scope, receive=receive)
         request_path = scope.get("path", "")

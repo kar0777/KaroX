@@ -50,6 +50,7 @@ _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
+_PR_SET_PDEATHSIG = 1
 
 
 class WebBridgeLaunchError(RuntimeError):
@@ -139,14 +140,51 @@ def _creation_flags() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+def parent_death_hook() -> Optional[Callable[[], None]]:
+    """Return a pre-exec hook that has the kernel kill the child with us.
+
+    Windows uses a job object instead (see :func:`_create_child_job`). On Linux
+    ``PR_SET_PDEATHSIG`` is the equivalent: a hard kill of the launcher never
+    runs the cleanup path, and an orphaned cloudflared keeps a public
+    ``*.trycloudflare.com`` URL pointed at an authenticated bridge.
+
+    Linux is the only POSIX target where KaroX both has such a primitive and can
+    verify it here. macOS has none that a parent can set on a child it does not
+    control, and the FreeBSD analogue (``procctl PROC_PDEATHSIG_CTL``) is
+    untested, so those platforms fall back to the watchdog record and the orphan
+    reaper rather than pretending to hold the child down.
+    """
+    if os.name == "nt" or not sys.platform.startswith("linux"):
+        return None
+    import ctypes
+
+    try:
+        # Resolved in the parent: loading a library between fork and exec in a
+        # process that has threads can deadlock, and this one always does.
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return None
+
+    def hook() -> None:
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+
+    return hook
+
+
 def _child_options() -> dict[str, Any]:
     """Popen options that put a child in its own reapable process group."""
-    return {
+    options: dict[str, Any] = {
         "creationflags": _creation_flags(),
         # POSIX only: the group leader is the child itself, so the whole tree it
         # spawns can be signalled by one killpg instead of leaking behind it.
         "start_new_session": True,
     }
+    hook = parent_death_hook()
+    if hook is not None:
+        # subprocess runs this after its own setsid, and the kernel keeps the
+        # setting across the following execve.
+        options["preexec_fn"] = hook
+    return options
 
 
 def _pid_of(process: Optional[object]) -> Optional[int]:
@@ -471,15 +509,21 @@ def reap_orphaned_web_bridges() -> tuple[str, ...]:
                         pass
         session_id = record.get("session_id") if isinstance(record, dict) else None
         if isinstance(session_id, str) and session_id:
+            # A record is now written before the session and credential exist, so
+            # "reaped" may only name the ones that were really there to revoke.
+            revoked = False
             try:
                 BridgeCredentialStore().delete(session_id)
+                revoked = True
             except Exception:
                 pass
             try:
                 SessionStore(session_dir()).revoke(session_id)
+                revoked = True
             except Exception:
                 pass
-            reaped.append(session_id)
+            if revoked:
+                reaped.append(session_id)
         try:
             entry.unlink()
         except OSError:
@@ -552,6 +596,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
     session_created = False
     sessions: Optional[SessionStore] = None
     watchdog: Optional[Path] = None
+    session_id = _session_id(config)
     job = _create_child_job()
     if job is None and os.name == "nt":
         print(
@@ -572,7 +617,22 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             assert config.public_url is not None
             public_url = config.public_url
 
-        session_id = _session_id(config)
+        # Recorded as soon as the first child exists. Written after the second
+        # one instead, a kill landing between the two spawns left a live public
+        # tunnel that nothing on disk knew about, so nothing could reap it.
+        watchdog = watchdog_dir() / f"{session_id}.json"
+        watchdog_record: dict[str, Any] = {
+            "session_id": session_id,
+            "owner_pid": os.getpid(),
+            "profile": config.profile,
+            "port": config.port,
+            "public_url": public_url,
+            "started_at": time.time(),
+            "tunnel_pid": _pid_of(tunnel.process if tunnel else None),
+            "bridge_pid": None,
+        }
+        write_watchdog(watchdog, watchdog_record)
+
         sessions = SessionStore(session_dir())
         sessions.create(
             repository,
@@ -607,20 +667,8 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 f"cannot start KaroX bridge: {type(exc).__name__}"
             ) from exc
         _adopt_child(job, bridge)
-        watchdog = watchdog_dir() / f"{session_id}.json"
-        write_watchdog(
-            watchdog,
-            {
-                "session_id": session_id,
-                "owner_pid": os.getpid(),
-                "profile": config.profile,
-                "port": config.port,
-                "public_url": public_url,
-                "started_at": time.time(),
-                "tunnel_pid": _pid_of(tunnel.process if tunnel else None),
-                "bridge_pid": _pid_of(bridge),
-            },
-        )
+        watchdog_record["bridge_pid"] = _pid_of(bridge)
+        write_watchdog(watchdog, watchdog_record)
         _wait_for_bridge(bridge, config.port)
 
         endpoint = f"{public_url.rstrip('/')}/mcp"

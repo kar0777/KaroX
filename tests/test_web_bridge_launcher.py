@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import subprocess
+import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
-from _support import SRC  # noqa: F401 - inserts src on sys.path
+from _support import SRC
 
 from karox.cli import main
 from karox.models import AccessProfile
@@ -19,6 +26,8 @@ from karox.web_bridge_launcher import (
     WebBridgeConnectConfig,
     WebBridgeLaunchError,
     _bridge_argv,
+    _child_options,
+    parent_death_hook,
     run_web_bridge,
     start_cloudflare_quick_tunnel,
 )
@@ -238,6 +247,107 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         credentials.delete.assert_called_once_with(session_id)
         sessions.revoke.assert_called_once_with(session_id)
         tunnel.stop.assert_called_once_with()
+
+    def test_watchdog_records_the_tunnel_before_the_bridge_is_spawned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            tunnel = MagicMock()
+            tunnel.public_url = "https://small-tree.trycloudflare.com"
+            tunnel.process.pid = 4242
+            credentials = MagicMock()
+            credentials.set.return_value = {"secret": "approval-secret"}
+            seen: dict[str, Any] = {}
+
+            def popen(*args: object, **kwargs: object) -> None:
+                # A kill landing here is the window the watchdog has to cover:
+                # the tunnel is already public but the bridge does not exist yet.
+                seen["records"] = [
+                    json.loads(entry.read_text(encoding="utf-8"))
+                    for entry in sorted((root / "web-bridge").glob("*.json"))
+                ]
+                raise OSError("cannot spawn")
+
+            with (
+                patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(root)}),
+                patch(
+                    "karox.web_bridge_launcher._port_is_available", return_value=True
+                ),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=MagicMock()),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch("karox.web_bridge_launcher.subprocess.Popen", popen),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(
+                        WebBridgeLaunchError, "cannot start KaroX bridge"
+                    ):
+                        run_web_bridge(
+                            WebBridgeConnectConfig(
+                                profile="chatgpt-web", repository=repository
+                            )
+                        )
+        self.assertEqual(len(seen["records"]), 1)
+        record = seen["records"][0]
+        self.assertEqual(record["tunnel_pid"], 4242)
+        self.assertIsNone(record["bridge_pid"])
+        self.assertEqual(record["public_url"], "https://small-tree.trycloudflare.com")
+
+
+class ParentDeathTests(unittest.TestCase):
+    """A child must not outlive a hard kill of the launcher that owns it."""
+
+    def test_child_options_carry_a_pdeathsig_hook_only_where_one_exists(self) -> None:
+        options = _child_options()
+        if sys.platform.startswith("linux"):
+            self.assertTrue(callable(parent_death_hook()))
+            self.assertIn("preexec_fn", options)
+        else:
+            # Windows uses the job object; macOS has no equivalent primitive, and
+            # claiming one it does not have would be worse than the gap.
+            self.assertIsNone(parent_death_hook())
+            self.assertNotIn("preexec_fn", options)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"), "PR_SET_PDEATHSIG is Linux-only"
+    )
+    def test_a_hard_killed_launcher_takes_its_child_with_it(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            import os, subprocess, sys
+            sys.path.insert(0, {str(SRC)!r})
+            from karox.web_bridge_launcher import _child_options
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                **_child_options(),
+            )
+            print(child.pid, flush=True)
+            os.kill(os.getpid(), 9)
+            """
+        )
+        launcher = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        pid = int(launcher.stdout.strip())
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        os.kill(pid, 9)
+        self.fail("the child survived a hard kill of its launcher")
 
 
 if __name__ == "__main__":

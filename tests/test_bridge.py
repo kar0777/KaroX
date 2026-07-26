@@ -8,6 +8,7 @@ path is proven against the genuine transport -- not a mock.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 from typing import Optional
@@ -31,6 +33,7 @@ from karox.bridge import (
     BridgeStatus,
     known_bridge_profiles,
 )
+from karox.cli import main
 from karox.credentials import CredentialError
 from karox.mcp_client import (
     McpClient,
@@ -485,6 +488,43 @@ class WebBridgeOrphanTests(unittest.TestCase):
         self.assertFalse(orphan.exists())
         self.assertTrue(live.exists())
 
+    def test_bridge_doctor_reaps_without_starting_another_bridge(self) -> None:
+        credentials = MagicMock()
+        sessions = MagicMock()
+        orphan = self.root / "web-bridge" / "orphan.json"
+        printed = io.StringIO()
+        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+            write_watchdog(
+                orphan,
+                {"session_id": "orphan", "owner_pid": self._dead_pid()},
+            )
+            with (
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.SessionStore",
+                    return_value=sessions,
+                ),
+                patch(
+                    "karox.cli.BridgeCredentialStore",
+                    return_value=MagicMock(
+                        doctor=lambda: {"status": "ok", "scope": "bridge"}
+                    ),
+                ),
+                redirect_stdout(printed),
+            ):
+                code = main(("bridge", "doctor", "--json"))
+        self.assertEqual(code, 0)
+        # Reaping only on the next connect meant an orphaned public tunnel stayed
+        # up until someone happened to start another bridge.
+        self.assertEqual(
+            json.loads(printed.getvalue())["reaped_web_bridge_sessions"], ["orphan"]
+        )
+        sessions.revoke.assert_called_once_with("orphan")
+        self.assertFalse(orphan.exists())
+
 
 class BridgeCliTests(unittest.TestCase):
     """Bridge profile and credential CLI surface."""
@@ -574,6 +614,48 @@ class BridgeCliTests(unittest.TestCase):
         )
         self.assertEqual(code, 2)
         self.assertIn("require --protocol mcp", err)
+
+    def test_non_loopback_bind_is_refused_without_tls(self) -> None:
+        repository = self.root / "repo"
+        repository.mkdir(exist_ok=True)
+        arguments = (
+            "bridge",
+            "serve",
+            "--repository",
+            str(repository),
+            "--session-id",
+            "missing",
+            "--profile",
+            "promptql",
+            "--protocol",
+            "openapi",
+            "--tool",
+            "karox.repo.read_file",
+            "--credential",
+            "missing",
+            "--host",
+            "0.0.0.0",
+        )
+        code, _, err = self._cli(*arguments, "--allow-network-bind")
+        self.assertEqual(code, 2)
+        self.assertIn("requires TLS", err)
+
+        code, _, err = self._cli(
+            *arguments, "--allow-network-bind", "--tls-certfile", "cert.pem"
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("both --tls-certfile and --tls-keyfile", err)
+
+        code, _, err = self._cli(
+            *arguments,
+            "--allow-network-bind",
+            "--tls-certfile",
+            str(repository / "absent-cert.pem"),
+            "--tls-keyfile",
+            str(repository / "absent-key.pem"),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("must point to an existing PEM file", err)
 
     def test_bridge_show_unknown_fails(self) -> None:
         code, _, err = self._cli("bridge", "show", "nope", "--json")
