@@ -8,8 +8,8 @@ import math
 import re
 import time
 from collections import Counter, defaultdict, deque
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from .core import CoreRuntime, ToolDefinition
 from .models import CoreCommand, CoreResult, Origin, OriginKind
@@ -222,6 +222,10 @@ class AgentReport:
     evidence: tuple[Dict[str, Any], ...]
     usage: Dict[str, Any]
     provider_message: Optional[str] = None
+    # Which repository instruction files were folded into the prompt, and which
+    # were refused. Third-party text that steers the agent is never adopted
+    # invisibly: if it shaped the run, the run says so.
+    project_context: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(redact(asdict(self)))
@@ -248,6 +252,7 @@ class AgentKernel:
         limits: AgentLimits = AgentLimits(),
         system_prompt: str = SYSTEM_PROMPT,
         context: ContextBudget = ContextBudget(),
+        project_context: Optional[Mapping[str, Any]] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
@@ -261,6 +266,7 @@ class AgentKernel:
         self.origin = origin
         self.limits = limits
         self.context = context
+        self.project_context: Dict[str, Any] = dict(project_context or {})
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -1273,6 +1279,7 @@ class AgentKernel:
             evidence=tuple(record.evidence),
             usage=dict(record.usage),
             provider_message=provider_message,
+            project_context=dict(self.project_context),
         )
 
     @staticmethod

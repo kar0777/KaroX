@@ -418,6 +418,26 @@ class BackendDelegationTests(unittest.TestCase):
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def focus(self, pilot: object, app: object, widget_id: str) -> None:
+        """Wait for focus to land on a widget instead of assuming one tick.
+
+        A single ``pilot.pause()`` yields once. Dismissing a screen and focusing
+        the composer underneath takes more than one event-loop turn when the
+        machine is busy, so asserting straight after the pause passed alone and
+        failed inside the full suite -- a release gate that fails at random
+        teaches people to re-run it rather than read it.
+        """
+        for _ in range(50):
+            focused = getattr(app, "focused", None)
+            if focused is not None and focused.id == widget_id:
+                return
+            await pilot.pause()  # type: ignore[attr-defined]
+        focused = getattr(app, "focused", None)
+        self.fail(
+            f"focus never reached {widget_id!r}; it is on "
+            f"{getattr(focused, 'id', None)!r} on screen {type(app.screen).__name__}"
+        )
+
     async def test_first_run_asks_only_for_language_then_opens_chat(self) -> None:
         with (
             patch.object(tui, "_load_language", return_value=None),
@@ -433,7 +453,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
                 self.assertEqual(app.language, "ru")
                 save_language.assert_called_once_with("ru")
-                self.assertEqual(app.focused.id, "composer")
+                await self.focus(pilot, app, "composer")
                 self.assertIn(
                     "Опишите задачу",
                     app.query_one("#composer", tui.Input).placeholder,
@@ -452,7 +472,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.language, "en")
                 save_language.assert_called_once_with("en")
-                self.assertEqual(app.focused.id, "composer")
+                await self.focus(pilot, app, "composer")
 
     async def test_saved_language_skips_language_screen_and_connection_setup(
         self,
@@ -466,7 +486,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertNotIsInstance(app.screen, tui.LanguageScreen)
                 self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
-                self.assertEqual(app.focused.id, "composer")
+                await self.focus(pilot, app, "composer")
 
     async def test_slash_opens_and_filters_keyboard_command_menu(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
@@ -570,7 +590,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("f5")
                     await pilot.pause(0.3)
                     self.assertIsInstance(app.screen, tui.ModelPickerScreen)
-                    self.assertEqual(app.focused.id, "model-search")
+                    await self.focus(pilot, app, "model-search")
                     self.assertFalse(errors, repr(errors))
                     picker = app.screen
                     options = picker.query_one("#model-options", tui.OptionList)
@@ -617,7 +637,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.ManualModelScreen)
-                self.assertEqual(app.focused.id, "manual-model-id")
+                await self.focus(pilot, app, "manual-model-id")
                 app.screen.query_one("#manual-model-id", tui.Input).value = "model-manual"
                 app.screen.query_one("#manual-model-save", tui.Button).focus()
                 await pilot.press("enter")
@@ -691,7 +711,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(save.called)
                 self.assertTrue(probe.called)
                 self.assertIsInstance(app.screen, tui.BridgeSetupScreen)
-                self.assertEqual(app.focused.id, "bridge-profile")
+                await self.focus(pilot, app, "bridge-profile")
                 await pilot.press("down", "space")
                 self.assertEqual(
                     app.screen.query_one(

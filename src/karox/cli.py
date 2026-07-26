@@ -78,6 +78,7 @@ from .paths import (
     session_dir,
 )
 from .policy import CapabilityPolicy
+from .project_context import discover_project_context
 from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
 from .proxy import McpProxy
@@ -797,6 +798,14 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="user-approved verification command as a JSON array (repeatable)",
     )
+    run.add_argument(
+        "--no-project-context",
+        action="store_true",
+        help=(
+            "skip CLAUDE.md, AGENTS.md and KAROX.md and the environment stanza; "
+            "useful when reproducing a run that must not depend on them"
+        ),
+    )
     run.add_argument("--json", action="store_true")
 
     migrate = commands.add_parser(
@@ -829,6 +838,20 @@ def _print_agent_report(report: AgentReport) -> None:
     if report.changed_files:
         print("changed_files: " + ", ".join(report.changed_files))
     print(f"evidence_records: {len(report.evidence)}")
+    # Instructions written by whoever can commit to the repository shaped this
+    # run, so they are named rather than applied silently.
+    sources = report.project_context.get("sources") or []
+    if sources:
+        print(
+            "project_instructions: "
+            + ", ".join(
+                str(item.get("path"))
+                + (" (truncated)" if item.get("truncated") else "")
+                for item in sources
+            )
+        )
+    for skipped in report.project_context.get("skipped") or []:
+        print(f"project_instructions_skipped: {skipped}")
     if report.provider_message:
         print(f"provider_message: {report.provider_message}")
 
@@ -1818,7 +1841,23 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             Capability.MCP_CALL,
         },
     )
+    verification_commands = [
+        _verification_command(value) for value in args.verification_command
+    ]
+    # Project instructions and environment facts join the request-only part of
+    # the prompt, exactly like Skill content: the durable history keeps the base
+    # prompt, so an edited AGENTS.md cannot retroactively change what a past run
+    # was told and a handoff document carries no third-party text.
     system_prompt = SYSTEM_PROMPT
+    project_context: dict[str, Any] = {"enabled": False}
+    if not args.no_project_context:
+        project = discover_project_context(
+            repository,
+            branch=record.branch,
+            verification_commands=verification_commands,
+        )
+        system_prompt += project.prompt_suffix
+        project_context = {"enabled": True, **project.to_dict()}
     if content is not None and selection is not None:
         origin = configure_skill_policy(
             policy,
@@ -1844,9 +1883,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         store,
         runtime_dir() / "vnext" / "audit.jsonl",
         mcp_binding=mcp_binding,
-        verification_commands=[
-            _verification_command(value) for value in args.verification_command
-        ],
+        verification_commands=verification_commands,
     )
     return AgentKernel(
         provider=provider,
@@ -1857,6 +1894,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         limits=limits,
         system_prompt=system_prompt,
         context=ContextBudget(max_input_tokens=context_window),
+        project_context=project_context,
     ).run(record.session_id)
 
 

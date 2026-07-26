@@ -1290,6 +1290,10 @@ class AgentCliEndToEndTests(unittest.TestCase):
             repository = root / "repo"
             initialize_git_repository(repository)
             (repository / "sample.txt").write_text("before\n", encoding="utf-8")
+            (repository / "AGENTS.md").write_text(
+                "PROJECT_RULE_TOKEN: this repository formats with ruff.\n",
+                encoding="utf-8",
+            )
             git_environment = dict(os.environ)
             git_environment.update(
                 {
@@ -1300,7 +1304,7 @@ class AgentCliEndToEndTests(unittest.TestCase):
                 }
             )
             subprocess.run(
-                ["git", "add", "sample.txt"],
+                ["git", "add", "sample.txt", "AGENTS.md"],
                 cwd=repository,
                 env=git_environment,
                 check=True,
@@ -1495,6 +1499,39 @@ class AgentCliEndToEndTests(unittest.TestCase):
                 (repository / "sample.txt").read_text(encoding="utf-8"), "after\n"
             )
             self.assertEqual(len(server.requests), 5)  # type: ignore[attr-defined]
+            system_message = server.requests[0]["messages"][0]  # type: ignore[attr-defined]
+            self.assertEqual(system_message["role"], "system")
+            # The repository's own instructions reach the model, labelled as
+            # untrusted, together with the facts it would otherwise spend tool
+            # calls discovering.
+            self.assertIn("PROJECT_RULE_TOKEN", system_message["content"])
+            self.assertIn("untrusted", system_message["content"])
+            self.assertIn("<environment>", system_message["content"])
+            self.assertIn("e2e-ok", system_message["content"])
+            # Untrusted text that steered the run is named in the report, so it
+            # is never adopted invisibly.
+            self.assertTrue(report["project_context"]["enabled"])
+            self.assertEqual(
+                [item["path"] for item in report["project_context"]["sources"]],
+                ["AGENTS.md"],
+            )
+            # Third-party text stays request-only: an edited AGENTS.md must not
+            # retroactively change what a past run was told, and the handoff
+            # document must not carry it.
+            persisted = json.loads(
+                (
+                    root
+                    / "runtime"
+                    / "vnext"
+                    / "sessions"
+                    / "cli-e2e"
+                    / "session.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "PROJECT_RULE_TOKEN",
+                json.dumps(persisted["provider_history"], ensure_ascii=False),
+            )
             for request_payload in server.requests:  # type: ignore[attr-defined]
                 self.assertIs(request_payload["stream"], True)
                 self.assertEqual(
