@@ -306,6 +306,22 @@ def _parser() -> argparse.ArgumentParser:
     model_add.add_argument("--currency")
     model_add.add_argument("--input-per-million", type=float)
     model_add.add_argument("--output-per-million", type=float)
+    model_add.add_argument(
+        "--cache-read-per-million",
+        type=float,
+        help=(
+            "price of a prompt served from cache; defaults to a tenth of the "
+            "input rate, which is what the providers publish"
+        ),
+    )
+    model_add.add_argument(
+        "--cache-write-per-million",
+        type=float,
+        help=(
+            "price of a prompt written to cache; defaults to 1.25x the input "
+            "rate, which is what the providers publish"
+        ),
+    )
     model_add.add_argument("--pricing-source")
     model_add.add_argument("--provenance", default="manual")
     model_add.add_argument("--json", action="store_true")
@@ -924,6 +940,11 @@ def _pricing(args: argparse.Namespace) -> Optional[ModelPricing]:
         args.input_per_million,
         args.output_per_million,
         args.pricing_source,
+        # Omitted, these derive from the input rate using the multipliers the
+        # providers publish. They exist for a gateway that prices cache
+        # differently, so its cost figures are its own rather than an assumption.
+        cache_read_per_million=getattr(args, "cache_read_per_million", None),
+        cache_write_per_million=getattr(args, "cache_write_per_million", None),
     )
 
 

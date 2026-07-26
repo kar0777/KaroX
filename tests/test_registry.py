@@ -119,6 +119,54 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(list(self.path.parent.glob(f".{self.path.name}.*.tmp")), [])
 
+    def test_a_cached_prompt_is_not_billed_as_a_fresh_one(self) -> None:
+        pricing = ModelPricing("2026-07", "USD", 5.0, 25.0, "test fixture")
+
+        fresh = pricing.estimate(
+            {"prompt_tokens": 100_000, "completion_tokens": 1_000}
+        )
+        cached = pricing.estimate(
+            {
+                "prompt_tokens": 100_000,
+                "completion_tokens": 1_000,
+                "cache_read_tokens": 95_000,
+            }
+        )
+
+        # prompt_tokens is the whole prompt; charging all of it at the input
+        # rate reported a cost the run did not incur once caching existed.
+        self.assertEqual(fresh, 0.525)
+        self.assertEqual(cached, 0.0975)
+
+    def test_a_cache_write_costs_more_than_plain_input(self) -> None:
+        pricing = ModelPricing("2026-07", "USD", 5.0, 25.0, "test fixture")
+
+        written = pricing.estimate(
+            {"prompt_tokens": 1_000_000, "cache_write_tokens": 1_000_000}
+        )
+
+        self.assertEqual(written, 6.25)
+
+    def test_explicit_cache_rates_beat_the_assumed_multipliers(self) -> None:
+        pricing = ModelPricing(
+            "2026-07",
+            "USD",
+            5.0,
+            25.0,
+            "test fixture",
+            cache_read_per_million=0.25,
+            cache_write_per_million=7.5,
+        )
+
+        self.assertEqual(pricing.cache_read_rate, 0.25)
+        self.assertEqual(pricing.cache_write_rate, 7.5)
+        self.assertEqual(
+            pricing.estimate(
+                {"prompt_tokens": 1_000_000, "cache_read_tokens": 1_000_000}
+            ),
+            0.25,
+        )
+
     def test_pricing_rejects_invalid_currency_and_non_finite_values(self) -> None:
         for arguments in (
             ("v1", "usd", 1.0, 2.0, "source"),

@@ -839,6 +839,17 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                         ProviderErrorKind.MALFORMED_RESPONSE,
                         "Anthropic usage is invalid",
                     ) from exc
+                # Anthropic reports the three parts of the prompt separately;
+                # every other provider reports the total with the cached part as
+                # a subset of it. Normalising to the second shape gives one
+                # meaning of prompt_tokens across the product -- the whole
+                # prompt -- and one costing rule that is correct for all of them.
+                if usage:
+                    usage["prompt_tokens"] = (
+                        usage.get("prompt_tokens", 0)
+                        + usage.get("cache_read_tokens", 0)
+                        + usage.get("cache_write_tokens", 0)
+                    )
                 if usage:
                     yield ModelEvent(
                         ModelEventKind.USAGE,

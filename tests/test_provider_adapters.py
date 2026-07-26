@@ -466,9 +466,11 @@ class ProviderAdapterTests(unittest.TestCase):
                 "https://provider.example/v1"
             ).complete(request())
 
-        # input_tokens counts only the uncached remainder, so without these the
-        # reported prompt is 12 tokens when 4,012 were actually sent.
-        self.assertEqual(result.usage["prompt_tokens"], 12)
+        # Anthropic's input_tokens counts only the uncached remainder, so the
+        # reported prompt used to be 12 tokens when 4,042 were really sent.
+        # prompt_tokens now means the whole prompt on every provider, with the
+        # cached parts named as the subset they are.
+        self.assertEqual(result.usage["prompt_tokens"], 4_042)
         self.assertEqual(result.usage["cache_read_tokens"], 4_000)
         self.assertEqual(result.usage["cache_write_tokens"], 30)
 

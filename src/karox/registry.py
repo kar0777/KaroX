@@ -65,6 +65,17 @@ class ModelPricing:
     input_per_million: float
     output_per_million: float
     source: str
+    # A prompt served from cache bills at a fraction of the input rate, and one
+    # written to cache bills at a premium. Left unset, the published multipliers
+    # are used rather than pretending the two cost the same as ordinary input,
+    # which would overstate a cached run several times over.
+    cache_read_per_million: Optional[float] = None
+    cache_write_per_million: Optional[float] = None
+
+    # Multipliers on the input rate, used when a record does not name the two
+    # cache rates directly. They match what the providers publish today.
+    CACHE_READ_MULTIPLIER = 0.1
+    CACHE_WRITE_MULTIPLIER = 1.25
 
     def __post_init__(self) -> None:
         _safe_id(self.version, "pricing version")
@@ -75,7 +86,11 @@ class ModelPricing:
         for label, value in (
             ("input price", self.input_per_million),
             ("output price", self.output_per_million),
+            ("cache read price", self.cache_read_per_million),
+            ("cache write price", self.cache_write_per_million),
         ):
+            if value is None:
+                continue
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -86,11 +101,31 @@ class ModelPricing:
         if not isinstance(self.source, str) or not self.source.strip():
             raise ValueError("pricing source is required")
 
+    @property
+    def cache_read_rate(self) -> float:
+        if self.cache_read_per_million is not None:
+            return float(self.cache_read_per_million)
+        return float(self.input_per_million) * self.CACHE_READ_MULTIPLIER
+
+    @property
+    def cache_write_rate(self) -> float:
+        if self.cache_write_per_million is not None:
+            return float(self.cache_write_per_million)
+        return float(self.input_per_million) * self.CACHE_WRITE_MULTIPLIER
+
     def estimate(self, usage: Mapping[str, Any]) -> float:
-        input_tokens = _usage_count(usage, "prompt_tokens", "input_tokens")
+        prompt_tokens = _usage_count(usage, "prompt_tokens", "input_tokens")
         output_tokens = _usage_count(usage, "completion_tokens", "output_tokens")
+        cache_read = _usage_count(usage, "cache_read_tokens")
+        cache_write = _usage_count(usage, "cache_write_tokens")
+        # prompt_tokens is the whole prompt, of which the cached parts are a
+        # subset. Charging all of it at the input rate is what made every cached
+        # run report a cost it did not incur.
+        full_rate_tokens = max(0, prompt_tokens - cache_read - cache_write)
         return round(
-            input_tokens * float(self.input_per_million) / 1_000_000
+            full_rate_tokens * float(self.input_per_million) / 1_000_000
+            + cache_read * self.cache_read_rate / 1_000_000
+            + cache_write * self.cache_write_rate / 1_000_000
             + output_tokens * float(self.output_per_million) / 1_000_000,
             12,
         )
