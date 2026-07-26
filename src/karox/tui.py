@@ -3571,7 +3571,11 @@ if _HAS_TEXTUAL:
         MAX_VISIBLE_STEPS = 6
         CSS = """
         Screen { background: #121212; color: #dcdcdc; }
-        #brand { height: auto; padding: 1 2 0 2; background: #181511;
+        /* The chrome above and below the chat came to seventeen rows before a
+           single word of conversation, which in a small window left the answer a
+           few lines to live in. The blank row over the title and the one under
+           the composer were the two that bought nothing. */
+        #brand { height: auto; padding: 0 2; background: #181511;
           border-bottom: solid #4a4338; color: #e5e5e5; }
         #brand-title { height: 1; color: #d4b676; text-style: bold; }
         #status { height: 3; padding: 0 2; background: #1c1916;
@@ -3591,7 +3595,7 @@ if _HAS_TEXTUAL:
         #command-menu { display: none; height: auto; max-height: 14; margin: 0 2;
           padding: 0 1; background: #191612; border: round #4a4338;
           color: #c6bca8; }
-        #composer-wrap { height: 5; padding: 0 2 1 2; background: #181511;
+        #composer-wrap { height: 4; padding: 0 2; background: #181511;
           border-top: solid #2e2820; }
         #composer { border: round #4a4338; background: #20201c; color: #e5e5e5; }
         #composer:focus { border: round #c6a56b; }
@@ -5287,8 +5291,20 @@ if _HAS_TEXTUAL:
                 # the report carries the same text again, so every reply was drawn
                 # twice. `_last_assistant_content` was recorded for exactly this
                 # comparison and never consulted.
+                # A run that ends as `no_changes` got here because KaroX asked the
+                # model to "give the answer and name the tool results it rests on"
+                # after a turn that called no tools. There is nothing to name, so
+                # the reply is necessarily a report about itself -- "the task was
+                # only a greeting, no repository change was required" -- and the
+                # user has already read the actual reply above it. The one-line
+                # notice below says the same thing without a paragraph of it.
+                ceremony = (
+                    report.get("reason") == "no_changes"
+                    and bool(self._last_assistant_content.strip())
+                )
                 if (
                     text_message
+                    and not ceremony
                     and text_message.strip() != self._last_assistant_content.strip()
                 ):
                     self._write_assistant(text_message)
@@ -5326,12 +5342,15 @@ if _HAS_TEXTUAL:
                     # watched the model read, so this is neither a change nor an
                     # answer. It is still not a crash, so it is stated plainly
                     # rather than dressed up as an error.
+                    # One line, not three. The paragraph that used to sit here
+                    # repeated what the suppressed report above already said, in a
+                    # window where the answer itself had a few rows to live in.
                     self._set_activity(
                         self._label(
-                            "[bold]Без изменений[/]\nФайлы не менялись, и ответ "
-                            "не опирается на прочитанное из репозитория.",
-                            "[bold]No change[/]\nNo file was changed, and the "
-                            "reply rests on nothing read from the repository.",
+                            "[bold]Без изменений[/] — файлы не менялись, "
+                            "репозиторий не читался.",
+                            "[bold]No change[/] — no file was changed and nothing "
+                            "was read from the repository.",
                         ),
                         "warning",
                     )

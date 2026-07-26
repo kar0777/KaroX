@@ -656,6 +656,70 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("repo.write_file", rendered)
                 self.assertIn("running checks", rendered)
 
+    async def test_a_no_change_run_does_not_repeat_itself_in_a_second_bubble(self) -> None:
+        """A greeting produced a paragraph about the greeting.
+
+        When a turn calls no tools, KaroX asks the model to "give the answer and
+        name the tool results it rests on". There is nothing to name, so the reply
+        can only be a report about itself -- "the task was only a greeting, no
+        repository change was required" -- while the actual reply is already on
+        screen above it and the one-line notice below says the same again.
+        """
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._last_assistant_content = "Привет! Готов помочь."
+                report = json.dumps(
+                    {
+                        "provider_message": (
+                            "Задача состояла лишь из приветствия, на которое я "
+                            "ответил приветствием — изменения не требовалось."
+                        ),
+                        "status": "stopped",
+                        "reason": "no_changes",
+                        "verified": False,
+                    }
+                )
+                with patch.object(app, "_write_assistant") as write:
+                    app._agent_finished(0, report)
+
+                write.assert_not_called()
+
+    async def test_a_real_answer_is_still_shown_when_nothing_preceded_it(self) -> None:
+        """Suppression is for the repeat, not for the only thing the user gets."""
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._last_assistant_content = ""
+                report = json.dumps(
+                    {
+                        "provider_message": "Вот что я нашёл в файле.",
+                        "status": "stopped",
+                        "reason": "no_changes",
+                        "verified": False,
+                    }
+                )
+                with patch.object(app, "_write_assistant") as write:
+                    app._agent_finished(0, report)
+
+                write.assert_called_once_with("Вот что я нашёл в файле.")
+
+    async def test_the_chat_gets_most_of_a_small_window(self) -> None:
+        """Fixed chrome came to seventeen rows before a word of conversation."""
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                log = app.query_one("#conversation", tui.ChatLog)
+
+                self.assertGreaterEqual(
+                    log.size.height,
+                    12,
+                    "the chat has less than half of a 24-row window",
+                )
+
     async def test_a_narrow_window_wraps_the_answer_instead_of_clipping_it(self) -> None:
         """RichLog defaults to min_width=78 whatever the window is.
 
