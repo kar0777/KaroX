@@ -799,6 +799,15 @@ def _parser() -> argparse.ArgumentParser:
         help="user-approved verification command as a JSON array (repeatable)",
     )
     run.add_argument(
+        "--expect",
+        choices=("auto", "change"),
+        default="auto",
+        help=(
+            "auto: a task that changed nothing succeeds as an evidence-backed "
+            "answer; change: refuse to succeed unless a file actually changed"
+        ),
+    )
+    run.add_argument(
         "--no-project-context",
         action="store_true",
         help=(
@@ -838,6 +847,16 @@ def _print_agent_report(report: AgentReport) -> None:
     if report.changed_files:
         print("changed_files: " + ", ".join(report.changed_files))
     print(f"evidence_records: {len(report.evidence)}")
+    # An answer carries no Core evidence records of its own, so the inspections
+    # it rests on are named instead of leaving "verified" standing on nothing.
+    if report.answer_basis:
+        print(
+            "answer_basis: "
+            + ", ".join(
+                str(item.get("tool")) + (f" {item['path']}" if item.get("path") else "")
+                for item in report.answer_basis
+            )
+        )
     # Instructions written by whoever can commit to the repository shaped this
     # run, so they are named rather than applied silently.
     sources = report.project_context.get("sources") or []
@@ -1895,6 +1914,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         system_prompt=system_prompt,
         context=ContextBudget(max_input_tokens=context_window),
         project_context=project_context,
+        require_change=args.expect == "change",
     ).run(record.session_id)
 
 

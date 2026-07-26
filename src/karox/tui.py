@@ -3539,6 +3539,7 @@ if _HAS_TEXTUAL:
           border-left: thick #c6a56b; color: #d4b676; }
         #activity.activity-success { border-left: thick #8aab7e; color: #b7c2b0; }
         #activity.activity-error { border-left: thick #cf7c7c; color: #e0a3a3; }
+        #activity.activity-warning { border-left: thick #c3a86b; color: #d6c49a; }
         #command-menu { display: none; height: auto; max-height: 14; margin: 0 2;
           padding: 0 1; background: #191612; border: round #4a4338;
           color: #c6bca8; }
@@ -3717,6 +3718,10 @@ if _HAS_TEXTUAL:
             activity.styles.display = "block"
             activity.set_class(kind == "success", "activity-success")
             activity.set_class(kind == "error", "activity-error")
+            # An outcome that is neither a success nor a failure -- a run that
+            # changed nothing and answered from nothing -- gets its own colour
+            # rather than borrowing one that would misreport it.
+            activity.set_class(kind == "warning", "activity-warning")
             activity.update(message)
 
         def _label(self, russian: str, english: str) -> str:
@@ -5137,7 +5142,22 @@ if _HAS_TEXTUAL:
                 if text_message:
                     self._write_assistant(text_message)
                 changed = ", ".join(report.get("changed_files") or [])
-                if verified:
+                if verified and report.get("reason") == "answer":
+                    # A question is answered, not verified. Saying "completed
+                    # and verified" over an empty file list described a change
+                    # that never happened, so the answer names what it read.
+                    basis = report.get("answer_basis") or []
+                    sources = ", ".join(
+                        sorted({str(item.get("tool")) for item in basis})
+                    )
+                    self._set_activity(
+                        self._label(
+                            f"[bold]Ответ получен[/]\nОснование: {escape(sources)}",
+                            f"[bold]Answered[/]\nBased on: {escape(sources)}",
+                        ),
+                        "success",
+                    )
+                elif verified:
                     completion = self._label(
                         "Задача завершена и проверена.",
                         "Task completed and verified.",
@@ -5151,17 +5171,18 @@ if _HAS_TEXTUAL:
                         f"[bold]{escape(completion)}[/]", "success"
                     )
                 elif report.get("reason") == "no_changes":
-                    # An answer is not a failure. The agent touched no file, so
-                    # there is nothing to verify and nothing went wrong; saying
-                    # "did not complete" here made every question look broken.
+                    # Nothing changed and the reply rested on nothing KaroX
+                    # watched the model read, so this is neither a change nor an
+                    # answer. It is still not a crash, so it is stated plainly
+                    # rather than dressed up as an error.
                     self._set_activity(
                         self._label(
-                            "[bold]Ответ получен[/]\nФайлы не изменялись, "
-                            "поэтому проверять нечего.",
-                            "[bold]Answered[/]\nNo file was changed, so there "
-                            "is nothing to verify.",
+                            "[bold]Без изменений[/]\nФайлы не менялись, и ответ "
+                            "не опирается на прочитанное из репозитория.",
+                            "[bold]No change[/]\nNo file was changed, and the "
+                            "reply rests on nothing read from the repository.",
                         ),
-                        "success",
+                        "warning",
                     )
                 else:
                     reason = str(report.get("reason") or state)

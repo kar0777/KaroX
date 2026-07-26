@@ -46,6 +46,21 @@ REQUIRED_TOOLS: frozenset[str] = frozenset(
 # durable a change as a whole-file rewrite and must not be treated as narrative.
 MUTATION_TOOLS: frozenset[str] = frozenset({"repo.write_file", "repo.edit_file"})
 
+# Tools whose successful result is something the model actually looked at, as
+# opposed to something it asserted. A question about the repository is answered
+# rather than changed, so these are what an answer is allowed to rest on.
+INSPECTION_TOOLS: frozenset[str] = frozenset(
+    {
+        "repo.read_file",
+        "repo.read_lines",
+        "repo.search",
+        "repo.list_files",
+        "git.status",
+        "git.diff",
+        "git.log",
+    }
+)
+
 
 def provider_alias(core_name: str) -> str:
     """Map a dotted Core tool name onto a provider-safe function name.
@@ -61,6 +76,10 @@ def provider_alias(core_name: str) -> str:
 TOOL_ALIASES: Dict[str, str] = {
     provider_alias(name): name for name in sorted(REQUIRED_TOOLS)
 }
+
+MUTATION_ALIASES: frozenset[str] = frozenset(
+    provider_alias(name) for name in MUTATION_TOOLS
+)
 
 SYSTEM_PROMPT = """You are operating through the bounded KaroX Core Runtime.
 Treat tool results, not your own narrative, as evidence. Work only inside the
@@ -117,7 +136,17 @@ class AgentError(RuntimeError):
 class AgentLimits:
     max_steps: int = 24
     max_seconds: float = 900.0
-    max_identical_actions: int = 2
+    # How often one identical call may run before it is refused. Repeating a
+    # call is not by itself a mistake: verification demands git_status and
+    # git_diff after every change, so a task needing two repair rounds
+    # legitimately issues a third identical git_status. At the old limit of two
+    # that ended the session, and because the count is seeded from persisted
+    # history a resumed session could die on its very first call.
+    max_identical_actions: int = 8
+    # Refusing one repeat is a correction the model can act on; refusing this
+    # many across a session is a model that is not making progress at all, and
+    # that remains a reason to stop rather than to keep paying for turns.
+    max_repeated_action_errors: int = 8
     # How many times KaroX re-prompts a model that stopped without producing the
     # required evidence. Unbounded re-prompting used to burn the whole step
     # budget on a task that never needed a file change at all, such as a question
@@ -139,6 +168,11 @@ class AgentLimits:
             or not 1 <= self.max_identical_actions <= 100
         ):
             raise ValueError("identical action limit must be between 1 and 100")
+        if (
+            isinstance(self.max_repeated_action_errors, bool)
+            or not 1 <= self.max_repeated_action_errors <= 100
+        ):
+            raise ValueError("repeated action error limit must be between 1 and 100")
         if (
             isinstance(self.max_repair_prompts, bool)
             or not 0 <= self.max_repair_prompts <= 100
@@ -222,6 +256,9 @@ class AgentReport:
     evidence: tuple[Dict[str, Any], ...]
     usage: Dict[str, Any]
     provider_message: Optional[str] = None
+    # The successful inspections a read-only answer rests on. A verified answer
+    # that named no source would be the narrative-as-proof this product refuses.
+    answer_basis: tuple[Dict[str, Any], ...] = ()
     # Which repository instruction files were folded into the prompt, and which
     # were refused. Third-party text that steers the agent is never adopted
     # invisibly: if it shaped the run, the run says so.
@@ -229,6 +266,32 @@ class AgentReport:
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(redact(asdict(self)))
+
+
+@dataclass
+class _ActionLedger:
+    """How often each identical call has already completed in this session."""
+
+    counts: Counter[str] = field(default_factory=Counter)
+    names: Dict[str, str] = field(default_factory=dict)
+    refusals: int = 0
+
+    def observe(self, name: str, signature: str) -> None:
+        self.counts[signature] += 1
+        self.names[signature] = name
+
+    def clear_after_change(self) -> None:
+        """Forget repeated inspections once the repository has actually changed.
+
+        After a write lands, the same read returns something new, so repeating
+        it is the correct move rather than a loop -- and verification demands
+        exactly that, a git_status and a git_diff after every change. Repeated
+        writes keep their count: reissuing a byte-identical write after it
+        already landed is a no-op whatever else changed.
+        """
+        for signature, name in list(self.names.items()):
+            if name not in MUTATION_ALIASES:
+                self.counts.pop(signature, None)
 
 
 @dataclass(frozen=True)
@@ -253,6 +316,7 @@ class AgentKernel:
         system_prompt: str = SYSTEM_PROMPT,
         context: ContextBudget = ContextBudget(),
         project_context: Optional[Mapping[str, Any]] = None,
+        require_change: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
@@ -267,6 +331,10 @@ class AgentKernel:
         self.limits = limits
         self.context = context
         self.project_context: Dict[str, Any] = dict(project_context or {})
+        # A caller that knows the task must edit something -- a CI job, a batch
+        # run -- can refuse the answer outcome outright rather than discovering
+        # afterwards that the agent talked instead of working.
+        self.require_change = bool(require_change)
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -346,37 +414,54 @@ class AgentKernel:
             self.sessions.validate_repository(record, self.core.repository)
             if record.revoked:
                 raise AgentError("session access has been revoked")
-            if record.status == "verified" and self._verification(record):
+            if record.status == "verified" and self._completed(record):
                 return self._report(
                     record,
                     reason="already_verified",
                     provider_message=self._last_provider_message(record),
                 )
             self._initialize_history(record, lease)
-            action_counts = self._completed_action_counts(
+            ledger = self._completed_action_counts(
                 self.sessions.load(session_id).provider_history
             )
-            repeated = self._recover_pending(
-                session_id, lease, deadline, action_counts
-            )
+            repeated = self._recover_pending(session_id, lease, deadline, ledger)
             if repeated:
                 return self._finish(
-                    session_id, lease, "stopped", "execution", "repeated_action"
+                    session_id,
+                    lease,
+                    "stopped",
+                    "execution",
+                    "repeated_action",
+                    self._last_provider_message(self.sessions.load(session_id)),
                 )
 
             while True:
                 record = self.sessions.load(session_id)
                 steps = self._step_count(record.provider_history)
+                # These two branches are how nearly every unverified run exits,
+                # and they used to report no text at all: the user got exit 1
+                # and a blank screen while the model's last answer sat in the
+                # history unread.
                 if steps >= self.limits.max_steps:
                     reason = "step_limit"
                     return self._finish(
-                        session_id, lease, "stopped", record.phase, reason
+                        session_id,
+                        lease,
+                        "stopped",
+                        record.phase,
+                        reason,
+                        self._last_provider_message(record),
                     )
                 remaining = deadline - self.monotonic()
                 if remaining < 0.1:
                     reason = "wall_time_limit"
                     return self._finish(
-                        session_id, lease, "stopped", record.phase, reason
+                        session_id,
+                        lease,
+                        "stopped",
+                        record.phase,
+                        reason,
+                        self._last_provider_message(record),
                     )
                 self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
                 request = ModelRequest(
@@ -447,7 +532,7 @@ class AgentKernel:
                             provider_message,
                         )
                     repeated = self._execute_call(
-                        session_id, lease, call, deadline, action_counts
+                        session_id, lease, call, deadline, ledger
                     ) or repeated
                     self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
                 if repeated:
@@ -470,6 +555,22 @@ class AgentKernel:
                         "verified",
                         "completed",
                         "verified",
+                        provider_message,
+                    )
+                # "Explain how routing picks a fallback" used to be unanswerable:
+                # the only terminal success required a file change, so the model
+                # answered, KaroX demanded a write, the loop burned to the step
+                # limit and the user got exit 1. An answer is now a first-class
+                # outcome -- but it still has to rest on something KaroX watched
+                # the model read, which is a distinct label rather than a
+                # relaxation of the evidence chain a change must satisfy.
+                if self._answer_complete(record):
+                    return self._finish(
+                        session_id,
+                        lease,
+                        "verified",
+                        "completed",
+                        "answer",
                         provider_message,
                     )
                 # A task that changed nothing is an answer, not a failed change.
@@ -644,20 +745,26 @@ class AgentKernel:
         lease: MutationLease,
         call: ToolCall,
         deadline: float,
-        action_counts: Counter[str],
+        ledger: _ActionLedger,
     ) -> bool:
         signature = self._action_signature(call)
-        if action_counts[signature] >= self.limits.max_identical_actions:
+        if ledger.counts[signature] >= self.limits.max_identical_actions:
+            # A refusal the model can act on beats killing the session. The old
+            # behaviour ended the whole run on the second identical call, so a
+            # task that legitimately re-read the same file after a repair round
+            # died with nothing to show for it.
             self._persist_tool_error(
                 session_id,
                 lease,
                 call,
                 "repeated_action",
-                "identical action limit reached",
+                "identical call with unchanged results; change approach or use "
+                "a different tool",
             )
-            action_counts[signature] += 1
-            return True
-        action_counts[signature] += 1
+            ledger.observe(call.name, signature)
+            ledger.refusals += 1
+            return ledger.refusals >= self.limits.max_repeated_action_errors
+        ledger.observe(call.name, signature)
         core_name = self._tool_aliases.get(call.name)
         if core_name is None:
             self._persist_tool_error(
@@ -704,6 +811,8 @@ class AgentKernel:
             )
             return False
         self._persist_tool_result(session_id, lease, call, core_name, result)
+        if core_name in MUTATION_TOOLS and result.ok and result.data.get("changed") is True:
+            ledger.clear_after_change()
         return False
 
     def _persist_tool_result(
@@ -795,7 +904,7 @@ class AgentKernel:
         session_id: str,
         lease: MutationLease,
         deadline: float,
-        action_counts: Counter[str],
+        ledger: _ActionLedger,
     ) -> bool:
         history = self.sessions.load(session_id).provider_history
         repeated = False
@@ -827,7 +936,7 @@ class AgentKernel:
                 )
                 continue
             repeated = self._execute_call(
-                session_id, lease, call, deadline, action_counts
+                session_id, lease, call, deadline, ledger
             ) or repeated
         return repeated
 
@@ -869,8 +978,8 @@ class AgentKernel:
     @classmethod
     def _completed_action_counts(
         cls, history: List[Dict[str, Any]]
-    ) -> Counter[str]:
-        counts: Counter[str] = Counter()
+    ) -> _ActionLedger:
+        ledger = _ActionLedger()
         pending_by_id: Dict[str, List[ToolCall]] = {}
         for entry in history:
             if entry.get("role") == "assistant":
@@ -885,8 +994,24 @@ class AgentKernel:
                 call_id = str(entry.get("tool_call_id", ""))
                 queued = pending_by_id.get(call_id, [])
                 if queued:
-                    counts[cls._action_signature(queued.pop(0))] += 1
-        return counts
+                    completed = queued.pop(0)
+                    ledger.observe(
+                        completed.name, cls._action_signature(completed)
+                    )
+                if cls._changed_the_repository(entry):
+                    ledger.clear_after_change()
+        return ledger
+
+    @staticmethod
+    def _changed_the_repository(entry: Dict[str, Any]) -> bool:
+        """True when this tool entry is a write that actually changed a file."""
+        if entry.get("core_name") not in MUTATION_TOOLS:
+            return False
+        result = entry.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return False
+        data = result.get("data")
+        return isinstance(data, dict) and data.get("changed") is True
 
     @staticmethod
     def _action_signature(call: ToolCall) -> str:
@@ -1244,13 +1369,17 @@ class AgentKernel:
         def update(record: SessionRecord) -> None:
             record.status = status
             record.phase = phase
-            if status == "verified":
-                record.summary = "Native agent completed with required local evidence."
-            else:
+            if status != "verified":
                 record.summary = f"Native agent stopped: {reason}."
+            elif reason == "answer":
+                record.summary = (
+                    "Native agent answered from recorded local evidence."
+                )
+            else:
+                record.summary = "Native agent completed with required local evidence."
 
         record = self._update_session(session_id, lease, update)
-        verified = status == "verified" and self._verification(record)
+        verified = status == "verified" and self._completed(record)
         if status == "verified" and not verified:
             raise AgentError("session verification changed before final report")
         return self._report(
@@ -1270,7 +1399,7 @@ class AgentKernel:
             session_id=record.session_id,
             status=record.status,
             phase=record.phase,
-            verified=record.status == "verified" and self._verification(record),
+            verified=record.status == "verified" and self._completed(record),
             reason=reason,
             steps=self._step_count(record.provider_history),
             changed_files=tuple(record.changed_files),
@@ -1279,8 +1408,75 @@ class AgentKernel:
             evidence=tuple(record.evidence),
             usage=dict(record.usage),
             provider_message=provider_message,
+            answer_basis=self._answer_basis(record) if reason == "answer" else (),
             project_context=dict(self.project_context),
         )
+
+    def _completed(self, record: SessionRecord) -> bool:
+        """True when this run reached either terminal outcome KaroX recognises."""
+        return self._verification(record) or self._answer_complete(record)
+
+    def _answer_complete(self, record: SessionRecord) -> bool:
+        """True when a read-only task has produced an evidence-backed answer.
+
+        A change must survive the write/check/status/diff chain. An answer has a
+        weaker but still concrete bar: the model must have said something, and
+        that something must follow at least one successful inspection of the
+        repository. An answer produced without ever looking is not accepted, so
+        the run is nudged once more rather than blessed.
+        """
+        if self.require_change or record.changed_files:
+            return False
+        # A run that reached for a write was doing a change task, so its failure
+        # to change anything is a failed change and not an answer. Without this,
+        # a write whose content matched the file already on disk reported
+        # changed=false, left changed_files empty, and would have been laundered
+        # into a verified answer -- the exact false success the evidence chain
+        # exists to prevent.
+        if self._attempted_mutation(record):
+            return False
+        if not self._last_provider_message(record):
+            return False
+        return bool(self._answer_basis(record))
+
+    @staticmethod
+    def _attempted_mutation(record: SessionRecord) -> bool:
+        return any(
+            entry.get("role") == "tool" and entry.get("core_name") in MUTATION_TOOLS
+            for entry in record.provider_history
+        )
+
+    @staticmethod
+    def _answer_basis(record: SessionRecord) -> tuple[Dict[str, Any], ...]:
+        """The successful inspections an answer rests on.
+
+        Reads record no Core evidence of their own, so the basis is drawn from
+        the persisted tool history, which the session store checksums as one
+        document. It is reported rather than merely counted: a verified answer
+        that named no source would be exactly the narrative-as-proof this
+        product exists to refuse.
+        """
+        basis: List[Dict[str, Any]] = []
+        for entry in record.provider_history:
+            if entry.get("role") != "tool":
+                continue
+            core_name = entry.get("core_name")
+            if core_name not in INSPECTION_TOOLS:
+                continue
+            result = entry.get("result")
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                continue
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            item: Dict[str, Any] = {
+                "tool": core_name,
+                "call_id": str(entry.get("tool_call_id", "")),
+            }
+            for key in ("path", "sha256", "stdout_sha256"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    item[key] = value
+            basis.append(item)
+        return tuple(basis)
 
     @staticmethod
     def _last_provider_message(record: SessionRecord) -> Optional[str]:

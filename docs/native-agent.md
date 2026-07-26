@@ -74,8 +74,36 @@ is missing is rejected outright by every provider wire format.
 
 ## Finishing
 
-A run that changed a file must produce a successful check plus Git status and
-diff evidence before it is reported as verified; an unverified mutation is never
-reported as success. A run that changed nothing is an answer rather than a failed
-change, and reports `no_changes` after a single nudge instead of spending the
-whole step budget being re-prompted.
+There are two terminal outcomes, and they are labelled differently because they
+prove different things.
+
+A **change** must produce a `repo.write_file` or `repo.edit_file` reporting
+`changed=true`, then a successful check after that change, then model-requested
+`git.status` and `git.diff`. An unverified mutation is never reported as
+success.
+
+An **answer** is what a read-only task produces, reported as `answer`. It
+requires text from the model plus at least one successful inspection of the
+repository — a read, a search, a listing or a Git read — and the run report names
+those inspections. An answer that rests on nothing is refused: the model is
+nudged once and the run then exits non-zero, because narrative is not evidence.
+A run that reached for a write is judged as a change even if the write turned out
+to be a no-op, so a byte-identical write cannot be laundered into an answer.
+
+`--expect change` refuses the answer outcome outright, for a caller that already
+knows the task must edit something.
+
+Every exit reports the model's last message, including the step and wall-time
+limits — the two branches nearly every unverified run leaves through, which used
+to report nothing at all.
+
+## Repeating a call
+
+An identical call is refused after the eighth attempt with an error the model can
+act on, and the run continues. Repetition is not by itself a mistake:
+verification demands `git.status` and `git.diff` after *every* change, so a task
+needing two repair rounds legitimately issues the same call a third time. The
+count is cleared once the repository actually changes, since the same read then
+returns something new; repeated writes keep their count, because reissuing a
+byte-identical write is a no-op whatever else changed. Only a model that ignores
+the refusal repeatedly ends the session.

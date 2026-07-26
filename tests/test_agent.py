@@ -143,8 +143,11 @@ class AgentKernelTests(unittest.TestCase):
         *,
         origin: Origin | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        require_change: bool = False,
     ) -> AgentKernel:
         kwargs: dict[str, object] = {}
+        if require_change:
+            kwargs["require_change"] = True
         if monotonic is not None:
             kwargs["monotonic"] = monotonic
         return AgentKernel(
@@ -361,20 +364,25 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(error["error"]["type"], "malformed_arguments")
         self.assertEqual(record.changed_files, [])
 
-    def test_identical_action_limit_stops_repeated_calls(self) -> None:
+    def test_a_repeated_call_is_refused_without_ending_the_session(self) -> None:
         arguments = {"path": "sample.txt", "content": "after\n"}
         provider = QueueProvider(
             [
                 model_response(call("write-1", "repo_write_file", arguments)),
                 model_response(call("write-2", "repo_write_file", arguments)),
+                model_response(content="I will stop repeating that call."),
             ]
         )
         report = self.kernel(
             provider,
-            AgentLimits(max_steps=5, max_seconds=30, max_identical_actions=1),
+            AgentLimits(
+                max_steps=5,
+                max_seconds=30,
+                max_identical_actions=1,
+                max_repair_prompts=0,
+            ),
         ).run("session")
-        self.assertFalse(report.verified)
-        self.assertEqual(report.reason, "repeated_action")
+
         record = self.sessions.load("session")
         repeated = next(
             item
@@ -382,6 +390,86 @@ class AgentKernelTests(unittest.TestCase):
             if item.get("tool_call_id") == "write-2"
         )
         self.assertEqual(repeated["error"]["type"], "repeated_action")
+        # The refusal is a correction the model can act on, so the run keeps
+        # going. Ending the whole session on the second identical call used to
+        # throw away every result the run had already produced.
+        self.assertNotEqual(report.reason, "repeated_action")
+        self.assertEqual(len(provider.requests), 3)
+
+    def test_repeating_forever_still_ends_the_session(self) -> None:
+        arguments = {"path": "sample.txt"}
+        provider = QueueProvider(
+            [
+                model_response(call(f"read-{index}", "repo_read_file", arguments))
+                for index in range(6)
+            ]
+        )
+        report = self.kernel(
+            provider,
+            AgentLimits(
+                max_steps=10,
+                max_seconds=30,
+                max_identical_actions=1,
+                max_repeated_action_errors=2,
+            ),
+        ).run("session")
+
+        self.assertFalse(report.verified)
+        self.assertEqual(report.reason, "repeated_action")
+        # One refusal is a nudge; a model that ignores every nudge is not making
+        # progress and is stopped rather than paid for.
+        self.assertEqual(len(provider.requests), 3)
+
+    def test_two_repair_rounds_do_not_exhaust_the_repeat_budget(self) -> None:
+        # Verification demands git_status and git_diff after the successful
+        # check, so a task whose first two checks fail legitimately issues the
+        # same git_status a third time. At the old limit of two that killed the
+        # session outright and threw away the work already done.
+        failing = {"argv": [sys.executable, "-c", "raise SystemExit(9)"]}
+        passing = {"argv": [sys.executable, "-c", "print('ok')"]}
+        provider = QueueProvider(
+            [
+                model_response(
+                    call(
+                        "write",
+                        "repo_write_file",
+                        {"path": "sample.txt", "content": "after\n"},
+                    )
+                ),
+                model_response(call("check-1", "checks_run", failing)),
+                model_response(
+                    call("status-1", "git_status", {}),
+                    call("diff-1", "git_diff", {}),
+                ),
+                model_response(call("check-2", "checks_run", failing)),
+                model_response(
+                    call("status-2", "git_status", {}),
+                    call("diff-2", "git_diff", {}),
+                ),
+                model_response(call("check-3", "checks_run", passing)),
+                model_response(
+                    call("status-3", "git_status", {}),
+                    call("diff-3", "git_diff", {}),
+                ),
+                model_response(content="verified locally"),
+            ]
+        )
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=12, max_seconds=30)
+        ).run("session")
+
+        self.assertTrue(report.verified)
+        self.assertEqual(report.reason, "verified")
+        record = self.sessions.load("session")
+        self.assertFalse(
+            [
+                item
+                for item in record.provider_history
+                if isinstance(item.get("error"), dict)
+                and item["error"].get("type") == "repeated_action"
+            ]
+        )
 
     def test_step_and_wall_time_limits_stop_deterministically(self) -> None:
         provider = QueueProvider([model_response(content="not finished")])
@@ -881,9 +969,56 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(report.reason, "budget_exceeded")
         self.assertEqual(report.steps, 0)
 
-    def test_answer_without_changes_stops_early_instead_of_burning_steps(
-        self,
-    ) -> None:
+    def test_an_answer_backed_by_a_read_is_a_successful_outcome(self) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call("read", "repo_read_file", {"path": "sample.txt"})
+                ),
+                model_response(content="the file says before"),
+            ]
+        )
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=24, max_seconds=30)
+        ).run("session")
+
+        # A question used to be structurally unanswerable: the only terminal
+        # success required a file change, so the model answered, KaroX demanded
+        # a write, and the run exited 1 with the answer discarded.
+        self.assertTrue(report.verified)
+        self.assertEqual(report.status, "verified")
+        self.assertEqual(report.reason, "answer")
+        self.assertEqual(report.provider_message, "the file says before")
+        self.assertEqual(report.changed_files, ())
+        # It costs two provider calls, and the answer names what it rests on.
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(
+            [item["tool"] for item in report.answer_basis], ["repo.read_file"]
+        )
+        self.assertEqual(report.answer_basis[0]["path"], "sample.txt")
+
+    def test_an_answer_that_looked_at_nothing_is_not_accepted(self) -> None:
+        provider = QueueProvider(
+            [
+                model_response(content="I think it says before"),
+                model_response(content="I still think it says before"),
+            ]
+        )
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=24, max_seconds=30)
+        ).run("session")
+
+        # Narrative is not evidence. A model that never looked at the repository
+        # gets one nudge and then a non-zero exit, rather than having its guess
+        # blessed as verified.
+        self.assertFalse(report.verified)
+        self.assertEqual(report.reason, "no_changes")
+        self.assertEqual(report.provider_message, "I still think it says before")
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_a_change_task_may_refuse_the_answer_outcome(self) -> None:
         provider = QueueProvider(
             [
                 model_response(
@@ -895,17 +1030,14 @@ class AgentKernelTests(unittest.TestCase):
         )
 
         report = self.kernel(
-            provider, AgentLimits(max_steps=24, max_seconds=30)
+            provider,
+            AgentLimits(max_steps=24, max_seconds=30),
+            require_change=True,
         ).run("session")
 
-        self.assertEqual(report.status, "stopped")
-        self.assertEqual(report.reason, "no_changes")
         self.assertFalse(report.verified)
-        self.assertEqual(report.provider_message, "the file says before")
-        # A task that changed nothing gets one nudge, so a question costs three
-        # provider calls rather than the whole 24-step budget.
-        self.assertEqual(len(provider.requests), 3)
-        self.assertEqual(report.changed_files, ())
+        self.assertEqual(report.reason, "no_changes")
+        self.assertEqual(report.answer_basis, ())
 
     def test_unverified_change_is_reported_separately_from_no_change(self) -> None:
         provider = QueueProvider(
