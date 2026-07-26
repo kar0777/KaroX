@@ -49,11 +49,34 @@ with a user-supplied or OS-protected wrapping key; there is no machine-readable
 plaintext fallback.
 
 Secret entry uses a protected prompt/stdin channel, never a command argument.
-Logs, errors, HTTP headers, support bundles, session snapshots, evidence, and MCP
-results pass through structural and value-based redaction. User-visible identity
+Logs, errors, HTTP headers, support bundles, audit records, and MCP result
+metadata pass through structural and value-based redaction. User-visible identity
 is a masked fingerprint. Rotation overwrites the stored value atomically from
 the runtime's perspective; the wire server resolves it on every request so the
 old bearer stops authorizing immediately.
+
+Repository **content** is deliberately exempt from pattern-based rewriting.
+`repo.read_file`, `repo.read_lines`, and `repo.search` return the bytes that are
+on disk, and a read whose body does not hold the whole file says so with
+`truncated`, `content_sha256`, and a `detail` field.
+
+This is a correctness requirement, not an oversight. Pattern rewriting inside
+file content changed a token-shaped literal in real source into `[REDACTED]`, so
+an exact-match edit anchor taken from a read could not match the file it came
+from, and echoing that content back through a write destroyed the original line.
+It also clamped the body at one million characters while reporting the whole
+file's byte count and digest, which lost data with no error.
+
+The pattern list covers four shapes, so it never was a general content-privacy
+control: a password, a private key body, or a cloud access key passed through it
+untouched. Reads therefore report `secret_like` when the content matches one of
+those shapes, so a caller and the user are told rather than silently handed
+altered text. Credential *values* KaroX itself holds are still removed on every
+path, and keys whose name looks like a credential are still replaced.
+
+If a repository must not be shown to a model at all, that is a decision about
+which repository to point KaroX at, not something a four-pattern regular
+expression can enforce.
 
 ## Network boundaries
 

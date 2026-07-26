@@ -557,6 +557,51 @@ class CoreRuntimeTests(unittest.TestCase):
         count = runtime._git(["rev-list", "--count", "HEAD"], 60.0)["stdout"].strip()
         self.assertEqual(count, "1")
 
+    def test_read_returns_secret_shaped_source_byte_for_byte(self) -> None:
+        source = 'TOKEN = "ghp_' + "A" * 30 + '"\nprint(TOKEN)\n'
+        (self.repository / "conf.py").write_bytes(source.encode("utf-8"))
+
+        result = self.runtime.execute(
+            self.command("repo.read_file", {"path": "conf.py"})
+        )
+
+        # Rewriting a token-shaped literal inside real source makes an edit
+        # anchor copied from the read unmatchable, and echoing it back through a
+        # write destroys the original line.
+        self.assertEqual(result.data["content"], source)
+        self.assertTrue(result.data["secret_like"])
+        self.assertFalse(result.data["truncated"])
+
+    def test_read_flags_truncation_instead_of_losing_content_silently(self) -> None:
+        limit = CoreRuntime.MAX_READ_CONTENT_CHARS
+        source = "source line\n" * ((limit // 12) + 5_000)
+        self.assertGreater(len(source), limit)
+        (self.repository / "big.txt").write_bytes(source.encode("utf-8"))
+
+        result = self.runtime.execute(
+            self.command("repo.read_file", {"path": "big.txt"})
+        )
+
+        self.assertTrue(result.data["truncated"])
+        self.assertEqual(len(result.data["content"]), limit)
+        self.assertEqual(result.data["bytes"], len(source.encode("utf-8")))
+        # The whole-file digest must not be presented as the digest of a partial
+        # body, or a caller cannot tell it is about to destroy the rest.
+        self.assertNotEqual(result.data["sha256"], result.data["content_sha256"])
+        self.assertIn("repo.read_lines", result.data["detail"])
+
+    def test_search_returns_matched_lines_byte_for_byte(self) -> None:
+        line = 'header = "Bearer abcdefghijklmnop"'
+        (self.repository / "client.py").write_bytes(f"{line}\n".encode("utf-8"))
+
+        result = self.runtime.execute(
+            self.command("repo.search", {"query": "header ="})
+        )
+
+        self.assertEqual(
+            [item["text"] for item in result.data["matches"]], [line]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

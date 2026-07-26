@@ -234,6 +234,20 @@ class ExtendedCoreToolTests(unittest.TestCase):
         self.assertEqual(result["data"]["lines"], ["c"])
         self.assertFalse(result["data"]["has_more"])
 
+    def test_read_lines_returns_secret_shaped_lines_byte_for_byte(self) -> None:
+        line = 'KEY = "sk-' + "b" * 24 + '"'
+        (self.repository / "settings.py").write_bytes(f"{line}\nrest\n".encode("utf-8"))
+        bridge = self._bridge("karox.repo.read_lines")
+
+        data = bridge.execute(
+            "karox.repo.read_lines", {"path": "settings.py", "start": 1, "count": 1}
+        )["data"]
+
+        # An edit anchor is taken from these lines, so a rewritten one cannot be
+        # used to change the file it came from.
+        self.assertEqual(data["lines"], [line])
+        self.assertTrue(data["secret_like"])
+
     def test_read_lines_rejects_a_zero_start(self) -> None:
         bridge = self._bridge("karox.repo.read_lines")
         with self.assertRaisesRegex(Exception, "start must be 1 or greater"):

@@ -17,7 +17,12 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .policy import CapabilityPolicy
-from .security import child_process_environment, contains_credential, redact
+from .security import (
+    child_process_environment,
+    contains_credential,
+    redact,
+    redact_content,
+)
 from .sessions import MutationLease, SessionError, SessionRecord, SessionStore
 
 
@@ -46,6 +51,8 @@ class ToolDefinition:
 
 class CoreRuntime:
     MAX_FILE_BYTES = 2_000_000
+    # A read may return less than the file holds, but never without saying so.
+    MAX_READ_CONTENT_CHARS = 1_000_000
     MAX_OUTPUT_BYTES = 1_000_000
     MAX_AUDIT_BYTES = 10_000_000
     MAX_COMMIT_MESSAGE_BYTES = 4_000
@@ -651,12 +658,33 @@ class CoreRuntime:
             content = raw_content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CoreError("repo.read_file supports UTF-8 text only") from exc
-        return {
+        # Content is the caller's working material, so it is returned byte for
+        # byte. Pattern redaction here used to rewrite token-shaped literals
+        # inside real source, which made an exact-match edit anchor copied from
+        # the read unmatchable and turned a read-then-write into corruption.
+        returned = str(redact_content(content))
+        truncated = len(returned) > self.MAX_READ_CONTENT_CHARS
+        if truncated:
+            returned = returned[: self.MAX_READ_CONTENT_CHARS]
+        payload = {
             "path": path.relative_to(self.repository).as_posix(),
-            "content": str(redact(content)),
+            "content": returned,
             "bytes": size,
             "sha256": hashlib.sha256(raw_content).hexdigest(),
+            "truncated": truncated,
+            # A caller that echoes content back must be able to tell whether it
+            # holds the whole file. Reporting only the whole-file digest beside a
+            # shortened body previously lost data with no error at all.
+            "content_sha256": hashlib.sha256(returned.encode("utf-8")).hexdigest(),
+            "secret_like": contains_credential(content),
         }
+        if truncated:
+            payload["detail"] = (
+                f"only the first {self.MAX_READ_CONTENT_CHARS} characters are "
+                "included; use repo.read_lines for a specific range and do not "
+                "write this content back as a whole file"
+            )
+        return payload
 
     def _write_file(
         self, arguments: Dict[str, Any], deadline_seconds: float
@@ -1124,7 +1152,10 @@ class CoreRuntime:
                     {
                         "path": relative,
                         "line": number,
-                        "text": str(redact(line)),
+                        # A matched line is repository content a caller may quote
+                        # back, so it follows the same byte-faithful rule as a
+                        # read rather than the display rule used for audit rows.
+                        "text": str(redact_content(line)),
                         "clipped": clipped,
                     }
                 )

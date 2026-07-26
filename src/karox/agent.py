@@ -23,7 +23,7 @@ from .providers import (
     ProviderTool,
     ToolCall,
 )
-from .security import redact
+from .security import redact, redact_content
 from .sessions import MutationLease, SessionRecord, SessionStore
 
 
@@ -714,14 +714,19 @@ class AgentKernel:
             ensure_ascii=False,
             sort_keys=True,
         )
+        # A tool result is the model's working material for the rest of the run.
+        # Pattern redaction here rewrote file content that the model then had to
+        # reproduce exactly, so an edit anchor taken from a read could not match
+        # the file on disk. Key-name redaction and known credential values are
+        # still removed; Core has already applied the same rule at its boundary.
         entry = {
             "role": "tool",
             "origin": self.origin.key,
-            "content": redact(content),
+            "content": redact_content(content),
             "tool_call_id": call.call_id,
             "tool_name": call.name,
             "core_name": core_name,
-            "result": redact(result_value),
+            "result": redact_content(result_value),
         }
 
         def update(record: SessionRecord) -> None:

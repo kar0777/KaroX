@@ -41,7 +41,7 @@ from .core import (
     ToolDefinition,
 )
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
-from .security import contains_credential, redact
+from .security import contains_credential, redact, redact_content
 from .sessions import MutationLease, SessionRecord
 
 
@@ -312,7 +312,10 @@ class ExtendedCoreRuntime(CoreRuntime):
             "count": len(selected),
             "total_lines": len(lines),
             "has_more": (start - 1 + len(selected)) < len(lines),
-            "lines": [str(redact(item)) for item in selected],
+            # Byte-faithful, for the same reason as repo.read_file: a line
+            # rewritten by pattern redaction cannot be used as an edit anchor.
+            "lines": [str(redact_content(item)) for item in selected],
+            "secret_like": any(contains_credential(item) for item in selected),
         }
 
     @staticmethod
