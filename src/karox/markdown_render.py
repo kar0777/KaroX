@@ -276,6 +276,17 @@ def _collect_item_lines(tokens: List[Token], start: int) -> tuple[List[Text], in
         elif token.type == "inline":
             lines.append(_inline_text(token))
             i += 1
+        elif token.type in ("fence", "code_block"):
+            # A list item collects lines of text, so a highlighted Syntax block
+            # cannot go here -- but dropping the token silently deleted the
+            # command in "1. Run this:" answers, which is usually the only part
+            # of the answer the reader needed. The code is kept verbatim and
+            # styled as code instead.
+            lines.extend(
+                Text(line, style=_INLINE_CODE_STYLE)
+                for line in token.content.rstrip("\n").split("\n")
+            )
+            i += 1
         else:
             i += 1
     return lines, i

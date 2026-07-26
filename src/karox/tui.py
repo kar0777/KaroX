@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -1647,6 +1648,30 @@ if _HAS_TEXTUAL:
             Binding("tab", "complete_command", show=False, priority=True),
             Binding("escape", "dismiss_commands", show=False, priority=True),
         ]
+
+        def _on_paste(self, event: Any) -> None:
+            """Keep a multi-line paste instead of throwing away all but line one.
+
+            Textual's single-line Input keeps ``splitlines()[0]`` and discards
+            the rest without saying so, which for a coding agent silently ate
+            the most common input there is: a pasted stack trace or diff. The
+            text is held whole and the composer shows a short marker for it,
+            which is also more readable than one enormous scrolling line.
+            """
+            text = getattr(event, "text", "")
+            if not isinstance(text, str) or not text:
+                return
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            if "\n" not in normalized:
+                return
+            register = getattr(self.app, "_register_pasted_block", None)
+            if register is None:
+                return
+            self.insert_text_at_cursor(register(normalized))
+            # Textual runs the handler from every class in the MRO, so without
+            # this the base Input would append line one after the marker.
+            event.prevent_default()
+            event.stop()
 
         def _app_action(self, name: str) -> bool:
             app = self.app
@@ -3589,6 +3614,13 @@ if _HAS_TEXTUAL:
             self.agent_process: Optional[subprocess.Popen[str]] = None
             self._stop_requested = False
             self._history_seen = 0
+            # Multi-line pastes held aside while the composer shows a short
+            # marker for each. Pasting a stack trace or a diff is the most
+            # common way a coding agent is handed context, and a one-line widget
+            # cannot show one -- so the text is kept whole here and put back
+            # when the message is sent.
+            self._pasted_blocks: "OrderedDict[str, str]" = OrderedDict()
+            self._paste_counter = 0
             self.bridge_process: Optional[subprocess.Popen[str]] = None
             self.tunnel_process: Optional[subprocess.Popen[str]] = None
             self._tailscale_active = False
@@ -3995,9 +4027,24 @@ if _HAS_TEXTUAL:
             composer.clear()
             self._update_command_menu("")
 
+        def _register_pasted_block(self, text: str) -> str:
+            self._paste_counter += 1
+            marker = f"[paste #{self._paste_counter}: {len(text.splitlines())} lines]"
+            self._pasted_blocks[marker] = text
+            # A composer that is cleared without sending would otherwise hold
+            # every paste of the session in memory.
+            while len(self._pasted_blocks) > 20:
+                self._pasted_blocks.popitem(last=False)
+            return marker
+
+        def _expand_pasted_blocks(self, value: str) -> str:
+            for marker, text in self._pasted_blocks.items():
+                value = value.replace(marker, text)
+            return value
+
         @on(Input.Submitted, "#composer")
         def input_submitted(self, event: Input.Submitted) -> None:
-            value = event.value.strip()
+            value = self._expand_pasted_blocks(event.value).strip()
             if self._command_menu_open and self._filtered_commands:
                 selected = self._filtered_commands[self._command_index]
                 insertion = self._command_insertion(selected)

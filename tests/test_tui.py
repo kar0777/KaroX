@@ -14,6 +14,7 @@ from _support import SRC  # noqa: F401 - inserts src on sys.path
 from karox import tui
 from karox.providers import ProviderError, ProviderErrorKind
 from karox.registry import ModelRecord
+from textual.events import Paste
 from textual.geometry import Offset
 from textual.selection import Selection
 
@@ -503,6 +504,38 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#command-menu", tui.Static).styles.display,
                     "block",
                 )
+
+    async def test_a_pasted_stack_trace_is_not_truncated_to_one_line(self) -> None:
+        trace = (
+            "Traceback (most recent call last):\n"
+            '  File "app.py", line 3, in <module>\n'
+            "    main()\n"
+            "ZeroDivisionError: division by zero"
+        )
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await self.focus(pilot, app, "composer")
+                composer = app.query_one("#composer", tui.Input)
+                composer.post_message(Paste(trace))
+                await pilot.pause()
+
+                # The composer shows a marker rather than one enormous line,
+                # and the base widget must not also append line one after it.
+                self.assertEqual(composer.value, "[paste #1: 4 lines]")
+                # The text the agent receives is the whole trace.
+                self.assertEqual(app._expand_pasted_blocks(composer.value), trace)
+
+    async def test_a_single_line_paste_still_goes_in_verbatim(self) -> None:
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await self.focus(pilot, app, "composer")
+                composer = app.query_one("#composer", tui.Input)
+                composer.post_message(Paste("fix the parser\n"))
+                await pilot.pause()
+
+                self.assertEqual(composer.value, "fix the parser")
 
     async def test_slash_selection_opens_connect_screen(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):

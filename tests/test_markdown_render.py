@@ -100,6 +100,17 @@ class MarkdownRenderTests(unittest.TestCase):
         self.assertIn("2. second", rendered)
         self.assertIn("3. third", rendered)
 
+    def test_code_inside_a_list_item_survives(self) -> None:
+        rendered = _render_to_str(
+            "1. Install it:\n\n   ```bash\n   pip install karox\n   ```\n\n2. Run it"
+        )
+
+        # The command was silently deleted, which for a step-by-step answer
+        # removed the only part the reader needed.
+        self.assertIn("1. Install it:", rendered)
+        self.assertIn("pip install karox", rendered)
+        self.assertIn("2. Run it", rendered)
+
     def test_blockquote_indents_every_line(self) -> None:
         rendered = _render_to_str("> line one\n> line two\n>\n> second para")
         # Every quote line carries a two-space indent so softbreaks don't
