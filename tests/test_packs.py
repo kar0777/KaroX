@@ -12,16 +12,18 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from _support import SRC  # noqa: F401 - inserts src on sys.path
+from _support import SRC, child_environment  # noqa: F401 - inserts src on sys.path
 
 from karox.packs import (
     PackAccessDenied,
     PackConfigurationError,
     PackManifestError,
     PackRegistry,
+    _exclusive_file_lock,
     create_pack_template,
     parse_pack_manifest,
 )
@@ -192,6 +194,42 @@ class PackLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(PackConfigurationError, "cannot remove an enabled pack"):
             self.registry.remove(pack.identity)
 
+    def test_enable_refuses_a_pack_whose_content_changed_since_install(self) -> None:
+        """Enabling is when a Pack's code becomes callable, so it re-verifies.
+
+        The install directory is ordinary files. Verifying only at install time
+        meant a Pack whose skill had been rewritten afterwards was activated in
+        silence, with the registry still vouching for the original hashes.
+        """
+        pack = self.registry.install(self.source)
+        tampered = Path(pack.install_path) / "skills" / "SKILL.md"
+        tampered.write_text("---\nname: s\ndescription: d\nversion: 0.1.0\n---\nowned\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(PackConfigurationError, "refusing to enable.*were modified"):
+            self.registry.enable(pack.identity)
+        self.assertFalse(self.registry.get(pack.identity).enabled)
+
+    def test_enable_refuses_a_pack_whose_manifest_changed_since_install(self) -> None:
+        pack = self.registry.install(self.source)
+        manifest = Path(pack.install_path) / "karox-pack.toml"
+        text = manifest.read_text(encoding="utf-8").replace(
+            'description = "Sample pack"', 'description = "Rewritten after install"'
+        )
+        self.assertIn("Rewritten", text)
+        manifest.write_text(text, encoding="utf-8")
+
+        with self.assertRaisesRegex(PackConfigurationError, "refusing to enable.*manifest changed"):
+            self.registry.enable(pack.identity)
+        self.assertFalse(self.registry.get(pack.identity).enabled)
+
+    def test_enable_refuses_a_pack_whose_declared_file_was_deleted(self) -> None:
+        pack = self.registry.install(self.source)
+        (Path(pack.install_path) / "detectors" / "generic.txt").unlink()
+
+        with self.assertRaisesRegex(PackConfigurationError, "refusing to enable.*are missing"):
+            self.registry.enable(pack.identity)
+        self.assertFalse(self.registry.get(pack.identity).enabled)
+
     def test_unapproved_capability_rejected(self) -> None:
         # The sample pack requests only repo.read, which requires no extra
         # permission approval; force a mismatch by approving nothing.
@@ -275,6 +313,98 @@ class PackLifecycleTests(unittest.TestCase):
         self.assertEqual(manifest.description, 'He said "go"\\now')
 
 
+class PackRegistryConcurrencyTests(unittest.TestCase):
+    """The registry's read-modify-write has to survive a second writer."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_lock_is_held_against_another_process(self) -> None:
+        """The lock has to be an OS lock, not a process-local one.
+
+        Two `karox pack` commands are two processes, so a `threading.Lock` would
+        not see the other at all. This holds the lock from a real child and
+        asserts the parent cannot take it.
+        """
+        lock_path = self.root / "packs.json.lock"
+        holder = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]);"
+                "from pathlib import Path;"
+                "from karox.packs import _exclusive_file_lock;"
+                "\nwith _exclusive_file_lock(Path(sys.argv[2])):\n"
+                "    print('held', flush=True)\n"
+                "    sys.stdin.readline()\n",
+                str(SRC), str(lock_path),
+            ],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert holder.stdout is not None and holder.stdin is not None
+            # Read stderr only once the child is gone: it is a pipe, and reading
+            # it while the child still waits on stdin would deadlock the test.
+            if holder.stdout.readline().strip() != "held":
+                holder.kill()
+                holder.wait(timeout=30)
+                reason = holder.stderr.read() if holder.stderr else ""
+                self.fail(f"the lock holder never started: {reason.strip() or 'no output'}")
+
+            with self.assertRaisesRegex(PackConfigurationError, "timed out.*waiting for the pack registry lock"):
+                with _exclusive_file_lock(lock_path, timeout=0.3):
+                    pass
+
+            # Releasing it must hand the lock over, not leave the file poisoned.
+            holder.stdin.write("\n")
+            holder.stdin.flush()
+            holder.wait(timeout=30)
+            with _exclusive_file_lock(lock_path, timeout=5):
+                pass
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait(timeout=30)
+
+    def test_racing_installs_all_survive(self) -> None:
+        """No install may be lost to a concurrent one.
+
+        Each writer loaded the registry, worked, then saved the snapshot it had
+        read. Whoever saved last therefore erased every pack installed in the
+        meantime. The registries here are separate instances -- as separate as
+        two processes -- so nothing but the file lock serialises them.
+        """
+        names = [f"racer-{index}" for index in range(6)]
+        for name in names:
+            create_pack_template(self.root / name, name=name, description="Racer")
+
+        registry_root = self.root / "registry"
+        PackRegistry(registry_root)  # create the root once, off the hot path
+        start = threading.Barrier(len(names))
+        failures: list[BaseException] = []
+
+        def install(name: str) -> None:
+            try:
+                start.wait(timeout=30)
+                PackRegistry(registry_root).install(self.root / name)
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                failures.append(exc)
+
+        workers = [threading.Thread(target=install, args=(name,)) for name in names]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=60)
+            self.assertFalse(worker.is_alive(), "an installing thread did not finish")
+
+        self.assertEqual(failures, [])
+        installed = sorted(pack.name for pack in PackRegistry(registry_root).list())
+        self.assertEqual(installed, sorted(names))
+
+
 class PackCliTests(unittest.TestCase):
     """Full create/install/inspect/doctor/enable/disable/remove CLI flow."""
 
@@ -287,57 +417,60 @@ class PackCliTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _cli(self, *args: str) -> tuple[int, str, str]:
-        env = dict(os.environ)
-        env.update(
-            {
-                "PYTHONPATH": str(SRC),
-                "KAROX_CONFIG_DIR": str(self.root / "config"),
-                "KAROX_RUNTIME_DIR": str(self.runtime_dir),
-            }
-        )
         proc = subprocess.run(
             [sys.executable, "-m", "karox.cli", *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            env=env,
+            env=child_environment(
+                config_dir=self.root / "config",
+                runtime_dir=self.runtime_dir,
+                PYTHONPATH=str(SRC),
+            ),
         )
         return proc.returncode, proc.stdout, proc.stderr
+
+    def _ok(self, *args: str) -> str:
+        """Run a pack command that must succeed, and say why if it did not.
+
+        The CLI reports a refusal on stderr, so asserting with stdout produced a
+        bare "2 != 0" that named neither the command nor the reason.
+        """
+        code, out, err = self._cli(*args)
+        self.assertEqual(
+            code, 0, f"karox {' '.join(args)} exited {code}: {err.strip() or out.strip()}"
+        )
+        return out
 
     def test_full_lifecycle(self) -> None:
         import json
 
         target = self.root / "src-pack"
-        code, out, _ = self._cli(
+        self._ok(
             "pack", "create", str(target), "--name", "cli-pack", "--description", "CLI pack", "--json",
         )
-        self.assertEqual(code, 0, out)
         self.assertTrue((target / "karox-pack.toml").is_file())
 
-        code, out, _ = self._cli("pack", "install", str(target), "--json")
-        self.assertEqual(code, 0, out)
+        out = self._ok("pack", "install", str(target), "--json")
         self.assertEqual(json.loads(out)["name"], "cli-pack")
 
-        code, out, _ = self._cli("pack", "list", "--json")
-        self.assertEqual(code, 0, out)
+        out = self._ok("pack", "list", "--json")
         self.assertEqual(len(json.loads(out)), 1)
 
-        code, out, _ = self._cli("pack", "doctor", "cli-pack@0.1.0", "--json")
-        self.assertEqual(code, 0, out)
+        out = self._ok("pack", "doctor", "cli-pack@0.1.0", "--json")
         self.assertEqual(json.loads(out)["status"], "ok")
 
-        code, out, _ = self._cli("pack", "enable", "cli-pack@0.1.0", "--json")
-        self.assertEqual(code, 0, out)
+        out = self._ok("pack", "enable", "cli-pack@0.1.0", "--json")
         self.assertTrue(json.loads(out)["enabled"])
 
-        code, out, _ = self._cli("pack", "disable", "cli-pack@0.1.0", "--json")
-        self.assertEqual(code, 0, out)
+        out = self._ok("pack", "disable", "cli-pack@0.1.0", "--json")
         self.assertFalse(json.loads(out)["enabled"])
 
-        code, out, _ = self._cli("pack", "remove", "cli-pack@0.1.0", "--json")
-        self.assertEqual(code, 0, out)
+        self._ok("pack", "remove", "cli-pack@0.1.0", "--json")
 
-        code, _, _ = self._cli("pack", "list", "--json")
-        self.assertEqual(code, 0)
-        self._cli("pack", "list", "--json")
+        # The removal has to be observable, not merely un-refused: the old
+        # assertion only checked that listing exited zero, which it does
+        # whether or not the pack is actually gone.
+        out = self._ok("pack", "list", "--json")
+        self.assertEqual(json.loads(out), [])
 
 
 if __name__ == "__main__":

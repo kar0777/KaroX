@@ -13,6 +13,7 @@ copies are immutable; enable/disable grants only a user-approved subset.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -20,9 +21,10 @@ import re
 import shutil
 import stat
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 # tomllib entered the standard library in 3.11, but this package declares 3.10 as
 # its floor and both installers accept it. cli.py imports this module at the top
@@ -32,6 +34,33 @@ if sys.version_info >= (3, 11):  # pragma: no cover - selected by interpreter
     import tomllib
 else:  # pragma: no cover - selected by interpreter
     import tomli as tomllib
+
+# The registry lock has to hold across processes -- two `karox pack` invocations,
+# not two threads -- so it is taken on a file descriptor by the OS. The two
+# platforms expose that through different modules and neither is importable on
+# the other.
+if os.name == "nt":  # pragma: no cover - selected by platform
+    import msvcrt
+
+    def _try_lock(descriptor: int) -> None:
+        # Locks one byte at the current offset; the byte need not exist. Windows
+        # refuses immediately rather than waiting, which is what the retry loop
+        # in _exclusive_file_lock wants.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+    def _unlock(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:  # pragma: no cover - selected by platform
+    import fcntl
+
+    def _try_lock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 PACK_MANIFEST_NAME = "karox-pack.toml"
@@ -431,6 +460,61 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
             pass
 
 
+@contextlib.contextmanager
+def _exclusive_file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]:
+    """Hold an OS-level exclusive lock on ``path`` for the duration of the block.
+
+    ``_atomic_json`` already makes each write all-or-nothing, but every registry
+    mutation is a read-modify-write spanning two calls. Two ``karox pack``
+    processes could therefore both read the same state and whichever saved second
+    would silently drop the other's pack -- a lost install, or a resurrected
+    removal. Serialising the whole read-modify-write is the only fix; a lock in
+    process memory would not see the other process at all.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    # Opened without truncation on purpose: the lock carries no content, and
+    # truncating would race with whoever currently holds it.
+    descriptor = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        while True:
+            try:
+                _try_lock(descriptor)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise PackConfigurationError(
+                        f"timed out after {timeout:g}s waiting for the pack registry lock; "
+                        "another karox process may be installing or removing a pack"
+                    ) from None
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            _unlock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _verification_complaint(report: Dict[str, Any]) -> str:
+    """Say, in one clause, why a verification report is not ``ok``."""
+    if not report.get("installed"):
+        return "its install directory is missing"
+    if not report.get("manifest_present"):
+        return "its manifest is missing"
+    if report.get("error"):
+        return f"its manifest no longer parses: {report['error']}"
+    problems = []
+    if not report.get("manifest_matches", True):
+        problems.append("its manifest changed since install")
+    if report.get("missing_files"):
+        problems.append("declared files are missing: " + ", ".join(sorted(report["missing_files"])))
+    if report.get("modified_files"):
+        problems.append("declared files were modified: " + ", ".join(sorted(report["modified_files"])))
+    return "; ".join(problems) or "it failed verification"
+
+
 class PackRegistry:
     """Manages installed immutable Packs and their enabled state."""
 
@@ -438,6 +522,26 @@ class PackRegistry:
         self.root = root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "packs.json"
+        self.lock_path = self.root / "packs.json.lock"
+        self._lock_depth = 0
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Serialise a read-modify-write against other processes.
+
+        Re-entrant within one process: both platform locks are held per
+        descriptor, so a mutator that called another locked method would refuse
+        or block against itself. Nesting therefore reuses the outer hold.
+        """
+        if self._lock_depth:
+            yield
+            return
+        with _exclusive_file_lock(self.lock_path):
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
 
     def _load(self) -> Dict[str, InstalledPack]:
         if not self.state_path.exists():
@@ -482,7 +586,11 @@ class PackRegistry:
         )
 
     def list(self) -> List[InstalledPack]:
-        return [self._load()[key] for key in sorted(self._load())]
+        # One read, not two. Taking the keys from one snapshot and the values
+        # from another let a concurrent install or removal land in between, and
+        # the second lookup then raised KeyError out of a read-only command.
+        packs = self._load()
+        return [packs[key] for key in sorted(packs)]
 
     def get(self, identity: str) -> InstalledPack:
         try:
@@ -491,6 +599,15 @@ class PackRegistry:
             raise PackConfigurationError(f"pack is not installed: {identity}") from exc
 
     def install(self, source: Path, *, approved_permissions: Optional[Iterable[str]] = None) -> InstalledPack:
+        # The lock spans the collision check as well as the write: without it two
+        # installs of the same name could both find the name free and both stage
+        # into the tree.
+        with self._locked():
+            return self._install_locked(source, approved_permissions=approved_permissions)
+
+    def _install_locked(
+        self, source: Path, *, approved_permissions: Optional[Iterable[str]] = None
+    ) -> InstalledPack:
         source = source.expanduser().resolve(strict=True)
         if not source.is_dir():
             raise PackConfigurationError(f"pack source is not a directory: {source}")
@@ -555,60 +672,81 @@ class PackRegistry:
         return pack
 
     def enable(self, identity: str) -> InstalledPack:
-        packs = self._load()
-        try:
-            pack = packs[identity]
-        except KeyError as exc:
-            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
-        if pack.enabled:
+        with self._locked():
+            packs = self._load()
+            try:
+                pack = packs[identity]
+            except KeyError as exc:
+                raise PackConfigurationError(f"pack is not installed: {identity}") from exc
+            if pack.enabled:
+                return pack
+            # Install-time verification is not enough. Enabling is the moment a
+            # Pack's tools become callable, and the install directory is ordinary
+            # files on disk that anything could have edited since -- so the
+            # hashes recorded at install are re-checked here, against the same
+            # rules `doctor` reports. Previously a Pack whose code had been
+            # swapped out was activated without a word.
+            report = self._verify(pack)
+            if report["status"] != "ok":
+                raise PackConfigurationError(
+                    f"refusing to enable {identity}: {_verification_complaint(report)}"
+                )
+            pack = InstalledPack(
+                pack.name, pack.version, pack.install_path, pack.manifest_sha256,
+                pack.content_hashes, enabled=True,
+            )
+            packs[identity] = pack
+            self._save(packs)
             return pack
-        pack = InstalledPack(
-            pack.name, pack.version, pack.install_path, pack.manifest_sha256,
-            pack.content_hashes, enabled=True,
-        )
-        packs[identity] = pack
-        self._save(packs)
-        return pack
 
     def disable(self, identity: str) -> InstalledPack:
-        packs = self._load()
-        try:
-            pack = packs[identity]
-        except KeyError as exc:
-            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
-        if not pack.enabled:
+        with self._locked():
+            packs = self._load()
+            try:
+                pack = packs[identity]
+            except KeyError as exc:
+                raise PackConfigurationError(f"pack is not installed: {identity}") from exc
+            if not pack.enabled:
+                return pack
+            pack = InstalledPack(
+                pack.name, pack.version, pack.install_path, pack.manifest_sha256,
+                pack.content_hashes, enabled=False,
+            )
+            packs[identity] = pack
+            self._save(packs)
             return pack
-        pack = InstalledPack(
-            pack.name, pack.version, pack.install_path, pack.manifest_sha256,
-            pack.content_hashes, enabled=False,
-        )
-        packs[identity] = pack
-        self._save(packs)
-        return pack
 
     def remove(self, identity: str) -> InstalledPack:
-        packs = self._load()
-        try:
-            pack = packs[identity]
-        except KeyError as exc:
-            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
-        if pack.enabled:
-            raise PackConfigurationError("cannot remove an enabled pack; disable it first")
-        install_path = Path(pack.install_path)
-        if install_path.exists():
+        with self._locked():
+            packs = self._load()
             try:
-                shutil.rmtree(install_path)
-            except OSError as exc:
-                raise PackConfigurationError(
-                    f"cannot remove installed pack {identity}: {exc}"
-                ) from exc
-        packs.pop(identity)
-        self._save(packs)
-        return pack
+                pack = packs[identity]
+            except KeyError as exc:
+                raise PackConfigurationError(f"pack is not installed: {identity}") from exc
+            if pack.enabled:
+                raise PackConfigurationError("cannot remove an enabled pack; disable it first")
+            install_path = Path(pack.install_path)
+            if install_path.exists():
+                try:
+                    shutil.rmtree(install_path)
+                except OSError as exc:
+                    raise PackConfigurationError(
+                        f"cannot remove installed pack {identity}: {exc}"
+                    ) from exc
+            packs.pop(identity)
+            self._save(packs)
+            return pack
 
     def doctor(self, identity: str) -> dict[str, Any]:
         """Verify an installed Pack without mutating the machine."""
-        pack = self.get(identity)
+        return self._verify(self.get(identity))
+
+    def _verify(self, pack: InstalledPack) -> dict[str, Any]:
+        """Check a Pack on disk against what was recorded when it was installed.
+
+        Shared with ``enable`` so the two can never disagree about what counts as
+        an intact Pack.
+        """
         install_path = Path(pack.install_path)
         result: dict[str, Any] = {
             "identity": pack.identity,
