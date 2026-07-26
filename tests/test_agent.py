@@ -882,6 +882,59 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(report.reason, "budget_exceeded")
         self.assertEqual(report.steps, 0)
 
+    def test_answer_without_changes_stops_early_instead_of_burning_steps(
+        self,
+    ) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call("read", "repo_read_file", {"path": "sample.txt"})
+                ),
+                model_response(content="the file says before"),
+                model_response(content="the file says before"),
+            ]
+        )
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=24, max_seconds=30)
+        ).run("session")
+
+        self.assertEqual(report.status, "stopped")
+        self.assertEqual(report.reason, "no_changes")
+        self.assertFalse(report.verified)
+        self.assertEqual(report.provider_message, "the file says before")
+        # A task that changed nothing gets one nudge, so a question costs three
+        # provider calls rather than the whole 24-step budget.
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(report.changed_files, ())
+
+    def test_unverified_change_is_reported_separately_from_no_change(self) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call(
+                        "write",
+                        "repo_write_file",
+                        {"path": "sample.txt", "content": "after\n"},
+                    )
+                ),
+                model_response(content="I changed it, trust me"),
+                model_response(content="I changed it, trust me"),
+                model_response(content="I changed it, trust me"),
+            ]
+        )
+
+        report = self.kernel(
+            provider, AgentLimits(max_steps=24, max_seconds=30)
+        ).run("session")
+
+        # A real change is worth re-prompting twice, because the model can still
+        # run the check and the two Git reads that make it verifiable.
+        self.assertEqual(len(provider.requests), 4)
+        self.assertEqual(report.reason, "unverified_changes")
+        self.assertFalse(report.verified)
+        self.assertIn("sample.txt", report.changed_files)
+
     def test_offered_tools_exclude_capabilities_the_origin_lacks(self) -> None:
         provider = QueueProvider([model_response(content="stopping")])
         kernel = self.kernel(provider, AgentLimits(max_steps=1, max_seconds=30))

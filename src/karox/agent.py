@@ -82,6 +82,11 @@ REPAIR_PROMPT = """KaroX cannot verify completion yet. Continue using tools.
 After the latest real file change, run a successful check, then request both
 git_status and git_diff. A narrative answer is not verification."""
 
+ANSWER_PROMPT = """KaroX recorded no repository change for this task. If the task
+only needed an answer, give the answer now and name the tool results it rests on.
+If it needed a change, make that change with repo_edit_file or repo_write_file,
+then run a check followed by git_status and git_diff."""
+
 
 def _usage_total(usage: Dict[str, Any]) -> int:
     total = usage.get("total_tokens")
@@ -113,6 +118,11 @@ class AgentLimits:
     max_steps: int = 24
     max_seconds: float = 900.0
     max_identical_actions: int = 2
+    # How many times KaroX re-prompts a model that stopped without producing the
+    # required evidence. Unbounded re-prompting used to burn the whole step
+    # budget on a task that never needed a file change at all, such as a question
+    # about the repository.
+    max_repair_prompts: int = 2
 
     def __post_init__(self) -> None:
         if isinstance(self.max_steps, bool) or not 1 <= self.max_steps <= 10_000:
@@ -129,6 +139,11 @@ class AgentLimits:
             or not 1 <= self.max_identical_actions <= 100
         ):
             raise ValueError("identical action limit must be between 1 and 100")
+        if (
+            isinstance(self.max_repair_prompts, bool)
+            or not 0 <= self.max_repair_prompts <= 100
+        ):
+            raise ValueError("repair prompt limit must be between 0 and 100")
 
 
 @dataclass(frozen=True)
@@ -387,10 +402,34 @@ class AgentKernel:
                         "verified",
                         provider_message,
                     )
+                # A task that changed nothing is an answer, not a failed change.
+                # Nagging it through the whole step budget produced 24 provider
+                # calls and a red "did not complete" for a plain question, so the
+                # two outcomes are now separated and both are bounded.
+                mutated = bool(record.changed_files)
+                # Re-prompting a model that changed something is productive: it
+                # can still run the check and the two Git reads. Re-prompting one
+                # that changed nothing mostly is not, so it gets a single nudge in
+                # case it only narrated a plan.
+                kind = "repair" if mutated else "answer_prompt"
+                ceiling = self.limits.max_repair_prompts if mutated else 1
+                if self._prompt_count(record.provider_history, kind) >= ceiling:
+                    return self._finish(
+                        session_id,
+                        lease,
+                        "stopped",
+                        "verification",
+                        "unverified_changes" if mutated else "no_changes",
+                        provider_message,
+                    )
                 self._append_message(
                     session_id,
                     lease,
-                    {"role": "user", "content": REPAIR_PROMPT},
+                    {
+                        "role": "user",
+                        "content": REPAIR_PROMPT if mutated else ANSWER_PROMPT,
+                        "kind": kind,
+                    },
                     phase="verification",
                 )
         finally:
@@ -841,6 +880,10 @@ class AgentKernel:
                 yield ModelMessage("system", self.system_prompt)
             else:
                 yield message
+
+    @staticmethod
+    def _prompt_count(history: List[Dict[str, Any]], kind: str) -> int:
+        return sum(1 for entry in history if entry.get("kind") == kind)
 
     @staticmethod
     def _step_count(history: List[Dict[str, Any]]) -> int:

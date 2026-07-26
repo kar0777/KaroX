@@ -5150,6 +5150,19 @@ if _HAS_TEXTUAL:
                     self._set_activity(
                         f"[bold]{escape(completion)}[/]", "success"
                     )
+                elif report.get("reason") == "no_changes":
+                    # An answer is not a failure. The agent touched no file, so
+                    # there is nothing to verify and nothing went wrong; saying
+                    # "did not complete" here made every question look broken.
+                    self._set_activity(
+                        self._label(
+                            "[bold]Ответ получен[/]\nФайлы не изменялись, "
+                            "поэтому проверять нечего.",
+                            "[bold]Answered[/]\nNo file was changed, so there "
+                            "is nothing to verify.",
+                        ),
+                        "success",
+                    )
                 else:
                     reason = str(report.get("reason") or state)
                     self._set_activity(
