@@ -30,6 +30,7 @@ VENV_DIR="$RUNTIME_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 LOCAL_BIN="$HOME/.local/bin"
 KAROX_SHIM="$LOCAL_BIN/karox"
+KAROX_VNEXT_SHIM="$LOCAL_BIN/karox-vnext"
 MIGRATION="$ROOT/scripts/karox_paths.py"
 REBRAND="$ROOT/scripts/rebrand_runtime.py"
 
@@ -47,8 +48,11 @@ copy_app() {
   shopt -s dotglob nullglob 2>/dev/null || true
   for item in "$ROOT"/*; do
     base="$(basename "$item")"
-    case "$base" in .git|.venv|__pycache__) continue ;; esac
+    case "$base" in .git|.venv|__pycache__|build) continue ;; esac
     cp -R "$item" "$APP_DIR/"
+  done
+  for generated in "$APP_DIR/src/"*.egg-info; do
+    [ ! -e "$generated" ] || rm -rf "$generated"
   done
 }
 
@@ -80,6 +84,7 @@ export KAROX_RUNTIME_DIR="$RUNTIME_DIR"
 if [ ! -x "$VENV_PYTHON" ]; then "$BASE_PYTHON" -m venv "$VENV_DIR"; fi
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
 "$VENV_PYTHON" -m pip install -r "$ROOT/requirements.txt" --quiet
+"$VENV_PYTHON" -m pip install --upgrade --no-deps "$ROOT" --quiet
 
 copy_app
 repair_required
@@ -90,12 +95,24 @@ cat > "$KAROX_SHIM" <<'EOF'
 #!/usr/bin/env bash
 export KAROX_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/KaroX"
 export KAROX_RUNTIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/KaroX"
-case "$(uname -s)" in Darwin) export KAROX_CONFIG_DIR="$HOME/Library/Application Support/KaroX" ;; esac
+KAROX_PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/KaroX/.venv/bin/python"
+case "$(uname -s)" in
+  Darwin)
+    export KAROX_CONFIG_DIR="$HOME/Library/Application Support/KaroX"
+    export KAROX_RUNTIME_DIR="$HOME/.local/share/KaroX"
+    KAROX_PYTHON="$HOME/.local/share/KaroX/.venv/bin/python"
+    ;;
+esac
 export PATH="$KAROX_RUNTIME_DIR/bin:$PATH"
-cd "$KAROX_RUNTIME_DIR/app" || exit 1
-exec bash ./start.sh "$@"
+exec "$KAROX_PYTHON" -m karox.cli "$@"
 EOF
 chmod +x "$KAROX_SHIM"
+
+cat > "$KAROX_VNEXT_SHIM" <<'EOF'
+#!/usr/bin/env bash
+exec "$(dirname "$0")/karox" "$@"
+EOF
+chmod +x "$KAROX_VNEXT_SHIM"
 
 case ":$PATH:" in *":$LOCAL_BIN:"*) ;; *) export PATH="$LOCAL_BIN:$PATH" ;; esac
 for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
@@ -122,5 +139,5 @@ printf '\nInstallation complete.\nApplication : %s\nRuntime     : %s\nConfig    
 rm -rf "$LEGACY_CONFIG_DIR" "$LEGACY_RUNTIME_DIR" 2>/dev/null || true
 rm -f "$HOME/.local/bin/repopilot" 2>/dev/null || true
 
-if [ "$DO_START" = 1 ]; then exec bash "$APP_DIR/start.sh"; fi
+if [ "$DO_START" = 1 ]; then exec "$KAROX_SHIM"; fi
 exec "$VENV_PYTHON" "$APP_DIR/scripts/product_doctor.py" --root "$APP_DIR"

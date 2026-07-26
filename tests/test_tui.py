@@ -375,6 +375,46 @@ class BackendDelegationTests(unittest.TestCase):
         self.assertEqual(launch.secret, "bridge-secret")
         self.assertIn("karox.repo.read_file", launch.argv)
 
+    def test_bridge_launch_passes_oauth_public_origin(self) -> None:
+        with (
+            patch.object(tui, "SessionStore"),
+            patch.object(tui, "BridgeCredentialStore") as credentials,
+        ):
+            credentials.return_value.set.return_value = {"secret": "approval-secret"}
+            launch = tui._bridge_launch(
+                Path.cwd(),
+                tui.BridgeSetup(
+                    "chatgpt-web",
+                    9877,
+                    ("karox.repo.read_file",),
+                    tunnel_provider="tailscale",
+                    public_url="https://device.example.ts.net",
+                ),
+            )
+        self.assertEqual(launch.protocol, "mcp")
+        self.assertEqual(launch.public_url, "https://device.example.ts.net")
+        self.assertIn("--public-url", launch.argv)
+        self.assertIn("https://device.example.ts.net", launch.argv)
+
+    def test_web_bridge_launch_delegates_complete_lifecycle_to_cli(self) -> None:
+        launch = tui._managed_web_bridge_launch(
+            Path.cwd(),
+            tui.BridgeSetup(
+                "chatgpt-web",
+                9878,
+                ("karox.repo.read_file", "karox.repo.write_file"),
+                tunnel_provider="cloudflare",
+            ),
+        )
+        self.assertTrue(launch.managed)
+        self.assertEqual(launch.profile, "chatgpt-web")
+        self.assertIn("connect", launch.argv)
+        self.assertIn("chatgpt-web", launch.argv)
+        self.assertIn("--session-id", launch.argv)
+        self.assertIn("workspace_write", launch.argv)
+        self.assertNotIn("--public-url", launch.argv)
+        self.assertEqual(launch.argv.count("--tool"), 2)
+
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
@@ -451,6 +491,11 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("/", "c", "o", "n", "enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.ConnectionChoiceScreen)
+                web_label = str(
+                    app.screen.query_one("#choice-web", tui.Button).label
+                )
+                self.assertIn("ChatGPT Web", web_label)
+                self.assertIn("Claude Web", web_label)
 
     async def test_english_connection_flow_stays_in_english(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
@@ -1403,6 +1448,35 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(reset_calls)
 
+    async def test_stop_managed_web_bridge_requests_graceful_cli_cleanup(self) -> None:
+        selected = ModelRecord("openai", "model-a", tools="true")
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        launch = tui.BridgeLaunch(
+            session_id="web-1",
+            profile="chatgpt-web",
+            protocol="mcp",
+            endpoint="",
+            secret="",
+            argv=(),
+            managed=True,
+        )
+        with patch.object(tui, "_selected_model", return_value=selected):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.bridge_process = process
+                app.bridge_launch = launch
+                app._stop_bridge(quiet=True)
+                await pilot.pause()
+        expected_signal = (
+            tui.signal.CTRL_BREAK_EVENT
+            if tui.os.name == "nt"
+            else tui.signal.SIGINT
+        )
+        process.send_signal.assert_called_once_with(expected_signal)
+        process.terminate.assert_not_called()
+
     async def test_bridge_setup_dialog_is_scrollable_with_section_labels(self) -> None:
         # Regression: the bridge setup dialog must scroll (content overflows
         # the viewport) and every form group must carry a visible label.
@@ -1456,6 +1530,27 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.4)
                 true_btns = [b.id for b in screen.query("#bridge-tunnel-kind RadioButton") if b.value]
                 self.assertEqual(true_btns, ["tunnel-cloudflare"])
+                self.assertEqual(screen._tunnel_value(), "cloudflare")
+
+    async def test_chatgpt_and_claude_are_visible_bridge_profiles(self) -> None:
+        selected = ModelRecord("openai", "model-a", tools="true")
+        with patch.object(tui, "_selected_model", return_value=selected):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(100, 40)) as pilot:
+                app.action_bridge()
+                await pilot.pause(0.4)
+                screen = app.screen
+                self.assertIsNotNone(
+                    screen.query_one("#profile-chatgpt-web", tui.RadioButton)
+                )
+                self.assertIsNotNone(
+                    screen.query_one("#profile-claude-web", tui.RadioButton)
+                )
+                screen.query_one(
+                    "#profile-chatgpt-web", tui.RadioButton
+                ).value = True
+                await pilot.pause(0.3)
+                self.assertEqual(screen._profile_value(), "chatgpt-web")
                 self.assertEqual(screen._tunnel_value(), "cloudflare")
 
 

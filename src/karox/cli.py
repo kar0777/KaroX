@@ -71,6 +71,7 @@ from .paths import (
 )
 from .policy import CapabilityPolicy
 from .openapi_bridge import build_openapi_bridge_app
+from .oauth_bridge import build_oauth_proxy_asgi_app
 from .proxy import McpProxy
 from .proxy_server import build_proxy_asgi_app
 from .provider_factory import ProviderFactory
@@ -104,6 +105,13 @@ from .skills import (
     skill_selection,
     skill_system_prompt,
     validate_selection,
+)
+from .web_bridge_launcher import (
+    DEFAULT_WEB_TOOLS,
+    WRITE_WEB_TOOLS,
+    WebBridgeConnectConfig,
+    WebBridgeLaunchError,
+    run_web_bridge,
 )
 
 
@@ -565,6 +573,65 @@ def _parser() -> argparse.ArgumentParser:
         "doctor", help="verify secure bridge credential storage"
     )
     bridge_doctor.add_argument("--json", action="store_true")
+    bridge_connect = bridge_commands.add_parser(
+        "connect",
+        help="launch a complete ChatGPT or Claude web bridge",
+    )
+    bridge_connect.add_argument(
+        "profile",
+        choices=("chatgpt-web", "claude-web"),
+    )
+    bridge_connect.add_argument(
+        "--repository",
+        type=Path,
+        default=Path.cwd(),
+    )
+    bridge_connect.add_argument("--session-id")
+    bridge_connect.add_argument(
+        "--access-profile",
+        choices=[item.value for item in AccessProfile],
+        help="defaults to read_only, or workspace_write with --write",
+    )
+    bridge_connect.add_argument(
+        "--tunnel",
+        choices=("cloudflare", "custom"),
+        default="cloudflare",
+    )
+    bridge_connect.add_argument(
+        "--public-url",
+        help="public HTTPS origin when --tunnel custom is selected",
+    )
+    bridge_connect.add_argument(
+        "--cloudflared",
+        help="explicit cloudflared executable path",
+    )
+    bridge_connect.add_argument("--port", type=int, default=8765)
+    bridge_connect.add_argument(
+        "--tool",
+        action="append",
+        choices=tuple(sorted(CORE_TOOL_NAMES)),
+        help="replace the safe default tool set (repeatable)",
+    )
+    bridge_connect.add_argument(
+        "--write",
+        action="store_true",
+        help="add repository edit and write tools",
+    )
+    bridge_connect.add_argument(
+        "--verification-command",
+        action="append",
+        default=[],
+        help=(
+            "user-approved checks.run command as a JSON array; required when "
+            "karox.checks.run is exposed"
+        ),
+    )
+    bridge_connect.add_argument("--deadline-seconds", type=float, default=30.0)
+    bridge_connect.add_argument(
+        "--tunnel-timeout-seconds",
+        type=float,
+        default=30.0,
+    )
     bridge_serve = bridge_commands.add_parser(
         "serve", help="serve selected Core/MCP tools over authenticated HTTP"
     )
@@ -572,7 +639,7 @@ def _parser() -> argparse.ArgumentParser:
     bridge_serve.add_argument("--session-id", required=True)
     bridge_serve.add_argument(
         "--profile",
-        choices=("generic-streamable-http", "promptql", "notion", "hyperagent"),
+        choices=tuple(item.name for item in BridgeRegistry().list()),
         default="generic-streamable-http",
     )
     bridge_serve.add_argument(
@@ -603,6 +670,13 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     bridge_serve.add_argument("--credential", required=True)
+    bridge_serve.add_argument(
+        "--public-url",
+        help=(
+            "stable public HTTPS origin for OAuth web profiles, for example "
+            "https://karox.example.com"
+        ),
+    )
     bridge_serve.add_argument("--host", default="127.0.0.1")
     bridge_serve.add_argument("--port", type=int, default=8765)
     bridge_serve.add_argument("--deadline-seconds", type=float, default=30.0)
@@ -1411,6 +1485,35 @@ def _handle_mcp(args: argparse.Namespace) -> int:
 
 
 def _handle_bridge(args: argparse.Namespace) -> int:
+    if args.bridge_command == "connect":
+        tools = tuple(args.tool) if args.tool else DEFAULT_WEB_TOOLS
+        if args.write:
+            tools = tuple(dict.fromkeys((*tools, *WRITE_WEB_TOOLS)))
+        access_profile = (
+            AccessProfile(args.access_profile)
+            if args.access_profile
+            else (
+                AccessProfile.WORKSPACE_WRITE
+                if args.write
+                else AccessProfile.READ_ONLY
+            )
+        )
+        return run_web_bridge(
+            WebBridgeConnectConfig(
+                profile=args.profile,
+                repository=args.repository,
+                port=args.port,
+                tools=tools,
+                session_id=args.session_id,
+                access_profile=access_profile,
+                tunnel=args.tunnel,
+                public_url=args.public_url,
+                cloudflared=args.cloudflared,
+                tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+                deadline_seconds=args.deadline_seconds,
+                verification_commands=tuple(args.verification_command),
+            )
+        )
     if args.bridge_command == "serve":
         if (
             args.host not in {"127.0.0.1", "::1", "localhost"}
@@ -1421,7 +1524,17 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             raise ValueError("bridge port must be between 1 and 65535")
         if not args.tool and not args.server:
             raise ValueError("bridge serve requires at least one --tool or --server")
+        bridge_profile = BridgeRegistry().get(args.profile)
         protocol = args.protocol or ("openapi" if args.profile == "promptql" else "mcp")
+        if bridge_profile.auth_scheme == "oauth":
+            if protocol != "mcp":
+                raise ValueError("OAuth web bridge profiles require --protocol mcp")
+            if not args.public_url:
+                raise ValueError(
+                    "OAuth web bridge profiles require --public-url with the public HTTPS origin"
+                )
+        elif args.public_url:
+            raise ValueError("--public-url is only valid for OAuth web bridge profiles")
         repository = _mcp_repository(args.repository)
         sessions = SessionStore(session_dir())
         record = sessions.load(args.session_id)
@@ -1485,7 +1598,14 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         def credential() -> str:
             return credential_store.resolve(credential_reference)
 
-        if protocol == "mcp":
+        if bridge_profile.auth_scheme == "oauth":
+            app = build_oauth_proxy_asgi_app(
+                bridge_runtime,
+                credential,
+                public_url=args.public_url,
+                deadline_seconds=args.deadline_seconds,
+            )
+        elif protocol == "mcp":
             app = build_proxy_asgi_app(
                 bridge_runtime,
                 credential,
@@ -2147,6 +2267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         RegistryError,
         SessionError,
         SkillError,
+        WebBridgeLaunchError,
         OSError,
         ValueError,
     ) as exc:

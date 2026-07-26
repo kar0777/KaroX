@@ -33,7 +33,7 @@ python -m unittest discover -s tests -p "test_*.py"
 ```
 
 285 unittest tests pass (2 environment/platform skips on Windows); pytest reports
-295 passed plus 117 subtests. The KB-HYBRID-01..10 benchmark
+420 passed plus 133 subtests. The KB-HYBRID-01..10 benchmark
 (`tests/test_benchmark.py`) regenerates raw run records (latency, usage, cost,
 evidence) from a clean checkout.
 

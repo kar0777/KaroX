@@ -604,6 +604,35 @@ class StdioMcpEndToEndTests(unittest.TestCase):
         self.assertEqual(first.data["result"]["content"][0]["text"], "noted: note")
         self.assertTrue(second.idempotent_replay)
 
+    def test_injected_generic_credential_is_redacted_from_tool_result(self) -> None:
+        secret = "secret-value-with-no-provider-prefix"
+        backend = _FakeCredentialBackend()
+        credentials = McpCredentialStore(backend=backend)
+        info = credentials.set("stdio-reflect", secret)
+        record = McpServerRecord(
+            server_id="reflect",
+            namespace="reflect",
+            transport="stdio",
+            command=sys.executable,
+            args=(str(Path(__file__).resolve().parent / "_mcp_echo_server.py"),),
+            credential_ref=info["reference"],
+            credential_target="KAROX_TEST_SECRET",
+            read_only_tools=("reflect_secret",),
+            timeout_seconds=15.0,
+        )
+        registry = McpRegistry(self.root / "reflect-registry.json")
+        registry.put(record)
+        client = McpClient(registry, credentials)
+        descriptor = next(
+            item
+            for item in client.discover(record.server_id, self.repository)
+            if item.remote_name == "reflect_secret"
+        )
+        result = client.call_record(record, descriptor, {}, self.repository)
+        encoded = json.dumps(result)
+        self.assertNotIn(secret, encoded)
+        self.assertIn("[REDACTED]", encoded)
+
 
 class HttpMcpEndToEndTests(unittest.TestCase):
     """Real Streamable HTTP MCP server with bearer auth via McpCredentialStore."""

@@ -60,10 +60,21 @@ class KeyringBackend:
     def _module(cls):
         try:
             import keyring  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise CredentialError(
-                "OS credential support is unavailable; install the project dependencies"
-            ) from exc
+        except ImportError:
+            # The OS credential backend is a declared dependency (keyring in
+            # requirements.txt / pyproject.toml), but the running interpreter
+            # may not have it (e.g. when KaroX is launched directly with a
+            # system Python instead of the installer venv).  Rather than fail
+            # with a cryptic message, install it into the current interpreter
+            # once so the user never has to think about the dependency.
+            cls._autoinstall_keyring()
+            try:
+                import keyring  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise CredentialError(
+                    "OS credential support is unavailable. Install the keyring "
+                    "dependency with: python -m pip install keyring"
+                ) from exc
         try:
             backend = keyring.get_keyring()
             identity = (
@@ -79,6 +90,30 @@ class KeyringBackend:
                 "no secure OS credential backend is available; plaintext fallback is disabled"
             )
         return keyring
+
+    @staticmethod
+    def _autoinstall_keyring() -> None:
+        """Install the keyring package into the current interpreter if absent.
+
+        Best-effort and silent on success: keyring is a declared KaroX
+        dependency, so installing it is a repair, not a side effect.  Any
+        failure (offline, read-only site-packages, no pip) is swallowed here;
+        the caller retries the import and raises a clear, actionable error.
+        """
+        import subprocess
+        import sys
+
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--", "keyring"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            # Swallowed: the following import retry surfaces an actionable error.
+            pass
 
     def set(self, service: str, account: str, secret: str) -> None:
         self._module().set_password(service, account, secret)

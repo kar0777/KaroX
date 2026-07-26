@@ -281,13 +281,11 @@ class ProviderAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result.content, "done")
-        self.assertEqual(
-            result.tool_calls,
-            (
-                ToolCall("gemini-call-0", "first", '{"a":1}'),
-                ToolCall("gemini-call-1", "second", "{}"),
-            ),
-        )
+        self.assertEqual([item.name for item in result.tool_calls], ["first", "second"])
+        self.assertEqual([item.raw_arguments for item in result.tool_calls], ['{"a":1}', "{}"])
+        self.assertNotEqual(result.tool_calls[0].call_id, result.tool_calls[1].call_id)
+        self.assertTrue(result.tool_calls[0].call_id.endswith("-0"))
+        self.assertTrue(result.tool_calls[1].call_id.endswith("-1"))
         self.assertIn("/models/test-model:streamGenerateContent?alt=sse", client.calls[0]["url"])
 
     def test_shared_sse_reader_enforces_resource_bounds(self) -> None:

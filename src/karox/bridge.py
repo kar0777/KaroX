@@ -1,7 +1,8 @@
 """Bridge profiles and credentials for hosted-client access to KaroX.
 
-A bridge connects an external hosted AI client (Notion, HyperAgent, PromptQL,
-or a generic Streamable HTTP client) to the local KaroX runtime.  Each known
+A bridge connects an external hosted AI client (ChatGPT Web, Claude Web,
+Notion, HyperAgent, PromptQL, or a generic Streamable HTTP client) to the local
+KaroX runtime.  Each known
 client is described by a declarative profile with an honest status; KaroX never
 claims support for a product that lacks a real end-to-end test.
 
@@ -76,8 +77,10 @@ class BridgeProfile:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or _SAFE_NAME.fullmatch(self.name) is None:
             raise ValueError("bridge profile name must contain 1-64 safe characters")
-        if self.transport not in {"streamable_http", "stdio"}:
-            raise ValueError("bridge transport must be streamable_http or stdio")
+        if self.transport not in {"streamable_http", "openapi", "stdio"}:
+            raise ValueError(
+                "bridge transport must be streamable_http, openapi, or stdio"
+            )
         if self.status not in _VALID_STATUSES:
             raise ValueError(
                 "bridge status must be tested, experimental, protocol_compatible, or planned"
@@ -110,7 +113,8 @@ class BridgeProfile:
 # Declarative registry of known hosted clients.  Statuses are honest:
 # - Notion: tested legacy integration covered by existing regression scripts.
 # - Generic Streamable HTTP: protocol-compatible transport, client-dependent.
-# - PromptQL: experimental (launcher/OpenAPI, no dedicated product E2E).
+# - ChatGPT/Claude Web: OAuth/DCR/PKCE contract tested locally, no live account run.
+# - PromptQL: local OpenAPI/Core wire E2E, no recorded live product run.
 # - HyperAgent: experimental (no verified dedicated path in repository).
 def known_bridge_profiles() -> List[BridgeProfile]:
     return [
@@ -142,14 +146,59 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             limitations=("Behavior depends on the remote client implementation.",),
         ),
         BridgeProfile(
-            name="promptql",
+            name="chatgpt-web",
             transport="streamable_http",
             status=BridgeStatus.EXPERIMENTAL,
-            description="PromptQL hosted agent bridge (launcher/OpenAPI-oriented).",
+            auth_scheme="oauth",
+            description=(
+                "OAuth remote MCP bridge from ChatGPT Web to selected KaroX tools."
+            ),
+            tunnel="public HTTPS URL or supported secure MCP tunnel",
+            persistent_url=True,
+            instructions=(
+                "Publish the bridge on a stable HTTPS URL, then add its /mcp URL "
+                "as a custom MCP app in ChatGPT developer mode. Complete the "
+                "KaroX password approval page when ChatGPT starts OAuth."
+            ),
+            limitations=(
+                "OAuth/DCR/PKCE is covered locally; no live ChatGPT workspace run is recorded.",
+                "Dynamic clients and grants are process-local and require reconnection after restart.",
+            ),
+        ),
+        BridgeProfile(
+            name="claude-web",
+            transport="streamable_http",
+            status=BridgeStatus.EXPERIMENTAL,
+            auth_scheme="oauth",
+            description=(
+                "OAuth remote MCP bridge from Claude Web to selected KaroX tools."
+            ),
+            tunnel="public HTTPS URL",
+            persistent_url=True,
+            instructions=(
+                "Publish the bridge on a stable HTTPS URL, add its /mcp URL under "
+                "Claude Settings > Connectors, and complete the KaroX password "
+                "approval page."
+            ),
+            limitations=(
+                "OAuth/DCR/PKCE is covered locally; no live Claude account run is recorded.",
+                "Dynamic clients and grants are process-local and require reconnection after restart.",
+            ),
+        ),
+        BridgeProfile(
+            name="promptql",
+            transport="openapi",
+            status=BridgeStatus.EXPERIMENTAL,
+            description="PromptQL hosted agent bridge to selected KaroX Core tools.",
             tunnel="cloudflare or tailscale funnel",
             persistent_url=False,
-            instructions="Connect PromptQL to the bridge URL with the bridge credential.",
-            limitations=("No dedicated product end-to-end test yet.",),
+            instructions=(
+                "Import the bridge /openapi.json URL as a PromptQL connector and "
+                "store the bridge credential in its protected Bearer or X-API-Key field."
+            ),
+            limitations=(
+                "The OpenAPI wire path is tested locally; no recorded live PromptQL run yet.",
+            ),
         ),
         BridgeProfile(
             name="hyperagent",
@@ -241,7 +290,10 @@ class BridgeCredentialStore:
             raise CredentialError(
                 f"cannot write bridge OS credential: {type(exc).__name__}"
             ) from exc
-        return {"reference": str(reference), "fingerprint": self.fingerprint(value)}
+        result = {"reference": str(reference), "fingerprint": self.fingerprint(value)}
+        if secret is None:
+            result["secret"] = value
+        return result
 
     def resolve(self, reference: str | BridgeCredentialReference) -> str:
         parsed = (
@@ -262,7 +314,6 @@ class BridgeCredentialStore:
         return value
 
     def rotate(self, name: str) -> dict[str, str]:
-        self.delete(name)
         return self.set(name)
 
     def delete(self, name: str) -> dict[str, str]:

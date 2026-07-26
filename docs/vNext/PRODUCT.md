@@ -41,8 +41,8 @@ Provider adapters and bridge adapters never execute local actions directly.
 | Surface | Current evidence | vNext status |
 | --- | --- | --- |
 | Notion MCP | Provider transformation, profile, transport, doctor, and gateway tests | Tested legacy bridge; must remain green during migration |
-| Generic Streamable HTTP MCP | FastMCP endpoint and host-security tests | Tested legacy transport; vNext profile planned |
-| PromptQL | Launcher/OpenAPI-oriented files and examples, no dedicated product E2E | Experimental |
+| Generic Streamable HTTP MCP | Authenticated wire E2E to built-in Core and proxied external MCP tools | Protocol-compatible vNext |
+| PromptQL | Importable OpenAPI bridge, session/context preflight, Core wire E2E; no live product run | Experimental |
 | HyperAgent | No verified dedicated implementation or E2E in this repository | Experimental |
 | Native model agent | No baseline implementation | In implementation |
 | External MCP client/proxy | No baseline implementation | Planned |

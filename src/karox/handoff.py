@@ -55,7 +55,8 @@ def _model_history(provider_history: Any) -> list[dict[str, Any]]:
     if not isinstance(provider_history, list):
         return []
     summary: list[dict[str, Any]] = []
-    for entry in provider_history[:128]:
+    entries = [entry for entry in provider_history if isinstance(entry, dict)][-128:]
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         role = entry.get("role")
@@ -67,17 +68,19 @@ def _model_history(provider_history: Any) -> list[dict[str, Any]]:
         tool_calls = entry.get("tool_calls")
         if isinstance(tool_calls, list):
             item["tool_calls"] = [
-                {"name": tc.get("name"), "id": tc.get("id")}
+                {"name": tc.get("name"), "id": tc.get("call_id") or tc.get("id")}
                 for tc in tool_calls
                 if isinstance(tc, dict)
             ][:16]
-        tool_result = entry.get("tool_result")
+        tool_result = entry.get("tool_result") or entry.get("result")
         if isinstance(tool_result, dict):
             item["tool_result"] = {
                 "ok": tool_result.get("ok"),
-                "command": tool_result.get("command"),
+                "command": entry.get("core_name") or tool_result.get("command"),
             }
         route = entry.get("route")
+        if role == "provider_audit":
+            route = {key: value for key, value in entry.items() if key != "role"}
         if isinstance(route, dict):
             item["route"] = dict(redact(route))
         usage = entry.get("usage")

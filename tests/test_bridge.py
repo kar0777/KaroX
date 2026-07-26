@@ -435,12 +435,60 @@ class BridgeCliTests(unittest.TestCase):
         names = [p["name"] for p in profiles]
         self.assertIn("notion", names)
         self.assertIn("hyperagent", names)
+        self.assertIn("chatgpt-web", names)
+        self.assertIn("claude-web", names)
         notion = next(p for p in profiles if p["name"] == "notion")
         self.assertEqual(notion["status"], "tested")
         promptql = next(p for p in profiles if p["name"] == "promptql")
         self.assertEqual(promptql["transport"], "openapi")
         hyperagent = next(p for p in profiles if p["name"] == "hyperagent")
         self.assertEqual(hyperagent["status"], "experimental")
+        chatgpt = next(p for p in profiles if p["name"] == "chatgpt-web")
+        claude = next(p for p in profiles if p["name"] == "claude-web")
+        self.assertEqual(chatgpt["auth_scheme"], "oauth")
+        self.assertEqual(claude["auth_scheme"], "oauth")
+        self.assertTrue(chatgpt["persistent_url"])
+
+    def test_oauth_web_profile_requires_public_https_origin(self) -> None:
+        repository = self.root / "repo"
+        repository.mkdir()
+        code, _, err = self._cli(
+            "bridge",
+            "serve",
+            "--repository",
+            str(repository),
+            "--session-id",
+            "missing",
+            "--profile",
+            "chatgpt-web",
+            "--tool",
+            "karox.repo.read_file",
+            "--credential",
+            "missing",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("require --public-url", err)
+
+        code, _, err = self._cli(
+            "bridge",
+            "serve",
+            "--repository",
+            str(repository),
+            "--session-id",
+            "missing",
+            "--profile",
+            "claude-web",
+            "--protocol",
+            "openapi",
+            "--public-url",
+            "https://karox.example",
+            "--tool",
+            "karox.repo.read_file",
+            "--credential",
+            "missing",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("require --protocol mcp", err)
 
     def test_bridge_show_unknown_fails(self) -> None:
         code, _, err = self._cli("bridge", "show", "nope", "--json")

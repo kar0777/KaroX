@@ -152,6 +152,40 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return value
 
 
+@contextlib.contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Serialize session state transitions across processes.
+
+    The lease token is only a fence when validation and replacement happen in
+    one critical section.  Keep the lock file separate from the replaceable
+    JSON documents so atomic renames cannot invalidate the OS lock.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class SessionStore:
     def __init__(self, root: Path):
         self.root = root.expanduser().resolve()
@@ -174,6 +208,9 @@ class SessionStore:
     def lease_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "lease.json"
 
+    def lock_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / ".state.lock"
+
     def create(
         self,
         repository: Path,
@@ -189,23 +226,24 @@ class SessionStore:
             raise SessionError(f"repository is not a directory: {repo}")
         sid = self._validate_id(session_id or uuid.uuid4().hex)
         target = self.state_path(sid)
-        if target.exists():
-            raise SessionError(f"session already exists: {sid}")
-        now = time.time()
-        record = SessionRecord(
-            session_id=sid,
-            repository=str(repo),
-            repo_fingerprint=repository_fingerprint(repo),
-            branch=branch,
-            access_profile=access_profile.value,
-            task=str(redact(task)),
-            created_at=now,
-            updated_at=now,
-        )
-        payload = record.to_dict()
-        _atomic_json(target, payload)
-        record.checksum = payload["checksum"]
-        return record
+        with _exclusive_file_lock(self.lock_path(sid)):
+            if target.exists():
+                raise SessionError(f"session already exists: {sid}")
+            now = time.time()
+            record = SessionRecord(
+                session_id=sid,
+                repository=str(repo),
+                repo_fingerprint=repository_fingerprint(repo),
+                branch=branch,
+                access_profile=access_profile.value,
+                task=str(redact(task)),
+                created_at=now,
+                updated_at=now,
+            )
+            payload = record.to_dict()
+            _atomic_json(target, payload)
+            record.checksum = payload["checksum"]
+            return record
 
     def load(self, session_id: str) -> SessionRecord:
         return SessionRecord.from_dict(_read_json(self.state_path(session_id)))
@@ -219,56 +257,71 @@ class SessionStore:
                 continue
         return records
 
+    def revoke(self, session_id: str) -> SessionRecord:
+        """Atomically revoke a session and fence any active mutation owner."""
+        with _exclusive_file_lock(self.lock_path(session_id)):
+            record = self.load(session_id)
+            record.revoked = True
+            record.status = "revoked"
+            payload = record.to_dict()
+            payload["revision"] = record.revision + 1
+            payload["updated_at"] = time.time()
+            payload["checksum"] = _checksum(payload)
+            _atomic_json(self.state_path(session_id), payload)
+            lease_path = self.lease_path(session_id)
+            try:
+                lease_path.unlink()
+            except FileNotFoundError:
+                pass
+            return SessionRecord.from_dict(payload)
+
     def acquire(
         self, session_id: str, owner: str, ttl_seconds: float = 30.0
     ) -> MutationLease:
         if ttl_seconds < 5 or ttl_seconds > 3600:
             raise ValueError("lease TTL must be between 5 and 3600 seconds")
-        record = self.load(session_id)
-        path = self.lease_path(session_id)
-        now = time.time()
-        lease = MutationLease(
-            session_id=session_id,
-            session_revision=record.revision,
-            owner=owner,
-            fencing_token=uuid.uuid4().hex,
-            pid=os.getpid(),
-            hostname=socket.gethostname(),
-            acquired_at=now,
-            expires_at=now + ttl_seconds,
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            current = _read_json(path)
-            if float(current.get("expires_at", 0)) >= now:
-                raise SessionBusy(
-                    f"session {session_id} is locked by {current.get('owner', 'unknown')}"
-                )
-            # Expiry is authoritative. A still-running former owner is fenced by
-            # the replacement token and can no longer commit a mutation.
-            stale = path.with_name(f"lease.stale.{uuid.uuid4().hex}.json")
-            try:
+        with _exclusive_file_lock(self.lock_path(session_id)):
+            record = self.load(session_id)
+            if record.revoked:
+                raise SessionError(f"session has been revoked: {session_id}")
+            path = self.lease_path(session_id)
+            now = time.time()
+            if path.exists():
+                current = _read_json(path)
+                if float(current.get("expires_at", 0)) >= now:
+                    raise SessionBusy(
+                        f"session {session_id} is locked by {current.get('owner', 'unknown')}"
+                    )
+                stale = path.with_name(f"lease.stale.{uuid.uuid4().hex}.json")
                 os.replace(path, stale)
-            except FileNotFoundError:
-                pass
-            return self.acquire(session_id, owner, ttl_seconds)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(lease.to_dict(), handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return lease
+            lease = MutationLease(
+                session_id=session_id,
+                session_revision=record.revision,
+                owner=owner,
+                fencing_token=uuid.uuid4().hex,
+                pid=os.getpid(),
+                hostname=socket.gethostname(),
+                acquired_at=now,
+                expires_at=now + ttl_seconds,
+            )
+            _atomic_json(path, lease.to_dict())
+            return lease
 
-    def validate_lease(self, lease: MutationLease) -> None:
+    def _validate_lease_unlocked(self, lease: MutationLease) -> None:
         if not isinstance(lease, MutationLease):
             raise SessionBusy("a valid mutation lease is required")
-        current = _read_json(self.lease_path(lease.session_id))
+        try:
+            current = _read_json(self.lease_path(lease.session_id))
+        except SessionError as exc:
+            raise SessionBusy("mutation lease is no longer active") from exc
         if current.get("fencing_token") != lease.fencing_token:
             raise SessionBusy("mutation lease fencing token is no longer current")
         if float(current.get("expires_at", 0)) < time.time():
             raise SessionBusy("mutation lease expired")
+
+    def validate_lease(self, lease: MutationLease) -> None:
+        with _exclusive_file_lock(self.lock_path(lease.session_id)):
+            self._validate_lease_unlocked(lease)
 
     def validate_repository(self, record: SessionRecord, repository: Path) -> None:
         try:
@@ -284,25 +337,27 @@ class SessionStore:
     def heartbeat(self, lease: MutationLease, ttl_seconds: float = 30.0) -> MutationLease:
         if ttl_seconds < 5 or ttl_seconds > 3600:
             raise ValueError("lease TTL must be between 5 and 3600 seconds")
-        self.validate_lease(lease)
-        expires_at = time.time() + ttl_seconds
-        session_revision = self.load(lease.session_id).revision
-        payload = lease.to_dict()
-        payload["expires_at"] = expires_at
-        payload["session_revision"] = session_revision
-        _atomic_json(self.lease_path(lease.session_id), payload)
-        lease.expires_at = expires_at
-        lease.session_revision = session_revision
-        return lease
+        with _exclusive_file_lock(self.lock_path(lease.session_id)):
+            self._validate_lease_unlocked(lease)
+            expires_at = time.time() + ttl_seconds
+            session_revision = self.load(lease.session_id).revision
+            payload = lease.to_dict()
+            payload["expires_at"] = expires_at
+            payload["session_revision"] = session_revision
+            _atomic_json(self.lease_path(lease.session_id), payload)
+            lease.expires_at = expires_at
+            lease.session_revision = session_revision
+            return lease
 
     def release(self, lease: MutationLease) -> None:
-        path = self.lease_path(lease.session_id)
-        try:
-            current = _read_json(path)
-            if current.get("fencing_token") == lease.fencing_token:
-                path.unlink()
-        except SessionError:
-            return
+        with _exclusive_file_lock(self.lock_path(lease.session_id)):
+            path = self.lease_path(lease.session_id)
+            try:
+                current = _read_json(path)
+                if current.get("fencing_token") == lease.fencing_token:
+                    path.unlink()
+            except SessionError:
+                return
 
     def save(
         self,
@@ -310,25 +365,26 @@ class SessionStore:
         expected_revision: int,
         lease: MutationLease,
     ) -> SessionRecord:
-        self.validate_lease(lease)
-        if record.session_id != lease.session_id:
-            raise SessionError("lease and session record do not match")
-        current = self.load(record.session_id)
-        if current.revision != expected_revision:
-            raise StaleSessionRevision(
-                f"expected revision {expected_revision}, found {current.revision}"
-            )
-        next_revision = expected_revision + 1
-        updated_at = time.time()
-        payload = record.to_dict()
-        payload["revision"] = next_revision
-        payload["updated_at"] = updated_at
-        payload["checksum"] = _checksum(payload)
-        _atomic_json(self.state_path(record.session_id), payload)
-        record.revision = next_revision
-        record.updated_at = updated_at
-        record.checksum = payload["checksum"]
-        return record
+        with _exclusive_file_lock(self.lock_path(lease.session_id)):
+            self._validate_lease_unlocked(lease)
+            if record.session_id != lease.session_id:
+                raise SessionError("lease and session record do not match")
+            current = self.load(record.session_id)
+            if current.revision != expected_revision:
+                raise StaleSessionRevision(
+                    f"expected revision {expected_revision}, found {current.revision}"
+                )
+            next_revision = expected_revision + 1
+            updated_at = time.time()
+            payload = record.to_dict()
+            payload["revision"] = next_revision
+            payload["updated_at"] = updated_at
+            payload["checksum"] = _checksum(payload)
+            _atomic_json(self.state_path(record.session_id), payload)
+            record.revision = next_revision
+            record.updated_at = updated_at
+            record.checksum = payload["checksum"]
+            return record
 
     @contextlib.contextmanager
     def mutate(

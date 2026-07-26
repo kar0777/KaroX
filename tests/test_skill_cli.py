@@ -242,6 +242,8 @@ class SkillCliTests(unittest.TestCase):
             "https://provider.example/v1",
             "--session-id",
             "invalid-skill",
+            "--verification-command",
+            '["python", "-c", "print(\"ok\")"]',
             "--skill",
             "invalid",
             "--json",

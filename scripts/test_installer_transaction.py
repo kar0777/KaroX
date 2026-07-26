@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 installer = (ROOT / "install.karox.ps1").read_text(encoding="utf-8-sig")
+posix_installer = (ROOT / "install.karox.sh").read_text(encoding="utf-8")
 guard = (ROOT / "scripts" / "install_guard.ps1").read_text(encoding="utf-8-sig")
 admin = (ROOT / "scripts" / "karox_admin.py").read_text(encoding="utf-8")
 patcher = (ROOT / "scripts" / "patch_notion_provider.py").read_text(encoding="utf-8")
@@ -26,6 +27,16 @@ assert 'Promote-StagedApp' in activation_flow
 # The guard must stop the real v4 runtime, including app_entry and watchdog.
 assert 'app_entry:app' in guard
 assert 'karox_supervisor\\.py' in guard
+assert 'pip install --upgrade --no-deps $Root' in installer
+assert 'karox-vnext.ps1' in installer
+assert '& (Join-Path $AppRoot ".venv\\Scripts\\python.exe") -m karox.cli @args' in installer
+assert '& (Join-Path $PSScriptRoot "karox.ps1") @args' in installer
+assert 'powershell -NoProfile -ExecutionPolicy Bypass -File $KaroXPs1' in installer
+assert 'pip install --upgrade --no-deps "$ROOT"' in posix_installer
+assert 'KAROX_VNEXT_SHIM' in posix_installer
+assert 'exec "$KAROX_PYTHON" -m karox.cli "$@"' in posix_installer
+assert 'exec "$(dirname "$0")/karox" "$@"' in posix_installer
+assert 'then exec "$KAROX_SHIM"' in posix_installer
 assert 'Wait-UpdateParentExit' in guard
 assert 'app-lock' in guard
 

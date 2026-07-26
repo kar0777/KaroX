@@ -335,7 +335,7 @@ class SkillCatalogTests(unittest.TestCase):
         )
         metadata = SkillCatalog(
             self.repository, global_directory=self.root / "none"
-        ).get("permissions")
+        ).load("permissions").metadata
         selection = skill_selection(
             metadata,
             {
@@ -359,6 +359,46 @@ class SkillCatalogTests(unittest.TestCase):
         changed["metadata_sha256"] = "0" * 64
         with self.assertRaisesRegex(SkillError, "metadata_sha256"):
             validate_selection(metadata, changed)
+
+    def test_permission_grant_is_invalidated_by_body_or_reference_change(self) -> None:
+        source = self.repository / ".karox" / "skills"
+        directory = self.write_skill(
+            source,
+            "grant-digest",
+            metadata="permissions: [repo.read]\nfiles: [reference.txt]",
+            body="Original instructions.\n",
+            references={"reference.txt": "original\n"},
+        )
+        first = SkillCatalog(
+            self.repository, global_directory=self.root / "none"
+        ).load("grant-digest").metadata
+        selection = skill_selection(
+            first, {Capability.REPO_READ: SkillPermission.ALLOW}
+        )
+
+        manifest = directory / "SKILL.md"
+        manifest.write_bytes(
+            manifest.read_bytes().replace(
+                b"Original instructions.", b"Changed instructions."
+            )
+        )
+        changed_body = SkillCatalog(
+            self.repository, global_directory=self.root / "none"
+        ).load("grant-digest").metadata
+        with self.assertRaisesRegex(SkillError, "content_sha256"):
+            validate_selection(changed_body, selection)
+
+        manifest.write_bytes(
+            manifest.read_bytes().replace(
+                b"Changed instructions.", b"Original instructions."
+            )
+        )
+        (directory / "reference.txt").write_text("changed\n", encoding="utf-8")
+        changed_reference = SkillCatalog(
+            self.repository, global_directory=self.root / "none"
+        ).load("grant-digest").metadata
+        with self.assertRaisesRegex(SkillError, "content_sha256"):
+            validate_selection(changed_reference, selection)
 
     def test_validation_metadata_is_inert_prompt_data(self) -> None:
         source = self.repository / ".karox" / "skills"

@@ -85,8 +85,9 @@ class ProviderCliTests(unittest.TestCase):
     def test_credential_value_never_reaches_output_or_registry(self) -> None:
         secret = "sk-test-secret-that-must-never-leak"
         store = CredentialStore(MemoryCredentials())
-        with patch("karox.cli.CredentialStore", return_value=store), patch(
-            "sys.stdin", io.StringIO(secret + "\n")
+        with (
+            patch("karox.cli.CredentialStore", return_value=store),
+            patch("sys.stdin", io.StringIO(secret + "\n")),
         ):
             code, stdout, stderr = self.invoke(
                 "credential", "set", "openai", "--stdin", "--json"
@@ -149,12 +150,61 @@ class ProviderCliTests(unittest.TestCase):
         code, _, stderr = self.invoke("provider", "remove", "local")
         self.assertEqual(code, 2)
         self.assertIn("use cascade", stderr)
-        code, _, stderr = self.invoke(
-            "provider", "remove", "local", "--cascade"
-        )
+        code, _, stderr = self.invoke("provider", "remove", "local", "--cascade")
         self.assertEqual(code, 0, stderr)
         registry = ProviderRegistry(self.root / "config" / "vnext" / "providers.json")
         self.assertIsNone(registry.selected_model())
+
+    def test_native_provider_presets_and_plural_model_alias_commands(self) -> None:
+        code, stdout, stderr = self.invoke("provider", "presets", "--json")
+        self.assertEqual(code, 0, stderr)
+        presets = {item["preset_id"]: item for item in json.loads(stdout)}
+        for expected in (
+            "routing-run",
+            "omniakey",
+            "apimaster",
+            "chutes",
+            "empiriolabs",
+            "puter",
+            "tinfoil",
+            "vivgrid",
+            "merge-gateway",
+            "openrouter",
+        ):
+            self.assertIn(expected, presets)
+        self.assertFalse(presets["puter"]["installable"])
+
+        code, stdout, stderr = self.invoke(
+            "provider", "add-preset", "openrouter", "--json"
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["base_url"], "https://openrouter.ai/api/v1")
+        code, stdout, stderr = self.invoke(
+            "models",
+            "map",
+            "sol",
+            "provider/actual-sol-id",
+            "--provider",
+            "openrouter",
+            "--json",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("sol", json.loads(stdout)["aliases"])
+
+        code, stdout, stderr = self.invoke(
+            "models", "list", "--provider", "openrouter", "--json"
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)[0]["model_id"], "provider/actual-sol-id")
+
+    def test_undocumented_preset_requires_user_documented_contract(self) -> None:
+        code, _, stderr = self.invoke("provider", "add-preset", "puter")
+        self.assertEqual(code, 2)
+        self.assertIn("documented specialized adapter", stderr)
+
+        code, _, stderr = self.invoke("provider", "add-preset", "routing-run")
+        self.assertEqual(code, 2)
+        self.assertIn("requires --base-url", stderr)
 
     def test_route_splits_only_at_first_slash(self) -> None:
         target = _route("provider/org/model/v1")
@@ -185,25 +235,19 @@ class ProviderCliTests(unittest.TestCase):
                     "https://provider.example/v1",
                     "--session-id",
                     session_id,
+                    "--verification-command",
+                    '["python", "-c", "print("ok")"]',
                     *option,
                 )
 
                 self.assertEqual(code, 2)
                 self.assertIn(option[0], stderr)
                 self.assertFalse(
-                    (
-                        self.root
-                        / "runtime"
-                        / "vnext"
-                        / "sessions"
-                        / session_id
-                    ).exists()
+                    (self.root / "runtime" / "vnext" / "sessions" / session_id).exists()
                 )
 
     def test_invalid_routes_and_limits_do_not_create_session_state(self) -> None:
-        registry = ProviderRegistry(
-            self.root / "config" / "vnext" / "providers.json"
-        )
+        registry = ProviderRegistry(self.root / "config" / "vnext" / "providers.json")
         registry.put_provider(
             ProviderRecord(
                 provider_id="local",
@@ -258,18 +302,14 @@ class ProviderCliTests(unittest.TestCase):
                     "work",
                     "--session-id",
                     session_id,
+                    "--verification-command",
+                    '["python", "-c", "print("ok")"]',
                     *options,
                 )
 
                 self.assertEqual(code, 2)
                 self.assertFalse(
-                    (
-                        self.root
-                        / "runtime"
-                        / "vnext"
-                        / "sessions"
-                        / session_id
-                    ).exists()
+                    (self.root / "runtime" / "vnext" / "sessions" / session_id).exists()
                 )
 
     def test_agent_routing_falls_back_and_resumed_budget_preflights(self) -> None:
@@ -309,8 +349,9 @@ class ProviderCliTests(unittest.TestCase):
             max_cost=None,
             currency=None,
         )
-        with patch("karox.cli._registry", return_value=registry), patch(
-            "karox.cli.ProviderFactory", Factory
+        with (
+            patch("karox.cli._registry", return_value=registry),
+            patch("karox.cli.ProviderFactory", Factory),
         ):
             routed, _ = _agent_provider(args, SimpleNamespace(usage={}), AgentLimits())
             result = routed.complete(

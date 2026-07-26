@@ -38,7 +38,8 @@ themselves capabilities.
 - Correlation IDs across provider, bridge, Core, MCP, session, and evidence.
 - Emergency session revoke and bridge-key rotation.
 - Explicit target-window constraints for desktop input.
-- Explicit MCP tool allowlists; no implicit exposure after installation.
+- Separate explicit allowlists for built-in Core tools and external MCP tools;
+  no implicit exposure after installation.
 
 ## Credentials
 
@@ -50,38 +51,52 @@ plaintext fallback.
 Secret entry uses a protected prompt/stdin channel, never a command argument.
 Logs, errors, HTTP headers, support bundles, session snapshots, evidence, and MCP
 results pass through structural and value-based redaction. User-visible identity
-is a masked fingerprint. Rotation writes the new secret before invalidating the
-old reference and is audit-recorded without values.
+is a masked fingerprint. Rotation overwrites the stored value atomically from
+the runtime's perspective; the wire server resolves it on every request so the
+old bearer stops authorizing immediately.
 
 ## Network boundaries
 
 - Local servers bind loopback by default.
 - Public tunnels require an authenticated bridge profile and validated hosts.
 - Bridge credentials are distinct from provider and external-MCP credentials.
+- MCP and OpenAPI bridge requests use the same dynamically resolved credential;
+  OpenAPI accepts exactly one of Bearer or `X-API-Key` authentication.
+- ChatGPT/Claude web profiles expose OAuth metadata only for one configured
+  HTTPS origin and MCP resource. They require DCR, Authorization Code, PKCE
+  S256, exact redirect/resource binding, short-lived access tokens, and rotating
+  refresh tokens. Refresh replay revokes the token family.
+- The bridge credential is the OAuth approval-page password for web profiles;
+  it is never returned to the MCP client. OAuth state is process-local, so a
+  restart is also a full grant revocation.
 - Redirects cannot forward authorization across origins.
 - Custom provider URLs are validated; local/private endpoints require an
   explicit profile and cannot silently become exfiltration fallbacks.
 - A provider fallback must satisfy the session privacy boundary.
 
-## Approval queue
+## Approval state
 
-Approvals name the exact origin, capability, target, effect, expiry, and whether
-they are one-shot or session-scoped. The queue is visible in line mode and TUI.
-Approval is invalid after origin, arguments, repository fingerprint, or session
-lease changes.
+Core supports origin-bound, expiring one-shot capability tokens for the
+always-explicit operations. A general visible approval queue in line mode/TUI
+is not implemented; the documentation does not treat it as a release feature.
 
 ## Audit and evidence
 
-Audit records are append-only diagnostics with sequence, timestamp, origin,
-correlation, decision, redacted parameters, and result class. Evidence records
-are immutable references to verification artifacts such as test results, Git
-diff hashes, and screenshots. Neither store contains credentials. Audit is not
-a substitute for authorization or transactional state.
+Audit records are bounded, rotated JSONL diagnostics with timestamp, origin,
+correlation, decision, redacted parameters, and result class. They are not a
+tamper-evident ledger. Evidence records are checksum-protected session data with
+artifact hashes, not an external immutable store. Neither contains credentials;
+neither substitutes for authorization or transactional state.
 
 ## Threat-driven tests
 
 - Traversal, absolute path, symlink, and repository-swap attempts.
 - Empty/wrong/replayed/rotated bridge credentials.
+- OAuth metadata, hostile redirect registration, wrong PKCE/resource/client
+  bindings, one-use authorization codes, refresh rotation, and replay
+  revocation.
+- OpenAPI schema exposure, session binding, missing mutation idempotency, and
+  built-in Core read/write calls over a real HTTP server.
 - Cross-origin capability escalation.
 - Concurrent mutation and stale lease takeover.
 - Duplicate mutations after transport loss.
@@ -92,8 +107,8 @@ a substitute for authorization or transactional state.
 
 ## Known baseline gaps
 
-The legacy server has useful confinement, redaction, audit, and no-push rules but
-centralizes policy and execution in import-time global state. Origin identity,
-capability tokens, shared session leases, provider-key isolation, and MCP proxy
-isolation are vNext work. Phase 0 fixed missing-key startup so import succeeds
-while authentication fails closed; this is covered by `test_app_entry.py`.
+The legacy server still centralizes policy and execution in import-time global
+state and does not share vNext origin identities or leases. vNext implements
+those controls in `src/karox`; the legacy path remains contained for coexistence
+and is not represented as having the same isolation. Missing-key startup fails
+closed and remains covered by `test_app_entry.py`.

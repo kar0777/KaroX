@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from typing import Any, Dict, Iterator, Mapping, Optional
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
@@ -983,6 +984,7 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
     ) -> Iterator[ModelEvent]:
         completed = False
         response_id: Optional[str] = None
+        call_scope = uuid.uuid4().hex
         next_tool_index = 0
         for _event_name, data in self._sse_records(response, deadline):
             value = self._json_event(data, response.status_code)
@@ -1034,7 +1036,8 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                         raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini function call is invalid")
                     index = next_tool_index
                     next_tool_index += 1
-                    call_id = f"gemini-call-{index}"
+                    response_scope = response_id or "no-response-id"
+                    call_id = f"gemini-call-{call_scope}-{response_scope}-{index}"
                     yield ModelEvent(
                         ModelEventKind.TOOL_CALL_DELTA,
                         tool_call_delta=ToolCallDelta(

@@ -74,6 +74,63 @@ mutations require `_meta.karoxIdempotencyKey`. `--server SERVER_ID` additionally
 proxies an external MCP server that was already selected and allowed for the
 session.
 
+### ChatGPT Web and Claude Web over OAuth MCP
+
+The `chatgpt-web` and `claude-web` bridge profiles implement the remote-MCP
+pattern used by [AgentDock](https://github.com/uvwt/agentdock): OAuth protected
+resource discovery, authorization-server metadata, Dynamic Client
+Registration, Authorization Code with PKCE S256, access tokens, and rotating
+refresh tokens. AgentDock is an MCP runtime, not an LLM inference provider, so
+these profiles belong to `bridge`, not to the model-provider registry.
+
+The primary path is one CLI command. It creates a repository-bound session and
+temporary approval credential, starts a Cloudflare Quick Tunnel, starts the
+OAuth MCP bridge with the tunnel's exact HTTPS origin, and supervises both
+processes:
+
+```powershell
+karox bridge connect chatgpt-web --repository . --write
+karox bridge connect claude-web --repository . --write
+```
+
+Without `--write`, the command exposes only the safe read-only repository and
+Git tool set under a `read_only` session. `--write` adds `edit_file` and
+`write_file` and selects `workspace_write`. The command prints the generated
+MCP URL and temporary bridge approval password. Add that URL to the web client:
+
+- ChatGPT: create a custom MCP app in developer mode and scan its tools.
+- Claude: open **Settings > Connectors > Add custom connector**.
+
+Do **not** paste the approval password into the connector form. The browser
+opens KaroX's approval page during OAuth; verify the client and resource, then
+enter the password there. Press `Ctrl+C` in the CLI to stop the bridge and
+tunnel and remove the temporary credential. Only the safe defaults, tools
+named with `--tool`, and the two write tools requested by `--write` are
+exposed.
+
+`cloudflared` is installed by the Windows KaroX installer when accepted, or can
+be selected explicitly with `--cloudflared PATH`. For an existing stable
+reverse proxy, keep the lifecycle in the CLI but replace the managed Quick
+Tunnel:
+
+```powershell
+karox bridge connect chatgpt-web --repository . --write `
+  --tunnel custom --public-url https://device.example.com
+```
+
+The lower-level `session create`, `bridge credential set`, and `bridge serve`
+commands remain available for automation that intentionally manages each
+resource separately; they are not required for the normal web connection.
+
+OAuth clients and grants are process-local in this first implementation.
+Restarting the bridge intentionally invalidates them, so the web connector must
+authenticate again. A Quick Tunnel also receives a new public URL on each run;
+the exact URL is bound before the bridge starts, but the connector must be
+updated after a restart. Use `--tunnel custom` with a stable HTTPS origin when
+the URL must survive restarts. The wire contract is tested locally, but no live
+ChatGPT or Claude account run is claimed yet; both profiles therefore remain
+`experimental`.
+
 ## 3. CLI to a hosted web agent
 
 A hosted agent that exposes a documented invocation API can be called from the
@@ -130,7 +187,9 @@ syntax. Type `/` for the keyboard command menu and run `/connect` to choose API,
 site, or both. API setup can discover models and
 advertised token limits with `F5`; the user reviews or edits them, then `F10`
 performs a real minimal request before activation. `Ctrl+B` directly opens the
-PromptQL, Notion, or generic MCP/OpenAPI bridge screen. When `cloudflared` is
-installed, it can create the public HTTPS connector URL automatically. The
-explicit scriptable equivalent remains `karox tui --repository .`; `karox-vnext`
-is only a compatibility alias.
+ChatGPT Web, Claude Web, PromptQL, Notion, or generic MCP/OpenAPI bridge screen.
+The `/connect` website choice names ChatGPT and Claude explicitly and their
+profiles invoke the same managed `bridge connect` lifecycle. When
+`cloudflared` is installed, it creates the public HTTPS connector URL
+automatically. The explicit scriptable equivalent remains
+`karox tui --repository .`; `karox-vnext` is only a compatibility alias.

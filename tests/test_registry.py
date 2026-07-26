@@ -96,8 +96,9 @@ class ProviderRegistryTests(unittest.TestCase):
             model("second", aliases=("shared",)),
             model("third", aliases=("third",)),
         ):
-            with self.subTest(record=record), self.assertRaisesRegex(
-                RegistryError, "colliding model IDs or aliases"
+            with (
+                self.subTest(record=record),
+                self.assertRaisesRegex(RegistryError, "colliding model IDs or aliases"),
             ):
                 self.registry.put_model(record)
 
@@ -135,8 +136,9 @@ class ProviderRegistryTests(unittest.TestCase):
             {"query": {"api-version": 1}},
         )
         for options in cases:
-            with self.subTest(options=options), self.assertRaisesRegex(
-                ValueError, "must contain only text"
+            with (
+                self.subTest(options=options),
+                self.assertRaisesRegex(ValueError, "must contain only text"),
             ):
                 ProviderRecord(
                     provider_id="typed",
@@ -154,12 +156,23 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(selected.model_id, "model-a")
         reloaded = ProviderRegistry(self.path).selected_model()
         assert reloaded is not None
-        self.assertEqual((reloaded.provider_id, reloaded.model_id), ("local", "model-a"))
+        self.assertEqual(
+            (reloaded.provider_id, reloaded.model_id), ("local", "model-a")
+        )
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(
             payload["selected_model"],
             {"provider_id": "local", "model_id": "model-a"},
         )
+
+    def test_map_alias_creates_and_moves_provider_scoped_alias(self) -> None:
+        self.registry.put_provider(provider())
+        first = self.registry.map_alias("local", "sol", "actual-sol-a")
+        self.assertEqual(first.aliases, ("sol",))
+        second = self.registry.map_alias("local", "sol", "actual-sol-b")
+        self.assertIn("sol", second.aliases)
+        self.assertNotIn("sol", self.registry.model("local", "actual-sol-a").aliases)
+        self.assertEqual(self.registry.model("local", "sol").model_id, "actual-sol-b")
 
     def test_removal_requires_cascade_and_clears_selection(self) -> None:
         self.registry.put_provider(provider())

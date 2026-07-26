@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hmac
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Optional
 
 import anyio
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import Tool
+from mcp.types import Tool, ToolAnnotations
 from starlette.responses import Response
 
 from .hosted_bridge import HostedToolRuntime
@@ -17,16 +17,28 @@ from .hosted_bridge import HostedToolRuntime
 
 def build_proxy_asgi_app(
     proxy: HostedToolRuntime,
-    bearer_token: str | Callable[[], str],
+    bearer_token: str | Callable[[], str] | None = None,
     *,
     path: str = "/mcp",
     deadline_seconds: float = 30.0,
+    bearer_authorizer: Optional[Callable[[str], bool]] = None,
+    unauthorized_headers: Optional[Mapping[str, str]] = None,
 ) -> Any:
     """Expose selected Core and/or proxied tools as authenticated MCP."""
-    if not isinstance(bearer_token, str) and not callable(bearer_token):
+    if (bearer_token is None) == (bearer_authorizer is None):
+        raise ValueError(
+            "bridge requires exactly one bearer token resolver or authorizer"
+        )
+    if bearer_token is not None and not isinstance(bearer_token, str) and not callable(
+        bearer_token
+    ):
         raise ValueError("bridge bearer token must be a string or resolver")
+    if bearer_authorizer is not None and not callable(bearer_authorizer):
+        raise ValueError("bridge bearer authorizer must be callable")
 
     def resolve_token() -> str:
+        if bearer_token is None:
+            raise ValueError("bridge static bearer token is not configured")
         value = bearer_token() if callable(bearer_token) else bearer_token
         if (
             not isinstance(value, str)
@@ -37,7 +49,8 @@ def build_proxy_asgi_app(
             raise ValueError("bridge bearer token is invalid")
         return value
 
-    resolve_token()
+    if bearer_token is not None:
+        resolve_token()
     if not isinstance(path, str) or not path.startswith("/") or "?" in path:
         raise ValueError("bridge MCP path must be an absolute URL path")
     if not 0.1 <= float(deadline_seconds) <= 3600.0:
@@ -53,6 +66,12 @@ def build_proxy_asgi_app(
                 name=item.name,
                 description=item.description,
                 inputSchema=item.input_schema,
+                annotations=ToolAnnotations(
+                    readOnlyHint=item.read_only,
+                    destructiveHint=not item.read_only,
+                    idempotentHint=item.read_only,
+                    openWorldHint=False,
+                ),
             )
             for item in descriptors
         ]
@@ -112,11 +131,23 @@ def build_proxy_asgi_app(
         if len(values) != 1:
             return False
         try:
-            token = await anyio.to_thread.run_sync(resolve_token)
-            expected = f"Bearer {token}".encode("utf-8")
+            scheme, supplied = values[0].decode("utf-8").split(" ", 1)
+        except (UnicodeDecodeError, ValueError):
+            return False
+        if scheme.lower() != "bearer" or not supplied:
+            return False
+        if bearer_authorizer is not None:
+            try:
+                return bool(
+                    await anyio.to_thread.run_sync(bearer_authorizer, supplied)
+                )
+            except Exception:
+                return False
+        try:
+            expected = await anyio.to_thread.run_sync(resolve_token)
         except Exception:
             return False
-        return hmac.compare_digest(values[0], expected)
+        return hmac.compare_digest(supplied, expected)
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         scope_type = scope.get("type")
@@ -134,7 +165,11 @@ def build_proxy_asgi_app(
             await Response("not found", status_code=404)(scope, receive, send)
             return
         if not await authorized(scope):
-            await Response("unauthorized", status_code=401)(scope, receive, send)
+            await Response(
+                "unauthorized",
+                status_code=401,
+                headers=dict(unauthorized_headers or {}),
+            )(scope, receive, send)
             return
         await manager.handle_request(scope, receive, send)
 

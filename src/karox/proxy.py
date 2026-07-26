@@ -15,8 +15,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import hashlib
+import os
+from typing import Any, Dict, List, Optional, Sequence
 
+from .core import CoreRuntime
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
@@ -25,9 +28,9 @@ from .mcp_client import (
     McpServerRecord,
     McpToolDescriptor,
 )
-from .models import Capability, Origin, OriginKind
+from .models import Capability, CoreCommand, Origin, OriginKind
 from .policy import CapabilityPolicy
-from .sessions import SessionRecord
+from .sessions import SessionStore
 
 
 class ProxyError(RuntimeError):
@@ -73,35 +76,59 @@ class McpProxy:
         self,
         client: McpClient,
         repository: Path,
-        session: SessionRecord,
+        sessions: SessionStore,
+        session_id: str,
         allowed_server_ids: Sequence[str],
         *,
+        policy: CapabilityPolicy,
         hosted_origin: Optional[Origin] = None,
+        proxied_origin: Optional[Origin] = None,
+        audit_path: Optional[Path] = None,
     ) -> None:
         if hosted_origin is None:
             hosted_origin = Origin(OriginKind.HOSTED_CLIENT, "bridge-proxy")
         if hosted_origin.kind is not OriginKind.HOSTED_CLIENT:
             raise ProxyAccessDenied("proxy origin must be a hosted client")
+        if proxied_origin is None:
+            proxied_origin = Origin(OriginKind.PROXIED_MCP, f"bridge-proxy-{session_id}")
+        if proxied_origin.kind is not OriginKind.PROXIED_MCP:
+            raise ProxyAccessDenied("external proxy origin must be proxied MCP")
         self.client = client
         self.repository = repository.resolve(strict=True)
-        self.session = session
+        self.sessions = sessions
+        self.session_id = session_id
+        self.policy = policy
         self.hosted_origin = hosted_origin
-        self._allowed = list(dict.fromkeys(allowed_server_ids))
+        self.proxied_origin = proxied_origin
+        self.audit_path = audit_path
+        self._allowed = list(allowed_server_ids)
         if not self._allowed:
             raise ProxyAccessDenied("proxy allowlist must not be empty")
+        if len(self._allowed) != len(set(self._allowed)):
+            raise ProxyAccessDenied("proxy allowlist contains duplicate servers")
         self._binding: Optional[McpRuntimeBinding] = None
         self._descriptors: List[McpToolDescriptor] = []
         self._servers: List[McpServerRecord] = []
-        self._policy: Optional[CapabilityPolicy] = None
+        self._session_revision: Optional[int] = None
 
     def _session_selection(self, server_id: str) -> dict[str, Any]:
-        for raw in self.session.mcp_servers:
+        session = self.sessions.load(self.session_id)
+        self.sessions.validate_repository(session, self.repository)
+        if session.revoked:
+            raise ProxyAccessDenied("session access has been revoked")
+        for raw in session.mcp_servers:
             if isinstance(raw, dict) and raw.get("server_id") == server_id:
                 return raw
         raise ProxyAccessDenied(f"server is not selected for this session: {server_id}")
 
     def _build(self) -> None:
-        if self._binding is not None:
+        self.policy.require(self.hosted_origin, Capability.MCP_CALL)
+        self.policy.require(self.proxied_origin, Capability.MCP_CALL)
+        session = self.sessions.load(self.session_id)
+        self.sessions.validate_repository(session, self.repository)
+        if session.revoked:
+            raise ProxyAccessDenied("session access has been revoked")
+        if self._binding is not None and self._session_revision == session.revision:
             return
         seen: set[str] = set()
         servers: List[McpServerRecord] = []
@@ -145,6 +172,7 @@ class McpProxy:
         )
         self._descriptors = descriptors
         self._servers = servers
+        self._session_revision = session.revision
 
     def descriptors(self) -> List[ProxyToolDescriptor]:
         """Return the secret-free tools visible to the hosted client."""
@@ -157,17 +185,13 @@ class McpProxy:
             for item in self._descriptors
         ]
 
-    def ensure_policy(self, policy: CapabilityPolicy) -> None:
-        """Attach a hosted-client policy and verify the MCP_CALL capability."""
-        decision = policy.require(self.hosted_origin, Capability.MCP_CALL)
-        self._policy = policy
-
     def execute(
         self,
         tool_name: str,
         arguments: Dict[str, Any],
         *,
-        policy: Optional[CapabilityPolicy] = None,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = 30.0,
     ) -> dict[str, Any]:
         """Run one proxied tool call under both authorization boundaries.
 
@@ -176,17 +200,47 @@ class McpProxy:
         """
         self._build()
         assert self._binding is not None
-        active = policy or self._policy
-        if active is not None:
-            active.require(self.hosted_origin, Capability.MCP_CALL)
-        try:
-            return self._binding.execute(
-                tool_name, arguments, self.session,
+        descriptor = next(
+            (item for item in self._descriptors if item.name == tool_name), None
+        )
+        if descriptor is None:
+            raise ProxyAccessDenied(f"MCP tool is not exposed: {tool_name}")
+        if descriptor.mutates and not idempotency_key:
+            raise ProxyAccessDenied("mutating proxy calls require an idempotency key")
+        correlation = hashlib.sha256(
+            f"{self.session_id}\0{tool_name}\0{idempotency_key or ''}".encode("utf-8")
+        ).hexdigest()[:32]
+        core = CoreRuntime(
+            self.repository,
+            self.policy,
+            self.sessions,
+            self.audit_path,
+            mcp_binding=self._binding,
+        )
+        command = CoreCommand(
+            name=tool_name,
+            arguments=dict(arguments),
+            session_id=self.session_id,
+            origin=self.proxied_origin,
+            correlation_id=f"proxy-{correlation}",
+            idempotency_key=idempotency_key,
+            deadline_seconds=deadline_seconds,
+        )
+        lease = None
+        if descriptor.mutates:
+            ttl = max(30.0, min(3600.0, float(deadline_seconds) + 10.0))
+            lease = self.sessions.acquire(
+                self.session_id, f"proxy-{os.getpid()}", ttl_seconds=ttl
             )
+        try:
+            return core.execute(command, lease=lease).data
         except McpAccessDenied as exc:
             raise ProxyAccessDenied(str(exc)) from exc
         except McpProtocolError as exc:
             raise ProxyError(str(exc)) from exc
+        finally:
+            if lease is not None:
+                self.sessions.release(lease)
 
     def allowed_server_ids(self) -> List[str]:
         return list(self._allowed)

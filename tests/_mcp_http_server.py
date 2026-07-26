@@ -100,7 +100,9 @@ def build_asgi_app() -> "object":
     Lifespan is implemented by hand so ``manager.run()`` stays open for the
     whole process and shuts down cleanly on test teardown.
     """
-    manager = StreamableHTTPSessionManager(app=server)
+    manager = StreamableHTTPSessionManager(
+        app=server, json_response=True, stateless=True
+    )
 
     async def asgi_app(scope: dict, receive: object, send: object) -> None:
         scope_type = scope.get("type")

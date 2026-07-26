@@ -98,6 +98,9 @@ class HandoffDocumentTests(unittest.TestCase):
         )
         self.core = CoreRuntime(
             self.repository, self.policy, self.sessions, self.root / "audit.jsonl",
+            verification_commands=[
+                [sys.executable, "-c", "print('ok')"],
+            ],
         )
 
     def tearDown(self) -> None:
@@ -199,6 +202,34 @@ class HandoffDocumentTests(unittest.TestCase):
         self.assertLess(len(assistant["content_preview"]), 500)
         self.assertEqual(assistant["tool_calls"][0]["name"], "repo_write_file")
 
+    def test_handoff_uses_latest_history_and_real_agent_schema(self) -> None:
+        with self.sessions.mutate("s", "history-contract") as record:
+            record.provider_history = [
+                {"role": "user", "model": "old", "content": str(index)}
+                for index in range(130)
+            ]
+            record.provider_history.extend(
+                [
+                    {
+                        "role": "tool",
+                        "core_name": "checks.run",
+                        "result": {"ok": True, "command": "checks.run"},
+                    },
+                    {
+                        "role": "provider_audit",
+                        "selected_provider": "fallback",
+                        "selected_model": "model-b",
+                    },
+                ]
+            )
+        history = build_handoff(
+            self.sessions.load("s"), repository=self.repository
+        )["model_history"]
+        self.assertEqual(len(history), 128)
+        self.assertNotEqual(history[0].get("content_preview"), "0")
+        self.assertEqual(history[-2]["tool_result"]["command"], "checks.run")
+        self.assertEqual(history[-1]["route"]["selected_provider"], "fallback")
+
 
 class SessionLockCliTests(unittest.TestCase):
     """The lock CLI reports the durable mutation lease state."""
@@ -284,6 +315,9 @@ class ModelSwitchEndToEndTests(unittest.TestCase):
     def _kernel(self, model: str, responses: list, *, max_steps: int = 8) -> AgentKernel:
         core = CoreRuntime(
             self.repository, self.policy, self.sessions, self.root / "audit.jsonl",
+            verification_commands=[
+                [sys.executable, "-c", "print('ok')"],
+            ],
         )
         return AgentKernel(
             provider=QueueProvider(responses),

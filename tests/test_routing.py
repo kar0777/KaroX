@@ -337,9 +337,32 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(second.cumulative_cost, 0.056)
         self.assertEqual(
             second.cumulative_usage,
-            {"prompt_tokens": 12, "completion_tokens": 8},
+            {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
         )
         self.assertEqual(second.pricing_version, "2026-07")
+
+    def test_mixed_provider_usage_schemas_preserve_canonical_total(self) -> None:
+        route = self.add_route("mixed")
+        provider = FakeProvider(
+            [
+                ModelResponse(
+                    content="first",
+                    tool_calls=(),
+                    usage={"total_tokens": 10},
+                    finish_reason="stop",
+                ),
+                ModelResponse(
+                    content="second",
+                    tool_calls=(),
+                    usage={"input_tokens": 11, "output_tokens": 9},
+                    finish_reason="stop",
+                ),
+            ]
+        )
+        routed, _ = self.routed((route,), {"mixed": provider})
+        routed.complete(request())
+        second = routed.complete(request())
+        self.assertEqual(second.cumulative_usage["total_tokens"], 30)
 
     def test_response_that_crosses_budget_is_charged_and_marked(self) -> None:
         pricing = ModelPricing("v1", "USD", 1_000.0, 1_000.0, "fixture")

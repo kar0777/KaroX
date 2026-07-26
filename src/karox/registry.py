@@ -7,7 +7,7 @@ import math
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urlsplit
@@ -207,7 +207,9 @@ class ModelRecord:
         _safe_id(self.provider_id, "provider ID")
         if not isinstance(self.model_id, str) or not self.model_id.strip():
             raise ValueError("model ID is required")
-        if len(self.model_id) > 500 or any(char in self.model_id for char in "\r\n\x00"):
+        if len(self.model_id) > 500 or any(
+            char in self.model_id for char in "\r\n\x00"
+        ):
             raise ValueError("model ID contains invalid characters")
         for alias in self.aliases:
             _safe_id(alias, "model alias")
@@ -279,7 +281,10 @@ class ProviderRegistry:
             value = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RegistryError(f"cannot read provider registry: {exc}") from exc
-        if not isinstance(value, dict) or value.get("schema_version") != REGISTRY_VERSION:
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != REGISTRY_VERSION
+        ):
             raise RegistryError("provider registry has an unsupported schema")
         raw_providers = value.get("providers")
         raw_models = value.get("models")
@@ -411,6 +416,37 @@ class ProviderRegistry:
         self._save(providers.values(), retained, selected)
         return record
 
+    def map_alias(self, provider_id: str, alias: str, model_id: str) -> ModelRecord:
+        """Move one provider-scoped alias to a model, creating it when needed."""
+        _safe_id(alias, "model alias")
+        providers, models, selected = self._load()
+        if provider_id not in providers:
+            raise RegistryError(f"provider does not exist: {provider_id}")
+        target: Optional[ModelRecord] = None
+        updated: list[ModelRecord] = []
+        for item in models:
+            if item.provider_id != provider_id:
+                updated.append(item)
+                continue
+            aliases = tuple(value for value in item.aliases if value != alias)
+            if item.model_id == model_id:
+                target = replace(item, aliases=tuple(dict.fromkeys((*aliases, alias))))
+                updated.append(target)
+            elif aliases != item.aliases:
+                updated.append(replace(item, aliases=aliases))
+            else:
+                updated.append(item)
+        if target is None:
+            target = ModelRecord(
+                provider_id=provider_id,
+                model_id=model_id,
+                aliases=(alias,),
+                provenance="user-alias-map",
+            )
+            updated.append(target)
+        self._save(providers.values(), updated, selected)
+        return target
+
     def provider(self, provider_id: str) -> ProviderRecord:
         providers, _, _ = self._load()
         try:
@@ -425,9 +461,7 @@ class ProviderRegistry:
             if item.model_id == model_or_alias or model_or_alias in item.aliases
         ]
         if not candidates:
-            raise RegistryError(
-                f"model does not exist: {provider_id}/{model_or_alias}"
-            )
+            raise RegistryError(f"model does not exist: {provider_id}/{model_or_alias}")
         if len(candidates) > 1:
             raise RegistryError(
                 f"model alias is ambiguous: {provider_id}/{model_or_alias}"

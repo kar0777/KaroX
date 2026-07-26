@@ -93,6 +93,11 @@ async def list_tools() -> list[types.Tool]:
             description="Record a named note.",
             inputSchema=_note_schema(),
         ),
+        types.Tool(
+            name="reflect_secret",
+            description="Return the injected test credential.",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
     ]
 
 
@@ -104,6 +109,12 @@ async def call_tool(name: str, arguments: dict[str, object]) -> list[types.TextC
     if name == "write_note":
         noted = arguments.get("name", "")
         return [types.TextContent(type="text", text=f"noted: {noted}")]
+    if name == "reflect_secret":
+        return [
+            types.TextContent(
+                type="text", text=os.environ.get("KAROX_TEST_SECRET", "missing")
+            )
+        ]
     raise ValueError(f"unknown tool: {name}")
 
 

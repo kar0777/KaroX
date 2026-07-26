@@ -128,8 +128,12 @@ function Copy-AppFiles($targetDir) {
     Move-OutOf-AppDirectory
     if (Test-Path -LiteralPath $targetDir) { Remove-Item -LiteralPath $targetDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-    Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__") } | ForEach-Object {
+    Get-ChildItem -LiteralPath $Root -Force | Where-Object { $_.Name -notin @(".git", ".venv", "__pycache__", "build") } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $targetDir $_.Name) -Recurse -Force
+    }
+    $generatedMetadata = Join-Path $targetDir "src"
+    if (Test-Path -LiteralPath $generatedMetadata) {
+        Get-ChildItem -LiteralPath $generatedMetadata -Directory -Filter "*.egg-info" | Remove-Item -Recurse -Force
     }
 }
 
@@ -274,6 +278,8 @@ if (!$ValidateOnly) {
     & $PythonExe -m pip install --upgrade pip
     & $PythonExe -m pip install -r (Join-Path $Root "requirements.txt")
     if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
+    & $PythonExe -m pip install --upgrade --no-deps $Root
+    if ($LASTEXITCODE -ne 0) { throw "KaroX vNext package installation failed." }
 }
 
 Recover-PendingRollback
@@ -313,6 +319,8 @@ if (!(Test-Path -LiteralPath $newCloudflared) -and !$cloudflaredOnPath) {
 
 $KaroXPs1 = Join-Path $BinDir "karox.ps1"
 $KaroXCmd = Join-Path $BinDir "karox.cmd"
+$KaroXVNextPs1 = Join-Path $BinDir "karox-vnext.ps1"
+$KaroXVNextCmd = Join-Path $BinDir "karox-vnext.cmd"
 @'
 $ErrorActionPreference = "Stop"
 try { chcp.com 65001 > $null; [Console]::InputEncoding = [Text.Encoding]::UTF8; [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -320,7 +328,6 @@ $AppRoot = Join-Path $env:LOCALAPPDATA "KaroX"
 $env:KAROX_CONFIG_DIR = Join-Path $env:APPDATA "KaroX"
 $env:KAROX_RUNTIME_DIR = $AppRoot
 $Bin = Join-Path $AppRoot "bin"
-$Root = Join-Path $AppRoot "app"
 $LegacyRoot = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
 $LegacyBin = Join-Path $LegacyRoot "bin"
 $legacyNormalized = $LegacyBin.TrimEnd('\')
@@ -329,13 +336,22 @@ if (!$legacyInCurrentPath -and (Test-Path -LiteralPath $LegacyRoot)) {
     try { Remove-Item -LiteralPath $LegacyRoot -Recurse -Force -ErrorAction Stop } catch {}
 }
 $env:Path = "$Bin;" + $env:Path
-& (Join-Path $Root "start.ps1") @args
+& (Join-Path $AppRoot ".venv\Scripts\python.exe") -m karox.cli @args
 exit $LASTEXITCODE
 '@ | Set-Content -LiteralPath $KaroXPs1 -Encoding UTF8
 @'
 @echo off
 powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\karox.ps1" %*
 '@ | Set-Content -LiteralPath $KaroXCmd -Encoding ASCII
+@'
+$ErrorActionPreference = "Stop"
+& (Join-Path $PSScriptRoot "karox.ps1") @args
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath $KaroXVNextPs1 -Encoding UTF8
+@'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\karox-vnext.ps1" %*
+'@ | Set-Content -LiteralPath $KaroXVNextCmd -Encoding ASCII
 @'
 @echo off
 title KaroX
@@ -364,7 +380,7 @@ Write-Host ""
 Schedule-LegacyCleanup
 
 if ($Start) {
-    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppDir "start.ps1")
+    powershell -NoProfile -ExecutionPolicy Bypass -File $KaroXPs1
     $startCode = $LASTEXITCODE
     if ($startCode -eq 0 -and (Test-Path -LiteralPath $RollbackAppDir)) {
         Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force -ErrorAction SilentlyContinue

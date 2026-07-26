@@ -65,3 +65,30 @@ dropped.
 - Working Notion tests log noisy upstream shutdown exceptions despite passing.
 
 No legacy code has been removed in Phase 0.
+
+## Implementation status (Phases 0-10)
+
+This strategy is now backed by implemented code on the
+`codex/vnext-hybrid-runtime` branch:
+
+- **Legacy discovery/import** is implemented: `karox migrate` discovers legacy
+  runtime homes without modifying them, validates paths/versions/permissions,
+  copies only non-secret metadata, imports secrets into the OS credential
+  store, converts session state to a versioned schema, writes a JSON/dry-run
+  report, and keeps the source untouched. Covered by `test_migration_cli.py`.
+- **Credential isolation** is implemented: provider, MCP, and bridge secrets
+  live in dedicated keyring namespaces (`KaroX/provider`, `KaroX/mcp`,
+  `KaroX/bridge`) and never in plaintext config. Covered by
+  `test_credentials.py` and `test_bridge.py`.
+- **Session versioning** is implemented: durable, checksum-protected session
+  records with mutation leases, fencing tokens, and idempotency. Covered by
+  `test_sessions.py` and `test_handoff.py`.
+- **Notion bridge** remains available and `TESTED` via the bundled transport
+  regression (`scripts/test_notion_mcp_transport.py`, KB-HYBRID-08).
+- **PromptQL and HyperAgent** remain labelled `EXPERIMENTAL` (no dedicated
+  product E2E on this branch).
+
+No legacy code has been removed. vNext installs beside the current runtime; a
+retirement phase (removal of legacy paths) is explicitly **not** part of this
+branch's work and would require cross-platform and migration gates to pass for
+two consecutive release candidates, per the compatibility phases above.

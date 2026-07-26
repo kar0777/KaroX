@@ -53,6 +53,23 @@ descriptors never include provider keys, MCP credentials, process environment,
 or tools outside the allowlist. Results are size-limited and redacted before
 returning to the hosted client.
 
+Built-in tools use a shorter path because there is no external MCP trust
+boundary:
+
+```text
+hosted client
+  -> Bearer/X-API-Key bridge authentication
+  -> explicit --tool allowlist + hosted-client origin policy
+  -> Core Runtime command + session profile
+  -> repository/check/Git implementation
+```
+
+The same allowlist is exposed either as Streamable HTTP MCP (`/mcp`) or as an
+OpenAPI 3.1 connector (`/openapi.json`). OpenAPI exposes authenticated
+`/session` and `/context/brief` preflight endpoints. Mutations require a stable
+idempotency key in MCP request `_meta.karoxIdempotencyKey` or the OpenAPI
+`X-KaroX-Idempotency-Key` header.
+
 ## Bridge profiles
 
 A profile records client name, transport, authentication, tunnel/URL lifetime,
@@ -64,9 +81,11 @@ Current baseline:
 
 | Profile | Status | Reason |
 | --- | --- | --- |
+| ChatGPT Web | experimental | OAuth discovery, DCR, PKCE, code exchange, refresh rotation/replay revocation, and authenticated MCP wire tests; no live workspace run |
+| Claude Web | experimental | Same remote-MCP OAuth wire contract and official callback shape; no live account run |
 | Notion | tested legacy | Existing provider/profile/transport/doctor tests |
-| Generic Streamable HTTP | protocol-compatible legacy | Transport and host-security tests; client-dependent |
-| PromptQL | experimental | Launcher/OpenAPI integration lacks dedicated E2E |
+| Generic Streamable HTTP | protocol-compatible vNext | Authenticated wire E2E covers built-in Core and proxied real stdio MCP tools |
+| PromptQL | experimental | OpenAPI wire/Core E2E passes locally; no recorded live PromptQL product run |
 | HyperAgent | experimental | No dedicated verified path in repository |
 
 ## Authentication and revocation
@@ -76,16 +95,25 @@ credentials. Values are shown once through a protected channel and stored only
 in the credential store. Rotation invalidates the prior value; emergency revoke
 terminates tunnel access, mutation leases, and pending approvals.
 
+Bearer profiles use that credential directly. OAuth web profiles use it only as
+the human approval-page password; web clients receive short-lived access tokens
+and rotating refresh tokens. Authorization codes are bound to the registered
+client, exact redirect URI, public MCP resource, and PKCE verifier. Dynamic
+clients and grants are intentionally process-local, so a bridge restart revokes
+all issued OAuth state.
+
 ## Reliability
 
 Transport reconnect never replays a mutation without the same Core idempotency
-record. Tool cancellation propagates to Core/MCP when supported and otherwise
-marks the outcome unknown for reconciliation. Health and schema changes are
-visible session events.
+record. Hosted mutations must provide `_meta.karoxIdempotencyKey`; retrying with
+the same key is safe, while omission fails closed. Downstream cancellation is
+transport-dependent and is not claimed as verified. Health and schema changes
+are visible session events.
 
 ## Verification gates
 
-Contract tests cover discovery, invocation, errors, cancellation, reconnect,
-schema rejection, namespaces, result limits, and redaction. End-to-end tests
-cover stdio native use, hosted selected-tool proxy use, permission denial, and
-interrupted mutation without duplication.
+Contract tests cover discovery, invocation, errors, schema rejection,
+namespaces, result limits, redaction, and idempotent replay. End-to-end tests
+cover stdio native use, authenticated hosted built-in Core tools over both MCP
+and OpenAPI, and an authenticated selected-tool external MCP proxy, including
+permission denial, missing mutation idempotency, and live key rotation.

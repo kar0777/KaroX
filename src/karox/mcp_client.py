@@ -22,7 +22,14 @@ import anyio
 import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+try:
+    from mcp.client.streamable_http import streamable_http_client
+
+    _MODERN_STREAMABLE_HTTP = True
+except ImportError:  # compatibility for pre-1.27 development environments
+    from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
+
+    _MODERN_STREAMABLE_HTTP = False
 
 from .credentials import CredentialBackend, CredentialError, KeyringBackend
 from .models import Capability
@@ -668,9 +675,10 @@ class McpClient:
 
     @asynccontextmanager
     async def _session(
-        self, record: McpServerRecord, repository: Path
+        self, record: McpServerRecord, repository: Path, secret: Optional[str] = None
     ) -> AsyncIterator[ClientSession]:
-        secret = self._credential(record)
+        if secret is None:
+            secret = self._credential(record)
         read_timeout = timedelta(seconds=record.timeout_seconds)
         if record.transport == "stdio":
             environment = child_process_environment()
@@ -697,7 +705,24 @@ class McpClient:
             if record.credential_scheme:
                 value = f"{record.credential_scheme} {secret}"
             headers[record.credential_target] = value
-        async with streamablehttp_client(
+        if _MODERN_STREAMABLE_HTTP:
+            async with _http_client_factory(
+                headers=headers,
+                timeout=httpx.Timeout(record.timeout_seconds),
+            ) as http_client:
+                async with streamable_http_client(
+                    record.url or "", http_client=http_client
+                ) as streams:
+                    try:
+                        async with ClientSession(
+                            streams[0], streams[1], read_timeout_seconds=read_timeout
+                        ) as session:
+                            yield session
+                    finally:
+                        await streams[0].aclose()
+                        await streams[1].aclose()
+            return
+        async with streamable_http_client(
             record.url or "",
             headers=headers,
             timeout=record.timeout_seconds,
@@ -710,10 +735,10 @@ class McpClient:
                 yield session
 
     async def _discover_once(
-        self, record: McpServerRecord, repository: Path
+        self, record: McpServerRecord, repository: Path, secret: Optional[str]
     ) -> list[McpToolDescriptor]:
         with anyio.fail_after(record.timeout_seconds):
-            async with self._session(record, repository) as session:
+            async with self._session(record, repository, secret) as session:
                 await session.initialize()
                 response = await session.list_tools()
         self._validate_discovery_size(record, response)
@@ -731,10 +756,12 @@ class McpClient:
         return tools
 
     @staticmethod
-    def _classified(exc: Exception, *, mutation: bool) -> McpError:
+    def _classified(
+        exc: Exception, *, mutation: bool, secrets: tuple[str, ...] = ()
+    ) -> McpError:
         if isinstance(exc, McpError):
             return exc
-        message = str(redact(str(exc)))
+        message = str(redact(str(exc), secrets=secrets))
         if mutation:
             return McpUnknownOutcome(
                 f"MCP mutating call outcome is unknown ({type(exc).__name__}): {message}"
@@ -750,11 +777,15 @@ class McpClient:
     ) -> list[McpToolDescriptor]:
         attempts = record.max_transport_retries + 1
         last: Optional[McpError] = None
+        secret = self._credential(record)
+        exact = (secret,) if secret else ()
         for _ in range(attempts):
             try:
-                return anyio.run(self._discover_once, record, repository.resolve(strict=True))
+                return anyio.run(
+                    self._discover_once, record, repository.resolve(strict=True), secret
+                )
             except Exception as exc:
-                last = self._classified(exc, mutation=False)
+                last = self._classified(exc, mutation=False, secrets=exact)
                 if isinstance(
                     last,
                     (McpAccessDenied, McpConfigurationError, McpProtocolError),
@@ -774,6 +805,7 @@ class McpClient:
         descriptor: McpToolDescriptor,
         arguments: Dict[str, Any],
         repository: Path,
+        secret: Optional[str],
     ) -> dict[str, Any]:
         try:
             encoded = json.dumps(
@@ -787,7 +819,7 @@ class McpClient:
         if len(encoded) > record.max_message_bytes:
             raise McpProtocolError("MCP tool arguments exceed the configured message limit")
         with anyio.fail_after(record.timeout_seconds):
-            async with self._session(record, repository) as session:
+            async with self._session(record, repository, secret) as session:
                 await session.initialize()
                 listed = await session.list_tools()
                 self._validate_discovery_size(record, listed)
@@ -807,7 +839,7 @@ class McpClient:
                 result = await session.call_tool(descriptor.remote_name, arguments)
         try:
             payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-            payload = redact(payload)
+            payload = redact(payload, secrets=(secret,) if secret else ())
             result_bytes = json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -844,6 +876,8 @@ class McpClient:
             raise McpAccessDenied("MCP server identity does not match the bound tool")
         attempts = (record.max_transport_retries + 1) if descriptor.read_only else 1
         last: Optional[McpError] = None
+        secret = self._credential(record)
+        exact = (secret,) if secret else ()
         for _ in range(attempts):
             try:
                 return anyio.run(
@@ -852,9 +886,12 @@ class McpClient:
                     descriptor,
                     dict(arguments),
                     repository.resolve(strict=True),
+                    secret,
                 )
             except Exception as exc:
-                last = self._classified(exc, mutation=descriptor.mutates)
+                last = self._classified(
+                    exc, mutation=descriptor.mutates, secrets=exact
+                )
                 if isinstance(
                     last,
                     (McpAccessDenied, McpConfigurationError, McpProtocolError, McpRemoteToolError),

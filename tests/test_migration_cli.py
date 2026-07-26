@@ -123,6 +123,13 @@ class CliSmokeTests(unittest.TestCase):
             code = main(arguments)
         return code, json.loads(output.getvalue())
 
+    def test_no_arguments_opens_interactive_cli_in_current_repository(self) -> None:
+        with patch("karox.tui.run_tui", return_value=17) as run_tui:
+            code = main([])
+
+        self.assertEqual(code, 17)
+        run_tui.assert_called_once_with(repository=str(Path.cwd().resolve()))
+
     def test_paths_and_session_commands(self) -> None:
         code, paths = self.invoke(["paths", "--json"])
         self.assertEqual(code, 0)
@@ -149,6 +156,26 @@ class CliSmokeTests(unittest.TestCase):
         code, shown = self.invoke(["session", "show", "cli-smoke", "--json"])
         self.assertEqual(code, 0)
         self.assertEqual(shown["task"], "smoke task")
+
+        code, revoked = self.invoke(["session", "revoke", "cli-smoke", "--json"])
+        self.assertEqual(code, 0)
+        self.assertTrue(revoked["revoked"])
+        self.assertEqual(revoked["status"], "revoked")
+
+    def test_top_level_doctor_reports_every_runtime_scope(self) -> None:
+        code, report = self.invoke(["doctor", "--json"])
+        self.assertEqual(code, 0)
+        self.assertIn(report["status"], {"ok", "degraded"})
+        self.assertEqual(
+            set(report["checks"]),
+            {
+                "provider_credentials",
+                "mcp_credentials",
+                "bridge_credentials",
+                "sessions",
+                "packs",
+            },
+        )
 
     def test_migration_dry_run_command(self) -> None:
         legacy = self.root / "legacy"

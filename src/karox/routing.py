@@ -119,6 +119,7 @@ def _merge_usage(base: Mapping[str, Any], addition: Mapping[str, Any]) -> Dict[s
                 and raw_count >= 0
             ):
                 merged[name] = merged.get(name, 0) + raw_count
+    merged["total_tokens"] = _usage_total(base) + _usage_total(addition)
     return merged
 
 

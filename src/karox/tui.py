@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -41,6 +42,7 @@ from .provider_presets import (
 from .providers import ModelMessage, ModelRequest, ProviderError, ProviderErrorKind
 from .registry import ModelRecord, ProviderRecord, ProviderRegistry
 from .sessions import SessionStore
+from .web_bridge_launcher import WEB_BRIDGE_PROFILES
 
 try:
     from rich.markup import escape
@@ -465,6 +467,9 @@ class BridgeSetup:
     #   "cloudflare" — public HTTPS via the cloudflared Quick Tunnel;
     #   "tailscale"  — public HTTPS via Tailscale Funnel (*.ts.net).
     tunnel_provider: str = "cloudflare"
+    # OAuth web MCP clients bind codes and tokens to one stable public origin.
+    # This is required for chatgpt-web/claude-web and omitted for bearer profiles.
+    public_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +480,8 @@ class BridgeLaunch:
     endpoint: str
     secret: str
     argv: tuple[str, ...]
+    public_url: Optional[str] = None
+    managed: bool = False
 
 
 def _registry() -> ProviderRegistry:
@@ -1501,6 +1508,8 @@ def _bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLaunch:
     ]
     for tool in setup.tools:
         argv.extend(("--tool", tool))
+    if setup.public_url:
+        argv.extend(("--public-url", setup.public_url))
     endpoint_path = "/openapi.json" if protocol == "openapi" else "/mcp"
     return BridgeLaunch(
         session_id=sid,
@@ -1509,6 +1518,56 @@ def _bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLaunch:
         endpoint=f"http://127.0.0.1:{setup.port}{endpoint_path}",
         secret=secret,
         argv=tuple(argv),
+        public_url=setup.public_url,
+    )
+
+
+def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLaunch:
+    """Build a one-command ChatGPT/Claude bridge owned by the CLI launcher."""
+    if setup.profile not in WEB_BRIDGE_PROFILES:
+        raise ValueError("managed web bridge requires a ChatGPT or Claude profile")
+    if setup.tunnel_provider != "cloudflare":
+        raise ValueError("ChatGPT/Claude web bridges require Cloudflare in the TUI")
+    sid = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    mutating_tools = {
+        "karox.repo.edit_file",
+        "karox.repo.write_file",
+        "karox.git.commit",
+        "karox.checks.run",
+    }
+    access_profile = (
+        AccessProfile.WORKSPACE_WRITE
+        if any(tool in mutating_tools for tool in setup.tools)
+        else AccessProfile.READ_ONLY
+    )
+    argv = [
+        sys.executable,
+        "-m",
+        "karox.cli",
+        "bridge",
+        "connect",
+        setup.profile,
+        "--repository",
+        str(repository),
+        "--session-id",
+        sid,
+        "--access-profile",
+        access_profile.value,
+        "--tunnel",
+        "cloudflare",
+        "--port",
+        str(setup.port),
+    ]
+    for tool in setup.tools:
+        argv.extend(("--tool", tool))
+    return BridgeLaunch(
+        session_id=sid,
+        profile=setup.profile,
+        protocol="mcp",
+        endpoint="",
+        secret="",
+        argv=tuple(argv),
+        managed=True,
     )
 
 
@@ -1660,9 +1719,9 @@ if _HAS_TEXTUAL:
                 )
                 yield Button(
                     (
-                        "[2] Website — PromptQL, Notion, or MCP/OpenAPI client"
+                        "[2] Web client — ChatGPT Web, Claude Web, PromptQL, Notion, MCP/OpenAPI"
                         if english
-                        else "[2] Сайт — PromptQL, Notion или MCP/OpenAPI-клиент"
+                        else "[2] Веб-клиент — ChatGPT Web, Claude Web, PromptQL, Notion, MCP/OpenAPI"
                     ),
                     id="choice-web",
                 )
@@ -2929,6 +2988,12 @@ if _HAS_TEXTUAL:
                     )
                     yield RadioButton("Notion Custom Agent (MCP)", id="profile-notion")
                     yield RadioButton(
+                        "ChatGPT Web (OAuth MCP)", id="profile-chatgpt-web"
+                    )
+                    yield RadioButton(
+                        "Claude Web (OAuth MCP)", id="profile-claude-web"
+                    )
+                    yield RadioButton(
                         "Generic Streamable HTTP MCP", id="profile-generic"
                     )
                     yield RadioButton(
@@ -3091,12 +3156,24 @@ if _HAS_TEXTUAL:
                     )
                 )
                 return
+            profile = self._profile_value()
+            tunnel = self._tunnel_value()
+            if profile in WEB_BRIDGE_PROFILES and tunnel != "cloudflare":
+                self.query_one("#bridge-error", Label).update(
+                    self._label(
+                        "ChatGPT Web и Claude Web сейчас запускаются из интерфейса "
+                        "через управляемый Cloudflare Tunnel.",
+                        "ChatGPT Web and Claude Web currently use the managed "
+                        "Cloudflare Tunnel from this screen.",
+                    )
+                )
+                return
             self.dismiss(
                 BridgeSetup(
-                    profile=self._profile_value(),
+                    profile=profile,
                     port=port,
                     tools=tools,
-                    tunnel_provider=self._tunnel_value(),
+                    tunnel_provider=tunnel,
                 )
             )
 
@@ -3120,6 +3197,8 @@ if _HAS_TEXTUAL:
             values = {
                 "profile-promptql": "promptql",
                 "profile-notion": "notion",
+                "profile-chatgpt-web": "chatgpt-web",
+                "profile-claude-web": "claude-web",
                 "profile-generic": "generic-streamable-http",
                 "profile-hyperagent": "hyperagent",
             }
@@ -4160,8 +4239,16 @@ if _HAS_TEXTUAL:
                     + "[/]"
                 )
             try:
-                launch = _bridge_launch(self.repository, setup)
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                launch = (
+                    _managed_web_bridge_launch(self.repository, setup)
+                    if setup.profile in WEB_BRIDGE_PROFILES
+                    else _bridge_launch(self.repository, setup)
+                )
+                flags = (
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if launch.managed and os.name == "nt"
+                    else getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
                 self.bridge_process = subprocess.Popen(
                     launch.argv,
                     cwd=self.repository,
@@ -4181,6 +4268,22 @@ if _HAS_TEXTUAL:
             self.active_session = launch.session_id
             self._refresh_status()
             threading.Thread(target=self._read_bridge_output, daemon=True).start()
+            if launch.managed:
+                self._write(
+                    "[dim]"
+                    + self._label(
+                        "KaroX создаёт HTTPS-туннель и OAuth MCP-мост. "
+                        "Готовый URL и пароль появятся ниже.",
+                        "KaroX is creating the HTTPS tunnel and OAuth MCP bridge. "
+                        "The connector URL and approval password will appear below.",
+                    )
+                    + "[/]"
+                )
+                self.query_one("#composer", Input).focus()
+                if self.pending_task and _selected_model() is not None:
+                    task, self.pending_task = self.pending_task, None
+                    self._submit_task(task)
+                return
             # Confirm the bridge is actually listening before claiming success.
             # If the bind fails (port in use, permission error, …) the process
             # exits within a second; writing "Мост запущен" first would mislead
@@ -4776,6 +4879,13 @@ if _HAS_TEXTUAL:
                     break
                 message = line.strip()
                 if message:
+                    if message.startswith("MCP URL:"):
+                        endpoint = message.partition(":")[2].strip()
+                        if endpoint.startswith("https://"):
+                            self.call_from_thread(
+                                self._managed_web_endpoint_ready,
+                                endpoint,
+                            )
                     self.call_from_thread(
                         self._write, "[dim cyan]bridge[/] " + escape(message)
                     )
@@ -4783,11 +4893,16 @@ if _HAS_TEXTUAL:
             if self.bridge_process is process:
                 self.call_from_thread(self._bridge_exited, code)
 
+        def _managed_web_endpoint_ready(self, endpoint: str) -> None:
+            self.public_endpoint = endpoint
+            self._refresh_status()
+
         def _bridge_exited(self, code: int) -> None:
             if self.bridge_process is not None:
                 self._write(f"[dim]Мост остановлен (код {code}).[/]")
             self.bridge_process = None
             self.bridge_launch = None
+            self.public_endpoint = None
             self._refresh_status()
 
         def _stop_bridge(self, quiet: bool = False) -> None:
@@ -4813,11 +4928,21 @@ if _HAS_TEXTUAL:
                         check=False,
                     )
             process = self.bridge_process
+            launch = self.bridge_launch
             self.bridge_process = None
             if process is not None and process.poll() is None:
-                process.terminate()
+                if launch is not None and launch.managed:
+                    try:
+                        if os.name == "nt":
+                            process.send_signal(signal.CTRL_BREAK_EVENT)
+                        else:
+                            process.send_signal(signal.SIGINT)
+                    except (OSError, ValueError):
+                        process.terminate()
+                else:
+                    process.terminate()
                 try:
-                    process.wait(timeout=3)
+                    process.wait(timeout=12 if launch and launch.managed else 3)
                 except subprocess.TimeoutExpired:
                     process.kill()
             self.bridge_launch = None

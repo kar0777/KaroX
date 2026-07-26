@@ -3,6 +3,13 @@
 __pycache__/
 *.pyc
 
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
 # Local state
 logs/
 runs/

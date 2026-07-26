@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
@@ -76,6 +76,7 @@ class SkillMetadata:
     directory: Path
     manifest_path: Path
     metadata_sha256: str
+    content_sha256: Optional[str]
     _manifest_identity: _FileIdentity
 
     @property
@@ -101,6 +102,7 @@ class SkillMetadata:
             "directory": str(self.directory),
             "manifest_path": str(self.manifest_path),
             "metadata_sha256": self.metadata_sha256,
+            "content_sha256": self.content_sha256,
         }
 
 
@@ -494,6 +496,9 @@ class SkillCatalog:
         )
         total = len(manifest)
         references: Dict[str, str] = {}
+        digest = hashlib.sha256()
+        digest.update(b"SKILL.md\0")
+        digest.update(manifest)
         for reference in metadata.files:
             target = self._confined_reference(metadata.directory, reference)
             value, _ = _read_bounded(target, self.MAX_REFERENCE_BYTES)
@@ -503,7 +508,12 @@ class SkillCatalog:
                     f"Skill content exceeds the {self.MAX_TOTAL_BYTES}-byte total limit"
                 )
             references[reference] = _decode_content(value, target)
-        return SkillContent(metadata, instructions, references)
+            digest.update(b"\0REFERENCE\0")
+            digest.update(reference.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(value)
+        loaded_metadata = replace(metadata, content_sha256=digest.hexdigest())
+        return SkillContent(loaded_metadata, instructions, references)
 
     def _ensure_discovered(self) -> None:
         if not self._discovered:
@@ -699,6 +709,7 @@ class SkillCatalog:
             directory=resolved_directory,
             manifest_path=manifest.resolve(strict=True),
             metadata_sha256=hashlib.sha256(prefix).hexdigest(),
+            content_sha256=None,
             _manifest_identity=manifest_identity,
         )
 
@@ -755,6 +766,8 @@ def skill_selection(
     *,
     previous: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if metadata.content_sha256 is None:
+        raise SkillError("Skill content must be loaded before permissions are selected")
     decisions = decisions or {}
     requested = set(metadata.requested_capabilities)
     unexpected = set(decisions).difference(requested)
@@ -788,6 +801,7 @@ def skill_selection(
         "source_root": str(metadata.source_root),
         "directory": str(metadata.directory),
         "metadata_sha256": metadata.metadata_sha256,
+        "content_sha256": metadata.content_sha256,
         "permissions": permissions,
         "selected_at": time.time(),
     }
@@ -804,6 +818,7 @@ def validate_selection(
         "source_root": str(metadata.source_root),
         "directory": str(metadata.directory),
         "metadata_sha256": metadata.metadata_sha256,
+        "content_sha256": metadata.content_sha256,
     }
     for key, value in expected.items():
         if selection.get(key) != value:

@@ -1,6 +1,6 @@
 # KaroX vNext Implementation Status
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 Branch: `codex/vnext-hybrid-runtime`  
 Base: `main` at `a5c233a`
 
@@ -9,16 +9,148 @@ Base: `main` at `a5c233a`
 | Phase | Status | Evidence |
 | --- | --- | --- |
 | 0 — audit/design | Complete | Baseline suite passed; required documents reviewed and validated |
-| 1 — foundation | Complete | 25 discoverable tests cover Core, policy, sessions, migration, and CLI |
-| 2 — native vertical slice | Complete | 52 tests plus a subprocess CLI E2E cover provider → agent → Core → verification |
-| 3 — providers/credentials | Complete | 99 tests cover adapters, registry, keyring references, routing, fallback, and budgets |
-| 4 — Skills | Complete | 119 tests cover secure discovery, lazy loading, permissions, CLI, and Agent integration |
-| 5 — MCP client | Complete | 163 tests cover registry, credentials, selection, Core integration, and real stdio + Streamable HTTP E2E |
-| 6 — unified handoff | Complete | 170 tests cover structured handoff, mid-task model switch, locking, and recovery |
-| 7 — MCP proxy/bridges | Complete | 193 tests cover bridge profiles, dedicated credentials, proxy allowlist, and real stdio proxy E2E |
-| 8 — Pack SDK | Complete | 207 tests cover manifest validation, lifecycle, permissions, path confinement, and CLI E2E |
-| 9 — TUI | Complete | 221 tests cover slash→argv translation, loop control, plain-text fallback, and backend delegation |
-| 10 — benchmark/readiness | Not started | — |
+| 1 — foundation | Complete | Core, policy, cross-process sessions, migration, and CLI tests |
+| 2 — native vertical slice | Complete | Subprocess CLI E2E covers provider → agent → Core → approved verification |
+| 3 — providers/credentials | Complete | Adapter, registry, keyring, routing, fallback, budget, and canonical-usage tests |
+| 4 — Skills | Complete | Secure discovery, content-bound grants, permissions, CLI, and Agent integration |
+| 5 — MCP client | Complete | Registry, credentials, selection, Core integration, and real stdio/HTTP E2E |
+| 6 — unified handoff | Complete | Bounded structured handoff, model switch, locking, and restart recovery |
+| 7 — MCP proxy/bridges | Complete | Built-in Core and external MCP allowlists over authenticated MCP/OpenAPI wire E2E |
+| 8 — Pack SDK | Complete | Strict manifest, declared-file install, compatibility, integrity doctor, and CLI E2E |
+| 9 — TUI | Complete | Full-screen Textual chat/task client, provider onboarding, status view, hosted bridge/tunnel setup, and line-mode fallback |
+| 10 — benchmark/readiness | Complete | Current 420-test pytest suite plus KB-HYBRID-01..10 functional run records |
+| 11 — outbound target ask | Complete | `target ask` CLI/TUI against the verified PromptQL Natural Language API contract, with mocked-HTTP contract tests |
+| 12 — web MCP OAuth | Complete (local contract) | ChatGPT/Claude bridge profiles with OAuth discovery, DCR, PKCE, rotating refresh tokens, replay revocation, and real HTTP/MCP tests; live account runs pending |
+
+## Phase 12 — ChatGPT/Claude web MCP OAuth
+
+Completed:
+
+- Applied the useful part of AgentDock's architecture to KaroX without treating
+  AgentDock as a model-inference API. `chatgpt-web` and `claude-web` are hosted
+  bridge profiles, not entries in the model selector.
+- Added RFC-style protected-resource and authorization-server discovery,
+  Dynamic Client Registration for public clients, Authorization Code with PKCE
+  S256, exact client/redirect/resource binding, short-lived access tokens,
+  rotating refresh tokens, and token-family revocation on refresh replay.
+- Added a local KaroX approval page. The existing OS-keyring bridge secret is
+  used as its password and is never sent to the web MCP client.
+- Added `bridge serve --public-url HTTPS_ORIGIN`; OAuth profiles require it and
+  reject OpenAPI mode. The public origin is stable and explicit rather than
+  trusted from attacker-controlled forwarding headers.
+- Added `bridge connect chatgpt-web|claude-web` as the normal entry point. One
+  CLI process creates the session and temporary credential, starts the
+  Cloudflare HTTPS tunnel, binds its exact origin into OAuth, starts the local
+  MCP bridge, supervises both children, and cleans up on `Ctrl+C`.
+- Kept the existing Core/session/origin/allowlist boundary unchanged: OAuth
+  authenticates the hosted client but does not grant tools that were not
+  selected with `--tool` or `--server`.
+
+Verification:
+
+- `tests/test_oauth_bridge.py` drives discovery, DCR, the approval page, PKCE
+  exchange, authenticated MCP initialize, refresh rotation, replay revocation,
+  hostile redirect rejection, and failed-binding retry over a real HTTP server.
+- `tests/test_bridge.py` covers profile metadata plus CLI fail-closed rules for
+  missing public URLs and the wrong protocol.
+
+Limitations:
+
+- Dynamic clients and grants are process-local; restarting the bridge revokes
+  them and requires the web connector to authenticate again.
+- No live ChatGPT Business/Enterprise/Edu workspace or Claude paid-account run
+  is recorded, so both profiles remain honestly `experimental`.
+- A Quick Tunnel URL changes after restart. `bridge connect` binds the exact
+  generated origin before starting OAuth, but the web connector must be updated
+  after a restart. `--tunnel custom --public-url HTTPS_ORIGIN` supports a
+  separately provisioned stable reverse proxy while the bridge lifecycle stays
+  in the CLI.
+
+## Post-review hardening
+
+- Both platform installers install the vNext artifact and expose it through
+  the primary `karox` command. With no arguments it opens the interactive
+  shell; `karox-vnext` remains a forwarding compatibility alias.
+- CI builds/installs that artifact and runs the complete suite on three OSes.
+- Streamable HTTP uses stateless JSON responses, eliminating the AnyIO stream
+  leak observed in the stateful SSE test server.
+- Current local evidence is 420 pytest tests / 133 subtests with one
+  environment/platform skip on Windows; a remote matrix result is still pending.
+- Hosted bridge E2E now covers explicit built-in Core tools over real
+  Streamable HTTP MCP and OpenAPI wire servers. The OpenAPI path includes
+  `/session` and `/context/brief`, mutation idempotency, bearer denial, and
+  dynamic credential rotation. PromptQL remains experimental until a live
+  product run is recorded.
+
+## Phase 11 — outbound target ask
+
+Completed:
+
+- Added the outbound half of the bridge contract: the CLI (and the interactive
+  shell) can call a hosted agent that exposes a documented invocation API. The
+  first and only supported target is PromptQL's Natural Language API.
+- Verified the PromptQL contract against the official `hasura/promptql-python-sdk`
+  source (`client.py`): `POST {api_base_url}/query`, `Authorization: Bearer
+  {api_key}`, default base `https://api.promptql.pro.hasura.io`, v2 body with
+  `ddn.build_version` or `ddn.build_id` and `stream:false`, response
+  `assistant_actions` / `modified_artifacts`.
+- PromptQL is a hosted agent (actions run server-side; it returns
+  `assistant_actions`, not tool-calls), so it is exposed as a dedicated
+  `target ask` command rather than a provider in the tool-calling routing loop.
+  Mixing the two would be a semantic mismatch.
+- Credentials stay in the OS keyring (`os-keyring:provider/<name>`), resolved at
+  request time via `CredentialStore.accessor`, and the live key is redacted from
+  results, errors, and logs. HTTPS-or-loopback is enforced before the credential
+  leaves the process.
+- v1 (`ddn_url` with explicit LLM config) and SSE streaming are deferred with
+  explicit, honest errors — not half-built shims.
+
+Changed files in Phase 11:
+
+- `src/karox/promptql_outbound.py` (new)
+- `src/karox/cli.py`
+- `src/karox/tui.py`
+- `tests/test_promptql_outbound.py` (new)
+- `tests/test_ecosystem.py`
+- `docs/vNext/CONNECTIVITY.md`
+- `examples/promptql-connect.md`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"`
+- `git diff --check`
+
+End-to-end evidence:
+
+- `PromptQLTargetConfigTests` (5) assert the fail-closed configuration rules:
+  a target without `build_version`/`build_id`, a v1-only `ddn_url` target, a
+  target with both, a missing credential reference, and base URL normalization.
+- `PromptQLClientContractTests` (10) drive the client against a fake
+  `httpx.Client`: the exact `/query` endpoint, `Authorization: Bearer` header,
+  v2 body shape (`build_version` and `build_id` alternatives, prior interactions
+  appended, `stream:false`), 401→access denied, 500→invocation error with the key
+  redacted, response-level key redaction, non-loopback HTTP rejection before any
+  network, loopback allowance, empty-message rejection, and a failing
+  credential accessor.
+- `EcosystemTests.test_target_ask_invokes_promptql_natural_language_api` drives
+  the real CLI path end to end: `credential set` → `target add` → `target
+  configure` → `target ask`, asserts the request URL/header/body and that the
+  API key never reaches stdout or stderr.
+
+Security boundaries, known problems, and migration risks:
+
+- No live PromptQL run has been recorded. The contract is exercised only against
+  a mocked HTTP transport; the PromptQL target status remains experimental, not
+  `tested`.
+- SSE streaming and v1 `ddn_url` mode are deferred with explicit errors. A user
+  who needs them receives a clear message instead of a half-built path.
+- The architectural blockers from the prior technical review (proxy fail-open,
+  lease fencing, verification no-op acceptance, process-execution confinement,
+  MCP secret reflection, etc.) are out of scope for this phase. This phase
+  closes the outbound-direction product gap and the false documentation claim
+  that PromptQL had no public outbound API; it does not re-open the readiness
+  gate.
 
 ## Phase 0 baseline
 
@@ -486,28 +618,31 @@ Security boundaries, known problems, and migration risks:
   experimental.
 - The hybrid runtime benchmark remains pending.
 
-## Phase 9 — optional TUI
+## Phase 9 — terminal client
 
 Completed:
 
-- Added an optional interactive TUI (`karox tui`) that is a thin presentation
-  layer over the already-working CLI backend. The TUI contains no business
-  logic: every slash command is translated into the same `argparse` argv that
-  `karox.cli.main` already handles, so the backend stays fully usable without
-  the TUI (line-mode, non-interactive, JSON, CI).
-- Mapped 15 slash commands (`/help /provider /model /status /plan /diff
-  /tests /checkpoint /cost /context /handoff /bridge /permissions /doctor
-  /exit`) to their underlying CLI argv, with session-aware variants that inject
-  `--session-id`/`--repository` when a session is active and fall back to the
-  list view otherwise.
-- Made rendering degrade gracefully: `rich` is used when importable and falls
-  back to plain text on a minimal install, so the TUI never hard-fails.
-- Honoured the injected input/output streams: `_render_help` writes to the
-  provided output stream (not a fresh stdout console), and the read loop reads
-  from the provided input stream while keeping readline-backed `input()` for
-  the real stdin, so both interactive use and piped/test use work correctly.
-- Treated non-slash input as raw CLI argv for power users, and reported
-  unknown slash commands without calling the backend.
+- `karox` now opens a full-screen Textual application with a conversation view,
+  composer, repository/model/session/bridge status, keyboard shortcuts, and a
+  command palette. `karox SUBCOMMAND` remains the automation interface.
+- Ordinary input is always treated as a natural-language agent task. It is
+  never forwarded to `argparse`; malformed CLI diagnostics therefore cannot
+  leak into the chat experience.
+- First run opens a provider setup screen for OpenAI Responses,
+  OpenAI-compatible endpoints, Anthropic, or Gemini. Secrets go directly to the
+  OS keyring and the chosen model becomes the active route.
+- First-run choice supports API, hosted site, or both. The complete flow is
+  keyboard-operable: numeric choices, Tab/Shift+Tab, arrows, Space/Enter, F5
+  discovery, Alt+Up/Down model switching, F10 validation, and Escape.
+- Model discovery reads provider IDs and advertised context/output limits. All
+  values remain editable for providers that omit metadata. A candidate route is
+  activated only after a real minimal model request succeeds.
+- `Ctrl+B` opens hosted-client setup for PromptQL/OpenAPI, Notion/MCP, generic
+  MCP, or HyperAgent. It creates a repository-bound session and credential,
+  starts the allowlisted bridge, and optionally starts Cloudflare Tunnel to
+  produce the public connector URL.
+- Redirected stdin and non-interactive terminals retain a bounded line-mode
+  fallback; JSON and explicit CLI commands remain usable in CI.
 
 Changed files in Phase 9:
 
@@ -519,34 +654,108 @@ Verification:
 
 - `python -m compileall -q src tests`
 - `python -m unittest discover -s tests -p "test_*.py"` — 221 passed (14 new, 1 skipped)
-- `printf '/help\n/bridge list --json\n/exit\n' | python -m karox.cli tui` —
-  renders the KaroX panel and slash-command table, delegates `/bridge list
-  --json` to the backend, and exits cleanly.
+- `printf '/help\n/quit\n' | python -m karox.cli` — renders line-mode help and
+  exits cleanly without attempting full-screen terminal control.
 - `git diff --check`
 
 End-to-end evidence:
 
-- `SlashTranslationTests` cover slash→argv translation for known commands,
-  session-aware injection, default-list fallback, doctor pass-through, and
-  unknown-command rejection.
-- `TuiLoopTests` cover `/exit` and EOF returning zero, `/help` handled by the
-  shell, unknown slash commands reported without a backend call, empty-line
-  skipping, and the plain-text fallback path.
-- `BackendDelegationTests` prove the TUI forwards to the real CLI entrypoint
-  (no reimplementation), and that raw non-slash argv is forwarded through the
-  loop.
+- `InputRoutingTests` prove normal text, including `-`, is never parsed as CLI
+  syntax and that task execution carries an explicit verification allowlist.
+- `LineModeTests` cover task routing, friendly setup guidance, help, EOF, and
+  unknown-command behavior for redirected streams.
+- `FullScreenAppTests` run the Textual application headlessly and verify the
+  composer/status view plus natural-language delegation to the agent backend.
 
 Security boundaries, known problems, and migration risks:
 
-- The TUI adds no new trust boundary: it only translates and forwards. All
-  authorization continues to happen in the CLI backend, Core policy, and the
-  MCP/bridge layers exactly as in non-interactive use.
-- No secrets, credentials, or new persistent state are introduced. The TUI
-  never holds secrets and delegates any credential operation to the backend.
-- `rich` is an optional dependency; the TUI degrades to plain text without it.
-  No network or external key was required. Legacy paths and the tested Notion
-  integration were not modified.
+- The UI adds no authorization bypass: agent tasks and hosted calls still cross
+  the CLI/service layer, Core policy, repository binding, leases, and audit.
+- Provider secrets and bridge credentials are written to their dedicated OS
+  keyring scopes. Generated bridge credentials are displayed once for connector
+  setup and are not persisted in UI configuration.
+- Textual is an installed runtime dependency. Redirected input uses line mode;
+  a broken minimal installation receives a reinstall diagnostic.
 - The hybrid runtime benchmark remains pending.
+
+## Phase 10 — benchmark and release readiness
+
+Completed:
+
+- Formalized the gates the roadmap names for Phases 2/5/6/7 plus the
+  release-readiness benchmark as **KB-HYBRID-01..10**, each exercising the
+  real runtime (real `AgentKernel` loop, real stdio MCP server, real session
+  store, real proxy boundaries, real bridge credentials) through deterministic
+  scripted providers.
+- Captured structured raw run records (pass/fail, latency, usage, cost,
+  evidence kinds, limitations, failure reason) per gate. Raw run records are
+  regenerated by the suite and are intentionally not committed as frozen
+  numbers, because latency/usage vary by machine and run; reproducibility is
+  the contract.
+- Added the new harness this phase required: **KB-HYBRID-05** drives
+  `AgentKernel` with a scripted provider tool-call to an MCP alias so the
+  kernel routes the call through `CoreRuntime` to the real external stdio MCP
+  server — the path no earlier phase test exercised.
+- Added an aggregation gate that asserts every benchmark produced a
+  well-formed record and that all gates passed, so a silent skip or a missing
+  gate fails the suite. The suite prints a summary table of raw run records.
+- Wrote a truthful implemented-only overview (`docs/vNext/README.md`, distinct
+  from the shipping product README), a release-readiness report
+  (`docs/vNext/RELEASE-READINESS.md`) that recommends an action and lists
+  blockers, and refreshed `MIGRATION.md` with implementation status.
+
+KB-HYBRID gates and what each proves:
+
+- **01** — a failing check cannot report success (durable verification chain
+  resets on failure).
+- **02** — proxy enforces both the hosted-client policy (`MCP_CALL`) and the
+  session MCP selection; descriptors are secret-free.
+- **03** — model A stops at the step limit on a leased session; model B
+  resumes the same session and verifies without re-mutating.
+- **04** — fresh `SessionStore`/`CoreRuntime` handles on the same on-disk
+  paths recover the session and verify.
+- **05** — the native agent routes a scripted tool-call to an MCP alias through
+  Core to the real external stdio echo server.
+- **06** — bridge credentials live in the `KaroX/bridge` namespace; a
+  provider-namespace reference cannot resolve; profile statuses are honest.
+- **07** — a second lease on a held session is blocked by `SessionBusy`.
+- **08** — the bundled Notion transport regression script exits 0.
+- **09** — the structured handoff document is strict-JSON, content-digested,
+  secret-free, and carries both models' history.
+- **10** — a capstone verified run accumulates routed cost end-to-end
+  (`0.40 USD`) in the session store and the agent report.
+
+Changed files in Phase 10:
+
+- `tests/_bench_support.py`
+- `tests/test_benchmark.py`
+- `docs/vNext/README.md`
+- `docs/vNext/RELEASE-READINESS.md`
+- `docs/vNext/MIGRATION.md`
+- `docs/vNext/IMPLEMENTATION_STATUS.md`
+
+Verification:
+
+- `python -m compileall -q src tests`
+- `python -m unittest discover -s tests -p "test_*.py"` — 292 passed (2 skipped on Windows)
+- `python -m unittest discover -s tests -p "test_benchmark.py" -v` — 10/10 KB-HYBRID gates pass
+- `python scripts/test_notion_mcp_transport.py` (KB-HYBRID-08 in-env)
+- `git diff --check`
+
+Security boundaries, known problems, and migration risks:
+
+- The benchmark adds no new trust boundary: every gate exercises the real
+  runtime through its existing authorization paths. No secret value is written
+  to records, logs, or evidence; credentials are keyring references.
+- No live service, paid account, or external key was required for
+  KB-HYBRID-01..07, 09, and 10. KB-HYBRID-08 runs the bundled Notion transport
+  regression and fails honestly if that environment is unavailable.
+- Live OpenAI/Anthropic/Gemini conformance and a macOS/Linux cross-platform
+  matrix are **not** recorded on this branch; they need a human decision and
+  are listed as blockers in `RELEASE-READINESS.md`.
+- Context compaction remains pending. Pack-declared MCP remains metadata only
+  this phase. No legacy code was removed; vNext installs beside the current
+  runtime.
 
 ## Phase 7 — MCP proxy and bridge layer
 
@@ -805,7 +1014,7 @@ Security boundaries, known problems, and migration risks:
 - No remote, third-party, or paid MCP server was contacted. Legacy bridge paths
   and the tested Notion integration were not modified. HyperAgent and PromptQL
   remain experimental.
-- Context compaction and the hybrid runtime benchmark remain pending.
+- Context compaction remains pending.
 
 ## Commit record
 
@@ -827,5 +1036,8 @@ Security boundaries, known problems, and migration risks:
 - `2d07dda docs: record Phase 7 MCP proxy and bridge layer`
 - `6bdf7e3 feat: add KaroX Pack SDK with manifest and lifecycle`
 - `a640ee2 docs: record Phase 8 Pack SDK`
+- `319e53d feat: add optional TUI shell over the CLI backend`
+- `533aa6b docs: record Phase 9 TUI`
+- `10495f7 feat: add hybrid runtime benchmark (KB-HYBRID-01..10)`
 
 No merge, push, or release has been performed.

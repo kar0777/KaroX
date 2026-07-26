@@ -151,6 +151,15 @@ class PackManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(PackManifestError, "unsupported platform"):
             parse_pack_manifest(self.root / "karox-pack.toml")
 
+    def test_malformed_tool_entries_are_rejected_not_coerced(self) -> None:
+        _write_pack(self.root)
+        path = self.root / "karox-pack.toml"
+        text = path.read_text(encoding="utf-8")
+        text = text.replace("mutates = false", 'mutates = "false"')
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(PackManifestError, "mutates must be boolean"):
+            parse_pack_manifest(path)
+
 
 class PackLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -219,6 +228,51 @@ class PackLifecycleTests(unittest.TestCase):
         result = self.registry.doctor(pack.identity)
         self.assertEqual(result["status"], "broken")
         self.assertTrue(result["missing_files"])
+
+    def test_doctor_detects_modified_pack_content(self) -> None:
+        pack = self.registry.install(self.source)
+        install_path = Path(pack.install_path)
+        (install_path / "detectors" / "generic.txt").write_text(
+            "tampered\n", encoding="utf-8"
+        )
+        result = self.registry.doctor(pack.identity)
+        self.assertEqual(result["status"], "broken")
+        self.assertEqual(result["modified_files"], ["detectors/generic.txt"])
+
+    def test_install_does_not_copy_undeclared_content(self) -> None:
+        (self.source / "undeclared.txt").write_text("not installed\n", encoding="utf-8")
+        pack = self.registry.install(self.source)
+        self.assertFalse((Path(pack.install_path) / "undeclared.txt").exists())
+
+    def test_install_rejects_incompatible_version_and_platform(self) -> None:
+        manifest = self.source / "karox-pack.toml"
+        original = manifest.read_text(encoding="utf-8")
+        manifest.write_text(
+            original.replace('karox_version = "5.x"', 'karox_version = "99.x"'),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PackConfigurationError, "incompatible"):
+            self.registry.install(self.source)
+
+        current = "windows" if sys.platform == "win32" else "macos" if sys.platform == "darwin" else "linux"
+        other = next(item for item in ("windows", "linux", "macos") if item != current)
+        manifest.write_text(
+            original.replace(
+                'platforms = ["windows", "linux", "macos"]',
+                f'platforms = ["{other}"]',
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PackConfigurationError, "current platform"):
+            self.registry.install(self.source)
+
+    def test_template_description_is_toml_escaped(self) -> None:
+        target = self.root / "quoted"
+        create_pack_template(
+            target, name="quoted-pack", description='He said "go"\\now',
+        )
+        manifest = parse_pack_manifest(target / "karox-pack.toml")
+        self.assertEqual(manifest.description, 'He said "go"\\now')
 
 
 class PackCliTests(unittest.TestCase):

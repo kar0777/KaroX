@@ -14,8 +14,12 @@ copies are immutable; enable/disable grants only a user-approved subset.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import shutil
+import stat
+import sys
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -30,6 +34,29 @@ _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _SAFE_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SAFE_CAPABILITY = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 _SAFE_TOOL = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+
+
+def _runtime_platform() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def _compatible_karox(requirement: str) -> bool:
+    from . import __version__
+
+    current_major = int(__version__.split(".", 1)[0])
+    if re.fullmatch(r"\d+\.x", requirement):
+        return int(requirement.split(".", 1)[0]) == current_major
+    if _SAFE_VERSION.fullmatch(requirement):
+        current_release = __version__.split(".")[:3]
+        current = ".".join(re.match(r"\d+", item).group(0) for item in current_release)
+        return current == requirement
+    raise PackManifestError(
+        "pack karox_version must be an exact semantic version or a major.x range"
+    )
 
 
 class PackError(RuntimeError):
@@ -251,27 +278,43 @@ def parse_pack_manifest(path: Path) -> PackManifest:
     for required in ("name", "version", "description", "authors", "license", "karox_version", "platforms"):
         if required not in data:
             raise PackManifestError(f"pack manifest missing field: {required}")
-    tools = tuple(
-        PackTool(
-            str(item.get("name", "")),
-            str(item.get("capability", "")),
-            str(item.get("description", "")),
-            bool(item.get("mutates", False)),
+    raw_tools = _require_list(data.get("tools", []), "tools")
+    tools_list: list[PackTool] = []
+    for item in raw_tools:
+        if not isinstance(item, dict):
+            raise PackManifestError("pack tools entries must be tables")
+        unknown_tool = set(item).difference({"name", "capability", "description", "mutates"})
+        if unknown_tool:
+            raise PackManifestError(f"unknown pack tool fields: {sorted(unknown_tool)}")
+        tools_list.append(
+            PackTool(
+                item.get("name"),
+                item.get("capability"),
+                item.get("description", ""),
+                item.get("mutates", False),
+            )
         )
-        for item in _require_list(data.get("tools", []), "tools")
-        if isinstance(item, dict)
-    )
+    tools = tuple(tools_list)
     skills = tuple(_require_list(data.get("skills", []), "skills"))
-    mcp = tuple(
-        PackMcpDeclaration(
-            str(item.get("server_id", "")),
-            str(item.get("namespace", "")),
-            str(item.get("transport", "")),
-            str(item.get("description", "")),
+    raw_mcp = _require_list(data.get("mcp", []), "mcp")
+    mcp_list: list[PackMcpDeclaration] = []
+    for item in raw_mcp:
+        if not isinstance(item, dict):
+            raise PackManifestError("pack MCP entries must be tables")
+        unknown_mcp = set(item).difference(
+            {"server_id", "namespace", "transport", "description"}
         )
-        for item in _require_list(data.get("mcp", []), "mcp")
-        if isinstance(item, dict)
-    )
+        if unknown_mcp:
+            raise PackManifestError(f"unknown pack MCP fields: {sorted(unknown_mcp)}")
+        mcp_list.append(
+            PackMcpDeclaration(
+                item.get("server_id"),
+                item.get("namespace"),
+                item.get("transport"),
+                item.get("description", ""),
+            )
+        )
+    mcp = tuple(mcp_list)
     return PackManifest(
         name=data["name"],
         version=data["version"],
@@ -323,6 +366,14 @@ def _content_hashes(root: Path, manifest: PackManifest) -> Dict[str, str]:
     ):
         for relative in attr:
             target = root / relative
+            try:
+                details = target.lstat()
+            except FileNotFoundError as exc:
+                raise PackManifestError(f"pack references missing file: {relative}") from exc
+            attributes = getattr(details, "st_file_attributes", 0)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if stat.S_ISLNK(details.st_mode) or (reparse and attributes & reparse):
+                raise PackManifestError(f"pack reference cannot be a link: {relative}")
             if not target.is_file():
                 raise PackManifestError(f"pack references missing file: {relative}")
             raw = target.read_bytes()
@@ -437,6 +488,15 @@ class PackRegistry:
             raise PackConfigurationError(f"pack source is not a directory: {source}")
         manifest_path = source / PACK_MANIFEST_NAME
         manifest = parse_pack_manifest(manifest_path)
+        if not _compatible_karox(manifest.karox_version):
+            raise PackConfigurationError(
+                f"pack requires incompatible KaroX version: {manifest.karox_version}"
+            )
+        current_platform = _runtime_platform()
+        if current_platform not in manifest.platforms:
+            raise PackConfigurationError(
+                f"pack does not support the current platform: {current_platform}"
+            )
         _validate_pack_paths(source, manifest)
         hashes = _content_hashes(source, manifest)
         manifest_sha = _strict_json_hash(manifest.to_dict())
@@ -458,25 +518,25 @@ class PackRegistry:
         if install_dir.exists():
             raise PackConfigurationError(f"pack install path already exists: {install_dir}")
         # Atomic staging: copy into a temp dir then rename.
-        import shutil
-
         staging = install_dir.with_name(f".{install_dir.name}.staging")
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
-        for entry in source.iterdir():
-            if entry.name in {".git", "__pycache__"}:
-                continue
-            dest = staging / entry.name
-            if entry.is_dir():
-                shutil.copytree(entry, dest)
-            else:
-                shutil.copy2(entry, dest)
+        declared = [PACK_MANIFEST_NAME, *sorted(hashes)]
+        for relative in declared:
+            entry = source / relative
+            dest = staging / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(entry, dest, follow_symlinks=False)
         # Re-validate the staged copy before activation.
         staged_manifest = parse_pack_manifest(staging / PACK_MANIFEST_NAME)
         if _strict_json_hash(staged_manifest.to_dict()) != manifest_sha:
             shutil.rmtree(staging, ignore_errors=True)
             raise PackConfigurationError("staged manifest diverged from source")
+        staged_hashes = _content_hashes(staging, staged_manifest)
+        if staged_hashes != hashes:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise PackConfigurationError("staged Pack content diverged from source")
         os.replace(staging, install_dir)
         pack = InstalledPack(
             manifest.name, manifest.version, str(install_dir),
@@ -488,7 +548,10 @@ class PackRegistry:
 
     def enable(self, identity: str) -> InstalledPack:
         packs = self._load()
-        pack = packs[identity]
+        try:
+            pack = packs[identity]
+        except KeyError as exc:
+            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
         if pack.enabled:
             return pack
         pack = InstalledPack(
@@ -501,7 +564,10 @@ class PackRegistry:
 
     def disable(self, identity: str) -> InstalledPack:
         packs = self._load()
-        pack = packs[identity]
+        try:
+            pack = packs[identity]
+        except KeyError as exc:
+            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
         if not pack.enabled:
             return pack
         pack = InstalledPack(
@@ -514,14 +580,20 @@ class PackRegistry:
 
     def remove(self, identity: str) -> InstalledPack:
         packs = self._load()
-        pack = packs[identity]
+        try:
+            pack = packs[identity]
+        except KeyError as exc:
+            raise PackConfigurationError(f"pack is not installed: {identity}") from exc
         if pack.enabled:
             raise PackConfigurationError("cannot remove an enabled pack; disable it first")
-        import shutil
-
         install_path = Path(pack.install_path)
         if install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
+            try:
+                shutil.rmtree(install_path)
+            except OSError as exc:
+                raise PackConfigurationError(
+                    f"cannot remove installed pack {identity}: {exc}"
+                ) from exc
         packs.pop(identity)
         self._save(packs)
         return pack
@@ -551,9 +623,19 @@ class PackRegistry:
             relative for relative, expected in pack.content_hashes.items()
             if not (install_path / relative).is_file()
         ]
+        modified = [
+            relative
+            for relative, expected in pack.content_hashes.items()
+            if (install_path / relative).is_file()
+            and hashlib.sha256((install_path / relative).read_bytes()).hexdigest()
+            != expected
+        ]
         result["missing_files"] = missing
+        result["modified_files"] = modified
         result["status"] = (
-            "ok" if result["manifest_matches"] and not missing else "broken"
+            "ok"
+            if result["manifest_matches"] and not missing and not modified
+            else "broken"
         )
         return result
 
@@ -567,10 +649,11 @@ def create_pack_template(target: Path, *, name: str, description: str) -> Path:
     if not _SAFE_NAME.fullmatch(safe_name):
         raise PackConfigurationError("pack name must be lowercase kebab (1-63 chars)")
     target.mkdir(parents=True)
+    description_literal = json.dumps(description, ensure_ascii=False)
     manifest = f'''manifest_version = {PACK_MANIFEST_VERSION}
 name = "{safe_name}"
 version = "0.1.0"
-description = "{description}"
+description = {description_literal}
 authors = ["KaroX"]
 license = "MIT"
 karox_version = "5.x"
