@@ -108,20 +108,25 @@ extension details are in [providers](docs/providers/README.md),
 
 ## Verification
 
-The suite is 536 tests. The runner is `unittest`, which is what CI executes:
+The suite is 576 tests. The runner is `unittest`, which is what CI executes:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-536 is the number `python -m pytest --collect-only -q tests` reports and the
-number `unittest` reports as `Ran 536 tests`, so it is reproducible from a clean
+576 is the number `python -m pytest --collect-only -q tests` reports and the
+number `unittest` reports as `Ran 576 tests`, so it is reproducible from a clean
 checkout. A pass tally from `python -m pytest -q` is not: pytest counts subtests
 on top of tests, and how many it counts moves between runs, so no such figure is
 published here. Note also that a bare `python -m pytest -q` at the repository
-root collects 541, because it picks up the five legacy checks in
+root collects 581, because it picks up the five legacy checks in
 `scripts/test_karox4_units.py` alongside the vNext suite.
 
-Two tests skip for platform reasons on Windows. All ten KB-HYBRID release gates
+Every count on this page is checked by `python scripts/check_test_count.py`,
+which CI runs: three hand-written copies of a figure that moves whenever a test
+is added had already gone stale together once, all three reading 536 against a
+suite of 576.
+
+Three tests skip for platform reasons on Windows. All ten KB-HYBRID release gates
 pass. Live paid-provider, PromptQL, ChatGPT Web, and Claude Web product runs
 still require the user's own accounts and credentials.

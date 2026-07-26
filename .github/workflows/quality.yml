@@ -88,6 +88,12 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install --group coverage
 
+      # Runs here rather than in the lint job because it imports the test
+      # modules, so it needs the runtime's dependencies. Cheap, and it fails on a
+      # stale figure before the expensive coverage run starts.
+      - name: Check the published test counts
+        run: python scripts/check_test_count.py
+
       # unittest, not pytest: pytest counts subtests separately, so its pass
       # tally moves between runs and cannot be used as a gate. The threshold is
       # the level the suite actually reaches today -- raise it with the coverage

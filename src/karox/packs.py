@@ -38,8 +38,10 @@ else:  # pragma: no cover - selected by interpreter
 # The registry lock has to hold across processes -- two `karox pack` invocations,
 # not two threads -- so it is taken on a file descriptor by the OS. The two
 # platforms expose that through different modules and neither is importable on
-# the other.
-if os.name == "nt":  # pragma: no cover - selected by platform
+# the other. The test is written against `sys.platform` rather than `os.name`
+# because a type checker narrows on the former, and otherwise reports the whole
+# unreachable branch as errors on each platform in turn.
+if sys.platform == "win32":  # pragma: no cover - selected by platform
     import msvcrt
 
     def _try_lock(descriptor: int) -> None:
@@ -84,13 +86,22 @@ def _runtime_platform() -> str:
 def _compatible_karox(requirement: str) -> bool:
     from . import __version__
 
-    current_major = int(__version__.split(".", 1)[0])
+    # A release component can carry a suffix -- 5.0.0.dev0 compares as 5, 0, 0 --
+    # so only its leading digits count. A component with no digits at all is
+    # reported rather than dereferenced: the old expression assumed the match
+    # always succeeded and would have raised AttributeError from inside a
+    # generator, naming neither the version nor the pack.
+    release: list[str] = []
+    for component in __version__.split(".")[:3]:
+        digits = re.match(r"\d+", component)
+        if digits is None:
+            raise PackError(f"KaroX version is not comparable: {__version__!r}")
+        release.append(digits.group(0))
+    current_major = int(release[0])
     if re.fullmatch(r"\d+\.x", requirement):
         return int(requirement.split(".", 1)[0]) == current_major
     if _SAFE_VERSION.fullmatch(requirement):
-        current_release = __version__.split(".")[:3]
-        current = ".".join(re.match(r"\d+", item).group(0) for item in current_release)
-        return current == requirement
+        return ".".join(release) == requirement
     raise PackManifestError(
         "pack karox_version must be an exact semantic version or a major.x range"
     )
@@ -323,10 +334,17 @@ def parse_pack_manifest(path: Path) -> PackManifest:
         unknown_tool = set(item).difference({"name", "capability", "description", "mutates"})
         if unknown_tool:
             raise PackManifestError(f"unknown pack tool fields: {sorted(unknown_tool)}")
+        # Absence is reported as absence. PackTool's own checks reject the None
+        # that a missing key produced, but they described it as a malformed value
+        # -- "pack tool name must contain 1-128 safe characters" for a manifest
+        # that never mentioned a name.
+        for field in ("name", "capability"):
+            if field not in item:
+                raise PackManifestError(f"pack tool entry missing field: {field}")
         tools_list.append(
             PackTool(
-                item.get("name"),
-                item.get("capability"),
+                item["name"],
+                item["capability"],
                 item.get("description", ""),
                 item.get("mutates", False),
             )
@@ -343,11 +361,14 @@ def parse_pack_manifest(path: Path) -> PackManifest:
         )
         if unknown_mcp:
             raise PackManifestError(f"unknown pack MCP fields: {sorted(unknown_mcp)}")
+        for field in ("server_id", "namespace", "transport"):
+            if field not in item:
+                raise PackManifestError(f"pack MCP entry missing field: {field}")
         mcp_list.append(
             PackMcpDeclaration(
-                item.get("server_id"),
-                item.get("namespace"),
-                item.get("transport"),
+                item["server_id"],
+                item["namespace"],
+                item["transport"],
                 item.get("description", ""),
             )
         )

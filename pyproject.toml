@@ -101,10 +101,21 @@ no_implicit_optional = true
 strict_equality = true
 
 [[tool.mypy.overrides]]
-# The eleven modules below do not pass mypy's defaults yet: 59 findings, mostly
-# a JSON-shaped local rebound between `dict` and `list` in the CLI's report
-# builders. They are excused BY NAME and with a count so the debt is visible and
-# finite. Delete a name when its module is fixed; never add one.
+# `tomli` is the 3.10 fallback for `tomllib`, so it is only installed below 3.11
+# and mypy cannot find it on any newer interpreter. Excused by name rather than
+# with `ignore_missing_imports` globally, which would also hide a genuinely
+# missing dependency.
+module = ["tomli"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The ten modules below do not pass mypy's defaults yet: 52 findings, mostly a
+# JSON-shaped local rebound between `dict` and `list` in the CLI's report
+# builders, which alone accounts for 20. They are excused BY NAME and with a
+# count so the debt is visible and finite. Delete a name when its module is
+# fixed; never add one. `karox.packs` was deleted from this list once its seven
+# findings were fixed, taking the count from 59 -- that is the intended
+# direction of travel.
 module = [
   "karox.agent",
   "karox.cli",
@@ -112,7 +123,6 @@ module = [
   "karox.mcp_client",
   "karox.oauth_bridge",
   "karox.openapi_bridge",
-  "karox.packs",
   "karox.provider_adapters",
   "karox.sessions",
   "karox.tui",

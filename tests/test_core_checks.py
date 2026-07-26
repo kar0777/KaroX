@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from typing import Optional, Sequence
 
-from _support import initialize_git_repository
+from _support import cleanup_temporary_directory, initialize_git_repository
 from karox.core import CoreError, CoreRuntime, InvalidCommand, VerificationRule
 from karox.hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS
 from karox.models import (
@@ -167,7 +167,10 @@ class CheckRunTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.temporary.cleanup()
+        # These tests kill process trees on purpose, and a killed child holds the
+        # repository directory it was running in until Windows finishes tearing it
+        # down -- which is a race this teardown used to lose.
+        cleanup_temporary_directory(self.temporary)
 
     def runtime(self, *rules: Sequence[str]) -> CoreRuntime:
         return CoreRuntime(
@@ -408,6 +411,46 @@ class CheckRunTests(unittest.TestCase):
         record = self.sessions.load("session")
         self.assertEqual(len(record.checks), 2)
         self.assertEqual(len(record.evidence), 2)
+
+
+class TemporaryDirectoryCleanupTests(unittest.TestCase):
+    """The teardown helper that stops a killed child from failing the suite.
+
+    These tests deliberately kill process trees, and on Windows the directory a
+    killed child was running in stays open until the OS finishes tearing the
+    process down. Teardown lost that race often enough to be recorded as a known
+    flake in IMPLEMENTATION_STATUS.
+    """
+
+    def test_cleanup_retries_a_handle_that_clears(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        attempts: list[int] = []
+        real_cleanup = temporary.cleanup
+
+        def flaky_cleanup() -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise PermissionError(13, "The process cannot access the file")
+            real_cleanup()
+
+        temporary.cleanup = flaky_cleanup  # type: ignore[method-assign]
+        cleanup_temporary_directory(temporary)
+
+        self.assertGreaterEqual(len(attempts), 2, "the cleanup was not retried")
+        self.assertFalse(Path(temporary.name).exists())
+
+    def test_cleanup_still_raises_when_the_handle_never_clears(self) -> None:
+        """Retrying must not become ignoring: a real leak still has to be loud."""
+        temporary = tempfile.TemporaryDirectory()
+        try:
+            def always_locked() -> None:
+                raise PermissionError(13, "The process cannot access the file")
+
+            temporary.cleanup = always_locked  # type: ignore[method-assign]
+            with self.assertRaises(PermissionError):
+                cleanup_temporary_directory(temporary, timeout=0.2)
+        finally:
+            tempfile.TemporaryDirectory.cleanup(temporary)
 
 
 if __name__ == "__main__":  # pragma: no cover

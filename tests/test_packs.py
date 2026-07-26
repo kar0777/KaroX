@@ -166,6 +166,26 @@ class PackManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(PackManifestError, "mutates must be boolean"):
             parse_pack_manifest(path)
 
+    def test_a_missing_tool_field_is_reported_as_missing(self) -> None:
+        """A field that was never written is not a malformed value.
+
+        A tool entry with no `name` was rejected as "pack tool name must contain
+        1-128 safe characters", which sends the author looking for a name they
+        never wrote.
+        """
+        _write_pack(self.root)
+        path = self.root / "karox-pack.toml"
+        text = path.read_text(encoding="utf-8").replace('name = "meta", ', "")
+        self.assertNotIn('name = "meta"', text)
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(PackManifestError, "pack tool entry missing field: name"):
+            parse_pack_manifest(path)
+
+    def test_a_missing_mcp_field_is_reported_as_missing(self) -> None:
+        _write_pack(self.root, mcp=[{"server_id": "srv", "namespace": "ns"}])
+        with self.assertRaisesRegex(PackManifestError, "pack MCP entry missing field: transport"):
+            parse_pack_manifest(self.root / "karox-pack.toml")
+
 
 class PackLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:

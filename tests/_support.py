@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -52,6 +54,33 @@ def child_environment(
             environment[names[0]] = str(value)
     environment.update(extra)
     return environment
+
+
+def cleanup_temporary_directory(
+    temporary: tempfile.TemporaryDirectory, *, timeout: float = 5.0
+) -> None:
+    """Remove a test's temporary directory, tolerating a handle that is closing.
+
+    Windows will not remove a directory any process still holds open -- including
+    a child that was just killed and whose working directory it was. A test that
+    deliberately kills a process therefore races its own teardown, and loses
+    often enough to be recorded as a known flake. The handle clears in
+    milliseconds, so this retries.
+
+    It deliberately does not pass ``ignore_cleanup_errors``: that would leave the
+    directory behind and say nothing, hiding a genuine leak. A handle that never
+    clears still raises.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            temporary.cleanup()
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def initialize_git_repository(path: Path) -> None:
