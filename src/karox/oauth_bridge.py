@@ -12,11 +12,13 @@ import hashlib
 import hmac
 import html
 import json
+import os
 import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from pathlib import Path
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from starlette.requests import Request
@@ -37,6 +39,7 @@ _REFRESH_TTL_SECONDS = 30 * 24 * 3600
 _MAX_BODY_BYTES = 65_536
 _MAX_CLIENTS = 256
 _SCOPES = frozenset({"mcp:tools", "offline_access"})
+_STATE_VERSION = 1
 
 
 class OAuthBridgeError(RuntimeError):
@@ -215,6 +218,36 @@ class _Grant:
     expires_at: float
 
 
+def _grant_from_state(
+    key: object, entry: object, resource: str, now: float
+) -> Optional[_Grant]:
+    """Rebuild one stored grant, or ``None`` if it is not exactly what it claims.
+
+    The file is trusted no further than any other input: a hand-edited or
+    truncated entry must be dropped, not turned into a grant for a scope or a
+    resource nobody issued.
+    """
+    if not isinstance(key, str) or not key or not isinstance(entry, dict):
+        return None
+    client_id = entry.get("client_id")
+    scopes = entry.get("scopes")
+    family = entry.get("family")
+    expires_at = entry.get("expires_at")
+    if (
+        not isinstance(client_id, str)
+        or not client_id
+        or entry.get("resource") != resource
+        or not isinstance(family, str)
+        or not family
+        or not isinstance(scopes, list)
+        or not all(isinstance(item, str) and item in _SCOPES for item in scopes)
+        or not isinstance(expires_at, (int, float))
+        or expires_at <= now
+    ):
+        return None
+    return _Grant(client_id, resource, tuple(scopes), family, float(expires_at))
+
+
 class OAuthBridgeService:
     """Small in-process OAuth authorization server bound to one MCP resource."""
 
@@ -224,6 +257,7 @@ class OAuthBridgeService:
         approval_secret: str | Callable[[], str],
         *,
         path: str = "/mcp",
+        state_dir: Optional[Path] = None,
     ) -> None:
         self.public_url = _public_origin(public_url)
         if not isinstance(path, str) or not path.startswith("/") or "?" in path:
@@ -240,6 +274,12 @@ class OAuthBridgeService:
         self._access: dict[str, _Grant] = {}
         self._refresh: dict[str, _Grant] = {}
         self._used_refresh: dict[str, tuple[str, float]] = {}
+        self.state_path = (
+            None
+            if state_dir is None
+            else Path(state_dir) / f"{_digest(self.resource)[:32]}.json"
+        )
+        self._load()
 
     def _secret(self) -> str:
         value = (
@@ -255,6 +295,143 @@ class OAuthBridgeService:
         ):
             raise OAuthBridgeError("OAuth approval secret is invalid")
         return value
+
+    def _load(self) -> None:
+        """Restore the registrations and refresh grants of an earlier run.
+
+        Everything here used to live only in RAM, so restarting the bridge made
+        every connector's stored ``client_id`` unknown and every refresh token
+        invalid: the user had to delete the connector in ChatGPT or Claude and add
+        it again, for a restart. Nothing stored is a bearer secret -- tokens are
+        keyed by their SHA-256 digest, exactly as in memory -- so what survives is
+        the ability to recognise a token, never the token itself.
+
+        Authorization codes and pending approvals are deliberately not restored.
+        They live for minutes and belong to a browser flow that a restart has
+        already interrupted.
+        """
+        path = self.state_path
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # Starting empty costs the user one re-add; refusing to start costs
+            # them the bridge. Say which happened, because the re-add is otherwise
+            # unexplained -- the launcher mirrors this to the console.
+            print(
+                f"Warning: KaroX could not read its saved OAuth state ({path}): "
+                f"{type(exc).__name__}. Connected clients will have to be added "
+                "again.",
+                flush=True,
+            )
+            return
+        if not isinstance(payload, dict) or payload.get("version") != _STATE_VERSION:
+            return
+        # A Quick Tunnel hands out a new host on every start, and a grant minted
+        # for one resource must never be honoured for another.
+        if payload.get("resource") != self.resource:
+            return
+        now = time.time()
+        clients = payload.get("clients")
+        if isinstance(clients, dict):
+            for client_id, entry in list(clients.items())[:_MAX_CLIENTS]:
+                if not isinstance(client_id, str) or not isinstance(entry, dict):
+                    continue
+                redirects = entry.get("redirect_uris")
+                name = entry.get("client_name")
+                created = entry.get("created_at")
+                if (
+                    not isinstance(redirects, list)
+                    or not redirects
+                    or not all(isinstance(item, str) for item in redirects)
+                    or not isinstance(name, str)
+                    or not isinstance(created, int)
+                ):
+                    continue
+                try:
+                    parsed = tuple(_redirect_uri(item) for item in redirects)
+                except OAuthBridgeError:
+                    continue
+                self._clients[client_id] = _Client(client_id, parsed, name, created)
+        grants = payload.get("refresh")
+        if isinstance(grants, dict):
+            for key, entry in grants.items():
+                grant = _grant_from_state(key, entry, self.resource, now)
+                if grant is not None:
+                    self._refresh[key] = grant
+        used = payload.get("used_refresh")
+        if isinstance(used, dict):
+            for key, entry in used.items():
+                if (
+                    not isinstance(key, str)
+                    or not isinstance(entry, list)
+                    or len(entry) != 2
+                    or not isinstance(entry[0], str)
+                    or not isinstance(entry[1], (int, float))
+                    or entry[1] <= now
+                ):
+                    continue
+                self._used_refresh[key] = (entry[0], float(entry[1]))
+
+    def _persist(self) -> None:
+        """Write the state a restart must not lose, atomically and privately."""
+        path = self.state_path
+        if path is None:
+            return
+        with self._lock:
+            payload = {
+                "version": _STATE_VERSION,
+                "resource": self.resource,
+                "clients": {
+                    client_id: {
+                        "redirect_uris": list(client.redirect_uris),
+                        "client_name": client.client_name,
+                        "created_at": client.created_at,
+                    }
+                    for client_id, client in self._clients.items()
+                },
+                "refresh": {
+                    key: {
+                        "client_id": grant.client_id,
+                        "resource": grant.resource,
+                        "scopes": list(grant.scopes),
+                        "family": grant.family,
+                        "expires_at": grant.expires_at,
+                    }
+                    for key, grant in self._refresh.items()
+                },
+                "used_refresh": {
+                    key: [family, expires_at]
+                    for key, (family, expires_at) in self._used_refresh.items()
+                },
+            }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 0600 before a byte is written: the digests here recognise a live
+            # bearer token, so another local account must never read them.
+            descriptor = os.open(
+                str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            # A bridge that is serving must not die because its cache could not be
+            # written; the cost of the failure is a re-add after the next restart.
+            print(
+                f"Warning: KaroX could not save its OAuth state ({path}): "
+                f"{type(exc).__name__}.",
+                flush=True,
+            )
 
     def _prune(self) -> None:
         now = time.time()
@@ -333,6 +510,7 @@ class OAuthBridgeService:
             if len(self._clients) >= _MAX_CLIENTS:
                 raise OAuthBridgeError("dynamic client registry is full")
             self._clients[client.client_id] = client
+        self._persist()
         return {
             "client_id": client.client_id,
             "client_id_issued_at": client.created_at,
@@ -432,6 +610,9 @@ class OAuthBridgeService:
                 grant.family,
                 time.time() + _REFRESH_TTL_SECONDS,
             )
+        # Before the token is handed out, so a crash cannot leave a client holding
+        # a refresh token this bridge will not recognise after a restart.
+        self._persist()
         return {
             "access_token": access,
             "token_type": "Bearer",
@@ -493,6 +674,10 @@ class OAuthBridgeService:
                         for token, item in self._access.items()
                         if item.family != family
                     }
+                    # The revocation this replay triggered has to outlive the
+                    # process too, or a restart would resurrect the family a
+                    # stolen token just got killed for.
+                    self._persist()
                 raise OAuthBridgeError("refresh token is invalid or was already used")
             if record.client_id != client_id or record.resource != resource:
                 self._refresh[key] = record
@@ -556,10 +741,18 @@ def build_oauth_proxy_asgi_app(
     public_url: str,
     path: str = "/mcp",
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
+    state_dir: Optional[Path] = None,
 ) -> Any:
-    """Expose an MCP bridge with OAuth discovery, DCR, PKCE, and refresh."""
+    """Expose an MCP bridge with OAuth discovery, DCR, PKCE, and refresh.
 
-    service = OAuthBridgeService(public_url, approval_secret, path=path)
+    ``state_dir`` is where registrations and refresh grants survive a restart.
+    Omitting it keeps every one of them in RAM, which means a connector added in
+    ChatGPT or Claude stops working the moment this process exits.
+    """
+
+    service = OAuthBridgeService(
+        public_url, approval_secret, path=path, state_dir=state_dir
+    )
     metadata_url = (
         f"{service.public_url}/.well-known/oauth-protected-resource{service.path}"
     )

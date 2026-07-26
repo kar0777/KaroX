@@ -90,8 +90,11 @@ expression can enforce.
   S256, exact redirect/resource binding, short-lived access tokens, and rotating
   refresh tokens. Refresh replay revokes the token family.
 - The bridge credential is the OAuth approval-page password for web profiles;
-  it is never returned to the MCP client. OAuth state is process-local, so a
-  restart is also a full grant revocation.
+  it is never returned to the MCP client. Persisted OAuth state holds SHA-256
+  digests, never a bearer token, under mode 0600 and bound to the issuing
+  resource URL; a grant is dropped rather than honoured when the file does not
+  say exactly what it claims, and a persisted family revocation is not undone by
+  a restart.
 - Redirects cannot forward authorization across origins.
 - Custom provider URLs are validated; local/private endpoints require an
   explicit profile and cannot silently become exfiltration fallbacks.

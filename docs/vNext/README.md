@@ -32,12 +32,12 @@ Run the suite:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-That reports `Ran 619 tests` with 3 environment/platform skips on Windows, and it
-is the runner CI executes. 619 is also what `python -m pytest --collect-only -q
+That reports `Ran 627 tests` with 3 environment/platform skips on Windows, and it
+is the runner CI executes. 627 is also what `python -m pytest --collect-only -q
 tests` reports, which is why it is the figure quoted here: collection is stable
 run to run, whereas a pytest pass tally is not — pytest adds a subtest count on
 top of the test count and that count moves between runs. A bare `python -m pytest
--q` at the repository root collects 624, because it also picks up the five legacy
+-q` at the repository root collects 632, because it also picks up the five legacy
 checks in `scripts/test_karox4_units.py`.
 
 `python scripts/check_test_count.py` recomputes both figures and fails when any

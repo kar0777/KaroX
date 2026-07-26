@@ -136,14 +136,25 @@ The lower-level `session create`, `bridge credential set`, and `bridge serve`
 commands remain available for automation that intentionally manages each
 resource separately; they are not required for the normal web connection.
 
-OAuth clients and grants are process-local in this first implementation.
-Restarting the bridge intentionally invalidates them, so the web connector must
-authenticate again. A Quick Tunnel also receives a new public URL on each run;
-the exact URL is bound before the bridge starts, but the connector must be
-updated after a restart. Use `--tunnel custom` with a stable HTTPS origin when
-the URL must survive restarts. The wire contract is tested locally, but no live
-ChatGPT or Claude account run is claimed yet; both profiles therefore remain
-`experimental`.
+Registered OAuth clients and refresh grants survive a restart. They are kept in
+`<runtime dir>/vnext/oauth-bridge`, one file per resource, mode 0600, holding
+SHA-256 digests rather than tokens — enough to recognise a token, never enough to
+be one. The state is bound to the exact resource URL that issued it, so a bridge
+that comes back on a different origin starts empty rather than honouring a grant
+minted elsewhere. Authorization codes and half-finished approvals are not
+restored: they live for minutes and belong to a browser flow the restart already
+interrupted. A replayed refresh token still revokes its whole token family, and
+that revocation is persisted too.
+
+That makes the connector durable only if its URL is. A Quick Tunnel receives a
+new public URL on every run — the exact URL is bound before the bridge starts,
+but a restart moves it, and the connector then points at a host that no longer
+exists. Use `--tunnel custom` with a stable HTTPS origin for a connector that is
+meant to keep working; `bridge connect` prints this warning itself when the
+profile needs a stable URL and none was given.
+
+The wire contract is tested locally, but no live ChatGPT or Claude account run is
+claimed yet; both profiles therefore remain `experimental`.
 
 ## 3. CLI to a hosted web agent
 

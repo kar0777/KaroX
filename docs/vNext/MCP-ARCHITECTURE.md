@@ -153,8 +153,9 @@ Bearer profiles use that credential directly. OAuth web profiles use it only as
 the human approval-page password; web clients receive short-lived access tokens
 and rotating refresh tokens. Authorization codes are bound to the registered
 client, exact redirect URI, public MCP resource, and PKCE verifier. Dynamic
-clients and grants are intentionally process-local, so a bridge restart revokes
-all issued OAuth state.
+clients and refresh grants outlive the process, stored as digests bound to the
+resource URL that issued them; access tokens, authorization codes, and pending
+approvals do not, so a restart costs one refresh round-trip and never a re-add.
 
 ## Reliability
 

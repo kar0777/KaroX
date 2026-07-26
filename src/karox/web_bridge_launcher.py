@@ -559,7 +559,8 @@ def ephemeral_url_warning(profile_name: str, public_url: Optional[str]) -> Optio
     return (
         "\nNote: this is a Cloudflare Quick Tunnel, so the URL above is temporary. "
         "It changes every time the bridge restarts, and the connector you paste it "
-        "into will stop working when it does. For something you keep, publish a "
+        "into will stop working when it does. Your authorization does survive a "
+        "restart -- the URL is what does not. For something you keep, publish a "
         "stable HTTPS origin and pass --tunnel custom --public-url."
     )
 

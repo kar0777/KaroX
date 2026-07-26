@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import json
+import os
 import re
+import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -384,6 +390,202 @@ class OAuthBridgeWireTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
         self.assertIn("duplicate", response.text)
+
+
+class OAuthStatePersistenceTests(unittest.TestCase):
+    """A connector must survive the bridge restarting, or it is not a connector.
+
+    All of this state used to live only in RAM. Restarting made the client_id
+    ChatGPT or Claude had stored unknown and every refresh token invalid, so the
+    only way back was to delete the connector and add it again -- after a restart,
+    a crash, or a reboot.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.state = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+
+    def _service(self, public_url: str = "https://karox.example") -> OAuthBridgeService:
+        return OAuthBridgeService(public_url, "approval-password", state_dir=self.state)
+
+    def _connect(self, service: OAuthBridgeService) -> tuple[str, dict[str, Any]]:
+        """Run one full registration and code exchange, returning the tokens."""
+        client_id = service.register(
+            {
+                "client_name": "Claude",
+                "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+            }
+        )["client_id"]
+        verifier = "v" * 64
+        request_id, _client = service.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": ["https://claude.ai/api/mcp/auth_callback"],
+                "state": ["state-123"],
+                "code_challenge": [_pkce(verifier)],
+                "code_challenge_method": ["S256"],
+                "resource": [service.resource],
+                "scope": ["mcp:tools offline_access"],
+            }
+        )
+        location = service.approve(request_id, "approval-password")
+        code = parse_qs(urlsplit(location).query)["code"][0]
+        tokens = service.exchange_code(
+            {
+                "code": [code],
+                "client_id": [client_id],
+                "redirect_uri": ["https://claude.ai/api/mcp/auth_callback"],
+                "code_verifier": [verifier],
+                "resource": [service.resource],
+            }
+        )
+        return client_id, tokens
+
+    def test_a_registered_client_and_its_refresh_token_outlive_the_process(
+        self,
+    ) -> None:
+        first = self._service()
+        client_id, tokens = self._connect(first)
+
+        # A different instance on the same state: this is what a restart is.
+        restarted = self._service()
+        refreshed = restarted.refresh(
+            {
+                "refresh_token": [tokens["refresh_token"]],
+                "client_id": [client_id],
+                "resource": [restarted.resource],
+            }
+        )
+        self.assertTrue(refreshed["access_token"])
+        self.assertTrue(restarted.authorize_access_token(refreshed["access_token"]))
+        # The client_id the connector stored still authorizes, so no re-add.
+        request_id, _client = restarted.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": ["https://claude.ai/api/mcp/auth_callback"],
+                "state": ["state-456"],
+                "code_challenge": [_pkce("w" * 64)],
+                "code_challenge_method": ["S256"],
+                "resource": [restarted.resource],
+                "scope": ["mcp:tools"],
+            }
+        )
+        self.assertTrue(request_id)
+
+    def test_the_saved_state_holds_no_bearer_token(self) -> None:
+        service = self._service()
+        _client_id, tokens = self._connect(service)
+        assert service.state_path is not None
+        saved = service.state_path.read_text(encoding="utf-8")
+        for secret in (tokens["access_token"], tokens["refresh_token"]):
+            self.assertNotIn(secret, saved)
+        # What is stored recognises a token without being one.
+        self.assertIn(
+            hashlib.sha256(tokens["refresh_token"].encode("utf-8")).hexdigest(),
+            saved,
+        )
+        self.assertNotIn("approval-password", saved)
+
+    def test_a_grant_is_not_inherited_by_a_bridge_on_another_origin(self) -> None:
+        first = self._service()
+        client_id, tokens = self._connect(first)
+        # A Cloudflare Quick Tunnel hands out a new host on every start, and a
+        # grant minted for one resource must not be honoured for another.
+        moved = self._service("https://other-tunnel.example")
+        with self.assertRaises(OAuthBridgeError):
+            moved.refresh(
+                {
+                    "refresh_token": [tokens["refresh_token"]],
+                    "client_id": [client_id],
+                    "resource": [moved.resource],
+                }
+            )
+
+    def test_a_replayed_refresh_token_stays_revoked_across_a_restart(self) -> None:
+        first = self._service()
+        client_id, tokens = self._connect(first)
+        rotated = first.refresh(
+            {
+                "refresh_token": [tokens["refresh_token"]],
+                "client_id": [client_id],
+                "resource": [first.resource],
+            }
+        )
+        with self.assertRaises(OAuthBridgeError):
+            first.refresh(
+                {
+                    "refresh_token": [tokens["refresh_token"]],
+                    "client_id": [client_id],
+                    "resource": [first.resource],
+                }
+            )
+        # The replay killed the whole family. A restart must not bring it back:
+        # persistence that resurrected a revoked token would be worse than none.
+        restarted = self._service()
+        with self.assertRaises(OAuthBridgeError):
+            restarted.refresh(
+                {
+                    "refresh_token": [rotated["refresh_token"]],
+                    "client_id": [client_id],
+                    "resource": [restarted.resource],
+                }
+            )
+
+    def test_unreadable_state_starts_empty_and_says_so(self) -> None:
+        service = self._service()
+        client_id, tokens = self._connect(service)
+        assert service.state_path is not None
+        service.state_path.write_text("{ this is not json", encoding="utf-8")
+        reported = io.StringIO()
+        with redirect_stdout(reported):
+            restarted = self._service()
+        self.assertIn("could not read its saved OAuth state", reported.getvalue())
+        with self.assertRaises(OAuthBridgeError):
+            restarted.refresh(
+                {
+                    "refresh_token": [tokens["refresh_token"]],
+                    "client_id": [client_id],
+                    "resource": [restarted.resource],
+                }
+            )
+
+    def test_a_tampered_grant_is_dropped_rather_than_honoured(self) -> None:
+        service = self._service()
+        client_id, tokens = self._connect(service)
+        assert service.state_path is not None
+        payload = json.loads(service.state_path.read_text(encoding="utf-8"))
+        for entry in payload["refresh"].values():
+            entry["scopes"] = ["mcp:tools", "repo:admin"]
+        service.state_path.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+        restarted = self._service()
+        with self.assertRaises(OAuthBridgeError):
+            restarted.refresh(
+                {
+                    "refresh_token": [tokens["refresh_token"]],
+                    "client_id": [client_id],
+                    "resource": [restarted.resource],
+                }
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes are not enforced on Windows")
+    def test_the_state_file_is_not_readable_by_other_accounts(self) -> None:
+        service = self._service()
+        self._connect(service)
+        assert service.state_path is not None
+        self.assertEqual(service.state_path.stat().st_mode & 0o077, 0)
+
+    def test_without_a_state_directory_nothing_is_written(self) -> None:
+        # The in-process default has to stay in RAM: a library caller that never
+        # asked for a file must not leave grants on disk.
+        service = OAuthBridgeService("https://karox.example", "approval-password")
+        self._connect(service)
+        self.assertIsNone(service.state_path)
+        self.assertEqual(list(self.state.iterdir()), [])
 
 
 if __name__ == "__main__":

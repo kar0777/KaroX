@@ -79,6 +79,7 @@ from .paths import (
     config_dir,
     legacy_config_dir,
     migration_dir,
+    oauth_state_dir,
     runtime_dir,
     session_dir,
 )
@@ -1883,6 +1884,9 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 credential,
                 public_url=args.public_url,
                 deadline_seconds=args.deadline_seconds,
+                # Without this the connector the user just added in ChatGPT or
+                # Claude stops working when this process exits.
+                state_dir=oauth_state_dir(),
             )
         elif protocol == "mcp":
             app = build_proxy_asgi_app(

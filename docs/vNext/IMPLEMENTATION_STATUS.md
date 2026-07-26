@@ -18,7 +18,7 @@ Base: `main` at `a5c233a`
 | 7 — MCP proxy/bridges | Complete | Built-in Core and external MCP allowlists over authenticated MCP/OpenAPI wire E2E |
 | 8 — Pack SDK | Complete | Strict manifest, declared-file install, compatibility, integrity doctor, and CLI E2E |
 | 9 — TUI | Complete | Full-screen Textual chat/task client, provider onboarding, status view, hosted bridge/tunnel setup, and line-mode fallback |
-| 10 — benchmark/readiness | Complete | Current 619-test suite plus KB-HYBRID-01..10 functional run records |
+| 10 — benchmark/readiness | Complete | Current 627-test suite plus KB-HYBRID-01..10 functional run records |
 | 11 — outbound target ask | Complete | `target ask` CLI/TUI against the verified PromptQL Natural Language API contract, with mocked-HTTP contract tests |
 | 12 — web MCP OAuth | Complete (local contract) | ChatGPT/Claude bridge profiles with OAuth discovery, DCR, PKCE, rotating refresh tokens, replay revocation, and real HTTP/MCP tests; live account runs pending |
 
@@ -53,18 +53,29 @@ Verification:
   hostile redirect rejection, and failed-binding retry over a real HTTP server.
 - `tests/test_bridge.py` covers profile metadata plus CLI fail-closed rules for
   missing public URLs and the wrong protocol.
+- Dynamic clients and refresh grants persist in `<runtime dir>/vnext/oauth-bridge`
+  as SHA-256 digests under mode 0600, bound to the exact resource URL that issued
+  them, so a restart no longer forces the web connector to be re-added. Access
+  tokens are not persisted: the client refreshes on its first 401.
+  `OAuthStatePersistenceTests` covers the restart, the origin change, the
+  tampered and unreadable file, the absence of any bearer token in the file, and
+  that a persisted family revocation is not undone by a restart.
 
 Limitations:
 
-- Dynamic clients and grants are process-local; restarting the bridge revokes
-  them and requires the web connector to authenticate again.
+- The 0600 mode on the OAuth state file is a POSIX guarantee. Windows applies
+  ACLs instead, where the file inherits the protection of the per-user runtime
+  directory that holds it; the digest-only content is what bounds the exposure
+  there.
 - No live ChatGPT Business/Enterprise/Edu workspace or Claude paid-account run
   is recorded, so both profiles remain honestly `experimental`.
 - A Quick Tunnel URL changes after restart. `bridge connect` binds the exact
-  generated origin before starting OAuth, but the web connector must be updated
-  after a restart. `--tunnel custom --public-url HTTPS_ORIGIN` supports a
-  separately provisioned stable reverse proxy while the bridge lifecycle stays
-  in the CLI.
+  generated origin before starting OAuth, but the connector's URL must be updated
+  after a restart -- and because the saved grants are bound to the issuing
+  resource, a moved origin also starts with an empty registry, so that restart is
+  a re-add after all. `--tunnel custom --public-url HTTPS_ORIGIN` is what avoids
+  both, supporting a separately provisioned stable reverse proxy while the bridge
+  lifecycle stays in the CLI.
 
 ## Post-review hardening
 
@@ -74,9 +85,9 @@ Limitations:
 - CI builds/installs that artifact and runs the complete suite on three OSes.
 - Streamable HTTP uses stateless JSON responses, eliminating the AnyIO stream
   leak observed in the stateful SSE test server.
-- Current local evidence is 619 tests with three platform skips on Windows, run as
+- Current local evidence is 627 tests with three platform skips on Windows, run as
   `python -m unittest discover -s tests -p "test_*.py"` — the runner CI uses.
-  619 is what `python -m pytest --collect-only -q tests` reports too; a pytest
+  627 is what `python -m pytest --collect-only -q tests` reports too; a pytest
   *pass* tally is deliberately not quoted anywhere, because pytest adds a subtest
   count whose value moves between runs. A remote matrix result is still pending.
   Every published copy of these figures is verified by
