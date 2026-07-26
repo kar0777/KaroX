@@ -14,6 +14,8 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -785,7 +787,34 @@ class OpenAIChatCompletionsProvider:
             ) from exc
 
     @staticmethod
-    def _http_error(response: httpx.Response) -> ProviderError:
+    def _retry_after(raw_value: Optional[str]) -> Optional[float]:
+        """Return the wait a provider asked for, in seconds.
+
+        RFC 9110 allows ``Retry-After`` to carry either a delay in seconds or an
+        HTTP date, and real gateways send both.  Reading only the number threw
+        the date form away and left the router guessing its own backoff.
+        """
+        if not raw_value:
+            return None
+        try:
+            seconds = float(raw_value)
+        except ValueError:
+            try:
+                moment = parsedate_to_datetime(raw_value)
+            except (TypeError, ValueError):
+                return None
+            if moment is None:
+                return None
+            if moment.tzinfo is None:
+                # An HTTP date without a usable zone is UTC by definition.
+                moment = moment.replace(tzinfo=timezone.utc)
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+        if not math.isfinite(seconds):
+            return None
+        return max(0.0, seconds)
+
+    @classmethod
+    def _http_error(cls, response: httpx.Response) -> ProviderError:
         status = response.status_code
         if status == 401:
             kind = ProviderErrorKind.AUTHENTICATION
@@ -801,14 +830,7 @@ class OpenAIChatCompletionsProvider:
             kind = ProviderErrorKind.PROVIDER_INTERNAL
         else:
             kind = ProviderErrorKind.INVALID_REQUEST
-        retry_after: Optional[float] = None
-        raw_retry = response.headers.get("Retry-After")
-        if raw_retry:
-            try:
-                parsed_retry = float(raw_retry)
-                retry_after = max(0.0, parsed_retry) if math.isfinite(parsed_retry) else None
-            except ValueError:
-                retry_after = None
+        retry_after = cls._retry_after(response.headers.get("Retry-After"))
         detail = response.reason_phrase or "provider request failed"
         return ProviderError(
             kind,
