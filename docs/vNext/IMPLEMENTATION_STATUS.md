@@ -18,7 +18,7 @@ Base: `main` at `a5c233a`
 | 7 — MCP proxy/bridges | Complete | Built-in Core and external MCP allowlists over authenticated MCP/OpenAPI wire E2E |
 | 8 — Pack SDK | Complete | Strict manifest, declared-file install, compatibility, integrity doctor, and CLI E2E |
 | 9 — TUI | Complete | Full-screen Textual chat/task client, provider onboarding, status view, hosted bridge/tunnel setup, and line-mode fallback |
-| 10 — benchmark/readiness | Complete | Current 595-test suite plus KB-HYBRID-01..10 functional run records |
+| 10 — benchmark/readiness | Complete | Current 598-test suite plus KB-HYBRID-01..10 functional run records |
 | 11 — outbound target ask | Complete | `target ask` CLI/TUI against the verified PromptQL Natural Language API contract, with mocked-HTTP contract tests |
 | 12 — web MCP OAuth | Complete (local contract) | ChatGPT/Claude bridge profiles with OAuth discovery, DCR, PKCE, rotating refresh tokens, replay revocation, and real HTTP/MCP tests; live account runs pending |
 
@@ -74,9 +74,9 @@ Limitations:
 - CI builds/installs that artifact and runs the complete suite on three OSes.
 - Streamable HTTP uses stateless JSON responses, eliminating the AnyIO stream
   leak observed in the stateful SSE test server.
-- Current local evidence is 595 tests with three platform skips on Windows, run as
+- Current local evidence is 598 tests with three platform skips on Windows, run as
   `python -m unittest discover -s tests -p "test_*.py"` — the runner CI uses.
-  595 is what `python -m pytest --collect-only -q tests` reports too; a pytest
+  598 is what `python -m pytest --collect-only -q tests` reports too; a pytest
   *pass* tally is deliberately not quoted anywhere, because pytest adds a subtest
   count whose value moves between runs. A remote matrix result is still pending.
   Every published copy of these figures is verified by

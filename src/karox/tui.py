@@ -5500,6 +5500,23 @@ def _line_help(out: Callable[[str], Any]) -> None:
         out(f"  {command:<18} {description}\n")
 
 
+# Zero-width marks a shell can put in front of a piped line. Windows PowerShell
+# writes a UTF-8 BOM ahead of the first line it pipes into a program, and
+# ``str.strip()`` does not remove it.
+_LINE_NOISE = "﻿￾​‎‏"
+
+
+def _clean_line(line: str) -> str:
+    """Reduce a line of input to what the user actually typed.
+
+    A leading BOM made ``/quit`` match neither the command table nor even
+    ``startswith("/")``, so it fell through to the agent: an exit became a billed
+    model request that answered "I cannot quit". Anything invisible is removed
+    before a command is recognised, so a shell's framing cannot cost money.
+    """
+    return line.strip().strip(_LINE_NOISE).strip()
+
+
 def _run_line_mode(
     repository: Path,
     *,
@@ -5514,7 +5531,7 @@ def _run_line_mode(
         line = input_stream.readline()
         if line == "":
             return 0
-        value = line.strip()
+        value = _clean_line(line)
         if not value:
             continue
         if value in {"/quit", "/exit"}:

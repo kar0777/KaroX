@@ -89,6 +89,36 @@ class LineModeTests(unittest.TestCase):
         )
         return code, output.getvalue()
 
+    def test_a_byte_order_mark_does_not_turn_a_command_into_a_paid_request(self) -> None:
+        """Windows PowerShell pipes a UTF-8 BOM ahead of the first line.
+
+        `str.strip()` does not remove it, so `/quit` arrived as `﻿/quit` and
+        matched neither the command table nor even `startswith("/")`. It fell
+        through to the agent: the exit became a billed model request that answered
+        "I cannot quit". Confirmed against a real `powershell.exe` pipe, which
+        delivers `'﻿/quit\\n'`.
+        """
+        with patch.object(tui, "_run_cli") as agent:
+            code, output = self.run_lines("﻿/quit\n")
+
+        agent.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertNotIn("Unknown command", output)
+
+    def test_a_byte_order_mark_still_reaches_a_backend_command(self) -> None:
+        with patch.object(tui, "_run_cli") as agent:
+            code, output = self.run_lines("﻿/help\n/quit\n")
+
+        agent.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertIn("KaroX commands:", output)
+
+    def test_an_invisible_mark_does_not_swallow_a_real_task(self) -> None:
+        """Cleaning the framing must not eat the text the user meant to send."""
+        self.assertEqual(tui._clean_line("﻿review the diff\n"), "review the diff")
+        self.assertEqual(tui._clean_line("  ​ /help \n"), "/help")
+        self.assertEqual(tui._clean_line("/quit\n"), "/quit")
+
     def test_a_status_glyph_does_not_kill_a_redirected_session(self) -> None:
         # Line mode is exactly what runs when stdout is a pipe, and on Windows
         # that stream is the system code page. KaroX prints status glyphs that
