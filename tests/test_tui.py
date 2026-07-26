@@ -89,6 +89,48 @@ class LineModeTests(unittest.TestCase):
         )
         return code, output.getvalue()
 
+    def test_a_status_glyph_does_not_kill_a_redirected_session(self) -> None:
+        # Line mode is exactly what runs when stdout is a pipe, and on Windows
+        # that stream is the system code page. KaroX prints status glyphs that
+        # cp1251 cannot represent, so redirecting output ended the session with
+        # UnicodeEncodeError instead of printing a status line.
+        written: list[str] = []
+
+        class NarrowStream:
+            encoding = "cp1251"
+
+            def write(self, text: str) -> None:
+                text.encode(self.encoding)  # raises exactly as a real pipe does
+                written.append(text)
+
+        stream = NarrowStream()
+        with self.assertRaises(UnicodeEncodeError):
+            stream.write("✓ done")
+
+        tui._line_writer(stream)("✓ done ●")
+
+        self.assertEqual(len(written), 1)
+        self.assertIn("done", written[0])
+
+    def test_redirected_line_mode_still_exits_cleanly(self) -> None:
+        written: list[str] = []
+
+        class NarrowStream:
+            encoding = "cp1251"
+
+            def write(self, text: str) -> None:
+                text.encode(self.encoding)
+                written.append(text)
+
+        code = tui.run_tui(
+            repository=str(Path.cwd()),
+            input_stream=io.StringIO("/quit\n"),
+            output_stream=NarrowStream(),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(written)
+
     def test_exit_and_eof_return_zero(self) -> None:
         self.assertEqual(self.run_lines("/quit\n")[0], 0)
         self.assertEqual(self.run_lines("")[0], 0)

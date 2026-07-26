@@ -3614,6 +3614,7 @@ if _HAS_TEXTUAL:
             self.agent_process: Optional[subprocess.Popen[str]] = None
             self._stop_requested = False
             self._history_seen = 0
+            self._history_fingerprint: Optional[Tuple[int, int]] = None
             # Multi-line pastes held aside while the composer shows a short
             # marker for each. Pasting a stack trace or a diff is the most
             # common way a coding agent is handed context, and a one-line widget
@@ -5023,6 +5024,7 @@ if _HAS_TEXTUAL:
             session_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
             self.active_session = session_id
             self._history_seen = 0
+            self._history_fingerprint = None
             self.agent_busy = True
             self._stop_requested = False
             self.agent_process = None
@@ -5094,8 +5096,20 @@ if _HAS_TEXTUAL:
             if not self.agent_busy or not self.active_session:
                 return
             store = SessionStore(session_dir())
-            if not store.state_path(self.active_session).exists():
+            state_path = store.state_path(self.active_session)
+            try:
+                stat = state_path.stat()
+            except OSError:
                 return
+            # Loading a session reads the whole document, re-serialises it
+            # canonically and checksums it. That record holds every tool result
+            # the run has produced, so at three times a second on a long task it
+            # was several milliseconds of work per tick on the thread that draws
+            # the interface -- for a file that had usually not changed at all.
+            fingerprint = (stat.st_mtime_ns, stat.st_size)
+            if fingerprint == self._history_fingerprint:
+                return
+            self._history_fingerprint = fingerprint
             try:
                 history = store.load(self.active_session).provider_history
             except Exception:
@@ -5368,6 +5382,29 @@ if _HAS_TEXTUAL:
             self.query_one("#conversation", ChatLog).clear()
 
 
+def _line_writer(stream: Any) -> Callable[[str], None]:
+    """Write to a possibly-redirected stream without dying on a glyph.
+
+    Line mode is what runs when stdout is a pipe or a file, and on Windows that
+    stream defaults to the system code page rather than UTF-8. The status
+    glyphs KaroX prints are not in cp1251, so redirecting output crashed the
+    whole session with UnicodeEncodeError instead of printing a status line.
+    """
+    with contextlib.suppress(Exception):
+        stream.reconfigure(encoding="utf-8")
+
+    def write(text: str) -> None:
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(stream, "encoding", None) or "ascii"
+            stream.write(
+                text.encode(encoding, "replace").decode(encoding, "replace")
+            )
+
+    return write
+
+
 def _line_help(out: Callable[[str], Any]) -> None:
     out("KaroX commands:\n")
     for command, description in SLASH_COMMANDS.items():
@@ -5381,7 +5418,7 @@ def _run_line_mode(
     output_stream: Any,
 ) -> int:
     """Non-full-screen fallback for redirected stdin and minimal terminals."""
-    out = output_stream.write
+    out = _line_writer(output_stream)
     out("KaroX line mode. Type a task, /help, or /quit.\n")
     verification = _default_verification(repository)
     while True:
