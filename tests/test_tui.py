@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,6 +90,42 @@ class LineModeTests(unittest.TestCase):
             output_stream=output,
         )
         return code, output.getvalue()
+
+    def test_a_child_process_is_told_to_write_utf8(self) -> None:
+        """Both ends have to name the same encoding, not just the reader.
+
+        Every KaroX child is read back with `encoding="utf-8"`, but a Python
+        process writing to a pipe on Windows encodes with the locale code page.
+        Nothing told it otherwise, so the two ends disagreed and `errors="replace"`
+        turned each undecodable byte into U+FFFD: the model's `привет — hello`
+        reached the chat as six replacement marks and one more for the dash.
+        """
+        env = tui._child_environment()
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+
+    def test_a_child_process_keeps_the_import_path_it_was_given(self) -> None:
+        with patch.dict(os.environ, {"PYTHONPATH": "existing-entry"}):
+            env = tui._child_environment(Path("added-entry"))
+        self.assertTrue(env["PYTHONPATH"].startswith(str(Path("added-entry"))))
+        self.assertIn("existing-entry", env["PYTHONPATH"])
+
+    def test_non_ascii_survives_a_real_child_process(self) -> None:
+        """The end-to-end proof, run the way the client runs it."""
+        message = "привет — hello"
+        script = (
+            "import sys; sys.stdout.write(sys.argv[1])"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, message],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=tui._child_environment(),
+        )
+
+        self.assertEqual(result.stdout, message)
+        self.assertNotIn("�", result.stdout)
 
     def test_a_byte_order_mark_does_not_turn_a_command_into_a_paid_request(self) -> None:
         """Windows PowerShell pipes a UTF-8 BOM ahead of the first line.
@@ -617,6 +655,79 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("repo.read_file", rendered)
                 self.assertIn("repo.write_file", rendered)
                 self.assertIn("running checks", rendered)
+
+    async def test_a_narrow_window_wraps_the_answer_instead_of_clipping_it(self) -> None:
+        """RichLog defaults to min_width=78 whatever the window is.
+
+        In a window narrower than that the chat was laid out at 78 columns and
+        everything past the right edge disappeared behind a horizontal scrollbar,
+        so words ended mid-letter -- "requiring" was drawn as "requiri".
+        """
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(56, 24)) as pilot:
+                await pilot.pause()
+                app._write_assistant(
+                    "This answer rests on no tool results — it was a simple "
+                    "conversational greeting, requiring no repository inspection "
+                    "or changes at all."
+                )
+                await pilot.pause()
+
+                log = app.query_one("#conversation", tui.ChatLog)
+                self.assertLessEqual(
+                    log.virtual_size.width,
+                    log.size.width,
+                    "the chat overflows its own width, so the right edge is clipped",
+                )
+
+    async def test_an_answer_is_not_drawn_twice(self) -> None:
+        """The polling reader and the final report carry the same text.
+
+        `_agent_finished` calls `_poll_agent_history`, which writes the turn's
+        answer out of the session record, and then wrote
+        `report["provider_message"]` as well -- so every reply appeared twice in
+        the chat. `_last_assistant_content` was already being recorded for this
+        comparison and was never consulted.
+        """
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                answer = "Hello — привет"
+                app._last_assistant_content = answer
+                report = json.dumps(
+                    {
+                        "provider_message": answer,
+                        "status": "stopped",
+                        "reason": "answer",
+                        "verified": False,
+                    }
+                )
+                with patch.object(app, "_write_assistant") as write:
+                    app._agent_finished(0, report)
+
+                write.assert_not_called()
+
+    async def test_a_different_final_message_is_still_shown(self) -> None:
+        """Suppressing the repeat must not suppress genuinely new text."""
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._last_assistant_content = "an earlier step"
+                report = json.dumps(
+                    {
+                        "provider_message": "the final answer",
+                        "status": "stopped",
+                        "reason": "answer",
+                        "verified": False,
+                    }
+                )
+                with patch.object(app, "_write_assistant") as write:
+                    app._agent_finished(0, report)
+
+                write.assert_called_once_with("the final answer")
 
     async def test_a_failed_tool_is_not_marked_as_done(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):

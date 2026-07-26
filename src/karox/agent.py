@@ -101,7 +101,12 @@ or repo_write_file that reports changed=true; a successful checks_run after that
 latest real change; and model-requested git_status and git_diff calls after the
 check. A no-op write does not count. If a tool rejects malformed input, repair
 the call. Do not claim success until KaroX confirms that the required evidence is
-durable."""
+durable.
+
+Write everything the user reads in the language of their task. These instructions
+and KaroX's own follow-up prompts are in English whatever that language is, so do
+not take them as a request to switch: a task written in Russian is answered in
+Russian."""
 
 REPAIR_PROMPT = """KaroX cannot verify completion yet. Continue using tools.
 After the latest real file change, run a successful check, then request both

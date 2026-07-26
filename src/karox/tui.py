@@ -1215,6 +1215,31 @@ def _capture_cli(argv: Sequence[str]) -> tuple[int, str]:
     return code, output
 
 
+def _child_environment(extra_path: Optional[Path] = None) -> dict[str, str]:
+    """Environment for a KaroX child process, with both sides agreed on UTF-8.
+
+    Every one of these children is read back with ``encoding="utf-8"``, but a
+    Python process writing to a pipe on Windows encodes with the locale code page
+    -- cp1251 on a Russian install -- and nothing told it otherwise. So the two
+    ends disagreed, and ``errors="replace"`` turned each undecodable byte into
+    U+FFFD: the model's "привет — hello" reached the chat as six replacement marks
+    and one more for the dash, which read as though the model had produced
+    garbage. Naming the encoding on one side only is what caused it.
+
+    Deliberately not applied to foreign programs like ``netstat`` or
+    ``tailscale``: those really do emit the locale code page, and they are decoded
+    with it on purpose.
+    """
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    if extra_path is not None:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{extra_path}{os.pathsep}{existing}" if existing else str(extra_path)
+        )
+    return env
+
+
 def _run_agent_cli(
     argv: Sequence[str], on_process: Callable[[subprocess.Popen[str]], None]
 ) -> tuple[int, str]:
@@ -1227,12 +1252,7 @@ def _run_agent_cli(
     ``_capture_cli`` when a subprocess cannot be started.
     """
     src = Path(__file__).resolve().parent.parent  # repo/src on disk, or site-packages
-    env = dict(os.environ)
-    env["PYTHONPATH"] = (
-        str(src) + os.pathsep + env.get("PYTHONPATH", "")
-        if env.get("PYTHONPATH")
-        else str(src)
-    )
+    env = _child_environment(src)
     try:
         process = subprocess.Popen(
             [sys.executable, "-m", "karox.cli", *argv],
@@ -3654,7 +3674,18 @@ if _HAS_TEXTUAL:
                 yield Static("", id="session-status")
                 yield Static("", id="context-status")
                 yield Static("bridge: off", id="bridge-status")
-            yield ChatLog(id="conversation", markup=True, wrap=True, highlight=False)
+            # min_width defaults to 78 in RichLog, so the chat was laid out at 78
+            # columns however narrow the window was, and everything past the right
+            # edge was clipped behind a horizontal scrollbar -- words ended
+            # mid-letter. Wrapping is only honoured down to this width, so it has
+            # to be smaller than any window someone might actually use.
+            yield ChatLog(
+                id="conversation",
+                markup=True,
+                wrap=True,
+                highlight=False,
+                min_width=20,
+            )
             yield LoadingIndicator(id="busy")
             yield Static("", id="activity", markup=True)
             yield Static("", id="command-menu", markup=True)
@@ -4318,6 +4349,7 @@ if _HAS_TEXTUAL:
                     encoding="utf-8",
                     errors="replace",
                     creationflags=flags,
+                    env=_child_environment(),
                 )
                 self.bridge_launch = launch
             except Exception as exc:
@@ -5251,7 +5283,14 @@ if _HAS_TEXTUAL:
                 verified = bool(report.get("verified"))
                 state = "verified" if verified else str(report.get("status", "stopped"))
                 text_message = str(message)
-                if text_message:
+                # The polling reader above already showed this turn's answer, and
+                # the report carries the same text again, so every reply was drawn
+                # twice. `_last_assistant_content` was recorded for exactly this
+                # comparison and never consulted.
+                if (
+                    text_message
+                    and text_message.strip() != self._last_assistant_content.strip()
+                ):
                     self._write_assistant(text_message)
                 changed = ", ".join(report.get("changed_files") or [])
                 if verified and report.get("reason") == "answer":
