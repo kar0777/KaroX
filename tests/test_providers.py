@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from typing import Iterator
 from unittest.mock import patch
 
@@ -516,6 +518,28 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                 self.assertFalse(
                     error.retry_after is not None and math.isfinite(error.retry_after)
                 )
+
+    def test_reads_both_retry_after_forms(self) -> None:
+        def retry_after(raw_value: str) -> float | None:
+            item = error_response(429, "rate limited", **{"Retry-After": raw_value})
+            return OpenAIChatCompletionsProvider._http_error(item).retry_after
+
+        now = datetime.now(timezone.utc)
+        # RFC 9110 allows a delay or an HTTP date, and gateways send both; the
+        # date form used to be dropped, leaving the router nothing to honour.
+        self.assertAlmostEqual(
+            retry_after(format_datetime(now + timedelta(seconds=120), usegmt=True)),
+            120,
+            delta=5,
+        )
+        self.assertEqual(
+            retry_after(format_datetime(now - timedelta(seconds=30), usegmt=True)),
+            0.0,
+        )
+        self.assertEqual(retry_after("2.5"), 2.5)
+        for unusable in ("", "later", "Sun, 99 Xxx 2026 99:99:99 GMT"):
+            with self.subTest(raw_value=unusable):
+                self.assertIsNone(retry_after(unusable))
 
     def test_validates_numeric_configuration_types(self) -> None:
         invalid = (

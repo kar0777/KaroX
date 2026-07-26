@@ -1,22 +1,45 @@
-"""Opaque provider credential references backed by the operating system.
+"""Opaque provider credential references.
 
-KaroX deliberately keeps secret values out of its JSON configuration.  The
-default backend is ``keyring``, which delegates to Windows Credential Manager,
-macOS Keychain, or Linux Secret Service.  Backends that advertise themselves as
-null, failing, or plaintext storage are rejected.
+KaroX deliberately keeps secret values out of its JSON configuration.  Two
+reference schemes exist, and both name a secret without holding one:
+
+``os-keyring:provider/<name>``
+    The default.  Delegates to Windows Credential Manager, macOS Keychain, or
+    Linux Secret Service.  Backends that advertise themselves as null, failing,
+    or plaintext storage are rejected.
+
+``env:KAROX_PROVIDER_<NAME>_API_KEY``
+    For hosts that have no OS keyring at all — CI runners and containers, where
+    the Secret Service is simply absent.  The process environment is not
+    OS-protected storage, and :meth:`CredentialStore.doctor` says so rather than
+    reporting it as a keyring.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
 
+KEYRING_SCHEME = "os-keyring"
+ENVIRONMENT_SCHEME = "env"
+
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Pinned to KaroX's own namespace: an attacker who can edit the provider
+# registry must not be able to point the resolver at an unrelated secret in the
+# environment (AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN) and have KaroX send it to a
+# base URL of their choosing.
+_ENVIRONMENT_NAME = re.compile(r"^KAROX_PROVIDER_[A-Z0-9]+(?:_[A-Z0-9]+)*_API_KEY$")
 _REFERENCE_PREFIX = "os-keyring:provider/"
+_ENVIRONMENT_PREFIX = "env:"
 _SERVICE = "KaroX/provider"
+_SCHEME_HELP = (
+    "credential reference must use os-keyring:provider/<name> or "
+    "env:KAROX_PROVIDER_<NAME>_API_KEY"
+)
 
 
 class CredentialError(RuntimeError):
@@ -26,21 +49,40 @@ class CredentialError(RuntimeError):
 @dataclass(frozen=True)
 class CredentialReference:
     name: str
+    scheme: str = KEYRING_SCHEME
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or _NAME.fullmatch(self.name) is None:
-            raise ValueError(
-                "credential name must contain 1-128 safe alphanumeric characters"
-            )
+        if self.scheme == KEYRING_SCHEME:
+            if not isinstance(self.name, str) or _NAME.fullmatch(self.name) is None:
+                raise ValueError(
+                    "credential name must contain 1-128 safe alphanumeric characters"
+                )
+        elif self.scheme == ENVIRONMENT_SCHEME:
+            if (
+                not isinstance(self.name, str)
+                or len(self.name) > 128
+                or _ENVIRONMENT_NAME.fullmatch(self.name) is None
+            ):
+                raise ValueError(
+                    "environment credential must be named "
+                    "KAROX_PROVIDER_<NAME>_API_KEY"
+                )
+        else:
+            raise ValueError(f"unsupported credential scheme: {self.scheme!r}")
 
     def __str__(self) -> str:
+        if self.scheme == ENVIRONMENT_SCHEME:
+            return f"{_ENVIRONMENT_PREFIX}{self.name}"
         return f"{_REFERENCE_PREFIX}{self.name}"
 
     @classmethod
     def parse(cls, value: str) -> "CredentialReference":
-        if not isinstance(value, str) or not value.startswith(_REFERENCE_PREFIX):
-            raise ValueError("credential reference must use os-keyring:provider/<name>")
-        return cls(value[len(_REFERENCE_PREFIX) :])
+        if isinstance(value, str):
+            if value.startswith(_REFERENCE_PREFIX):
+                return cls(value[len(_REFERENCE_PREFIX) :])
+            if value.startswith(_ENVIRONMENT_PREFIX):
+                return cls(value[len(_ENVIRONMENT_PREFIX) :], ENVIRONMENT_SCHEME)
+        raise ValueError(_SCHEME_HELP)
 
 
 class CredentialBackend(Protocol):
@@ -60,21 +102,16 @@ class KeyringBackend:
     def _module(cls):
         try:
             import keyring  # type: ignore[import-not-found]
-        except ImportError:
-            # The OS credential backend is a declared dependency (keyring in
-            # requirements.txt / pyproject.toml), but the running interpreter
-            # may not have it (e.g. when KaroX is launched directly with a
-            # system Python instead of the installer venv).  Rather than fail
-            # with a cryptic message, install it into the current interpreter
-            # once so the user never has to think about the dependency.
-            cls._autoinstall_keyring()
-            try:
-                import keyring  # type: ignore[import-not-found]
-            except ImportError as exc:
-                raise CredentialError(
-                    "OS credential support is unavailable. Install the keyring "
-                    "dependency with: python -m pip install keyring"
-                ) from exc
+        except ImportError as exc:
+            # Reading a secret must never install software: this path runs
+            # lazily, mid-run, from a credential accessor, and a package
+            # manager reaching the network there is neither expected nor
+            # auditable by the user who only asked for a model call.
+            raise CredentialError(
+                "OS credential support is unavailable. Install it with "
+                "'python -m pip install keyring', or reference the key from the "
+                "environment instead: env:KAROX_PROVIDER_<NAME>_API_KEY"
+            ) from exc
         try:
             backend = keyring.get_keyring()
             identity = (
@@ -87,33 +124,11 @@ class KeyringBackend:
             ) from exc
         if priority <= 0 or any(item in identity for item in cls._UNSAFE_BACKEND_MARKERS):
             raise CredentialError(
-                "no secure OS credential backend is available; plaintext fallback is disabled"
+                "no secure OS credential backend is available; plaintext fallback "
+                "is disabled. On a host without a Secret Service, reference the "
+                "key from the environment: env:KAROX_PROVIDER_<NAME>_API_KEY"
             )
         return keyring
-
-    @staticmethod
-    def _autoinstall_keyring() -> None:
-        """Install the keyring package into the current interpreter if absent.
-
-        Best-effort and silent on success: keyring is a declared KaroX
-        dependency, so installing it is a repair, not a side effect.  Any
-        failure (offline, read-only site-packages, no pip) is swallowed here;
-        the caller retries the import and raises a clear, actionable error.
-        """
-        import subprocess
-        import sys
-
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--", "keyring"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            # Swallowed: the following import retry surfaces an actionable error.
-            pass
 
     def set(self, service: str, account: str, secret: str) -> None:
         self._module().set_password(service, account, secret)
@@ -167,6 +182,8 @@ class CredentialStore:
             if isinstance(reference, CredentialReference)
             else CredentialReference.parse(reference)
         )
+        if parsed.scheme == ENVIRONMENT_SCHEME:
+            return self._environment_secret(parsed)
         try:
             value = self._backend.get(_SERVICE, parsed.name)
         except CredentialError:
@@ -178,6 +195,23 @@ class CredentialStore:
         if not isinstance(value, str) or not value:
             raise CredentialError(f"credential reference does not exist: {parsed}")
         return self._secret(value)
+
+    @staticmethod
+    def _environment_secret(reference: CredentialReference) -> str:
+        raw_value = os.environ.get(reference.name)
+        # A trailing newline is the classic CI mistake (`KEY=$(cat key.txt)`)
+        # and would otherwise be rejected as a control character.
+        value = raw_value.strip() if isinstance(raw_value, str) else ""
+        if not value:
+            raise CredentialError(
+                f"credential reference does not exist: {reference}"
+            )
+        try:
+            return CredentialStore._secret(value)
+        except ValueError as exc:
+            raise CredentialError(
+                f"environment credential is unusable: {exc}"
+            ) from exc
 
     def delete(self, name: str) -> dict[str, str]:
         reference = CredentialReference(name)
@@ -199,8 +233,24 @@ class CredentialStore:
 
         return access
 
-    def doctor(self) -> dict[str, str]:
-        """Verify that the configured backend can be initialized safely."""
+    def doctor(
+        self, reference: str | CredentialReference | None = None
+    ) -> dict[str, str]:
+        """Report how a credential is protected, without reading its value."""
+        parsed = (
+            reference
+            if isinstance(reference, CredentialReference) or reference is None
+            else CredentialReference.parse(reference)
+        )
+        if parsed is not None and parsed.scheme == ENVIRONMENT_SCHEME:
+            return {
+                # Any process the user runs can read this variable, so calling
+                # it "os-keyring" would overstate what protects the key.
+                "status": "ok" if os.environ.get(parsed.name, "").strip() else "missing",
+                "backend": "environment",
+                "protection": "process-environment",
+                "reference": str(parsed),
+            }
         if isinstance(self._backend, KeyringBackend):
             self._backend._module()
-        return {"status": "ok", "backend": "os-keyring"}
+        return {"status": "ok", "backend": "os-keyring", "protection": "os-protected"}

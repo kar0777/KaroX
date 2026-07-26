@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
@@ -17,7 +20,12 @@ from karox.providers import (
     ProviderTool,
 )
 from karox.registry import ModelPricing, ModelRecord, ProviderRecord, ProviderRegistry
-from karox.routing import RouteTarget, RoutedProvider, RoutingPolicy
+from karox.routing import RetryPolicy, RouteTarget, RoutedProvider, RoutingPolicy
+
+
+# Routing-decision cases assert which route ran, not how often it was asked;
+# retry has its own cases below.
+NO_RETRY = RetryPolicy(max_attempts=1)
 
 
 def request(*, tools: bool = False) -> ModelRequest:
@@ -72,12 +80,28 @@ class FakeFactory:
         return self.providers[record.provider_id]
 
 
+class FakeClock:
+    """A monotonic clock that only advances when the router sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class RoutingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.registry = ProviderRegistry(
             Path(self.temporary.name) / "providers.json"
         )
+        self.clock = FakeClock()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -119,14 +143,20 @@ class RoutingTests(unittest.TestCase):
         self,
         routes: tuple[RouteTarget, ...],
         providers: dict[str, FakeProvider],
+        *,
+        jitter: Callable[[], float] = lambda: 0.0,
         **policy: object,
     ) -> tuple[RoutedProvider, FakeFactory]:
         factory = FakeFactory(providers)
+        policy.setdefault("retry", NO_RETRY)
         return (
             RoutedProvider(
                 self.registry,
                 factory,
                 RoutingPolicy(routes, **policy),  # type: ignore[arg-type]
+                sleep=self.clock.sleep,
+                monotonic=self.clock.monotonic,
+                jitter=jitter,
             ),
             factory,
         )
@@ -240,6 +270,160 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(raised.exception.kind, kind)
                 self.assertEqual(factory.created, ["first"])
                 self.assertEqual(raised.exception.route_attempts[0]["status"], "failed")
+
+    def test_a_rate_limited_route_is_retried_instead_of_ending_the_run(self) -> None:
+        target = self.add_route("only")
+        limited = ProviderError(
+            ProviderErrorKind.RATE_LIMIT, "slow down", retry_after=0.01
+        )
+        provider = FakeProvider([limited, limited, response()])
+        routed, factory = self.routed(
+            (target,), {"only": provider}, retry=RetryPolicy()
+        )
+
+        result = routed.complete(request())
+
+        # A single-route configuration has no next route, so before this the
+        # first transient rejection ended a whole task.
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(self.clock.sleeps, [0.01, 0.01])
+        self.assertEqual(factory.created, ["only"])
+        self.assertEqual(result.selected_provider, "only")
+        self.assertEqual(
+            [item["status"] for item in result.route_attempts], ["completed"]
+        )
+        self.assertEqual(result.route_attempts[0]["retries"], 2)
+
+    def test_an_error_a_retry_cannot_help_is_never_retried(self) -> None:
+        target = self.add_route("only")
+        hopeless = set(ProviderErrorKind).difference(
+            {
+                ProviderErrorKind.RATE_LIMIT,
+                ProviderErrorKind.MODEL_UNAVAILABLE,
+                ProviderErrorKind.TRANSPORT,
+                ProviderErrorKind.PROVIDER_INTERNAL,
+            }
+        )
+        for kind in sorted(hopeless, key=lambda item: item.value):
+            with self.subTest(kind=kind):
+                provider = FakeProvider(
+                    # Even an explicit Retry-After must not buy an attempt that
+                    # cannot change the answer.
+                    [ProviderError(kind, "terminal", retry_after=0.01)]
+                )
+                routed, _ = self.routed(
+                    (target,), {"only": provider}, retry=RetryPolicy()
+                )
+
+                with self.assertRaises(ProviderError) as raised:
+                    routed.complete(request())
+
+                self.assertEqual(raised.exception.kind, kind)
+                self.assertEqual(len(provider.requests), 1)
+                self.assertEqual(self.clock.sleeps, [])
+                self.assertNotIn("retries", raised.exception.route_attempts[0])
+
+    def test_backoff_grows_and_is_jittered_within_its_ceiling(self) -> None:
+        target = self.add_route("only")
+        for jitter, expected in ((0.0, [0.5, 1.0, 1.5]), (1.0, [1.0, 2.0, 3.0])):
+            with self.subTest(jitter=jitter):
+                self.clock = FakeClock()
+                internal = ProviderError(ProviderErrorKind.PROVIDER_INTERNAL, "boom")
+                provider = FakeProvider([internal, internal, internal, response()])
+                routed, _ = self.routed(
+                    (target,),
+                    {"only": provider},
+                    jitter=lambda value=jitter: value,
+                    retry=RetryPolicy(
+                        max_attempts=4,
+                        base_delay_seconds=1.0,
+                        max_delay_seconds=3.0,
+                    ),
+                )
+
+                routed.complete(replace(request(), deadline_seconds=60))
+
+                self.assertEqual(self.clock.sleeps, expected)
+
+    def test_a_retry_never_sleeps_past_the_request_deadline(self) -> None:
+        target = self.add_route("only")
+        provider = FakeProvider(
+            [ProviderError(ProviderErrorKind.RATE_LIMIT, "slow down", retry_after=90.0)]
+        )
+        routed, _ = self.routed((target,), {"only": provider}, retry=RetryPolicy())
+
+        with self.assertRaises(ProviderError) as raised:
+            routed.complete(request())
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.RATE_LIMIT)
+        self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_retries_are_spent_before_the_next_route_is_tried(self) -> None:
+        first = self.add_route("first")
+        second = self.add_route("second")
+        busy = ProviderError(ProviderErrorKind.RATE_LIMIT, "busy", retry_after=0.01)
+        providers = {
+            "first": FakeProvider([busy, busy]),
+            "second": FakeProvider([response()]),
+        }
+        routed, factory = self.routed(
+            (first, second), providers, retry=RetryPolicy(max_attempts=2)
+        )
+
+        result = routed.complete(request())
+
+        self.assertEqual(len(providers["first"].requests), 2)
+        self.assertEqual(self.clock.sleeps, [0.01])
+        self.assertEqual(factory.created, ["first", "second"])
+        self.assertEqual(
+            [item["status"] for item in result.route_attempts],
+            ["fallback", "completed"],
+        )
+        self.assertEqual(result.route_attempts[0]["retries"], 1)
+
+    def test_retry_policy_rejects_unusable_configuration(self) -> None:
+        invalid = (
+            {"max_attempts": 0},
+            {"max_attempts": True},
+            {"max_attempts": 2.0},
+            {"max_attempts": 11},
+            {"base_delay_seconds": -1.0},
+            {"base_delay_seconds": float("inf")},
+            {"max_delay_seconds": 0.1},
+        )
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                RetryPolicy(**options)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            RoutingPolicy((RouteTarget("only", "model"),), retry="fast")  # type: ignore[arg-type]
+
+    def test_a_route_authenticates_from_the_environment_without_a_keyring(self) -> None:
+        captured: dict[str, object] = {}
+
+        def constructor(base_url: str, **kwargs: object) -> FakeProvider:
+            captured.update({"base_url": base_url, **kwargs})
+            return FakeProvider([response()])
+
+        record = ProviderRecord(
+            provider_id="ci",
+            adapter_kind="openai_responses",
+            base_url="https://provider.example/v1",
+            credential_ref="env:KAROX_PROVIDER_CI_API_KEY",
+        )
+
+        with (
+            # A headless runner has no Secret Service and often no keyring
+            # module either; the routed layer still has to authenticate.
+            patch.dict(sys.modules, {"keyring": None}),
+            patch.dict(os.environ, {"KAROX_PROVIDER_CI_API_KEY": "harmless-ci-key"}),
+            patch.dict(ProviderFactory._ADAPTERS, {"openai_responses": constructor}),
+        ):
+            ProviderFactory().create(record)
+
+            credential = captured["credential"]
+            self.assertTrue(callable(credential))
+            self.assertEqual(credential(), "harmless-ci-key")  # type: ignore[operator]
 
     def test_preflight_rejects_tools_streaming_and_privacy_fail_closed(self) -> None:
         cases = (
