@@ -82,8 +82,14 @@ jobs, model history, usage, unfinished actions, and evidence references
 (kind, summary, digest, id). Secrets are redacted and lists are length-capped.
 
 Because `decisions`, `checkpoints`, `plan`, `jobs` and `unfinished_actions` have
-no writer, those sections are structurally present and empty in practice. The
-document is not a "goal and constraints" record: there is no constraints field.
+no writer, those sections are structurally present and empty in practice.
+
+It *is* a goal-and-constraints record: `build_handoff` emits `goal` from the
+session task and a `constraints` object holding `repository`, `repo_fingerprint`,
+`branch`, `access_profile`, and the names and versions of the selected skills and
+MCP servers. What `constraints` does not carry is anything the receiver could
+mistake for a grant — no credentials, no tool allowlist, no capability set. The
+receiver still has to be granted those on its own origin.
 
 The receiver reconciles the repository fingerprint and branch and must hold the
 lease before mutating. A provider switch adds history and constructs new model

@@ -14,6 +14,7 @@ copies are immutable; enable/disable grants only a user-approved subset.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -490,6 +492,14 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
 _FS_RETRY_SECONDS = 2.0
 _FS_RETRY_DELAY = 0.05
 
+# What "someone else holds it" looks like from each platform's lock call. Windows
+# msvcrt reports EACCES; POSIX flock reports EWOULDBLOCK, which is EAGAIN on
+# every platform CPython supports. EDEADLK is included because msvcrt uses it for
+# a lock it will not grant.
+_LOCK_CONTENTION_ERRNOS = frozenset(
+    {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}
+)
+
 
 def _clear_read_only(target: Path) -> None:
     """Drop the read-only attribute Windows will not delete through.
@@ -553,7 +563,16 @@ def _exclusive_file_lock(path: Path, *, timeout: float = 30.0) -> Iterator[None]
             try:
                 _try_lock(descriptor)
                 break
-            except OSError:
+            except OSError as exc:
+                # Only contention is worth waiting out. Retrying every OSError
+                # turned a permanent failure -- a full disk, a revoked ACL, a
+                # filesystem with no locking -- into a thirty-second stall
+                # followed by a confident and wrong diagnosis about another
+                # karox process.
+                if exc.errno not in _LOCK_CONTENTION_ERRNOS:
+                    raise PackConfigurationError(
+                        f"cannot lock the pack registry at {path}: {exc}"
+                    ) from exc
                 if time.monotonic() >= deadline:
                     raise PackConfigurationError(
                         f"timed out after {timeout:g}s waiting for the pack registry lock; "
@@ -594,25 +613,36 @@ class PackRegistry:
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "packs.json"
         self.lock_path = self.root / "packs.json.lock"
-        self._lock_depth = 0
+        # Threads sharing this instance are serialised in memory; other processes
+        # are serialised by the file lock. Both are needed: a file lock is held
+        # per descriptor and so cannot separate two threads that would each open
+        # their own, and an in-memory lock cannot see another process at all.
+        self._thread_lock = threading.RLock()
+        self._held = threading.local()
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        """Serialise a read-modify-write against other processes.
+        """Serialise a read-modify-write against other threads and processes.
 
-        Re-entrant within one process: both platform locks are held per
-        descriptor, so a mutator that called another locked method would refuse
-        or block against itself. Nesting therefore reuses the outer hold.
+        Re-entrant, because a mutator that called another locked method would
+        otherwise block against itself: the platform locks are per descriptor, so
+        a second acquisition from the same process is refused rather than
+        recognised as its own.
+
+        The re-entrancy bookkeeping is per thread. Counting it per instance let
+        two threads sharing one registry interleave freely inside the critical
+        section -- the second saw a non-zero depth, concluded the lock was
+        already its own, and took nothing.
         """
-        if self._lock_depth:
+        if getattr(self._held, "value", False):
             yield
             return
-        with _exclusive_file_lock(self.lock_path):
-            self._lock_depth += 1
+        with self._thread_lock, _exclusive_file_lock(self.lock_path):
+            self._held.value = True
             try:
                 yield
             finally:
-                self._lock_depth -= 1
+                self._held.value = False
 
     def _load(self) -> Dict[str, InstalledPack]:
         if not self.state_path.exists():
@@ -751,8 +781,10 @@ class PackRegistry:
                 pack = packs[identity]
             except KeyError as exc:
                 raise PackConfigurationError(f"pack is not installed: {identity}") from exc
-            if pack.enabled:
-                return pack
+            # Verified even when already enabled. Returning early treated the
+            # redundant call as nothing to do, which meant the one case that
+            # matters most -- a Pack whose files were rewritten while it was live
+            # -- was reported as intact.
             # Install-time verification is not enough. Enabling is the moment a
             # Pack's tools become callable, and the install directory is ordinary
             # files on disk that anything could have edited since -- so the
@@ -764,6 +796,8 @@ class PackRegistry:
                 raise PackConfigurationError(
                     f"refusing to enable {identity}: {_verification_complaint(report)}"
                 )
+            if pack.enabled:
+                return pack
             pack = InstalledPack(
                 pack.name, pack.version, pack.install_path, pack.manifest_sha256,
                 pack.content_hashes, enabled=True,
@@ -837,15 +871,21 @@ class PackRegistry:
             return result
         result["manifest_sha256"] = _strict_json_hash(manifest.to_dict())
         result["manifest_matches"] = result["manifest_sha256"] == pack.manifest_sha256
-        # Re-check content hashes.
+        # Re-check content hashes. A declared path that has become a symlink counts
+        # as modified without being followed: install copies with
+        # follow_symlinks=False and validates that every reference stays inside the
+        # Pack, so a link in an installed tree was put there afterwards, and
+        # reading through it would hash a file the Pack does not own.
         missing = [
             relative for relative, expected in pack.content_hashes.items()
             if not (install_path / relative).is_file()
+            or (install_path / relative).is_symlink()
         ]
         modified = [
             relative
             for relative, expected in pack.content_hashes.items()
             if (install_path / relative).is_file()
+            and not (install_path / relative).is_symlink()
             and hashlib.sha256((install_path / relative).read_bytes()).hexdigest()
             != expected
         ]

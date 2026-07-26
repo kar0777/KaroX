@@ -36,6 +36,8 @@ _ERROR_STATUS: dict[str, int] = {
     "not_found": 404,
     "denied": 403,
     "invalid_request": 400,
+    "idempotency_key_required": 400,
+    "idempotency_key_invalid": 400,
     "internal": 500,
 }
 
@@ -63,13 +65,19 @@ def _operation_id(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
-def bridge_error_response(code: str) -> JSONResponse:
-    """Build the only tool-error shape this wire is allowed to send."""
+def bridge_error_response(code: str, detail: str | None = None) -> JSONResponse:
+    """Build the only tool-error shape this wire is allowed to send.
+
+    ``detail`` replaces the code's generic wording where the reason is a fixed
+    literal that tells the client more than "the call was rejected as invalid".
+    It is never an exception string -- reflecting those is what handed a remote
+    agent the absolute repository path.
+    """
     return JSONResponse(
         {
             "ok": False,
             "error_code": code,
-            "error": BRIDGE_ERROR_MESSAGES[code],
+            "error": detail or BRIDGE_ERROR_MESSAGES[code],
         },
         status_code=_ERROR_STATUS[code],
     )
@@ -213,28 +221,22 @@ def build_openapi_bridge_app(
         descriptor = by_name.get(tool_name)
         if descriptor is None:
             return bridge_error_response("tool_not_exposed")
+        # These three carry `error_code` like every other error from this handler.
+        # Emitting two shapes from one endpoint meant a client that read
+        # `error_code` found it absent exactly for the errors it could have fixed.
         try:
             arguments = await request.json()
         except Exception:
-            return JSONResponse(
-                {"ok": False, "error": "request body must be JSON"},
-                status_code=400,
-            )
+            return bridge_error_response("invalid_request", "request body must be JSON")
         if not isinstance(arguments, dict):
-            return JSONResponse(
-                {"ok": False, "error": "tool arguments must be an object"},
-                status_code=400,
+            return bridge_error_response(
+                "invalid_request", "tool arguments must be an object"
             )
         idempotency_key = request.headers.get("x-karox-idempotency-key")
         if not descriptor.read_only and not idempotency_key:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": (
-                        "mutating calls require X-KaroX-Idempotency-Key"
-                    ),
-                },
-                status_code=400,
+            return bridge_error_response(
+                "idempotency_key_required",
+                "mutating calls require X-KaroX-Idempotency-Key",
             )
         try:
             return runtime.execute(

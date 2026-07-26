@@ -8,12 +8,14 @@ doctor/enable/disable/remove flow is exercised end to end.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -462,6 +464,65 @@ class PackRegistryConcurrencyTests(unittest.TestCase):
             if holder.poll() is None:
                 holder.kill()
                 holder.wait(timeout=30)
+
+    def test_threads_sharing_one_registry_are_still_serialised(self) -> None:
+        """One instance, two threads: the lock must not conclude it is its own.
+
+        Re-entrancy was tracked per instance, so the second thread saw a non-zero
+        depth, decided the lock was already held by itself, and took nothing --
+        two callers then ran the critical section at once. The bookkeeping is per
+        thread now, with an in-process lock alongside the file lock, because a
+        file lock is held per descriptor and cannot separate two threads.
+        """
+        registry = PackRegistry(self.root / "registry")
+        events: list[str] = []
+        started = threading.Event()
+
+        def hold(tag: str) -> None:
+            with registry._locked():
+                events.append(f"{tag}-in")
+                started.set()
+                time.sleep(0.15)
+                events.append(f"{tag}-out")
+
+        first = threading.Thread(target=hold, args=("A",))
+        second = threading.Thread(target=hold, args=("B",))
+        first.start()
+        self.assertTrue(started.wait(timeout=30), "the first holder never entered")
+        second.start()
+        for worker in (first, second):
+            worker.join(timeout=60)
+            self.assertFalse(worker.is_alive(), "a holder never released the lock")
+
+        # Whoever went first must have left before the other arrived.
+        self.assertIn(events, ([
+            "A-in", "A-out", "B-in", "B-out",
+        ], [
+            "B-in", "B-out", "A-in", "A-out",
+        ]), f"the critical section interleaved: {events}")
+
+    def test_a_nested_mutation_on_one_thread_does_not_deadlock(self) -> None:
+        """Re-entrancy still has to work, or install's inner calls would hang."""
+        registry = PackRegistry(self.root / "registry")
+        with registry._locked():
+            with registry._locked():
+                self.assertTrue(getattr(registry._held, "value", False))
+        self.assertFalse(getattr(registry._held, "value", False))
+
+    def test_a_lock_failure_that_is_not_contention_is_reported_at_once(self) -> None:
+        """A full disk is not a busy neighbour, and must not be described as one."""
+        registry = PackRegistry(self.root / "registry")
+
+        def out_of_space(descriptor: int) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(karox.packs, "_try_lock", out_of_space):
+            started = time.monotonic()
+            with self.assertRaisesRegex(PackConfigurationError, "cannot lock the pack registry"):
+                with registry._locked():
+                    pass
+            # Immediately, not after the thirty-second contention timeout.
+            self.assertLess(time.monotonic() - started, 5.0)
 
     def test_racing_installs_all_survive(self) -> None:
         """No install may be lost to a concurrent one.

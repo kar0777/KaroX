@@ -51,10 +51,12 @@ from karox.proxy_server import build_proxy_asgi_app
 from karox.sessions import SessionStore
 from karox.web_bridge_launcher import (
     WebBridgeConnectConfig,
+    WebBridgeLaunchError,
     _adopt_child,
     _child_options,
     _close_job,
     _create_child_job,
+    claim_watchdog,
     reap_orphaned_web_bridges,
     write_watchdog,
 )
@@ -524,6 +526,57 @@ class WebBridgeOrphanTests(unittest.TestCase):
         sessions.revoke.assert_called_once_with("orphan")
         self.assertFalse(orphan.exists())
         self.assertTrue(live.exists())
+
+    def test_a_second_bridge_cannot_take_over_a_live_session_record(self) -> None:
+        """The record decides ownership, so the loser must not touch it.
+
+        The launcher wrote its record before the session store -- the only thing
+        enforcing session-id uniqueness -- had a chance to refuse, and deleted it
+        unconditionally on the way out. A second `bridge connect --session-id X`
+        therefore overwrote the live bridge's record with its own pid and then
+        removed it, leaving a running public tunnel that nothing on disk could
+        find.
+        """
+        record = self.root / "web-bridge" / "shared.json"
+        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+            claim_watchdog(
+                record,
+                {"session_id": "shared", "owner_pid": os.getpid(), "port": 8765},
+            )
+            original = record.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(WebBridgeLaunchError, "already serving this session"):
+                claim_watchdog(
+                    record,
+                    {"session_id": "shared", "owner_pid": os.getpid() + 1, "port": 9999},
+                )
+
+        # Untouched: not rewritten with the loser's details, and not deleted.
+        self.assertTrue(record.exists())
+        self.assertEqual(record.read_text(encoding="utf-8"), original)
+
+    def test_a_stale_record_is_kept_so_doctor_can_still_reap_it(self) -> None:
+        """Overwriting a dead owner's record would strand its session.
+
+        The record is what `bridge doctor` needs in order to revoke the orphan's
+        credential and session, so a claim refuses rather than replacing it, and
+        says which command clears it.
+        """
+        record = self.root / "web-bridge" / "stale.json"
+        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+            claim_watchdog(
+                record,
+                {"session_id": "stale", "owner_pid": self._dead_pid()},
+            )
+            original = record.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(WebBridgeLaunchError, "karox bridge doctor"):
+                claim_watchdog(
+                    record,
+                    {"session_id": "stale", "owner_pid": os.getpid()},
+                )
+
+        self.assertEqual(record.read_text(encoding="utf-8"), original)
 
     def test_bridge_doctor_reaps_without_starting_another_bridge(self) -> None:
         credentials = MagicMock()

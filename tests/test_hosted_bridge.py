@@ -858,5 +858,49 @@ class BridgeWireSecurityTests(unittest.TestCase):
         self.assertEqual(openapi_response.status, 401)
 
 
+class BridgeErrorVocabularyTests(unittest.TestCase):
+    """Both wires answer from one fixed error table, so it has to be complete.
+
+    The OpenAPI wire looks a code up in its own status map and its message in the
+    table shared with the MCP wire. A code present in one and absent from the
+    other is a KeyError raised while building an error response -- a 500 with a
+    traceback, from the path whose whole job is to answer cleanly.
+    """
+
+    def test_every_code_has_both_a_message_and_a_status(self) -> None:
+        from karox.openapi_bridge import _ERROR_STATUS
+        from karox.proxy_server import BRIDGE_ERROR_MESSAGES
+
+        self.assertEqual(
+            sorted(_ERROR_STATUS), sorted(BRIDGE_ERROR_MESSAGES),
+            "a bridge error code exists in only one of the two tables",
+        )
+
+    def test_a_fixed_detail_replaces_the_wording_but_not_the_code(self) -> None:
+        """The specific reason is kept; the machine-readable code is still there.
+
+        Three errors on the tool endpoint used to carry no `error_code` at all, so
+        a client reading it found it absent for exactly the failures it could have
+        corrected.
+        """
+        from karox.openapi_bridge import bridge_error_response
+
+        response = bridge_error_response("invalid_request", "request body must be JSON")
+        payload = json.loads(bytes(response.body))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error_code"], "invalid_request")
+        self.assertEqual(payload["error"], "request body must be JSON")
+        self.assertIs(payload["ok"], False)
+
+    def test_an_error_response_never_reflects_an_exception(self) -> None:
+        """The generic wording is fixed text, not whatever was raised."""
+        from karox.openapi_bridge import bridge_error_response
+        from karox.proxy_server import BRIDGE_ERROR_MESSAGES
+
+        payload = json.loads(bytes(bridge_error_response("internal").body))
+        self.assertEqual(payload["error"], BRIDGE_ERROR_MESSAGES["internal"])
+        self.assertNotIn("error_type", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

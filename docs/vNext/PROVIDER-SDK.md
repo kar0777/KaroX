@@ -60,7 +60,8 @@ by `karox.provider_factory` from the credential store. Secrets never travel in
 
 - `text_delta`
 - `reasoning_delta` — the model's own deliberation, kept off the answer channel
-  so it is never persisted or re-sent as assistant content
+  so it never becomes assistant text. It is not discarded: see
+  [reasoning replay](#reasoning-replay) below.
 - `tool_call_delta`
 - `usage`
 - `completion` — carries the authoritative `ModelResponse` for the call
@@ -88,8 +89,35 @@ not yielded, so a consumer must catch it rather than match on an event kind.
 - `malformed_response`
 - `budget_exceeded`
 
-Only `transport` failures that happen before a usable HTTP response are retried.
-KaroX does not retry a tool mutation because a provider stream was interrupted.
+Two different things retry, and they are easy to confuse.
+
+An **adapter** retries only `transport` failures that happen before a usable HTTP
+response, bounded by the provider record's `max_transport_retries`. KaroX does not
+retry a tool mutation because a provider stream was interrupted.
+
+The **router** additionally re-sends the same request to the same route for
+`rate_limit`, `model_unavailable`, `transport` and `provider_internal`, up to
+`RetryPolicy.max_attempts` — 3 by default, with exponential backoff and a
+`retry_after` a provider supplied taken as a floor. On moving to the *next* route
+it also admits `invalid_request`, because two endpoints serving one model
+disagree about parameter names often enough that a 400 on the first route is what
+a fallback route exists for. Everything else ends the call at once.
+
+## Reasoning replay
+
+A model that signs its reasoning requires that reasoning back, byte for byte, on
+the next request of the same turn — otherwise it rejects the tool result. So the
+blocks are carried, not dropped:
+
+- `ReasoningBlock` holds the provider's own opaque payload and signature.
+- `ModelResponse.reasoning_blocks` collects them from `reasoning_delta` events.
+- `ModelMessage.reasoning_blocks` carries them back, and is rejected on any role
+  but `assistant`.
+- The kernel persists them on the session record and rebuilds them on the
+  following request.
+
+They are never rendered to the user as assistant content and never summarised or
+re-encoded — a changed byte invalidates the signature.
 
 `cancelled` is a **declared but unreached** classification: nothing in
 `src/karox` raises it, because the synchronous transport has no cancellation

@@ -475,6 +475,53 @@ def write_watchdog(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def claim_watchdog(path: Path, payload: dict[str, Any]) -> None:
+    """Create a session's watchdog record, refusing to take over another's.
+
+    The record used to be written unconditionally, before the session store --
+    the only thing enforcing session-id uniqueness -- had been consulted, and the
+    launcher's ``finally`` then deleted it just as unconditionally. Two
+    ``bridge connect`` runs sharing a ``--session-id`` therefore had the second
+    overwrite the first's record with its own pid and delete it on the way out,
+    leaving a live bridge holding a public tunnel that nothing on disk could find.
+    That is the exact failure the record exists to prevent.
+
+    Creating it exclusively makes the record the thing that decides ownership, so
+    the loser never touches what it does not own. An existing record is not
+    overwritten even when its owner is dead: a stale one is what
+    ``karox bridge doctor`` needs in order to revoke the orphan's credential and
+    session, and silently replacing it would strand them.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    try:
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise WebBridgeLaunchError(_watchdog_conflict(path)) from None
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(body)
+
+
+def _watchdog_conflict(path: Path) -> str:
+    """Explain a refused claim in terms of what the user should do next."""
+    owner: Any = None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = None
+    if isinstance(record, dict):
+        owner = record.get("owner_pid")
+    if isinstance(owner, int) and _process_is_alive(owner):
+        return (
+            f"a web bridge is already serving this session in process {owner}; "
+            "stop it, or start this one with a different --session-id"
+        )
+    return (
+        f"a previous web bridge left a record at {path} and it has not been "
+        "cleaned up; run `karox bridge doctor` to revoke it, then start again"
+    )
+
+
 def reap_orphaned_web_bridges() -> tuple[str, ...]:
     """Revoke bridges whose launcher died before it could clean up.
 
@@ -620,7 +667,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         # Recorded as soon as the first child exists. Written after the second
         # one instead, a kill landing between the two spawns left a live public
         # tunnel that nothing on disk knew about, so nothing could reap it.
-        watchdog = watchdog_dir() / f"{session_id}.json"
+        watchdog_path = watchdog_dir() / f"{session_id}.json"
         watchdog_record: dict[str, Any] = {
             "session_id": session_id,
             "owner_pid": os.getpid(),
@@ -631,7 +678,11 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             "tunnel_pid": _pid_of(tunnel.process if tunnel else None),
             "bridge_pid": None,
         }
-        write_watchdog(watchdog, watchdog_record)
+        # `watchdog` is what the cleanup below deletes, so it is assigned only
+        # once the claim succeeded: this process must never remove a record it
+        # does not own.
+        claim_watchdog(watchdog_path, watchdog_record)
+        watchdog = watchdog_path
 
         sessions = SessionStore(session_dir())
         sessions.create(

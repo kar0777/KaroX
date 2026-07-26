@@ -109,9 +109,31 @@ def _stated(path: Path, pattern: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _restate(path: Path, pattern: str, value: int) -> bool:
+    """Rewrite the number this pattern captures, leaving the sentence alone.
+
+    Without this, adding a test means hand-editing the same figure in three
+    documents and getting the arithmetic right, which is how it drifted in the
+    first place. Only the captured group is replaced, so the prose around it --
+    which is the part that carries the reasoning -- is untouched.
+    """
+    text = path.read_text(encoding="utf-8")
+    match = re.search(pattern, text, re.M)
+    if match is None:
+        return False
+    start, end = match.span(1)
+    path.write_text(f"{text[:start]}{value}{text[end:]}", encoding="utf-8")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--print", choices=("suite", "root"), dest="emit")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="update the documents to the measured counts instead of reporting drift",
+    )
     args = parser.parse_args(argv)
 
     cases = _discover(ROOT / "tests", "test_*.py")
@@ -134,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     problems: list[str] = []
+    rewritten = 0
     for claims, expected, label in (
         (SUITE_COUNT_CLAIMS, suite_count, "suite"),
         (ROOT_COUNT_CLAIMS, root_count, "repository-root collection"),
@@ -142,6 +165,14 @@ def main(argv: list[str] | None = None) -> int:
             path = ROOT / relative
             if not path.is_file():
                 problems.append(f"{relative} does not exist but is checked for a {label} count")
+                continue
+            if args.write:
+                if _restate(path, pattern, expected):
+                    rewritten += 1
+                else:
+                    problems.append(
+                        f"{relative} has no {label} count matching {pattern!r} to update"
+                    )
                 continue
             stated = _stated(path, pattern)
             if stated is None:
@@ -159,7 +190,15 @@ def main(argv: list[str] | None = None) -> int:
         print("published test counts disagree with the suite:")
         for problem in problems:
             print(f"  - {problem}")
+        if not args.write:
+            print("  run `python scripts/check_test_count.py --write` to update them")
         return 1
+    if args.write:
+        print(
+            f"updated {rewritten} published counts (suite {suite_count}, "
+            f"repository root {root_count})"
+        )
+        return 0
     print(
         f"published test counts agree (suite {suite_count} under "
         f'`unittest discover -s tests -p "test_*.py"`, {root_count} collected at the '

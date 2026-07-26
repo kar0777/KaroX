@@ -223,8 +223,14 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             tunnel="cloudflare or tailscale funnel",
             persistent_url=False,
             instructions=(
-                "Import the bridge /openapi.json URL as a PromptQL connector and "
-                "store the bridge credential in its protected Bearer or X-API-Key field."
+                # /openapi.json now costs the same credential as calling a tool,
+                # because the schema names every exposed tool and its path. The
+                # credential therefore has to be in place before the import, not
+                # after it: the old order described a fetch that is now a 401.
+                "Store the bridge credential in the PromptQL connector's protected "
+                "Bearer or X-API-Key field first, then import the bridge "
+                "/openapi.json URL -- the schema itself requires that credential, "
+                "and only the discovery document at / is public."
             ),
             limitations=(
                 "The OpenAPI wire path is tested locally; no recorded live PromptQL run yet.",

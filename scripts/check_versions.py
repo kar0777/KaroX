@@ -109,11 +109,34 @@ def _check_release_records(problems: list[str], release: str) -> None:
         return
     # RELEASE.json records what was actually published. It may legitimately lag
     # VERSION while a release is in flight, but it must never run ahead of it.
-    if marker.get("status") == "published" and marker.get("version") != release:
-        problems.append(
-            f"RELEASE.json records published {marker.get('version')!r} "
-            f"but VERSION says {release!r}"
-        )
+    #
+    # This was written as an equality test, which contradicted the sentence above
+    # and made the check fail on exactly the commit it is meant to guard: the one
+    # that bumps VERSION. release.yml writes `"status": "published"` into every
+    # marker, so the status was no escape either, and the new
+    # tests-before-publish gate could never have gone green.
+    recorded = marker.get("version")
+    if marker.get("status") == "published" and isinstance(recorded, str):
+        if _version_key(recorded) > _version_key(release):
+            problems.append(
+                f"RELEASE.json records published {recorded!r} which is ahead of "
+                f"VERSION {release!r}; a marker may lag a release in flight, never lead it"
+            )
+
+
+def _version_key(text: str) -> tuple[int, ...]:
+    """Order two release lines by their leading numeric components.
+
+    Deliberately not a PEP 440 parser: this compares release lines such as 4.1.4,
+    and the standard library offers nothing to do it with. A component with no
+    digits sorts as 0 rather than raising, so a malformed marker cannot turn an
+    ordering question into a crash.
+    """
+    components: list[int] = []
+    for component in text.strip().split("."):
+        digits = re.match(r"\d+", component)
+        components.append(int(digits.group(0)) if digits else 0)
+    return tuple(components)
 
 
 def main(argv: list[str] | None = None) -> int:

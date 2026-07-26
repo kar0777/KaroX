@@ -28,6 +28,13 @@ permissions:
   security-events: write
 
 jobs:
+  # A green run here means the scan completed, NOT that it found nothing.
+  # `analyze` uploads its results and succeeds regardless of what they say, so
+  # this job is not the gate and must not be read as one: what blocks a merge is
+  # the "Code scanning results" required status check in branch protection, which
+  # is a repository setting and cannot be declared in this file. Without that
+  # setting enabled, findings are reported in the Security tab and nothing stops
+  # a merge.
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 25
