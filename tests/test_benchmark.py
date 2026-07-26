@@ -539,7 +539,7 @@ class HybridRuntimeBenchmark(unittest.TestCase):
             # Honesty: bridge profile statuses are labelled, not all "tested".
             profiles = known_bridge_profiles()
             statuses = {p.name: p.status for p in profiles}
-            self.assertEqual(statuses["notion"], "tested")
+            self.assertEqual(statuses["notion"], "tested_legacy")
             self.assertIn(statuses["hyperagent"], {"experimental", "untested"})
             return {
                 "usage": {},

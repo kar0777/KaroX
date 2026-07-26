@@ -42,14 +42,29 @@ class BridgeAccessDenied(BridgeError, PermissionError):
 
 class BridgeStatus(str):
     TESTED = "tested"
+    # Evidence exists, but it exercises the legacy ``server/`` gateway rather
+    # than this runtime. That is a different HTTP server, so it cannot stand in
+    # for a vNext end-to-end run; calling it ``tested`` overstated what the
+    # repository can show. Kept as its own label instead of being flattened into
+    # ``tested`` or ``experimental``, because neither of those is the truth.
+    TESTED_LEGACY = "tested_legacy"
     EXPERIMENTAL = "experimental"
     PROTOCOL_COMPATIBLE = "protocol_compatible"
     PLANNED = "planned"
 
 
 _VALID_STATUSES = frozenset(
-    {BridgeStatus.TESTED, BridgeStatus.EXPERIMENTAL, BridgeStatus.PROTOCOL_COMPATIBLE, BridgeStatus.PLANNED}
+    {
+        BridgeStatus.TESTED,
+        BridgeStatus.TESTED_LEGACY,
+        BridgeStatus.EXPERIMENTAL,
+        BridgeStatus.PROTOCOL_COMPATIBLE,
+        BridgeStatus.PLANNED,
+    }
 )
+
+# Statuses that must name the versions their evidence was recorded against.
+_EVIDENCE_BACKED = frozenset({BridgeStatus.TESTED, BridgeStatus.TESTED_LEGACY})
 
 
 @dataclass(frozen=True)
@@ -81,7 +96,8 @@ class BridgeProfile:
             )
         if self.status not in _VALID_STATUSES:
             raise ValueError(
-                "bridge status must be tested, experimental, protocol_compatible, or planned"
+                "bridge status must be tested, tested_legacy, experimental, "
+                "protocol_compatible, or planned"
             )
         if self.status == BridgeStatus.PLANNED and self.transport == "stdio":
             raise ValueError("planned bridge profiles cannot use stdio")
@@ -97,7 +113,7 @@ class BridgeProfile:
             isinstance(item, str) and item for item in self.verified_versions
         ):
             raise ValueError("bridge verified versions must be non-empty strings")
-        if self.status == BridgeStatus.TESTED and not self.verified_versions:
+        if self.status in _EVIDENCE_BACKED and not self.verified_versions:
             raise ValueError("tested bridge profiles require verified versions")
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,11 +121,23 @@ class BridgeProfile:
 
     @property
     def is_usable(self) -> bool:
-        return self.status in {BridgeStatus.TESTED, BridgeStatus.PROTOCOL_COMPATIBLE}
+        # ``tested_legacy`` counts as usable, but not because of its legacy
+        # evidence. Every such profile is a plain authenticated Streamable HTTP
+        # or OpenAPI client, and that wire is covered end to end by this
+        # runtime's own tests -- the same ground on which
+        # ``protocol_compatible`` is usable. Withholding it would deny a
+        # connection the transport tests actually support.
+        return self.status in {
+            BridgeStatus.TESTED,
+            BridgeStatus.TESTED_LEGACY,
+            BridgeStatus.PROTOCOL_COMPATIBLE,
+        }
 
 
 # Declarative registry of known hosted clients.  Statuses are honest:
-# - Notion: tested legacy integration covered by existing regression scripts.
+# - Notion: tested_legacy.  The only evidence, scripts/test_notion_mcp_transport.py,
+#   drives server/notion_gateway.py -- a different HTTP server from this runtime's
+#   bridge -- so it proves the legacy gateway and says nothing about src/karox.
 # - Generic Streamable HTTP: protocol-compatible transport, client-dependent.
 # - ChatGPT/Claude Web: OAuth/DCR/PKCE contract tested locally, no live account run.
 # - PromptQL: local OpenAPI/Core wire E2E, no recorded live product run.
@@ -119,7 +147,7 @@ def known_bridge_profiles() -> List[BridgeProfile]:
         BridgeProfile(
             name="notion",
             transport="streamable_http",
-            status=BridgeStatus.TESTED,
+            status=BridgeStatus.TESTED_LEGACY,
             description="Notion Custom Agent bridge to the local KaroX runtime.",
             tunnel="cloudflare or tailscale funnel",
             persistent_url=False,
@@ -127,8 +155,12 @@ def known_bridge_profiles() -> List[BridgeProfile]:
                 "Configure the Notion Custom Agent MCP endpoint to the KaroX "
                 "bridge URL and use the bridge credential as the bearer token."
             ),
-            limitations=("Per-session key protects both the MCP and REST paths.",),
-            verified_versions=("4.x",),
+            limitations=(
+                "Per-session key protects both the MCP and REST paths.",
+                "Verified against the legacy server/notion_gateway.py only; no "
+                "recorded Notion run against this runtime's bridge.",
+            ),
+            verified_versions=("4.x-legacy-gateway",),
         ),
         BridgeProfile(
             name="generic-streamable-http",

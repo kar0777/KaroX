@@ -87,21 +87,58 @@ class BridgeProfileTests(unittest.TestCase):
         profiles = known_bridge_profiles()
         names = [p.name for p in profiles]
         self.assertIn("notion", names)
-        notion = next(p for p in profiles if p.name == "notion")
-        self.assertEqual(notion.status, BridgeStatus.TESTED)
-        self.assertTrue(notion.verified_versions)
         for p in profiles:
             if p.name in {"hyperagent", "promptql"}:
                 self.assertEqual(p.status, BridgeStatus.EXPERIMENTAL)
-            # No profile claims tested without verified versions.
-            if p.status == BridgeStatus.TESTED:
-                self.assertTrue(p.verified_versions)
+
+    def test_notion_evidence_runs_the_legacy_gateway_not_this_runtime(self) -> None:
+        """The label has to follow the evidence, not the other way round.
+
+        Two assertions used to live here: ``notion.status == TESTED`` and, inside
+        a loop, ``if p.status == TESTED: assertTrue(p.verified_versions)``. Both
+        read the registry and compared it with itself, so they passed whatever
+        the registry happened to say -- including a ``tested`` label whose only
+        evidence exercises a different HTTP server. This reads the evidence file
+        and derives what the label is allowed to be.
+        """
+        evidence = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "test_notion_mcp_transport.py"
+        ).read_text(encoding="utf-8")
+        # It puts server/ on sys.path and drives notion_gateway; nothing in it
+        # reaches src/karox, so it cannot vouch for this runtime's bridge.
+        self.assertIn("import notion_gateway", evidence)
+        self.assertNotIn("import karox", evidence)
+
+        notion = BridgeRegistry().get("notion")
+        self.assertEqual(notion.status, BridgeStatus.TESTED_LEGACY)
+        self.assertNotEqual(notion.status, BridgeStatus.TESTED)
+        # A reader of `bridge show notion` must be told where the evidence came
+        # from, not just given a status word.
+        self.assertTrue(
+            any("legacy" in item.lower() for item in notion.limitations),
+            notion.limitations,
+        )
+        self.assertTrue(any("legacy" in item for item in notion.verified_versions))
+
+    def test_no_profile_claims_a_verified_run_against_this_runtime(self) -> None:
+        """``tested`` is reserved for a recorded run against ``src/karox``.
+
+        No profile has one yet. When the first real vNext end-to-end lands, this
+        test is the thing that has to be updated -- deliberately, in that commit.
+        """
+        for p in known_bridge_profiles():
+            self.assertNotEqual(p.status, BridgeStatus.TESTED, p.name)
 
     def test_tested_status_requires_verified_versions(self) -> None:
-        with self.assertRaisesRegex(ValueError, "require verified versions"):
-            BridgeProfile(
-                name="x", transport="streamable_http", status=BridgeStatus.TESTED,
-            )
+        # Both evidence-backed labels have to name what they were verified
+        # against; a legacy claim with no version is as empty as a tested one.
+        for status in (BridgeStatus.TESTED, BridgeStatus.TESTED_LEGACY):
+            with self.assertRaisesRegex(ValueError, "require verified versions"):
+                BridgeProfile(
+                    name="x", transport="streamable_http", status=status,
+                )
 
     def test_invalid_transport_and_status_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "transport must be"):
@@ -523,7 +560,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("chatgpt-web", names)
         self.assertIn("claude-web", names)
         notion = next(p for p in profiles if p["name"] == "notion")
-        self.assertEqual(notion["status"], "tested")
+        self.assertEqual(notion["status"], "tested_legacy")
         promptql = next(p for p in profiles if p["name"] == "promptql")
         self.assertEqual(promptql["transport"], "openapi")
         hyperagent = next(p for p in profiles if p["name"] == "hyperagent")
