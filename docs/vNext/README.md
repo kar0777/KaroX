@@ -32,10 +32,16 @@ Run the suite:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-285 unittest tests pass (2 environment/platform skips on Windows); pytest reports
-420 passed plus 133 subtests. The KB-HYBRID-01..10 benchmark
-(`tests/test_benchmark.py`) regenerates raw run records (latency, usage, cost,
-evidence) from a clean checkout.
+That reports `Ran 536 tests` with 2 environment/platform skips on Windows, and it
+is the runner CI executes. 536 is also what `python -m pytest --collect-only -q
+tests` reports, which is why it is the figure quoted here: collection is stable
+run to run, whereas a pytest pass tally is not — pytest adds a subtest count on
+top of the test count and that count moves between runs. A bare `python -m pytest
+-q` at the repository root collects 541, because it also picks up the five legacy
+checks in `scripts/test_karox4_units.py`.
+
+The KB-HYBRID-01..10 benchmark (`tests/test_benchmark.py`) regenerates raw run
+records (latency, usage, cost, evidence) from a clean checkout.
 
 | Layer | What works | Evidence |
 | --- | --- | --- |
@@ -104,9 +110,12 @@ that forwards to the same entry point.
 - **Live services are opt-in and unlabelled-tested.** Provider adapters are
   proven against deterministic in-process/HTTP fakes; live OpenAI/Anthropic/
   Gemini E2E requires a user-supplied key and is not recorded on this branch.
-- **Notion** is `TESTED` via the bundled transport regression
-  (`scripts/test_notion_mcp_transport.py`, KB-HYBRID-08) which passed in the
-  development environment; it depends on that server's deps being importable.
+- **Notion** is `tested_legacy`, not `tested`. Its only evidence,
+  `scripts/test_notion_mcp_transport.py` (KB-HYBRID-08), drives
+  `server/notion_gateway.py` — the legacy HTTP server, a different program from
+  this runtime's bridge — so it proves nothing about `src/karox`. The profile is
+  still usable, on the same footing as `generic-streamable-http`: the
+  authenticated Streamable HTTP wire itself has vNext end-to-end coverage.
 - **PromptQL** remains product-level `EXPERIMENTAL`: its OpenAPI wire path to
   built-in Core tools has local E2E coverage, but no live PromptQL run is
   recorded. **HyperAgent** has no dedicated product E2E.
