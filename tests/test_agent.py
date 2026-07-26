@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from _support import SRC, initialize_git_repository
-from karox.agent import AgentKernel, AgentLimits, SYSTEM_PROMPT
+from karox.agent import AgentKernel, AgentLimits, ContextBudget, SYSTEM_PROMPT
 from karox.core import CoreRuntime
 from karox.core_tools import ExtendedCoreRuntime
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
@@ -1083,6 +1083,181 @@ class ExtendedToolAgentTests(unittest.TestCase):
         self.assertIn(
             "file_edit", {item.get("kind") for item in report.evidence}
         )
+
+
+class ContextCompactionTests(unittest.TestCase):
+    """History is bounded before it reaches the provider, not after it fails."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repo"
+        initialize_git_repository(self.repository)
+        (self.repository / "sample.txt").write_text("before\n", encoding="utf-8")
+        self.sessions = SessionStore(self.root / "sessions")
+        self.sessions.create(
+            self.repository,
+            "work through a long task",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id="session",
+        )
+        self.origin = Origin(OriginKind.NATIVE_AGENT, "test-agent")
+        self.policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
+        self.policy.set_grants(
+            self.origin,
+            {
+                Capability.REPO_READ,
+                Capability.REPO_WRITE,
+                Capability.PROCESS_RUN,
+                Capability.CHECKS_RUN,
+                Capability.GIT_READ,
+            },
+        )
+        self.core = CoreRuntime(
+            self.repository,
+            self.policy,
+            self.sessions,
+            self.root / "audit.jsonl",
+            verification_commands=[[sys.executable, "-c", "print('ok')"]],
+        )
+
+    def kernel(self, context: ContextBudget) -> AgentKernel:
+        return AgentKernel(
+            provider=QueueProvider([]),
+            model="test-model",
+            core=self.core,
+            sessions=self.sessions,
+            origin=self.origin,
+            limits=AgentLimits(max_seconds=30),
+            context=context,
+        )
+
+    @staticmethod
+    def history(turns: int, payload_chars: int) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "the original task"},
+        ]
+        for index in range(turns):
+            entries.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "provider": "test_provider",
+                    "tool_calls": [
+                        {
+                            "call_id": f"c{index}",
+                            "name": "repo_read_file",
+                            "raw_arguments": '{"path": "sample.txt"}',
+                            "recoverable": True,
+                        }
+                    ],
+                }
+            )
+            entries.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": f"c{index}",
+                    "tool_name": "repo_read_file",
+                    "core_name": "repo.read_file",
+                    "content": "x" * payload_chars,
+                    "result": {"ok": True, "data": {"path": f"file{index}.txt"}},
+                }
+            )
+        return entries
+
+    def test_history_under_the_ceiling_is_untouched(self) -> None:
+        kernel = self.kernel(ContextBudget(max_input_tokens=200_000))
+        entries = self.history(4, 200)
+
+        self.assertEqual(kernel._compact(entries), entries)
+
+    def test_oldest_turns_are_replaced_by_a_summary(self) -> None:
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=8_000, keep_recent_groups=2)
+        )
+        entries = self.history(12, 3_000)
+
+        compacted = kernel._compact(entries)
+
+        # The system prompt and the original task are never candidates.
+        self.assertEqual(compacted[0]["content"], "system prompt")
+        self.assertEqual(compacted[1]["content"], "the original task")
+        summary = compacted[2]
+        self.assertEqual(summary["kind"], "context_summary")
+        self.assertIn("repo.read_file", str(summary["content"]))
+        self.assertIn("file0.txt", str(summary["content"]))
+        self.assertLess(len(compacted), len(entries))
+        self.assertLessEqual(
+            kernel._estimated_tokens(compacted), kernel.context.token_ceiling
+        )
+
+    def test_compaction_never_splits_a_tool_call_from_its_result(self) -> None:
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=8_000, keep_recent_groups=2)
+        )
+
+        compacted = kernel._compact(self.history(12, 3_000))
+
+        pending = [
+            str(raw.get("call_id"))
+            for entry in compacted
+            if entry.get("role") == "assistant"
+            for raw in entry.get("tool_calls", [])
+        ]
+        answered = [
+            str(entry.get("tool_call_id"))
+            for entry in compacted
+            if entry.get("role") == "tool"
+        ]
+        # Every wire format rejects an assistant tool call with no matching
+        # result, and a result with no matching call.
+        self.assertEqual(sorted(pending), sorted(answered))
+
+    def test_recent_turns_survive_even_when_they_exceed_the_ceiling(self) -> None:
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=2_000, keep_recent_groups=4)
+        )
+        entries = self.history(10, 20_000)
+
+        compacted = kernel._compact(entries)
+
+        # The floor of recent turns is kept even though it is over budget:
+        # dropping the freshest evidence would be worse than a large request,
+        # and clipping still bounds each individual result.
+        self.assertEqual(
+            sum(1 for entry in compacted if entry.get("role") == "assistant"), 4
+        )
+        self.assertEqual(compacted[2]["kind"], "context_summary")
+
+    def test_oversized_tool_results_are_clipped_in_the_request_only(self) -> None:
+        kernel = self.kernel(
+            ContextBudget(max_input_tokens=200_000, max_tool_result_chars=1_000)
+        )
+        entries = self.history(1, 50_000)
+
+        messages = list(kernel._request_messages(entries))
+
+        tool_message = next(item for item in messages if item.role == "tool")
+        self.assertLess(len(tool_message.content or ""), 1_400)
+        self.assertIn("KaroX omitted", tool_message.content or "")
+        self.assertIn("repo_read_lines", tool_message.content or "")
+        # The durable record is untouched; only the outbound view is bounded.
+        self.assertEqual(len(str(entries[3]["content"])), 50_000)
+
+    def test_unknown_window_still_applies_a_safety_ceiling(self) -> None:
+        kernel = self.kernel(ContextBudget(keep_recent_groups=2))
+        self.assertFalse(kernel.context.window_known)
+        entries = self.history(400, 3_000)
+
+        compacted = kernel._compact(entries)
+
+        self.assertLess(len(compacted), len(entries))
+        summary = next(
+            item for item in compacted if item.get("kind") == "context_summary"
+        )
+        self.assertIn("does not advertise an input window", str(summary["content"]))
 
 
 class ScriptedChatHandler(BaseHTTPRequestHandler):

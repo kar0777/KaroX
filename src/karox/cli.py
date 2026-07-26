@@ -12,7 +12,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from .agent import AgentError, AgentKernel, AgentLimits, AgentReport, SYSTEM_PROMPT
+from .agent import (
+    AgentError,
+    AgentKernel,
+    AgentLimits,
+    AgentReport,
+    ContextBudget,
+    SYSTEM_PROMPT,
+)
 from .bridge import (
     BridgeCredentialStore,
     BridgeError,
@@ -776,6 +783,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=int, default=24)
     run.add_argument("--max-seconds", type=float, default=900.0)
     run.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help=(
+            "model input window in tokens; routed models take this from the "
+            "registry, so it is only needed for --base-url endpoints"
+        ),
+    )
+    run.add_argument(
         "--verification-command",
         action="append",
         required=True,
@@ -1090,7 +1106,13 @@ def _test_registered_model(
 
 def _agent_provider(
     args: argparse.Namespace, record: SessionRecord | None, limits: AgentLimits
-) -> tuple[Any, str]:
+) -> tuple[Any, str, int | None]:
+    """Resolve the provider, the model and the model's input window.
+
+    The window drives history compaction, so it is read from the registry entry
+    that is actually routed to rather than guessed. A direct ``--base-url``
+    endpoint publishes nothing, so it relies on ``--context-window``.
+    """
     direct = args.model is not None or args.base_url is not None or args.api_key_env
     if direct:
         routed_options = [
@@ -1131,6 +1153,7 @@ def _agent_provider(
                 timeout_seconds=min(60.0, float(limits.max_seconds)),
             ),
             args.model,
+            args.context_window,
         )
 
     registry = _registry()
@@ -1142,9 +1165,19 @@ def _agent_provider(
                 "no provider route was given and no default model is selected"
             )
         routes = (RouteTarget(selected.provider_id, selected.model_id),)
+    windows: list[int] = []
     for target in routes:
         registry.provider(target.provider_id)
-        registry.model(target.provider_id, target.model)
+        entry = registry.model(target.provider_id, target.model)
+        window = getattr(entry, "context_window", None)
+        if isinstance(window, int) and window > 0:
+            windows.append(window)
+    # A fallback route may have a smaller window than the primary one. Compacting
+    # to the smallest keeps a fallback from failing on a history the first model
+    # accepted. An unknown window anywhere means the smallest is unknown.
+    context_window = (
+        min(windows) if windows and len(windows) == len(routes) else None
+    )
     initial_usage = record.usage if record is not None else {}
     costs = initial_usage.get("costs")
     initial_costs = costs if isinstance(costs, dict) else {}
@@ -1161,7 +1194,7 @@ def _agent_provider(
         initial_usage=initial_usage,
         initial_costs=initial_costs,
     )
-    return provider, routes[0].model
+    return provider, routes[0].model, args.context_window or context_window
 
 
 def _handle_skill(args: argparse.Namespace) -> int:
@@ -1742,7 +1775,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             raise SessionError("native agent requires a workspace_write session")
         if record.task != str(redact(args.task)):
             raise SessionError("resume task differs from the existing session task")
-    provider, model = _agent_provider(args, record, limits)
+    provider, model, context_window = _agent_provider(args, record, limits)
 
     content = None
     selection: dict[str, Any] | None = None
@@ -1823,6 +1856,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         origin=origin,
         limits=limits,
         system_prompt=system_prompt,
+        context=ContextBudget(max_input_tokens=context_window),
     ).run(record.session_id)
 
 

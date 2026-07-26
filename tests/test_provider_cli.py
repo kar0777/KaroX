@@ -328,6 +328,7 @@ class ProviderCliTests(unittest.TestCase):
                     model_id=f"{provider_id}/model",
                     tools="true",
                     streaming="true",
+                    context_window=8_000 if provider_id == "first" else 4_000,
                 )
             )
         Factory.created = []
@@ -348,12 +349,19 @@ class ProviderCliTests(unittest.TestCase):
             max_total_tokens=10,
             max_cost=None,
             currency=None,
+            context_window=None,
         )
         with (
             patch("karox.cli._registry", return_value=registry),
             patch("karox.cli.ProviderFactory", Factory),
         ):
-            routed, _ = _agent_provider(args, SimpleNamespace(usage={}), AgentLimits())
+            routed, _, window = _agent_provider(
+                args, SimpleNamespace(usage={}), AgentLimits()
+            )
+            # Both routed models declare a window, so compaction targets the
+            # smaller one and a fallback cannot receive a history the primary
+            # model accepted but it cannot.
+            self.assertEqual(window, 4_000)
             result = routed.complete(
                 ModelRequest("ignored", (ModelMessage("user", "work"),))
             )
@@ -363,7 +371,7 @@ class ProviderCliTests(unittest.TestCase):
             Factory.created = []
             args.route = ["first/first/model"]
             args.max_total_tokens = 10
-            exhausted, _ = _agent_provider(
+            exhausted, _, _ = _agent_provider(
                 args,
                 SimpleNamespace(usage={"total_tokens": 10}),
                 AgentLimits(),

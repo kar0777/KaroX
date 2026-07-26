@@ -147,6 +147,68 @@ class AgentLimits:
 
 
 @dataclass(frozen=True)
+class ContextBudget:
+    """Bounds on how much transcript is resent to the model on every step.
+
+    An agent loop resends its whole history each turn, so a single large file
+    read or diff is paid for again in every later request. Core allows a two
+    megabyte read, which on its own exceeds the input window of every model
+    KaroX can route to.
+
+    Compaction here is deliberately deterministic. The summary that replaces
+    dropped turns is computed from recorded tool results, so it cannot invent a
+    change that never happened -- the same reason KaroX treats evidence rather
+    than narration as proof.
+
+    ``max_input_tokens`` is the model's advertised input window when the registry
+    knows it. When it does not, ``fallback_input_tokens`` is a safety ceiling
+    rather than a claim about the model: it only prevents an accidental
+    million-token request, and the summary says the real window was unknown.
+    """
+
+    max_input_tokens: Optional[int] = None
+    fallback_input_tokens: int = 120_000
+    utilization: float = 0.6
+    keep_recent_groups: int = 8
+    max_tool_result_chars: int = 24_000
+    chars_per_token: float = 3.0
+
+    def __post_init__(self) -> None:
+        if self.max_input_tokens is not None and (
+            isinstance(self.max_input_tokens, bool)
+            or not isinstance(self.max_input_tokens, int)
+            or self.max_input_tokens <= 0
+        ):
+            raise ValueError("context max input tokens must be a positive integer")
+        if (
+            isinstance(self.fallback_input_tokens, bool)
+            or not isinstance(self.fallback_input_tokens, int)
+            or self.fallback_input_tokens <= 0
+        ):
+            raise ValueError("context fallback input tokens must be positive")
+        if not 0.05 <= float(self.utilization) <= 0.95:
+            raise ValueError("context utilization must be between 0.05 and 0.95")
+        if isinstance(self.keep_recent_groups, bool) or self.keep_recent_groups < 1:
+            raise ValueError("context must keep at least one recent turn")
+        if (
+            isinstance(self.max_tool_result_chars, bool)
+            or self.max_tool_result_chars < 500
+        ):
+            raise ValueError("tool result ceiling must be at least 500 characters")
+        if not 1.0 <= float(self.chars_per_token) <= 10.0:
+            raise ValueError("chars per token must be between 1 and 10")
+
+    @property
+    def token_ceiling(self) -> int:
+        window = self.max_input_tokens or self.fallback_input_tokens
+        return max(1_000, int(window * float(self.utilization)))
+
+    @property
+    def window_known(self) -> bool:
+        return self.max_input_tokens is not None
+
+
+@dataclass(frozen=True)
 class AgentReport:
     session_id: str
     status: str
@@ -185,6 +247,7 @@ class AgentKernel:
         origin: Origin,
         limits: AgentLimits = AgentLimits(),
         system_prompt: str = SYSTEM_PROMPT,
+        context: ContextBudget = ContextBudget(),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
@@ -197,6 +260,7 @@ class AgentKernel:
         self.sessions = sessions
         self.origin = origin
         self.limits = limits
+        self.context = context
         approved_checks = core.verification_commands
         if not approved_checks:
             raise AgentError(
@@ -874,12 +938,176 @@ class AgentKernel:
         self, history: Iterable[Dict[str, Any]]
     ) -> Iterable[ModelMessage]:
         replaced = False
-        for message in self._messages(history):
+        for message in self._messages(self._compact(list(history))):
             if not replaced and message.role == "system":
                 replaced = True
                 yield ModelMessage("system", self.system_prompt)
+            elif message.role == "tool" and message.content is not None:
+                yield ModelMessage(
+                    role="tool",
+                    content=self._clip(
+                        message.content, self.context.max_tool_result_chars
+                    ),
+                    tool_call_id=message.tool_call_id,
+                )
             else:
                 yield message
+
+    # -- context compaction ------------------------------------------------
+
+    def _compact(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Drop the oldest complete turns until the request fits the window.
+
+        Whole turns are dropped, never half of one: an assistant message whose
+        tool results are missing (or a tool result with no matching call) is
+        rejected outright by the OpenAI, Anthropic and Gemini wire formats, so
+        partial trimming would turn a large request into a broken one.
+        """
+        head, groups = self._split_history(history)
+        if not groups:
+            return list(history)
+        ceiling = self.context.token_ceiling
+        if self._estimated_tokens(history) <= ceiling:
+            return list(history)
+        keep = min(self.context.keep_recent_groups, len(groups))
+        for cut in range(1, len(groups) - keep + 1):
+            digest = self._context_summary(groups[:cut])
+            kept = [entry for group in groups[cut:] for entry in group]
+            candidate = head + [digest] + kept
+            if self._estimated_tokens(candidate) <= ceiling:
+                return candidate
+        # Even the floor of recent turns exceeds the ceiling. Keep that floor:
+        # clipping in _request_messages still applies, and discarding the most
+        # recent evidence would be worse than sending a large request.
+        older = groups[:-keep]
+        if not older:
+            return list(history)
+        return (
+            head
+            + [self._context_summary(older)]
+            + [entry for group in groups[-keep:] for entry in group]
+        )
+
+    @staticmethod
+    def _split_history(
+        history: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], List[List[Dict[str, Any]]]]:
+        """Separate the immutable head from the droppable turns.
+
+        The head is the system prompt plus the original task. Losing either
+        removes what the run is even for, so neither is ever a compaction
+        candidate.
+        """
+        head: List[Dict[str, Any]] = []
+        boundary = -1
+        for index, entry in enumerate(history):
+            head.append(entry)
+            if entry.get("role") == "user":
+                boundary = index
+                break
+        if boundary < 0:
+            return list(history), []
+        groups: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        for entry in history[boundary + 1 :]:
+            if entry.get("role") in {"assistant", "user"} and current:
+                groups.append(current)
+                current = []
+            current.append(entry)
+        if current:
+            groups.append(current)
+        return head, groups
+
+    def _estimated_tokens(self, entries: Iterable[Dict[str, Any]]) -> int:
+        """Approximate the request size the same way the request is built.
+
+        Tool results are counted at their clipped length because that is what
+        actually leaves the process; counting the full stored text would compact
+        away turns that would have fitted.
+        """
+        characters = 0
+        for entry in entries:
+            content = entry.get("content")
+            if isinstance(content, str):
+                characters += (
+                    min(len(content), self.context.max_tool_result_chars)
+                    if entry.get("role") == "tool"
+                    else len(content)
+                )
+            for raw in entry.get("tool_calls", []) or ():
+                arguments = raw.get("raw_arguments")
+                if isinstance(arguments, str):
+                    characters += len(arguments)
+                name = raw.get("name")
+                if isinstance(name, str):
+                    characters += len(name)
+        return int(characters / float(self.context.chars_per_token)) + 1
+
+    def _context_summary(
+        self, groups: List[List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        steps = 0
+        tools: Counter[str] = Counter()
+        paths: List[str] = []
+        failures: List[str] = []
+        for group in groups:
+            for entry in group:
+                role = entry.get("role")
+                if role == "assistant":
+                    steps += 1
+                    continue
+                if role != "tool":
+                    continue
+                name = str(entry.get("core_name") or entry.get("tool_name") or "?")
+                tools[name] += 1
+                error = entry.get("error")
+                if isinstance(error, dict):
+                    failures.append(f"{name}: {error.get('type')}")
+                result = entry.get("result")
+                data = result.get("data") if isinstance(result, dict) else None
+                path = data.get("path") if isinstance(data, dict) else None
+                if isinstance(path, str) and path not in paths:
+                    paths.append(path)
+        used = ", ".join(f"{name} x{count}" for name, count in sorted(tools.items()))
+        lines = [
+            "KaroX summarized the earliest turns of this session to stay inside "
+            "the model context window. The summary below is computed from the "
+            "recorded tool results, not from any narration.",
+            f"Turns summarized: {steps}.",
+            f"Tools used: {used or 'none'}.",
+        ]
+        if paths:
+            lines.append("Files involved: " + ", ".join(paths[:40]) + ".")
+        if failures:
+            lines.append("Failures: " + "; ".join(failures[:20]) + ".")
+        if not self.context.window_known:
+            lines.append(
+                "The active model does not advertise an input window, so a "
+                "conservative default ceiling was applied."
+            )
+        lines.append(
+            "The omitted text is gone from this request. Re-read any file or "
+            "re-run any search you still need instead of relying on memory of it."
+        )
+        return {
+            "role": "user",
+            "content": "\n".join(lines),
+            "kind": "context_summary",
+        }
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        head = text[: (limit * 2) // 3]
+        tail = text[-(limit // 3) :]
+        omitted = len(text) - len(head) - len(tail)
+        return (
+            f"{head}\n... [KaroX omitted {omitted} characters so this result fits "
+            "the context window. Use repo_read_lines for a specific range, or a "
+            "narrower repo_search.] ...\n"
+            f"{tail}"
+        )
 
     @staticmethod
     def _prompt_count(history: List[Dict[str, Any]], kind: str) -> int:
