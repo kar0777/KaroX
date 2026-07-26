@@ -19,6 +19,7 @@ from .bridge import (
     BridgeRegistry,
 )
 from .core import CoreError, CoreRuntime
+from .core_tools import ExtendedCoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .ecosystem import (
     INTEGRATION_PRESETS,
@@ -1800,7 +1801,11 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         ) as current:
             store.validate_repository(current, repository)
             _replace_stored_skill(current, content.metadata.name, selection)
-    core = CoreRuntime(
+    # The native agent gets the same extended tool table the hosted bridge hands
+    # to a web client: exact-string editing, windowed reads, commit history and a
+    # file listing that skips dependency directories. Running KaroX's own agent
+    # on the narrower base runtime made it rewrite whole files and walk .venv.
+    core = ExtendedCoreRuntime(
         repository,
         policy,
         store,

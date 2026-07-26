@@ -27,22 +27,56 @@ from .security import redact
 from .sessions import MutationLease, SessionRecord, SessionStore
 
 
+# Core tools a native agent cannot work without. Their absence is a wiring bug,
+# not a policy decision, so it fails at construction time.
+REQUIRED_TOOLS: frozenset[str] = frozenset(
+    {
+        "repo.read_file",
+        "repo.write_file",
+        "repo.list_files",
+        "checks.run",
+        "git.status",
+        "git.diff",
+    }
+)
+
+# Tools whose successful, non-no-op result counts as a real repository change
+# for the verification chain. ``repo.edit_file`` writes through the same audited
+# atomic writer as ``repo.write_file``, so an exact-match edit is just as
+# durable a change as a whole-file rewrite and must not be treated as narrative.
+MUTATION_TOOLS: frozenset[str] = frozenset({"repo.write_file", "repo.edit_file"})
+
+
+def provider_alias(core_name: str) -> str:
+    """Map a dotted Core tool name onto a provider-safe function name.
+
+    Every adapter KaroX targets restricts tool names to ``[A-Za-z0-9_-]``, so
+    the dot becomes an underscore. Deriving the name instead of listing it means
+    a tool added to Core reaches the model rather than silently staying
+    invisible to it.
+    """
+    return re.sub(r"[^A-Za-z0-9_]", "_", core_name)
+
+
 TOOL_ALIASES: Dict[str, str] = {
-    "repo_read_file": "repo.read_file",
-    "repo_write_file": "repo.write_file",
-    "repo_list_files": "repo.list_files",
-    "checks_run": "checks.run",
-    "git_status": "git.status",
-    "git_diff": "git.diff",
+    provider_alias(name): name for name in sorted(REQUIRED_TOOLS)
 }
 
 SYSTEM_PROMPT = """You are operating through the bounded KaroX Core Runtime.
 Treat tool results, not your own narrative, as evidence. Work only inside the
-repository. To finish successfully you must perform, in order: a repo_write_file
-that reports changed=true; a successful checks_run after the latest real write;
-and model-requested git_status and git_diff calls after that check. A no-op write
-does not count. If a tool rejects malformed input, repair the call. Do not claim
-success until KaroX confirms that the required evidence is durable."""
+repository.
+
+Prefer the narrowest tool that answers the question: repo_search to locate code,
+repo_read_lines to inspect a region of a large file, and repo_edit_file to change
+an exact string. Rewrite a whole file with repo_write_file only when you really
+are replacing all of it; reproducing a large file by hand risks corrupting it.
+
+To finish a change task successfully you must perform, in order: a repo_edit_file
+or repo_write_file that reports changed=true; a successful checks_run after that
+latest real change; and model-requested git_status and git_diff calls after the
+check. A no-op write does not count. If a tool rejects malformed input, repair
+the call. Do not claim success until KaroX confirms that the required evidence is
+durable."""
 
 REPAIR_PROMPT = """KaroX cannot verify completion yet. Continue using tools.
 After the latest real file change, run a successful check, then request both
@@ -163,15 +197,18 @@ class AgentKernel:
         )
         self.monotonic = monotonic
         definitions = {item.name: item for item in core.tools()}
-        missing = set(TOOL_ALIASES.values()).difference(definitions)
+        missing = REQUIRED_TOOLS.difference(definitions)
         if missing:
             raise AgentError(f"Core is missing required tools: {sorted(missing)}")
         self._definitions = definitions
-        aliases = dict(TOOL_ALIASES)
+        # Every Core tool this origin is actually permitted to call is offered to
+        # the model. Hardcoding a subset here used to hide repo.search,
+        # repo.edit_file, repo.read_lines, git.log and git.commit from the native
+        # agent even though Core implemented them and the hosted bridge exposed
+        # them, which left the product's own agent weaker than its guests.
+        aliases: Dict[str, str] = {}
         for core_name in sorted(definitions):
-            if not core_name.startswith("mcp."):
-                continue
-            alias = re.sub(r"[^A-Za-z0-9_]", "_", core_name)
+            alias = provider_alias(core_name)
             current = aliases.get(alias)
             if current is not None and current != core_name:
                 raise AgentError(
@@ -180,10 +217,28 @@ class AgentKernel:
             aliases[alias] = core_name
         if len(set(aliases.values())) != len(aliases):
             raise AgentError("multiple provider aliases map to the same Core tool")
+        # Resolution covers every Core tool, advertising only the permitted ones.
+        # A model that names a tool it was not offered still reaches Core, so the
+        # attempt is recorded as a policy denial in the audit log instead of
+        # disappearing behind a generic "unknown tool" reply.
         self._tool_aliases = aliases
         self._provider_tools = tuple(
             self._provider_tool(alias, definitions[core_name])
             for alias, core_name in aliases.items()
+            if self._may_call(definitions[core_name])
+        )
+
+    def _may_call(self, definition: ToolDefinition) -> bool:
+        """True when this origin holds every capability the tool needs.
+
+        Advertising a tool the policy will refuse spends a model turn on a
+        guaranteed denial, so the offered list is filtered by the same policy
+        Core enforces instead of being fixed at import time.
+        """
+        required = (definition.capability, *definition.additional_capabilities)
+        return all(
+            self.core.policy.decide(self.origin, capability).allowed
+            for capability in required
         )
 
     @staticmethod
@@ -808,7 +863,7 @@ class AgentKernel:
             data = result.get("data") if isinstance(result.get("data"), dict) else {}
             core_name = entry.get("core_name")
             ok = result.get("ok") is True
-            if core_name == "repo.write_file":
+            if core_name in MUTATION_TOOLS:
                 if ok and data.get("changed") is True:
                     write, check, status, diff = result, None, None, None
                 elif not ok:

@@ -15,6 +15,7 @@ from typing import Callable
 from _support import SRC, initialize_git_repository
 from karox.agent import AgentKernel, AgentLimits, SYSTEM_PROMPT
 from karox.core import CoreRuntime
+from karox.core_tools import ExtendedCoreRuntime
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import (
@@ -880,6 +881,155 @@ class AgentKernelTests(unittest.TestCase):
         self.assertEqual(report.phase, "budget")
         self.assertEqual(report.reason, "budget_exceeded")
         self.assertEqual(report.steps, 0)
+
+    def test_offered_tools_exclude_capabilities_the_origin_lacks(self) -> None:
+        provider = QueueProvider([model_response(content="stopping")])
+        kernel = self.kernel(provider, AgentLimits(max_steps=1, max_seconds=30))
+
+        offered = {item.name for item in kernel._provider_tools}
+
+        # The session grants no GIT_COMMIT, so the tool is never advertised even
+        # though Core implements it.
+        self.assertNotIn("git_commit", offered)
+        self.assertIn("repo_search", offered)
+        self.assertIn("repo_read_file", offered)
+
+    def test_unoffered_core_tool_still_reaches_core_for_an_audited_denial(
+        self,
+    ) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call("commit", "git_commit", {"message": "m", "paths": ["a"]})
+                ),
+                model_response(content="denied"),
+            ]
+        )
+
+        self.kernel(provider, AgentLimits(max_steps=2, max_seconds=30)).run(
+            "session"
+        )
+
+        failure = next(
+            item
+            for item in self.sessions.load("session").provider_history
+            if item.get("tool_call_id") == "commit" and item.get("role") == "tool"
+        )
+        self.assertEqual(failure["error"]["type"], "PolicyDenied")
+
+
+class ExtendedToolAgentTests(unittest.TestCase):
+    """The native agent runs on the same extended Core as the hosted bridge."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repo"
+        initialize_git_repository(self.repository)
+        (self.repository / "sample.txt").write_text(
+            "alpha\nbeta\ngamma\n", encoding="utf-8"
+        )
+        self.sessions = SessionStore(self.root / "sessions")
+        self.sessions.create(
+            self.repository,
+            "edit sample and verify it",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id="session",
+        )
+        self.origin = Origin(OriginKind.NATIVE_AGENT, "test-agent")
+        self.policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
+        self.policy.set_grants(
+            self.origin,
+            {
+                Capability.REPO_READ,
+                Capability.REPO_WRITE,
+                Capability.PROCESS_RUN,
+                Capability.CHECKS_RUN,
+                Capability.GIT_READ,
+            },
+        )
+        self.core = ExtendedCoreRuntime(
+            self.repository,
+            self.policy,
+            self.sessions,
+            self.root / "audit.jsonl",
+            verification_commands=[[sys.executable, "-c", "print('ok')"]],
+        )
+
+    def kernel(self, provider: QueueProvider, limits: AgentLimits) -> AgentKernel:
+        return AgentKernel(
+            provider=provider,
+            model="test-model",
+            core=self.core,
+            sessions=self.sessions,
+            origin=self.origin,
+            limits=limits,
+        )
+
+    def test_extended_tools_are_offered_to_the_model(self) -> None:
+        provider = QueueProvider([model_response(content="stopping")])
+        kernel = self.kernel(provider, AgentLimits(max_steps=1, max_seconds=30))
+
+        offered = {item.name for item in kernel._provider_tools}
+
+        self.assertLessEqual(
+            {
+                "repo_edit_file",
+                "repo_read_lines",
+                "repo_search",
+                "git_log",
+                "repo_read_file",
+                "repo_write_file",
+                "repo_list_files",
+                "checks_run",
+                "git_status",
+                "git_diff",
+            },
+            offered,
+        )
+
+    def test_exact_string_edit_satisfies_verification(self) -> None:
+        provider = QueueProvider(
+            [
+                model_response(
+                    call(
+                        "edit",
+                        "repo_edit_file",
+                        {
+                            "path": "sample.txt",
+                            "old_string": "beta",
+                            "new_string": "delta",
+                        },
+                    )
+                ),
+                model_response(
+                    call(
+                        "check",
+                        "checks_run",
+                        {"argv": [sys.executable, "-c", "print('ok')"]},
+                    )
+                ),
+                model_response(
+                    call("status", "git_status", {}),
+                    call("diff", "git_diff", {}),
+                ),
+                model_response(content="verified locally"),
+            ]
+        )
+
+        report = self.kernel(provider, AgentLimits(max_seconds=30)).run("session")
+
+        self.assertTrue(report.verified)
+        self.assertEqual(report.reason, "verified")
+        self.assertIn("sample.txt", report.changed_files)
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "alpha\ndelta\ngamma\n",
+        )
+        self.assertIn(
+            "file_edit", {item.get("kind") for item in report.evidence}
+        )
 
 
 class ScriptedChatHandler(BaseHTTPRequestHandler):
