@@ -398,6 +398,19 @@ if (!$resolved) {
     Write-Host "              A machine-wide PATH entry takes precedence over the user one." -ForegroundColor Yellow
     Write-Host "              Remove the shadowing file, or run the full path above." -ForegroundColor Yellow
 }
+
+# The PATH entry is written to the registry, but a process only ever inherits its
+# environment from its parent. A terminal opened from an Explorer session that
+# started before this install therefore still has the old PATH and answers
+# `karox` with CommandNotFoundException -- which reads as a failed installation
+# when nothing failed. Say so, and give the two ways out that need no sign-out.
+Write-Host ""
+Write-Host "A terminal that is already open will not see the new PATH yet." -ForegroundColor Yellow
+Write-Host "In that terminal, either refresh it:" -ForegroundColor Yellow
+Write-Host '  $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")'
+Write-Host "or run the launcher directly:" -ForegroundColor Yellow
+Write-Host "  & `"$KaroXCmd`""
+Write-Host "The KaroX shortcut on the Desktop needs neither." -ForegroundColor Yellow
 Write-Host ""
 Schedule-LegacyCleanup
 

@@ -26,6 +26,25 @@ On macOS or Linux:
 Open a new terminal in the repository you want to work with and run `karox`.
 The application binds every session to that repository.
 
+On Windows, a terminal that was already open when you installed will still answer
+`karox` with `CommandNotFoundException`: the launcher directory is added to the
+user PATH in the registry, but a process only ever inherits its environment from
+its parent, so a shell started before the install keeps the old one. Nothing
+failed — refresh that shell:
+
+```powershell
+$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+```
+
+Or call the launcher directly, which needs no PATH at all:
+
+```powershell
+& "$env:LOCALAPPDATA\KaroX\bin\karox.cmd"
+```
+
+The `KaroX` shortcut the installer puts on the Desktop needs neither. Terminals
+opened after the next sign-in resolve `karox` normally.
+
 ## Terminal client
 
 `karox` opens the full-screen client. Normal text is an agent task; it is not
