@@ -10,7 +10,7 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 
 <br>
 
-[![Direct support](https://img.shields.io/badge/direct_project_support-12_teams-7C3AED?style=for-the-badge)](#personal-acknowledgements)
+[![Direct support](https://img.shields.io/badge/direct_project_support-13_teams-7C3AED?style=for-the-badge)](#personal-acknowledgements)
 [![Student led](https://img.shields.io/badge/student_led-open_source-111827?style=for-the-badge)](https://github.com/kar0777/KaroX)
 
 </div>
@@ -88,6 +88,15 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 <strong><a href="https://empiriolabs.ai">EmpirioLabs</a></strong><br>
 <sub>KIMI-COMPATIBLE API</sub>
 </td>
+</tr>
+<tr>
+<td align="center">
+<a href="https://langfuse.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=langfuse.com" width="64" height="64" alt="Langfuse logo"></a><br><br>
+<strong><a href="https://langfuse.com">Langfuse</a></strong><br>
+<sub>RESEARCH OBSERVABILITY & EVALS</sub>
+</td>
+<td></td>
+<td></td>
 </tr>
 </table>
 
@@ -167,6 +176,14 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 <h3 align="center"><a href="https://empiriolabs.ai">EmpirioLabs</a></h3>
 <p><strong>Thank you to the EmpirioLabs team for responding quickly and providing Kimi-compatible API access.</strong> Your support helps KaroX evaluate provider behavior, tool calling, reliability, test-verified completion, and cost on controlled repositories.</p>
 </td>
+</tr>
+<tr>
+<td valign="top">
+<p align="center"><a href="https://langfuse.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=langfuse.com" width="58" height="58" alt="Langfuse logo"></a></p>
+<h3 align="center"><a href="https://langfuse.com">Langfuse</a></h3>
+<p><strong>Thank you to Ashmita Bohara and the Langfuse team for Research & Education access.</strong> The cloud support gives KaroX room to trace agent workflows, evaluate tool-call reliability, compare providers, measure latency and cost, and preserve reproducible evidence while keeping the work non-commercial and research-focused.</p>
+</td>
+<td></td>
 </tr>
 </table>
 
