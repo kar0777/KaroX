@@ -10,7 +10,7 @@ KaroX — открытый проект, который разрабатывае
 
 <br>
 
-[![Поддержка проекта](https://img.shields.io/badge/прямая_поддержка-12_команд-7C3AED?style=for-the-badge)](#персональные-благодарности)
+[![Поддержка проекта](https://img.shields.io/badge/прямая_поддержка-13_команд-7C3AED?style=for-the-badge)](#персональные-благодарности)
 [![Open source](https://img.shields.io/badge/ученический-open_source-111827?style=for-the-badge)](https://github.com/kar0777/KaroX)
 
 [English version](SUPPORTERS.md) · [Главная страница KaroX](README_RU.md)
@@ -43,6 +43,11 @@ KaroX — открытый проект, который разрабатывае
 <td align="center"><a href="https://chutes.ai"><img src="https://www.google.com/s2/favicons?sz=256&domain=chutes.ai" width="64" height="64" alt="Chutes"></a><br><br><strong><a href="https://chutes.ai">Chutes</a></strong><br><sub>OPEN-MODEL INFERENCE</sub></td>
 <td align="center"><a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=256&domain=empiriolabs.ai" width="64" height="64" alt="EmpirioLabs"></a><br><br><strong><a href="https://empiriolabs.ai">EmpirioLabs</a></strong><br><sub>KIMI-COMPATIBLE API</sub></td>
 </tr>
+<tr>
+<td align="center"><a href="https://langfuse.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=langfuse.com" width="64" height="64" alt="Langfuse"></a><br><br><strong><a href="https://langfuse.com">Langfuse</a></strong><br><sub>OBSERVABILITY И EVALS ДЛЯ ИССЛЕДОВАНИЙ</sub></td>
+<td></td>
+<td></td>
+</tr>
 </table>
 
 ---
@@ -73,6 +78,10 @@ KaroX — открытый проект, который разрабатывае
 <tr>
 <td valign="top"><p align="center"><a href="https://chutes.ai"><img src="https://www.google.com/s2/favicons?sz=256&domain=chutes.ai" width="58" height="58" alt="Chutes"></a></p><h3 align="center"><a href="https://chutes.ai">Chutes</a></h3><p><strong>Спасибо Rykorb и Chutes за тестовый доступ и безопасную помощь с аккаунтом без запроса чувствительных данных.</strong> Поддержка полезна для контролируемой проверки open-model и confidential-inference маршрутов: tool use, structured output, recovery, latency и cost.</p></td>
 <td valign="top"><p align="center"><a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=256&domain=empiriolabs.ai" width="58" height="58" alt="EmpirioLabs"></a></p><h3 align="center"><a href="https://empiriolabs.ai">EmpirioLabs</a></h3><p><strong>Спасибо команде EmpirioLabs за быстрый ответ и Kimi-compatible API-доступ.</strong> Он помогает KaroX проверять поведение провайдера, tool calling, надёжность, test-verified completion и стоимость на контролируемых репозиториях.</p></td>
+</tr>
+<tr>
+<td valign="top"><p align="center"><a href="https://langfuse.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=langfuse.com" width="58" height="58" alt="Langfuse"></a></p><h3 align="center"><a href="https://langfuse.com">Langfuse</a></h3><p><strong>Спасибо Ashmita Bohara и команде Langfuse за доступ по программе Research & Education.</strong> Облачная поддержка поможет KaroX трассировать agent workflows, оценивать надёжность tool calls, сравнивать провайдеров, измерять latency и cost и сохранять воспроизводимые доказательства в рамках некоммерческой исследовательской работы.</p></td>
+<td></td>
 </tr>
 </table>
 
