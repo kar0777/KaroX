@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 from _support import SRC
 
-from karox.cli import main
+from karox.cli import _verification_command, main
 from karox.models import AccessProfile
 from karox.web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
@@ -36,6 +36,8 @@ from karox.web_bridge_launcher import (
     parent_death_hook,
     run_web_bridge,
     start_cloudflare_quick_tunnel,
+    web_bridge_connection_instructions,
+    windows_cloudflared_candidates,
 )
 
 
@@ -139,7 +141,7 @@ class WebBridgeConfigTests(unittest.TestCase):
             tools=("karox.repo.read_file", "karox.repo.edit_file"),
             tunnel="custom",
             public_url="https://bridge.example.com",
-            verification_commands=('["python", "-m", "pytest"]',),
+            verification_commands=(("python", "-m", "pytest"),),
         )
         argv = _bridge_argv(
             config,
@@ -151,10 +153,27 @@ class WebBridgeConfigTests(unittest.TestCase):
         self.assertIn("https://bridge.example.com", argv)
         self.assertEqual(argv.count("--tool"), 2)
         self.assertEqual(argv.count("--verification-command"), 1)
+        index = argv.index("--verification-command")
+        serialized = argv[index + 1]
+        self.assertEqual(serialized, '["python","-m","pytest"]')
+        self.assertEqual(_verification_command(serialized), ("python", "-m", "pytest"))
 
 
 class WebBridgeCliTests(unittest.TestCase):
     def test_connect_builds_managed_cloudflare_config(self) -> None:
+        expected_command = (
+            "python",
+            "scripts/run_v5_preflight.py",
+            "--apply-reviewed-fixes",
+            "--full",
+            "--keep-going",
+        )
+        # Windows PowerShell 5.1 legacy native argv removes embedded JSON quotes
+        # before Python receives this native-process argument.
+        powershell_native_value = (
+            "[python,scripts/run_v5_preflight.py,--apply-reviewed-fixes,"
+            "--full,--keep-going]"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch("karox.cli.run_web_bridge", return_value=0) as launch:
@@ -166,6 +185,8 @@ class WebBridgeCliTests(unittest.TestCase):
                         "--repository",
                         str(root),
                         "--write",
+                        "--verification-command",
+                        powershell_native_value,
                     )
                 )
         self.assertEqual(code, 0)
@@ -174,8 +195,23 @@ class WebBridgeCliTests(unittest.TestCase):
         self.assertEqual(config.tunnel, "cloudflare")
         self.assertEqual(config.access_profile, AccessProfile.WORKSPACE_WRITE)
         self.assertEqual(config.tools[: len(DEFAULT_WEB_TOOLS)], DEFAULT_WEB_TOOLS)
+        self.assertEqual(config.verification_commands, (expected_command,))
         for tool in WRITE_WEB_TOOLS:
             self.assertIn(tool, config.tools)
+
+        child_argv = _bridge_argv(
+            config,
+            session_id="web-test",
+            public_url="https://bridge.example.com",
+        )
+        command_index = child_argv.index("--verification-command")
+        child_value = child_argv[command_index + 1]
+        self.assertEqual(_verification_command(child_value), expected_command)
+        self.assertEqual(json.loads(child_value), list(expected_command))
+        escaped = r'[\"python\",\"-m\",\"pytest\"]'
+        self.assertEqual(
+            _verification_command(escaped), ("python", "-m", "pytest")
+        )
 
     def test_connect_supports_cli_managed_custom_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,7 +243,9 @@ class WebBridgeCliTests(unittest.TestCase):
 class WebBridgeSupervisorTests(unittest.TestCase):
     def test_child_failure_stops_tunnel_and_revokes_temporary_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            repository = Path(tmp)
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
             sessions = MagicMock()
             credentials = MagicMock()
             credentials.set.return_value = {"secret": "approval-secret"}
@@ -216,6 +254,19 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             bridge = MagicMock()
             bridge.poll.return_value = 9
             with (
+                # Without this the launcher reaps the developer's real watchdog
+                # directory, and because BridgeCredentialStore is patched here the
+                # reaper's own delete() lands on these mocks -- so an unrelated
+                # leftover record made the single-call assertions below fail.
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        # paths.py prefers this spelling, so an inherited value
+                        # would otherwise win over the line above.
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
                 patch(
                     "karox.web_bridge_launcher._port_is_available",
                     return_value=True,
@@ -283,7 +334,15 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                 raise OSError("cannot spawn")
 
             with (
-                patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(root)}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        # paths.py prefers this spelling, so an inherited value
+                        # would otherwise win over the line above.
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
                 patch(
                     "karox.web_bridge_launcher._port_is_available", return_value=True
                 ),
@@ -350,6 +409,33 @@ class CloudflaredLookupTests(unittest.TestCase):
                 bundled.parent.mkdir(parents=True)
                 bundled.write_bytes(b"binary")
                 self.assertEqual(find_cloudflared(str(bundled)), str(bundled))
+
+    @unittest.skipUnless(sys.platform == "win32", "WinGet is Windows-only")
+    def test_finds_cloudflared_inside_the_winget_package_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp)
+            executable = (
+                local
+                / "Microsoft"
+                / "WinGet"
+                / "Packages"
+                / "Cloudflare.cloudflared_Microsoft.Winget.Source_test"
+                / "cloudflared.exe"
+            )
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"binary")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LOCALAPPDATA": tmp,
+                        "KAROX_RUNTIME_DIR": str(local / "karox-runtime"),
+                    },
+                ),
+                patch("karox.web_bridge_launcher.shutil.which", return_value=None),
+            ):
+                self.assertIn(executable, windows_cloudflared_candidates())
+                self.assertEqual(find_cloudflared(), str(executable))
 
 
 class BridgeDiagnosticsTests(unittest.TestCase):
@@ -500,6 +586,14 @@ class EphemeralUrlWarningTests(unittest.TestCase):
             ephemeral_url_warning("chatgpt-web", "https://mcp.example.com")
         )
 
+    def test_russian_warning_explains_that_the_saved_url_must_be_updated(self) -> None:
+        note = ephemeral_url_warning("chatgpt-web", None, language="ru")
+        self.assertIsNotNone(note)
+        assert note is not None
+        self.assertIn("URL меняется", note)
+        self.assertIn("нужно будет обновить", note)
+        self.assertIn("--public-url", note)
+
     def test_a_profile_that_never_needed_a_stable_url_is_left_alone(self) -> None:
         for profile in ("promptql", "notion", "generic-streamable-http"):
             with self.subTest(profile=profile):
@@ -507,6 +601,37 @@ class EphemeralUrlWarningTests(unittest.TestCase):
 
     def test_an_unknown_profile_does_not_raise(self) -> None:
         self.assertIsNone(ephemeral_url_warning("not-a-profile", None))
+
+
+class WebBridgeInstructionTests(unittest.TestCase):
+    def test_connection_steps_name_current_ui_and_password_destination(self) -> None:
+        for language, settings, create in (
+            ("ru", "Настройки → Приложения", "Приложения → Создать"),
+            ("en", "Settings → Apps", "Apps → Create"),
+        ):
+            with self.subTest(profile="chatgpt-web", language=language):
+                text = "\n".join(
+                    web_bridge_connection_instructions(
+                        "chatgpt-web", language=language
+                    )
+                )
+                self.assertIn(settings, text)
+                self.assertIn(create, text)
+                self.assertIn("MCP URL", text)
+                self.assertNotIn("Plugins", text)
+                self.assertNotIn("Плагины", text)
+
+        russian = "\n".join(
+            web_bridge_connection_instructions("chatgpt-web", language="ru")
+        )
+        self.assertIn("только на странице KaroX", russian)
+
+        claude = "\n".join(
+            web_bridge_connection_instructions("claude-web", language="en")
+        )
+        self.assertIn("Settings → Connectors → Add custom connector", claude)
+        self.assertIn("MCP URL", claude)
+        self.assertIn("only on the KaroX page", claude)
 
 
 if __name__ == "__main__":
