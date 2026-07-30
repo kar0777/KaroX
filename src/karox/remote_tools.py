@@ -173,13 +173,20 @@ def _kill_pid_tree(pid: int) -> None:
         except (OSError, subprocess.SubprocessError):
             pass
         return
+    # Reached only when os.name != "nt" because of the early return above, but a
+    # type check running on Windows sees a stub where these do not exist. The
+    # ignores are per-line and per-symbol so a genuine error on this path is not
+    # also silenced.
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
     except OSError:
         return
     time.sleep(0.2)
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        os.killpg(  # type: ignore[attr-defined,unused-ignore]
+            os.getpgid(pid),  # type: ignore[attr-defined,unused-ignore]
+            signal.SIGKILL,  # type: ignore[attr-defined,unused-ignore]
+        )
     except OSError:
         pass
 
@@ -502,6 +509,11 @@ class RemoteCoreRuntime(ExtendedCoreRuntime):
                 )
             ],
         }
+
+    # Declared so the attribute has one type instead of being inferred from the
+    # first assignment: execute() clears it with None on the way out, which a
+    # `str` inference rejects.
+    _executing_session_id: Optional[str] = None
 
     @property
     def _active_session_id(self) -> str:

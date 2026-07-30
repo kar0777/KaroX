@@ -153,6 +153,16 @@ module = ["tomli"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# `playwright` is the `browser` extra, so it is absent from a normal install and
+# from CI's type-check environment. remote_tools imports it inside the one
+# function that needs it and raises an actionable CoreError when it is missing,
+# which is the behaviour the runtime promises. Excused by name rather than with a
+# global ignore_missing_imports, so a genuinely missing required dependency still
+# fails this gate.
+module = ["playwright.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # The ten modules below do not pass mypy's defaults yet: 52 findings, mostly a
 # JSON-shaped local rebound between `dict` and `list` in the CLI's report
 # builders, which alone accounts for 20. They are excused BY NAME and with a
