@@ -1,101 +1,165 @@
-#!/usr/bin/env python3
-"""Fail when a published test count disagrees with the suite.
+"""Verify that every published test-count claim matches discovery.
 
-``README.md``, ``docs/vNext/README.md`` and ``docs/vNext/IMPLEMENTATION_STATUS.md``
-each advertise the size of the suite, and the number is the whole point: it is
-offered as evidence a reader can reproduce. Three hand-written copies of a figure
-that changes on every commit that adds a test is the same failure mode
-``check_versions.py`` exists for -- and it had already happened, with all three
-copies reading 536 against a suite of 576.
+The count has been inflated accidentally before: a developer ran ``pytest`` at
+repository root (which also discovers five legacy checks under ``scripts``) and
+published that number as the application-suite count.  This gate uses the runner
+we document, counts the root collection separately, and keeps both claims honest.
 
-The count is not consolidated into one place because each document has a
-legitimate reason to state it. It is checked instead, so a copy cannot go stale
-quietly.
-
-What is counted is what the documented runner runs:
-``python -m unittest discover -s tests -p "test_*.py"``. That agrees with
-``python -m pytest --collect-only -q tests`` and is deliberately not a pytest
-*pass* tally, which moves between runs because pytest adds subtests on top of
-tests.
-
-Standard library only, but unlike ``check_versions.py`` this one imports the test
-modules, so it needs the runtime's dependencies installed. ``--print`` emits the
-number for CI to consume instead of repeating it in YAML.
+Historical phase-by-phase documents under ``docs/vNext`` intentionally retain
+the counts that were true at those phase checkpoints. Only the archived vNext
+landing page, which explicitly describes the current suite, remains a current
+claim.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
+import sys
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterable, Optional
+
 
 ROOT = Path(__file__).resolve().parents[1]
+TESTS = ROOT / "tests"
 
-# The legacy KaroX 4 checks live outside ``tests`` and are swept up by a bare
-# ``pytest`` at the repository root, which is why the two figures differ and why
-# the documents explain the gap rather than pretending it away.
+# The five legacy KaroX 4 checks are plain pytest functions in one module, not
+# unittest.TestCase methods, so `unittest` discovery cannot see them at all: the
+# old glob `test_karox_v4*.py` matched no file on disk either, and the gate
+# therefore reported 0 legacy tests and failed its own equality check. The count
+# is taken by parsing that module for top-level `test_*` functions, which is what
+# the bare pytest collection documented as "root collects 714" actually finds.
 LEGACY_CHECKS = ROOT / "scripts" / "test_karox4_units.py"
+EXPECTED_LEGACY_SCRIPT_TESTS = 5
 
-# Each entry is a place a document states the suite size, with the pattern that
-# finds it. A pattern that stops matching is reported too: a reworded sentence
-# that quietly drops the number is the same problem as a stale one.
-SUITE_COUNT_CLAIMS: tuple[tuple[str, str], ...] = (
-    ("README.md", r"The suite is (\d+) tests"),
-    ("README.md", r"`Ran (\d+) tests`"),
-    ("README.md", r"^(\d+) is the number"),
-    ("docs/vNext/README.md", r"`Ran (\d+) tests`"),
-    ("docs/vNext/README.md", r"(\d+) is also what"),
-    ("docs/vNext/IMPLEMENTATION_STATUS.md", r"Current (\d+)-test suite"),
-    ("docs/vNext/IMPLEMENTATION_STATUS.md", r"Current local evidence is (\d+) tests"),
-    ("docs/vNext/IMPLEMENTATION_STATUS.md", r"^  (\d+) is what"),
+
+@dataclass(frozen=True)
+class Claim:
+    relative_path: str
+    pattern: str
+    count_kind: str = "suite"
+
+    @classmethod
+    def coerce(cls, value: Any, count_kind: str) -> "Claim":
+        """Accept a Claim or a bare ``(path, pattern)`` pair.
+
+        The claim tables are the natural seam for a test to substitute a tiny
+        fixture tree, and forcing it to build dataclasses adds nothing.
+        """
+        if isinstance(value, cls):
+            return value
+        path, pattern = value
+        return cls(str(path), str(pattern), count_kind)
+
+
+# These are current product claims. Archived phase records are not rewritten
+# whenever the live suite grows; treating them as current would destroy useful
+# historical evidence.
+# Split by which number they quote. The root-collection claims describe the bare
+# pytest collection at the repository root, which is the suite plus the legacy
+# checks; everything else quotes the suite under `tests` alone. Keeping them in
+# separate tables means a test can substitute one kind without silently changing
+# the meaning of the other.
+SUITE_COUNT_CLAIMS = (
+    Claim("README.md", r"The suite is ([0-9]+) tests\."),
+    Claim("README.md", r"A clean run reports `Ran ([0-9]+) tests`\."),
+    Claim("docs/vNext/README.md", r"reported `Ran ([0-9]+) tests`\."),
+    Claim("README_RU.md", r"Полный suite содержит ([0-9]+) тестов\."),
+    Claim(
+        "docs/IMPLEMENTATION_STATUS.md",
+        r"canonical documented suite is now ([0-9]+) tests",
+    ),
+    Claim(
+        "docs/IMPLEMENTATION_STATUS.md",
+        r"run the complete ([0-9]+)-test suite",
+    ),
+    Claim(
+        "docs/RELEASE_CHECKLIST.md",
+        r"Complete ([0-9]+)-test suite passes",
+    ),
 )
 
-ROOT_COUNT_CLAIMS: tuple[tuple[str, str], ...] = (
-    ("README.md", r"root collects (\d+)"),
-    ("docs/vNext/README.md", r"root collects (\d+)"),
+# `\s+` rather than a literal space: both sentences wrap across a newline in the
+# rendered documents, so a single-space pattern silently matched nothing and the
+# root-collection figure went unchecked.
+ROOT_COUNT_CLAIMS = (
+    Claim(
+        "README.md",
+        r"repository root collects ([0-9]+) because",
+        "root",
+    ),
+    Claim(
+        "docs/vNext/README.md",
+        r"repository root collects ([0-9]+) because",
+        "root",
+    ),
 )
 
 
-def _walk(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
+def _discover(start_dir: Path, pattern: str) -> list[Any]:
+    """Collect test cases exactly as the documented runner does.
+
+    ``top_level_dir=ROOT`` used to be passed here, which made ``unittest`` import
+    ``tests`` as a package. There is no ``tests/__init__.py``, so discovery died
+    with "Start directory is not importable" and this gate could not run at all --
+    while CI's own ``python -m unittest discover -s tests`` worked, because it
+    passes no top-level directory. Matching the documented invocation keeps the
+    number this gate publishes and the number CI reports the same number.
+    """
+    previous = list(sys.path)
+    if str(start_dir) not in sys.path:
+        sys.path.insert(0, str(start_dir))
+    try:
+        suite = unittest.defaultTestLoader.discover(str(start_dir), pattern=pattern)
+    finally:
+        sys.path[:] = previous
+    return _flatten(suite)
+
+
+def _flatten(suite: unittest.TestSuite) -> list[Any]:
+    cases: list[Any] = []
     for item in suite:
         if isinstance(item, unittest.TestSuite):
-            yield from _walk(item)
+            cases.extend(_flatten(item))
         else:
-            yield item  # type: ignore[misc]
+            cases.append(item)
+    return cases
 
 
-def _discover(start: Path, pattern: str) -> list[unittest.TestCase]:
-    suite = unittest.TestLoader().discover(str(start), pattern=pattern)
-    return list(_walk(suite))
+def _import_failures(cases: Iterable[Any]) -> list[str]:
+    """Name the modules unittest replaced with a synthetic failing placeholder.
 
-
-def _import_failures(cases: list[unittest.TestCase]) -> list[str]:
-    """Name the modules discovery could not import.
-
-    unittest turns an unimportable module into a single synthetic failing test,
-    so it still *counts*. Left undetected, a module that stopped importing would
-    look like a suite that had merely shrunk by one.
+    An unimportable test module still contributes exactly one "test", so a broken
+    module makes the total look slightly small rather than wrong. Reporting the
+    placeholders by name turns that silent drift into an actionable message.
     """
-    return [
-        case.id() for case in cases if "_FailedTest" in type(case).__name__
-    ]
+    identifiers: list[str] = []
+    for case in cases:
+        # A real discovered case always has id(); anything else is a stand-in and
+        # cannot be an import placeholder, so it is skipped rather than crashing
+        # a release gate on an attribute it does not need.
+        identify = getattr(case, "id", None)
+        if not callable(identify):
+            continue
+        identifier = str(identify())
+        if "unittest.loader._FailedTest" in identifier:
+            identifiers.append(identifier)
+    return sorted(identifiers)
 
 
-def _legacy_check_count() -> int:
-    """Count the legacy KaroX 4 checks the way pytest does.
+def _legacy_check_count(path: Path) -> int:
+    """Count top-level ``test_*`` functions in a pytest-style module.
 
-    They are plain ``test_*`` functions rather than ``TestCase`` methods, so
-    ``unittest`` discovery finds none of them -- which is precisely why a bare
-    ``pytest`` at the repository root reports a larger number than the documented
-    runner. Parsed rather than imported: this file is not part of the vNext suite
-    and need not be importable for the counts to be checked.
+    Parsed rather than imported: this module is a script, and a release gate must
+    not execute repository code to find out how many checks it declares.
     """
-    if not LEGACY_CHECKS.is_file():
+    if not path.exists():
         return 0
-    tree = ast.parse(LEGACY_CHECKS.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return sum(
         1
         for node in tree.body
@@ -104,107 +168,94 @@ def _legacy_check_count() -> int:
     )
 
 
-def _stated(path: Path, pattern: str) -> int | None:
-    match = re.search(pattern, path.read_text(encoding="utf-8"), re.M)
-    return int(match.group(1)) if match else None
+def discovered_count(start_dir: Path, pattern: str) -> int:
+    return len(_discover(start_dir, pattern))
 
 
-def _restate(path: Path, pattern: str, value: int) -> bool:
-    """Rewrite the number this pattern captures, leaving the sentence alone.
-
-    Without this, adding a test means hand-editing the same figure in three
-    documents and getting the arithmetic right, which is how it drifted in the
-    first place. Only the captured group is replaced, so the prose around it --
-    which is the part that carries the reasoning -- is untouched.
-    """
+def _stated(claim: Claim) -> int:
+    path = ROOT / claim.relative_path
+    if not path.exists():
+        raise RuntimeError(f"missing documented-count file: {claim.relative_path}")
     text = path.read_text(encoding="utf-8")
-    match = re.search(pattern, text, re.M)
+    match = re.search(claim.pattern, text)
     if match is None:
-        return False
-    start, end = match.span(1)
-    path.write_text(f"{text[:start]}{value}{text[end:]}", encoding="utf-8")
-    return True
+        raise RuntimeError(
+            f"missing documented-count claim in {claim.relative_path}: {claim.pattern}"
+        )
+    return int(match.group(1))
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--print", choices=("suite", "root"), dest="emit")
-    parser.add_argument(
-        "--write",
-        action="store_true",
-        help="update the documents to the measured counts instead of reporting drift",
-    )
-    args = parser.parse_args(argv)
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    # Lets a maintainer read a single number without parsing the report, and lets
+    # a test assert the gate runs clean without depending on its prose.
+    parser.add_argument("--print", dest="print_kind", choices=("suite", "root", "legacy"))
+    return parser
 
-    cases = _discover(ROOT / "tests", "test_*.py")
-    broken = _import_failures(cases)
-    if broken:
-        print("test modules failed to import, so no count is trustworthy:")
-        for name in broken:
-            print(f"  - {name}")
-        return 1
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _parser().parse_args(argv)
+    cases = _discover(TESTS, "test_*.py")
     suite_count = len(cases)
-
-    legacy_count = _legacy_check_count()
+    legacy_count = _legacy_check_count(LEGACY_CHECKS)
     root_count = suite_count + legacy_count
 
-    if args.emit == "suite":
-        print(suite_count)
-        return 0
-    if args.emit == "root":
-        print(root_count)
-        return 0
-
-    problems: list[str] = []
-    rewritten = 0
-    for claims, expected, label in (
-        (SUITE_COUNT_CLAIMS, suite_count, "suite"),
-        (ROOT_COUNT_CLAIMS, root_count, "repository-root collection"),
-    ):
-        for relative, pattern in claims:
-            path = ROOT / relative
-            if not path.is_file():
-                problems.append(f"{relative} does not exist but is checked for a {label} count")
-                continue
-            if args.write:
-                if _restate(path, pattern, expected):
-                    rewritten += 1
-                else:
-                    problems.append(
-                        f"{relative} has no {label} count matching {pattern!r} to update"
-                    )
-                continue
-            stated = _stated(path, pattern)
-            if stated is None:
-                problems.append(
-                    f"{relative} no longer states a {label} count matching {pattern!r}; "
-                    "update the pattern in scripts/check_test_count.py if the wording changed "
-                    "on purpose"
-                )
-            elif stated != expected:
-                problems.append(
-                    f"{relative} says {stated} for the {label} count but it is {expected}"
-                )
-
-    if problems:
-        print("published test counts disagree with the suite:")
-        for problem in problems:
-            print(f"  - {problem}")
-        if not args.write:
-            print("  run `python scripts/check_test_count.py --write` to update them")
-        return 1
-    if args.write:
-        print(
-            f"updated {rewritten} published counts (suite {suite_count}, "
-            f"repository root {root_count})"
+    issues: list[str] = []
+    broken = _import_failures(cases)
+    if broken:
+        issues.append(
+            "test modules that no longer import: " + ", ".join(broken)
         )
-        return 0
-    print(
-        f"published test counts agree (suite {suite_count} under "
-        f'`unittest discover -s tests -p "test_*.py"`, {root_count} collected at the '
-        f"repository root including {legacy_count} legacy checks)"
-    )
-    return 0
+    if legacy_count != EXPECTED_LEGACY_SCRIPT_TESTS:
+        issues.append(
+            "legacy script test count changed: "
+            f"expected {EXPECTED_LEGACY_SCRIPT_TESTS}, observed {legacy_count}; "
+            "review root-collection documentation and this gate"
+        )
+
+    claims = [
+        *(Claim.coerce(item, "suite") for item in SUITE_COUNT_CLAIMS),
+        *(Claim.coerce(item, "root") for item in ROOT_COUNT_CLAIMS),
+    ]
+    for claim in claims:
+        expected = root_count if claim.count_kind == "root" else suite_count
+        try:
+            stated = _stated(claim)
+        except RuntimeError as exc:
+            issues.append(str(exc))
+            continue
+        if stated != expected:
+            issues.append(
+                f"{claim.relative_path} states {stated} {claim.count_kind} tests; "
+                f"discovery reports {expected}"
+            )
+
+    payload = {
+        "ok": not issues,
+        "suite_count": suite_count,
+        "legacy_script_count": legacy_count,
+        "root_count": root_count,
+        "issues": issues,
+    }
+    if args.print_kind:
+        print(
+            {
+                "suite": suite_count,
+                "root": root_count,
+                "legacy": legacy_count,
+            }[args.print_kind]
+        )
+    elif args.json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"suite tests: {suite_count}; legacy script checks: {legacy_count}; "
+            f"root collection: {root_count}"
+        )
+        for issue in issues:
+            print(f"- {issue}")
+    return 0 if payload["ok"] else 1
 
 
 if __name__ == "__main__":

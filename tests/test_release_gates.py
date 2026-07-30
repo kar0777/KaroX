@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -35,12 +36,26 @@ def _run_quietly(gate: ModuleType, argv: list[str]) -> int:
 
 
 def _load_gate(name: str) -> ModuleType:
-    """Import a checker from scripts/, which is not an importable package."""
+    """Import a checker from scripts/, which is not an importable package.
+
+    The module is registered in :data:`sys.modules` before it is executed. A gate
+    that declares a dataclass under ``from __future__ import annotations`` has only
+    string annotations, and ``dataclasses`` resolves those through
+    ``sys.modules[cls.__module__].__dict__``; with the module absent that lookup
+    found ``None`` and every test here died in ``dataclasses`` rather than in the
+    gate. The entry is removed afterwards so one gate cannot shadow another.
+    """
     path = ROOT / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"_gate_{name}", path)
+    module_name = f"_gate_{name}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[module_name]
+        raise
     return module
 
 

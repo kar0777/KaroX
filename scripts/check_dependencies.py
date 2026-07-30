@@ -71,6 +71,30 @@ def _pyproject_dependencies(text: str) -> list[str]:
     ]
 
 
+def _pyproject_optional_dependencies(text: str) -> list[str]:
+    """Requirements declared under ``[project.optional-dependencies]``.
+
+    An extra satisfies an import without belonging in ``requirements.txt``: the
+    runtime has to work when it is absent, which is why the importing code guards
+    it. ``playwright`` is exactly that -- declared as the ``browser`` extra and
+    imported inside the function that needs it -- and because this check read only
+    the required list, it reported the extra as an undeclared dependency and
+    failed the release.
+    """
+    block = re.search(
+        r"^\[project\.optional-dependencies\](.*?)(?=^\[|\Z)", text, re.S | re.M
+    )
+    if block is None:
+        return []
+    names: list[str] = []
+    for raw in re.findall(r"\[(.*?)\]", block.group(1), re.S):
+        for item in raw.split(","):
+            name = _requirement_name(item.strip().strip('"').strip("'"))
+            if name is not None:
+                names.append(name)
+    return names
+
+
 def _imported_top_level_modules() -> dict[str, set[str]]:
     local = {path.stem for path in PACKAGE.glob("*.py")} | {"karox"}
     stdlib = set(sys.stdlib_module_names)
@@ -111,9 +135,12 @@ def main() -> int:
     for name in sorted(only_requirements):
         problems.append(f"{name} is in requirements.txt but not pyproject.toml")
 
+    declared_optional = _pyproject_optional_dependencies(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
     declared_modules = {
         IMPORT_NAMES.get(name, name).replace("-", "_").lower()
-        for name in declared_project
+        for name in (*declared_project, *declared_optional)
     }
     for module, users in sorted(_imported_top_level_modules().items()):
         if module.lower() not in declared_modules:

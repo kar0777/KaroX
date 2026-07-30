@@ -15,7 +15,6 @@ import os
 import re
 import signal
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -32,7 +31,7 @@ from .bridge import BridgeCredentialStore
 from .credentials import CredentialStore
 from .markdown_render import render_message
 from .models import AccessProfile
-from .paths import config_dir, runtime_dir, session_dir
+from .paths import config_dir, session_dir
 from .provider_factory import ProviderFactory
 from .provider_presets import (
     ProviderPreset,
@@ -43,7 +42,8 @@ from .provider_presets import (
 from .providers import ModelMessage, ModelRequest, ProviderError, ProviderErrorKind
 from .registry import ModelRecord, ProviderRecord, ProviderRegistry
 from .sessions import SessionStore
-from .web_bridge_launcher import WEB_BRIDGE_PROFILES
+from .tailscale import TailscaleError, find_tailscale, prepare_tailscale_funnel
+from .web_bridge_launcher import WEB_BRIDGE_PROFILES, find_cloudflared
 
 try:
     from rich.markup import escape
@@ -595,30 +595,36 @@ def _selected_model() -> Optional[ModelRecord]:
 
 
 def _find_cloudflared() -> Optional[str]:
-    discovered = shutil.which("cloudflared")
-    if discovered:
-        return discovered
-    executable = "cloudflared.exe" if os.name == "nt" else "cloudflared"
-    bundled = runtime_dir() / "bin" / executable
-    return str(bundled) if bundled.is_file() else None
+    """Use the same lookup as the managed bridge CLI."""
+    return find_cloudflared()
 
 
 def _find_tailscale() -> Optional[str]:
-    """Locate the ``tailscale`` CLI on PATH, in the runtime bin dir, or in the
-    standard install location (``C:\\Program Files\\Tailscale`` on Windows,
-    where ``winget install tailscale.tailscale`` places it)."""
-    discovered = shutil.which("tailscale")
-    if discovered:
-        return discovered
-    executable = "tailscale.exe" if os.name == "nt" else "tailscale"
-    bundled = runtime_dir() / "bin" / executable
-    if bundled.is_file():
-        return str(bundled)
-    if os.name == "nt":
-        standard = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tailscale" / "tailscale.exe"
-        if standard.is_file():
-            return str(standard)
-    return None
+    """Use the same Tailscale lookup as the managed bridge CLI."""
+    return find_tailscale()
+
+
+def _start_worker(
+    target: Callable[..., Any],
+    *args: Any,
+    name: Optional[str] = None,
+) -> threading.Thread:
+    """Start a daemon background worker through one patchable seam.
+
+    Every background worker in this screen goes through this function instead of
+    calling ``threading.Thread`` inline, so a test that needs to observe or
+    suppress a worker patches *this* name.
+
+    The indirection is not cosmetic. ``tui.threading`` is the stdlib module
+    object itself, so patching ``tui.threading.Thread`` replaces
+    ``threading.Thread`` for the whole interpreter -- including Textual's and
+    asyncio's own internals. A test that did that deadlocked forever instead of
+    failing, because the framework driving the test could no longer start a
+    thread of its own.
+    """
+    thread = threading.Thread(target=target, args=args, name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 def _tailscale_gui_app(executable: Optional[str]) -> Optional[str]:
@@ -1547,8 +1553,8 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
     """Build a one-command ChatGPT/Claude bridge owned by the CLI launcher."""
     if setup.profile not in WEB_BRIDGE_PROFILES:
         raise ValueError("managed web bridge requires a ChatGPT or Claude profile")
-    if setup.tunnel_provider != "cloudflare":
-        raise ValueError("ChatGPT/Claude web bridges require Cloudflare in the TUI")
+    if setup.tunnel_provider not in {"cloudflare", "tailscale"}:
+        raise ValueError("ChatGPT/Claude web bridges require a public HTTPS tunnel")
     sid = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     mutating_tools = {
         "karox.repo.edit_file",
@@ -1575,7 +1581,7 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
         "--access-profile",
         access_profile.value,
         "--tunnel",
-        "cloudflare",
+        setup.tunnel_provider,
         "--port",
         str(setup.port),
     ]
@@ -3203,13 +3209,13 @@ if _HAS_TEXTUAL:
                 return
             profile = self._profile_value()
             tunnel = self._tunnel_value()
-            if profile in WEB_BRIDGE_PROFILES and tunnel != "cloudflare":
+            if profile in WEB_BRIDGE_PROFILES and tunnel == "none":
                 self.query_one("#bridge-error", Label).update(
                     self._label(
-                        "ChatGPT Web и Claude Web сейчас запускаются из интерфейса "
-                        "через управляемый Cloudflare Tunnel.",
-                        "ChatGPT Web and Claude Web currently use the managed "
-                        "Cloudflare Tunnel from this screen.",
+                        "ChatGPT Web и Claude Web требуют публичный HTTPS: "
+                        "выберите Cloudflare или Tailscale Funnel.",
+                        "ChatGPT Web and Claude Web require public HTTPS: "
+                        "choose Cloudflare or Tailscale Funnel.",
                     )
                 )
                 return
@@ -4344,6 +4350,8 @@ if _HAS_TEXTUAL:
                     if launch.managed and os.name == "nt"
                     else getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 )
+                child_env = _child_environment()
+                child_env["KAROX_UI_LANGUAGE"] = self.language
                 self.bridge_process = subprocess.Popen(
                     launch.argv,
                     cwd=self.repository,
@@ -4353,7 +4361,7 @@ if _HAS_TEXTUAL:
                     encoding="utf-8",
                     errors="replace",
                     creationflags=flags,
-                    env=_child_environment(),
+                    env=child_env,
                 )
                 self.bridge_launch = launch
             except Exception as exc:
@@ -4363,7 +4371,7 @@ if _HAS_TEXTUAL:
                 return
             self.active_session = launch.session_id
             self._refresh_status()
-            threading.Thread(target=self._read_bridge_output, daemon=True).start()
+            _start_worker(self._read_bridge_output, name="karox-bridge-output")
             if launch.managed:
                 self._write(
                     "[dim]"
@@ -4384,11 +4392,12 @@ if _HAS_TEXTUAL:
             # If the bind fails (port in use, permission error, …) the process
             # exits within a second; writing "Мост запущен" first would mislead
             # the user into pasting a dead URL into Notion.
-            threading.Thread(
-                target=self._confirm_bridge_started,
-                args=(setup, launch),
-                daemon=True,
-            ).start()
+            _start_worker(
+                self._confirm_bridge_started,
+                setup,
+                launch,
+                name="karox-bridge-confirm",
+            )
             self.query_one("#composer", Input).focus()
             if self.pending_task and _selected_model() is not None:
                 task, self.pending_task = self.pending_task, None
@@ -4487,11 +4496,9 @@ if _HAS_TEXTUAL:
                 )
                 return
             self._write("[dim]Создаю публичный HTTPS endpoint…[/]")
-            threading.Thread(
-                target=self._read_tunnel_output,
-                args=(launch,),
-                daemon=True,
-            ).start()
+            _start_worker(
+                self._read_tunnel_output, launch, name="karox-tunnel-output"
+            )
 
         def _read_tunnel_output(self, launch: BridgeLaunch) -> None:
             process = self.tunnel_process
@@ -4525,13 +4532,7 @@ if _HAS_TEXTUAL:
             )
 
         def _start_tailscale_funnel(self, port: int, launch: BridgeLaunch) -> None:
-            """Publish the loopback bridge over a public Tailscale Funnel URL.
-
-            Unlike the Cloudflare Quick Tunnel, Funnel does not keep a long-lived
-            child process: it configures the local tailscaled once and the daemon
-            serves the public HTTPS endpoint.  We reset the funnel config when
-            the bridge is stopped (``_stop_bridge``).
-            """
+            """Publish through the same ownership-safe foreground flow as CLI."""
             executable = _find_tailscale()
             if executable is None:
                 # Ask permission before installing — never install silently.
@@ -4564,40 +4565,46 @@ if _HAS_TEXTUAL:
                 # for login) — never log in silently.
                 self._offer_tailscale_login(port, launch, executable)
                 return
-            if not _tailscale_funnel_available(payload):
-                self._write(
-                    "[#c6a56b]Tailscale Funnel недоступен.[/] "
-                    + self._label(
-                        "Включите Funnel для узла: `tailscale funnel 443 on` "
-                        "или в админке tailnet.",
-                        "Enable Funnel for the node: `tailscale funnel 443 on` "
-                        "or in the tailnet admin panel.",
-                    )
-                )
-                return
             try:
-                result = subprocess.run(
-                    [executable, "funnel", "--bg", "--https", "443", f"http://localhost:{port}"],
-                    capture_output=True,
+                plan = prepare_tailscale_funnel(
+                    port, executable=executable, run=subprocess.run
+                )
+                process = subprocess.Popen(
+                    list(plan.argv),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    timeout=30,
+                    encoding="utf-8",
+                    errors="replace",
                     creationflags=flags,
-                    check=False,
                 )
-            except (OSError, subprocess.SubprocessError) as exc:
+            except (OSError, subprocess.SubprocessError, TailscaleError) as exc:
                 self._write(
-                    f"[#e0a3a3]Не удалось запустить Tailscale Funnel:[/] {escape(str(exc))}"
+                    f"[#e0a3a3]Tailscale Funnel не запущен:[/] {escape(str(exc))}"
                 )
                 return
-            if result.returncode != 0:
-                self._write(
-                    "[#e0a3a3]Tailscale Funnel не запущен.[/] "
-                    + escape((result.stderr or result.stdout or "").strip())
-                )
-                return
+            self.tunnel_process = process
             self._tailscale_active = True
             suffix = "/openapi.json" if launch.protocol == "openapi" else "/mcp"
-            self._tunnel_ready(f"https://{dns_name}{suffix}")
+            self._tunnel_ready(plan.public_url + suffix)
+            _start_worker(
+                self._read_tailscale_output, process, name="karox-tailscale-output"
+            )
+
+        def _read_tailscale_output(self, process: subprocess.Popen[str]) -> None:
+            stream = process.stdout
+            if stream is not None:
+                for line in stream:
+                    if self.tunnel_process is not process:
+                        break
+                    message = line.strip()
+                    if message:
+                        self.call_from_thread(
+                            self._write, "[dim cyan]tailscale[/] " + escape(message)
+                        )
+            code = process.wait()
+            if self.tunnel_process is process:
+                self.call_from_thread(self._tunnel_exited, code)
 
         def _offer_tailscale_install(self, port: int, launch: BridgeLaunch) -> None:
             """Ask the user's permission before installing Tailscale."""
@@ -4635,11 +4642,12 @@ if _HAS_TEXTUAL:
                 )
                 return
             self._set_activity(self._label("Устанавливаю Tailscale…", "Installing Tailscale…"))
-            threading.Thread(
-                target=self._install_tailscale_worker,
-                args=(port, launch),
-                daemon=True,
-            ).start()
+            _start_worker(
+                self._install_tailscale_worker,
+                port,
+                launch,
+                name="karox-tailscale-install",
+            )
 
         def _install_tailscale_worker(self, port: int, launch: BridgeLaunch) -> None:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -4721,11 +4729,13 @@ if _HAS_TEXTUAL:
                 )
                 return
             self._set_activity(self._label("Запускаю tailscale up…", "Running tailscale up…"))
-            threading.Thread(
-                target=self._tailscale_login_worker,
-                args=(port, launch, executable),
-                daemon=True,
-            ).start()
+            _start_worker(
+                self._tailscale_login_worker,
+                port,
+                launch,
+                executable,
+                name="karox-tailscale-login",
+            )
 
         def _tailscale_login_worker(
             self, port: int, launch: BridgeLaunch, executable: str
@@ -5010,19 +5020,10 @@ if _HAS_TEXTUAL:
                     tunnel.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     tunnel.kill()
-            if getattr(self, "_tailscale_active", False):
-                self._tailscale_active = False
-                executable = _find_tailscale()
-                if executable is not None:
-                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    subprocess.run(
-                        [executable, "serve", "reset"],
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
-                        creationflags=flags,
-                        check=False,
-                    )
+            # Tailscale uses a foreground child owned by this bridge. Stopping
+            # that child withdraws only this route; a global reset could remove
+            # unrelated Serve/Funnel routes and is deliberately forbidden.
+            self._tailscale_active = False
             process = self.bridge_process
             launch = self.bridge_launch
             self.bridge_process = None

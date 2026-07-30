@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
+from karox import tailscale as tailscale_module
 from karox import tui
 from karox.providers import ProviderError, ProviderErrorKind
 from karox.registry import ModelRecord
@@ -1462,18 +1463,28 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("сообщение пользователя", text)
 
     async def test_tailscale_funnel_start_publishes_endpoint(self) -> None:
-        # _start_tailscale_funnel runs `tailscale funnel --bg --https 443 …`
-        # and reports the funnel URL derived from the node's DNSName.
+        # TUI and CLI share one ownership-safe foreground Funnel plan.
+        # The TUI must not start a background route or use a global reset.
         selected = ModelRecord("openai", "model-a", tools="true")
         status_payload = {
             "BackendState": "Running",
             "Self": {"DNSName": "myhost.tailnet.ts.net.", "CapMap": {"funnel": [1]}},
         }
-        funnel_ok = Mock(returncode=0, stdout="", stderr="")
         status_ok = Mock(returncode=0, stdout=json.dumps(status_payload), stderr="")
-
-        def fake_run(argv, **kwargs):  # noqa: ANN001
-            return status_ok if "status" in argv else funnel_ok
+        plan = Mock(
+            public_url="https://myhost.tailnet.ts.net",
+            argv=(
+                "/usr/bin/tailscale",
+                "funnel",
+                "--yes",
+                "--https",
+                "443",
+                "http://127.0.0.1:8765",
+            ),
+        )
+        process = Mock()
+        process.stdout = None
+        process.poll.return_value = None
 
         launch = tui.BridgeLaunch(
             session_id="s", profile="notion", protocol="mcp",
@@ -1482,9 +1493,15 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(tui, "_selected_model", return_value=selected),
             patch.object(tui, "_find_tailscale", return_value="/usr/bin/tailscale"),
+            patch.object(tui, "prepare_tailscale_funnel", return_value=plan),
+            # Patch KaroX's own worker seam, never threading.Thread itself:
+            # tui.threading is the stdlib module, so patching it there disables
+            # threads for Textual and asyncio too and hangs this test forever.
+            patch.object(tui, "_start_worker") as start_worker,
             patch.object(tui, "subprocess", wraps=tui.subprocess) as sub_module,
         ):
-            sub_module.run.side_effect = fake_run
+            sub_module.run.return_value = status_ok
+            sub_module.Popen.return_value = process
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
                 app._start_tailscale_funnel(8765, launch)
@@ -1493,6 +1510,17 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     app.public_endpoint, "https://myhost.tailnet.ts.net/mcp"
                 )
+                sub_module.Popen.assert_called_once()
+                funnel_argv = sub_module.Popen.call_args.args[0]
+                self.assertNotIn("--bg", funnel_argv)
+                self.assertNotIn("reset", funnel_argv)
+                start_worker.assert_called_once()
+                worker = start_worker.call_args.args[0]
+                self.assertIs(worker.__self__, app)
+                self.assertIs(
+                    worker.__func__, type(app)._read_tailscale_output
+                )
+                self.assertIs(start_worker.call_args.args[1], process)
 
     async def test_tailscale_funnel_unavailable_offers_login(self) -> None:
         # When the node is not logged in (BackendState != Running) the funnel
@@ -1760,10 +1788,13 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 # The funnel flow never resumes because login never completed.
                 funnel_resume.assert_not_called()
 
-    async def test_stop_bridge_resets_tailscale_funnel(self) -> None:
-        # Stopping the bridge runs `tailscale serve reset` to tear down the
-        # funnel configuration the daemon holds for this node.
+    async def test_stop_bridge_stops_only_owned_tailscale_child(self) -> None:
+        # Foreground ownership means cleanup terminates only the KaroX child;
+        # a global Serve/Funnel reset is forbidden.
         selected = ModelRecord("openai", "model-a", tools="true")
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
         with (
             patch.object(tui, "_selected_model", return_value=selected),
             patch.object(tui, "_find_tailscale", return_value="/usr/bin/tailscale"),
@@ -1772,15 +1803,17 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             sub_module.run.return_value = Mock(returncode=0, stdout="", stderr="")
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
+                app.tunnel_process = process
                 app._tailscale_active = True
                 app._stop_bridge(quiet=True)
                 await pilot.pause()
                 self.assertFalse(app._tailscale_active)
+                process.terminate.assert_called_once()
                 reset_calls = [
                     c for c in sub_module.run.call_args_list
-                    if "serve" in (c.args[0] if c.args else []) and "reset" in c.args[0]
+                    if "reset" in (c.args[0] if c.args else [])
                 ]
-                self.assertTrue(reset_calls)
+                self.assertEqual(reset_calls, [])
 
     async def test_stop_managed_web_bridge_requests_graceful_cli_cleanup(self) -> None:
         selected = ModelRecord("openai", "model-a", tools="true")
@@ -1889,16 +1922,46 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TunnelHelperTests(unittest.TestCase):
+    """The TUI must report the same Tailscale binary the bridge CLI would use.
+
+    ``tui._find_tailscale`` delegates to :mod:`karox.tailscale`, so these tests
+    drive that lookup. They rebind the ``shutil`` name inside that module rather
+    than setting an attribute on the stdlib ``shutil`` module, which would alter
+    it for every other test in the process.
+    """
+
+    def _lookup_env(self) -> dict[str, str]:
+        # A developer machine may export these; the lookup must be decided by
+        # the test, not by the environment that happens to run it.
+        return {
+            "KAROX_TAILSCALE_EXE": "",
+            "KAROX_VNEXT_RUNTIME_DIR": "",
+            "KAROX_RUNTIME_DIR": "",
+        }
+
     def test_find_tailscale_returns_path_from_which(self) -> None:
-        with patch.object(tui.shutil, "which", return_value="/usr/bin/tailscale"):
-            self.assertEqual(tui._find_tailscale(), "/usr/bin/tailscale")
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / (
+                "tailscale.exe" if os.name == "nt" else "tailscale"
+            )
+            executable.write_text("", encoding="utf-8")
+            with (
+                patch.dict(os.environ, self._lookup_env()),
+                patch.object(
+                    tailscale_module, "shutil", Mock(which=lambda _: str(executable))
+                ),
+            ):
+                self.assertEqual(
+                    tui._find_tailscale(), str(executable.resolve())
+                )
 
     def test_find_tailscale_returns_none_when_missing(self) -> None:
-        bundled = tui.runtime_dir() / "bin" / "tailscale"
+        # is_file() is forced False so an installation on the developer's own
+        # machine cannot satisfy one of the well-known fallback paths.
         with (
-            patch.object(tui.shutil, "which", return_value=None),
-            patch.object(Path, "is_file", return_value=False) if bundled.exists()
-            else patch.object(Path, "is_file", return_value=False),
+            patch.dict(os.environ, self._lookup_env()),
+            patch.object(tailscale_module, "shutil", Mock(which=lambda _: None)),
+            patch.object(Path, "is_file", return_value=False),
         ):
             self.assertIsNone(tui._find_tailscale())
 
