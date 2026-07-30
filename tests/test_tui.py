@@ -550,6 +550,41 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             f"{getattr(focused, 'id', None)!r} on screen {type(app.screen).__name__}"
         )
 
+    async def screen(self, pilot: object, app: object, expected: type) -> None:
+        """Wait for a screen transition instead of guessing how long it takes.
+
+        The fixed ``pause(0.3)`` this replaces was a guess about how long pushing
+        a screen takes, and under a parallel suite the guess was sometimes wrong:
+        the assertion ran while the previous screen was still current and failed
+        with "ProviderSetupScreen is not an instance of ModelPickerScreen".
+        Waiting for the condition is both faster in the common case and stable in
+        the slow one.
+        """
+        for _ in range(100):
+            if isinstance(getattr(app, "screen", None), expected):
+                # The screen being current is not the same as its widgets being
+                # mounted: returning on the type alone made a following
+                # `query_one("#confirm-yes")` raise NoMatches. One more turn lets
+                # compose() finish, which is what the fixed pause was covering.
+                await pilot.pause()  # type: ignore[attr-defined]
+                return
+            await pilot.pause()  # type: ignore[attr-defined]
+        self.assertIsInstance(getattr(app, "screen", None), expected)
+
+    async def language(self, pilot: object, app: object, expected: str) -> None:
+        """Wait for a key press to be applied instead of assuming one tick.
+
+        Same race as :meth:`focus`, and the same fix. Moving the highlight and
+        confirming it are separate event-loop turns, so on a busy machine -- which
+        is what a parallel suite guarantees -- the assertion could observe the
+        default language rather than the chosen one and fail with 'ru' != 'en'.
+        """
+        for _ in range(50):
+            if getattr(app, "language", None) == expected:
+                return
+            await pilot.pause()  # type: ignore[attr-defined]
+        self.assertEqual(getattr(app, "language", None), expected)
+
     async def test_first_run_asks_only_for_language_then_opens_chat(self) -> None:
         with (
             patch.object(tui, "_load_language", return_value=None),
@@ -561,9 +596,8 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.LanguageScreen)
                 await pilot.press("1")
-                await pilot.pause()
+                await self.language(pilot, app, "ru")
                 self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
-                self.assertEqual(app.language, "ru")
                 save_language.assert_called_once_with("ru")
                 await self.focus(pilot, app, "composer")
                 self.assertIn(
@@ -581,8 +615,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.pause()
                 await pilot.press("down", "enter")
-                await pilot.pause()
-                self.assertEqual(app.language, "en")
+                await self.language(pilot, app, "en")
                 save_language.assert_called_once_with("en")
                 await self.focus(pilot, app, "composer")
 
@@ -903,8 +936,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("enter", "1", "down", "down", "down", "enter")
                     await pilot.pause()
                     await pilot.press("f5")
-                    await pilot.pause(0.3)
-                    self.assertIsInstance(app.screen, tui.ModelPickerScreen)
+                    await self.screen(pilot, app, tui.ModelPickerScreen)
                     await self.focus(pilot, app, "model-search")
                     self.assertFalse(errors, repr(errors))
                     picker = app.screen
@@ -914,8 +946,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     self.assertEqual(options.option_count, 2)
                     await pilot.press("enter")
-                    await pilot.pause()
-                    self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
+                    await self.screen(pilot, app, tui.ProviderSetupScreen)
                     self.assertEqual(
                         app.screen.query_one("#provider-model", tui.Input).value,
                         "model-second",
@@ -1626,8 +1657,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 40)) as pilot:
                 # Drive the login flow: offer → accept → worker runs.
                 app._offer_tailscale_login(8765, launch, "/usr/bin/tailscale")
-                await pilot.pause(0.2)
-                self.assertIsInstance(app.screen, tui.ConfirmScreen)
+                await self.screen(pilot, app, tui.ConfirmScreen)
                 app.screen.dismiss(True)
                 await pilot.pause(0.5)
                 # Popen was called with `tailscale up` at some point (the login
@@ -1696,8 +1726,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
                 app._offer_tailscale_login(8765, launch, "/usr/bin/tailscale")
-                await pilot.pause(0.2)
-                self.assertIsInstance(app.screen, tui.ConfirmScreen)
+                await self.screen(pilot, app, tui.ConfirmScreen)
                 app.screen.dismiss(True)
                 # The worker streams `tailscale up`, polls the daemon (with
                 # time.sleep patched to no-op), then launches the GUI app and
@@ -1771,8 +1800,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
                 app._offer_tailscale_login(8765, launch, "/usr/bin/tailscale")
-                await pilot.pause(0.2)
-                self.assertIsInstance(app.screen, tui.ConfirmScreen)
+                await self.screen(pilot, app, tui.ConfirmScreen)
                 app.screen.dismiss(True)
                 for _ in range(15):
                     await pilot.pause(0.2)

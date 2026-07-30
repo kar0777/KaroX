@@ -41,9 +41,15 @@ dependencies = [
   "tomli>=2.0,<3.0; python_version < '3.11'",
 ]
 
+[project.optional-dependencies]
+# Browser verification is local and opt-in because Playwright also requires a
+# separately installed browser binary. The core runtime remains usable without it.
+browser = ["playwright>=1.50,<2.0"]
+
 [project.scripts]
-karox = "karox.cli:main"
-karox-vnext = "karox.cli:main"
+karox = "karox.entrypoint:main"
+karox-vnext = "karox.entrypoint:main"
+karox-agent-mcp = "karox.agent_mcp:main"
 
 # Development-only tooling, declared so CI and a contributor install the same
 # versions instead of each guessing. These are PEP 735 groups: `pip install
@@ -52,7 +58,45 @@ karox-vnext = "karox.cli:main"
 lint = ["ruff>=0.14,<1.0"]
 typing = ["mypy>=1.13,<2.0", "types-PyYAML>=6.0,<7.0"]
 coverage = ["coverage>=7.6,<9.0"]
-dev = [{ include-group = "lint" }, { include-group = "typing" }, { include-group = "coverage" }]
+# pytest is how a contributor actually runs the suite while working, even though
+# the published count and CI's gate use `unittest discover`. It was undeclared,
+# so the parallel runner below depended on whatever happened to be installed.
+test = ["pytest>=8.0,<10.0", "pytest-xdist>=3.5,<4.0"]
+dev = [
+  { include-group = "lint" },
+  { include-group = "typing" },
+  { include-group = "coverage" },
+  { include-group = "test" },
+]
+
+[tool.pytest.ini_options]
+# `-n auto` is the whole point of this section: the suite is dominated by tests
+# that boot a real Textual application or spawn a real interpreter, which are
+# latency-bound rather than CPU-bound. Serially the suite takes 202s; across
+# workers it takes 45s for the same 705 passed / 4 skipped. A contributor who
+# runs `pytest` with no arguments should get the fast path by default, because a
+# check nobody is willing to wait for is a check nobody runs.
+#
+# Tests must therefore stay independent: anything that writes to a shared path
+# has to redirect KAROX_RUNTIME_DIR/KAROX_CONFIG_DIR (both spellings) to a
+# temporary directory, exactly as tests/test_web_bridge_launcher.py now does.
+# `-p no:cacheprovider` keeps a parallel run from racing on .pytest_cache.
+#
+# One test cannot run this way at all -- it accumulates state across the tests
+# before it -- so tests/conftest.py skips that single aggregator while pytest is
+# distributing, and says where it is still enforced. Everything else is
+# independent, which is the property to preserve when adding tests: redirect
+# KAROX_RUNTIME_DIR/KAROX_CONFIG_DIR (both spellings) at a temporary directory
+# instead of touching a shared one.
+# `-n 6` rather than `-n auto`: on a 12-thread Windows machine `auto` oversubscribes
+# the box, and tests that create a temporary Git repository start losing the race
+# to delete it -- `PermissionError [WinError 32] file already in use` out of
+# shutil.rmtree, in a different test on each run. Six workers reproduced no such
+# failure across repeated runs and still cut the suite from 202s to under 45s;
+# most of the remaining time is booting real Textual apps and child interpreters,
+# so the extra workers were buying very little anyway.
+addopts = "-q -n 6 -p no:cacheprovider"
+testpaths = ["tests"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -153,10 +197,13 @@ show_missing = true
 exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
-  "\\.\\.\\.$",
+  "/././.$",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # Each test module inserts src on sys.path through this import for its side
 # effect, so the name itself is genuinely unused.
 "tests/*" = ["F401"]
+# ProcessTree is retained as an explicit compatibility import beside the
+# platform-specific process-tree fallback used by this module.
+"src/karox/remote_tools.py" = ["F401"]
