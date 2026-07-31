@@ -207,7 +207,7 @@ still require recorded runs on Windows, macOS, and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 798 tests under:
+The canonical documented suite is now 817 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -247,10 +247,22 @@ servers cannot substitute for named-product live evidence.
 
 ## Current P0 blockers
 
+### Terminal-client defects
+
+Fifteen defects in the terminal client are recorded in
+[`docs/UX_BUG_INVENTORY.md`](UX_BUG_INVENTORY.md), each with a test that proves it.
+Four are P0 and all four come from one decision: the transcript is a `RichLog`,
+which does not take part in Textual's selection machinery, so selection is
+reimplemented by hand and reads whole messages where a user selected a word.
+
+They are listed as release-relevant rather than cosmetic because two of them lose
+data a user asked for — a copy that silently yields a different message — and one
+makes the first screen unreadable at a common window size.
+
 ### Source and automated verification
 
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
-- run the complete 798-test suite;
+- run the complete 817-test suite;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
   gates;
 - validate the edited release workflow in GitHub Actions;

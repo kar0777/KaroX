@@ -71,11 +71,42 @@ python -m ruff check src tests scripts
 python -m mypy src/karox
 ```
 
+Adding a test makes the published suite size stale in nine documents. Apply the
+new figure instead of retyping it:
+
+```bash
+python scripts/check_test_count.py --write
+```
+
 Run the complete documented suite:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+### Terminal-client tests
+
+`tests/_tui_harness.py` boots the real application and reads the composited
+screen, so an assertion can be made about what a person would actually see rather
+than about a widget queried by id. Use it for anything layout- or
+selection-related; every defect in
+[`docs/UX_BUG_INVENTORY.md`](docs/UX_BUG_INVENTORY.md) survived tests that
+asserted *something* had happened without asserting *what*.
+
+Screen snapshots live in `tests/snapshots/`. When a change alters what is drawn,
+re-record and read the diff before committing it:
+
+```bash
+KAROX_UPDATE_SNAPSHOTS=1 python -m unittest discover -s tests -p "test_tui_*.py"
+```
+
+A snapshot diff is the point of the snapshot. It is how a refactor that was
+supposed to change nothing proves it.
+
+Known defects carry `unittest.expectedFailure` with an identifier from the
+inventory. Unittest counts an unexpected success as a failure, so fixing one turns
+the run red until the decorator is deleted in the same commit — that is deliberate,
+and it is why a defect there cannot be silently reintroduced later.
 
 Run coverage without lowering the threshold:
 

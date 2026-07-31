@@ -89,7 +89,7 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [ ] Complete 798-test suite passes on the current release-candidate commit.
+- [ ] Complete 817-test suite passes on the current release-candidate commit.
 - [ ] Ruff passes without suppressing new defects.
 - [ ] Mypy passes.
 - [ ] Coverage passes without lowering the configured threshold.
