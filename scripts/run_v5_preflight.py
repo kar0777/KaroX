@@ -8,12 +8,17 @@ which checks actually ran.
 
 Examples:
 
-    python scripts/run_v5_preflight.py --apply-reviewed-fixes --full
+    python scripts/run_v5_preflight.py --full
     python scripts/run_v5_preflight.py --static-only --json
 
 The default runs repository/static contracts and focused bridge tests. ``--full``
 also runs the complete suite, Ruff, Mypy, and coverage. The script never commits,
 pushes, publishes, edits VERSION, or marks live conformance records passed.
+
+It used to open with an ``--apply-reviewed-fixes`` stage that ran two one-time
+migration helpers. Both fixes are in the source, both helpers are deleted, and
+the release-hygiene gate refuses a shipping tree that still contains them, so the
+stage would have nothing left to run.
 """
 
 from __future__ import annotations
@@ -53,17 +58,6 @@ class StepResult:
     stderr_tail: str = ""
     output_truncated: bool = False
 
-
-APPLY_STEPS = (
-    Step(
-        "apply current ChatGPT/Claude and CLI copy fix",
-        (PYTHON, "scripts/apply_v5_connection_copy_fix.py"),
-    ),
-    Step(
-        "preserve legacy installer data for rollback",
-        (PYTHON, "scripts/apply_v5_installer_preservation_fix.py"),
-    ),
-)
 
 STATIC_STEPS = (
     Step(
@@ -224,8 +218,6 @@ def _run_step(step: Step, *, json_mode: bool) -> StepResult:
 
 def _build_steps(args: argparse.Namespace) -> list[Step]:
     steps: list[Step] = []
-    if args.apply_reviewed_fixes:
-        steps.extend(APPLY_STEPS)
     steps.extend(STATIC_STEPS)
     if not args.static_only:
         steps.extend(FOCUSED_STEPS)
@@ -246,11 +238,6 @@ def main(argv: list[str] | None = None) -> int:
         "--full",
         action="store_true",
         help="also run Ruff, Mypy, complete unittest suite, and coverage",
-    )
-    parser.add_argument(
-        "--apply-reviewed-fixes",
-        action="store_true",
-        help="atomically apply the two reviewed one-time source/installer fixes first",
     )
     parser.add_argument(
         "--keep-going",
@@ -274,7 +261,6 @@ def main(argv: list[str] | None = None) -> int:
         "ok": not failed and not_run == 0,
         "root": str(ROOT),
         "python": PYTHON,
-        "apply_reviewed_fixes": args.apply_reviewed_fixes,
         "mode": "full" if args.full else "static" if args.static_only else "focused",
         "steps_planned": len(steps),
         "steps_run": len(results),

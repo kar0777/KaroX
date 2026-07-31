@@ -1,11 +1,58 @@
 # KaroX 5.0 release scope
 
-Status: **frozen preview scope**  
-Runtime version: `5.0.0.dev0`
+- Status: **frozen preview scope, amended once — see Scope amendment 1**
+- Runtime version: `5.0.0.dev0`
 
 This is the product and release contract for KaroX 5.0. Code is not part of the
 stable product promise merely because it exists. It is part of 5.0 only when it
 appears in the shipping scope below and passes the required evidence gates.
+
+## Scope amendment 1 (2026-07-31)
+
+The feature freeze rule at the end of this document permits a change to the scope
+only with an explicit rationale recorded here, in the same commit. This is that
+record.
+
+**What changed.** The Skill marketplace moves out of *Deferred beyond 5.0* into
+the shipping scope, and a set of interface capabilities is added to it: an
+explicit plan/act split, per-turn checkpoints with undo on the native agent path,
+inline diff review before a write reaches disk, file mentions and image
+attachments, language-server diagnostics as a gated Core tool, parallel sessions
+with a session browser, themes, user-defined commands, budget-bounded subagents,
+and a benchmark harness with published methodology.
+
+**Why.** The freeze rule exists to stop scope from growing while the primary
+scenario is unfinished. It is not the constraint that was actually binding here.
+Two things forced this instead:
+
+1. *The competitive floor moved.* An agent terminal without a plan/act split,
+   without undo, without diagnostics from a language server, and without a way to
+   review a diff before it lands is now behind what a user already has elsewhere.
+   Shipping 5.0 without them means shipping something a user compares
+   unfavourably on the first day, and the control-plane guarantees that make
+   KaroX different never get evaluated because the surface loses first.
+2. *The deferral was partly fictional.* Bounded context compaction was listed
+   below as a 5.1 item; it has been implemented, deterministically, in
+   `karox.agent` for some time, with a `compacted` event and per-run metadata. A
+   contract that defers what the code already does is not a constraint, it is an
+   inaccuracy.
+
+**What did not change.** Nothing in this amendment relaxes a boundary. Every
+addition lands inside the existing capability policy rather than beside it: plan
+mode only *narrows* an access profile to read-only; checkpoints restore paths
+KaroX itself recorded as written; language-server diagnostics arrive as a gated
+capability; subagents cannot exceed a parent's budget or tool set; marketplace
+cards install as data, pinned by commit and verified by content hash, through the
+Pack machinery that already requires explicit approval. Git push, package
+publishing, arbitrary website automation, automatic execution of extension code,
+and multi-agent orchestration as a default all remain deferred, and no P0 blocker
+is removed.
+
+**What this costs.** The 5.0 surface is larger, so there is more to keep working.
+The mitigation is ordering, not optimism: the UX core (text selection, copy,
+decomposition of the terminal client) is done before any of these features is
+added, because each new screen built on the current transcript widget would
+reproduce the same class of defect.
 
 ## Product promise
 
@@ -95,6 +142,41 @@ The full-screen terminal client, explicit CLI subcommands, and JSON automation
 remain first-class. The TUI is a view over shared services and must not contain
 a second policy, provider, bridge, or mutation implementation.
 
+Release-critical interface behaviour, added by Scope amendment 1:
+
+- character-level text selection and copy in the transcript, working after a
+  resize and over a remote terminal;
+- an explicit plan/act split, where plan narrows the session to read-only
+  regardless of the access profile and act requires confirmation;
+- a checkpoint before each mutating series, with undo limited to the paths KaroX
+  recorded as written;
+- inline diff review with per-hunk accept and reject, before a write reaches
+  disk;
+- file mentions bounded by the repository root, and image attachments where the
+  provider supports them;
+- language-server diagnostics as a separately gated Core capability, so the agent
+  acts on a compiler's verdict rather than its own guess;
+- parallel sessions, a session browser, and evidence export;
+- themes including a high-contrast one, and full keyboard-only operation;
+- user-defined commands from repository files;
+- subagents bounded by an explicit budget, tool set, and step limit.
+
+### Skill marketplace
+
+Moved into scope by Scope amendment 1. A card is a pointer -- repository,
+subdirectory, and a ref pinned to a commit -- installed as data through the Pack
+machinery, verified against a content hash, and cached locally. Installation
+requires explicit approval of the capabilities the skill asks for. Nothing in a
+card executes on install.
+
+### Benchmarks
+
+Moved into scope by Scope amendment 1. Runtime latency baselines and
+control-plane integrity measurements ship with the release and gate regressions
+in CI. Task-success numbers against public suites require a provider key and are
+published only with a reproducible run manifest; no figure is published without
+one.
+
 ## Preview and legacy scope
 
 The following may be present in the artifact but remain visibly Preview,
@@ -113,9 +195,11 @@ Preview features cannot be required for the primary release scenario.
 
 ## Deferred beyond 5.0
 
-Explicitly out of scope:
+Explicitly out of scope. The Skill marketplace was removed from this list by
+Scope amendment 1; a Pack marketplace stays deferred, because a Pack can declare
+executable behaviour and a Skill card cannot.
 
-- Pack or Skill marketplace;
+- Pack marketplace;
 - automatic execution of arbitrary extension code;
 - multi-agent orchestration as the default workflow;
 - remote runners, teams, organizations, or a hosted KaroX control plane;
@@ -208,7 +292,12 @@ third-party facts remain explicit conformance and beta records.
 ## P2 after stable release
 
 1. 5.0.x reliability, onboarding, compatibility, and security fixes.
-2. Bounded context compaction and long-session ergonomics for 5.1.
+2. Long-session ergonomics for 5.1. Bounded context compaction itself is **not**
+   deferred and never was in practice: `karox.agent` implements it
+   deterministically, replacing dropped turns with a summary computed from
+   recorded tool results rather than from the model's own account of them, and
+   reports each compaction as an event with the token counts either side. Scope
+   amendment 1 corrects the claim.
 3. Permission-bound Pack execution for 5.2.
 4. Team and remote-runner features only after repeated user demand.
 
@@ -217,8 +306,14 @@ third-party facts remain explicit conformance and beta records.
 Until stable 5.0, accept a change only when it fixes a defect, completes the
 primary scenario, improves installation/update/rollback, closes a security
 boundary, improves onboarding or diagnostics, removes contradictory claims, or
-adds a release gate or conformance record. Everything else is deferred.
+adds a release gate or conformance record. Everything else is deferred, unless it
+is admitted by a numbered scope amendment at the top of this document.
 
 Release status changes through evidence, not by editing a marketing table. A
 blocker may be removed only with an explicit rationale in this document and in
 the same commit; it must not be silently bypassed in CI.
+
+An amendment is not a way around this rule. It has to name what changed, why the
+rule did not hold, what boundary was *not* relaxed, and what the change costs.
+Scope amendment 1 is the worked example; anything less than that is a bypass with
+extra steps.

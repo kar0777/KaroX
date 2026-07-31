@@ -59,30 +59,30 @@ python scripts/check_access_profiles.py --json
 python scripts/check_release_workflow.py --json
 ```
 
-## 3. Current ChatGPT/Claude bridge copy fix
+## 3. Current ChatGPT/Claude bridge copy fix — done
 
-The current runtime source still contains an outdated ChatGPT path using
-`Settings → Plugins`. Official current instructions use Apps/developer mode.
-The reviewed exact replacement is prepared but has not been executed from this
-read/write-only connector.
+The runtime source used to send a user to `Settings → Plugins`, a ChatGPT path
+that no longer exists; the current product uses Apps with developer mode. The fix
+is applied, tested, and enforced, so this section is closed rather than pending.
 
 - [x] Official ChatGPT and Claude setup paths were reviewed on 2026-07-29.
 - [x] `docs/LIVE_TEST_RUNBOOK.md` records current external requirements.
-- [x] `scripts/apply_v5_connection_copy_fix.py` preflights exact source/test
-  blocks, preserves test count, writes atomically, and rolls back the first file
-  when the second write fails.
-- [ ] Run `python scripts/apply_v5_connection_copy_fix.py` locally.
-- [ ] Inspect the resulting source and regression-test diff.
-- [ ] Confirm no ChatGPT instruction contains `Plugins` or `Плагины`.
-- [ ] Run focused OAuth and web-bridge tests.
-- [ ] Run the complete suite.
-- [ ] Remove the one-time helper after its applied diff is committed, or retain
-  it only with a documented ongoing maintenance purpose.
+- [x] `src/karox/web_bridge_launcher.py` names `Settings → Apps` and
+  `Apps → Create` in English, `Настройки → Приложения` and `Приложения → Создать`
+  in Russian, and the Claude path as
+  `Settings → Connectors → Add custom connector`.
+- [x] No ChatGPT instruction contains `Plugins` or `Плагины`;
+  `scripts/check_v5_release.py` fails the release if either returns, and
+  `tests/test_web_bridge_launcher.py::WebBridgeInstructionTests` asserts the
+  current wording in both languages.
+- [x] The one-time helper was applied and deleted. `scripts/check_release_hygiene.py`
+  and `scripts/check_v5_release.py --strict` both refuse a shipping tree that
+  contains any `scripts/apply_v5_*.py`.
 
-Focused commands:
+Verification, which needs no helper:
 
 ```bash
-python scripts/apply_v5_connection_copy_fix.py
+python scripts/check_v5_release.py --json
 python -m unittest tests.test_oauth_bridge tests.test_web_bridge_launcher -v
 git diff --check
 ```

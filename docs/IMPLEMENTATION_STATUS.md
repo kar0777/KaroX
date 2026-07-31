@@ -142,11 +142,19 @@ The pre-existing working diff on this branch adds:
 - focused regression tests.
 
 A documentation review on 2026-07-29 found one remaining P0 copy defect in the
-runtime source: ChatGPT instructions still say `Settings → Plugins`, while the
-current official product uses Apps/developer mode. The exact source/test change
-is prepared in `scripts/apply_v5_connection_copy_fix.py` but has **not** been
-executed by this read/write-only connector. Until it is applied and tested, the
-runtime connection instructions are not considered complete.
+runtime source: ChatGPT instructions said `Settings → Plugins`, while the current
+official product uses Apps with developer mode. **That defect is fixed.**
+`src/karox/web_bridge_launcher.py` now names `Settings → Apps` and
+`Apps → Create` in English and `Настройки → Приложения` and
+`Приложения → Создать` in Russian; `scripts/check_v5_release.py` fails the
+release if either stale path reappears, and
+`tests/test_web_bridge_launcher.py::WebBridgeInstructionTests` asserts the
+current wording in both languages. The one-time helper that carried the change
+has been applied and deleted, as the release-hygiene gate requires.
+
+This paragraph claimed the opposite for several commits after the fix had landed,
+which is the failure mode these documents exist to prevent. It is corrected here
+rather than in a later pass.
 
 ## Release infrastructure implemented in this update
 
@@ -234,7 +242,6 @@ servers cannot substitute for named-product live evidence.
 
 ### Source and automated verification
 
-- apply and review `scripts/apply_v5_connection_copy_fix.py`;
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
 - run the complete 798-test suite;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage

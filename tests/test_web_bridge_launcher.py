@@ -164,15 +164,13 @@ class WebBridgeCliTests(unittest.TestCase):
         expected_command = (
             "python",
             "scripts/run_v5_preflight.py",
-            "--apply-reviewed-fixes",
             "--full",
             "--keep-going",
         )
         # Windows PowerShell 5.1 legacy native argv removes embedded JSON quotes
         # before Python receives this native-process argument.
         powershell_native_value = (
-            "[python,scripts/run_v5_preflight.py,--apply-reviewed-fixes,"
-            "--full,--keep-going]"
+            "[python,scripts/run_v5_preflight.py,--full,--keep-going]"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

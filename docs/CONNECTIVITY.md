@@ -136,7 +136,7 @@ Credentials and OAuth grants remain in the OS keyring and runtime stores.
 Create and validate a reusable development profile:
 
 ```bash
-karox bridge saved create full-dev --target-profile chatgpt-web --repository . --write --tool karox.repo.read_file --tool karox.repo.read_lines --tool karox.repo.list_files --tool karox.repo.search --tool karox.git.status --tool karox.git.diff --tool karox.git.log --tool karox.checks.run --verification-command '["python","scripts/run_v5_preflight.py","--apply-reviewed-fixes","--full","--keep-going"]' --deadline-preset full-suite --tunnel tailscale --language ru
+karox bridge saved create full-dev --target-profile chatgpt-web --repository . --write --tool karox.repo.read_file --tool karox.repo.read_lines --tool karox.repo.list_files --tool karox.repo.search --tool karox.git.status --tool karox.git.diff --tool karox.git.log --tool karox.checks.run --verification-command '["python","scripts/run_v5_preflight.py","--full","--keep-going"]' --deadline-preset full-suite --tunnel tailscale --language ru
 karox bridge saved validate full-dev --json
 ```
 

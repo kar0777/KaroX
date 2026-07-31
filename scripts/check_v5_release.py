@@ -246,7 +246,8 @@ def collect_problems(
             if stale in launcher:
                 problems.append(
                     f"runtime ChatGPT instructions still contain stale UI path {stale!r}; "
-                    "apply and test scripts/apply_v5_connection_copy_fix.py"
+                    "the current product uses Settings -> Apps with developer mode, so "
+                    "the instruction sends a user somewhere that no longer exists"
                 )
 
     conformance = root / "docs" / "conformance"
@@ -340,11 +341,14 @@ def collect_problems(
         if open_p0 > 0:
             problems.append(f"external beta still has {open_p0} open P0 issue(s)")
 
-        helper = root / "scripts" / "apply_v5_connection_copy_fix.py"
-        if helper.exists():
+        # One-time migration helpers must not ship. Both named here were applied,
+        # verified against the runtime source, and deleted; the pattern stays so a
+        # new helper cannot reach a release tree just because it has a new name.
+        # scripts/check_release_hygiene.py enforces the same rule from its own side.
+        for helper in sorted(root.glob("scripts/apply_v5_*.py")):
             problems.append(
                 "strict/final release still contains one-time "
-                "scripts/apply_v5_connection_copy_fix.py; apply, verify, and remove it"
+                f"{helper.relative_to(root).as_posix()}; apply, verify, and remove it"
             )
 
     if final_requested:
