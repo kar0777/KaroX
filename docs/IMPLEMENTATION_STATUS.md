@@ -217,10 +217,17 @@ The ten KB-HYBRID gates are implemented. CI declares dependency, version,
 product-contract, lint, typing, coverage, wheel-install, legacy regression,
 PowerShell, POSIX, and multi-OS checks.
 
-This page does not claim that the current working tree passes them. The connected
-KaroX surface available in this chat supports repository read/write and Git
-status/diff but does not expose process execution, so commands must be run by the
-developer or CI and the exact results recorded.
+This page does not itself claim that a working tree passes them; a claim like that
+belongs to a dated record of an actual run. Those live in
+[`docs/evidence/`](evidence/README.md), each naming its commit, its platform, and
+the command behind every number.
+
+The starting point for the 5.0 work is
+[`docs/evidence/baseline-2026-07-31.md`](evidence/baseline-2026-07-31.md), taken
+on commit `dee041c`: 796 tests pass with 7 Playwright skips, all 12 static gates
+pass, Ruff and Mypy are clean, coverage is 71.26% against a gate of 70, and
+`check_v5_release.py --strict` fails on nothing except the live evidence listed
+below. Windows only — the macOS and Linux matrix has no record yet.
 
 ## Required external evidence
 
