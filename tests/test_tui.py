@@ -759,7 +759,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(100, 24)) as pilot:
                 await pilot.pause()
-                log = app.query_one("#conversation", tui.ChatLog)
+                log = app.query_one("#conversation", tui.TranscriptView)
 
                 self.assertGreaterEqual(
                     log.size.height,
@@ -785,7 +785,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await pilot.pause()
 
-                log = app.query_one("#conversation", tui.ChatLog)
+                log = app.query_one("#conversation", tui.TranscriptView)
                 self.assertLessEqual(
                     log.virtual_size.width,
                     log.size.width,
@@ -1225,10 +1225,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 capture.assert_not_called()
                 self.assertFalse(app.agent_busy)
-                rendered = "\n".join(
-                    line.text
-                    for line in app.query_one("#conversation", tui.RichLog).lines
-                )
+                rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                 self.assertIn("Системная папка Windows", rendered)
 
     async def test_final_answer_renders_markdown_and_explicit_completion(self) -> None:
@@ -1247,10 +1244,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.active_session = None
                 app._agent_finished(0, json.dumps(report, ensure_ascii=False))
                 await pilot.pause()
-                rendered = "\n".join(
-                    line.text
-                    for line in app.query_one("#conversation", tui.RichLog).lines
-                )
+                rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                 self.assertIn("Результат", rendered)
                 self.assertIn("Готово", rendered)
                 self.assertNotIn("**Готово**", rendered)
@@ -1290,10 +1284,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app._stop_requested = True
                 app._agent_finished(0, json.dumps(report, ensure_ascii=False))
                 await pilot.pause()
-                rendered = "\n".join(
-                    line.text
-                    for line in app.query_one("#conversation", tui.RichLog).lines
-                )
+                rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                 # The stop notice is shown, not the interrupted answer.
                 self.assertIn("остановили", rendered)
                 self.assertNotIn("незавершённый ответ", rendered)
@@ -1354,36 +1345,35 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 for phrase in forbidden:
                     self.assertNotIn(phrase, activity_text)
 
-    async def test_chatlog_renders_selection_highlight(self) -> None:
-        # A selection over the chat must produce a visible highlight on the
-        # covered lines (RichLog itself renders none), so the user can tell
-        # what Ctrl+C will copy.
+    async def test_every_message_in_the_transcript_is_selectable(self) -> None:
+        # A message reaches the screen as Content inside a widget, which is what
+        # makes Textual's own selection able to find it. This asserts the property
+        # the whole transcript design rests on; the character-level precision it
+        # buys is covered in tests/test_tui_selection.py.
+        #
+        # It replaces a test that read strip._segments looking for a highlight
+        # colour, checking a hand-written render_line override that no longer
+        # exists -- and which passed while selection returned the wrong text.
         selected = ModelRecord("openai", "model-a", tools="true")
         with patch.object(tui, "_selected_model", return_value=selected):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause(0.3)
-                log = app.query_one("#conversation", tui.ChatLog)
-                # welcome text occupies the first lines; select y=0..2
-                app.screen.selections[log] = Selection(Offset(0, 0), Offset(2, 70))
-                log.selection_updated(app.screen.selections[log])
-                await pilot.pause(0.2)
-                # The first line is inside the selection: it must carry the
-                # screen selection background (#6b5b3e), which is the visible
-                # highlight the plain RichLog never renders.
-                selected_strip = log.render_line(0)
-                sel_bg = next(
-                    (getattr(s.style, "bgcolor", None) for s in selected_strip._segments
-                     if getattr(s.style, "bgcolor", None) is not None),
-                    None,
-                )
-                self.assertIsNotNone(sel_bg)
-                self.assertIn("6b5b3e", str(sel_bg).lower())
-                # And copying the selection yields the chat text (not nothing).
-                self.assertIn(
-                    "KaroX",
-                    app.screen.get_selected_text(),
-                )
+                app._write_user("сообщение пользователя")
+                app._write_assistant("ответ **ассистента** с `кодом`")
+                app._write_notice("уведомление")
+                await pilot.pause(0.3)
+
+                app.screen.text_select_all()
+                everything = app.screen.get_selected_text() or ""
+
+                for expected in (
+                    "KaroX готов",
+                    "сообщение пользователя",
+                    "ответ ассистента с кодом",
+                    "уведомление",
+                ):
+                    self.assertIn(expected, everything)
 
     async def test_provider_audit_does_not_write_model_activity(self) -> None:
         # Regression: the activity line must not show "Модель: …" on every
@@ -1414,52 +1404,59 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Модель", activity)
                 self.assertNotIn("gpt", activity)
 
-    async def test_chatlog_mouse_drag_selects_and_copies_chat_lines(self) -> None:
-        # RichLog does not support drag selection, so ChatLog implements it:
-        # a mouse down + drag must highlight the dragged lines and make
-        # Ctrl+C copy them (not the last assistant answer).
+    async def test_a_real_mouse_drag_over_the_chat_copies_what_was_dragged(self) -> None:
+        # Driven through Pilot's real mouse events rather than a hand-built fake
+        # one. The previous version constructed an object with `button` and `y`
+        # attributes and called ChatLog.on_mouse_down directly, which tested the
+        # hand-written handler and nothing about whether a terminal drag reaches
+        # it -- and asserted only that "KaroX" appeared somewhere in the clipboard.
         selected = ModelRecord("openai", "model-a", tools="true")
-
-        class FakeMouseEvent:
-            def __init__(self, button: int = 1, y: int = 0) -> None:
-                self.button = button
-                self.y = y
-
         with patch.object(tui, "_selected_model", return_value=selected):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause(0.3)
-                log = app.query_one("#conversation", tui.ChatLog)
-                await log.on_mouse_down(FakeMouseEvent(1, 0))
-                await pilot.pause(0.1)
-                await log.on_mouse_move(FakeMouseEvent(1, 2))
-                await pilot.pause(0.1)
-                # the three dragged lines are highlighted
-                for y in range(3):
-                    strip = log.render_line(y)
-                    has_highlight = any(
-                        "6b5b3e" in str(getattr(s.style, "bgcolor", None) or "").lower()
-                        for s in strip._segments
-                    )
-                    self.assertTrue(has_highlight, f"line {y} not highlighted")
-                # Ctrl+C copies the selection, not the last answer
+                app._write_assistant("ALPHA BETA GAMMA")
+                await pilot.pause(0.3)
+                block = next(iter(app.query("MarkdownParagraph")))
+                column = str(block._render()).index("BETA")
+                origin = block.region.offset
+
+                await pilot.mouse_down(offset=origin + (column, 0))
+                await pilot.mouse_up(offset=origin + (column + 4, 0))
+                await pilot.pause(0.2)
+
                 app.agent_busy = False
                 app._last_assistant_content = "OLD ANSWER"
                 await pilot.press("ctrl+c")
                 await pilot.pause(0.2)
-                self.assertIn("KaroX", app.clipboard)
-                self.assertNotIn("OLD ANSWER", app.clipboard)
-                # mouse up ends the drag
-                await log.on_mouse_up(FakeMouseEvent(1, 2))
-                self.assertIsNone(log._drag_anchor)
-                # writing a new user message clears the stale selection
-                app._write_user("next task")
-                await pilot.pause()
-                self.assertNotIn(log, app.screen.selections)
 
-    async def test_ctrl_c_stops_running_agent(self) -> None:
-        # Ctrl+C must reach action_stop_agent while the agent is busy and
-        # terminate the subprocess — the user's primary complaint.
+                self.assertEqual(app.clipboard, "BETA")
+
+                # A new turn drops the stale selection rather than leaving it
+                # highlighted over text the user has moved past.
+                app._write_user("next task")
+                await pilot.pause(0.2)
+                self.assertFalse(app.screen.get_selected_text())
+
+    async def test_escape_stops_the_running_agent(self) -> None:
+        # Esc stops, and is now the only key that does. Ctrl+C used to stop as
+        # well, which meant the copy key aborted the task whenever one was
+        # running -- during exactly the period a user most wants to copy an error
+        # scrolling past. The pair is asserted here and in the test below so a
+        # future change cannot re-merge them without one of the two failing.
+        selected = ModelRecord("openai", "model-a", tools="true")
+        process = Mock()
+        with patch.object(tui, "_selected_model", return_value=selected):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.agent_busy = True
+                app.agent_process = process
+                await pilot.press("escape")
+                await pilot.pause()
+                process.terminate.assert_called_once()
+                self.assertTrue(app._stop_requested)
+
+    async def test_ctrl_c_does_not_stop_a_running_agent(self) -> None:
         selected = ModelRecord("openai", "model-a", tools="true")
         process = Mock()
         with patch.object(tui, "_selected_model", return_value=selected):
@@ -1469,42 +1466,47 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.agent_process = process
                 await pilot.press("ctrl+c")
                 await pilot.pause()
-                process.terminate.assert_called_once()
-                self.assertTrue(app._stop_requested)
+                process.terminate.assert_not_called()
+                self.assertFalse(app._stop_requested)
 
-    async def test_ctrl_c_idle_copies_last_assistant_content(self) -> None:
-        # In idle state, Ctrl+C copies the last assistant answer to the
-        # clipboard (no mouse selection present).
+    async def test_ctrl_c_with_nothing_selected_copies_the_last_answer(self) -> None:
+        # A convenience, but an announced one: the notice has to say a fallback
+        # happened, because being told "Copied" after selecting a line and
+        # receiving a different message is worse than being told nothing.
         selected = ModelRecord("openai", "model-a", tools="true")
         with patch.object(tui, "_selected_model", return_value=selected):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
+                notices: list[str] = []
+                app.notify = lambda message, *a, **k: notices.append(str(message))
                 app.agent_busy = False
                 app._last_assistant_content = "ответ ассистента"
                 await pilot.press("ctrl+c")
                 await pilot.pause()
                 self.assertEqual(app.clipboard, "ответ ассистента")
+                self.assertIn("последний ответ", notices[-1])
 
-    async def test_chatlog_records_plain_text_for_selection(self) -> None:
-        # ChatLog keeps a parallel plain transcript so get_selection can
-        # return chat text (RichLog itself returns None).
+    async def test_the_transcript_reports_its_own_text_in_order(self) -> None:
+        # There is one transcript now, not two. The parallel plain-text list this
+        # replaces was maintained beside the rendered output and drifted out of
+        # step with it, which is what made a copy return the wrong message;
+        # `plain_text` reads the widgets that are actually on screen.
         selected = ModelRecord("openai", "model-a", tools="true")
         with patch.object(tui, "_selected_model", return_value=selected):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 40)) as pilot:
-                log = app.query_one("#conversation", tui.ChatLog)
+                log = app.query_one("#conversation", tui.TranscriptView)
                 app._write_user("сообщение пользователя")
                 app._write_assistant("ответ ассистента")
                 app._write_notice("уведомление")
-                await pilot.pause()
-                self.assertEqual(log._plain_lines[-1], "уведомление")
-                # get_selection maps the vertical range onto the transcript.
-                selection = Mock()
-                selection.start = Mock(y=0, x=0)
-                selection.end = Mock(y=5, x=0)
-                text = log.get_selection(selection)
-                self.assertIsNotNone(text)
-                self.assertIn("сообщение пользователя", text)
+                await pilot.pause(0.3)
+
+                text = log.plain_text
+                self.assertLess(
+                    text.index("сообщение пользователя"),
+                    text.index("ответ ассистента"),
+                )
+                self.assertTrue(text.rstrip().endswith("уведомление"))
 
     async def test_tailscale_funnel_start_publishes_endpoint(self) -> None:
         # TUI and CLI share one ownership-safe foreground Funnel plan.
@@ -1682,10 +1684,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(up_calls, "tailscale up was not invoked")
                 # The auth URL was shown in the chat AND the browser was opened.
-                rendered = "\n".join(
-                    line.text
-                    for line in app.query_one("#conversation", tui.RichLog).lines
-                )
+                rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                 self.assertIn("login.tailscale.com/a/abc123", rendered)
                 webbrowser_open.assert_called()
                 self.assertIn(
@@ -1756,10 +1755,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     if any("tailscale-ipn" in str(arg) for arg in a)
                 ]
                 self.assertTrue(gui_launches, "Tailscale GUI app was not launched")
-                rendered = "\n".join(
-                    line.text
-                    for line in app.query_one("#conversation", tui.RichLog).lines
-                )
+                rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                 # The user-facing message explains the no-op and the GUI fallback.
                 self.assertIn("Запускаю приложение Tailscale", rendered)
                 # After login completes (polling returns True on the 3rd check),
@@ -1817,10 +1813,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.screen.dismiss(True)
                 for _ in range(15):
                     await pilot.pause(0.2)
-                    rendered = "\n".join(
-                        line.text
-                        for line in app.query_one("#conversation", tui.RichLog).lines
-                    )
+                    rendered = app.query_one("#conversation", tui.TranscriptView).plain_text
                     if "Служба Tailscale не отвечает" in rendered:
                         break
                 # The message points at the stuck service, not a missing login.

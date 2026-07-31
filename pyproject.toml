@@ -30,10 +30,14 @@ dependencies = [
   "textual>=0.89,<7.0",
   "rich>=13.7,<15.0",
   "Pygments>=2.17,<3.0",
-  # Imported directly by src/karox: markdown_render, the MCP client, the proxy
-  # server, and the OAuth bridge. They previously arrived only because textual
-  # and mcp happen to depend on them, so a change in either one's dependency set
-  # would have broken KaroX at import time with nothing here to prevent it.
+  # Required by src/karox: the MCP client, the proxy server, the OAuth bridge, and
+  # the transcript, which renders answers with Textual's Markdown widget and so
+  # needs markdown-it-py to parse and Pygments to highlight fenced code. KaroX
+  # imported both directly until it had its own Rich markdown renderer; that was
+  # removed because a Rich renderable cannot be selected, and the requirement did
+  # not go with it. They previously arrived only because textual and mcp happen to
+  # depend on them, so a change in either one's dependency set would have broken
+  # KaroX at import time with nothing here to prevent it.
   "markdown-it-py>=3.0,<5.0",
   "anyio>=4.4,<5.0",
   "starlette>=0.37,<2.0",

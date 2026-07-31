@@ -35,13 +35,20 @@ IMPORT_NAMES = {
 # Declared on purpose without a direct ``import`` in src/karox.
 #   pydantic  - the legacy server/ runtime and the FastAPI/MCP request models
 #   httpx-sse - required by the installed MCP SDK's HTTP transport
-#   Pygments  - rich renders syntax through it, and markdown_render depends on
-#               that rendering rather than on rich alone
+#   Pygments / markdown-it-py - the transcript renders answers with Textual's own
+#               Markdown widget, which parses through markdown-it-py and
+#               highlights fenced code through Pygments. KaroX imported both
+#               directly until it had its own Rich markdown renderer; that
+#               renderer was removed because a Rich renderable cannot be
+#               selected, and these two are still required at runtime. They stay
+#               declared rather than left to arrive through textual, which is the
+#               exact drift the header of this file describes.
 #   fastapi / uvicorn / tomli - imported lazily or only on one interpreter
 INDIRECT_BUT_REQUIRED = {
     "pydantic",
     "httpx-sse",
     "Pygments",
+    "markdown-it-py",
     "fastapi",
     "uvicorn[standard]",
     "tomli",

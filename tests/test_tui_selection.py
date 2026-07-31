@@ -1,18 +1,20 @@
-"""What selecting and copying in the transcript actually does today.
+"""Selecting and copying in the transcript.
 
-The transcript is a ``RichLog``, which does not take part in Textual's selection
-machinery: it has no ``get_selection`` that returns anything and renders no
-highlight. ``ChatLog`` therefore implements selection by hand -- mouse handlers
-that build a ``Selection`` from line numbers, a ``render_line`` override that
-repaints whole rows, and a ``get_selection`` that maps a vertical range onto a
-list of whole messages through a table of heights snapshotted at write time.
+The transcript is a scroll container of one widget per message: a ``Static``
+holding a ``Content`` for a user message or a notice, and Textual's own
+``Markdown`` for an answer. Both render a ``Content``, which is what
+``Widget.get_selection`` extracts from, so selection is Textual's rather than
+ours -- character precise, highlighted, and correct after a resize because the
+widgets are laid out again rather than replayed from recorded lines.
 
-Every one of those pieces loses information, and the existing tests do not notice
-because they assert that *something* was selected and highlighted rather than that
-it was the right something. The tests below assert the right something. Most are
-``expectedFailure`` against an identifier in ``docs/UX_BUG_INVENTORY.md``; unittest
-counts an unexpected success as a failure, so a fix cannot land without deleting
-the decorator, and a regression afterwards cannot pass unnoticed.
+It replaced a ``RichLog`` subclass with hand-written mouse handlers, a
+``render_line`` override reaching into a private attribute, and a table mapping
+screen rows onto whole messages. The tests here assert what that arrangement got
+wrong, so it cannot come back: precision, and the row a user points at resolving
+to the message drawn on it.
+
+Identifiers in comments refer to ``docs/UX_BUG_INVENTORY.md``. Anything still
+marked ``expectedFailure`` is an open entry there.
 """
 
 from __future__ import annotations
@@ -31,22 +33,29 @@ import karox.tui as tui
 
 
 def _transcript(app: object) -> object:
-    return app.query_one("#conversation", tui.ChatLog)
+    return app.query_one("#conversation", tui.TranscriptView)
 
 
-def _row_holding(log: object, needle: str) -> tuple[int, int]:
-    """Return ``(widget_y, column)`` of the row containing ``needle``.
+def _text_of(node: object) -> str:
+    """Everything selectable inside one widget, via the public selection API."""
+    extracted = node.get_selection(Selection(None, None))
+    return extracted[0] if extracted else ""
 
-    ``render_line`` takes a viewport row while a ``Selection`` carries widget
-    coordinates, so the scroll offset has to be added. Getting that wrong is how
-    a selection test ends up asserting against a different message than the one it
-    meant to.
+
+def _node_holding(app: object, needle: str) -> tuple[object, int, int]:
+    """Find the widget whose own text contains ``needle``.
+
+    Returns the widget, the line index inside it, and the column, which is what a
+    ``Selection`` needs -- its offsets are relative to the widget, not the screen.
     """
-    for viewport_y in range(log.size.height):
-        text = log.render_line(viewport_y).text
-        if needle in text:
-            return viewport_y + log.scroll_offset.y, text.index(needle)
-    raise AssertionError(f"no rendered row contains {needle!r}")
+    for node in _transcript(app).walk_children(with_self=False):
+        text = _text_of(node)
+        if needle not in text:
+            continue
+        for line_index, line in enumerate(text.splitlines()):
+            if needle in line:
+                return node, line_index, line.index(needle)
+    raise AssertionError(f"no message widget contains {needle!r}")
 
 
 async def _conversation(app: object, pilot: object) -> object:
@@ -60,167 +69,159 @@ async def _conversation(app: object, pilot: object) -> object:
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class SelectionPrecisionTests(unittest.IsolatedAsyncioTestCase):
-    @unittest.expectedFailure  # UX-001
     async def test_selecting_four_characters_copies_four_characters(self) -> None:
-        # UX-001: the mouse handlers discard the horizontal position entirely --
-        # ``_begin_drag`` anchors at ``Offset(0, line)`` and ``_extend_drag`` ends
-        # at ``Offset(10_000, line)`` -- and ``get_selection`` returns whole
-        # entries from its plain-text list. Selecting the word BETA out of
-        # "ALPHA BETA GAMMA" returns the entire message.
+        # UX-001. The previous implementation read only the vertical range and
+        # returned whole entries from a parallel list, so selecting BETA out of
+        # "ALPHA BETA GAMMA" produced the entire message.
         async with karox_app(size=STANDARD) as (app, pilot):
-            log = await _conversation(app, pilot)
-            widget_y, column = _row_holding(log, "BETA")
-            app.screen.selections[log] = Selection(
-                Offset(column, widget_y), Offset(column + 4, widget_y)
+            await _conversation(app, pilot)
+            node, line, column = _node_holding(app, "BETA")
+
+            app.screen.selections[node] = Selection(
+                Offset(column, line), Offset(column + 4, line)
             )
 
             self.assertEqual(app.screen.get_selected_text(), "BETA")
 
-    @unittest.expectedFailure  # UX-001
     async def test_selecting_one_line_of_a_message_copies_one_line(self) -> None:
-        # The same defect at line granularity, which is the common case: a
-        # three-line answer with one interesting line in it copies all three.
+        # UX-001 at line granularity, which is the common case: a three-line
+        # answer with one interesting line in it used to copy all three.
         async with karox_app(size=STANDARD) as (app, pilot):
-            app._write_assistant("ПЕРВАЯ СТРОКА\nВТОРАЯ СТРОКА\nТРЕТЬЯ СТРОКА")
+            app._write_user("ПЕРВАЯ СТРОКА\nВТОРАЯ СТРОКА\nТРЕТЬЯ СТРОКА")
             await pilot.pause(0.3)
-            log = _transcript(app)
-            widget_y, column = _row_holding(log, "ВТОРАЯ СТРОКА")
-            app.screen.selections[log] = Selection(
-                Offset(column, widget_y), Offset(column + len("ВТОРАЯ СТРОКА"), widget_y)
+            node, line, column = _node_holding(app, "ВТОРАЯ СТРОКА")
+
+            app.screen.selections[node] = Selection(
+                Offset(column, line),
+                Offset(column + len("ВТОРАЯ СТРОКА"), line),
             )
 
             self.assertEqual(app.screen.get_selected_text(), "ВТОРАЯ СТРОКА")
 
+    async def test_a_real_drag_selects_from_the_press_to_the_release(self) -> None:
+        # UX-002. No drag could express a sub-line range at all: the anchor was
+        # column 0 and the end was Offset(10_000, y) by construction, with the
+        # mouse event's x read nowhere. Driven here through Pilot's real mouse
+        # events, so it is the terminal path rather than a handler called directly.
+        async with karox_app(size=STANDARD) as (app, pilot):
+            await _conversation(app, pilot)
+            node, line, column = _node_holding(app, "EPSILON")
+            origin = node.region.offset
+
+            await pilot.mouse_down(offset=origin + (column, line))
+            await pilot.mouse_up(offset=origin + (column + len("EPSILON"), line))
+            await pilot.pause(0.2)
+
+            self.assertEqual(app.screen.get_selected_text(), "EPSILON")
+
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class SelectionMappingTests(unittest.IsolatedAsyncioTestCase):
-    """The table that maps a screen row onto a message, and how it goes wrong."""
+    """The row a user points at, and which message it resolves to."""
 
-    @unittest.expectedFailure  # UX-003
-    async def test_the_recorded_height_of_a_message_matches_what_it_renders(self) -> None:
-        # UX-003: ``ChatLog.write`` records ``virtual_size.height`` immediately
-        # after ``super().write()``, before layout has settled, so the first entry
-        # gets whatever the fallback produces. Measured: the three-line welcome is
-        # recorded as ending at row 1 while it occupies rows 0, 1 and 2.
+    async def test_pointing_at_a_row_returns_the_message_drawn_on_it(self) -> None:
+        # UX-003, asserted as the property rather than as the mechanism.
         #
-        # The consequence is not an off-by-one in a diagnostic. Entry 1's block
-        # becomes rows 1 to 5, which covers the last two rows of the welcome, so
-        # selecting the end of the welcome copies the first user message instead.
+        # The old transcript kept a table of cumulative heights snapshotted at
+        # write time, and RichLog defers rendering until its size is known, so the
+        # three-line welcome was recorded as one row. Every block after it began
+        # two rows early: selecting the end of the welcome returned the first user
+        # message. There is no table now -- each message is a widget and Textual
+        # resolves the row -- and this walks every message to say so.
         async with karox_app(size=STANDARD) as (app, pilot):
-            log = _transcript(app)
-            self.assertEqual(len(log._plain_lines), 1, "expected only the welcome")
+            transcript = await _conversation(app, pilot)
 
-            self.assertEqual(
-                log._plain_line_end_heights[0],
-                log.virtual_size.height,
-                "the only entry does not account for every rendered row",
+            checked = 0
+            for node in transcript.walk_children(with_self=False):
+                own = _text_of(node)
+                if not own.strip() or node.region.height < 1:
+                    continue
+                if not node.region.overlaps(app.screen.region):
+                    continue  # scrolled out of view; nothing to point at
+                app.screen.clear_selection()
+                app.screen.selections[node] = Selection(Offset(0, 0), Offset(500, 0))
+                got = app.screen.get_selected_text() or ""
+                self.assertIn(
+                    got.strip(),
+                    own,
+                    f"row 0 of {type(node).__name__} returned text it does not hold",
+                )
+                checked += 1
+
+            self.assertGreater(checked, 3, "the walk found almost nothing to check")
+
+    async def test_a_selection_still_belongs_to_its_message_after_a_resize(self) -> None:
+        # The old height table was a snapshot: a resize re-wrapped everything and
+        # nothing recomputed it, so afterwards a row mapped to whichever message
+        # had been there at the old width.
+        async with karox_app(size=(100, 30)) as (app, pilot):
+            await _conversation(app, pilot)
+            node, line, column = _node_holding(app, "DELTA")
+            app.screen.selections[node] = Selection(
+                Offset(column, line), Offset(column + 5, line)
             )
+            self.assertEqual(app.screen.get_selected_text(), "DELTA")
 
-    @unittest.expectedFailure  # UX-003
-    async def test_selecting_the_welcome_does_not_return_a_later_message(self) -> None:
-        async with karox_app(size=STANDARD) as (app, pilot):
-            log = await _conversation(app, pilot)
-            widget_y, _ = _row_holding(log, "Введите /")
+            await pilot.resize_terminal(56, 30)
+            await pilot.pause(0.3)
 
-            app.screen.selections[log] = Selection(
-                Offset(0, widget_y), Offset(80, widget_y)
-            )
-            selected = app.screen.get_selected_text() or ""
-
-            self.assertNotIn("первая задача", selected)
-            self.assertIn("Введите /", selected)
-
-    @unittest.expectedFailure  # UX-003
-    async def test_a_message_written_before_the_size_is_known_records_a_real_height(
-        self,
-    ) -> None:
-        # This is the mechanism behind UX-003, stated as its own assertion because
-        # it explains every symptom.
-        #
-        # ``RichLog.write`` defers rendering until its size is known -- its own
-        # docstring says a write from ``compose`` or ``on_mount`` is not rendered
-        # immediately. The welcome message is written exactly there, so when
-        # ``ChatLog.write`` reads ``virtual_size.height`` straight afterwards it
-        # gets 0, and the ``max(total, previous + 1)`` fallback fabricates a height
-        # of 1 for a message that occupies three rows.
-        #
-        # Nothing later repairs it: the table is append-only. So entry 1's block
-        # starts two rows early and every subsequent lookup near the top of the log
-        # resolves to the wrong message.
-        async with karox_app(size=STANDARD) as (app, pilot):
-            log = _transcript(app)
-            rendered_rows = sum(
-                1
-                for y in range(log.virtual_size.height)
-                if log.render_line(y).text.strip()
-            )
-
-            self.assertGreaterEqual(
-                log._plain_line_end_heights[0],
-                rendered_rows,
-                "the welcome is recorded as shorter than it draws",
-            )
+            self.assertEqual(app.screen.get_selected_text(), "DELTA")
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class TranscriptWidthTests(unittest.IsolatedAsyncioTestCase):
     """How much of the terminal the conversation is allowed to use."""
 
-    @unittest.expectedFailure  # UX-014
+    LONG_ANSWER = (
+        "Проверка не прошла, потому что декодирование вывода дочернего "
+        "процесса использовало errors=ignore, и поэтому кириллица не "
+        "искажалась, а удалялась целиком, оставляя агента без текста "
+        "ошибки при непустом коде возврата."
+    )
+
     async def test_an_answer_uses_the_width_of_a_wide_window(self) -> None:
-        # UX-014: ``RichLog.write`` takes ``expand=False`` by default, and the
-        # transcript never overrides it, so a renderable is drawn at its own
-        # measured width and the content region is used only as an upper bound.
-        # Measured: a 116-column conversation area draws the answer panel 37
-        # columns wide and wraps the text into eight lines, leaving 79 columns
-        # empty. A wide terminal reads like a phone.
+        # UX-014. RichLog.write takes expand=False, and the transcript never
+        # overrode it, so a renderable was laid out at its own measured width
+        # while the content region served only as an upper bound: measured, a
+        # 116-column conversation drew the answer 37 columns wide and left 79
+        # empty. A CSS-framed widget at `width: 1fr` takes what it is given.
         async with karox_app(size=(120, 30)) as (app, pilot):
-            app._write_assistant(
-                "Проверка не прошла, потому что декодирование вывода дочернего "
-                "процесса использовало errors=ignore, и поэтому кириллица не "
-                "искажалась, а удалялась целиком, оставляя агента без текста "
-                "ошибки при непустом коде возврата."
-            )
+            app._write_assistant(self.LONG_ANSWER)
             await pilot.pause(0.4)
-            log = _transcript(app)
+            transcript = _transcript(app)
+            answer = transcript.children[-1]
 
             self.assertGreaterEqual(
-                log.virtual_size.width,
-                int(log.size.width * 0.8),
-                f"answer laid out at {log.virtual_size.width} of "
-                f"{log.size.width} available columns",
+                answer.size.width,
+                int(transcript.size.width * 0.9),
+                f"answer laid out at {answer.size.width} of "
+                f"{transcript.size.width} available columns",
             )
 
-    @unittest.expectedFailure  # UX-015
     async def test_an_answer_is_relaid_out_when_the_window_changes(self) -> None:
-        # UX-015: ``RichLog`` renders each write once, to a list of lines, and
-        # keeps them. A resize changes the viewport but not those lines, so an
-        # answer written in a narrow window stays narrow after the window is
-        # widened, and one written wide is clipped when the window shrinks below
-        # its recorded width -- there is no reflow at any point.
+        # UX-015. RichLog rendered each write once into a list of lines and kept
+        # them, so an answer written at 56 columns occupied the same rows at 140.
+        # A widget tree is laid out again on resize, so the same text needs fewer
+        # rows once it has more columns.
         async with karox_app(size=(56, 30)) as (app, pilot):
-            app._write_assistant(
-                "Короткие строки, записанные в узком окне, обязаны "
-                "перенестись заново, когда окно станет широким."
-            )
+            app._write_assistant(self.LONG_ANSWER)
             await pilot.pause(0.4)
-            log = _transcript(app)
-            narrow_height = log.virtual_size.height
+            answer = _transcript(app).children[-1]
+            narrow_height = answer.size.height
 
             await pilot.resize_terminal(140, 30)
             await pilot.pause(0.5)
 
             self.assertLess(
-                log.virtual_size.height,
+                answer.size.height,
                 narrow_height,
-                "the answer occupies the same number of rows at 140 columns "
-                "as it did at 56, so it was never re-wrapped",
+                f"the answer still occupies {answer.size.height} rows at 140 "
+                f"columns, the same as at 56, so it was never re-wrapped",
             )
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
-    @unittest.expectedFailure  # UX-005
     async def test_copying_is_possible_while_a_task_is_running(self) -> None:
         # UX-005: Ctrl+C is bound to ``stop_or_copy``, which returns early to
         # ``stop_agent`` whenever the agent is busy. So during the one period a
@@ -228,10 +229,10 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
         # while a task runs -- the copy key aborts the task instead, and there is
         # no second binding that copies.
         async with karox_app(size=STANDARD) as (app, pilot):
-            log = await _conversation(app, pilot)
-            widget_y, column = _row_holding(log, "ALPHA BETA GAMMA")
-            app.screen.selections[log] = Selection(
-                Offset(column, widget_y), Offset(column + 16, widget_y)
+            await _conversation(app, pilot)
+            node, line, column = _node_holding(app, "ALPHA")
+            app.screen.selections[node] = Selection(
+                Offset(column, line), Offset(column + 16, line)
             )
             app.agent_busy = True
 
@@ -243,16 +244,13 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
                 app._stop_requested, "the copy key stopped the running task"
             )
 
-    @unittest.expectedFailure  # UX-008
     async def test_copying_the_last_answer_is_distinguishable_from_copying_a_selection(
         self,
     ) -> None:
         # UX-008: with no selection, ``action_stop_or_copy`` falls back to the last
         # assistant answer and reports the same "Скопировано" as a real selection
-        # copy. Combined with UX-001 and UX-003 -- where the mapping can return
-        # nothing -- a user who selects a line, presses copy, and is told it
-        # worked can end up with an entirely different message on the clipboard
-        # and no way to tell.
+        # copy, so a user who selects a line, presses copy and is told it worked
+        # cannot tell which of the two happened.
         async with karox_app(size=STANDARD) as (app, pilot):
             await _conversation(app, pilot)
             app.screen.clear_selection()
@@ -267,7 +265,7 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(notices, "copying said nothing at all")
             self.assertNotEqual(
                 notices[-1],
-                "Скопировано",
+                "Скопировано выделение",
                 "a fallback copy is announced exactly like a selection copy",
             )
 

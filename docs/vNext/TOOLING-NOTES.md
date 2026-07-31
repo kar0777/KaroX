@@ -15,7 +15,9 @@ the operational limits the agent has to plan around.
   checkout requires the editable install.
 - `requirements.txt` and the `dependencies` list in `pyproject.toml` are kept in
   step. Both declare `rich` and `Pygments` explicitly because
-  `markdown_render` imports `rich.syntax` directly. Relying on them arriving
+  the transcript renders answers with Textual's `Markdown` widget, which parses
+  through `markdown-it-py` and highlights fenced code through Pygments. Relying
+  on them arriving
   transitively through `textual` is what previously produced a working install
   with a broken import, and the wheel built in CI would have reproduced it.
 

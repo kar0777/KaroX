@@ -223,16 +223,16 @@ See [Migrating from KaroX 4.x to KaroX 5](docs/MIGRATION_V4_TO_V5.md).
 
 ## Verification
 
-The suite is 817 tests. CI runs:
+The suite is 801 tests. CI runs:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 817 tests`.
+A clean run reports `Ran 801 tests`.
 
 790 is the number collected under `tests` by the documented runner. The
-repository root collects 822 because a bare pytest collection also finds five
+repository root collects 806 because a bare pytest collection also finds five
 legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

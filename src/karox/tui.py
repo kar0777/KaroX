@@ -29,7 +29,6 @@ import httpx
 
 from .bridge import BridgeCredentialStore
 from .credentials import CredentialStore
-from .markdown_render import render_message
 from .models import AccessProfile
 from .paths import config_dir, session_dir
 from .provider_factory import ProviderFactory
@@ -47,17 +46,14 @@ from .web_bridge_launcher import WEB_BRIDGE_PROFILES, find_cloudflared
 
 try:
     from rich.markup import escape
-    from rich.panel import Panel
-    from rich.segment import Segment
     from rich.text import Text
     from textual import on
     from textual.app import App, ComposeResult, SkipAction
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.content import Content
     from textual.screen import ModalScreen
     from textual.selection import Selection
-    from textual.strip import Strip
-    from textual.geometry import Offset
     from textual.theme import Theme
     from textual.widgets import (
         Button,
@@ -65,10 +61,10 @@ try:
         Input,
         Label,
         LoadingIndicator,
+        Markdown,
         OptionList,
         RadioButton,
         RadioSet,
-        RichLog,
         Static,
     )
     from textual.widgets.option_list import Option
@@ -3442,244 +3438,176 @@ if _HAS_TEXTUAL:
                 self.dismiss(None)
 
 
-    class ChatLog(RichLog):
-        """A RichLog that also keeps a parallel plain-text transcript so the
-        user can copy chat content (selection + a "copy last answer" action).
+    def _selectable_text(widget: Any) -> str:
+        """The text a user would get by selecting the whole of ``widget``.
 
-        ``RichLog`` itself returns ``None`` from ``get_selection`` and renders
-        no selection highlight, so mouse selection never copies anything.  We
-        track every written message as plain text and expose a best-effort
-        ``get_selection`` that maps the vertical selection range onto the
-        accumulated plain-text lines.
+        Asked through ``Widget.get_selection`` with an unbounded selection, which
+        is the same public route Textual's own copy action takes. Reading a
+        widget's renderable directly gives the wrong answer twice over: a
+        ``Static`` holds a rendered visual rather than the ``Content`` it was
+        given, and a ``Markdown`` holds its source, so ``**bold**`` would be
+        copied with the asterisks a reader never saw.
+
+        Descendants are included because a ``Markdown`` keeps its text in child
+        blocks -- paragraphs, list items, fenced code -- and none of it is on the
+        widget itself.
+        """
+        parts: List[str] = []
+        for node in widget.walk_children(with_self=True):
+            try:
+                extracted = node.get_selection(Selection(None, None))
+            except Exception:
+                continue
+            if extracted and extracted[0]:
+                parts.append(extracted[0])
+        return "\n".join(parts)
+
+    class MessageBlock(Static):
+        """One user message, notice or status line in the transcript.
+
+        ``Static`` holds a :class:`~textual.content.Content`, and
+        ``Widget.get_selection`` extracts from exactly that, so Textual's own
+        selection returns the characters the user dragged over -- to the
+        character, across a resize, with the highlight drawn for free.
+
+        The frame is CSS rather than a Rich ``Panel`` and that is the load-bearing
+        detail. ``Widget.get_selection`` returns ``None`` for anything whose
+        ``_render()`` is not a ``Content`` or a ``Text``, so a message wrapped in a
+        ``Panel`` cannot be selected at all -- which is why the transcript used to
+        reimplement selection by hand and got it wrong. A CSS border also fills the
+        available width and re-wraps when the window changes, neither of which a
+        renderable laid out once at write time can do.
         """
 
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self._plain_lines: List[str] = []
-            # Cumulative rendered height after each plain-line entry was written,
-            # so ``_plain_line_end_heights[i]`` is the RichLog's total line count
-            # once entry ``i`` has been rendered.  This lets us map a selection
-            # y-offset (in rendered lines) onto the exact plain-line entries it
-            # covers, instead of the lossy proportional mapping we used before.
-            self._plain_line_end_heights: List[int] = []
-            self._drag_anchor: Optional[int] = None  # line index of drag start
+        def __init__(self, text: str, *, title: str = "", classes: str = "") -> None:
+            super().__init__(Content(text), classes=classes)
+            self._border_title_text = title
 
-        def append_plain(self, text: str) -> None:
-            """Record a chat message as plain text (no markup)."""
-            self._plain_lines.append(text)
-            # The matching rendered height is captured in ``write`` once the
-            # renderable for this entry has been laid out.
+        def on_mount(self) -> None:
+            if self._border_title_text:
+                self.border_title = self._border_title_text
 
-        def write(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
-            super().write(*args, **kwargs)
-            # After each write, settle the rendered height for every plain-line
-            # entry that has text but no recorded height yet.  ``append_plain``
-            # runs just before the corresponding ``write`` in our call sites, so
-            # the newest entry is the one needing a height.
-            try:
-                total = self.virtual_size.height or 0
-            except Exception:
-                total = 0
-            # Heights must be strictly increasing so every entry owns at least
-            # one rendered line. Recording the same total for two entries makes
-            # the second one's block [previous, total) empty, and an empty block
-            # can never contain a selection y, so that entry becomes impossible
-            # to select and the search lands on a neighbour instead.
-            while len(self._plain_line_end_heights) < len(self._plain_lines):
-                previous = (
-                    self._plain_line_end_heights[-1]
-                    if self._plain_line_end_heights
-                    else 0
-                )
-                self._plain_line_end_heights.append(max(total, previous + 1))
+        @property
+        def plain_text(self) -> str:
+            """The message as the user could copy it."""
+            return _selectable_text(self)
 
-        def _line_at_event(self, event: Any) -> int:
-            """Map a mouse event's y onto a widget-relative line index."""
-            try:
-                y = int(getattr(event, "y", 0))
-            except (TypeError, ValueError):
-                y = 0
-            return max(0, y + self.scroll_offset.y)
+    class AssistantMessage(Markdown):
+        """An answer, rendered by Textual's own markdown widget.
 
-        def _begin_drag(self, line: int) -> None:
-            # ``Offset`` is (x, y); for a whole-line selection we anchor at the
-            # start of the line (x=0, y=line).
-            self._drag_anchor = line
-            self.screen.selections[self] = Selection(
-                Offset(0, line), Offset(0, line)
-            )
-            self.selection_updated(self.screen.selections[self])
-            try:
-                self.capture_mouse()
-            except Exception:
-                pass
+        Chosen over the Rich renderables KaroX used to build because a
+        ``Markdown`` is a tree of widgets rather than a block of pre-rendered
+        lines: every paragraph, list item and fenced code block is a ``Static``
+        holding a ``Content``, so all of them select natively -- including the code
+        block, which is the thing users copy most and the one the previous
+        implementation could not give them.
 
-        def _extend_drag(self, line: int) -> None:
-            anchor = self._drag_anchor
-            if anchor is None:
-                return
-            start, end = sorted((anchor, line))
-            # x=10_000 on the end line so the whole last dragged line is covered.
-            self.screen.selections[self] = Selection(
-                Offset(0, start), Offset(10_000, end)
-            )
-            self.selection_updated(self.screen.selections[self])
+        Being a widget tree also means it re-wraps when the window changes and
+        uses the width it is given, which pre-rendered lines never did.
+        """
 
-        def _end_drag(self) -> None:
-            try:
-                self.release_mouse()
-            except Exception:
-                pass
-            self._drag_anchor = None
+        def __init__(self, markdown: str, *, title: str = "", classes: str = "") -> None:
+            super().__init__(markdown, classes=classes)
+            self._border_title_text = title
 
-        def _clear_selection(self) -> None:
-            if self in self.screen.selections:
-                del self.screen.selections[self]
-            self.selection_updated(None)
-            self._drag_anchor = None
+        def on_mount(self) -> None:
+            if self._border_title_text:
+                self.border_title = self._border_title_text
 
-        async def on_mouse_down(self, event: Any) -> None:
-            # Textual only supports double-click → select-all on RichLog, so we
-            # add mouse drag selection manually: a click-drag over the chat now
-            # highlights the dragged lines and Ctrl+C copies them.
-            if getattr(event, "button", 0) != 1:
-                return
-            line = self._line_at_event(event)
-            self._begin_drag(line)
+        @property
+        def plain_text(self) -> str:
+            """The rendered answer, not its markdown source.
 
-        async def on_mouse_move(self, event: Any) -> None:
-            # Extend the drag on any mouse move while a drag is active.  We do
-            # NOT gate on ``event.button``: during a button-held drag many
-            # terminals deliver MouseMove with button=None, and gating on it
-            # meant the selection never grew past the anchor line (so Ctrl+C
-            # fell through to copying a single line instead of the drag).
-            if self._drag_anchor is None:
-                return
-            self._extend_drag(self._line_at_event(event))
-
-        async def on_mouse_up(self, event: Any) -> None:
-            # Finalize the selection across the full drag range.  Many
-            # terminals deliver a mouse drag as only MouseDown + MouseUp with
-            # no MouseMove in between (or MouseMove with button=None that we
-            # can't reliably distinguish from a hovering cursor), so relying
-            # on on_mouse_move alone leaves the selection stuck on the anchor
-            # line — the user drags across several lines but Ctrl+C copies
-            # only one.  Extending to the release line here guarantees the
-            # selection covers everything between the press and the release.
-            if self._drag_anchor is not None:
-                self._extend_drag(self._line_at_event(event))
-            self._end_drag()
-
-        def clear(self) -> None:  # type: ignore[override]
-            self._plain_lines.clear()
-            self._plain_line_end_heights.clear()
-            super().clear()
-
-        def selection_updated(self, selection: Any) -> None:  # noqa: ARG002
-            """Re-render so the new selection highlight is visible."""
-            self.refresh()
-
-        def get_selection(self, selection: Any) -> Any:
-            """Return the plain-text lines covered by the vertical selection.
-
-            RichLog writes one renderable per call; the number of screen lines
-            a renderable occupies varies (a welcome notice can span several
-            wrapped lines, an assistant panel several more).  We recorded the
-            cumulative rendered height after each plain-line entry was written,
-            so we can map the selection's start/end y (in rendered lines) onto
-            the exact plain-line entries it covers — not a lossy proportional
-            guess.  This is what makes "drag from line 0 to line 5" copy every
-            entry in between rather than roughly the first third.
+            The source is what the model sent; the rendered text is what the user
+            read and what they expect on the clipboard. Returning the source would
+            hand back ``**bold**`` and fenced-code backticks that were never on
+            screen.
             """
-            try:
-                start_y = int(getattr(selection.start, "y", 0))
-                end_y = int(getattr(selection.end, "y", 0))
-                if end_y < start_y:
-                    start_y, end_y = end_y, start_y
-                lines = self._plain_lines
-                n = len(lines)
-                if n == 0:
-                    return None
-                # An entry recorded by append_plain whose write has not settled
-                # yet has no height. Without padding, the loops below find no
-                # block containing the selection and fall through to the else
-                # branch, which selects the last entry, so a drag in the middle
-                # of the log copied the end of it. Give every missing entry one
-                # rendered line so it stays selectable and in order.
-                heights = list(self._plain_line_end_heights[:n])
-                while len(heights) < n:
-                    heights.append((heights[-1] if heights else 0) + 1)
-                # Entry i occupies rendered lines [prev, heights[i]) where prev
-                # is heights[i-1] (or 0 for i==0).  Find the first entry whose
-                # block contains start_y, and the last whose block contains
-                # end_y.
-                start_idx = 0
-                prev = 0
-                for i, h in enumerate(heights[:n]):
-                    if prev <= start_y < h:
-                        start_idx = i
-                        break
-                    prev = h
-                else:
-                    start_idx = n - 1
-                end_idx = start_idx
-                prev = 0
-                for i, h in enumerate(heights[:n]):
-                    if prev <= end_y < h:
-                        end_idx = i
-                        break
-                    prev = h
-                else:
-                    end_idx = n - 1
-                if end_idx < start_idx:
-                    end_idx = start_idx
-                selected = lines[start_idx : end_idx + 1]
-            except Exception:
-                return None
-            if not selected:
-                return None
-            return "\n".join(selected)
+            return _selectable_text(self)
 
-        def render_line(self, y: int) -> Any:
-            """Render a line, applying the selection highlight to whole lines.
+    class TranscriptView(VerticalScroll):
+        """The conversation: one selectable widget per message.
 
-            ``RichLog`` does not implement selection rendering, so a mouse
-            drag over the chat leaves no visible highlight and the user can
-            not tell what is selected.  We highlight every line that falls
-            inside the vertical selection range using the screen's standard
-            selection style, which gives an immediate visual signal that the
-            text is selectable (and Ctrl+C will copy it).
+        Replaces a ``RichLog`` subclass that carried hand-written mouse handlers, a
+        ``render_line`` override reaching into a private attribute, and a table
+        mapping screen rows onto whole messages. All of it existed because
+        ``RichLog`` does not take part in Textual's selection machinery; none of it
+        is needed once each message is a widget that does.
+        """
 
-            ``Strip.apply_style`` only merges missing style attributes and
-            leaves an existing segment background untouched, so for selected
-            lines we rebuild the strip with the selection style forced onto
-            every segment (matching how the plain ``Log`` widget highlights).
+        # A resize re-lays out every block, and that cost is linear in how many
+        # there are: measured at 0.86s for 242 blocks on this machine. Three
+        # hundred keeps a resize under a second in the worst case while holding far
+        # more conversation than a window can show. The session record keeps the
+        # full history regardless -- this bounds the *view*, not the transcript.
+        MAX_BLOCKS = 300
+
+        def _append(self, block: Any) -> Any:
+            self.mount(block)
+            self._trim()
+            # A message arriving while the user is reading further up must not yank
+            # the viewport, but one arriving at the bottom must stay visible.
+            if self.is_vertical_scroll_end:
+                self.scroll_end(animate=False)
+            return block
+
+        def _trim(self) -> None:
+            blocks = list(self.children)
+            excess = len(blocks) - self.MAX_BLOCKS
+            for block in blocks[:excess]:
+                block.remove()
+
+        def add_line(self, text: str) -> Any:
+            """An unframed line: the welcome, a status line, a short confirmation.
+
+            Kept distinct from :meth:`add_notice` because a frame is a claim that
+            something needs attention. Boxing every status line spends that signal
+            on nothing and makes the screen busier than the conversation in it.
             """
-            strip = super().render_line(y)
-            selection = self.text_selection
-            if selection is None:
-                return strip
-            try:
-                start_y = selection.start.y
-                end_y = selection.end.y
-                if end_y < start_y:
-                    start_y, end_y = end_y, start_y
-                # ``y`` is a viewport-relative line; the selection offsets are
-                # widget-relative, so add the current vertical scroll offset.
-                real_line = self.scroll_offset.y + y
-                if not (start_y <= real_line <= end_y):
-                    return strip
-                selection_style = self.screen.get_component_rich_style(
-                    "screen--selection"
+            return self._append(MessageBlock(text, classes="message message-line"))
+
+        def add_user(self, text: str, *, title: str) -> Any:
+            return self._append(
+                MessageBlock(text, title=title, classes="message message-user")
+            )
+
+        def add_assistant(self, markdown: str, *, title: str = "KaroX") -> Any:
+            return self._append(
+                AssistantMessage(
+                    markdown, title=title, classes="message message-assistant"
                 )
-                new_segments = [
-                    Segment(seg.text, selection_style, seg.control)
-                    for seg in strip._segments
-                ]
-                strip = Strip(new_segments, strip.cell_length)
-            except Exception:
-                pass
-            return strip
+            )
+
+        def add_notice(self, text: str, kind: str = "info") -> Any:
+            return self._append(
+                MessageBlock(text, classes=f"message message-notice notice-{kind}")
+            )
+
+        def clear(self) -> None:
+            for block in list(self.children):
+                block.remove()
+
+        @property
+        def plain_text(self) -> str:
+            """Every message as plain text, in order.
+
+            Used by tests and by the copy fallback. Reading it from the widgets
+            themselves means there is no second transcript to keep in step with the
+            first -- the parallel plain-text list this class replaced is exactly
+            what drifted out of step with what was on screen.
+            """
+            return "\n".join(
+                str(getattr(block, "plain_text", "")) for block in self.children
+            )
+
+        def clear_selection(self) -> None:
+            """Drop any selection over the transcript.
+
+            Textual owns the selection now, so this defers to the screen instead of
+            editing ``screen.selections`` directly.
+            """
+            with contextlib.suppress(Exception):
+                self.screen.clear_selection()
 
     class KaroXApp(App[int]):
         """Human-facing KaroX terminal application."""
@@ -3694,7 +3622,18 @@ if _HAS_TEXTUAL:
             Binding("ctrl+l", "clear_log", "Очистить", show=False),
             Binding("ctrl+q", "quit", "Выход", show=False),
             Binding("escape", "stop_agent", "Стоп", show=False, priority=True),
-            Binding("ctrl+c", "stop_or_copy", "Стоп / Копировать", show=False, priority=True),
+            # Ctrl+C copies. It used to mean "stop the task, or copy if idle",
+            # which meant the copy key destroyed work in progress during exactly
+            # the period a user most wants to copy an error scrolling past. Esc
+            # already stops, and now says so instead of sharing a key.
+            Binding("ctrl+c", "copy_selection", "Копировать", show=False, priority=True),
+            Binding(
+                "ctrl+shift+c",
+                "copy_selection",
+                "Копировать",
+                show=False,
+                priority=True,
+            ),
         ]
         # The activity panel is four lines tall, so more than a few steps would
         # scroll the oldest out of sight anyway.
@@ -3715,6 +3654,26 @@ if _HAS_TEXTUAL:
         #sponsor-ticker { height: 1; padding: 0; background: #181511;
           color: #8f8170; text-style: dim; overflow: hidden; }
         #conversation { height: 1fr; padding: 1 2; scrollbar-color: #6b5c3e; }
+        /* The frame around a message is CSS rather than a Rich Panel, and that is
+           what makes the message selectable: Widget.get_selection returns None for
+           anything whose render is not Content or Text, and a Panel is neither.
+           `width: 1fr` also gives a message the whole conversation width, where a
+           measured renderable took 37 columns of an available 116. */
+        .message { width: 1fr; border: round #4a4338; border-title-align: left;
+          padding: 0 1; margin-bottom: 1; }
+        /* An unframed line. A frame is a claim that something needs attention, so
+           the welcome and ordinary status lines do not get one. */
+        .message-line { border: none; padding: 0; margin-bottom: 0; }
+        .message-user { border: round #8a7a55; }
+        .message-assistant { border: round #8aab7e; }
+        .message-notice { border: round #c6a56b; }
+        .notice-success { border: round #8aab7e; }
+        .notice-warning { border: round #d4b676; }
+        .notice-error { border: round #cf7c7c; }
+        /* Textual's markdown blocks carry a bottom margin so paragraphs separate.
+           On the last block that margin lands inside our border and reads as a
+           stray blank line, so only that one is removed. */
+        .message-assistant > *:last-of-type { margin-bottom: 0; }
         #busy { height: 1; display: none; color: #c6a56b; }
         #activity { display: none; height: auto; min-height: 2; max-height: 4;
           margin: 0 2; padding: 0 1; background: #1a1712;
@@ -3808,18 +3767,12 @@ if _HAS_TEXTUAL:
                 yield Static("", id="session-status")
                 yield Static("", id="context-status")
                 yield Static("bridge: off", id="bridge-status")
-            # min_width defaults to 78 in RichLog, so the chat was laid out at 78
-            # columns however narrow the window was, and everything past the right
-            # edge was clipped behind a horizontal scrollbar -- words ended
-            # mid-letter. Wrapping is only honoured down to this width, so it has
-            # to be smaller than any window someone might actually use.
-            yield ChatLog(
-                id="conversation",
-                markup=True,
-                wrap=True,
-                highlight=False,
-                min_width=20,
-            )
+            # A scroll container of per-message widgets rather than a RichLog. The
+            # RichLog needed a min_width to stop it laying the chat out at 78
+            # columns in a narrower window and clipping words mid-letter; a widget
+            # tree is laid out by Textual at whatever width it has, so the problem
+            # and the workaround both go away.
+            yield TranscriptView(id="conversation")
             yield LoadingIndicator(id="busy")
             yield Static("", id="activity", markup=True)
             yield Static("", id="command-menu", markup=True)
@@ -3855,62 +3808,39 @@ if _HAS_TEXTUAL:
         def on_unmount(self) -> None:
             self._stop_bridge(quiet=True)
 
+        def _transcript(self) -> Any:
+            return self.query_one("#conversation", TranscriptView)
+
         def _write(self, message: Any) -> None:
-            log = self.query_one("#conversation", ChatLog)
-            # Keep a plain-text copy of anything written as a string (welcome
-            # notices, status lines, …) so the user can copy it from the chat.
-            # ``Text.from_markup`` strips Rich markup tags and leaves the words.
-            if isinstance(message, str) and message.strip():
-                try:
-                    log.append_plain(Text.from_markup(message).plain)
-                except Exception:
-                    pass
-            log.write(message)
+            """Write an unframed line to the transcript.
+
+            Callers pass Rich console markup, which the transcript no longer
+            renders: a message has to reach the screen as ``Content`` for Textual's
+            selection to find it, and markup tags would otherwise appear literally.
+            ``Text.from_markup`` applies the tags and yields the words, which is the
+            text the user will copy.
+            """
+            if not isinstance(message, str):
+                message = str(message)
+            try:
+                plain = Text.from_markup(message).plain
+            except Exception:
+                plain = message
+            self._transcript().add_line(plain)
 
         def _write_user(self, message: str) -> None:
-            log = self.query_one("#conversation", ChatLog)
-            # Starting a new turn clears any leftover selection from a previous
-            # drag so it does not linger as a stale highlight.
-            log._clear_selection()
-            log.append_plain(message)
-            self._write(
-                Panel(
-                    Text(message),
-                    title=self._label("Вы", "You"),
-                    title_align="left",
-                    border_style="#8a7a55",
-                    padding=(0, 1),
-                )
-            )
+            transcript = self._transcript()
+            # A new turn drops a selection left over from the previous one, so it
+            # does not linger as a highlight over text the user has moved past.
+            transcript.clear_selection()
+            transcript.add_user(message, title=self._label("Вы", "You"))
 
         def _write_assistant(self, message: str) -> None:
             self._last_assistant_content = message
-            self.query_one("#conversation", ChatLog).append_plain(message)
-            self._write(
-                Panel(
-                    render_message(message),
-                    title="KaroX",
-                    title_align="left",
-                    border_style="#8aab7e",
-                    padding=(0, 1),
-                )
-            )
+            self._transcript().add_assistant(message)
 
         def _write_notice(self, message: str, kind: str = "info") -> None:
-            colors = {
-                "info": "#c6a56b",
-                "success": "#8aab7e",
-                "warning": "#d4b676",
-                "error": "#cf7c7c",
-            }
-            self.query_one("#conversation", ChatLog).append_plain(message)
-            self._write(
-                Panel(
-                    Text(message),
-                    border_style=colors.get(kind, colors["info"]),
-                    padding=(0, 1),
-                )
-            )
+            self._transcript().add_notice(message, kind)
 
         def _set_activity(self, message: str, kind: str = "working") -> None:
             activity = self.query_one("#activity", Static)
@@ -5236,33 +5166,72 @@ if _HAS_TEXTUAL:
             self.query_one("#busy", LoadingIndicator).styles.display = "none"
             self._set_activity("", "idle")
 
-        def action_stop_or_copy(self) -> None:
-            """Ctrl+C: stop the running agent, otherwise copy chat content.
+        def action_copy_selection(self) -> None:
+            """Copy, whether or not a task is running, and say what was copied.
 
-            When an agent task is running, Ctrl+C stops it (the same path as
-            Esc).  In idle state, Ctrl+C copies the chat: if the composer has a
-            text selection we defer to the inherited ``Input`` copy action
-            (raised ``SkipAction`` lets the input binding handle it); otherwise
-            we copy the mouse selection from the chat, or the last assistant
-            answer when nothing is selected.
+            Three things this deliberately does not do, each of which it used to.
+
+            It does not stop the agent. Ctrl+C used to return early to
+            ``action_stop_agent`` whenever the agent was busy, so during a long
+            task the copy key aborted the task and copied nothing. Esc stops.
+
+            It does not silently substitute something else. When a selection
+            exists, that selection is what reaches the clipboard. When none does,
+            the last answer is copied as a convenience -- but the notice says which
+            of the two happened, because being told "Copied" after selecting a line
+            and receiving a different message is worse than being told nothing.
+
+            It does not swallow a failure. A selection that cannot be read reports
+            that, rather than presenting as an empty selection and falling through.
             """
-            if self.agent_busy:
-                self.action_stop_agent()
-                return
             composer = self.query_one("#composer", Input)
             if composer.has_focus and composer.selected_text:
                 # Let Input.action_copy handle copying the in-composer selection.
                 raise SkipAction()
-            selected = None
+
             try:
                 selected = self.screen.get_selected_text()
-            except Exception:
-                selected = None
-            text = (selected or self._last_assistant_content or "").strip()
-            if not text:
-                raise SkipAction()
+            except Exception as error:
+                self.notify(
+                    self._label(
+                        f"Не удалось прочитать выделение: {error}",
+                        f"Could not read the selection: {error}",
+                    ),
+                    severity="error",
+                )
+                return
+
+            if selected and selected.strip():
+                self._copy_text(selected)
+                self.notify(self._label("Скопировано выделение", "Selection copied"))
+                return
+
+            fallback = (self._last_assistant_content or "").strip()
+            if not fallback:
+                self.notify(
+                    self._label(
+                        "Нечего копировать: ничего не выделено.",
+                        "Nothing to copy: nothing is selected.",
+                    )
+                )
+                return
+            self._copy_text(fallback)
+            self.notify(
+                self._label(
+                    "Выделения нет — скопирован последний ответ",
+                    "Nothing selected — copied the last answer",
+                )
+            )
+
+        def _copy_text(self, text: str) -> None:
+            """Put text on the clipboard, including over SSH and inside tmux.
+
+            ``App.copy_to_clipboard`` emits OSC 52, which is what makes a copy from
+            a remote terminal reach the local clipboard at all; a terminal that
+            refuses the sequence is why the transcript remains selectable with the
+            terminal's own mouse as well.
+            """
             self.copy_to_clipboard(text)
-            self.notify(self._label("Скопировано", "Copied"))
 
         def _begin_step(self, call_id: str, label: str) -> None:
             if call_id in self._steps:
@@ -5616,7 +5585,7 @@ if _HAS_TEXTUAL:
             self._write(f"[{color}]{escape(message)}[/]")
 
         def action_clear_log(self) -> None:
-            self.query_one("#conversation", ChatLog).clear()
+            self._transcript().clear()
 
 
 # Core tool names as the audit log and the session record spell them. The model

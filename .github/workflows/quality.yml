@@ -166,7 +166,7 @@ jobs:
         shell: bash
         run: |
           cd "${{ runner.temp }}"
-          python -c "import karox.cli, karox.tui, karox.packs, karox.markdown_render; print('installed artifact imports')"
+          python -c "import karox.cli, karox.tui, karox.packs; print('installed artifact imports')"
 
       - name: Run the complete vNext suite
         shell: bash

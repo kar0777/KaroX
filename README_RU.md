@@ -231,7 +231,7 @@ publishing. Неудачный check нельзя превратить в под
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 817 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 801 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

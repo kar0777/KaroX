@@ -207,7 +207,7 @@ still require recorded runs on Windows, macOS, and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 817 tests under:
+The canonical documented suite is now 801 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -262,7 +262,7 @@ makes the first screen unreadable at a common window size.
 ### Source and automated verification
 
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
-- run the complete 817-test suite;
+- run the complete 801-test suite;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
   gates;
 - validate the edited release workflow in GitHub Actions;

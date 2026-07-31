@@ -31,25 +31,45 @@ python -m unittest discover -s tests -p "test_tui_layout.py" -v
 
 | ID | P | Area | Symptom |
 |---|---|---|---|
-| [UX-001](#ux-001) | P0 | selection | Selecting part of a message copies the whole message |
-| [UX-002](#ux-002) | P0 | selection | A mouse drag discards the horizontal position |
-| [UX-003](#ux-003) | P0 | selection | Row-to-message table is fabricated; the wrong message is returned |
-| [UX-005](#ux-005) | P0 | copy | Ctrl+C aborts the running task instead of copying |
-| [UX-006](#ux-006) | P1 | copy | Mouse capture removes the terminal's own selection, with no opt-out |
-| [UX-007](#ux-007) | P1 | selection | A failed selection lookup is silently reported as "nothing selected" |
-| [UX-008](#ux-008) | P1 | copy | A fallback copy is announced exactly like a selection copy |
+| [UX-006](#ux-006) | P1 | copy | No way to hand the mouse back to the terminal's own selection |
 | [UX-009](#ux-009) | P2 | layout | Sponsor ticker starts mid-word |
 | [UX-010](#ux-010) | P1 | layout | A 14-row window leaves the conversation two rows |
 | [UX-011](#ux-011) | P1 | layout | The welcome's first line is unreachable at that size |
 | [UX-012](#ux-012) | P1 | layout | Status columns run into each other at 80 columns |
 | [UX-013](#ux-013) | P1 | layout | Status values are truncated with no marker |
-| [UX-014](#ux-014) | P1 | layout | An answer uses 37 of 116 available columns |
-| [UX-015](#ux-015) | P1 | layout | Nothing is re-wrapped when the window is resized |
-| [UX-004](#ux-004) | P2 | selection | Selection highlight depends on a private attribute and fails silently |
 
 ## Closed
 
-None yet.
+Nine of the fifteen, and eight of them by one change: the transcript is now a
+scroll container of one widget per message instead of a `RichLog` with selection
+written by hand. Deleting the hand-written layer is what closed them, rather than
+nine separate repairs.
+
+| ID | P | Closed by | Now asserted by |
+|---|---|---|---|
+| UX-001 | P0 | native character-level selection | `test_selecting_four_characters_copies_four_characters` |
+| UX-002 | P0 | Textual owns the drag | `test_a_real_drag_selects_from_the_press_to_the_release` |
+| UX-003 | P0 | the height table is gone entirely | `test_pointing_at_a_row_returns_the_message_drawn_on_it` |
+| UX-004 | P2 | `render_line` override deleted | — (closed by deletion) |
+| UX-005 | P0 | Ctrl+C copies, Esc stops | `test_ctrl_c_does_not_stop_a_running_agent` |
+| UX-007 | P1 | a lookup failure is reported | `action_copy_selection` notifies with severity |
+| UX-008 | P1 | the notice says which copy happened | `test_ctrl_c_with_nothing_selected_copies_the_last_answer` |
+| UX-014 | P1 | CSS frame at `width: 1fr` | `test_an_answer_uses_the_width_of_a_wide_window` |
+| UX-015 | P1 | a widget tree is laid out again | `test_an_answer_is_relaid_out_when_the_window_changes` |
+
+Measured after the change, at a 116-column conversation: an answer occupies 72
+columns rather than 37, selecting `BETA` out of `ALPHA BETA GAMMA` yields `BETA`,
+and a fenced code block copies with its indentation intact -- which the previous
+implementation could not do at all, because a Rich renderable returns nothing from
+`Widget.get_selection`.
+
+What it cost: `src/karox/markdown_render.py` and its fourteen tests were deleted.
+A Rich renderable cannot be selected, so the custom markdown renderer could not
+stay and the answer be copyable; Textual's `Markdown` widget renders each block as
+a `Static` holding `Content`, which is why the code block now copies.
+`markdown-it-py` and Pygments are still required -- Textual's widget parses and
+highlights through them -- and are declared for that reason in
+`scripts/check_dependencies.py`.
 
 ---
 
@@ -177,15 +197,18 @@ running.
 Proven by `test_copying_is_possible_while_a_task_is_running`.
 
 ### UX-006
-**P1 · copy · mouse capture removes the terminal's own selection**
+**P1 · copy · no way to hand the mouse back to the terminal**
 
-`_begin_drag` calls `self.capture_mouse()`. While the application owns the mouse,
-the terminal emulator's native selection is unavailable, and with it the
-integration a user relies on over SSH and inside tmux. There is no key to hand the
-mouse back.
+Originally reported as `_begin_drag` calling `capture_mouse()`. That call is gone
+with the hand-written selection, but the underlying gap is not: while the
+application is reading mouse events, the terminal emulator's own selection is
+unavailable, and with it the copy integration a user relies on over SSH and inside
+tmux. Copying from inside KaroX now works through OSC 52, which covers most of
+that, but a user whose terminal already solves selection has no way to ask KaroX to
+stop competing for the mouse.
 
-Expected: a way to release mouse capture, so a user whose terminal already solves
-selection can use that instead.
+Expected: a binding that releases the mouse, and a note in the help overlay saying
+so.
 
 No test yet: the fix is a binding, and the test belongs with it.
 

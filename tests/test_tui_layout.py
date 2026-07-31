@@ -82,7 +82,7 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_standard_window_gives_the_chat_at_least_half(self) -> None:
         async with karox_app(size=STANDARD) as (app, _pilot):
-            log = app.query_one("#conversation", tui.ChatLog)
+            log = app.query_one("#conversation", tui.TranscriptView)
             self.assertGreaterEqual(
                 log.size.height,
                 STANDARD[1] // 2,
@@ -100,7 +100,7 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
         # is on by default and costs exactly the row that makes the difference.
         # With it off the chat gets four rows and this passes.
         async with karox_app(size=NARROW, sponsors=True) as (app, _pilot):
-            log = app.query_one("#conversation", tui.ChatLog)
+            log = app.query_one("#conversation", tui.TranscriptView)
             self.assertGreaterEqual(
                 log.size.height,
                 4,
