@@ -32,3 +32,27 @@ Thumbs.db
 
 # Agent tooling scratch
 .zcode/
+
+# Local scratch and probe output.
+#
+# Ad-hoc debugging output used to accumulate in the repository root, where a
+# single `git add .` would have published it: 32 such files (probe.out,
+# sel_api*.txt, logrender*.txt, pyproject.toml.bak, ...) were removed in one
+# sweep while establishing the 5.0 baseline. The rules below are deliberately
+# root-anchored and deny-by-default, because the previous approach -- naming each
+# stray file after the fact -- is exactly what let them accumulate.
+#
+# Put new scratch under scratch/ rather than in the root. It is ignored wholesale
+# there, so nothing has to be remembered.
+/scratch/
+/*.out
+/*.bak
+*.orig
+*.rej
+/karox_probe.*
+# Root .txt is scratch by default; the one real file is excepted by name. A new
+# root .txt therefore needs a deliberate `!` line, which is the point.
+/*.txt
+!/requirements.txt
+# Written by scripts/run_browser_audit.py on demand.
+/browser_audit_report.json
