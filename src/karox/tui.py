@@ -3649,7 +3649,15 @@ if _HAS_TEXTUAL:
         #brand-title { height: 1; color: #d4b676; text-style: bold; }
         #status { height: 3; padding: 0 2; background: #1c1916;
           border-bottom: solid #2e2820; }
-        #status Static { width: 1fr; content-align: left middle; color: #968a7a; }
+        /* `padding-right` is the gutter. Five columns at `1fr` with none of it
+           put "контекст: лимит" -- exactly 15 cells at an 80-column window -- flush
+           against the field after it, so the row read "контекст: лимитмост:
+           выключен" and looked like a rendering fault rather than two fields.
+           `text-overflow: ellipsis` marks a value that did not fit: at 46 columns
+           each field gets 8 cells, and "openai/model-a" drawn as "openai/m" reads
+           as a different model to the person checking which one is selected. */
+        #status Static { width: 1fr; content-align: left middle; color: #968a7a;
+          padding-right: 1; text-overflow: ellipsis; }
         #model-status, #session-status { color: #c6bca8; }
         #sponsor-ticker { height: 1; padding: 0; background: #181511;
           color: #8f8170; text-style: dim; overflow: hidden; }
@@ -4032,11 +4040,30 @@ if _HAS_TEXTUAL:
             self._apply_sponsor_visibility()
             self._tick_sponsor_ticker()
 
+        # Below this many rows the fixed chrome costs more than the conversation is
+        # worth. Measured at 46x14: brand, ticker, status bar, two separators and
+        # the composer take twelve of fourteen rows, leaving the chat two -- not
+        # enough for the three-line welcome, whose first line ("KaroX готов.", the
+        # one saying the product works) had already scrolled out of reach with no
+        # scrollbar to suggest anything was above it.
+        MINIMUM_ROWS_FOR_SPONSORS = 20
+
+        def _sponsors_fit(self) -> bool:
+            """Whether the window has a row to spare for the sponsor line."""
+            return self.size.height >= self.MINIMUM_ROWS_FOR_SPONSORS
+
         def _apply_sponsor_visibility(self) -> None:
             ticker = self._sponsor_widget
             if ticker is None or not ticker.is_mounted:
                 return
-            ticker.styles.display = "block" if self.sponsors_visible else "none"
+            visible = self.sponsors_visible and self._sponsors_fit()
+            ticker.styles.display = "block" if visible else "none"
+
+        def on_resize(self, event: Any) -> None:  # noqa: ARG002
+            # The sponsor line is the first thing to go when the window is short,
+            # and it comes back when there is room again. The user's own /sponsors
+            # preference still wins: this can only hide it, never show it.
+            self._apply_sponsor_visibility()
 
         def _set_sponsors_visible(self, visible: bool) -> None:
             self.sponsors_visible = bool(visible)

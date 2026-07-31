@@ -94,7 +94,12 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
         # UX-010: at 46x14 with the product's default settings the conversation
         # area is two rows tall -- 14% of the window -- because the brand, ticker,
         # status bar, separators and composer take a fixed twelve rows regardless
-        # of how many rows there are to divide.
+        # of how many rows there are to divide. Hiding the sponsor line below
+        # twenty rows recovered one of them -- the chat now gets three, measured --
+        # which is enough for the welcome to be readable but still not a share
+        # anyone would call usable. The remaining rows are in the status bar and
+        # the composer, and reclaiming them is a layout change rather than a
+        # visibility one.
         #
         # sponsors=True is the point of the test rather than a detail: the ticker
         # is on by default and costs exactly the row that makes the difference.
@@ -107,7 +112,6 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
                 f"the chat has {log.size.height} of {NARROW[1]} rows",
             )
 
-    @unittest.expectedFailure  # UX-011
     async def test_the_welcome_is_fully_visible_when_it_first_appears(self) -> None:
         # UX-011: whatever the window size, the message shown before the user has
         # typed anything must be readable in full. At 46x14 with default settings
@@ -123,7 +127,6 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
 class StatusBarLayoutTests(unittest.IsolatedAsyncioTestCase):
     """Five status columns of equal width, for values of very unequal length."""
 
-    @unittest.expectedFailure  # UX-012
     async def test_status_columns_do_not_run_into_each_other(self) -> None:
         # UX-012: the status bar is a Horizontal of five Statics at width: 1fr, so
         # at 80 columns each gets 15 cells and there is no gutter between them.
@@ -139,7 +142,6 @@ class StatusBarLayoutTests(unittest.IsolatedAsyncioTestCase):
                 f"status columns have no gutter:\n{rendered}",
             )
 
-    @unittest.expectedFailure  # UX-013
     async def test_a_truncated_status_value_says_it_was_truncated(self) -> None:
         # UX-013: at 46 columns each status column gets 8 cells, so
         # "openai/model-a" is drawn as "openai/m" and the repository name breaks

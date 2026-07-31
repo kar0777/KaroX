@@ -32,18 +32,14 @@ python -m unittest discover -s tests -p "test_tui_layout.py" -v
 | ID | P | Area | Symptom |
 |---|---|---|---|
 | [UX-006](#ux-006) | P1 | copy | No way to hand the mouse back to the terminal's own selection |
-| [UX-009](#ux-009) | P2 | layout | Sponsor ticker starts mid-word |
-| [UX-010](#ux-010) | P1 | layout | A 14-row window leaves the conversation two rows |
-| [UX-011](#ux-011) | P1 | layout | The welcome's first line is unreachable at that size |
-| [UX-012](#ux-012) | P1 | layout | Status columns run into each other at 80 columns |
-| [UX-013](#ux-013) | P1 | layout | Status values are truncated with no marker |
+| [UX-010](#ux-010) | P1 | layout | A 14-row window leaves the conversation three rows |
 
 ## Closed
 
-Nine of the fifteen, and eight of them by one change: the transcript is now a
+Thirteen of the fifteen. Eight went with one change -- the transcript is now a
 scroll container of one widget per message instead of a `RichLog` with selection
-written by hand. Deleting the hand-written layer is what closed them, rather than
-nine separate repairs.
+written by hand, and deleting the hand-written layer closed them together rather
+than as eight repairs. One was never a defect.
 
 | ID | P | Closed by | Now asserted by |
 |---|---|---|---|
@@ -56,6 +52,20 @@ nine separate repairs.
 | UX-008 | P1 | the notice says which copy happened | `test_ctrl_c_with_nothing_selected_copies_the_last_answer` |
 | UX-014 | P1 | CSS frame at `width: 1fr` | `test_an_answer_uses_the_width_of_a_wide_window` |
 | UX-015 | P1 | a widget tree is laid out again | `test_an_answer_is_relaid_out_when_the_window_changes` |
+| UX-009 | P2 | not a defect — see below | — |
+| UX-011 | P1 | the sponsor line yields a row when short | `test_the_welcome_is_fully_visible_when_it_first_appears` |
+| UX-012 | P1 | `padding-right: 1` on each status field | `test_status_columns_do_not_run_into_each_other` |
+| UX-013 | P1 | `text-overflow: ellipsis` on each field | `test_a_truncated_status_value_says_it_was_truncated` |
+
+**UX-009 was my misreading, not a bug.** The sponsor line is a marquee: it scrolls
+by one cell every 0.18s, so at any moment after the first tick it is showing the
+middle of a word, and at a narrow width it is clipped at both ends. That is what a
+marquee does. Recorded rather than deleted, because the reasoning is the useful
+part: an observation taken from one frame of an animation is not a defect report.
+
+Measured after the status-bar fix, at 80 columns the row reads
+`контекст:      мост: выключен` instead of `контекст: лимитмост: выключен`, and at
+46 columns a value that does not fit is drawn `openai…` rather than `openai/m`.
 
 Measured after the change, at a 116-column conversation: an answer occupies 72
 columns rather than 37, selecting `BETA` out of `ALPHA BETA GAMMA` yields `BETA`,
@@ -246,15 +256,20 @@ fragment. Cosmetic, but it is on the first screen a new user sees.
 Expected: the ticker begins at a word boundary.
 
 ### UX-010
-**P1 · layout · a 14-row window leaves the conversation two rows**
+**P1 · layout · a 14-row window leaves the conversation three rows**
 
-With the product's default settings at 46×14, `#conversation` is two rows tall —
-14% of the window. Brand, ticker, status bar, two separators and the composer take
-a fixed twelve rows no matter how few there are to divide.
+Partly fixed. Originally two rows of fourteen — 14% of the window — because brand,
+ticker, status bar, two separators and the composer take a fixed twelve rows no
+matter how few there are to divide.
 
-The sponsor ticker is on by default and costs exactly the row that makes the
-difference: with it off the conversation gets four rows. An existing test pins the
-share at a 24-row window, which is above where the guarantee stops holding.
+The sponsor line is now hidden below twenty rows, which recovered one row: the
+conversation gets three, measured, which is enough for the three-line welcome to be
+readable (that was UX-011, now closed) but not a share anyone would call usable.
+
+What remains is in the status bar, which is three rows for two rows of content, and
+the composer, which is four rows for one line of input. Reclaiming those is a layout
+change rather than a visibility one — collapsing the status bar to a single row at
+small heights, and dropping the composer's hint line with it.
 
 Expected: the conversation keeps a usable share at any size the application agrees
 to run at, or says the window is too small.
