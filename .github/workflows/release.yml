@@ -18,10 +18,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # This workflow used to tag, archive and publish without ever running a test.
-  # Reusing the quality workflow means the whole suite, the lint gate, the type
-  # gate and the version check all pass on the pushed commit before anything is
-  # published, and a red run cancels the release instead of shipping it.
   tests:
     name: Quality gate
     uses: ./.github/workflows/quality.yml
@@ -42,22 +38,34 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Resolve release metadata
+      - name: Resolve and validate release metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(tr -d '[:space:]' < VERSION)"
+          RUNTIME_VERSION="$(python scripts/check_versions.py --print runtime)"
           TAG="v${VERSION}"
           NOTES="RELEASE_NOTES_${TAG}.md"
           test -n "$VERSION"
           test -f "$NOTES"
+
+          REQUIRE_WHEEL=false
+          if [[ "$VERSION" == 5.* ]]; then
+            test "$RUNTIME_VERSION" = "$VERSION"
+            python scripts/check_v5_release.py --strict
+            REQUIRE_WHEEL=true
+          fi
+
           TITLE="$(sed -n '1s/^# //p' "$NOTES")"
           if [ -z "$TITLE" ]; then TITLE="★ KaroX ${TAG}"; fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "runtime_version=$RUNTIME_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "require_wheel=$REQUIRE_WHEEL" >> "$GITHUB_OUTPUT"
 
       - name: Fetch tags
         run: git fetch --force --tags origin
@@ -72,7 +80,7 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Prepare version and changelog
+      - name: Prepare version mirror and changelog
         if: steps.tag.outputs.exists == 'false'
         env:
           VERSION: ${{ steps.meta.outputs.version }}
@@ -105,21 +113,31 @@ jobs:
           text = changelog.read_text(encoding="utf-8")
           heading = f"## {version}"
           if heading not in text:
-              title = next((line[2:].strip() for line in notes.splitlines() if line.startswith("# ")), f"KaroX {version}")
-              bullets = [line.strip() for line in notes.splitlines() if line.startswith("- ")][:14]
+              title = next(
+                  (
+                      line[2:].strip()
+                      for line in notes.splitlines()
+                      if line.startswith("# ")
+                  ),
+                  f"KaroX {version}",
+              )
+              bullets = [
+                  line.strip()
+                  for line in notes.splitlines()
+                  if line.startswith("- ")
+              ][:14]
               body = "\n".join(bullets) or "- See the release notes for full details."
               entry = f"## {version}\n\n### {title}\n\n{body}\n\n"
               prefix = "# Changelog\n\n"
               if not text.startswith(prefix):
                   raise SystemExit("Unexpected CHANGELOG.md header")
-              changelog.write_text(prefix + entry + text[len(prefix):], encoding="utf-8")
+              changelog.write_text(
+                  prefix + entry + text[len(prefix) :],
+                  encoding="utf-8",
+              )
           PY
 
-      # Committed locally and NOT pushed yet. The check below is what decides
-      # whether this commit is fit to exist on main, and it used to run after the
-      # push -- so the one thing it could prevent had already happened by the time
-      # it spoke, and a branch cannot be un-pushed cleanly.
-      - name: Commit release metadata
+      - name: Commit release metadata locally
         id: metadata
         if: steps.tag.outputs.exists == 'false'
         shell: bash
@@ -135,24 +153,112 @@ jobs:
             echo "committed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # The quality gate ran on the commit this workflow was triggered for; the
-      # metadata commit sits on top of it. Tagging is only safe while that commit
-      # rewrites nothing but the two generated files, so prove it instead of
-      # assuming it -- before anything leaves this runner.
-      - name: Confirm the tag would point at the tested tree
+      - name: Confirm release metadata is the only post-test change
         if: steps.tag.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
-          untested="$(
-            git diff --name-only "${{ github.sha }}" HEAD \
-              | grep -vx -e 'server/repo_tools.py' -e 'CHANGELOG.md' || true
-          )"
+          untested="$({
+            git diff --name-only "${{ github.sha }}" HEAD
+          } | grep -vx -e 'server/repo_tools.py' -e 'CHANGELOG.md' || true)"
           if [ -n "$untested" ]; then
-            echo "these files changed after the suite ran and would be tagged untested:"
+            echo "These files changed after the quality suite and would be tagged untested:"
             printf '%s\n' "$untested"
             exit 1
           fi
+
+      - name: Revalidate the exact local release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_versions.py
+          python scripts/check_release_workflow.py
+          if [[ "${{ steps.meta.outputs.version }}" == 5.* ]]; then
+            python scripts/check_v5_release.py --strict
+            python scripts/check_access_profiles.py
+          fi
+          git diff --check
+
+      - name: Install release build tooling
+        run: python -m pip install --upgrade build
+
+      - name: Build and smoke-test release artifacts before tagging
+        id: artifacts
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REQUIRE_WHEEL: ${{ steps.meta.outputs.require_wheel }}
+          TAG_EXISTS: ${{ steps.tag.outputs.exists }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist .release-smoke
+          mkdir -p dist
+
+          if [ "$TAG_EXISTS" = "true" ]; then
+            REF="$TAG"
+          else
+            REF="HEAD"
+          fi
+
+          git archive --format=zip --prefix="KaroX-${TAG}/" \
+            -o "dist/KaroX-${TAG}.zip" "$REF"
+          git archive --format=tar.gz --prefix="KaroX-${TAG}/" \
+            -o "dist/KaroX-${TAG}.tar.gz" "$REF"
+
+          WHEEL_NAME=""
+          if [ "$REQUIRE_WHEEL" = "true" ]; then
+            WORKTREE_ROOT="$(mktemp -d)"
+            WORKTREE="$WORKTREE_ROOT/tree"
+            cleanup_worktree() {
+              git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+              rm -rf "$WORKTREE_ROOT"
+            }
+            trap cleanup_worktree EXIT
+            git worktree add --detach "$WORKTREE" "$REF"
+            python -m build --wheel --outdir "$GITHUB_WORKSPACE/dist" "$WORKTREE"
+            cleanup_worktree
+            trap - EXIT
+
+            WHEEL="$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
+            test -n "$WHEEL"
+            WHEEL_NAME="$(basename "$WHEEL")"
+
+            python -m venv .release-smoke
+            .release-smoke/bin/python -m pip install --upgrade pip
+            .release-smoke/bin/python -m pip install "$WHEEL"
+
+            SMOKE_ROOT="$(mktemp -d)"
+            cleanup_smoke() {
+              rm -rf "$SMOKE_ROOT"
+            }
+            trap cleanup_smoke EXIT
+            (
+              cd "$SMOKE_ROOT"
+              "$GITHUB_WORKSPACE/.release-smoke/bin/python" -c \
+                "import karox; print(karox.__version__)"
+              "$GITHUB_WORKSPACE/.release-smoke/bin/karox" --help >/dev/null
+              "$GITHUB_WORKSPACE/.release-smoke/bin/karox-vnext" --help >/dev/null
+            )
+            cleanup_smoke
+            trap - EXIT
+
+            INSTALLED_VERSION="$(
+              .release-smoke/bin/python -c 'import karox; print(karox.__version__)'
+            )"
+            test "$INSTALLED_VERSION" = "$VERSION"
+          fi
+
+          (
+            cd dist
+            find . -maxdepth 1 -type f ! -name '*-SHA256SUMS.txt' -printf '%f\n' \
+              | sort \
+              | xargs sha256sum \
+              > "KaroX-${TAG}-SHA256SUMS.txt"
+            sha256sum --check "KaroX-${TAG}-SHA256SUMS.txt"
+          )
+
+          echo "wheel_name=$WHEEL_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Push release metadata
         if: steps.tag.outputs.exists == 'false' && steps.metadata.outputs.committed == 'true'
@@ -161,23 +267,13 @@ jobs:
           set -euo pipefail
           git push origin HEAD:main
 
-      - name: Create and push tag
+      - name: Create and push tag only after artifacts pass
         if: steps.tag.outputs.exists == 'false'
         shell: bash
         run: |
           set -euo pipefail
           git tag -a "${{ steps.meta.outputs.tag }}" -m "KaroX ${{ steps.meta.outputs.tag }}"
           git push origin "${{ steps.meta.outputs.tag }}"
-
-      - name: Build release archives
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.meta.outputs.tag }}"
-          mkdir -p dist
-          git archive --format=zip --prefix="KaroX-${TAG}/" -o "dist/KaroX-${TAG}.zip" "$TAG"
-          git archive --format=tar.gz --prefix="KaroX-${TAG}/" -o "dist/KaroX-${TAG}.tar.gz" "$TAG"
-          (cd dist && sha256sum "KaroX-${TAG}.zip" "KaroX-${TAG}.tar.gz" > "KaroX-${TAG}-SHA256SUMS.txt")
 
       - name: Publish or refresh GitHub Release
         env:
@@ -191,7 +287,8 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$RELEASE_TITLE" --notes-file "$NOTES" --latest
           else
-            gh release create "$TAG" --verify-tag --title "$RELEASE_TITLE" --notes-file "$NOTES" --latest
+            gh release create "$TAG" --verify-tag --title "$RELEASE_TITLE" \
+              --notes-file "$NOTES" --latest
           fi
           gh release upload "$TAG" dist/* --clobber
 
@@ -200,6 +297,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
           TAG: ${{ steps.meta.outputs.tag }}
+          WHEEL_NAME: ${{ steps.artifacts.outputs.wheel_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -216,6 +314,9 @@ jobs:
               f"KaroX-{tag}.tar.gz",
               f"KaroX-{tag}-SHA256SUMS.txt",
           }
+          wheel = os.environ.get("WHEEL_NAME", "").strip()
+          if wheel:
+              expected.add(wheel)
           assets = sorted(item["name"] for item in release.get("assets", []))
           missing = expected.difference(assets)
           if release.get("tagName") != tag:
@@ -250,7 +351,10 @@ jobs:
           {
             echo "## ${{ steps.meta.outputs.title }}"
             echo
-            echo "Release published and verified with ZIP, TAR.GZ, and SHA-256 checksums."
+            echo "Release published and verified with source archives and SHA-256 checksums."
+            if [ -n "${{ steps.artifacts.outputs.wheel_name }}" ]; then
+              echo "The installed KaroX wheel was smoke-tested before the tag was pushed."
+            fi
             echo
             echo "### Windows"
             echo '```powershell'

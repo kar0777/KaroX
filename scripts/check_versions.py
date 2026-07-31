@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""Fail when the repository's version numbers disagree with each other.
+"""Fail when repository version and release-contract sources disagree.
 
-Three places used to state a version by hand and nothing compared them:
-``VERSION`` said ``4.1.4``, ``pyproject.toml`` said ``5.0.0.dev0``, and the
-quality workflow asserted a third hardcoded literal. Two of them happened to
-agree on the day they were written, which is exactly how the third one silently
-went stale.
+There are two versioned artefacts in this tree:
 
-There are genuinely two versioned artefacts in this tree, so there are two
-sources of truth and no more:
+* the runtime package: ``src/karox/__init__.py`` ``__version__``;
+* the shipping release line: ``VERSION`` mirrored into the legacy server.
 
-* the **runtime package** -- ``src/karox/__init__.py`` ``__version__``.
-  ``pyproject.toml`` derives the wheel version from it through setuptools
-  ``dynamic``, so a wheel can no longer disagree with ``karox --version``.
-* the **shipping release line** -- ``VERSION``, which ``release.yml`` turns into
-  a tag and mirrors into ``server/repo_tools.py``.
+The runtime can be an unreleased KaroX 5 development version while the stable
+shipping line remains 4.x. This script makes that difference deliberate, checks
+that the wheel derives its version from the runtime source, and runs the KaroX 5
+product, profile, user-copy, documented-command, installer, release-workflow,
+and release-hygiene contracts when their repository files are present.
 
-They are different numbers on purpose: the published product is 4.x while the
-vNext runtime is an unreleased 5.0 development version. This check makes that
-deliberate rather than accidental, and it refuses any *new* hardcoded copy.
-
-Runs on the standard library alone so it can execute before anything is
-installed. ``--print runtime`` / ``--print release`` emit one value for CI to
-consume instead of repeating it in YAML.
+Standard library only. ``--print runtime`` and ``--print release`` emit values
+for CI without repeating literals in workflow YAML.
 """
 
 from __future__ import annotations
@@ -31,9 +22,12 @@ import argparse
 import ast
 import json
 import re
+import runpy
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
+ProblemCollector = Callable[[Path], list[str] | tuple[list[str], object]]
 
 
 def _package_version() -> str:
@@ -45,7 +39,9 @@ def _package_version() -> str:
             isinstance(target, ast.Name) and target.id == "__version__"
             for target in node.targets
         ):
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            if isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, str
+            ):
                 return node.value.value
     raise SystemExit("src/karox/__init__.py has no literal __version__ assignment")
 
@@ -76,8 +72,6 @@ def _check_pyproject(problems: list[str], runtime: str) -> None:
             "pyproject.toml [tool.setuptools.dynamic] must derive version from "
             'attr = "karox.__version__"'
         )
-    # The comment above the declaration is the only thing telling a reader where
-    # the number lives, and a stale comment is how this drift started.
     if runtime not in text and "karox.__version__" not in text:
         problems.append("pyproject.toml no longer references the runtime version source")
 
@@ -107,14 +101,7 @@ def _check_release_records(problems: list[str], release: str) -> None:
     except (OSError, json.JSONDecodeError) as exc:
         problems.append(f"RELEASE.json is unreadable: {type(exc).__name__}")
         return
-    # RELEASE.json records what was actually published. It may legitimately lag
-    # VERSION while a release is in flight, but it must never run ahead of it.
-    #
-    # This was written as an equality test, which contradicted the sentence above
-    # and made the check fail on exactly the commit it is meant to guard: the one
-    # that bumps VERSION. release.yml writes `"status": "published"` into every
-    # marker, so the status was no escape either, and the new
-    # tests-before-publish gate could never have gone green.
+
     recorded = marker.get("version")
     if marker.get("status") == "published" and isinstance(recorded, str):
         if _version_key(recorded) > _version_key(release):
@@ -125,18 +112,97 @@ def _check_release_records(problems: list[str], release: str) -> None:
 
 
 def _version_key(text: str) -> tuple[int, ...]:
-    """Order two release lines by their leading numeric components.
-
-    Deliberately not a PEP 440 parser: this compares release lines such as 4.1.4,
-    and the standard library offers nothing to do it with. A component with no
-    digits sorts as 0 rather than raising, so a malformed marker cannot turn an
-    ordering question into a crash.
-    """
+    """Order release lines by their leading numeric components."""
     components: list[int] = []
     for component in text.strip().split("."):
         digits = re.match(r"\d+", component)
         components.append(int(digits.group(0)) if digits else 0)
     return tuple(components)
+
+
+def _load_problem_collector(path: Path) -> ProblemCollector:
+    namespace = runpy.run_path(str(path))
+    collect = namespace.get("collect_problems")
+    if not callable(collect):
+        raise TypeError(f"{path} has no callable collect_problems")
+    return collect
+
+
+def _contract_problems(path: Path) -> list[str]:
+    collect = _load_problem_collector(path)
+    result = collect(ROOT)
+    raw = result[0] if isinstance(result, tuple) else result
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise TypeError(f"{path} collect_problems returned an invalid problem list")
+    return raw
+
+
+def _check_optional_contract(
+    problems: list[str],
+    *,
+    marker: Path,
+    checker: Path,
+    label: str,
+) -> None:
+    """Run a repository contract when its marker exists."""
+    if not marker.is_file():
+        return
+    if not checker.is_file():
+        problems.append(f"{marker.relative_to(ROOT)} exists but {checker.name} is missing")
+        return
+    try:
+        contract_problems = _contract_problems(checker)
+    except Exception as exc:
+        problems.append(f"{label} contract crashed: {type(exc).__name__}: {exc}")
+        return
+    problems.extend(f"{label}: {problem}" for problem in contract_problems)
+
+
+def _check_repository_contracts(problems: list[str]) -> None:
+    contracts = (
+        (
+            ROOT / "docs" / "V5_RELEASE_SCOPE.md",
+            ROOT / "scripts" / "check_v5_release.py",
+            "KaroX 5",
+        ),
+        (
+            ROOT / "src" / "karox" / "policy.py",
+            ROOT / "scripts" / "check_access_profiles.py",
+            "access profiles",
+        ),
+        (
+            ROOT / "src" / "karox" / "cli.py",
+            ROOT / "scripts" / "check_user_facing_copy.py",
+            "user-facing copy",
+        ),
+        (
+            ROOT / "src" / "karox" / "cli.py",
+            ROOT / "scripts" / "check_documented_commands.py",
+            "documented commands",
+        ),
+        (
+            ROOT / "install.karox.sh",
+            ROOT / "scripts" / "check_installer_preservation.py",
+            "installer preservation",
+        ),
+        (
+            ROOT / ".github" / "workflows" / "release.yml",
+            ROOT / "scripts" / "check_release_workflow.py",
+            "release workflow",
+        ),
+        (
+            ROOT / "docs" / "RELEASE_CHECKLIST.md",
+            ROOT / "scripts" / "check_release_hygiene.py",
+            "release hygiene",
+        ),
+    )
+    for marker, checker, label in contracts:
+        _check_optional_contract(
+            problems,
+            marker=marker,
+            checker=checker,
+            label=label,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -162,15 +228,16 @@ def main(argv: list[str] | None = None) -> int:
     _check_pyproject(problems, runtime)
     _check_workflows(problems, runtime, release)
     _check_release_records(problems, release)
+    _check_repository_contracts(problems)
 
     if problems:
-        print("version sources disagree:")
+        print("version or release sources disagree:")
         for problem in problems:
             print(f"  - {problem}")
         return 1
     print(
         f"version sources agree (runtime {runtime} from src/karox/__init__.py, "
-        f"release {release} from VERSION)"
+        f"release {release} from VERSION); release contracts are internally consistent"
     )
     return 0
 

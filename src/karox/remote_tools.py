@@ -34,6 +34,7 @@ from .core import (
 from .core_tools import ExtendedCoreRuntime
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .paths import runtime_dir
+from .process_launcher import resolve_process_argv as _resolve_process_argv
 from .security import child_process_environment, redact, redact_content
 from .sessions import SessionRecord
 
@@ -145,10 +146,20 @@ def _pid_alive(pid: int) -> bool:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                # ``tasklist`` emits bytes in the OEM code page on localized
+                # Windows; decoding as the ANSI default raises
+                # UnicodeDecodeError in the reader thread, which leaves
+                # ``stdout`` as None and turns the ``in`` check below into a
+                # TypeError.  We only need ASCII tokens (the pid and the
+                # ``No tasks`` marker), so replace-mode decoding is exact.
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
+            return False
+        if completed.stdout is None:
             return False
         return str(pid) in completed.stdout and "No tasks" not in completed.stdout
     try:
@@ -470,8 +481,11 @@ class RemoteCoreRuntime(ExtendedCoreRuntime):
         stdout_handle = stdout_path.open("ab", buffering=0)
         stderr_handle = stderr_path.open("ab", buffering=0)
         try:
+            # Resolve ``npm`` to ``npm.cmd`` on Windows AFTER the caller's argv
+            # is validated; the stored record/evidence keeps the logical argv.
+            launch_argv = _resolve_process_argv(argv)
             process = subprocess.Popen(
-                argv,
+                launch_argv,
                 cwd=self.repository,
                 env=child_process_environment(),
                 stdout=stdout_handle,

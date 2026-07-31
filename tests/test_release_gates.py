@@ -169,6 +169,69 @@ class CheckTestCountTests(unittest.TestCase):
             ):
                 self.assertEqual(_run_quietly(self.gate, []), 1)
 
+    def test_write_updates_a_stale_count_and_leaves_the_prose_alone(self) -> None:
+        """The suite grows in most commits that add one, so nine documented copies
+        went stale constantly and were retyped by hand -- itself a way to publish a
+        wrong number. ``--write`` applies discovery's figure and nothing else."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs" / "vNext").mkdir(parents=True)
+            document = root / "README.md"
+            # CRLF on purpose: this repository is checked out with CRLF, and a
+            # naive read/write pair rewrites every line of the file instead of
+            # four digits.
+            document.write_bytes(
+                b"Intro paragraph.\r\nThe suite is 1 tests.\r\nTrailer.\r\n"
+            )
+            with (
+                patch.object(self.gate, "ROOT", root),
+                patch.object(
+                    self.gate,
+                    "SUITE_COUNT_CLAIMS",
+                    (("README.md", r"The suite is (\d+) tests"),),
+                ),
+                patch.object(self.gate, "ROOT_COUNT_CLAIMS", ()),
+                patch.object(self.gate, "LEGACY_CHECKS", root / "absent.py"),
+                # An absent legacy module means zero legacy checks, so the
+                # expected figure has to move with it. Without this the gate fails
+                # on that instead, and a test asserting a non-zero exit would pass
+                # for entirely the wrong reason.
+                patch.object(self.gate, "EXPECTED_LEGACY_SCRIPT_TESTS", 0),
+                patch.object(self.gate, "_discover", lambda *a, **k: [object()] * 7),
+            ):
+                self.assertEqual(_run_quietly(self.gate, ["--write"]), 0)
+                # Idempotent: a second pass has nothing to change and still passes.
+                self.assertEqual(_run_quietly(self.gate, ["--write"]), 0)
+
+            self.assertEqual(
+                document.read_bytes(),
+                b"Intro paragraph.\r\nThe suite is 7 tests.\r\nTrailer.\r\n",
+            )
+
+    def test_write_does_not_invent_a_claim_that_is_absent(self) -> None:
+        """A document that no longer contains the sentence is a real problem for a
+        person to look at, not something to patch a number into."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs" / "vNext").mkdir(parents=True)
+            (root / "README.md").write_text("No claim here.\n", encoding="utf-8")
+            with (
+                patch.object(self.gate, "ROOT", root),
+                patch.object(
+                    self.gate,
+                    "SUITE_COUNT_CLAIMS",
+                    (("README.md", r"The suite is (\d+) tests"),),
+                ),
+                patch.object(self.gate, "ROOT_COUNT_CLAIMS", ()),
+                patch.object(self.gate, "LEGACY_CHECKS", root / "absent.py"),
+                patch.object(self.gate, "EXPECTED_LEGACY_SCRIPT_TESTS", 0),
+                patch.object(self.gate, "_discover", lambda *a, **k: [object()] * 7),
+            ):
+                self.assertEqual(_run_quietly(self.gate, ["--write"]), 1)
+            self.assertEqual(
+                (root / "README.md").read_text(encoding="utf-8"), "No claim here.\n"
+            )
+
     def test_a_test_module_that_stops_importing_is_reported(self) -> None:
         """unittest turns an unimportable module into one synthetic failing test,
         so the total would merely look smaller rather than wrong."""

@@ -1,4 +1,4 @@
-"""KaroX vNext hybrid runtime."""
+"""KaroX 5 hybrid local runtime for native and hosted AI agents."""
 
 from .models import AccessProfile, Capability, Origin, OriginKind
 

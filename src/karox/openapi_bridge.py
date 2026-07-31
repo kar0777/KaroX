@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hmac
+import json
+import os
 import re
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
@@ -34,6 +36,7 @@ MAX_REQUEST_BYTES = 2_000_000
 _ERROR_STATUS: dict[str, int] = {
     "tool_not_exposed": 404,
     "not_found": 404,
+    "executable_not_found": 500,
     "denied": 403,
     "invalid_request": 400,
     "idempotency_key_required": 400,
@@ -90,10 +93,31 @@ def build_openapi_bridge_app(
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     title: str = "KaroX Hosted Bridge",
     allowed_hosts: Optional[Sequence[str]] = None,
+    diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> FastAPI:
     """Expose selected hosted tools as a small importable OpenAPI service."""
     if not 0.1 <= float(deadline_seconds) <= 3600.0:
         raise ValueError("bridge deadline must be between 0.1 and 3600 seconds")
+    diagnostics_payload: Optional[dict[str, Any]] = None
+    diagnostics_source: Any = diagnostics
+    if diagnostics_source is None:
+        raw_diagnostics = os.environ.get("KAROX_BRIDGE_DIAGNOSTICS_JSON", "").strip()
+        if raw_diagnostics:
+            try:
+                diagnostics_source = json.loads(raw_diagnostics)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "KAROX_BRIDGE_DIAGNOSTICS_JSON must contain valid JSON"
+                ) from exc
+    if diagnostics_source is not None:
+        try:
+            diagnostics_payload = json.loads(
+                json.dumps(dict(diagnostics_source), ensure_ascii=False, sort_keys=True)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bridge diagnostics must be JSON serializable") from exc
+        if not isinstance(diagnostics_payload, dict):
+            raise ValueError("bridge diagnostics must be a JSON object")
     resolve_token = _token_resolver(bearer_token)
     allowed = resolve_allowed_hosts(allowed_hosts)
     descriptors = runtime.descriptors()
@@ -199,6 +223,17 @@ def build_openapi_bridge_app(
     async def list_tools() -> dict[str, Any]:
         return {"tools": [item.to_dict() for item in runtime.descriptors()]}
 
+    @app.get("/diagnostics", operation_id="karox_bridge_diagnostics")
+    async def bridge_diagnostics() -> dict[str, Any]:
+        if diagnostics_payload is None:
+            return {
+                "schema_version": 1,
+                "available_tools": [item.name for item in runtime.descriptors()],
+                "disabled_tools": [],
+                "effective_deadline_seconds": deadline_seconds,
+            }
+        return dict(diagnostics_payload)
+
     def session_payload() -> dict[str, Any]:
         reader = getattr(runtime, "session_info", None)
         info = dict(reader()) if callable(reader) else {}
@@ -213,7 +248,10 @@ def build_openapi_bridge_app(
         return {
             **session_payload(),
             "tools": [item.name for item in runtime.descriptors()],
-            "recommended_next_action": "inspect repository state before mutation",
+            "bridge_diagnostics": await bridge_diagnostics(),
+            "recommended_next_action": (
+                "call karox_bridge_diagnostics before invoking optional tools"
+            ),
         }
 
     @app.post("/tools/{tool_name:path}", include_in_schema=False)
@@ -269,6 +307,17 @@ def build_openapi_bridge_app(
                         "summary": "List tools exposed to this hosted client",
                         "security": [{"bearerAuth": []}, {"apiKeyAuth": []}],
                         "responses": {"200": {"description": "Tool descriptors"}},
+                    }
+                },
+                "/diagnostics": {
+                    "get": {
+                        "operationId": "karox_bridge_diagnostics",
+                        "summary": (
+                            "Return available and disabled tools, verification "
+                            "allowlist, deadline, tunnel, and session lifetime"
+                        ),
+                        "security": [{"bearerAuth": []}, {"apiKeyAuth": []}],
+                        "responses": {"200": {"description": "Bridge diagnostics"}},
                     }
                 },
                 "/session": {

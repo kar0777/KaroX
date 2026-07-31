@@ -1,0 +1,148 @@
+name: KaroX 5 beta test report
+description: Report an external KaroX 5 installation and primary-flow attempt
+title: "[Beta] "
+labels:
+  - beta
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing KaroX 5. Do not include API keys, OAuth tokens,
+        approval passwords, private repository source, personal data, or an
+        unsanitized support bundle. Report security vulnerabilities privately
+        according to SECURITY.md.
+
+  - type: input
+    id: karox_version
+    attributes:
+      label: KaroX version and commit
+      description: Output of `karox --version` plus the tested commit when using a checkout.
+      placeholder: 5.0.0.dev0 / abcdef123456
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os_python
+    attributes:
+      label: OS and Python details
+      placeholder: Windows 11 24H2, Python 3.12.4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Local Windows preview installer
+        - Local macOS/Linux preview installer
+        - Wheel installation
+        - Upgrade from KaroX 4.x
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client or provider
+      options:
+        - ChatGPT Web
+        - Claude Web
+        - OpenAI Responses
+        - Anthropic Messages
+        - Gemini
+        - Generic OpenAI-compatible endpoint
+        - Generic MCP/OpenAPI client
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: First-attempt outcome
+      options:
+        - Complete unaided
+        - Complete with maintainer assistance
+        - Blocked by KaroX
+        - Blocked by account or environment
+        - Abandoned
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: completed_steps
+    attributes:
+      label: Completed steps
+      options:
+        - label: Installed KaroX
+        - label: Started `karox` in the disposable repository
+        - label: Understood Observe, Build, and Advanced
+        - label: Connected the selected client or provider
+        - label: Made one real file change
+        - label: Ran one explicitly approved check
+        - label: Inspected Git status and Git diff
+        - label: Received an evidence-backed final report
+        - label: Restarted and resumed the session
+        - label: Confirmed the mutation was not duplicated
+        - label: Used KaroX for a second task
+
+  - type: textarea
+    id: stopped_at
+    attributes:
+      label: Exact step where the first unaided attempt stopped
+      description: Include the exact sanitized error text and what you expected to happen.
+      placeholder: The bridge printed an MCP URL, but the client rejected it with...
+    validations:
+      required: true
+
+  - type: input
+    id: timings
+    attributes:
+      label: Approximate timings
+      description: Time to first launch, connection, and verified task where available.
+      placeholder: launch 4 min; connection 9 min; verified task 18 min
+
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Permission and trust feedback
+      description: Which profile did you choose, and did the evidence make the result trustworthy?
+    validations:
+      required: true
+
+  - type: textarea
+    id: unnecessary
+    attributes:
+      label: What felt unnecessary or confusing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: missing
+    attributes:
+      label: What missing capability actually blocked work?
+      description: Leave empty when no missing capability blocked the primary scenario.
+
+  - type: checkboxes
+    id: safety_confirmation
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, tokens, approval passwords, private source, and personal data.
+          required: true
+        - label: I used a disposable or otherwise safe test repository for the first attempt.
+          required: true

@@ -724,12 +724,38 @@ def _tailscale_funnel_available(status_payload: Dict[str, Any]) -> bool:
     return True
 
 
-def _default_verification(repository: Path) -> tuple[str, ...]:
+def _default_verification(repository: Path) -> tuple[tuple[str, ...], ...]:
+    """Safe verification commands for a repository, as a set of argv tuples.
+
+    The TUI launches both the managed web bridge and the native agent with
+    these commands as the approved verification allowlist; ``checks.run`` may
+    only run a command that matches one of them.  For a Node project the
+    common CI scripts are returned **only when they exist in ``package.json``**
+    so an allowlist never advertises a script the project does not define.
+    """
+    package_json = repository / "package.json"
+    if package_json.is_file():
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+            scripts = data.get("scripts") if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            scripts = None
+        if isinstance(scripts, dict):
+            # Each candidate is only included when the project defines it, so the
+            # allowlist never advertises a script that does not exist.
+            commands: list[tuple[str, ...]] = []
+            for candidate in (("npm", "test"), ("npm", "run", "ci"),
+                              ("npm", "run", "test:smoke")):
+                script_name = candidate[2] if candidate[1] == "run" else candidate[1]
+                if isinstance(script_name, str) and script_name in scripts:
+                    commands.append(candidate)
+            if commands:
+                return tuple(commands)
     if (repository / "pyproject.toml").exists() and (repository / "tests").is_dir():
-        return (sys.executable, "-m", "pytest", "-q")
-    if (repository / "package.json").exists():
-        return ("npm", "test")
-    return ("git", "diff", "--check")
+        return ((sys.executable, "-m", "pytest", "-q"),)
+    if package_json.is_file():
+        return (("npm", "test"),)
+    return (("git", "diff", "--check"),)
 
 
 def _optional_positive_int(value: Any) -> Optional[int]:
@@ -1178,10 +1204,10 @@ def _probe_provider(setup: ProviderSetup) -> Dict[str, Any]:
 def _agent_argv(
     task: str,
     repository: Path,
-    verification: Sequence[str],
+    verification: Sequence[Sequence[str]],
     session_id: str,
 ) -> List[str]:
-    return [
+    argv = [
         "agent",
         "run",
         "--repository",
@@ -1190,10 +1216,16 @@ def _agent_argv(
         session_id,
         "--task",
         task,
-        "--verification-command",
-        json.dumps(list(verification), ensure_ascii=False),
-        "--json",
     ]
+    # ``agent run`` accepts a repeatable ``--verification-command``; emit one
+    # per approved command so a repository with several safe checks (npm test,
+    # npm run ci, npm run test:smoke) gets the full allowlist.
+    for command in verification:
+        argv.extend(
+            ("--verification-command", json.dumps(list(command), ensure_ascii=False))
+        )
+    argv.append("--json")
+    return argv
 
 
 def _run_cli(argv: Sequence[str], out: Callable[[str], None]) -> int:
@@ -1556,16 +1588,26 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
     if setup.tunnel_provider not in {"cloudflare", "tailscale"}:
         raise ValueError("ChatGPT/Claude web bridges require a public HTTPS tunnel")
     sid = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    # The WRITE_WEB_TOOLS bundle (browser input + dev_server start/stop + file
+    # writes) is gated behind --write in the connect command, so any tool that
+    # mutates state or drives a UI surfaces as WORKSPACE_WRITE access here.
     mutating_tools = {
         "karox.repo.edit_file",
         "karox.repo.write_file",
         "karox.git.commit",
         "karox.checks.run",
+        "karox.browser.open",
+        "karox.browser.click",
+        "karox.browser.fill",
+        "karox.browser.select",
+        "karox.browser.press",
+        "karox.browser.close",
+        "karox.dev_server.start",
+        "karox.dev_server.stop",
     }
+    needs_write = any(tool in mutating_tools for tool in setup.tools)
     access_profile = (
-        AccessProfile.WORKSPACE_WRITE
-        if any(tool in mutating_tools for tool in setup.tools)
-        else AccessProfile.READ_ONLY
+        AccessProfile.WORKSPACE_WRITE if needs_write else AccessProfile.READ_ONLY
     )
     argv = [
         sys.executable,
@@ -1585,6 +1627,24 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
         "--port",
         str(setup.port),
     ]
+    if needs_write:
+        # --write tells the connect command to add the browser-input and
+        # dev_server-start tools from WRITE_WEB_TOOLS on top of the explicit
+        # --tool selections, so the read-only browser/dev_server checks still
+        # come from the checkbox tools while the mutating ones come from --write.
+        argv.append("--write")
+    if "karox.checks.run" in setup.tools:
+        # karox.checks.run requires an approved verification allowlist; supply
+        # the workspace's discovered default set (npm test / npm run ci /
+        # npm run test:smoke for a Node project, or the pytest/git fallbacks)
+        # so the bridge starts without a manual command.  Each approved
+        # command becomes a separate --verification-command, matching the
+        # repeatable CLI flag; the external agent can only run a command in
+        # this allowlist, not arbitrary shell.
+        for command in _default_verification(repository):
+            argv.extend(
+                ("--verification-command", json.dumps(list(command), ensure_ascii=False))
+            )
     for tool in setup.tools:
         argv.extend(("--tool", tool))
     return BridgeLaunch(
@@ -3083,6 +3143,43 @@ if _HAS_TEXTUAL:
                 )
                 yield Checkbox("Git status", value=True, id="tool-status")
                 yield Checkbox("Git diff", value=True, id="tool-diff")
+                yield Checkbox(
+                    self._label("Запуск проверок", "Run checks"),
+                    value=True,
+                    id="tool-checks",
+                )
+                yield Checkbox(
+                    self._label(
+                        "Браузер: чтение (snapshot, скриншот, консоль, сеть)",
+                        "Browser: read (snapshot, screenshot, console, network)",
+                    ),
+                    value=True,
+                    id="tool-browser-read",
+                )
+                yield Checkbox(
+                    self._label(
+                        "Браузер: ввод (open, click, fill, select, press, close)",
+                        "Browser: input (open, click, fill, select, press, close)",
+                    ),
+                    value=True,
+                    id="tool-browser-input",
+                )
+                yield Checkbox(
+                    self._label(
+                        "Dev-сервер: статус и логи (только чтение)",
+                        "Dev server: status and logs (read-only)",
+                    ),
+                    value=True,
+                    id="tool-server-read",
+                )
+                yield Checkbox(
+                    self._label(
+                        "Dev-сервер: запуск и остановка (start:safe)",
+                        "Dev server: start and stop (start:safe)",
+                    ),
+                    value=True,
+                    id="tool-server-input",
+                )
                 yield Static(
                     self._label(
                         "Публичный доступ (как внешний агент дойдёт до KaroX)",
@@ -3188,16 +3285,43 @@ if _HAS_TEXTUAL:
                 )
                 return
             tool_ids = {
-                "tool-read": "karox.repo.read_file",
-                "tool-list": "karox.repo.list_files",
-                "tool-write": "karox.repo.write_file",
-                "tool-status": "karox.git.status",
-                "tool-diff": "karox.git.diff",
+                "tool-read": ("karox.repo.read_file",),
+                "tool-list": ("karox.repo.list_files",),
+                "tool-write": ("karox.repo.write_file",),
+                "tool-status": ("karox.git.status",),
+                "tool-diff": ("karox.git.diff",),
+                "tool-checks": ("karox.checks.run",),
+                "tool-browser-read": (
+                    "karox.browser.snapshot",
+                    "karox.browser.get_text",
+                    "karox.browser.console",
+                    "karox.browser.network_failures",
+                    "karox.browser.screenshot",
+                    "karox.artifact.get",
+                    "karox.artifact.read_image",
+                ),
+                "tool-browser-input": (
+                    "karox.browser.open",
+                    "karox.browser.click",
+                    "karox.browser.fill",
+                    "karox.browser.select",
+                    "karox.browser.press",
+                    "karox.browser.close",
+                ),
+                "tool-server-read": (
+                    "karox.dev_server.status",
+                    "karox.dev_server.logs",
+                ),
+                "tool-server-input": (
+                    "karox.dev_server.start",
+                    "karox.dev_server.stop",
+                ),
             }
             tools = tuple(
                 tool
-                for widget_id, tool in tool_ids.items()
+                for widget_id, tool_names in tool_ids.items()
                 if self.query_one(f"#{widget_id}", Checkbox).value
+                for tool in tool_names
             )
             if not tools:
                 self.query_one("#bridge-error", Label).update(
@@ -4196,10 +4320,13 @@ if _HAS_TEXTUAL:
                         or not all(isinstance(item, str) and item for item in decoded)
                     ):
                         raise ValueError
-                    self.verification = tuple(decoded)
+                    # ``self.verification`` is a set of approved commands (one
+                    # per tuple); the user's single /verify entry replaces the
+                    # whole set with that one command.
+                    self.verification = (tuple(decoded),)
                     self._write(
                         "[#b7c2b0]Команда проверки подтверждена:[/] "
-                        + escape(" ".join(self.verification))
+                        + escape(" ".join(self.verification[0]))
                     )
                 except (json.JSONDecodeError, ValueError):
                     self._write(
@@ -5621,15 +5748,31 @@ def run_tui(
     *,
     session_id: Optional[str] = None,
     repository: Optional[str] = None,
-    input_stream: Any = sys.stdin,
-    output_stream: Any = sys.stdout,
+    input_stream: Any = None,
+    output_stream: Any = None,
 ) -> int:
-    """Open the full-screen KaroX app, or line mode for redirected streams."""
+    """Open the full-screen KaroX app, or line mode for redirected streams.
+
+    The full-screen Textual UI launches when both standard streams are live
+    terminals (``isatty()``); redirected streams (pipes, ``StringIO`` in tests,
+    EOF) get the line-mode reader, which exits cleanly on EOF.
+
+    ``karox`` with no arguments reaches this through ``cli.main`` without
+    passing streams, so they are resolved against the *current* ``sys.stdin``
+    /``sys.stdout`` here rather than captured as default arguments. The
+    interactive decision is based on ``isatty()`` instead of object identity
+    with ``sys.stdin``/``sys.stdout``: identity breaks the moment a host
+    rebinds those streams between import and launch (some terminal wrappers,
+    the ``python -m`` entry path, and redirected hosts), which silently routed
+    a real interactive console to line mode and an immediate EOF exit.
+    """
     repo = Path(repository or os.getcwd()).expanduser().resolve()
+    if input_stream is None:
+        input_stream = sys.stdin
+    if output_stream is None:
+        output_stream = sys.stdout
     interactive = (
-        input_stream is sys.stdin
-        and output_stream is sys.stdout
-        and bool(getattr(input_stream, "isatty", lambda: False)())
+        bool(getattr(input_stream, "isatty", lambda: False)())
         and bool(getattr(output_stream, "isatty", lambda: False)())
     )
     if interactive and _HAS_TEXTUAL:

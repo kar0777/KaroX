@@ -312,6 +312,59 @@ class CoreRuntimeTests(unittest.TestCase):
             "é\n[karox: 2 bytes elided from the middle of this stream]\né",
         )
 
+    def test_output_in_a_legacy_code_page_is_decoded_not_deleted(self) -> None:
+        # ``security.child_process_environment`` forces UTF-8 on Python children,
+        # which covers the test runners and linters most verification commands
+        # use. It cannot cover a child whose startup KaroX does not control: a
+        # Windows compiler or ``javac`` writes through the console API in the
+        # host's OEM code page regardless of any environment variable.
+        #
+        # ``errors="ignore"`` used to be applied to that output, which *deleted*
+        # every byte it could not read rather than mangling it. A Cyrillic build
+        # failure therefore reached the agent as an empty string beside exit
+        # code 1, which is the worst possible shape: no reason to report and
+        # nothing to act on. Writing through ``stdout.buffer`` reproduces the
+        # non-UTF-8 child exactly, since raw writes ignore PYTHONIOENCODING.
+        payload = "ошибка сборки".encode("cp1251")
+        result = self.runtime._run(
+            [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({payload!r})"],
+            30.0,
+        )
+
+        self.assertEqual(result["stdout_bytes"], len(payload))
+        self.assertNotEqual(result["stdout"], "")
+        self.assertEqual(result["stdout_elided_bytes"], 0)
+
+    def test_decoding_a_legacy_code_page_keeps_the_elided_count_honest(self) -> None:
+        # The elided figure used to be derived by re-encoding the decoded text as
+        # UTF-8, which is only equal to the source length while the decode really
+        # was UTF-8. Under the legacy fallback a single source byte can become
+        # three UTF-8 bytes, so the same arithmetic would report a *negative*
+        # number of elided bytes beside a sha256 of the whole stream.
+        from karox import core
+
+        raw = "ошибка".encode("cp1251")
+        with patch.object(core, "_legacy_output_encodings", lambda: ("cp1251",)):
+            text, used = core._decode_captured_bytes(raw)
+
+        self.assertEqual(text, "ошибка")
+        self.assertEqual(used, len(raw))
+        self.assertLess(len(raw), len(text.encode("utf-8")))
+
+    def test_a_chunk_taken_from_mid_stream_drops_only_the_orphaned_bytes(self) -> None:
+        # The tail of a truncated stream can begin inside a multi-byte character.
+        # Those continuation bytes belong to a character whose lead byte is in the
+        # elided middle, so they are counted as elided rather than decoded into a
+        # replacement character the child never wrote.
+        from karox import core
+
+        text, used = core._decode_captured_bytes(
+            "🙂é".encode("utf-8")[2:], mid_stream_start=True
+        )
+
+        self.assertEqual(text, "é")
+        self.assertEqual(used, 2)
+
     def test_non_finite_check_timeouts_are_rejected_without_pending_intent(self) -> None:
         for index, timeout in enumerate((float("nan"), float("inf"), float("-inf"))):
             command = self.command(

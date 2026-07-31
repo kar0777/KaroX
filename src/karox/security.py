@@ -40,6 +40,20 @@ _SAFE_CHILD_ENVIRONMENT = frozenset(
         "TMPDIR",
         "USERPROFILE",
         "WINDIR",
+        # Browser/tool cache directory pointer. This is not a credential: it is
+        # only a filesystem path a verification command (e.g. a Playwright-based
+        # smoke test) uses to locate its own already-downloaded browser
+        # binaries. Without forwarding it, a hosted ``checks.run`` of
+        # ``npm run test:smoke`` falls back to the default per-user cache, misses
+        # the browser, and reports ``Executable doesn't exist`` even though the
+        # same command passes in a direct shell. It is path-only, never
+        # secret-shaped, and ``redact`` still scans its value for anything that
+        # matches a credential pattern before it is shown in a result.
+        # NOTE: deliberately NOT forwarding ``NODE_OPTIONS`` (can inject modules
+        # via ``--require``) or ``PLAYWRIGHT_DOWNLOAD_HOST`` (can redirect the
+        # browser-binary source): both are code-injection vectors a hosted
+        # allowlist must not hand to a child.
+        "PLAYWRIGHT_BROWSERS_PATH",
     }
 )
 
@@ -109,13 +123,35 @@ def redact_content(value: Any, *, secrets: Iterable[str] = ()) -> Any:
     return redact(value, secrets=secrets, patterns=False)
 
 
+"""Encoding forced on every guarded child, rather than inherited from the host.
+
+The captured output of a check is decoded as UTF-8 by the caller. A Python child
+that inherits a non-UTF-8 console code page -- the default on a Russian-locale
+Windows install, where it is cp866 -- writes its diagnostics in that code page
+instead, so the failing line the agent needs arrives as bytes the decoder cannot
+read. Forcing the child's side of the contract is the only fix that works for
+output KaroX does not control the formatting of.
+
+These are set rather than forwarded: an inherited ``PYTHONIOENCODING`` would put
+the host back in charge of an invariant the runtime depends on. Neither is a
+credential and neither can inject code, which is why they may be added here
+while ``NODE_OPTIONS`` may not.
+"""
+_FORCED_CHILD_ENCODING = {
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUTF8": "1",
+}
+
+
 def child_process_environment(
     source: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build a minimal environment instead of forwarding arbitrary host secrets."""
     values = os.environ if source is None else source
-    return {
+    environment = {
         key: value
         for key, value in values.items()
         if key.upper() in _SAFE_CHILD_ENVIRONMENT or key.upper().startswith("LC_")
     }
+    environment.update(_FORCED_CHILD_ENCODING)
+    return environment

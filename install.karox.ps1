@@ -91,21 +91,6 @@ function Set-KaroXPath {
     $env:Path = ((@($BinDir) + $currentItems) -join ";")
 }
 
-function Write-LegacyForwarder {
-    New-Item -ItemType Directory -Force -Path $LegacyBinDir | Out-Null
-    @'
-$ErrorActionPreference = "Stop"
-$target = Join-Path $env:LOCALAPPDATA "KaroX\bin\karox.ps1"
-if (!(Test-Path -LiteralPath $target)) { throw "KaroX compatibility launcher could not find the new installation." }
-& $target @args
-exit $LASTEXITCODE
-'@ | Set-Content -LiteralPath (Join-Path $LegacyBinDir "karox.ps1") -Encoding UTF8
-    @'
-@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\karox.ps1" %*
-'@ | Set-Content -LiteralPath (Join-Path $LegacyBinDir "karox.cmd") -Encoding ASCII
-}
-
 function Move-OutOf-AppDirectory {
     try {
         $current = [IO.Path]::GetFullPath((Get-Location).Path).TrimEnd('\')
@@ -219,31 +204,15 @@ function Promote-StagedApp {
     }
 }
 
-function Schedule-LegacyCleanup {
-    if (!(Test-Path -LiteralPath $LegacyConfigDir) -and !(Test-Path -LiteralPath $LegacyRuntimeDir)) { return }
-    $cleanup = Join-Path $env:TEMP ("karox-cleanup-" + [guid]::NewGuid().ToString("N") + ".ps1")
-    $legacyConfigEsc = $LegacyConfigDir.Replace("'", "''")
-    $legacyRuntimeEsc = $LegacyRuntimeDir.Replace("'", "''")
-    @"
-`$ErrorActionPreference = 'SilentlyContinue'
-for (`$i = 0; `$i -lt 30; `$i++) {
-    Start-Sleep -Seconds 2
-    `$busy = @(Get-CimInstance Win32_Process | Where-Object { `$_.ProcessId -ne `$PID -and `$_.CommandLine -like '*RepoPilotBridge*' })
-    if (`$busy.Count -eq 0) {
-        Remove-Item -LiteralPath '$legacyConfigEsc' -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath '$legacyRuntimeEsc') {
-            Get-ChildItem -LiteralPath '$legacyRuntimeEsc' -Force | Where-Object { `$_.Name -ne 'bin' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            `$legacyBin = Join-Path '$legacyRuntimeEsc' 'bin'
-            if (Test-Path -LiteralPath `$legacyBin) {
-                Get-ChildItem -LiteralPath `$legacyBin -Force | Where-Object { `$_.Name -notin @('karox.cmd','karox.ps1') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
-        break
+function Report-PreservedRollbackData {
+    $preserved = @()
+    if (Test-Path -LiteralPath $LegacyConfigDir) { $preserved += $LegacyConfigDir }
+    if (Test-Path -LiteralPath $LegacyRuntimeDir) { $preserved += $LegacyRuntimeDir }
+    if (Test-Path -LiteralPath $RollbackAppDir) { $preserved += $RollbackAppDir }
+    if ($preserved.Count -gt 0) {
+        Write-Host "Legacy and previous KaroX data was preserved for rollback:" -ForegroundColor Yellow
+        foreach ($path in $preserved) { Write-Host "  $path" -ForegroundColor Yellow }
     }
-}
-Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-"@ | Set-Content -LiteralPath $cleanup -Encoding UTF8
-    Start-Process powershell -WindowStyle Hidden -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $cleanup) | Out-Null
 }
 
 Write-Host ""
@@ -279,7 +248,7 @@ if (!$ValidateOnly) {
     & $PythonExe -m pip install -r (Join-Path $Root "requirements.txt")
     if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
     & $PythonExe -m pip install --upgrade --no-deps $Root
-    if ($LASTEXITCODE -ne 0) { throw "KaroX vNext package installation failed." }
+    if ($LASTEXITCODE -ne 0) { throw "KaroX 5 package installation failed." }
 }
 
 Recover-PendingRollback
@@ -306,9 +275,6 @@ $cloudflaredRemedy = "Install it later with 'winget install --id Cloudflare.clou
 if (!(Test-Path -LiteralPath $newCloudflared) -and !$cloudflaredOnPath) {
     $answer = Read-Host "cloudflared (Cloudflare Tunnel) was not found. Download it automatically from github.com/cloudflare/cloudflared (~60 MB)? [Y/n]"
     if (!$answer -or $answer -match "^[Yy]") {
-        # Downloaded beside the target and moved only once it is whole: a transfer
-        # interrupted straight onto the target leaves a truncated cloudflared.exe,
-        # which is worse than none -- KaroX would find it and fail to run it.
         $partial = "$newCloudflared.part"
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -339,13 +305,6 @@ $AppRoot = Join-Path $env:LOCALAPPDATA "KaroX"
 $env:KAROX_CONFIG_DIR = Join-Path $env:APPDATA "KaroX"
 $env:KAROX_RUNTIME_DIR = $AppRoot
 $Bin = Join-Path $AppRoot "bin"
-$LegacyRoot = Join-Path $env:LOCALAPPDATA "RepoPilotBridge"
-$LegacyBin = Join-Path $LegacyRoot "bin"
-$legacyNormalized = $LegacyBin.TrimEnd('\')
-$legacyInCurrentPath = @((([string]$env:Path) -split ';') | Where-Object { ([string]$_).Trim().Trim('"').TrimEnd('\') -ieq $legacyNormalized }).Count -gt 0
-if (!$legacyInCurrentPath -and (Test-Path -LiteralPath $LegacyRoot)) {
-    try { Remove-Item -LiteralPath $LegacyRoot -Recurse -Force -ErrorAction Stop } catch {}
-}
 $env:Path = "$Bin;" + $env:Path
 & (Join-Path $AppRoot ".venv\Scripts\python.exe") -m karox.cli @args
 exit $LASTEXITCODE
@@ -371,7 +330,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\KaroX\bin\ka
 pause
 '@ | Set-Content -LiteralPath $DesktopBat -Encoding ASCII
 
-Write-LegacyForwarder
 Set-KaroXPath
 
 try {
@@ -387,12 +345,6 @@ Write-Host "Application : $AppDir"
 Write-Host "Runtime     : $RuntimeDir"
 Write-Host "Config      : $ConfigDir"
 
-# "Command: karox" was printed unconditionally, and it is a claim about PATH
-# resolution rather than about this installer. The bin directory is put first in
-# the USER path, but Windows searches the MACHINE path before it -- so an older
-# `karox` left in any machine-wide directory (a pip console script in
-# Python\Scripts is the common one) silently keeps winning, and the user runs a
-# different program than the one just installed. Report what actually resolves.
 $resolved = $null
 try {
     Refresh-Path
@@ -410,11 +362,6 @@ if (!$resolved) {
     Write-Host "              Remove the shadowing file, or run the full path above." -ForegroundColor Yellow
 }
 
-# The PATH entry is written to the registry, but a process only ever inherits its
-# environment from its parent. A terminal opened from an Explorer session that
-# started before this install therefore still has the old PATH and answers
-# `karox` with CommandNotFoundException -- which reads as a failed installation
-# when nothing failed. Say so, and give the two ways out that need no sign-out.
 Write-Host ""
 Write-Host "A terminal that is already open will not see the new PATH yet." -ForegroundColor Yellow
 Write-Host "In that terminal, either refresh it:" -ForegroundColor Yellow
@@ -423,19 +370,13 @@ Write-Host "or run the launcher directly:" -ForegroundColor Yellow
 Write-Host "  & `"$KaroXCmd`""
 Write-Host "The KaroX shortcut on the Desktop needs neither." -ForegroundColor Yellow
 Write-Host ""
-Schedule-LegacyCleanup
+Report-PreservedRollbackData
 
 if ($Start) {
     powershell -NoProfile -ExecutionPolicy Bypass -File $KaroXPs1
-    $startCode = $LASTEXITCODE
-    if ($startCode -eq 0 -and (Test-Path -LiteralPath $RollbackAppDir)) {
-        Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    exit $startCode
+    exit $LASTEXITCODE
 }
 & $PythonExe (Join-Path $AppDir "scripts\product_doctor.py") --root $AppDir
 $doctorCode = $LASTEXITCODE
-if ($doctorCode -eq 0 -and (Test-Path -LiteralPath $RollbackAppDir)) {
-    Remove-Item -LiteralPath $RollbackAppDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+Report-PreservedRollbackData
 exit $doctorCode

@@ -1,4 +1,4 @@
-"""Command-line entry point for the KaroX vNext foundation."""
+"""Command-line entry point for the KaroX 5 hybrid runtime."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
@@ -40,9 +40,16 @@ from .ecosystem import (
 from .hosted_bridge import (
     CORE_TOOL_NAMES,
     DEFAULT_HOSTED_DEADLINE_SECONDS,
+    HOSTED_EXTRA_TOOL_NAMES,
+    KNOWN_HOSTED_TOOL_NAMES,
     CompositeHostedBridge,
     CoreToolBridge,
     HostedBridgeError,
+)
+from .hosted_tools_runtime import (
+    HostedToolsRuntime,
+    ManagedServerProfile,
+    default_server_profiles,
 )
 from . import __version__
 from .migration import MigrationError, migrate_legacy_metadata
@@ -88,7 +95,7 @@ from .project_context import discover_project_context
 from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
 from .proxy import McpProxy
-from .proxy_server import build_proxy_asgi_app
+from .proxy_server import build_proxy_asgi_app, normalize_host
 from .provider_factory import ProviderFactory
 from .provider_presets import provider_preset, provider_presets
 from .providers import (
@@ -122,13 +129,20 @@ from .skills import (
     skill_system_prompt,
     validate_selection,
 )
+from .tailscale import tailscale_doctor
 from .web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
     WRITE_WEB_TOOLS,
+    WEB_BRIDGE_PROFILES,
     WebBridgeConnectConfig,
     WebBridgeLaunchError,
     reap_orphaned_web_bridges,
     run_web_bridge,
+    web_bridge_diagnostics,
+)
+from .web_bridge_profiles import (
+    SavedWebBridgeProfile,
+    WebBridgeProfileStore,
 )
 
 
@@ -137,12 +151,40 @@ def _json(value: Any) -> None:
 
 
 def _verification_command(value: str) -> tuple[str, ...]:
-    try:
-        decoded = json.loads(value)
-    except (TypeError, json.JSONDecodeError) as exc:
+    """Parse an approved command across PowerShell native argv boundaries."""
+    candidates = [value]
+    if "\\\"" in value:
+        try:
+            unescaped = json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(unescaped, str):
+                candidates.append(unescaped)
+
+    decoded: Any = None
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+            last_error = None
+            break
+        except (TypeError, json.JSONDecodeError) as exc:
+            last_error = exc
+
+    stripped = value.strip()
+    if last_error is not None and stripped.startswith("[") and stripped.endswith("]"):
+        inner = stripped[1:-1]
+        parts = [item.strip() for item in inner.split(",")]
+        if inner and parts and all(parts) and not any('"' in item for item in parts):
+            decoded = parts
+            last_error = None
+
+    if last_error is not None:
         raise ValueError(
-            "verification command must be a JSON array of strings"
-        ) from exc
+            "verification command must be a JSON array of strings; in Windows "
+            "PowerShell escape embedded quotes with backslashes"
+        ) from last_error
     if (
         not isinstance(decoded, list)
         or not decoded
@@ -151,6 +193,90 @@ def _verification_command(value: str) -> tuple[str, ...]:
     ):
         raise ValueError("verification command must contain 1-100 non-empty strings")
     return tuple(decoded)
+
+
+def _cleanup_hosted_runtimes(runtimes: Sequence[Any], session_id: str) -> None:
+    """Tear down browser sessions and stop dev servers owned by a bridge.
+
+    ``bridge serve`` builds a list of runtimes composed into one bridge; when
+    uvicorn returns (Ctrl+C or a fatal error), every runtime that owns a
+    browser or a managed process must release them so the bridge exit leaves
+    no orphaned Chromium or dev server behind.
+    """
+    if not session_id:
+        return
+    for runtime in runtimes:
+        cleanup = getattr(runtime, "cleanup_session", None)
+        if not callable(cleanup):
+            continue
+        try:
+            cleanup()
+        except Exception:
+            # Teardown is best-effort: a failing stop must not mask the original
+            # exit reason, and the launcher reaps orphans on the next run too.
+            pass
+
+
+def _server_profile(value: str) -> ManagedServerProfile:
+    """Parse a user-approved dev-server profile across PowerShell argv boundaries.
+
+    Mirrors :func:`_verification_command`: the JSON object may arrive with its
+    quotes escaped by PowerShell, so both the raw and unescaped forms are
+    tried.  The caller has already typed it as a ``str``; nothing else is
+    accepted because a server profile carries an executable argv.
+    """
+    candidates = [value]
+    if "\\\"" in value:
+        try:
+            unescaped = json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(unescaped, str):
+                candidates.append(unescaped)
+    decoded: Any = None
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+            last_error = None
+            break
+        except (TypeError, json.JSONDecodeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise ValueError(
+            "server profile must be a JSON object; in Windows PowerShell escape "
+            "embedded quotes with backslashes"
+        ) from last_error
+    if not isinstance(decoded, dict):
+        raise ValueError("server profile must be a JSON object")
+    name = decoded.get("name")
+    argv = decoded.get("argv")
+    if not isinstance(name, str) or not name:
+        raise ValueError("server profile requires a non-empty name")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) and item for item in argv)
+    ):
+        raise ValueError("server profile argv must be a non-empty string array")
+    env_keys = decoded.get("env_keys", [])
+    if not isinstance(env_keys, list):
+        env_keys = []
+    env_allowlist = decoded.get("env_allowlist", [])
+    if not isinstance(env_allowlist, list):
+        env_allowlist = []
+    # The public form persists env *keys* (never values); rebuild a value-less
+    # env map for the runtime object, which validates the rest.
+    env = {str(k): "" for k in env_keys if isinstance(k, str)}
+    return ManagedServerProfile(
+        name=name,
+        argv=tuple(str(item) for item in argv),
+        env=env,
+        env_allowlist=frozenset(str(item) for item in env_allowlist),
+        host_hint=str(decoded.get("host_hint", "127.0.0.1")),
+        ready_url=decoded.get("ready_url"),
+    )
 
 
 def _record_summary(record: SessionRecord) -> dict[str, Any]:
@@ -196,7 +322,7 @@ def _parser() -> argparse.ArgumentParser:
     paths = commands.add_parser("paths", help="show resolved application paths")
     paths.add_argument("--json", action="store_true")
 
-    session = commands.add_parser("session", help="manage durable vNext sessions")
+    session = commands.add_parser("session", help="manage durable KaroX sessions")
     sessions = session.add_subparsers(dest="session_command", required=True)
     create = sessions.add_parser("create", help="create a repository-bound session")
     create.add_argument("--repository", type=Path, default=Path.cwd())
@@ -626,19 +752,139 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     bridge_doctor.add_argument("--json", action="store_true")
+    bridge_saved = bridge_commands.add_parser(
+        "saved", help="create and manage reusable secret-free connection profiles"
+    )
+    bridge_saved_commands = bridge_saved.add_subparsers(
+        dest="bridge_saved_command", required=True
+    )
+    bridge_saved_list = bridge_saved_commands.add_parser(
+        "list", help="list saved connection profiles"
+    )
+    bridge_saved_list.add_argument("--json", action="store_true")
+    bridge_saved_show = bridge_saved_commands.add_parser(
+        "show", help="show one saved connection profile"
+    )
+    bridge_saved_show.add_argument("name")
+    bridge_saved_show.add_argument("--json", action="store_true")
+    bridge_saved_delete = bridge_saved_commands.add_parser(
+        "delete", help="delete one saved connection profile"
+    )
+    bridge_saved_delete.add_argument("name")
+    bridge_saved_delete.add_argument("--json", action="store_true")
+    bridge_saved_validate = bridge_saved_commands.add_parser(
+        "validate", help="validate a saved profile and print effective diagnostics"
+    )
+    bridge_saved_validate.add_argument("name")
+    bridge_saved_validate.add_argument("--repository", type=Path)
+    bridge_saved_validate.add_argument("--json", action="store_true")
+
+    bridge_saved_create = bridge_saved_commands.add_parser(
+        "create", help="create a saved connection profile"
+    )
+    bridge_saved_create.add_argument("name")
+    bridge_saved_create.add_argument(
+        "--target-profile",
+        choices=WEB_BRIDGE_PROFILES,
+        default="chatgpt-web",
+    )
+    bridge_saved_create.add_argument("--repository", type=Path)
+    bridge_saved_create.add_argument(
+        "--tool", action="append", choices=tuple(sorted(CORE_TOOL_NAMES))
+    )
+    bridge_saved_create.add_argument("--write", action="store_true")
+    bridge_saved_create.add_argument(
+        "--access-profile",
+        choices=[item.value for item in AccessProfile],
+    )
+    bridge_saved_create.add_argument(
+        "--tunnel",
+        choices=("cloudflare", "tailscale", "custom"),
+        default="cloudflare",
+    )
+    bridge_saved_create.add_argument("--public-url")
+    bridge_saved_create.add_argument("--language", choices=("en", "ru"), default="en")
+    bridge_saved_create.add_argument("--port", type=int, default=8765)
+    bridge_saved_create.add_argument(
+        "--deadline-preset",
+        choices=("standard", "long", "full-suite"),
+    )
+    bridge_saved_create.add_argument("--deadline-seconds", type=float)
+    bridge_saved_create.add_argument(
+        "--tunnel-timeout-seconds", type=float, default=30.0
+    )
+    bridge_saved_create.add_argument(
+        "--verification-command", action="append", default=[]
+    )
+    bridge_saved_create.add_argument(
+        "--server-profile",
+        action="append",
+        default=[],
+        help=(
+            "user-approved dev-server profile as a JSON object "
+            "({name, argv, env_keys, env_allowlist, host_hint}); repeatable"
+        ),
+    )
+    bridge_saved_create.add_argument("--json", action="store_true")
+
+    bridge_saved_edit = bridge_saved_commands.add_parser(
+        "edit", help="change selected fields of a saved connection profile"
+    )
+    bridge_saved_edit.add_argument("name")
+    bridge_saved_edit.add_argument(
+        "--target-profile", choices=WEB_BRIDGE_PROFILES
+    )
+    bridge_saved_edit.add_argument("--repository", type=Path)
+    bridge_saved_edit.add_argument("--clear-repository", action="store_true")
+    bridge_saved_edit.add_argument(
+        "--tool", action="append", choices=tuple(sorted(CORE_TOOL_NAMES))
+    )
+    bridge_saved_edit.add_argument("--write", action="store_true")
+    bridge_saved_edit.add_argument(
+        "--access-profile", choices=[item.value for item in AccessProfile]
+    )
+    bridge_saved_edit.add_argument(
+        "--tunnel", choices=("cloudflare", "tailscale", "custom")
+    )
+    bridge_saved_edit.add_argument("--public-url")
+    bridge_saved_edit.add_argument("--clear-public-url", action="store_true")
+    bridge_saved_edit.add_argument("--language", choices=("en", "ru"))
+    bridge_saved_edit.add_argument("--port", type=int)
+    bridge_saved_edit.add_argument(
+        "--deadline-preset", choices=("standard", "long", "full-suite")
+    )
+    bridge_saved_edit.add_argument("--deadline-seconds", type=float)
+    bridge_saved_edit.add_argument("--tunnel-timeout-seconds", type=float)
+    bridge_saved_edit.add_argument("--verification-command", action="append")
+    bridge_saved_edit.add_argument(
+        "--server-profile",
+        action="append",
+        help=(
+            "user-approved dev-server profile as a JSON object; pass once to "
+            "replace the list"
+        ),
+    )
+    bridge_saved_edit.add_argument(
+        "--clear-server-profiles", action="store_true"
+    )
+    bridge_saved_edit.add_argument(
+        "--clear-verification-commands", action="store_true"
+    )
+    bridge_saved_edit.add_argument("--json", action="store_true")
+
     bridge_connect = bridge_commands.add_parser(
         "connect",
         help="launch a complete ChatGPT or Claude web bridge",
     )
     bridge_connect.add_argument(
         "profile",
-        choices=("chatgpt-web", "claude-web"),
+        nargs="?",
+        choices=WEB_BRIDGE_PROFILES,
     )
     bridge_connect.add_argument(
-        "--repository",
-        type=Path,
-        default=Path.cwd(),
+        "--saved", help="launch a reusable profile created by `karox bridge saved`"
     )
+    bridge_connect.add_argument("--repository", type=Path)
     bridge_connect.add_argument("--session-id")
     bridge_connect.add_argument(
         "--access-profile",
@@ -647,8 +893,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_connect.add_argument(
         "--tunnel",
-        choices=("cloudflare", "custom"),
-        default="cloudflare",
+        choices=("cloudflare", "tailscale", "custom"),
     )
     bridge_connect.add_argument(
         "--public-url",
@@ -658,11 +903,14 @@ def _parser() -> argparse.ArgumentParser:
         "--cloudflared",
         help="explicit cloudflared executable path",
     )
-    bridge_connect.add_argument("--port", type=int, default=8765)
+    bridge_connect.add_argument(
+        "--tailscale", help="explicit tailscale executable path"
+    )
+    bridge_connect.add_argument("--port", type=int)
     bridge_connect.add_argument(
         "--tool",
         action="append",
-        choices=tuple(sorted(CORE_TOOL_NAMES)),
+        choices=tuple(sorted(KNOWN_HOSTED_TOOL_NAMES)),
         help="replace the safe default tool set (repeatable)",
     )
     bridge_connect.add_argument(
@@ -673,25 +921,35 @@ def _parser() -> argparse.ArgumentParser:
     bridge_connect.add_argument(
         "--verification-command",
         action="append",
-        default=[],
         help=(
             "user-approved checks.run command as a JSON array; required when "
             "karox.checks.run is exposed"
         ),
     )
     bridge_connect.add_argument(
-        "--deadline-seconds",
-        type=float,
-        default=DEFAULT_HOSTED_DEADLINE_SECONDS,
+        "--server-profile",
+        action="append",
         help=(
-            "ceiling on one tool call, including checks.run; thirty seconds is "
-            "shorter than the test suite of any real repository"
+            "user-approved dev-server profile as a JSON object "
+            "({name, argv, env_keys, env_allowlist, host_hint}); required when "
+            "karox.dev_server.start is exposed (repeatable)"
         ),
     )
     bridge_connect.add_argument(
-        "--tunnel-timeout-seconds",
+        "--deadline-preset",
+        choices=("standard", "long", "full-suite"),
+    )
+    bridge_connect.add_argument(
+        "--deadline-seconds",
         type=float,
-        default=30.0,
+        help="effective ceiling on one tool call, including checks.run",
+    )
+    bridge_connect.add_argument("--tunnel-timeout-seconds", type=float)
+    bridge_connect.add_argument("--language", choices=("en", "ru"))
+    bridge_connect.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="print effective machine-readable diagnostics without launching",
     )
     bridge_serve = bridge_commands.add_parser(
         "serve", help="serve selected Core/MCP tools over authenticated HTTP"
@@ -712,7 +970,7 @@ def _parser() -> argparse.ArgumentParser:
         "--tool",
         action="append",
         default=[],
-        choices=tuple(sorted(CORE_TOOL_NAMES)),
+        choices=tuple(sorted(KNOWN_HOSTED_TOOL_NAMES)),
         help="built-in KaroX Core tool to expose (repeatable)",
     )
     bridge_serve.add_argument(
@@ -730,12 +988,30 @@ def _parser() -> argparse.ArgumentParser:
             "karox.checks.run is exposed"
         ),
     )
+    bridge_serve.add_argument(
+        "--server-profile",
+        action="append",
+        default=[],
+        help=(
+            "user-approved dev-server profile as a JSON object "
+            "({name, argv, env_keys, env_allowlist, host_hint}); required when "
+            "karox.dev_server.start is exposed (repeatable)"
+        ),
+    )
     bridge_serve.add_argument("--credential", required=True)
     bridge_serve.add_argument(
         "--public-url",
         help=(
             "stable public HTTPS origin for OAuth web profiles, for example "
             "https://karox.example.com"
+        ),
+    )
+    bridge_serve.add_argument(
+        "--allowed-redirect-hosts",
+        help=(
+            "comma-separated exact client hosts a strict OAuth profile may "
+            "redirect authorization codes to (hyperagent-web pins "
+            "hyperagent.com); leave empty for the permissive default"
         ),
     )
     bridge_serve.add_argument("--host", default="127.0.0.1")
@@ -787,6 +1063,82 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_credential_revoke.add_argument("name")
     bridge_credential_revoke.add_argument("--json", action="store_true")
+
+    # `karox connect` is the one-command path: it launches a complete ChatGPT,
+    # Claude, or HyperAgent web bridge with Tailscale by default and brings
+    # Tailscale online (restarting its service if needed) before publishing.
+    # `bridge connect` stays the fully-specified form; this one just chooses the
+    # sensible defaults so a user types one word, not eight flags.
+    connect = commands.add_parser(
+        "connect",
+        help="one-command web-bridge launch (ChatGPT/Claude/HyperAgent + Tailscale)",
+    )
+    connect.add_argument(
+        "connector",
+        nargs="?",
+        choices=("chatgpt", "claude", "hyperagent"),
+        default="chatgpt",
+        help="target connector (defaults to chatgpt)",
+    )
+    connect.add_argument("--repository", type=Path)
+    connect.add_argument("--session-id")
+    connect.add_argument(
+        "--access-profile",
+        choices=[item.value for item in AccessProfile],
+        help="defaults to read_only, or workspace_write with --write",
+    )
+    connect.add_argument(
+        "--tunnel",
+        choices=("cloudflare", "tailscale", "custom"),
+        default="tailscale",
+        help="defaults to tailscale (stable URL); cloudflare is ephemeral",
+    )
+    connect.add_argument(
+        "--public-url",
+        help="public HTTPS origin when --tunnel custom is selected",
+    )
+    connect.add_argument(
+        "--cloudflared", help="explicit cloudflared executable path"
+    )
+    connect.add_argument(
+        "--tailscale", help="explicit tailscale executable path"
+    )
+    connect.add_argument("--port", type=int)
+    connect.add_argument(
+        "--tool",
+        action="append",
+        choices=tuple(sorted(KNOWN_HOSTED_TOOL_NAMES)),
+        help="replace the safe default tool set (repeatable)",
+    )
+    connect.add_argument(
+        "--write",
+        action="store_true",
+        help="add repository edit and write tools",
+    )
+    connect.add_argument(
+        "--verification-command",
+        action="append",
+        help=(
+            "user-approved checks.run command as a JSON array; required when "
+            "karox.checks.run is exposed"
+        ),
+    )
+    connect.add_argument(
+        "--deadline-preset",
+        choices=("standard", "long", "full-suite"),
+    )
+    connect.add_argument(
+        "--deadline-seconds",
+        type=float,
+        help="effective ceiling on one tool call, including checks.run",
+    )
+    connect.add_argument("--tunnel-timeout-seconds", type=float)
+    connect.add_argument("--language", choices=("en", "ru"))
+    connect.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="print effective machine-readable diagnostics without launching",
+    )
 
     pack = commands.add_parser("pack", help="manage installable KaroX Packs")
     pack_commands = pack.add_subparsers(dest="pack_command", required=True)
@@ -926,7 +1278,7 @@ def _parser() -> argparse.ArgumentParser:
         help="write sanitized metadata; default is dry-run",
     )
     migrate.add_argument("--json", action="store_true")
-    doctor = commands.add_parser("doctor", help="run aggregate vNext diagnostics")
+    doctor = commands.add_parser("doctor", help="run aggregate KaroX diagnostics")
     doctor.add_argument("--json", action="store_true")
     return parser
 
@@ -1749,12 +2101,231 @@ def _handle_mcp(args: argparse.Namespace) -> int:
     return _handle_mcp_call(args)
 
 
-def _handle_bridge(args: argparse.Namespace) -> int:
-    if args.bridge_command == "connect":
-        tools = tuple(args.tool) if args.tool else DEFAULT_WEB_TOOLS
-        if args.write:
-            tools = tuple(dict.fromkeys((*tools, *WRITE_WEB_TOOLS)))
-        access_profile = (
+_WEB_BRIDGE_DEADLINE_PRESETS = {
+    "standard": DEFAULT_HOSTED_DEADLINE_SECONDS,
+    "long": 1800.0,
+    "full-suite": 3600.0,
+}
+
+# `karox connect` takes the short connector name a user types and maps it to the
+# full web-bridge profile that the launcher expects. Keeping the mapping in one
+# place means the parser choices and the handler cannot drift.
+_CONNECTOR_PROFILES = {
+    "chatgpt": "chatgpt-web",
+    "claude": "claude-web",
+    "hyperagent": "hyperagent-web",
+}
+
+
+def _web_bridge_deadline(
+    explicit: Optional[float],
+    preset: Optional[str],
+    *,
+    fallback: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
+) -> float:
+    if explicit is not None and preset is not None:
+        raise ValueError("choose either --deadline-seconds or --deadline-preset")
+    if explicit is not None:
+        return float(explicit)
+    if preset is not None:
+        return _WEB_BRIDGE_DEADLINE_PRESETS[preset]
+    return float(fallback)
+
+
+def _web_bridge_tools(
+    selected: Optional[Sequence[str]],
+    *,
+    write: bool,
+    fallback: Sequence[str] = DEFAULT_WEB_TOOLS,
+) -> tuple[str, ...]:
+    tools = tuple(selected) if selected else tuple(fallback)
+    if write:
+        tools = tuple(dict.fromkeys((*tools, *WRITE_WEB_TOOLS)))
+    return tools
+
+
+def _web_bridge_repository(value: Optional[Path], saved: Optional[str] = None) -> Path:
+    repository = value or (Path(saved) if saved else Path.cwd())
+    resolved = repository.expanduser().resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("web bridge repository must be a directory")
+    return resolved
+
+
+def _saved_profile_connect_config(
+    profile: SavedWebBridgeProfile,
+    *,
+    repository: Optional[Path] = None,
+    session_id: Optional[str] = None,
+    tool: Optional[Sequence[str]] = None,
+    write: bool = False,
+    access_profile: Optional[str] = None,
+    tunnel: Optional[str] = None,
+    public_url: Optional[str] = None,
+    cloudflared: Optional[str] = None,
+    tailscale: Optional[str] = None,
+    port: Optional[int] = None,
+    verification_command: Optional[Sequence[str]] = None,
+    server_profile: Optional[Sequence[str]] = None,
+    deadline_seconds: Optional[float] = None,
+    deadline_preset: Optional[str] = None,
+    tunnel_timeout_seconds: Optional[float] = None,
+    language: Optional[str] = None,
+) -> WebBridgeConnectConfig:
+    effective_tunnel = tunnel or profile.tunnel
+    effective_public_url = public_url
+    if effective_public_url is None and effective_tunnel == "custom":
+        effective_public_url = profile.public_url
+    commands = (
+        tuple(_verification_command(value) for value in verification_command)
+        if verification_command is not None
+        else profile.verification_commands
+    )
+    if server_profile is not None:
+        profiles = tuple(_server_profile(value) for value in server_profile)
+    else:
+        # Rebuild the persisted secret-free dicts into runtime objects so the
+        # connect config validates them the same way a direct CLI profile does.
+        profiles = tuple(
+            ManagedServerProfile(
+                name=str(item["name"]),
+                argv=tuple(str(arg) for arg in item["argv"]),
+                env={str(k): "" for k in (item.get("env_keys") or [])},
+                env_allowlist=frozenset(str(k) for k in (item.get("env_allowlist") or [])),
+                host_hint=str(item.get("host_hint", "127.0.0.1")),
+                ready_url=item.get("ready_url"),
+            )
+            for item in profile.server_profiles
+        )
+    tools = _web_bridge_tools(tool, write=write, fallback=profile.tools)
+    effective_access = (
+        AccessProfile(access_profile)
+        if access_profile
+        else (
+            AccessProfile.WORKSPACE_WRITE
+            if write
+            else profile.access_profile
+        )
+    )
+    return WebBridgeConnectConfig(
+        profile=profile.target_profile,
+        repository=_web_bridge_repository(repository, profile.repository),
+        port=port if port is not None else profile.port,
+        tools=tools,
+        session_id=session_id,
+        access_profile=effective_access,
+        tunnel=effective_tunnel,
+        public_url=effective_public_url,
+        cloudflared=cloudflared,
+        tailscale=tailscale,
+        tunnel_timeout_seconds=(
+            tunnel_timeout_seconds
+            if tunnel_timeout_seconds is not None
+            else profile.tunnel_timeout_seconds
+        ),
+        deadline_seconds=_web_bridge_deadline(
+            deadline_seconds,
+            deadline_preset,
+            fallback=profile.deadline_seconds,
+        ),
+        verification_commands=commands,
+        server_profiles=profiles,
+        language=language or profile.language,
+        saved_profile_name=profile.name,
+    )
+
+
+def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
+    if args.profile is None:
+        raise ValueError("bridge connect requires PROFILE or --saved NAME")
+    commands = tuple(
+        _verification_command(value) for value in (args.verification_command or [])
+    )
+    tools = _web_bridge_tools(args.tool, write=args.write)
+    profiles = tuple(
+        _server_profile(value) for value in (args.server_profile or [])
+    )
+    # If the caller exposed karox.dev_server.start but passed no
+    # --server-profile, supply the bundled safe defaults (start:safe with
+    # FACEBOOK_LIVE_ENABLED=false) so the connect command stays one-liner.
+    if "karox.dev_server.start" in tools and not profiles:
+        profiles = default_server_profiles()
+    access = (
+        AccessProfile(args.access_profile)
+        if args.access_profile
+        else (
+            AccessProfile.WORKSPACE_WRITE
+            if args.write
+            else AccessProfile.READ_ONLY
+        )
+    )
+    return WebBridgeConnectConfig(
+        profile=args.profile,
+        repository=_web_bridge_repository(args.repository),
+        port=args.port if args.port is not None else 8765,
+        tools=tools,
+        session_id=args.session_id,
+        access_profile=access,
+        tunnel=args.tunnel or "cloudflare",
+        public_url=args.public_url,
+        cloudflared=args.cloudflared,
+        tailscale=args.tailscale,
+        tunnel_timeout_seconds=(
+            args.tunnel_timeout_seconds
+            if args.tunnel_timeout_seconds is not None
+            else 30.0
+        ),
+        deadline_seconds=_web_bridge_deadline(
+            args.deadline_seconds, args.deadline_preset
+        ),
+        verification_commands=commands,
+        server_profiles=profiles,
+        language=(
+            args.language
+            or (
+                "ru"
+                if os.environ.get("KAROX_UI_LANGUAGE", "en").lower().startswith("ru")
+                else "en"
+            )
+        ),
+    )
+
+
+def _handle_bridge_saved(args: argparse.Namespace) -> int:
+    store = WebBridgeProfileStore()
+    command = args.bridge_saved_command
+    if command == "list":
+        payload: Any = [profile.to_dict() for profile in store.list()]
+    elif command == "show":
+        payload = store.get(args.name).to_dict()
+    elif command == "delete":
+        payload = {
+            "status": "deleted",
+            "profile": store.delete(args.name).to_dict(),
+        }
+    elif command == "validate":
+        profile = store.get(args.name)
+        config = _saved_profile_connect_config(
+            profile, repository=args.repository
+        )
+        payload = {
+            "status": "ok",
+            "profile": profile.to_dict(),
+            "diagnostics": web_bridge_diagnostics(config),
+        }
+        if config.tunnel == "tailscale":
+            payload["tailscale"] = tailscale_doctor()
+    elif command == "create":
+        commands = tuple(
+            _verification_command(value) for value in args.verification_command
+        )
+        tools = _web_bridge_tools(args.tool, write=args.write)
+        profiles = tuple(
+            _server_profile(value) for value in (args.server_profile or [])
+        )
+        if "karox.dev_server.start" in tools and not profiles:
+            profiles = default_server_profiles()
+        access = (
             AccessProfile(args.access_profile)
             if args.access_profile
             else (
@@ -1763,22 +2334,213 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 else AccessProfile.READ_ONLY
             )
         )
-        return run_web_bridge(
-            WebBridgeConnectConfig(
-                profile=args.profile,
+        repository = (
+            str(_web_bridge_repository(args.repository))
+            if args.repository is not None
+            else None
+        )
+        profile = SavedWebBridgeProfile(
+            name=args.name,
+            target_profile=args.target_profile,
+            repository=repository,
+            tools=tools,
+            verification_commands=commands,
+            server_profiles=tuple(p.to_public_dict() for p in profiles),
+            deadline_seconds=_web_bridge_deadline(
+                args.deadline_seconds, args.deadline_preset
+            ),
+            tunnel=args.tunnel,
+            public_url=args.public_url,
+            language=args.language,
+            access_profile=access,
+            port=args.port,
+            tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+        )
+        store.put(profile, replace_existing=False)
+        payload = {
+            "status": "created",
+            "profile": profile.to_dict(),
+            "launch_command": f"karox bridge connect --saved {profile.name}",
+        }
+    else:
+        current = store.get(args.name)
+        if args.clear_repository and args.repository is not None:
+            raise ValueError("choose --repository or --clear-repository")
+        if args.clear_public_url and args.public_url is not None:
+            raise ValueError("choose --public-url or --clear-public-url")
+        if args.clear_verification_commands and args.verification_command is not None:
+            raise ValueError(
+                "choose --verification-command or --clear-verification-commands"
+            )
+        if args.clear_server_profiles and args.server_profile is not None:
+            raise ValueError(
+                "choose --server-profile or --clear-server-profiles"
+            )
+        repository = current.repository
+        if args.clear_repository:
+            repository = None
+        elif args.repository is not None:
+            repository = str(_web_bridge_repository(args.repository))
+        tools = _web_bridge_tools(
+            args.tool,
+            write=args.write,
+            fallback=current.tools,
+        )
+        access = (
+            AccessProfile(args.access_profile)
+            if args.access_profile
+            else (
+                AccessProfile.WORKSPACE_WRITE
+                if args.write
+                else current.access_profile
+            )
+        )
+        commands = current.verification_commands
+        if args.clear_verification_commands:
+            commands = ()
+        elif args.verification_command is not None:
+            commands = tuple(
+                _verification_command(value) for value in args.verification_command
+            )
+        profiles = current.server_profiles
+        if args.clear_server_profiles:
+            profiles = ()
+        elif args.server_profile is not None:
+            profiles = tuple(
+                _server_profile(value).to_public_dict()
+                for value in args.server_profile
+            )
+        if "karox.dev_server.start" in tools and not profiles:
+            profiles = tuple(p.to_public_dict() for p in default_server_profiles())
+        effective_tunnel = args.tunnel or current.tunnel
+        public_url = current.public_url
+        if args.clear_public_url or effective_tunnel != "custom":
+            public_url = None
+        elif args.public_url is not None:
+            public_url = args.public_url
+        updated = replace(
+            current,
+            target_profile=args.target_profile or current.target_profile,
+            repository=repository,
+            tools=tools,
+            verification_commands=commands,
+            server_profiles=profiles,
+            deadline_seconds=_web_bridge_deadline(
+                args.deadline_seconds,
+                args.deadline_preset,
+                fallback=current.deadline_seconds,
+            ),
+            tunnel=effective_tunnel,
+            public_url=public_url,
+            language=args.language or current.language,
+            access_profile=access,
+            port=args.port if args.port is not None else current.port,
+            tunnel_timeout_seconds=(
+                args.tunnel_timeout_seconds
+                if args.tunnel_timeout_seconds is not None
+                else current.tunnel_timeout_seconds
+            ),
+        )
+        store.put(updated)
+        payload = {
+            "status": "updated",
+            "profile": updated.to_dict(),
+            "launch_command": f"karox bridge connect --saved {updated.name}",
+        }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _handle_connect(args: argparse.Namespace) -> int:
+    """One-command web-bridge launch: connector + Tailscale with sensible defaults.
+
+    `karox connect` (or `karox connect chatgpt|claude|hyperagent`) builds the
+    same ``WebBridgeConnectConfig`` ``bridge connect`` does, but with Tailscale
+    as the default tunnel and the connector short name resolved to its full
+    profile. Bringing Tailscale online -- including restarting its service when
+    the engine is stuck -- happens inside ``run_web_bridge`` so this command is
+    the single thing a user types to publish a ChatGPT/Claude bridge.
+    """
+    profile = _CONNECTOR_PROFILES[args.connector]
+    commands = tuple(
+        _verification_command(value) for value in (args.verification_command or [])
+    )
+    tools = _web_bridge_tools(args.tool, write=args.write)
+    access = (
+        AccessProfile(args.access_profile)
+        if args.access_profile
+        else (
+            AccessProfile.WORKSPACE_WRITE
+            if args.write
+            else AccessProfile.READ_ONLY
+        )
+    )
+    language = args.language or (
+        "ru"
+        if os.environ.get("KAROX_UI_LANGUAGE", "en").lower().startswith("ru")
+        else "en"
+    )
+    config = WebBridgeConnectConfig(
+        profile=profile,
+        repository=_web_bridge_repository(args.repository),
+        port=args.port if args.port is not None else 8765,
+        tools=tools,
+        session_id=args.session_id,
+        access_profile=access,
+        tunnel=args.tunnel,
+        public_url=args.public_url,
+        cloudflared=args.cloudflared,
+        tailscale=args.tailscale,
+        tunnel_timeout_seconds=(
+            args.tunnel_timeout_seconds
+            if args.tunnel_timeout_seconds is not None
+            else 30.0
+        ),
+        deadline_seconds=_web_bridge_deadline(
+            args.deadline_seconds, args.deadline_preset
+        ),
+        verification_commands=commands,
+        language=language,
+    )
+    if args.diagnostics_only:
+        _json(web_bridge_diagnostics(config))
+        return 0
+    return run_web_bridge(config)
+
+
+def _handle_bridge(args: argparse.Namespace) -> int:
+    if args.bridge_command == "saved":
+        return _handle_bridge_saved(args)
+    if args.bridge_command == "connect":
+        if args.saved and args.profile:
+            raise ValueError("choose a positional PROFILE or --saved NAME, not both")
+        if args.saved:
+            saved = WebBridgeProfileStore().get(args.saved)
+            config = _saved_profile_connect_config(
+                saved,
                 repository=args.repository,
-                port=args.port,
-                tools=tools,
                 session_id=args.session_id,
-                access_profile=access_profile,
+                tool=args.tool,
+                write=args.write,
+                access_profile=args.access_profile,
                 tunnel=args.tunnel,
                 public_url=args.public_url,
                 cloudflared=args.cloudflared,
-                tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+                tailscale=args.tailscale,
+                port=args.port,
+                verification_command=args.verification_command,
+                server_profile=args.server_profile,
                 deadline_seconds=args.deadline_seconds,
-                verification_commands=tuple(args.verification_command),
+                deadline_preset=args.deadline_preset,
+                tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+                language=args.language,
             )
-        )
+        else:
+            config = _direct_connect_config(args)
+        if args.diagnostics_only:
+            _json(web_bridge_diagnostics(config))
+            return 0
+        return run_web_bridge(config)
     if args.bridge_command == "serve":
         loopback_bind = args.host in {"127.0.0.1", "::1", "localhost"}
         if not loopback_bind and not args.allow_network_bind:
@@ -1821,7 +2583,14 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         sessions.validate_repository(record, repository)
         audit_path = runtime_dir() / "vnext" / "audit.jsonl"
         runtimes: list[Any] = []
-        if args.tool:
+        # ``--tool`` now accepts both Core tools (repo/git/checks) and the
+        # hosted browser/dev-server/artifact tools.  They are served by two
+        # different runtimes composed into one bridge, so split the selection
+        # along that boundary: CoreToolBridge would reject an extra name as
+        # unknown, and HostedToolsRuntime would reject a Core name.
+        core_tools = [name for name in args.tool if name in CORE_TOOL_NAMES]
+        extra_tools = [name for name in args.tool if name in HOSTED_EXTRA_TOOL_NAMES]
+        if core_tools:
             verification_commands = (
                 [_verification_command(value) for value in args.verification_command]
                 if args.verification_command
@@ -1832,7 +2601,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                     repository,
                     sessions,
                     record.session_id,
-                    args.tool,
+                    core_tools,
                     hosted_origin=Origin(
                         OriginKind.HOSTED_CLIENT,
                         f"{args.profile}-core-{record.session_id}",
@@ -1843,6 +2612,28 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             )
         elif args.verification_command:
             raise ValueError("--verification-command requires a Core --tool")
+        if extra_tools:
+            server_profiles = tuple(
+                _server_profile(value) for value in (args.server_profile or [])
+            )
+            if "karox.dev_server.start" in extra_tools and not server_profiles:
+                server_profiles = default_server_profiles()
+            access_profile = AccessProfile(record.access_profile)
+            runtimes.append(
+                HostedToolsRuntime(
+                    repository,
+                    sessions,
+                    record.session_id,
+                    extra_tools,
+                    access_profile=access_profile,
+                    hosted_origin=Origin(
+                        OriginKind.HOSTED_CLIENT,
+                        f"{args.profile}-tools-{record.session_id}",
+                    ),
+                    server_profiles=server_profiles,
+                    audit_path=audit_path,
+                )
+            )
         if args.server:
             profile = AccessProfile(record.access_profile)
             policy = CapabilityPolicy(profile)
@@ -1879,6 +2670,18 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             return credential_store.resolve(credential_reference)
 
         if bridge_profile.auth_scheme == "oauth":
+            allowed_redirect_hosts: Optional[frozenset[str]] = None
+            if args.allowed_redirect_hosts:
+                hosts = frozenset(
+                    normalize_host(item.strip())
+                    for item in args.allowed_redirect_hosts.split(",")
+                    if item.strip()
+                )
+                if not hosts:
+                    raise ValueError(
+                        "--allowed-redirect-hosts must list at least one host"
+                    )
+                allowed_redirect_hosts = hosts
             app = build_oauth_proxy_asgi_app(
                 bridge_runtime,
                 credential,
@@ -1887,6 +2690,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 # Without this the connector the user just added in ChatGPT or
                 # Claude stops working when this process exits.
                 state_dir=oauth_state_dir(),
+                allowed_redirect_hosts=allowed_redirect_hosts,
             )
         elif protocol == "mcp":
             app = build_proxy_asgi_app(
@@ -1914,14 +2718,21 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             f"Local endpoint: {scheme}://{args.host}:{args.port}{endpoint}",
             flush=True,
         )
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level="info",
-            ssl_certfile=args.tls_certfile,
-            ssl_keyfile=args.tls_keyfile,
-        )
+        # The dev servers started through karox.dev_server.start are children of
+        # *this* bridge process, so a Ctrl+C here would orphan them without an
+        # explicit teardown.  Close every browser session and stop every server
+        # this session started before uvicorn returns.
+        try:
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level="info",
+                ssl_certfile=args.tls_certfile,
+                ssl_keyfile=args.tls_keyfile,
+            )
+        finally:
+            _cleanup_hosted_runtimes(runtimes, record.session_id)
         return 0
     if args.bridge_command == "list":
         payload: Any = [item.to_dict() for item in BridgeRegistry().list()]
@@ -1935,6 +2746,8 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         payload = {
             **BridgeCredentialStore().doctor(),
             "reaped_web_bridge_sessions": list(reaped),
+            "saved_profiles": WebBridgeProfileStore().doctor(),
+            "tailscale": tailscale_doctor(),
         }
     else:
         store = BridgeCredentialStore()
@@ -2527,6 +3340,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "bridge":
             return _handle_bridge(args)
+
+        if args.command == "connect":
+            return _handle_connect(args)
 
         if args.command == "doctor":
             return _handle_doctor(args)

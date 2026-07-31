@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from typing import Any, Optional
+from unittest.mock import patch
 
 import httpx
 import uvicorn
@@ -138,6 +140,12 @@ class _AsgiResponse:
         return json.loads(self.text)
 
 
+def _memory_stream_pair() -> tuple[Any, Any]:
+    import anyio
+
+    return anyio.create_memory_object_stream(8)
+
+
 async def _drive_asgi(app: Any, requests: list[dict[str, Any]]) -> list[_AsgiResponse]:
     """Run an ASGI app in-process, lifespan included, without opening a socket.
 
@@ -147,10 +155,16 @@ async def _drive_asgi(app: Any, requests: list[dict[str, Any]]) -> list[_AsgiRes
     """
     import anyio
 
-    to_app_send, to_app_receive = anyio.create_memory_object_stream(8)
-    from_app_send, from_app_receive = anyio.create_memory_object_stream(8)
+    to_app_send, to_app_receive = _memory_stream_pair()
+    from_app_send, from_app_receive = _memory_stream_pair()
     responses: list[_AsgiResponse] = []
-    async with anyio.create_task_group() as group:
+    async with (
+        to_app_send,
+        to_app_receive,
+        from_app_send,
+        from_app_receive,
+        anyio.create_task_group() as group,
+    ):
         group.start_soon(
             app, {"type": "lifespan"}, to_app_receive.receive, from_app_send.send
         )
@@ -451,8 +465,28 @@ class HostedBridgeWireTests(unittest.TestCase):
 
     def test_openapi_wire_auth_schema_call_idempotency_and_rotation(self) -> None:
         active = {"token": "first-wire-token"}
+        diagnostics = {
+            "schema_version": 1,
+            "available_tools": [
+                "karox.repo.read_file",
+                "karox.repo.write_file",
+            ],
+            "disabled_tools": [
+                {
+                    "name": "karox.checks.run",
+                    "reason": "no approved verification-command allowlist",
+                }
+            ],
+            "effective_deadline_seconds": 600.0,
+            "tunnel": "cloudflare",
+            "url_stability": "ephemeral",
+        }
         server = _WireServer(
-            build_openapi_bridge_app(self.runtime, lambda: active["token"])
+            build_openapi_bridge_app(
+                self.runtime,
+                lambda: active["token"],
+                diagnostics=diagnostics,
+            )
         )
         base = f"http://127.0.0.1:{server.port}"
         try:
@@ -465,6 +499,11 @@ class HostedBridgeWireTests(unittest.TestCase):
                 self.assertEqual(schema.status_code, 200)
                 paths = schema.json()["paths"]
                 self.assertIn("/tools/karox.repo.read_file", paths)
+                self.assertIn("/diagnostics", paths)
+                self.assertEqual(client.get("/diagnostics").status_code, 401)
+                diagnostics_response = client.get("/diagnostics", headers=headers)
+                self.assertEqual(diagnostics_response.status_code, 200)
+                self.assertEqual(diagnostics_response.json(), diagnostics)
                 self.assertTrue(
                     paths["/tools/karox.repo.write_file"]["post"]["parameters"][0][
                         "required"
@@ -516,7 +555,23 @@ class HostedBridgeWireTests(unittest.TestCase):
 
     def test_streamable_http_mcp_exposes_real_core_tool(self) -> None:
         token = "mcp-core-wire-token"
-        server = _WireServer(build_proxy_asgi_app(self.runtime, token))
+        diagnostics = {
+            "schema_version": 1,
+            "available_tools": ["karox.repo.read_file"],
+            "disabled_tools": [
+                {
+                    "name": "karox.checks.run",
+                    "reason": "no approved verification-command allowlist",
+                }
+            ],
+            "effective_deadline_seconds": 600.0,
+        }
+        with patch.dict(
+            os.environ,
+            {"KAROX_BRIDGE_DIAGNOSTICS_JSON": json.dumps(diagnostics)},
+            clear=False,
+        ):
+            server = _WireServer(build_proxy_asgi_app(self.runtime, token))
         backend = _FakeCredentialBackend()
         credentials = McpCredentialStore(backend=backend)
         info = credentials.set("core-wire", token)
@@ -528,7 +583,10 @@ class HostedBridgeWireTests(unittest.TestCase):
             url=f"http://127.0.0.1:{server.port}/mcp",
             credential_ref=info["reference"],
             credential_target="Authorization",
-            read_only_tools=("karox.repo.read_file",),
+            read_only_tools=(
+                "karox.repo.read_file",
+                "karox.bridge.diagnostics",
+            ),
             timeout_seconds=15.0,
         )
         registry.put(record)
@@ -538,6 +596,20 @@ class HostedBridgeWireTests(unittest.TestCase):
             descriptor = next(
                 item for item in tools if item.remote_name == "karox.repo.read_file"
             )
+            diagnostics_descriptor = next(
+                item
+                for item in tools
+                if item.remote_name == "karox.bridge.diagnostics"
+            )
+            self.assertTrue(diagnostics_descriptor.read_only)
+            diagnostics_result = _call_mcp_tool(
+                record.url,
+                token,
+                "karox.bridge.diagnostics",
+                {},
+            )
+            self.assertFalse(diagnostics_result.isError)
+            self.assertEqual(diagnostics_result.structuredContent, diagnostics)
             result = client.call_record(
                 record, descriptor, {"path": "sample.txt"}, self.repository
             )
@@ -733,6 +805,8 @@ class BridgeWireSecurityTests(unittest.TestCase):
         self.assertEqual(accepted.status, 200)
 
     def test_foreign_host_is_rejected_on_both_wires(self) -> None:
+        import anyio
+
         mcp_app = build_proxy_asgi_app(self.runtime, self.token)
         openapi_app = build_openapi_bridge_app(self.runtime, self.token)
         headers = [
@@ -740,16 +814,52 @@ class BridgeWireSecurityTests(unittest.TestCase):
             ("authorization", f"Bearer {self.token}"),
             ("accept", "application/json"),
         ]
-        (mcp_response,) = _wire_requests(
-            mcp_app,
-            [{"method": "GET", "path": "/mcp", "headers": headers}],
-        )
-        (openapi_response,) = _wire_requests(
-            openapi_app,
-            [{"method": "GET", "path": "/health", "headers": headers}],
-        )
+        created_streams: list[Any] = []
+        lifespan_events: list[str] = []
+        original_pair = _memory_stream_pair
+
+        def captured_pair() -> tuple[Any, Any]:
+            pair = original_pair()
+            created_streams.extend(pair)
+            return pair
+
+        async def tracked_mcp_app(
+            scope: dict[str, Any], receive: Any, send: Any
+        ) -> None:
+            if scope["type"] != "lifespan":
+                await mcp_app(scope, receive, send)
+                return
+
+            async def tracked_receive() -> dict[str, Any]:
+                message = await receive()
+                lifespan_events.append(message["type"])
+                return message
+
+            await mcp_app(scope, tracked_receive, send)
+
+        with patch(f"{__name__}._memory_stream_pair", side_effect=captured_pair):
+            (mcp_response,) = _wire_requests(
+                tracked_mcp_app,
+                [{"method": "GET", "path": "/mcp", "headers": headers}],
+            )
+            (openapi_response,) = _wire_requests(
+                openapi_app,
+                [{"method": "GET", "path": "/health", "headers": headers}],
+            )
         self.assertEqual(mcp_response.status, 421)
         self.assertEqual(openapi_response.status, 421)
+        self.assertEqual(
+            lifespan_events,
+            ["lifespan.startup", "lifespan.shutdown"],
+        )
+        self.assertEqual(len(created_streams), 8)
+        for stream in created_streams:
+            if hasattr(stream, "send_nowait"):
+                with self.assertRaises(anyio.ClosedResourceError):
+                    stream.send_nowait({})
+            else:
+                with self.assertRaises(anyio.ClosedResourceError):
+                    stream.receive_nowait()
 
     def test_declared_public_host_is_accepted_and_trailing_slash_is_served(
         self,

@@ -309,6 +309,40 @@ class OAuthBridgeWireTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", policy)
         self.assertNotIn("script-src", policy)
         self.assertNotIn("*", policy)
+        # ``no-referrer`` makes Chromium send ``Origin: null`` for some basic
+        # form POSTs. The rebinding guard correctly rejects that opaque origin,
+        # which used to make the bridge reject its own approval form with 421.
+        self.assertEqual(page.headers["referrer-policy"], "same-origin")
+
+    def test_chatgpt_russian_locale_explains_where_the_password_goes(self) -> None:
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            registration = client.post(
+                "/oauth/register",
+                json={
+                    "client_name": "ChatGPT",
+                    "redirect_uris": ["https://chatgpt.com/connector/oauth/callback"],
+                },
+            )
+            page = client.get(
+                "/oauth/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": registration.json()["client_id"],
+                    "redirect_uri": "https://chatgpt.com/connector/oauth/callback",
+                    "state": "state-123",
+                    "code_challenge": _pkce("v" * 64),
+                    "code_challenge_method": "S256",
+                    "resource": "https://karox.example/mcp",
+                    "scope": "mcp:tools offline_access",
+                    "ui_locales": "ru-RU en",
+                },
+            )
+
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertIn('<html lang="ru">', page.text)
+        self.assertIn("Пароль подтверждения из окна KaroX", page.text)
+        self.assertIn("Не закрывайте KaroX", page.text)
+        self.assertIn(">Разрешить</button>", page.text)
 
     def test_code_is_bound_to_pkce_client_redirect_and_resource(self) -> None:
         with httpx.Client(base_url=self.base, timeout=15.0) as client:

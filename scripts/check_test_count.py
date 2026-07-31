@@ -185,12 +185,51 @@ def _stated(claim: Claim) -> int:
     return int(match.group(1))
 
 
+def _rewrite(claim: Claim, expected: int) -> Optional[str]:
+    """Update one documented claim in place, returning what changed.
+
+    Every claim pattern captures the number in group 1, so the substitution can
+    be derived from the match rather than from a second copy of the sentence. The
+    surrounding prose is untouched: only the digits inside the group move.
+    """
+    path = ROOT / claim.relative_path
+    # ``newline=""`` on both sides: the default translates line endings on read
+    # and again on write, so updating four digits in a repository checked out with
+    # CRLF would rewrite every line of the file on Windows and none of them on
+    # Linux. Reading the bytes as they are keeps the change to the digits.
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    match = re.search(claim.pattern, text)
+    if match is None:
+        return None
+    stated = int(match.group(1))
+    if stated == expected:
+        return None
+    start, end = match.span(1)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text[:start] + str(expected) + text[end:])
+    return (
+        f"{claim.relative_path}: {claim.count_kind} count {stated} -> {expected}"
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", dest="json_output")
     # Lets a maintainer read a single number without parsing the report, and lets
     # a test assert the gate runs clean without depending on its prose.
     parser.add_argument("--print", dest="print_kind", choices=("suite", "root", "legacy"))
+    # The suite grows in most commits that add a test, so the documented copies
+    # go stale constantly and were being retyped by hand across five documents --
+    # which is its own source of a wrong number. This applies discovery's figure
+    # to the claims the gate already knows how to find. It deliberately does not
+    # touch anything else the gate reports: an unimportable module or a changed
+    # legacy count still has to be looked at by a person.
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="update stale documented counts in place instead of only reporting them",
+    )
     return parser
 
 
@@ -218,8 +257,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         *(Claim.coerce(item, "suite") for item in SUITE_COUNT_CLAIMS),
         *(Claim.coerce(item, "root") for item in ROOT_COUNT_CLAIMS),
     ]
+    updates: list[str] = []
     for claim in claims:
         expected = root_count if claim.count_kind == "root" else suite_count
+        if args.write:
+            try:
+                changed = _rewrite(claim, expected)
+            except OSError as exc:
+                issues.append(f"cannot update {claim.relative_path}: {exc}")
+                continue
+            if changed is not None:
+                updates.append(changed)
         try:
             stated = _stated(claim)
         except RuntimeError as exc:
@@ -237,6 +285,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "legacy_script_count": legacy_count,
         "root_count": root_count,
         "issues": issues,
+        "updates": updates,
     }
     if args.print_kind:
         print(
@@ -253,6 +302,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"suite tests: {suite_count}; legacy script checks: {legacy_count}; "
             f"root collection: {root_count}"
         )
+        for update in updates:
+            print(f"+ {update}")
         for issue in issues:
             print(f"- {issue}")
     return 0 if payload["ok"] else 1

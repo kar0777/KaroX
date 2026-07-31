@@ -1,148 +1,321 @@
-# Диагностика
+# KaroX 5 Preview — диагностика
 
-## HTTP 401
-
-Неверный `X-API-Key`.
-
-Скопируйте ключ из лаунчера заново и переподключите интеграцию. Не отправляйте ключ обычным сообщением в чат.
-
-Если PromptQL пишет `Failed to resolve integration credentials` ещё до HTTP-запроса, значит ключ не дошёл до KaroX: в защищённой карточке PromptQL не сохранился `X-API-Key`. Откройте подключение этого же provider id заново и вставьте значение из `K = X-API-Key`, а не provider id/name/base_url. Начиная с `3.8.12`, OpenAPI KaroX также явно описывает стандартную auth-схему `KaroXApiKey` для заголовка `X-API-Key`.
-
-Для Tailscale Funnel host `*.ts.net` обычно остаётся тем же между запусками. Начиная с `3.8.13`, KaroX добавляет session suffix в provider id. Если PromptQL пытается использовать старый provider id без session suffix, создайте интеграцию именно с новым provider id из свежей карточки KaroX.
-
-## HTTP 403
-
-Действие заблокировано политикой KaroX.
-
-Частые причины:
-
-- выбран режим только для чтения;
-- попытка прочитать `.env` или другой чувствительный файл;
-- путь выходит за пределы выбранного репозитория;
-- агент пытается выполнить прямой `git commit` вместо `/git/commit`;
-- агент пытается выполнить `git push`;
-- команда не разрешена в режиме `Автопилот`.
-
-## HTTP 530 / Cloudflare 1033
-
-URL туннеля устарел или локальный сервер/туннель не запущен.
-
-Перезапустите Star For KaroX и обновите OpenAPI-интеграцию новым tunnel URL.
-
-## AI-инструмент спрашивает подтверждение на каждый HTTP-вызов
-
-Для интеграции `repo-tools` выберите постоянное разрешение в текущем чате/проекте, если ваш AI-инструмент это поддерживает.
-
-## URL туннеля постоянно меняется
-
-Быстрые Cloudflare tunnels временные. Это нормально. Каждый новый запуск может выдавать новый URL, его нужно обновить в интеграции.
-
-## В списке много серых stopped-сессий
-
-Это сохранённые истории старых сессий. В главном меню нажмите `U`, чтобы удалить все остановленные истории. Чтобы удалить одну историю, откройте её номером и нажмите `D`; команда доступна только для stopped-сессий.
-
-## Tailscale Funnel не запускается
-
-В настройках KaroX (Windows) выберите `I = установить Tailscale через winget`, если Tailscale ещё не установлен. Затем нажмите `L = войти / запустить Tailscale CLI`, чтобы KaroX выполнил `tailscale up` и открыл логин. После входа нажмите `R`, чтобы проверить статус.
-
-На macOS / Linux установите Tailscale вручную:
+Начинай с команд:
 
 ```bash
-brew install --cask tailscale   # macOS
-# или sudo apt install tailscale (Linux)
+karox --version
+karox paths --json
+karox doctor
 ```
 
-Затем в настройках KaroX нажмите `L`, чтобы выполнить `tailscale up`. CLI Tailscale на macOS находится внутри `.app`: `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
+Для checkout preview-ветки также полезно:
 
-Для внешних AI-инструментов KaroX использует Tailscale Funnel, а не приватный Tailscale Serve. Funnel публикует публичный HTTPS URL `*.ts.net`, поэтому в tailnet должны быть включены MagicDNS, HTTPS certificates и разрешение Funnel в policy.
+```bash
+python scripts/check_versions.py
+python scripts/check_v5_release.py --json
+```
 
-Если Tailscale просит включить Funnel при первом запуске, KaroX покажет ссылку `login.tailscale.com/f/funnel`, скопирует её в буфер обмена и попробует открыть браузер. Подтвердите Funnel в Tailscale и запустите сессию KaroX ещё раз.
-
-## Сервер запустился, но AI-инструмент не подключается
-
-Проверьте, что открыты оба окна:
-
-- `KaroX: сервер`;
-- `KaroX: туннель`.
-
-Также проверьте, что в интеграции указан:
-
-- `base_url`: tunnel URL без `/openapi.json`;
-- `api_docs_url`: tunnel URL + `/openapi.json`;
-- header auth: `X-API-Key`.
+Не публикуй необработанные логи, support bundle, OAuth tokens, API keys, пароль
+approval или приватный исходный код.
 
 ## Команда `karox` не найдена
 
 ### Windows
 
-После установки откройте новое окно PowerShell. Если не помогло, запустите:
+Терминал, открытый до установки, сохраняет старый `PATH`. Открой новое окно
+PowerShell или Terminal. Установщик также создаёт launcher/ярлык, который можно
+запустить напрямую.
+
+Проверь, какую команду видит система:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\RepoPilotBridge\bin\karox.ps1"
+Get-Command karox -All
 ```
+
+Если первой находится старая pip-команда или launcher другой установки, удали
+или перемести shadowing entry. Не копируй файлы runtime вручную поверх активной
+установки.
 
 ### macOS / Linux
 
-KaroX ставит основную команду в `~/.local/bin/karox`; `repopilot` остаётся compatibility alias. Если терминал не видит его, проверьте, что `~/.local/bin` в `$PATH`:
+Проверь:
 
 ```bash
-echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" && echo "OK" || echo "НУЖНО ДОБАВИТЬ"
+command -v karox
+printf '%s\n' "$PATH" | tr ':' '\n'
 ```
 
-Если нет, добавьте в `~/.zshrc` (macOS по умолчанию) или `~/.bashrc`/`~/.bash_profile`:
+Убедись, что каталог user-local launcher присутствует в `PATH`, затем открой
+новую вкладку терминала. Точные каталоги текущей установки показывает
+`karox paths --json`.
+
+## Установщик завершился, но запускается старая версия
+
+Сравни:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+karox --version
+karox paths --json
 ```
 
-Затем откройте новую вкладку Terminal. Либо запустите напрямую:
+На Windows используй `Get-Command karox -All`; на POSIX — `type -a karox`.
+Старая machine-wide команда может иметь приоритет над новой user-local.
+Исправь порядок `PATH` или удали старый launcher. Не меняй VERSION-файлы внутри
+установки вручную.
+
+## KaroX не находит `cloudflared`
+
+Проверь:
 
 ```bash
-bash ~/.local/share/RepoPilotBridge/app/start.sh
+cloudflared --version
+karox doctor
 ```
 
-## Doctor падает
+На Windows KaroX ищет `cloudflared.exe` в `PATH`, bundled runtime, WinGet Links,
+WindowsApps, WinGet package directories и стандартном каталоге Cloudflare. Если
+WinGet установил пакет, но launcher не виден, открой новый терминал и повтори
+проверку.
 
-### Windows
+При нестандартной установке выбери явный путь или используй собственный стабильный
+HTTPS reverse proxy. Не скачивай бинарник из случайного источника.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\doctor.ps1
+## URL Cloudflare Quick Tunnel меняется
+
+Это ожидаемое поведение. Quick Tunnel выдаёт временный URL, который меняется
+после перезапуска bridge. Сохранённый connector ChatGPT или Claude перестанет
+работать, пока его URL не обновлён.
+
+Для постоянного подключения настрой стабильный HTTPS origin и запускай bridge с
+custom tunnel/public URL согласно `karox bridge --help`. Не ослабляй OAuth
+resource binding ради старого URL.
+
+## ChatGPT или Claude не завершает OAuth
+
+Проверь по порядку:
+
+1. Bridge всё ещё запущен.
+2. Используется свежий MCP URL из текущего запуска.
+3. Redirect идёт на страницу KaroX, а не на неизвестный домен.
+4. Пароль из строки `OAuth approval password` введён только на странице KaroX.
+5. В connector settings пароль не вставлен как client secret.
+6. Системное время не сильно отличается от реального.
+7. Browser не блокирует redirect или cookies, необходимые самому клиенту.
+
+После изменения public origin старые OAuth registrations и resource-bound grants
+могут быть неприменимы. Удали старое подключение и создай его заново с новым URL.
+
+## Страница approval возвращает HTTP 421
+
+Старые preview-сборки могли получать `Origin: null` при POST формы Chromium из-за
+слишком строгой Referrer Policy. Обнови KaroX до сборки с исправлением
+`same-origin` для собственной approval-формы и повтори подключение.
+
+421 на discovery-запросах (`/.well-known/...`, `/oauth/*`, `/register`) означает,
+что приходящий `Host` не совпал с публичным хостом текущей bridge-сессии. KaroX
+печатает одну redacted-строку диагностики на каждый такой запрос:
+
+```
+[karox-rebind] 421 GET /.well-known/oauth-authorization-server request_id=... host=<...> x-forwarded-host=no ... reason=host_not_allowed
 ```
 
-### macOS / Linux
+Строка показывает метод, путь, нормализованный Host, наличие `X-Forwarded-Host`/
+`X-Forwarded-Proto`/`Forwarded`, ожидаемый origin и причину — без заголовка
+Authorization, cookie, токенов, пароля approval или содержимого тела регистрации.
+
+Возможные причины:
+
+1. Публичный хост туннеля не передан в bridge. Managed launcher (Tailscale
+   Funnel/Cloudflare) передаёт его автоматически; ручной `karox bridge serve`
+   должен указать `--public-url` (и при необходимости `--allowed-redirect-hosts`).
+2. URL в HyperAgent/ChatGPT/Claude не совпадает с реальным публичным хостом
+   туннеля. Скопируй точный MCP URL из текущего окна KaroX.
+3. Proxies/TLS-терминаторы переписывают Host. KaroX доверяет `Forwarded`/
+   `X-Forwarded-Host` только от loopback-peer (т.е. от локального туннеля),
+   поэтому внешний клиент не может подменить Host через эти заголовки.
+
+Не отключай проверку Origin и Host глобально: она защищает от rebinding и должна
+оставаться fail-closed.
+
+## HyperAgent: redirect URI mismatch или ошибка DCR
+
+Профиль `hyperagent-web` разрешает redirect только на хост `hyperagent.com`.
+Любой другой HTTPS-redirect при регистрации вернёт 400 `invalid_request`.
+
+- Если HyperAgent использует callback на другом домене, это не ошибка KaroX:
+  сообщи точный redirect URI и используй `chatgpt-web`/`claude-web` или профиль
+  `generic-streamable-http` вместо `hyperagent-web`.
+- Wildcard-домены (`https://*.example/cb`), HTTP-redirect для внешнего клиента,
+  схемы `javascript:`/`data:`/`file:` и userinfo/fragment в URI отклоняются
+  структурно — они никогда не были валидным callback.
+- `POST /register` принимает только JSON и ограничивает размер тела (~64 KiB).
+- Повторная идентичная регистрация безопасна: тот же redirect + то же имя
+  возвращают тот же `client_id`.
+
+Не вставляй внутренний ключ KaroX в поле Client Secret: DCR возвращает public
+PKCE-клиент (`token_endpoint_auth_method: none`), и Client Secret не нужен.
+
+## Пароль approval не принимается
+
+Скопируй точное значение из текущего окна KaroX. Оно относится к текущему bridge
+запуску и не является API key или OAuth client secret.
+
+Не вводи его:
+
+- в чат;
+- в поле API key провайдера;
+- в app configuration;
+- в GitHub issue;
+- в conformance record.
+
+Если окно KaroX было перезапущено, используй новый пароль.
+
+## HTTP 401 или MCP access denied
+
+Возможные причины:
+
+- отсутствует или устарел bearer/access token;
+- bridge credential был rotated или revoked;
+- клиент использует старый public resource URL;
+- refresh-token family отозвана после replay;
+- OS keyring недоступен и credential не разрешается.
+
+Не вставляй credential в URL или обычный config. Выполни `karox doctor`, затем
+переподключи клиент или безопасно пересоздай credential через соответствующую
+CLI-команду.
+
+## HTTP 403 или tool отсутствует
+
+Это обычно политика, а не transport error:
+
+- выбран Observe;
+- tool не добавлен в bridge allowlist;
+- внешний MCP server или tool не выбран для session;
+- capability имеет решение `deny` или ещё не имеет явного `allow`;
+- путь чувствительный или выходит за `repoRoot`;
+- запрос пытается выполнить push, publish или запрещённую команду;
+- schema/identity внешнего MCP tool изменилась после выдачи grant.
+
+Не переключайся сразу в Advanced. Сначала проверь session, profile, selected tools
+и минимально необходимую capability.
+
+## `SessionBusy` или отказ mutation lease
+
+Другой процесс уже владеет правом мутации этой session. Это защита от
+одновременной записи.
+
+- найди активный процесс KaroX;
+- не запускай второй Build-agent на той же session;
+- дождись завершения или корректно останови владельца;
+- проверь lock state через session CLI;
+- emergency revoke используй только после понимания последствий.
+
+Не удаляй lock/state files вручную: stale holder должен быть fenced штатным
+механизмом.
+
+## Mutation завершилась с unknown outcome
+
+Transport мог оборваться после отправки mutating call, поэтому KaroX не должен
+притворяться, что операция точно не выполнилась.
+
+1. Не повторяй запрос с новым idempotency key сразу.
+2. Проверь файл, Git status, Git diff и evidence.
+3. Повтори исходный call с тем же idempotency key, когда это поддерживается.
+4. Создай новый key только после подтверждения фактического состояния.
+
+## Агент пишет «готово», но session не verified
+
+Для verified результата после изменения нужны:
+
+- реальное изменение файла;
+- успешный явно разрешённый check;
+- Git status evidence;
+- Git diff evidence.
+
+Failed, timed-out или отсутствующий check не считается успехом. Исправь ошибку и
+запусти разрешённую проверку заново. Не меняй evidence state вручную.
+
+## Проверка или build выполняет неожиданную команду
+
+KaroX не является OS sandbox. Approved test/build может запустить scripts из
+`package.json`, Makefile, Gradle, compiler plugin или другого build config.
+
+Останови процесс, перейди в Observe, изучи build files и выполняй неизвестный
+проект в отдельной VM/container или под отдельным системным пользователем.
+
+## Provider key не сохраняется или не читается
+
+KaroX 5 требует работающий OS keyring и не должен падать обратно на plaintext.
+Запусти credential/keyring doctor через доступные команды `karox credential
+--help` и `karox doctor`.
+
+В headless Linux может отсутствовать настроенный secret-service backend. Настрой
+системный keyring или используй подходящую защищённую среду. Не обходи проблему
+записью ключа в repository config.
+
+## Model test проходит локально, но реальный provider не работает
+
+Deterministic contract tests не доказывают текущую совместимость конкретного
+провайдера. Проверь:
+
+- точный endpoint и protocol adapter;
+- model ID;
+- account permissions и billing;
+- context/output limits;
+- streaming и tool-call support;
+- provider-specific headers;
+- timeout и rate-limit response.
+
+Запиши успешный или неуспешный живой прогон в соответствующий файл
+`docs/conformance/`, предварительно удалив secrets и private payloads.
+
+## Миграция 4.x → 5 не проходит
+
+Сначала используй dry-run и JSON report. Не удаляй старую установку, repository,
+`.git` или весь runtime directory.
+
+Проверь категории `migrated`, `skipped`, `unsupported`, `requires secret
+re-entry` и `failed`. Environment-only secrets должны быть введены заново через
+keyring; они не копируются в config.
+
+Полный контракт: [`docs/MIGRATION_V4_TO_V5.md`](docs/MIGRATION_V4_TO_V5.md).
+
+## Обновление прервалось
+
+Updater должен использовать staged install и rollback. Не запускай несколько
+обновлений одновременно и не заменяй файлы активного runtime вручную.
+
+Запусти doctor предыдущего launcher, проверь release/update logs и используй
+штатный rollback. Если rollback не работает, сохрани sanitized diagnostics до
+переустановки.
+
+## Release gate показывает pending records
+
+Для `5.0.0.dev0` это ожидаемо:
 
 ```bash
-bash ./doctor.sh
+python scripts/check_v5_release.py --json
 ```
 
-В конце будет путь к отчёту. При обращении за помощью приложите строку `[FAIL]` и путь к отчёту.
-
-## macOS: `pbcopy` / буфер обмена не работает
-
-KaroX использует `pbcopy` для копирования промптов/ключей. Если `pbcopy` недоступен (например, в SSH-сессии без GUI), KaroX выведет содержимое файла прямо в терминал — скопируйте его вручную. Для работы `pbcopy` нужен локальный сеанс macOS Terminal.
-
-## macOS: ярлык `.command` не запускается по двойному клику
-
-Если macOS показывает «не удается открыть, поскольку не удалось проверить разработчика»: правый клик по `~/Desktop/KaroX.command` → «Открыть» → «Открыть» в диалоге. Это разовое подтверждение для Quartz Gatekeeper.
-
-## macOS Apple Silicon vs Intel: путь Homebrew
-
-Homebrew на Apple Silicon ставит бинарники в `/opt/homebrew/bin`, на Intel — в `/usr/local/bin`. KaroX ищет `cloudflared` и `tailscale` в обоих местах. Если инструмент установлен, но не находится, проверьте:
+Обычный режим проверяет структуру репозитория, но разрешает pending live records
+на development version. Режим:
 
 ```bash
-which cloudflared
-ls /opt/homebrew/bin/cloudflared /usr/local/bin/cloudflared 2>/dev/null
+python scripts/check_v5_release.py --strict
 ```
 
-Если бинарник в нестандартном месте, добавьте его каталог в `$PATH`.
+предназначен для release-candidate rehearsal и должен падать, пока ChatGPT,
+Claude и обязательные provider records не имеют статус `passed`.
 
-## Mission Control показывает блокировку или предупреждение
+## Как собирать диагностику безопасно
 
-Откройте карточку сессии и нажмите `M`. Поле `recommendedNextAction` объясняет безопасный следующий шаг:
+Перед отправкой отчёта:
 
-- `stop_and_report_branch_mismatch` — остановитесь: ветка процесса не совпадает с карточкой;
-- `wait_for_or_start_real_task` — метка сессии не является задачей; сначала отправьте реальное ТЗ;
-- `inspect_existing_changes` — в рабочем дереве уже есть изменения; сначала изучите diff;
-- `inspect_project_context_then_execute_task` — preflight согласован, можно изучить проект и выполнять задачу.
+- удали API keys, tokens, cookies, approval passwords и private URLs;
+- не прикладывай исходный код без необходимости и разрешения;
+- не публикуй OS keyring dumps;
+- укажи KaroX version/commit, OS, Python, client, access profile и минимальный
+  reproduction в disposable repository;
+- сначала отзови credential, который мог быть раскрыт.
 
-`GET /context/brief` не исправляет состояние автоматически и не содержит `X-API-Key`. Если endpoint недоступен у уже запущенной сессии после обновления KaroX, остановите её и создайте новую: работающий процесс использует код той версии, с которой был запущен.
+Правила disclosure: [SECURITY.md](SECURITY.md).

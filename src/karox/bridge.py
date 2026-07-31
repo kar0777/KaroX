@@ -246,6 +246,31 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             instructions="Connect HyperAgent to the bridge URL with the bridge credential.",
             limitations=("No verified dedicated path in the repository yet.",),
         ),
+        BridgeProfile(
+            name="hyperagent-web",
+            transport="streamable_http",
+            status=BridgeStatus.EXPERIMENTAL,
+            auth_scheme="oauth",
+            description=(
+                "OAuth remote MCP bridge from HyperAgent to selected KaroX tools."
+            ),
+            tunnel="public HTTPS URL or supported secure MCP tunnel",
+            persistent_url=True,
+            instructions=(
+                "Publish the bridge on a stable HTTPS URL (Tailscale Funnel is "
+                "the recommended way), then add its /mcp URL as an MCP server in "
+                "HyperAgent. Leave \"Bring my own OAuth app\" off -- KaroX "
+                "advertises OAuth discovery metadata and Dynamic Client "
+                "Registration, so HyperAgent registers its own client. Complete "
+                "the KaroX password approval page when HyperAgent starts OAuth."
+            ),
+            limitations=(
+                "OAuth/DCR/PKCE and the redirect-host allowlist are covered "
+                "locally; no live HyperAgent workspace run is recorded yet.",
+                "Dynamic clients and grants are process-local and require "
+                "reconnection after restart unless a state directory is in use.",
+            ),
+        ),
     ]
 
 

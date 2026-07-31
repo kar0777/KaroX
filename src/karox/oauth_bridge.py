@@ -27,6 +27,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
 from .proxy_server import (
     build_proxy_asgi_app,
+    normalize_host,
     rebinding_rejection,
     resolve_allowed_hosts,
 )
@@ -74,16 +75,33 @@ def _public_origin(value: str) -> str:
     return urlunsplit(("https", parts.netloc, "", "", ""))
 
 
-def _redirect_uri(value: object) -> str:
+def _redirect_uri(
+    value: object, allowed_hosts: Optional[frozenset[str]] = None
+) -> str:
     if not isinstance(value, str) or not value or len(value) > 2048:
         raise OAuthBridgeError("redirect URI is invalid")
     parts = urlsplit(value)
     if parts.username is not None or parts.password is not None or parts.fragment:
         raise OAuthBridgeError("redirect URI is invalid")
-    host = (parts.hostname or "").lower()
-    local = host in {"127.0.0.1", "::1", "localhost"}
-    if not parts.netloc or (parts.scheme != "https" and not (parts.scheme == "http" and local)):
+    # Wildcards, scheme tricks, and userinfo have to be rejected structurally
+    # before the host is ever compared: a registered ``https://*.example/cb`` is an
+    # open redirect, and ``javascript:``, ``data:``, and ``file:`` are not web
+    # callbacks at all.
+    if parts.scheme not in {"https", "http"}:
         raise OAuthBridgeError("redirect URI must use HTTPS (HTTP is allowed for loopback)")
+    host = (parts.hostname or "").lower()
+    if not host or "*" in host:
+        raise OAuthBridgeError("redirect URI host is invalid")
+    local = host in {"127.0.0.1", "::1", "localhost"}
+    if parts.scheme == "http" and not local:
+        raise OAuthBridgeError("redirect URI must use HTTPS (HTTP is allowed for loopback)")
+    # A strict profile pins the exact client hosts it will redirect to, so a
+    # server registered with an arbitrary HTTPS host cannot collect a KaroX
+    # authorization code. Loopback stays open for native clients that run on the
+    # same machine as the browser flow. ``None`` keeps the original permissive
+    # behaviour for chatgpt-web/claude-web and the library callers behind it.
+    if allowed_hosts is not None and not local and host not in allowed_hosts:
+        raise OAuthBridgeError("redirect URI host is not allowed for this profile")
     return value
 
 
@@ -258,12 +276,23 @@ class OAuthBridgeService:
         *,
         path: str = "/mcp",
         state_dir: Optional[Path] = None,
+        allowed_redirect_hosts: Optional[frozenset[str]] = None,
     ) -> None:
         self.public_url = _public_origin(public_url)
         if not isinstance(path, str) or not path.startswith("/") or "?" in path:
             raise OAuthBridgeError("OAuth MCP path must be an absolute URL path")
         if not isinstance(approval_secret, str) and not callable(approval_secret):
             raise OAuthBridgeError("OAuth approval secret must be text or a resolver")
+        if allowed_redirect_hosts is not None:
+            if not isinstance(allowed_redirect_hosts, frozenset):
+                raise OAuthBridgeError("allowed redirect hosts must be a frozenset")
+            normalized = frozenset(
+                normalize_host(item) for item in allowed_redirect_hosts if normalize_host(item)
+            )
+            if not normalized:
+                raise OAuthBridgeError("allowed redirect hosts must not be empty")
+            allowed_redirect_hosts = normalized
+        self.allowed_redirect_hosts = allowed_redirect_hosts
         self.resource = f"{self.public_url}{path}"
         self.path = path
         self._approval_secret = approval_secret
@@ -350,7 +379,10 @@ class OAuthBridgeService:
                 ):
                     continue
                 try:
-                    parsed = tuple(_redirect_uri(item) for item in redirects)
+                    parsed = tuple(
+                        _redirect_uri(item, self.allowed_redirect_hosts)
+                        for item in redirects
+                    )
                 except OAuthBridgeError:
                     continue
                 self._clients[client_id] = _Client(client_id, parsed, name, created)
@@ -483,7 +515,7 @@ class OAuthBridgeService:
             or len(raw_redirects) > 16
         ):
             raise OAuthBridgeError("redirect_uris must contain 1-16 URLs")
-        redirects = tuple(_redirect_uri(item) for item in raw_redirects)
+        redirects = tuple(_redirect_uri(item, self.allowed_redirect_hosts) for item in raw_redirects)
         if len(set(redirects)) != len(redirects):
             raise OAuthBridgeError("redirect_uris must be unique")
         if payload.get("token_endpoint_auth_method", "none") != "none":
@@ -509,7 +541,24 @@ class OAuthBridgeService:
             self._prune()
             if len(self._clients) >= _MAX_CLIENTS:
                 raise OAuthBridgeError("dynamic client registry is full")
-            self._clients[client.client_id] = client
+            # An MCP client that restarts its OAuth flow re-POSTs the same
+            # metadata rather than storing the first client_id. Re-registering a
+            # byte-identical client must return the existing client_id, not mint
+            # a second one: two registrations for one redirect would otherwise
+            # each issue codes the other cannot redeem.
+            existing = next(
+                (
+                    item
+                    for item in self._clients.values()
+                    if item.redirect_uris == redirects
+                    and item.client_name == client.client_name
+                ),
+                None,
+            )
+            if existing is not None:
+                client = existing
+            else:
+                self._clients[client.client_id] = client
         self._persist()
         return {
             "client_id": client.client_id,
@@ -523,7 +572,9 @@ class OAuthBridgeService:
 
     def begin_authorization(self, values: Mapping[str, list[str]]) -> tuple[str, _Client]:
         client_id = _single(values, "client_id")
-        redirect_uri = _redirect_uri(_single(values, "redirect_uri"))
+        redirect_uri = _redirect_uri(
+            _single(values, "redirect_uri"), self.allowed_redirect_hosts
+        )
         if _single(values, "response_type") != "code":
             raise OAuthBridgeError("response_type must be code")
         state = _single(values, "state")
@@ -624,7 +675,9 @@ class OAuthBridgeService:
     def exchange_code(self, values: Mapping[str, list[str]]) -> dict[str, Any]:
         code = _single(values, "code")
         client_id = _single(values, "client_id")
-        redirect_uri = _redirect_uri(_single(values, "redirect_uri"))
+        redirect_uri = _redirect_uri(
+            _single(values, "redirect_uri"), self.allowed_redirect_hosts
+        )
         verifier = _single(values, "code_verifier")
         resource = _single(values, "resource")
         if not 43 <= len(verifier) <= 128 or not verifier.isascii():
@@ -718,20 +771,58 @@ def _oauth_error(message: str, *, status_code: int = 400) -> JSONResponse:
     )
 
 
-def _approval_page(service: OAuthBridgeService, request_id: str, client: _Client) -> str:
+def _approval_language(values: Mapping[str, list[str]]) -> str:
+    """Choose one of the approval page's supported languages from OIDC ui_locales."""
+    for value in values.get("ui_locales", []):
+        for tag in value.split():
+            language = tag.split("-", 1)[0].lower()
+            if language in {"ru", "en"}:
+                return language
+    return "en"
+
+
+def _approval_page(
+    service: OAuthBridgeService,
+    request_id: str,
+    client: _Client,
+    *,
+    language: str = "en",
+) -> str:
+    russian = language == "ru"
+    title = "Подключение KaroX" if russian else "Authorize KaroX"
+    heading = "Разрешить доступ к инструментам KaroX" if russian else "Authorize KaroX tools"
+    request_text = (
+        "запрашивает доступ к выбранным инструментам на этом компьютере."
+        if russian
+        else "requests access to the explicitly selected tools on this computer."
+    )
+    password_label = (
+        "Пароль подтверждения из окна KaroX"
+        if russian
+        else "Approval password from the KaroX window"
+    )
+    help_text = (
+        "Скопируйте строку «OAuth approval password» из окна KaroX и вставьте её сюда. "
+        "Не закрывайте KaroX до завершения подключения."
+        if russian
+        else "Copy the “OAuth approval password” from the KaroX window and paste it here. "
+        "Keep KaroX open until the connection finishes."
+    )
+    button = "Разрешить" if russian else "Authorize"
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Authorize KaroX</title>
+<html lang="{language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>{title}</title>
 <style>body{{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:0 1rem;background:#111;color:#eee}}
 main{{border:1px solid #555;border-radius:12px;padding:1.5rem}}input,button{{font:inherit;width:100%;box-sizing:border-box;padding:.75rem;margin-top:.75rem}}
 code{{overflow-wrap:anywhere;color:#d9bd7b}}small{{color:#aaa}}</style></head>
-<body><main><h1>Authorize KaroX tools</h1>
-<p><strong>{html.escape(client.client_name)}</strong> requests access to the explicitly selected tools on this computer.</p>
+<body><main><h1>{heading}</h1>
+<p><strong>{html.escape(client.client_name)}</strong> {request_text}</p>
 <p><small>Redirect: {html.escape(client.redirect_uris[0])}<br>Resource: <code>{html.escape(service.resource)}</code></small></p>
+<p>{help_text}</p>
 <form method="post" action="/oauth/authorize">
 <input type="hidden" name="request_id" value="{html.escape(request_id)}">
-<label>Bridge approval password<input type="password" name="password" required autocomplete="current-password"></label>
-<button type="submit">Authorize</button></form></main></body></html>"""
+<label>{password_label}<input type="password" name="password" required autocomplete="current-password"></label>
+<button type="submit">{button}</button></form></main></body></html>"""
 
 
 def build_oauth_proxy_asgi_app(
@@ -742,16 +833,26 @@ def build_oauth_proxy_asgi_app(
     path: str = "/mcp",
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     state_dir: Optional[Path] = None,
+    allowed_redirect_hosts: Optional[frozenset[str]] = None,
 ) -> Any:
     """Expose an MCP bridge with OAuth discovery, DCR, PKCE, and refresh.
 
     ``state_dir`` is where registrations and refresh grants survive a restart.
     Omitting it keeps every one of them in RAM, which means a connector added in
     ChatGPT or Claude stops working the moment this process exits.
+
+    ``allowed_redirect_hosts`` pins the exact client hostnames a strict profile
+    (such as ``hyperagent-web``) will redirect authorization codes to. ``None``
+    keeps the permissive default that admits any HTTPS redirect, which the
+    chatgpt-web/claude-web profiles and library callers rely on.
     """
 
     service = OAuthBridgeService(
-        public_url, approval_secret, path=path, state_dir=state_dir
+        public_url,
+        approval_secret,
+        path=path,
+        state_dir=state_dir,
+        allowed_redirect_hosts=allowed_redirect_hosts,
     )
     metadata_url = (
         f"{service.public_url}/.well-known/oauth-protected-resource{service.path}"
@@ -802,6 +903,16 @@ def build_oauth_proxy_asgi_app(
                     service.authorization_server_metadata(),
                     headers={"Cache-Control": "no-store"},
                 )
+            elif request_path == "/.well-known/openid-configuration" and method == "GET":
+                # KaroX is not an OIDC provider: it issues no ID tokens and has no
+                # userinfo endpoint. Some MCP clients probe this path during
+                # discovery regardless, so it is served as an explicit
+                # compatibility alias for the authorization-server metadata --
+                # the same fields, never an OIDC claim that is not honoured.
+                response = JSONResponse(
+                    service.authorization_server_metadata(),
+                    headers={"Cache-Control": "no-store"},
+                )
             elif request_path == "/oauth/register" and method == "POST":
                 if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
                     raise OAuthBridgeError("client registration must use application/json")
@@ -818,7 +929,12 @@ def build_oauth_proxy_asgi_app(
                     values.setdefault(key, []).append(value)
                 request_id, client = service.begin_authorization(values)
                 response = HTMLResponse(
-                    _approval_page(service, request_id, client),
+                    _approval_page(
+                        service,
+                        request_id,
+                        client,
+                        language=_approval_language(values),
+                    ),
                     headers={
                         "Cache-Control": "no-store",
                         "Content-Security-Policy": (
@@ -827,7 +943,13 @@ def build_oauth_proxy_asgi_app(
                             "base-uri 'none'; frame-ancestors 'none'"
                         ),
                         "X-Frame-Options": "DENY",
-                        "Referrer-Policy": "no-referrer",
+                        # Chromium may serialize Origin as ``null`` for a basic
+                        # form POST under ``no-referrer``. The rebinding guard
+                        # then rejects KaroX's own approval form before it can
+                        # check the password. ``same-origin`` preserves the
+                        # real origin for this POST and still sends no referrer
+                        # to ChatGPT/Claude on the cross-origin OAuth redirect.
+                        "Referrer-Policy": "same-origin",
                     },
                 )
             elif request_path == "/oauth/authorize" and method == "POST":

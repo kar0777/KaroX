@@ -50,8 +50,18 @@ def process_is_running(pid: int) -> bool:
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
             capture_output=True,
             text=True,
+            # ``tasklist`` emits bytes in the OEM code page on localized
+            # Windows; the default ANSI decoder raises UnicodeDecodeError in
+            # the reader thread, which leaves ``stdout`` as ``None`` and turns
+            # the ``in`` check below into a TypeError.  We only need the ASCII
+            # pid token, so replace-mode decoding is exact.
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
             check=False,
         )
+        if completed.stdout is None:
+            return False
         return f'"{pid}"' in completed.stdout
     try:
         os.kill(pid, 0)

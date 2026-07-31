@@ -44,6 +44,38 @@ CORE_TOOL_NAMES: dict[str, str] = {
     "karox.git.commit": "git.commit",
 }
 
+# Tools that are NOT Core commands but are still part of a hosted bridge
+# contract: the stateful browser session, the managed dev server, and
+# session-scoped artifact access.  They are served by ``HostedToolsRuntime`` and
+# are validated against this set wherever a launch selects its tool bundle.
+# The catalogue metadata (descriptions, input schemas, capabilities) lives in
+# :mod:`karox.hosted_tools_runtime`; this is only the name universe used for
+# allowlist validation, kept here to avoid an import cycle through that module.
+HOSTED_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "karox.browser.open",
+        "karox.browser.snapshot",
+        "karox.browser.click",
+        "karox.browser.fill",
+        "karox.browser.select",
+        "karox.browser.press",
+        "karox.browser.wait_for",
+        "karox.browser.get_text",
+        "karox.browser.screenshot",
+        "karox.browser.console",
+        "karox.browser.network_failures",
+        "karox.browser.close",
+        "karox.dev_server.start",
+        "karox.dev_server.status",
+        "karox.dev_server.logs",
+        "karox.dev_server.stop",
+        "karox.artifact.get",
+        "karox.artifact.read_image",
+    }
+)
+
+KNOWN_HOSTED_TOOL_NAMES: frozenset[str] = frozenset(CORE_TOOL_NAMES) | HOSTED_EXTRA_TOOL_NAMES
+
 
 # A hosted call's deadline is also the ceiling on how long checks.run may take,
 # and no real repository verifies itself in thirty seconds.

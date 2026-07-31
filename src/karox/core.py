@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
+import locale
 import math
 import os
 import re
@@ -19,6 +21,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .policy import CapabilityPolicy
+from .process_launcher import resolve_executable as _resolve_executable
 from .security import (
     child_process_environment,
     contains_credential,
@@ -333,6 +336,95 @@ class CapturedStream:
     truncated: bool
     total_bytes: int
     elided_bytes: int
+
+
+@lru_cache(maxsize=1)
+def _legacy_output_encodings() -> tuple[str, ...]:
+    """Code pages a guarded child may have written when its output is not UTF-8.
+
+    ``security.child_process_environment`` forces ``PYTHONIOENCODING`` so a
+    Python child always answers in UTF-8, which covers the test runners and
+    linters most verification commands use. It cannot cover a child KaroX does
+    not control the startup of: a Windows C# or C++ compiler, ``javac``, or any
+    tool that writes through the console API answers in the host's OEM code page
+    -- cp866 on a Russian-locale install -- and no environment variable changes
+    that.
+
+    Both candidates are single-byte on Windows, so either decodes any byte
+    sequence without raising. Choosing the wrong one mangles the text; deleting
+    the bytes, which is what ``errors="ignore"`` did at this call site, removes
+    it. A mangled diagnostic still shows the agent the path, the line number and
+    the ASCII keywords it needs to act on. A deleted one shows an empty error and
+    invites the agent to report success.
+    """
+    candidates: list[str] = []
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            oem = int(ctypes.windll.kernel32.GetOEMCP())  # type: ignore[attr-defined]
+        except (AttributeError, OSError, ValueError):
+            oem = 0
+        if oem:
+            candidates.append(f"cp{oem}")
+    try:
+        preferred = locale.getpreferredencoding(False)
+    except (LookupError, ValueError):
+        preferred = ""
+    if preferred:
+        candidates.append(preferred)
+    return tuple(
+        dict.fromkeys(
+            name
+            for name in candidates
+            if name.replace("-", "").replace("_", "").lower() != "utf8"
+        )
+    )
+
+
+def _decode_captured_bytes(raw: bytes, *, mid_stream_start: bool = False) -> tuple[str, int]:
+    """Decode one end of a captured stream, reporting the source bytes it accounts for.
+
+    The byte count is returned rather than recomputed by the caller because it is
+    only equal to ``len(text.encode("utf-8"))`` while the decode really was
+    UTF-8. Under the legacy fallback below, re-encoding the result produces a
+    different length, and the elided-byte arithmetic that used to assume
+    otherwise would report a negative number beside a sha256 of the whole stream.
+
+    ``mid_stream_start`` marks a chunk taken from the middle of the stream, whose
+    first bytes may be the continuation of a character whose lead byte was
+    elided. Those bytes are unrecoverable on their own, so they are attributed to
+    the elided middle instead of being decoded into a replacement character that
+    was never in the output.
+    """
+    if not raw:
+        return "", 0
+    start = 0
+    if mid_stream_start:
+        while start < len(raw) and 0x80 <= raw[start] < 0xC0:
+            start += 1
+    body = raw[start:]
+    if not body:
+        return "", 0
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        # ``final=False``: a chunk cut at a byte budget routinely ends inside a
+        # multi-byte character, and that is a truncation rather than a decode
+        # error. The decoder buffers those bytes instead of raising, and they are
+        # excluded from the count below because they produced no text.
+        text = decoder.decode(body, False)
+    except UnicodeDecodeError:
+        pass
+    else:
+        return text, len(text.encode("utf-8"))
+    for encoding in _legacy_output_encodings():
+        try:
+            return body.decode(encoding), len(body)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    # Nothing decoded cleanly. ``replace`` keeps the readable remainder and marks
+    # the rest, which is the whole point: never return less than the child wrote.
+    return body.decode("utf-8", errors="replace"), len(body)
 
 
 @dataclass(frozen=True)
@@ -1233,9 +1325,15 @@ class CoreRuntime:
         )
         env = child_process_environment()
         started = time.perf_counter()
+        # ``shell=False`` on Windows does not consult ``PATHEXT`` for ``.cmd``
+        # shims, so ``npm`` (which lives as ``npm.cmd``) would raise WinError 2.
+        # Resolve the executable to an absolute path *after* the verification
+        # allowlist has already matched on the logical argv, leaving the
+        # command-allowlist, cwd, env, and shell=False guarantees untouched.
+        launch_argv = _resolve_executable(argv)
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
-                argv,
+                launch_argv,
                 cwd=self.repository,
                 env=env,
                 stdout=stdout_file,
@@ -1292,8 +1390,9 @@ class CoreRuntime:
         if size <= limit:
             handle.seek(0)
             body = handle.read(size)
+            text, _ = _decode_captured_bytes(body)
             return CapturedStream(
-                body.decode("utf-8", errors="ignore"),
+                text,
                 digest.hexdigest(),
                 False,
                 size,
@@ -1314,9 +1413,9 @@ class CoreRuntime:
         # cut landed inside, so the count has to be taken from what is actually
         # returned rather than from the budgets. It sits beside a sha256 of the
         # whole stream, which makes an approximate number worse than useless.
-        head_text = head.decode("utf-8", errors="ignore")
-        tail_text = tail.decode("utf-8", errors="ignore")
-        elided = size - len(head_text.encode("utf-8")) - len(tail_text.encode("utf-8"))
+        head_text, head_bytes = _decode_captured_bytes(head)
+        tail_text, tail_bytes = _decode_captured_bytes(tail, mid_stream_start=True)
+        elided = size - head_bytes - tail_bytes
         text = (
             head_text
             + f"\n[karox: {elided} bytes elided from the middle of this stream]\n"

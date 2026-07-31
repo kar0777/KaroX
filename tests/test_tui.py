@@ -50,7 +50,7 @@ class InputRoutingTests(unittest.TestCase):
         argv = tui._agent_argv(
             "fix it",
             Path("/repo"),
-            ("python", "-m", "pytest", "-q"),
+            (("python", "-m", "pytest", "-q"),),
             "task-1",
         )
         self.assertEqual(argv[:2], ["agent", "run"])
@@ -59,6 +59,19 @@ class InputRoutingTests(unittest.TestCase):
             json.loads(argv[argv.index("--verification-command") + 1]),
             ["python", "-m", "pytest", "-q"],
         )
+
+    def test_agent_argv_emits_one_verification_command_per_approved_command(self) -> None:
+        argv = tui._agent_argv(
+            "fix it",
+            Path("/repo"),
+            (("npm", "test"), ("npm", "run", "ci"), ("npm", "run", "test:smoke")),
+            "task-2",
+        )
+        vc = [argv[i + 1] for i, a in enumerate(argv) if a == "--verification-command"]
+        self.assertEqual(len(vc), 3)
+        self.assertEqual(json.loads(vc[0]), ["npm", "test"])
+        self.assertEqual(json.loads(vc[1]), ["npm", "run", "ci"])
+        self.assertEqual(json.loads(vc[2]), ["npm", "run", "test:smoke"])
 
     def test_language_preference_round_trips_and_rejects_unknown_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

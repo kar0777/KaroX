@@ -15,7 +15,16 @@ class PolicyDenied(PermissionError):
 
 _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
     AccessProfile.READ_ONLY: frozenset(
-        {Capability.REPO_READ, Capability.GIT_READ}
+        {
+            Capability.REPO_READ,
+            Capability.GIT_READ,
+            # Browser read is non-mutating observation of a localhost UI
+            # (snapshot/screenshot/console/network) -- the same tier as
+            # repo.read.  The TUI exposes it through its own checkbox, and the
+            # hosted bridge runs read-only sessions that observe the dev
+            # server, so it must be reachable from READ_ONLY.
+            Capability.BROWSER_READ,
+        }
     ),
     AccessProfile.WORKSPACE_WRITE: frozenset(
         {
@@ -25,6 +34,12 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
             Capability.MCP_CALL,
+            # Browser read is reachable from read-only; browser *input*
+            # (open/click/fill/select/press/close) drives a localhost UI and
+            # is a workspace-scoped mutation gated behind --write, so it joins
+            # the write tier here.  git.commit stays ELEVATED-only by design.
+            Capability.BROWSER_READ,
+            Capability.BROWSER_INPUT,
         }
     ),
     AccessProfile.ELEVATED: frozenset(
@@ -112,6 +127,20 @@ class CapabilityPolicy:
         if grants is None:
             grants = set(profile_caps) if origin.kind.value == "user" else set()
         effective = set(profile_caps).intersection(grants)
+
+        # browser.input implies browser.read: a session that may drive a
+        # localhost UI (click/fill/select) may always observe it (snapshot/
+        # get_text).  This is the capability-level backstop for the
+        # ``WebBridgeConnectConfig`` tool-bundle normalization: even if a caller
+        # assembles grants directly (bypassing that normalization), a request for
+        # ``BROWSER_READ`` is allowed whenever ``BROWSER_INPUT`` is effectively
+        # granted, so the bridge can never reach the contradictory state where
+        # input is permitted but read is not.
+        if (
+            capability is Capability.BROWSER_READ
+            and Capability.BROWSER_INPUT in effective
+        ):
+            return PolicyDecision(True, capability, origin.key, "input implies read")
 
         if capability in _ALWAYS_EXPLICIT:
             approval = self.explicit_tokens.get(token or "")

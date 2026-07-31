@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
+import sys
 from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
@@ -22,6 +24,7 @@ from .hosted_bridge import (
     HostedBridgeError,
     HostedToolRuntime,
 )
+from .process_launcher import is_executable_resolution_error
 from .sessions import SessionError
 
 
@@ -50,6 +53,10 @@ BRIDGE_ERROR_MESSAGES: dict[str, str] = {
     ),
     "denied": "the call was denied by the KaroX session policy",
     "not_found": "the requested repository path does not exist",
+    "executable_not_found": (
+        "the guarded command's executable could not be resolved "
+        "(install the missing tool or use a command in the allowlist)"
+    ),
     "invalid_request": "the call was rejected as invalid",
     "internal": "the tool failed",
 }
@@ -88,6 +95,22 @@ def derive_idempotency_key(tool_name: str, arguments: Mapping[str, object]) -> s
     return f"derived-{digest}"
 
 
+def _idna_normalize(host: str) -> str:
+    """Return the punycode form of an internationalized host, or ``""``.
+
+    Tailscale MagicDNS names are ASCII, but a user can publish the bridge behind
+    an IDN origin, and the browser/TLS layer speaks punycode (``xn--...``) while
+    the operator may paste the unicode form into ``--public-url``. Comparing the
+    two as raw strings makes a perfectly good host look foreign and earns a 421.
+    """
+    if not host or host.isascii():
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return ""
+
+
 def normalize_host(value: Optional[str]) -> str:
     """Return a lowercase hostname without port, or ``""`` when unusable."""
     raw = (value or "").strip().lower().rstrip(".")
@@ -103,12 +126,46 @@ def normalize_host(value: Optional[str]) -> str:
         remainder = raw[closing + 1 :]
         if remainder and not (remainder.startswith(":") and remainder[1:].isdigit()):
             return ""
-        return host
+        return _idna_normalize(host)
     if raw.count(":") == 1:
         host, port = raw.rsplit(":", 1)
         if port.isdigit():
-            return host
-    return raw
+            return _idna_normalize(host)
+    return _idna_normalize(raw)
+
+
+def forwarded_host(headers: Mapping[str, str]) -> str:
+    """Extract the original host a trusted proxy forwarded, or ``""``.
+
+    Only the *first* hop's value is taken: a chain like ``a, b`` is read left to
+    right and the leftmost is the closest proxy, which is the one this bridge
+    configured. Untrusted later hops are ignored so an external client cannot
+    prepend its own host.
+    """
+    forwarded = headers.get("forwarded")
+    if forwarded:
+        for hop in forwarded.split(","):
+            for pair in hop.split(";"):
+                key, _, val = pair.strip().partition("=")
+                if key.lower() == "host" and val:
+                    return normalize_host(val.strip().strip('"'))
+    xfh = headers.get("x-forwarded-host")
+    if xfh:
+        return normalize_host(xfh.split(",")[0].strip())
+    return ""
+
+
+def peer_is_loopback(scope: Mapping[str, Any]) -> bool:
+    """True when the request reached the listener from this machine.
+
+    The tunnel child connects to ``127.0.0.1:<port>``, so the only loopback peer
+    in production is the tunnel itself. That is the trusted local proxy path
+    permitted to set ``Forwarded``/``X-Forwarded-Host``; a remote client is not.
+    """
+    client = scope.get("client")
+    if not isinstance(client, (list, tuple)) or len(client) < 1:
+        return False
+    return str(client[0]) in {"127.0.0.1", "::1", "localhost"}
 
 
 def resolve_allowed_hosts(extra: Optional[Sequence[str]] = None) -> frozenset[str]:
@@ -186,6 +243,13 @@ def bridge_error_result(code: str) -> CallToolResult:
 
 def bridge_error_code(exc: BaseException) -> str:
     """Classify a handler failure into one of the codes callers may be told."""
+    # A missing executable (npm.cmd not on PATH) raises ExecutableResolutionError,
+    # a FileNotFoundError subclass.  It must NOT be collapsed with a genuine
+    # missing-repository FileNotFoundError into ``not_found`` ("the requested
+    # repository path does not exist"), which previously misdiagnosed a WinError 2
+    # as a repo-path problem even though the repo was readable.  Check it first.
+    if is_executable_resolution_error(exc):
+        return "executable_not_found"
     if isinstance(exc, FileNotFoundError):
         return "not_found"
     if isinstance(exc, (PermissionError, SessionError)):
@@ -193,6 +257,44 @@ def bridge_error_code(exc: BaseException) -> str:
     if isinstance(exc, (CoreError, HostedBridgeError, TypeError, ValueError)):
         return "invalid_request"
     return "internal"
+
+
+def _log_rebinding_421(
+    scope: Mapping[str, Any],
+    headers: Mapping[str, str],
+    *,
+    rejected_host: str,
+    reason: str,
+    allowed: frozenset[str],
+    expected_host: Optional[str] = None,
+) -> None:
+    """Print one redacted line explaining a 421, to the launcher console.
+
+    The 421 used to be a bare ``invalid Host header`` on an open endpoint, so the
+    only way to learn which header a real client actually sent was to reproduce it
+    with a packet capture. This prints what the guard saw -- nothing it must not.
+
+    Nothing sensitive is logged: the Authorization header, Cookie, any token, the
+    approval password, and the bridge credential are all absent from ``scope``'s
+    path. ``scope["path"]`` carries no query string in ASGI (``query_string`` is
+    separate), and even that is not printed, so a ``code``/``token`` leaking into
+    a redirect's query is not a concern here.
+    """
+    method = scope.get("method", "GET").upper()
+    path = scope.get("path", "")
+    request_id = secrets.token_hex(8)
+    forwarded = headers.get("forwarded") or headers.get("x-forwarded-host")
+    expected = expected_host or ",".join(sorted(allowed))
+    print(
+        f"[karox-rebind] 421 {method} {path} request_id={request_id} "
+        f"host={rejected_host or '<none>'} "
+        f"x-forwarded-host={'yes' if forwarded else 'no'} "
+        f"x-forwarded-proto={'yes' if headers.get('x-forwarded-proto') else 'no'} "
+        f"forwarded={'yes' if headers.get('forwarded') else 'no'} "
+        f"expected_origin={expected} reason={reason}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def rebinding_rejection(
@@ -205,9 +307,33 @@ def rebinding_rejection(
     matter which path it lands on.
     """
     headers = scope_headers(scope)
-    if normalize_host(headers.get("host")) not in allowed:
-        return Response(HOST_REJECTION_HINT, status_code=421)
+    host = normalize_host(headers.get("host"))
+    if host not in allowed:
+        # A trusted local tunnel/proxy connects from loopback and may rewrite the
+        # Host to its loopback target while preserving the public name it received
+        # in Forwarded/X-Forwarded-Host. An external client is not a loopback peer,
+        # so it cannot use this path to smuggle in a host of its own choosing.
+        if peer_is_loopback(scope):
+            forwarded = forwarded_host(headers)
+            if forwarded and forwarded in allowed:
+                host = forwarded
+        if host not in allowed:
+            _log_rebinding_421(
+                scope,
+                headers,
+                rejected_host=normalize_host(headers.get("host")),
+                reason="host_not_allowed",
+                allowed=allowed,
+            )
+            return Response(HOST_REJECTION_HINT, status_code=421)
     if not origin_is_allowed(headers.get("origin"), allowed):
+        _log_rebinding_421(
+            scope,
+            headers,
+            rejected_host=host,
+            reason="origin_not_allowed",
+            allowed=allowed,
+        )
         return Response("invalid Origin header", status_code=421)
     return None
 
@@ -224,6 +350,7 @@ def build_proxy_asgi_app(
     bearer_authorizer: Optional[Callable[[str], bool]] = None,
     unauthorized_headers: Optional[Mapping[str, str]] = None,
     allowed_hosts: Optional[Sequence[str]] = None,
+    diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> Any:
     """Expose selected Core and/or proxied tools as authenticated MCP."""
     if (bearer_token is None) == (bearer_authorizer is None):
@@ -256,6 +383,26 @@ def build_proxy_asgi_app(
         raise ValueError("bridge MCP path must be an absolute URL path")
     if not 0.1 <= float(deadline_seconds) <= 3600.0:
         raise ValueError("bridge deadline must be between 0.1 and 3600 seconds")
+    diagnostics_payload: Optional[dict[str, Any]] = None
+    diagnostics_source: Any = diagnostics
+    if diagnostics_source is None:
+        raw_diagnostics = os.environ.get("KAROX_BRIDGE_DIAGNOSTICS_JSON", "").strip()
+        if raw_diagnostics:
+            try:
+                diagnostics_source = json.loads(raw_diagnostics)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "KAROX_BRIDGE_DIAGNOSTICS_JSON must contain valid JSON"
+                ) from exc
+    if diagnostics_source is not None:
+        try:
+            diagnostics_payload = json.loads(
+                json.dumps(dict(diagnostics_source), ensure_ascii=False, sort_keys=True)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bridge diagnostics must be JSON serializable") from exc
+        if not isinstance(diagnostics_payload, dict):
+            raise ValueError("bridge diagnostics must be a JSON object")
 
     allowed = resolve_allowed_hosts(allowed_hosts)
     server = Server("karox-proxy")
@@ -263,7 +410,7 @@ def build_proxy_asgi_app(
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
-        return [
+        tools = [
             Tool(
                 name=item.name,
                 description=item.description,
@@ -277,12 +424,48 @@ def build_proxy_asgi_app(
             )
             for item in descriptors
         ]
+        if diagnostics_payload is not None:
+            tools.append(
+                Tool(
+                    name="karox.bridge.diagnostics",
+                    description=(
+                        "Return the effective KaroX bridge contract: available and "
+                        "disabled tools with reasons, verification allowlist, "
+                        "deadline, tunnel stability, and session lifetime."
+                    ),
+                    inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=True,
+                        openWorldHint=False,
+                    ),
+                )
+            )
+        return tools
 
     @server.call_tool()
     async def call_tool(
         name: str, arguments: dict[str, object]
     ) -> dict[str, Any] | CallToolResult:
         try:
+            if name == "karox.bridge.diagnostics" and diagnostics_payload is not None:
+                if arguments:
+                    return bridge_error_result("invalid_request")
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                diagnostics_payload,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        )
+                    ],
+                    structuredContent=dict(diagnostics_payload),
+                    isError=False,
+                )
             descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
             descriptor = next(
                 (item for item in descriptors if item.name == name), None

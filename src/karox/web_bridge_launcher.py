@@ -20,14 +20,45 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from .bridge import BridgeCredentialStore, known_bridge_profiles
-from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS
+from .hosted_bridge import (
+    DEFAULT_HOSTED_DEADLINE_SECONDS,
+    KNOWN_HOSTED_TOOL_NAMES,
+)
+from .hosted_tools_runtime import (
+    ManagedServerProfile,
+)
 from .models import AccessProfile
+from .process_launcher import resolve_executable as _resolve_executable
+from .tailscale import (
+    TailscaleError,
+    classify_funnel_failure,
+    prepare_tailscale_funnel,
+)
 from .paths import runtime_dir, session_dir
 from .proxy_server import ALLOWED_HOSTS_ENVIRONMENT
 from .sessions import SessionStore
 
 
-WEB_BRIDGE_PROFILES = ("chatgpt-web", "claude-web")
+WEB_BRIDGE_PROFILES = ("chatgpt-web", "claude-web", "hyperagent-web")
+# The redirect hosts a strict profile will send authorization codes to. ``None``
+# means "any HTTPS host" -- the permissive default chatgpt-web/claude-web and
+# library callers rely on. hyperagent-web pins the one verified canonical host.
+# The exact callback path is deliberately not hardcoded: the documented
+# endpoint has moved (``/api/mcp`` today, ``/api/mcp-serve`` in one screenshot
+# that no source corroborates), so the host is pinned and any path on it is
+# accepted. Arbitrary subdomains, wildcards, HTTP, and non-web schemes are
+# rejected by the structural check in ``_redirect_uri`` before the host is ever
+# compared.
+PROFILE_REDIRECT_HOSTS: dict[str, Optional[frozenset[str]]] = {
+    "hyperagent-web": frozenset({"hyperagent.com"}),
+}
+
+
+def profile_redirect_hosts(profile: str) -> Optional[frozenset[str]]:
+    """Return the pinned redirect-host allowlist for a strict profile, or None."""
+    return PROFILE_REDIRECT_HOSTS.get(profile)
+
+
 DEFAULT_WEB_TOOLS = (
     "karox.repo.read_file",
     "karox.repo.read_lines",
@@ -36,11 +67,60 @@ DEFAULT_WEB_TOOLS = (
     "karox.git.status",
     "karox.git.diff",
     "karox.git.log",
+    # Read-only browser/artifact/dev-server tools a hosted client needs to see
+    # the interface without mutating it.  The mutating browser/server tools
+    # (open/click/fill/start/stop) are added by WRITE_WEB_TOOLS below.
+    "karox.browser.snapshot",
+    "karox.browser.get_text",
+    "karox.browser.console",
+    "karox.browser.network_failures",
+    "karox.browser.screenshot",
+    "karox.artifact.get",
+    "karox.artifact.read_image",
+    "karox.dev_server.status",
+    "karox.dev_server.logs",
 )
 WRITE_WEB_TOOLS = (
     "karox.repo.edit_file",
     "karox.repo.write_file",
+    # Stateful browser and dev-server control.  These drive a UI or start a
+    # process, so they are gated behind --write like repository writes.
+    "karox.browser.open",
+    "karox.browser.click",
+    "karox.browser.fill",
+    "karox.browser.select",
+    "karox.browser.press",
+    "karox.browser.close",
+    "karox.dev_server.start",
+    "karox.dev_server.stop",
 )
+# Canonical browser tool-name groups.  These are the single source of truth for
+# the browser read/input split: ``__post_init__`` normalizes the tool bundle
+# with them (browser.input implies browser.read) and ``web_bridge_diagnostics``
+# derives ``browser_permission`` from them, so the two never drift into the
+# contradictory ``read:false, input:true`` state.  ``open``/``close`` are input
+# tools because they mutate browser session state (navigate/tear down), the
+# same capability tier as click/fill/select/press.
+BROWSER_READ_TOOL_NAMES: tuple[str, ...] = (
+    "karox.browser.snapshot",
+    "karox.browser.get_text",
+    "karox.browser.console",
+    "karox.browser.network_failures",
+    "karox.browser.screenshot",
+)
+BROWSER_INPUT_TOOL_NAMES: tuple[str, ...] = (
+    "karox.browser.open",
+    "karox.browser.click",
+    "karox.browser.fill",
+    "karox.browser.select",
+    "karox.browser.press",
+    "karox.browser.close",
+)
+# checks.run is read-only in effect (it runs an approved verification command)
+# but is only useful with a verification allowlist, so it is surfaced by the
+# diagnostics as available when one is configured rather than forced into the
+# default bundle.
+CHECKS_RUN_TOOL = "karox.checks.run"
 _QUICK_TUNNEL_URL = re.compile(
     r"https://[A-Za-z0-9-]+\.trycloudflare\.com(?=$|[\s/])"
 )
@@ -71,22 +151,33 @@ class WebBridgeConnectConfig:
     tunnel: str = "cloudflare"
     public_url: Optional[str] = None
     cloudflared: Optional[str] = None
+    tailscale: Optional[str] = None
     tunnel_timeout_seconds: float = 30.0
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS
-    verification_commands: tuple[str, ...] = ()
+    verification_commands: tuple[tuple[str, ...], ...] = ()
+    # The dev-server recipes a hosted client may start through karox.dev_server.*.
+    # Defaults include the safe Vacancy Control profile (start:safe with
+    # FACEBOOK_LIVE_ENABLED=false).  Profiles carry no secrets, only argv, an
+    # env key set and an env allowlist, so they are safe to persist alongside a
+    # saved bridge profile.
+    server_profiles: tuple[ManagedServerProfile, ...] = ()
+    language: str = "en"
+    saved_profile_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.profile not in WEB_BRIDGE_PROFILES:
             raise ValueError("web bridge profile must be chatgpt-web or claude-web")
         if not 1 <= self.port <= 65_535:
             raise ValueError("web bridge port must be between 1 and 65535")
-        if self.tunnel not in {"cloudflare", "custom"}:
-            raise ValueError("web bridge tunnel must be cloudflare or custom")
+        if self.tunnel not in {"cloudflare", "tailscale", "custom"}:
+            raise ValueError(
+                "web bridge tunnel must be cloudflare, tailscale, or custom"
+            )
         if self.tunnel == "custom" and not self.public_url:
             raise ValueError("custom web bridge tunnel requires --public-url")
-        if self.tunnel == "cloudflare" and self.public_url:
+        if self.tunnel != "custom" and self.public_url:
             raise ValueError(
-                "--public-url is determined automatically for a Cloudflare Quick Tunnel"
+                "--public-url is only valid with --tunnel custom"
             )
         if self.public_url:
             parsed = urlsplit(self.public_url)
@@ -105,6 +196,66 @@ class WebBridgeConnectConfig:
                 )
         if not self.tools or len(set(self.tools)) != len(self.tools):
             raise ValueError("web bridge tools must be non-empty and unique")
+        # The tool universe is the union of Core tools and the hosted browser/
+        # dev-server/artifact tools.  Both halves are validated against the same
+        # ``KNOWN_HOSTED_TOOL_NAMES`` set so a launch cannot select a name that
+        # no runtime knows how to serve.
+        unknown_tools = sorted(set(self.tools) - set(KNOWN_HOSTED_TOOL_NAMES))
+        if unknown_tools:
+            raise ValueError(
+                "web bridge contains unknown tools: " + ", ".join(unknown_tools)
+            )
+        # browser.input implies browser.read.  Selecting any input tool (open/
+        # click/fill/select/press/close) without the read tools (snapshot/
+        # get_text/console/network_failures/screenshot) is a contradictory state:
+        # a hosted client could click a button but never snapshot the result, and
+        # ``web_bridge_diagnostics`` would report ``read:false, input:true``.  We
+        # normalize the bundle here so the read tools are always present whenever
+        # an input tool is, which makes the granted capability set (derived from
+        # this same bundle in ``CoreToolBridge``) and the diagnostics (derived
+        # from this bundle in ``web_bridge_diagnostics``) agree by construction.
+        tool_set = set(self.tools)
+        if tool_set.intersection(BROWSER_INPUT_TOOL_NAMES):
+            missing_read = set(BROWSER_READ_TOOL_NAMES) - tool_set
+            if missing_read:
+                # Preserve caller order, then append the auto-included read tools
+                # in their canonical order so the bundle is deterministic.
+                ordered = list(self.tools)
+                ordered.extend(
+                    name for name in BROWSER_READ_TOOL_NAMES if name in missing_read
+                )
+                object.__setattr__(self, "tools", tuple(ordered))
+        if any(
+            not command
+            or len(command) > 100
+            or not all(isinstance(item, str) and item for item in command)
+            for command in self.verification_commands
+        ):
+            raise ValueError(
+                "web bridge verification commands must contain 1-100 non-empty strings"
+            )
+        if "karox.checks.run" in self.tools and not self.verification_commands:
+            raise ValueError(
+                "karox.checks.run requires at least one approved verification command"
+            )
+        # ``karox.dev_server.start`` can only ever reject without an approved
+        # profile, so it is not allowed in the bundle: catch that early with a
+        # message that names the fix instead of a runtime denial.  status/logs
+        # are read-only and harmless without profiles (they report "not found"),
+        # so they are left alone here.
+        if "karox.dev_server.start" in self.tools and not self.server_profiles:
+            raise ValueError(
+                "karox.dev_server.start requires at least one approved server profile"
+            )
+        seen_profiles: set[str] = set()
+        for profile in self.server_profiles:
+            if not isinstance(profile, ManagedServerProfile):
+                raise ValueError("server profiles must be ManagedServerProfile instances")
+            if profile.name in seen_profiles:
+                raise ValueError(f"duplicate server profile: {profile.name}")
+            seen_profiles.add(profile.name)
+        if self.language not in {"en", "ru"}:
+            raise ValueError("web bridge language must be en or ru")
         if not 1.0 <= float(self.tunnel_timeout_seconds) <= 300.0:
             raise ValueError("tunnel timeout must be between 1 and 300 seconds")
         if not 0.1 <= float(self.deadline_seconds) <= 3600.0:
@@ -123,14 +274,62 @@ class CloudflareQuickTunnel:
         self.reader.join(timeout=2)
 
 
+@dataclass
+class TailscaleForegroundFunnel:
+    """A foreground Funnel route owned only by this launcher process."""
+
+    process: subprocess.Popen[str]
+    public_url: str
+    output_tail: deque[str]
+    reader: threading.Thread
+
+    def stop(self) -> None:
+        # Never use a global Funnel reset; foreground mode owns this route.
+        _stop_process(self.process)
+        self.reader.join(timeout=2)
+
+
 def bundled_cloudflared() -> Path:
     """Where the KaroX installer puts cloudflared when the user accepts it."""
     executable = "cloudflared.exe" if os.name == "nt" else "cloudflared"
     return runtime_dir() / "bin" / executable
 
 
+def windows_cloudflared_candidates() -> tuple[Path, ...]:
+    """Return cloudflared locations used by Windows installers.
+
+    WinGet normally exposes package executables through ``WinGet\\Links``, but
+    that directory is not guaranteed to be present in PATH (and on some WinGet
+    versions the link is not created at all).  The package itself is still
+    installed and executable, so include its stable package directory as a
+    fallback instead of telling the user to install an already installed tool.
+    """
+    if sys.platform != "win32":
+        return ()
+
+    candidates: list[Path] = []
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        local = Path(local_app_data)
+        candidates.extend(
+            (
+                local / "Microsoft" / "WinGet" / "Links" / "cloudflared.exe",
+                local / "Microsoft" / "WindowsApps" / "cloudflared.exe",
+            )
+        )
+        packages = local / "Microsoft" / "WinGet" / "Packages"
+        candidates.extend(
+            sorted(packages.glob("Cloudflare.cloudflared_*\\cloudflared.exe"))
+        )
+
+    program_files = os.environ.get("ProgramFiles", "").strip()
+    if program_files:
+        candidates.append(Path(program_files) / "Cloudflare" / "cloudflared.exe")
+    return tuple(candidates)
+
+
 def find_cloudflared(explicit: Optional[str] = None) -> Optional[str]:
-    """Resolve cloudflared from an explicit path, PATH, or KaroX runtime bin."""
+    """Resolve cloudflared from explicit, PATH, KaroX, or installer locations."""
     if explicit:
         candidate = Path(explicit).expanduser().resolve()
         return str(candidate) if candidate.is_file() else None
@@ -138,7 +337,12 @@ def find_cloudflared(explicit: Optional[str] = None) -> Optional[str]:
     if discovered:
         return discovered
     bundled = bundled_cloudflared()
-    return str(bundled) if bundled.is_file() else None
+    if bundled.is_file():
+        return str(bundled)
+    for candidate in windows_cloudflared_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def cloudflared_install_hint() -> str:
@@ -524,6 +728,101 @@ def start_cloudflare_quick_tunnel(
     return CloudflareQuickTunnel(process, public_url, output_tail, reader)
 
 
+def start_tailscale_foreground_funnel(
+    port: int,
+    *,
+    executable: Optional[str] = None,
+    timeout_seconds: float = 30.0,
+    popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+    job: Optional[int] = None,
+    emit: Optional[Callable[[str], None]] = None,
+    restart_service: bool = True,
+    elevated_run: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
+) -> TailscaleForegroundFunnel:
+    """Start a stable Funnel without replacing or globally resetting routes.
+
+    ``emit`` receives human-readable progress while Tailscale is brought online
+    (see :func:`karox.tailscale.ensure_tailscale_ready`); the bridge launcher
+    passes a flushed ``print`` so a user who confirmed ``bridge connect`` sees
+    that the daemon is being started rather than a silent hang. ``restart_service``
+    is on by default: a stuck engine (the state a freshly-booted Windows machine
+    reports) is recovered by restarting the Tailscale service -- one UAC prompt
+    the user consents to -- instead of the bridge dying on a daemon ``up`` cannot
+    fix.
+    """
+    try:
+        plan = prepare_tailscale_funnel(
+            port,
+            executable=executable,
+            emit=emit,
+            restart_service=restart_service,
+            elevated_run=elevated_run,
+        )
+    except TailscaleError as exc:
+        raise WebBridgeLaunchError(str(exc)) from exc
+    try:
+        process = popen(
+            list(plan.argv),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_child_options(),
+        )
+    except OSError as exc:
+        raise WebBridgeLaunchError(
+            f"cannot start Tailscale Funnel: {type(exc).__name__}"
+        ) from exc
+    _adopt_child(job, process)
+    ready = threading.Event()
+    confirmed = {"public_url": False}
+    output_tail: deque[str] = deque(maxlen=30)
+
+    def drain() -> None:
+        stream = process.stdout
+        if stream is None:
+            ready.set()
+            return
+        for raw_line in stream:
+            line = raw_line.rstrip()
+            output_tail.append(line)
+            print(f"[tailscale] {line}", flush=True)
+            if plan.public_url in line or ".ts.net" in line:
+                confirmed["public_url"] = True
+                ready.set()
+        ready.set()
+
+    reader = threading.Thread(
+        target=drain,
+        name="karox-tailscale-funnel-output",
+        daemon=True,
+    )
+    reader.start()
+    # The stable hostname comes from authenticated status, but publication is
+    # ready only after the foreground command echoes the public URL.
+    ready.wait(float(timeout_seconds))
+    code = process.poll()
+    if code is not None:
+        reader.join(timeout=2)
+        detail = "\n".join(output_tail)
+        failure = classify_funnel_failure(detail)
+        raise WebBridgeLaunchError(f"{failure['code']}: {failure['detail']}")
+    if not confirmed["public_url"]:
+        _stop_process(process)
+        reader.join(timeout=2)
+        raise WebBridgeLaunchError(
+            "Tailscale Funnel did not confirm its stable public URL within "
+            f"{timeout_seconds:g}s{_tail_detail(output_tail)}"
+        )
+    return TailscaleForegroundFunnel(
+        process=process,
+        public_url=plan.public_url,
+        output_tail=output_tail,
+        reader=reader,
+    )
+
+
 def _port_is_available(port: int) -> bool:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -574,7 +873,12 @@ def write_watchdog(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def ephemeral_url_warning(profile_name: str, public_url: Optional[str]) -> Optional[str]:
+def ephemeral_url_warning(
+    profile_name: str,
+    public_url: Optional[str],
+    language: Optional[str] = None,
+    tunnel: str = "cloudflare",
+) -> Optional[str]:
     """Warn when a profile that needs a stable URL is published on a throwaway one.
 
     ``chatgpt-web`` and ``claude-web`` both declare ``persistent_url=True``, and
@@ -586,19 +890,94 @@ def ephemeral_url_warning(profile_name: str, public_url: Optional[str]) -> Optio
     Returns ``None`` when the user supplied their own origin, which is exactly the
     case the note would be telling them to move to.
     """
-    if public_url:
+    if tunnel != "cloudflare" or public_url:
         return None
     profile = next(
         (item for item in known_bridge_profiles() if item.name == profile_name), None
     )
     if profile is None or not profile.persistent_url:
         return None
+    if (language or os.environ.get("KAROX_UI_LANGUAGE", "en")).lower() == "ru":
+        return (
+            "\nВажно: это временный Cloudflare Quick Tunnel. После каждого "
+            "перезапуска KaroX URL меняется, поэтому сохранённое в клиенте "
+            "подключение перестанет работать и его URL нужно будет обновить. "
+            "Для постоянного подключения опубликуйте стабильный HTTPS-адрес и "
+            "используйте --tunnel custom --public-url."
+        )
     return (
         "\nNote: this is a Cloudflare Quick Tunnel, so the URL above is temporary. "
         "It changes every time the bridge restarts, and the connector you paste it "
         "into will stop working when it does. Your authorization does survive a "
         "restart -- the URL is what does not. For something you keep, publish a "
         "stable HTTPS origin and pass --tunnel custom --public-url."
+    )
+
+
+def web_bridge_connection_instructions(
+    profile: str, language: Optional[str] = None
+) -> tuple[str, ...]:
+    """Human steps printed after a web bridge becomes reachable."""
+    selected = (language or os.environ.get("KAROX_UI_LANGUAGE", "en")).lower()
+    if selected == "ru":
+        if profile == "chatgpt-web":
+            return (
+                "Как подключить мост к ChatGPT:",
+                "  1. Нужен ChatGPT Web с доступом к developer mode и custom MCP apps.",
+                "  2. В ChatGPT откройте Настройки → Приложения и включите developer mode в расширенных настройках, если он доступен.",
+                "  3. Создайте custom app через Приложения → Создать и вставьте MCP URL из строки выше.",
+                "  4. Нажмите сканирование инструментов и завершите OAuth через KaroX.",
+                "  5. На странице KaroX вставьте пароль подтверждения из строки выше и нажмите «Разрешить».",
+                "Важно: пароль вводится только на странице KaroX, не в настройках приложения.",
+            )
+        if profile == "hyperagent-web":
+            return (
+                "Как подключить мост к HyperAgent:",
+                "  1. В HyperAgent откройте Add MCP server.",
+                "  2. Name: KaroX.",
+                "  3. URL: MCP URL из строки выше (заканчивается на /mcp).",
+                "  4. Оставьте «Bring my own OAuth app» выключенным: KaroX публикует OAuth discovery и поддерживает Dynamic Client Registration, поэтому Client ID и Client Secret вводить вручную не нужно.",
+                "  5. Включите «I trust this server», только если вы доверяете этому локальному экземпляру KaroX.",
+                "  6. Нажмите Connect.",
+                "  7. На открывшейся странице KaroX вставьте пароль подтверждения из строки выше и нажмите «Разрешить».",
+                "Важно: пароль подтверждения вводится только на странице KaroX, а не в настройках HyperAgent. Не вставляйте ключ KaroX в поле Client Secret.",
+            )
+        return (
+            "Как подключить мост к Claude:",
+            "  1. Нужен тариф Claude с поддержкой custom connectors.",
+            "  2. Откройте Claude: Settings → Connectors → Add custom connector.",
+            "  3. Вставьте MCP URL из строки выше и добавьте connector.",
+            "  4. На странице KaroX вставьте пароль подтверждения из строки выше и нажмите «Разрешить».",
+            "Важно: пароль вводится только на странице KaroX, не в настройках коннектора.",
+        )
+    if profile == "chatgpt-web":
+        return (
+            "How to connect the bridge to ChatGPT:",
+            "  1. Use ChatGPT Web with access to developer mode and custom MCP apps.",
+            "  2. Open Settings → Apps and enable developer mode in Advanced Settings when available.",
+            "  3. Create a custom app from Apps → Create and paste the MCP URL shown above.",
+            "  4. Scan tools and complete the OAuth prompt through KaroX.",
+            "  5. On the KaroX page, paste the approval password shown above and click Authorize.",
+            "Important: enter the password only on the KaroX page, not in the app settings.",
+        )
+    if profile == "hyperagent-web":
+        return (
+            "How to connect the bridge to HyperAgent:",
+            "  1. In HyperAgent, open Add MCP server.",
+            "  2. Name: KaroX.",
+            "  3. URL: the MCP URL shown above (it ends in /mcp).",
+            "  4. Leave \"Bring my own OAuth app\" disabled: KaroX publishes OAuth discovery metadata and supports Dynamic Client Registration, so you do not enter a Client ID or Client Secret by hand.",
+            "  5. Enable \"I trust this server\" only if you trust this local KaroX instance.",
+            "  6. Click Connect.",
+            "  7. On the KaroX page that opens, paste the approval password shown above and click Authorize.",
+            "Important: enter the approval password only on the KaroX page, never in HyperAgent settings. Do not put the KaroX key in the Client Secret field.",
+        )
+    return (
+        "How to connect the bridge to Claude:",
+        "  1. Open Claude Settings → Connectors → Add custom connector.",
+        "  2. Paste the MCP URL shown above and start connecting.",
+        "  3. On the KaroX page, paste the approval password shown above and click Authorize.",
+        "Important: enter the password only on the KaroX page, not in connector settings.",
     )
 
 
@@ -740,11 +1119,184 @@ def _bridge_argv(
         "--deadline-seconds",
         str(config.deadline_seconds),
     ]
+    redirect_hosts = profile_redirect_hosts(config.profile)
+    if redirect_hosts:
+        values.extend(
+            ("--allowed-redirect-hosts", ",".join(sorted(redirect_hosts)))
+        )
     for tool in config.tools:
         values.extend(("--tool", tool))
     for command in config.verification_commands:
-        values.extend(("--verification-command", command))
+        serialized = json.dumps(
+            list(command), ensure_ascii=False, separators=(",", ":")
+        )
+        values.extend(("--verification-command", serialized))
+    # Server profiles are secret-free (argv + env key set + env allowlist), so
+    # they travel to the bridge child as JSON the same way verification commands
+    # do.  The child deserializes and validates them before it will start a
+    # dev server.
+    for profile in config.server_profiles:
+        serialized = json.dumps(profile.to_public_dict(), ensure_ascii=False)
+        values.extend(("--server-profile", serialized))
     return tuple(values)
+
+
+def _expected_verification_seconds(
+    commands: tuple[tuple[str, ...], ...]
+) -> Optional[float]:
+    estimate = 0.0
+    for command in commands:
+        joined = " ".join(command).lower()
+        if "run_v5_preflight.py" in joined and "--full" in command:
+            estimate = max(estimate, 900.0)
+        elif "pytest" in joined or "unittest" in joined or "coverage" in joined:
+            estimate = max(estimate, 300.0)
+    return estimate or None
+
+
+def web_bridge_diagnostics(
+    config: WebBridgeConnectConfig,
+    *,
+    public_url: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Describe the effective bridge contract without exposing credentials.
+
+    After a restart this is the first thing a hosted client (ChatGPT, Claude)
+    reads, so it must name *every* capability surface and the exact reason any
+    of them is off, including the browser, managed-server and screenshot
+    capabilities that were previously absent from this payload.
+    """
+    disabled: list[dict[str, str]] = []
+    # Every name the runtimes could serve, not just the Core half: a client
+    # asking "can I screenshot?" must see the answer here even if the answer
+    # is "no, the profile does not allow it".
+    for tool in sorted(KNOWN_HOSTED_TOOL_NAMES):
+        if tool in config.tools:
+            continue
+        reason = "not selected by the connection profile"
+        if tool == "karox.checks.run" and not config.verification_commands:
+            reason = "no approved verification-command allowlist"
+        if tool.startswith("karox.dev_server.") and not config.server_profiles:
+            reason = "no approved server-profile allowlist"
+        if tool in {
+            "karox.browser.open",
+            "karox.browser.click",
+            "karox.browser.fill",
+            "karox.browser.select",
+            "karox.browser.press",
+            "karox.browser.close",
+            "karox.dev_server.start",
+            "karox.dev_server.stop",
+        } and config.access_profile == AccessProfile.READ_ONLY:
+            reason = "write actions require the workspace_write or elevated profile"
+        disabled.append({"name": tool, "reason": reason})
+    expected = _expected_verification_seconds(config.verification_commands)
+    advisory = None
+    if expected is not None and config.deadline_seconds < expected:
+        advisory = (
+            f"effective deadline {config.deadline_seconds:g}s is below the "
+            f"estimated {expected:g}s needed by the selected verification command"
+        )
+    stability = {
+        "cloudflare": "ephemeral",
+        "tailscale": "stable_device_hostname",
+        "custom": "stable_user_managed",
+    }[config.tunnel]
+    # Derived from the same canonical groups that ``__post_init__`` normalizes
+    # against, so diagnostics reflects the *effective* capability set, not raw
+    # checkbox values: because input implies read, ``browser_read`` is True
+    # whenever ``browser_input`` is.
+    browser_read = any(name in config.tools for name in BROWSER_READ_TOOL_NAMES)
+    browser_input = any(name in config.tools for name in BROWSER_INPUT_TOOL_NAMES)
+    managed_server = any(name in config.tools for name in (
+        "karox.dev_server.start",
+        "karox.dev_server.status",
+        "karox.dev_server.logs",
+        "karox.dev_server.stop",
+    ))
+    screenshot = "karox.browser.screenshot" in config.tools
+    # Safe repository + executable diagnostics.  ``config.repository`` is
+    # already the single canonicalized path (resolved strictly once in
+    # ``_direct_connect_config`` / saved-profile load), so these fields reflect
+    # that one value rather than re-deriving it from ``os.getcwd()``.  No
+    # environment variables or credentials are emitted.
+    repo_raw = str(config.repository)
+    try:
+        repo_resolved = str(Path(config.repository).expanduser().resolve(strict=False))
+    except OSError:
+        repo_resolved = repo_raw
+    repo_exists = Path(config.repository).exists()
+    repo_is_dir = Path(config.repository).is_dir()
+    # Resolve the executable of every guarded command the bridge may spawn
+    # (verification commands + the dev-server argv of each profile).  The key
+    # is the logical argv0 (what the allowlist matches); the value is the
+    # absolute path the runtime will actually launch.  Failures degrade to
+    # ``None`` so diagnostics never raise on a missing tool.
+    executable_resolution: dict[str, str] = {}
+    seen_argv0: set[str] = set()
+    for command in config.verification_commands:
+        if command:
+            seen_argv0.add(command[0])
+    for profile in config.server_profiles:
+        if profile.argv:
+            seen_argv0.add(profile.argv[0])
+    for argv0 in sorted(seen_argv0):
+        try:
+            resolved = _resolve_executable([argv0])
+            if resolved and resolved[0] != argv0:
+                executable_resolution[argv0] = resolved[0]
+        except Exception:
+            executable_resolution[argv0] = ""
+    return {
+        "schema_version": 1,
+        "saved_profile": config.saved_profile_name,
+        "target_profile": config.profile,
+        "repository": str(config.repository),
+        "repository_raw": repo_raw,
+        "repository_resolved": repo_resolved,
+        "repository_exists": repo_exists,
+        "repository_is_dir": repo_is_dir,
+        "runtime_cwd": os.getcwd(),
+        "executable_resolution": executable_resolution,
+        "access_profile": config.access_profile.value,
+        "write_permission": config.access_profile != AccessProfile.READ_ONLY,
+        "available_tools": list(config.tools),
+        "disabled_tools": disabled,
+        "verification_commands": [
+            list(command) for command in config.verification_commands
+        ],
+        "command_allowlist": [
+            list(command) for command in config.verification_commands
+        ],
+        "server_profiles": [p.to_public_dict() for p in config.server_profiles],
+        "browser_permission": {
+            "read": browser_read,
+            "input": browser_input,
+            "localhost_only": True,
+        },
+        "localhost_policy": "only http(s) URLs on 127.0.0.1/localhost/::1",
+        "screenshot_capability": screenshot,
+        "image_capability": screenshot or "karox.artifact.read_image" in config.tools,
+        "managed_server_capability": managed_server,
+        "session_deadline_seconds": config.deadline_seconds,
+        "requested_deadline_seconds": config.deadline_seconds,
+        "effective_deadline_seconds": config.deadline_seconds,
+        "expected_verification_seconds": expected,
+        "deadline_advisory": advisory,
+        "mode_restrictions": {
+            "read_only": config.access_profile == AccessProfile.READ_ONLY,
+            "no_git_push": True,
+            "no_publish": True,
+            "no_auth_commands": True,
+        },
+        "tunnel": config.tunnel,
+        "url_stability": stability,
+        "public_url": public_url,
+        "session_id": session_id,
+        "session_expiration": "when the managed launcher exits",
+        "language": config.language,
+    }
 
 
 def run_web_bridge(config: WebBridgeConnectConfig) -> int:
@@ -764,7 +1316,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             flush=True,
         )
 
-    tunnel: Optional[CloudflareQuickTunnel] = None
+    tunnel: Optional[CloudflareQuickTunnel | TailscaleForegroundFunnel] = None
     bridge: Optional[subprocess.Popen[str]] = None
     bridge_output: Optional[MirroredChildOutput] = None
     credential_created = False
@@ -788,6 +1340,18 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 job=job,
             )
             public_url = tunnel.public_url
+        elif config.tunnel == "tailscale":
+            tunnel = start_tailscale_foreground_funnel(
+                config.port,
+                executable=config.tailscale,
+                timeout_seconds=config.tunnel_timeout_seconds,
+                job=job,
+                # The user just confirmed ``bridge connect``; Tailscale being
+                # brought online is the thing they are waiting on, so progress
+                # reaches them instead of looking like a hang on the first try.
+                emit=lambda line: print(line, flush=True),
+            )
+            public_url = tunnel.public_url
         else:
             assert config.public_url is not None
             public_url = config.public_url
@@ -800,8 +1364,13 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             "session_id": session_id,
             "owner_pid": os.getpid(),
             "profile": config.profile,
+            "saved_profile": config.saved_profile_name,
             "port": config.port,
             "public_url": public_url,
+            "tunnel": config.tunnel,
+            "url_stability": web_bridge_diagnostics(config)["url_stability"],
+            "effective_deadline_seconds": config.deadline_seconds,
+            "available_tools": list(config.tools),
             "started_at": time.time(),
             "tunnel_pid": _pid_of(tunnel.process if tunnel else None),
             "bridge_pid": None,
@@ -834,6 +1403,13 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         # a Windows console code page would otherwise turn every non-ASCII path in
         # a traceback into replacement characters.
         environment["PYTHONIOENCODING"] = "utf-8"
+        environment["KAROX_UI_LANGUAGE"] = config.language
+        diagnostics = web_bridge_diagnostics(
+            config, public_url=public_url, session_id=session_id
+        )
+        environment["KAROX_BRIDGE_DIAGNOSTICS_JSON"] = json.dumps(
+            diagnostics, ensure_ascii=False, sort_keys=True
+        )
         try:
             bridge = subprocess.Popen(
                 _bridge_argv(
@@ -865,14 +1441,37 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         print(f"MCP URL: {endpoint}")
         print(f"OAuth approval password: {secret}")
         print(f"Session: {session_id}")
-        if config.profile == "chatgpt-web":
-            print("Add the MCP URL as a custom app in ChatGPT developer mode.")
-        else:
-            print("Add the MCP URL in Claude Settings > Connectors.")
-        note = ephemeral_url_warning(config.profile, config.public_url)
+        print(
+            "Bridge diagnostics JSON: "
+            + json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)
+        )
+        advisory = diagnostics.get("deadline_advisory")
+        if isinstance(advisory, str):
+            print(f"Warning: {advisory}")
+        for line in web_bridge_connection_instructions(
+            config.profile, language=config.language
+        ):
+            print(line)
+        note = ephemeral_url_warning(
+            config.profile,
+            config.public_url,
+            language=config.language,
+            tunnel=config.tunnel,
+        )
         if note:
             print(note)
-        print("Press Ctrl+C to stop the bridge and tunnel.", flush=True)
+        if config.language == "ru":
+            print(
+                "Не закрывайте KaroX: мост работает, пока открыто это окно. "
+                "Ctrl+C — остановить.",
+                flush=True,
+            )
+        else:
+            print(
+                "Keep KaroX open while using the connector. "
+                "Press Ctrl+C to stop the bridge and tunnel.",
+                flush=True,
+            )
 
         while True:
             bridge_code = bridge.poll()
@@ -885,7 +1484,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 tunnel_code = tunnel.process.poll()
                 if tunnel_code is not None:
                     raise WebBridgeLaunchError(
-                        f"Cloudflare tunnel stopped unexpectedly with code {tunnel_code}"
+                        f"{config.tunnel} tunnel stopped unexpectedly with code {tunnel_code}"
                     )
             time.sleep(0.2)
     except KeyboardInterrupt:

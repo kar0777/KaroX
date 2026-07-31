@@ -136,8 +136,7 @@ EOF
 esac
 
 printf '\nInstallation complete.\nApplication : %s\nRuntime     : %s\nConfig      : %s\nCommand     : karox\n\n' "$APP_DIR" "$RUNTIME_DIR" "$CONFIG_DIR"
-rm -rf "$LEGACY_CONFIG_DIR" "$LEGACY_RUNTIME_DIR" 2>/dev/null || true
-rm -f "$HOME/.local/bin/repopilot" 2>/dev/null || true
+printf '%s\n' "Legacy RepoPilotBridge config, runtime, and launcher were preserved for rollback."
 
 if [ "$DO_START" = 1 ]; then exec "$KAROX_SHIM"; fi
 exec "$VENV_PYTHON" "$APP_DIR/scripts/product_doctor.py" --root "$APP_DIR"

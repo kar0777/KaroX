@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karox-remote"
+dynamic = ["version"]
+description = "Thin remote transport adapter for a local KaroX guarded workspace"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+karox-remote = "karox_remote.client:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = { attr = "karox_remote.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["karox_remote*"]
