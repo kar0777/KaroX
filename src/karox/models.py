@@ -23,6 +23,7 @@ class OriginKind(str, Enum):
 
 class AccessProfile(str, Enum):
     READ_ONLY = "read_only"
+    BROWSER_CONTROL = "browser_control"
     WORKSPACE_WRITE = "workspace_write"
     ELEVATED = "elevated"
 
@@ -74,6 +75,11 @@ class CoreCommand:
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     idempotency_key: Optional[str] = None
     deadline_seconds: float = 120.0
+    # A human decision carried alongside the command. It is deliberately not
+    # part of ``input_digest``: the digest identifies the work, and an approval
+    # must never change the identity of the thing that was approved. It is also
+    # never echoed into audit rows or results, so a model cannot learn one.
+    confirmation_token: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -96,6 +102,12 @@ class CoreCommand:
             or not 0.1 <= float(self.deadline_seconds) <= 3600.0
         ):
             raise ValueError("deadline must be between 0.1 and 3600 seconds")
+        if self.confirmation_token is not None and (
+            not isinstance(self.confirmation_token, str)
+            or not self.confirmation_token.strip()
+            or len(self.confirmation_token) > 400
+        ):
+            raise ValueError("confirmation token must contain 1-400 characters")
 
     def input_digest(self) -> str:
         canonical = json.dumps(

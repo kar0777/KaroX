@@ -19,9 +19,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from .event_bus import EventBus, EventKind, EventLevel
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .policy import CapabilityPolicy
 from .process_launcher import resolve_executable as _resolve_executable
+from .risk_engine import ConfirmationRejected, RiskEngine, SmartStopRequired
+from .risk_mapping import action_for_command
 from .security import (
     child_process_environment,
     contains_credential,
@@ -453,6 +456,7 @@ class ToolDefinition:
 
 class CoreRuntime:
     MAX_FILE_BYTES = 2_000_000
+
     # A read may return less than the file holds, but never without saying so.
     MAX_READ_CONTENT_CHARS = 1_000_000
     MAX_OUTPUT_BYTES = 1_000_000
@@ -474,6 +478,8 @@ class CoreRuntime:
         audit_path: Optional[Path] = None,
         mcp_binding: Optional[Any] = None,
         verification_commands: Optional[Iterable[Iterable[str]]] = None,
+        risk: Optional[RiskEngine] = None,
+        events: Optional[EventBus] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         if not self.repository.is_dir():
@@ -482,6 +488,11 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
+        # Capability policy answers whether this origin may ever do this kind of
+        # thing; the RiskEngine answers whether this specific instance is safe
+        # to do now. Both are required, and neither replaces the other.
+        self._risk = risk
+        self._events = events
         self._verification_rules: Optional[tuple[VerificationRule, ...]] = (
             None
             if verification_commands is None
@@ -642,6 +653,80 @@ class CoreRuntime:
     def verification_commands(self) -> Optional[frozenset[tuple[str, ...]]]:
         return self._verification_commands
 
+    def _apply_smart_stop(self, command: CoreCommand) -> None:
+        """Run the source-independent risk gate for one command.
+
+        ``CoreRuntime`` is the single place every agent reaches the machine, so
+        it is the only correct place to enforce Smart Stop. An API model, a
+        sponsor API, ChatGPT Web, an MCP client and a subagent all arrive here,
+        and all get the same verdict for the same action.
+
+        No engine means no gate, which keeps every existing embedder working
+        exactly as before; a runtime that wants Smart Stop passes one in.
+        """
+
+        if self._risk is None:
+            return
+        action = action_for_command(command)
+        try:
+            assessment = self._risk.authorize(
+                action, confirmation_token=command.confirmation_token
+            )
+        except SmartStopRequired as stop:
+            self._publish_risk(stop.assessment, allowed=False, reason="confirmation_required")
+            self._audit(
+                "core.command.stopped",
+                {
+                    "session_id": command.session_id,
+                    "origin": command.origin.key,
+                    "command": command.name,
+                    "correlation_id": command.correlation_id,
+                    "risk": stop.assessment.level.value,
+                    "reasons": list(stop.assessment.reasons),
+                },
+            )
+            raise
+        except ConfirmationRejected as rejected:
+            self._publish_risk(
+                self._risk.assess(action), allowed=False, reason=rejected.reason
+            )
+            self._audit(
+                "core.command.confirmation_rejected",
+                {
+                    "session_id": command.session_id,
+                    "origin": command.origin.key,
+                    "command": command.name,
+                    "correlation_id": command.correlation_id,
+                    "reason": rejected.reason,
+                },
+            )
+            raise
+        self._publish_risk(assessment, allowed=True, reason="allowed")
+
+    def _publish_risk(self, assessment: Any, *, allowed: bool, reason: str) -> None:
+        """Announce a risk decision on the event stream, never the token."""
+
+        if self._events is None:
+            return
+        try:
+            self._events.publish(
+                EventKind.RISK_DECISION,
+                session_id=assessment.session_id,
+                summary=f"{assessment.kind}: {assessment.level.value}",
+                level=EventLevel.INFO if allowed else EventLevel.WARNING,
+                data={
+                    "allowed": allowed,
+                    "reason": reason,
+                    "risk": assessment.level.value,
+                    "reasons": list(assessment.reasons),
+                    "action_digest": assessment.action_digest,
+                    "preview": dict(assessment.preview),
+                },
+            )
+        except Exception:
+            # Observability must never be able to block or fail an action.
+            return
+
     def execute(
         self,
         command: CoreCommand,
@@ -671,6 +756,7 @@ class CoreRuntime:
         )
         for capability in definition.additional_capabilities:
             self.policy.require(command.origin, capability, capability_token)
+        self._apply_smart_stop(command)
         started = time.perf_counter()
         self._audit(
             "core.command.started",
@@ -709,6 +795,7 @@ class CoreRuntime:
                 )
                 if replay is not None:
                     result = CoreResult.from_dict(replay)
+                    self._validate_idempotent_replay(command, result)
                     result.idempotent_replay = True
                     self._audit(
                         "core.command.replayed",
@@ -797,6 +884,37 @@ class CoreRuntime:
         if record.access_profile != self.policy.profile.value:
             raise SessionError("session and runtime access profiles differ")
         return record
+
+    def _validate_idempotent_replay(
+        self, command: CoreCommand, result: CoreResult
+    ) -> None:
+        """Refuse a stored file result after the repository moved past it.
+
+        An immediate retry after a lost response must replay safely: the target
+        file still has the digest produced by the first attempt.  A later edit,
+        formatter, checkout, or second client may change the same file, though.
+        Returning the old success in that state claims a mutation happened when
+        it did not.  File mutations therefore replay only while their recorded
+        post-state is still the current post-state.  Other replayable operations
+        keep their existing semantics.
+        """
+        if command.name not in {"repo.write_file", "repo.edit_file"}:
+            return
+        path_value = result.data.get("path")
+        expected_digest = result.data.get("sha256")
+        if (
+            not isinstance(path_value, str)
+            or not isinstance(expected_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        ):
+            raise InvalidCommand("stored idempotent file result is invalid")
+        path = self.safe_path(path_value)
+        current_digest = self._file_sha256(path) if path.is_file() else None
+        if current_digest != expected_digest:
+            raise InvalidCommand(
+                "stored idempotent result no longer matches repository state; "
+                "use a new idempotency key"
+            )
 
     @staticmethod
     def _validate_arguments(
