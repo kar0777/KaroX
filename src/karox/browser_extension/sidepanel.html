@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KaroX Browser</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <div class="logo">✦ <b>KaroX</b></div>
+    <span id="connection" class="pill offline">OFFLINE</span>
+  </header>
+  <section class="hero">
+    <small>УПРАВЛЕНИЕ</small>
+    <h1 id="mode">Агент ожидает bridge</h1>
+    <p id="session">Отдельный профиль Chrome</p>
+    <button id="takeover">Передать управление мне</button>
+  </section>
+  <section class="tabs">
+    <div class="section-title"><span>Вкладки KaroX</span><button id="refresh">↻</button></div>
+    <div id="tabList" class="tab-list"></div>
+  </section>
+  <footer>Агент видит все обычные вкладки только этого профиля.</footer>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

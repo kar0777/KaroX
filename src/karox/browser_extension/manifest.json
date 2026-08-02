@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "KaroX Browser",
+  "version": "0.1.0",
+  "description": "Local browser workspace controlled by the user's KaroX bridge.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "webNavigation",
+    "webRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*"
+  },
+  "action": {
+    "default_title": "Открыть KaroX Browser"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  },
+  "incognito": "not_allowed"
+}
