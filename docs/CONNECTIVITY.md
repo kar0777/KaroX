@@ -156,6 +156,34 @@ Use `karox bridge saved list`, `show`, `edit`, `validate`, and `delete` to manag
 profiles. `--diagnostics-only` prints the effective contract without starting a
 listener or public tunnel.
 
+### Managing active connections
+
+After authenticating a bridge to a hosted client, KaroX keeps the secret-free
+connection configuration separately from its managed runtime state. Use
+`karox connections list`, `show`, `status`, `test`, `stop`, and `remove` without
+opening the TUI:
+
+```bash
+karox connections list
+karox connections show c-0123456789abcdef
+karox connections status c-0123456789abcdef --json
+karox connections show c-0123456789abcdef --reveal-secret
+karox connections test c-0123456789abcdef
+karox connections stop c-0123456789abcdef
+karox connections remove c-0123456789abcdef
+```
+
+`show` prints the connection URL, authentication header, masked credential, and
+runtime state; pass `--reveal-secret` only when the full value is genuinely
+needed. `status` distinguishes configured-but-not-running, running, degraded,
+unmanaged-running, and stopped records. `stop` works only for a runtime owned by
+the current KaroX process. After a restart, a live PID is reported as
+`unmanaged_running` and is not killed or adopted by PID alone because operating
+systems can reuse PIDs. `remove` stops a managed runtime before deleting its
+configuration and credential, and refuses to delete an unmanaged live runtime.
+`test` performs an MCP handshake and reports tool count and connection health.
+All commands support `--json` where applicable.
+
 ### Deadlines and diagnostics
 
 `--deadline-preset standard`, `long`, and `full-suite` map to 600, 1800, and 3600

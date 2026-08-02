@@ -36,8 +36,8 @@ Evidence:
 - [x] Quick start covers ChatGPT, Claude, API providers, verification, and resume.
 - [x] Public migration examples match the actual parser: dry-run is the default;
   only `--apply` writes.
-- [x] Observe/Build/Advanced documentation matches
-  `read_only/workspace_write/elevated`.
+- [x] Observe/Browser/Build/Advanced documentation matches
+  `read_only/browser_control/workspace_write/elevated`.
 - [x] Build is documented without `git.commit`; Advanced owns guarded local
   commit; no stable profile owns push or publish.
 - [x] `docs/vNext/README.md` is marked historical and points to canonical pages.
@@ -89,7 +89,9 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [ ] Complete 801-test suite passes on the current release-candidate commit.
+- [ ] Complete 1117-test suite passes on the current release-candidate commit.
+- [ ] `python scripts/check_wheel_contents.py` passes on the built wheel, after
+      deleting `build/` so no removed module can ship from a stale copy.
 - [ ] Ruff passes without suppressing new defects.
 - [ ] Mypy passes.
 - [ ] Coverage passes without lowering the configured threshold.

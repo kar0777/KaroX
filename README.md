@@ -114,6 +114,14 @@ tools, disabled-tool reasons, verification commands, deadlines, tunnel type, URL
 stability, and session lifetime before publication. Real Tailscale account
 conformance remains pending under `docs/TAILSCALE_LIVE_RUNBOOK.md`.
 
+For legal inspection of public HTTPS services, create a separate
+`browser_control` connection with `--browser-external-https`, a domain allowlist,
+headed takeover, and optional redacted network inspection. Headed takeover uses
+a dedicated persistent Chrome profile plus the local KaroX Manifest V3 extension;
+headless verification retains the isolated Playwright and pinned-proxy backend.
+Neither mode exposes cookies or credentials or grants repository write. See
+[External HTTPS browser](docs/EXTERNAL_BROWSER.md).
+
 ## Connect an API model
 
 KaroX supports adapter contracts for:
@@ -135,6 +143,9 @@ Fallback is restricted to classified failures and explicit configured routes.
 Friendly UI labels map to stable policy identifiers:
 
 - **Observe** (`read_only`) — repository and Git inspection without mutation.
+- **Browser** (`browser_control`) — repository/Git read plus an explicitly
+  configured, session-isolated browser and network policy; no repository writes,
+  process execution, or local commit.
 - **Build** (`workspace_write`) — file changes, explicitly approved process and
   check execution, Git status/diff evidence, and selected MCP calls. Build does
   not grant `git.commit`.
@@ -223,16 +234,16 @@ See [Migrating from KaroX 4.x to KaroX 5](docs/MIGRATION_V4_TO_V5.md).
 
 ## Verification
 
-The suite is 801 tests. CI runs:
+The suite is 1117 tests. CI runs:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 801 tests`.
+A clean run reports `Ran 1117 tests`.
 
-790 is the number collected under `tests` by the documented runner. The
-repository root collects 806 because a bare pytest collection also finds five
+1117 is the number collected under `tests` by the documented runner. The
+repository root collects 1122 because a bare pytest collection also finds five
 legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other
@@ -262,6 +273,7 @@ external beta gates are not passed.
 - [Migration from 4.x](docs/MIGRATION_V4_TO_V5.md)
 - [Live conformance records](docs/conformance/README.md)
 - [Connectivity](docs/CONNECTIVITY.md)
+- [External HTTPS browser](docs/EXTERNAL_BROWSER.md)
 - [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Security](SECURITY.md)

@@ -121,6 +121,14 @@ tools, причины отключения, verification allowlist, deadline, tu
 URL и срок жизни сессии до публикации. Реальная проверка аккаунта Tailscale пока
 остаётся pending по `docs/TAILSCALE_LIVE_RUNBOOK.md`.
 
+Для легальной проверки внешних HTTPS-сервисов создай отдельное подключение
+`browser_control` с `--browser-external-https`, allowlist доменов, видимым окном
+для takeover и при необходимости безопасной network inspection. Видимый режим
+использует отдельный постоянный профиль Chrome и локальное Manifest V3-расширение
+KaroX; headless-проверки сохраняют изолированный Playwright backend с pinned
+proxy. Ни один режим не возвращает cookies/credentials и не выдаёт запись в
+репозиторий. Подробности: [External HTTPS browser](docs/EXTERNAL_BROWSER.md).
+
 ## Ellipsis Opus 5 как remote reasoning backend
 
 Экспериментальный режим `karox agent` оставляет выбранный Git-репозиторий только
@@ -153,6 +161,9 @@ KaroX не должен незаметно менять провайдера, pr
 Понятные названия UI соответствуют стабильным идентификаторам policy:
 
 - **Observe** (`read_only`) — чтение репозитория и Git state без изменений.
+- **Browser** (`browser_control`) — чтение репозитория/Git и отдельный
+  session-isolated browser/network policy без записи в репозиторий, process run
+  или локального commit.
 - **Build** (`workspace_write`) — изменение файлов, явно разрешённые process и
   checks, Git status/diff evidence и выбранные MCP calls. Build не выдаёт
   `git.commit`.
@@ -231,7 +242,7 @@ publishing. Неудачный check нельзя превратить в под
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 801 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 1117 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 
@@ -258,6 +269,7 @@ python -m mypy src/karox
 - [Live test runbook](docs/LIVE_TEST_RUNBOOK.md)
 - [Миграция 4.x → 5](docs/MIGRATION_V4_TO_V5.md)
 - [Connectivity](docs/CONNECTIVITY.md)
+- [External HTTPS browser](docs/EXTERNAL_BROWSER.md)
 - [Ellipsis local agent](docs/ELLIPSIS_LOCAL_AGENT.md)
 - [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 - [Live conformance records](docs/conformance/README.md)

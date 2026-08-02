@@ -26,7 +26,7 @@ external beta rather than another large architecture phase.
 Implemented in source and covered by existing deterministic tests:
 
 - repository-bound origin/capability policy;
-- `read_only`, `workspace_write`, and `elevated` access profiles;
+- `read_only`, `browser_control`, `workspace_write`, and `elevated` access profiles;
 - durable checksum-protected sessions;
 - cross-process mutation leases and fencing;
 - durable idempotency;
@@ -40,6 +40,8 @@ Implemented in source and covered by existing deterministic tests:
 Policy truth:
 
 - Observe/read_only: repository and Git inspection;
+- Browser/browser_control: repository/Git read plus a session-isolated browser
+  and guarded network policy; no repository write, process run, or local commit;
 - Build/workspace_write: writes, approved checks/processes, Git status/diff, and
   selected MCP calls; no `git.commit`;
 - Advanced/elevated: adds guarded local commit and elevated browser,
@@ -87,6 +89,38 @@ Implemented:
 
 The local protocol path is contract tested. Real ChatGPT and Claude account runs
 remain pending, so both named product profiles remain Experimental.
+
+### External HTTPS browser for hosted clients
+
+Implemented as an explicit addition to the original localhost browser mode:
+
+- `browser_control` grants browser read/input and guarded network access without
+  repository write, process execution, or local commit;
+- public HTTPS is opt-in per session, with domain allow/deny lists, private-IP and
+  metadata blocking, unsafe-scheme blocking, redirect revalidation, and a block
+  on external pages reaching localhost;
+- headed user takeover uses installed Google Chrome with a dedicated persistent
+  KaroX profile and local Manifest V3 extension; every ordinary tab in that
+  profile is agent-controllable while the user's normal Chrome profile is absent;
+- headless verification retains the separate Playwright context and authenticated
+  random-port pinned-IP proxy, with service workers/downloads disabled;
+- extension commands use an authenticated loopback WebSocket that is never
+  exposed through the public MCP tunnel;
+- takeover pauses agent input for login, CAPTCHA, passwords, 2FA, consent, or
+  ambiguous payment review, then resumes the same tab/profile;
+- network inspection exposes bounded redacted metadata and selected model, usage,
+  credits, plan, trial, and subscription values without headers, cookies, tokens,
+  session identifiers, card data, or arbitrary message/file bodies;
+- payment and subscription confirmation remain a separate capability that is
+  absent by default.
+
+Deterministic URL, proxy, isolation, takeover, payment, network-redaction, CLI,
+profile, and compatibility tests are present. A Windows smoke opened
+`https://example.com/`, created a snapshot and PNG, exercised tab lifecycle, and
+inspected the GitLab signup page only to its first form without entering or
+submitting data. This is local contract/smoke evidence, not a completed live
+ChatGPT account conformance run. Full details are in
+[`docs/EXTERNAL_BROWSER.md`](EXTERNAL_BROWSER.md).
 
 ## Ellipsis Opus 5 local-workspace integration
 
@@ -207,7 +241,7 @@ still require recorded runs on Windows, macOS, and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 801 tests under:
+The canonical documented suite is now 1117 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -249,20 +283,20 @@ servers cannot substitute for named-product live evidence.
 
 ### Terminal-client defects
 
-Fifteen defects in the terminal client are recorded in
-[`docs/UX_BUG_INVENTORY.md`](UX_BUG_INVENTORY.md), each with a test that proves it.
-Four are P0 and all four come from one decision: the transcript is a `RichLog`,
-which does not take part in Textual's selection machinery, so selection is
-reimplemented by hand and reads whole messages where a user selected a word.
+Fifteen terminal-client defects are recorded in
+[`docs/UX_BUG_INVENTORY.md`](UX_BUG_INVENTORY.md), each with executable evidence.
+Thirteen are closed. The old RichLog selection design and all four former P0
+defects have been removed; the two remaining open items are P1: handing mouse
+selection back to the terminal (UX-006) and preserving a usable conversation area
+in a 14-row window (UX-010).
 
-They are listed as release-relevant rather than cosmetic because two of them lose
-data a user asked for — a copy that silently yields a different message — and one
-makes the first screen unreadable at a common window size.
+These remain release-relevant usability work, but this page must not describe
+closed P0 defects as current blockers.
 
 ### Source and automated verification
 
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
-- run the complete 801-test suite;
+- run the complete 1117-test suite;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
   gates;
 - validate the edited release workflow in GitHub Actions;

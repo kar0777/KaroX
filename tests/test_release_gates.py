@@ -30,8 +30,11 @@ def _run_quietly(gate: ModuleType, argv: list[str]) -> int:
     These scripts are built to talk to a human on stdout, which is right for CI
     and noise inside a test run.
     """
-    with contextlib.redirect_stdout(io.StringIO()):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
         result = gate.main(argv)
+    if result:
+        print(output.getvalue(), end="")
     return int(result)
 
 
