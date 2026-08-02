@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,8 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from .bridge import BridgeCredentialStore, known_bridge_profiles
+from .browser_access import BrowserAccessPolicy
+from .credentials import CredentialError
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     KNOWN_HOSTED_TOOL_NAMES,
@@ -36,7 +39,7 @@ from .tailscale import (
 )
 from .paths import runtime_dir, session_dir
 from .proxy_server import ALLOWED_HOSTS_ENVIRONMENT
-from .sessions import SessionStore
+from .sessions import SessionError, SessionStore
 
 
 WEB_BRIDGE_PROFILES = ("chatgpt-web", "claude-web", "hyperagent-web")
@@ -67,10 +70,15 @@ DEFAULT_WEB_TOOLS = (
     "karox.git.status",
     "karox.git.diff",
     "karox.git.log",
+    "karox.runtime.status",
+    "karox.browser.command",
     # Read-only browser/artifact/dev-server tools a hosted client needs to see
-    # the interface without mutating it.  The mutating browser/server tools
-    # (open/click/fill/start/stop) are added by WRITE_WEB_TOOLS below.
+    # the interface without mutating it. Tab enumeration is session-scoped and
+    # reveals no cookies or storage. Mutating browser/server tools are added by
+    # WRITE_WEB_TOOLS below.
+    "karox.browser.tabs",
     "karox.browser.snapshot",
+    "karox.browser.wait_for",
     "karox.browser.get_text",
     "karox.browser.console",
     "karox.browser.network_failures",
@@ -83,9 +91,15 @@ DEFAULT_WEB_TOOLS = (
 WRITE_WEB_TOOLS = (
     "karox.repo.edit_file",
     "karox.repo.write_file",
-    # Stateful browser and dev-server control.  These drive a UI or start a
-    # process, so they are gated behind --write like repository writes.
+    "karox.repo.command",
+    "karox.tests.run",
+    # Stateful browser and dev-server control. These drive a UI or start a
+    # process, so legacy profiles still gate them behind --write. The explicit
+    # external-browser mode uses the narrower browser_control access profile.
     "karox.browser.open",
+    "karox.browser.new_tab",
+    "karox.browser.switch_tab",
+    "karox.browser.close_tab",
     "karox.browser.click",
     "karox.browser.fill",
     "karox.browser.select",
@@ -102,29 +116,97 @@ WRITE_WEB_TOOLS = (
 # tools because they mutate browser session state (navigate/tear down), the
 # same capability tier as click/fill/select/press.
 BROWSER_READ_TOOL_NAMES: tuple[str, ...] = (
+    "karox.browser.command",
+    "karox.browser.tabs",
     "karox.browser.snapshot",
+    "karox.browser.wait_for",
     "karox.browser.get_text",
     "karox.browser.console",
     "karox.browser.network_failures",
+    "karox.browser.network_requests",
     "karox.browser.screenshot",
 )
 BROWSER_INPUT_TOOL_NAMES: tuple[str, ...] = (
     "karox.browser.open",
+    "karox.browser.new_tab",
+    "karox.browser.switch_tab",
+    "karox.browser.close_tab",
     "karox.browser.click",
     "karox.browser.fill",
     "karox.browser.select",
     "karox.browser.press",
+    "karox.browser.request_user_takeover",
+    "karox.browser.resume_after_user_takeover",
     "karox.browser.close",
+)
+EXTERNAL_BROWSER_TOOL_NAMES: tuple[str, ...] = tuple(
+    dict.fromkeys((*BROWSER_READ_TOOL_NAMES, *BROWSER_INPUT_TOOL_NAMES))
 )
 # checks.run is read-only in effect (it runs an approved verification command)
 # but is only useful with a verification allowlist, so it is surfaced by the
 # diagnostics as available when one is configured rather than forced into the
 # default bundle.
 CHECKS_RUN_TOOL = "karox.checks.run"
+
+# Stable, hot-reload command surfaces must not disappear merely because a
+# launcher supplied an explicit legacy ``--tool`` list. The TUI historically
+# selected concrete operations (write_file, checks.run, browser.snapshot, ...),
+# and argparse treats an explicit list as a replacement for DEFAULT_WEB_TOOLS.
+# That left a newly connected hosted agent with only the old calls even though
+# the guarded worker commands were implemented and available.
+#
+# These aliases do not grant a new capability tier: they are included only when
+# the corresponding capability family was already selected, and workspace
+# execution aliases still require a workspace-write/elevated session.
+_WORKSPACE_WRITE_PROFILES = {
+    AccessProfile.WORKSPACE_WRITE,
+    AccessProfile.ELEVATED,
+}
+_REPOSITORY_WRITE_TOOL_NAMES = {
+    "karox.repo.edit_file",
+    "karox.repo.write_file",
+}
+
+
+def _include_stable_worker_commands(
+    tools: tuple[str, ...],
+    *,
+    access_profile: AccessProfile,
+    verification_commands: tuple[tuple[str, ...], ...],
+) -> tuple[str, ...]:
+    """Merge stable worker commands implied by an already-selected tool family."""
+    ordered = list(tools)
+    selected = set(ordered)
+
+    def include(name: str) -> None:
+        if name not in selected:
+            ordered.append(name)
+            selected.add(name)
+
+    if access_profile in _WORKSPACE_WRITE_PROFILES:
+        if selected.intersection(_REPOSITORY_WRITE_TOOL_NAMES):
+            include("karox.repo.command")
+        # Supplying a verification allowlist is the explicit approval needed by
+        # checks.run. Hiding the tool after accepting that allowlist produced a
+        # contradictory bridge: diagnostics listed approved commands while the
+        # client received tool_not_exposed. Publish both guarded verification
+        # surfaces whenever a write-capable profile carries that approval.
+        if verification_commands:
+            include(CHECKS_RUN_TOOL)
+            include("karox.tests.run")
+
+    browser_family = set(BROWSER_READ_TOOL_NAMES) | set(BROWSER_INPUT_TOOL_NAMES)
+    if selected.intersection(browser_family):
+        include("karox.browser.command")
+
+    return tuple(ordered)
+
+
 _QUICK_TUNNEL_URL = re.compile(
     r"https://[A-Za-z0-9-]+\.trycloudflare\.com(?=$|[\s/])"
 )
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
@@ -161,6 +243,14 @@ class WebBridgeConnectConfig:
     # env key set and an env allowlist, so they are safe to persist alongside a
     # saved bridge profile.
     server_profiles: tuple[ManagedServerProfile, ...] = ()
+    browser_external_https: bool = False
+    browser_allowed_domains: tuple[str, ...] = ()
+    browser_denied_domains: tuple[str, ...] = ()
+    browser_headed: bool = False
+    browser_user_takeover: bool = False
+    browser_network_inspection: bool = False
+    browser_payment_confirmation: bool = False
+    browser_allowed_emails: tuple[str, ...] = ()
     language: str = "en"
     saved_profile_name: Optional[str] = None
 
@@ -196,6 +286,74 @@ class WebBridgeConnectConfig:
                 )
         if not self.tools or len(set(self.tools)) != len(self.tools):
             raise ValueError("web bridge tools must be non-empty and unique")
+        object.__setattr__(
+            self,
+            "tools",
+            _include_stable_worker_commands(
+                tuple(self.tools),
+                access_profile=self.access_profile,
+                verification_commands=tuple(self.verification_commands),
+            ),
+        )
+        if self.browser_external_https:
+            if self.access_profile == AccessProfile.READ_ONLY:
+                raise ValueError(
+                    "external browser mode requires the browser_control, workspace_write, or elevated access profile"
+                )
+            optional_tools = {
+                "karox.browser.network_requests",
+                "karox.browser.request_user_takeover",
+                "karox.browser.resume_after_user_takeover",
+            }
+            selected_external = [
+                name for name in EXTERNAL_BROWSER_TOOL_NAMES if name not in optional_tools
+            ]
+            if self.browser_network_inspection:
+                selected_external.append("karox.browser.network_requests")
+            if self.browser_user_takeover:
+                selected_external.extend(
+                    (
+                        "karox.browser.request_user_takeover",
+                        "karox.browser.resume_after_user_takeover",
+                    )
+                )
+            ordered_tools = list(self.tools)
+            ordered_tools.extend(name for name in selected_external if name not in ordered_tools)
+            object.__setattr__(self, "tools", tuple(ordered_tools))
+        # Validate and canonicalize the secret-free browser policy here, before
+        # the launcher persists it or passes it to the bridge child.
+        browser_policy = BrowserAccessPolicy(
+            session_id=self.session_id or "pending-web-bridge-session",
+            localhost=True,
+            external_https=self.browser_external_https,
+            allowed_domains=tuple(self.browser_allowed_domains),
+            denied_domains=tuple(self.browser_denied_domains),
+            headed=self.browser_headed,
+            user_takeover=self.browser_user_takeover,
+            network_inspection=self.browser_network_inspection,
+            payment_confirmation=self.browser_payment_confirmation,
+            allowed_emails=tuple(self.browser_allowed_emails),
+        )
+        object.__setattr__(self, "browser_allowed_domains", browser_policy.allowed_domains)
+        object.__setattr__(self, "browser_denied_domains", browser_policy.denied_domains)
+        object.__setattr__(self, "browser_allowed_emails", browser_policy.allowed_emails)
+        if "karox.browser.network_requests" in self.tools and not self.browser_network_inspection:
+            raise ValueError(
+                "karox.browser.network_requests requires --browser-network-inspection"
+            )
+        takeover_tools = {
+            "karox.browser.request_user_takeover",
+            "karox.browser.resume_after_user_takeover",
+        }
+        if takeover_tools.intersection(self.tools) and not self.browser_user_takeover:
+            raise ValueError("browser takeover tools require --browser-user-takeover")
+        if self.browser_network_inspection and "karox.browser.network_requests" not in self.tools:
+            raise ValueError("browser network inspection requires karox.browser.network_requests")
+        if self.browser_user_takeover and not {
+            "karox.browser.request_user_takeover",
+            "karox.browser.resume_after_user_takeover",
+        }.issubset(self.tools):
+            raise ValueError("browser user takeover tools are not exposed")
         # The tool universe is the union of Core tools and the hosted browser/
         # dev-server/artifact tools.  Both halves are validated against the same
         # ``KNOWN_HOSTED_TOOL_NAMES`` set so a launch cannot select a name that
@@ -222,7 +380,13 @@ class WebBridgeConnectConfig:
                 # in their canonical order so the bundle is deterministic.
                 ordered = list(self.tools)
                 ordered.extend(
-                    name for name in BROWSER_READ_TOOL_NAMES if name in missing_read
+                    name
+                    for name in BROWSER_READ_TOOL_NAMES
+                    if name in missing_read
+                    and (
+                        name != "karox.browser.network_requests"
+                        or self.browser_network_inspection
+                    )
                 )
                 object.__setattr__(self, "tools", tuple(ordered))
         if any(
@@ -489,7 +653,13 @@ def _create_child_job() -> Optional[int]:
     if not job:
         return None
     limits = _ExtendedLimits()
-    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    # The bridge and tunnel remain kill-on-close children. The dedicated KaroX
+    # Chrome profile is the one intentional exception: extension_browser starts
+    # it with CREATE_BREAKAWAY_FROM_JOB so a bridge restart does not destroy the
+    # user's open browser work. Nothing else escapes unless it explicitly asks.
+    limits.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    )
     ok = kernel32.SetInformationJobObject(
         wintypes.HANDLE(job),
         _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -981,6 +1151,16 @@ def web_bridge_connection_instructions(
     )
 
 
+def _write_console_utf8(line: str) -> None:
+    """Write one user-facing line under both real consoles and test streams."""
+    binary = getattr(sys.stdout, "buffer", None)
+    if binary is not None:
+        binary.write((line + "\n").encode("utf-8", errors="replace"))
+        binary.flush()
+        return
+    print(line, flush=True)
+
+
 def claim_watchdog(path: Path, payload: dict[str, Any]) -> None:
     """Create a session's watchdog record, refusing to take over another's.
 
@@ -1061,9 +1241,15 @@ def reap_orphaned_web_bridges() -> tuple[str, ...]:
                     except (OSError, AttributeError):
                         pass
         session_id = record.get("session_id") if isinstance(record, dict) else None
-        if isinstance(session_id, str) and session_id:
+        persistent = bool(
+            record.get("persistent_session") if isinstance(record, dict) else False
+        )
+        if isinstance(session_id, str) and session_id and not persistent:
             # A record is now written before the session and credential exist, so
             # "reaped" may only name the ones that were really there to revoke.
+            # Saved profiles deliberately keep their session and keyring secret:
+            # the dead process tree is reaped above, but the durable connector
+            # identity survives the restart.
             revoked = False
             try:
                 BridgeCredentialStore().delete(session_id)
@@ -1084,10 +1270,201 @@ def reap_orphaned_web_bridges() -> tuple[str, ...]:
     return tuple(reaped)
 
 
-def _session_id(config: WebBridgeConnectConfig) -> str:
-    return config.session_id or (
-        f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+def _persistent_session(config: WebBridgeConnectConfig) -> bool:
+    """Saved profiles are durable identities, not one-launch throwaways."""
+    return bool(config.saved_profile_name)
+
+
+def saved_web_bridge_session_id(profile_name: str) -> str:
+    """Return the durable session/keyring identity for one saved profile name.
+
+    The saved profile name is the registry identity. Target profile, tool bundle,
+    tunnel, and language are editable configuration; including any of them in the
+    digest would strand the previous session and credential after an ordinary
+    edit.
+    """
+    if not isinstance(profile_name, str) or not profile_name:
+        raise ValueError("saved web bridge profile name must not be empty")
+    digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
+    return f"web-saved-{digest}"
+
+
+def _legacy_saved_web_bridge_session_id(
+    profile_name: str,
+    target_profile: str,
+) -> str:
+    """Identity emitted by the first durable-profile implementation."""
+    digest = hashlib.sha256(
+        f"{target_profile}\0{profile_name}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"web-saved-{digest}"
+
+
+def saved_web_bridge_session_candidates(profile_name: str) -> tuple[str, ...]:
+    """Current identity followed by every legacy target-profile identity."""
+    ordered = [saved_web_bridge_session_id(profile_name)]
+    ordered.extend(
+        _legacy_saved_web_bridge_session_id(profile_name, target)
+        for target in WEB_BRIDGE_PROFILES
     )
+    return tuple(dict.fromkeys(ordered))
+
+
+def saved_web_bridge_identity_exists(profile_name: str) -> bool:
+    """Return whether any current/legacy durable session or watchdog exists."""
+    session_root = session_dir()
+    watchdog_root = watchdog_dir()
+    return any(
+        (session_root / session_id / "session.json").exists()
+        or (watchdog_root / f"{session_id}.json").exists()
+        for session_id in saved_web_bridge_session_candidates(profile_name)
+    )
+
+
+def _session_id(config: WebBridgeConnectConfig) -> str:
+    if config.session_id:
+        return config.session_id
+    if config.saved_profile_name:
+        candidates = saved_web_bridge_session_candidates(config.saved_profile_name)
+        session_root = session_dir()
+        watchdog_root = watchdog_dir()
+
+        def exists(session_id: str) -> bool:
+            return (
+                (session_root / session_id / "session.json").exists()
+                or (watchdog_root / f"{session_id}.json").exists()
+            )
+
+        if exists(candidates[0]):
+            return candidates[0]
+        legacy = [session_id for session_id in candidates[1:] if exists(session_id)]
+        if len(legacy) > 1:
+            raise WebBridgeLaunchError(
+                "saved bridge profile has multiple legacy durable identities; "
+                "stop all matching launchers and delete/recreate the profile"
+            )
+        if legacy:
+            return legacy[0]
+        return candidates[0]
+    return f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+
+def delete_saved_web_bridge_identity(profile_name: str) -> dict[str, Any]:
+    """Delete current and legacy durable identities when every launcher is offline.
+
+    Configuration deletion must not strand OS-keyring tokens or repository-bound
+    sessions.  The operation performs a complete preflight over both the current
+    name-only identity and identities emitted by the first implementation before
+    it revokes anything, so one forgotten live legacy launcher cannot cause a
+    partial cleanup.
+    """
+    candidates = saved_web_bridge_session_candidates(profile_name)
+    session_root = session_dir()
+    watchdog_root = watchdog_dir()
+    store = SessionStore(session_root)
+
+    selected: list[str] = [candidates[0]]
+    for candidate in candidates[1:]:
+        if (
+            store.state_path(candidate).exists()
+            or (watchdog_root / f"{candidate}.json").exists()
+        ):
+            selected.append(candidate)
+
+    stale_watchdog = False
+    for session_id in selected:
+        watchdog = watchdog_root / f"{session_id}.json"
+        if watchdog.exists():
+            try:
+                record = json.loads(watchdog.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise WebBridgeLaunchError(
+                    "saved bridge watchdog is unreadable; run `karox bridge doctor` "
+                    "before deleting the profile"
+                ) from exc
+            owner = record.get("owner_pid") if isinstance(record, dict) else None
+            if isinstance(owner, int) and _process_is_alive(owner):
+                raise WebBridgeLaunchError(
+                    f"saved bridge profile is running in process {owner}; stop it "
+                    "before deleting the profile"
+                )
+            stale_watchdog = True
+
+        state_path = store.state_path(session_id)
+        lease_path = store.lease_path(session_id)
+        if state_path.exists() and lease_path.exists():
+            try:
+                lease = json.loads(lease_path.read_text(encoding="utf-8"))
+                expires_at = float(lease.get("expires_at", 0))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                raise WebBridgeLaunchError(
+                    "saved bridge mutation lease is unreadable; run "
+                    "`karox bridge doctor` before deleting the profile"
+                ) from exc
+            if expires_at >= time.time():
+                raise WebBridgeLaunchError(
+                    "saved bridge session still has an active mutation lease; "
+                    "wait for the operation to finish before deleting the profile"
+                )
+
+    if stale_watchdog:
+        # Persistent identities are preserved by the orphan reaper; it only
+        # terminates the dead process tree and removes its watchdog.
+        reap_orphaned_web_bridges()
+    for session_id in selected:
+        if (watchdog_root / f"{session_id}.json").exists():
+            raise WebBridgeLaunchError(
+                "saved bridge watchdog could not be reconciled; run "
+                "`karox bridge doctor` before deleting the profile"
+            )
+
+    credential_store = BridgeCredentialStore()
+    identities: list[dict[str, str]] = []
+    for session_id in selected:
+        session_status = "not_found"
+        if store.state_path(session_id).exists():
+            try:
+                store.revoke(session_id)
+                session_status = "revoked"
+            except SessionError as exc:
+                raise WebBridgeLaunchError(
+                    f"saved bridge session could not be revoked: {exc}"
+                ) from exc
+            try:
+                shutil.rmtree(store.session_dir(session_id))
+                session_status = "deleted"
+            except OSError:
+                # Revocation is the security boundary. A filesystem cleanup
+                # failure leaves an inert record for bridge doctor.
+                session_status = "revoked_cleanup_pending"
+
+        credential_status = "not_found"
+        try:
+            credential_store.delete(session_id)
+            credential_status = "deleted"
+        except CredentialError:
+            pass
+        identities.append(
+            {
+                "session_id": session_id,
+                "session": session_status,
+                "credential": credential_status,
+            }
+        )
+
+    def aggregate(field: str) -> str:
+        values = [item[field] for item in identities if item[field] != "not_found"]
+        if not values:
+            return "not_found"
+        return values[0] if len(set(values)) == 1 else "multiple"
+
+    return {
+        "profile_name": profile_name,
+        "session_id": candidates[0],
+        "session": aggregate("session"),
+        "credential": aggregate("credential"),
+        "identities": identities,
+    }
 
 
 def _bridge_argv(
@@ -1138,6 +1515,22 @@ def _bridge_argv(
     for profile in config.server_profiles:
         serialized = json.dumps(profile.to_public_dict(), ensure_ascii=False)
         values.extend(("--server-profile", serialized))
+    if config.browser_external_https:
+        values.append("--browser-external-https")
+    for domain in config.browser_allowed_domains:
+        values.extend(("--browser-domain", domain))
+    for domain in config.browser_denied_domains:
+        values.extend(("--browser-deny-domain", domain))
+    if config.browser_headed:
+        values.append("--browser-headed")
+    if config.browser_user_takeover:
+        values.append("--browser-user-takeover")
+    if config.browser_network_inspection:
+        values.append("--browser-network-inspection")
+    if config.browser_payment_confirmation:
+        values.append("--browser-payment-confirmation")
+    for email in config.browser_allowed_emails:
+        values.extend(("--browser-allowed-email", email))
     return tuple(values)
 
 
@@ -1179,13 +1572,16 @@ def web_bridge_diagnostics(
             reason = "no approved verification-command allowlist"
         if tool.startswith("karox.dev_server.") and not config.server_profiles:
             reason = "no approved server-profile allowlist"
+        if tool == "karox.browser.network_requests" and not config.browser_network_inspection:
+            reason = "network inspection is not enabled for this browser session"
         if tool in {
-            "karox.browser.open",
-            "karox.browser.click",
-            "karox.browser.fill",
-            "karox.browser.select",
-            "karox.browser.press",
-            "karox.browser.close",
+            "karox.browser.request_user_takeover",
+            "karox.browser.resume_after_user_takeover",
+        } and not config.browser_user_takeover:
+            reason = "user takeover is not enabled for this browser session"
+        if tool in BROWSER_INPUT_TOOL_NAMES and config.access_profile == AccessProfile.READ_ONLY:
+            reason = "browser input requires browser_control, workspace_write, or elevated access"
+        if tool in {
             "karox.dev_server.start",
             "karox.dev_server.stop",
         } and config.access_profile == AccessProfile.READ_ONLY:
@@ -1216,6 +1612,7 @@ def web_bridge_diagnostics(
         "karox.dev_server.stop",
     ))
     screenshot = "karox.browser.screenshot" in config.tools
+    extension_backend = config.browser_headed and config.browser_user_takeover
     # Safe repository + executable diagnostics.  ``config.repository`` is
     # already the single canonicalized path (resolved strictly once in
     # ``_direct_connect_config`` / saved-profile load), so these fields reflect
@@ -1260,7 +1657,10 @@ def web_bridge_diagnostics(
         "runtime_cwd": os.getcwd(),
         "executable_resolution": executable_resolution,
         "access_profile": config.access_profile.value,
-        "write_permission": config.access_profile != AccessProfile.READ_ONLY,
+        "write_permission": config.access_profile in {
+            AccessProfile.WORKSPACE_WRITE,
+            AccessProfile.ELEVATED,
+        },
         "available_tools": list(config.tools),
         "disabled_tools": disabled,
         "verification_commands": [
@@ -1273,9 +1673,53 @@ def web_bridge_diagnostics(
         "browser_permission": {
             "read": browser_read,
             "input": browser_input,
-            "localhost_only": True,
+            "localhost": True,
+            "external_https": config.browser_external_https,
+            "user_takeover": config.browser_user_takeover,
+            "network_inspection": config.browser_network_inspection,
+            "payment_confirmation": config.browser_payment_confirmation,
+            "headed": config.browser_headed,
+            "backend": "extension" if extension_backend else "playwright",
+            "allowed_domains": list(config.browser_allowed_domains),
+            "denied_domains": list(config.browser_denied_domains),
+            "allowed_email_count": len(config.browser_allowed_emails),
+            # Backward-compatible summary for older clients/tests. The detailed
+            # policy above remains authoritative; this is never the only guard.
+            "localhost_only": not config.browser_external_https,
         },
-        "localhost_policy": "only http(s) URLs on 127.0.0.1/localhost/::1",
+        "browser_isolation": {
+            "context_per_session": True,
+            "cross_session_control": False,
+            "artifacts_bound_to_session": True,
+            "dedicated_chrome_profile": extension_backend,
+            "main_chrome_profile_visible": False,
+            "dns_pinning_proxy": not extension_backend,
+            "proxy_authentication": "per_session" if not extension_backend else "not_used",
+            "proxy_port": "random_loopback" if not extension_backend else "not_used",
+        },
+        "browser_lifecycle": {
+            "survives_bridge_restart": extension_backend,
+            "reconnects_from_extension_config": extension_backend,
+            "close_requires_explicit_user_confirmation": True,
+        },
+        "url_policy": {
+            "https_external": "allowed" if config.browser_external_https else "blocked",
+            "localhost": "allowed",
+            "external_http": "blocked",
+            "private_network": "blocked",
+            "metadata_endpoints": "blocked",
+            "unsafe_schemes": "blocked",
+            "redirects_revalidated": True,
+            "external_to_localhost": "blocked",
+            "dns_rebinding": (
+                "navigation_validation_only"
+                if extension_backend
+                else "pinned_ip_connect_proxy"
+            ),
+            "service_workers": "browser_default" if extension_backend else "blocked",
+            "downloads": "browser_default" if extension_backend else "cancelled",
+        },
+        "localhost_policy": "http(s) on 127.0.0.1/localhost/::1 remains available",
         "screenshot_capability": screenshot,
         "image_capability": screenshot or "karox.artifact.read_image" in config.tools,
         "managed_server_capability": managed_server,
@@ -1294,7 +1738,11 @@ def web_bridge_diagnostics(
         "url_stability": stability,
         "public_url": public_url,
         "session_id": session_id,
-        "session_expiration": "when the managed launcher exits",
+        "session_expiration": (
+            "persists across managed launcher restarts"
+            if config.saved_profile_name
+            else "when the managed launcher exits"
+        ),
         "language": config.language,
     }
 
@@ -1321,8 +1769,10 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
     bridge_output: Optional[MirroredChildOutput] = None
     credential_created = False
     session_created = False
+    bridge_ready = False
     sessions: Optional[SessionStore] = None
     watchdog: Optional[Path] = None
+    persistent_session = _persistent_session(config)
     session_id = _session_id(config)
     job = _create_child_job()
     if job is None and os.name == "nt":
@@ -1365,6 +1815,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             "owner_pid": os.getpid(),
             "profile": config.profile,
             "saved_profile": config.saved_profile_name,
+            "persistent_session": persistent_session,
             "port": config.port,
             "public_url": public_url,
             "tunnel": config.tunnel,
@@ -1382,16 +1833,46 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         watchdog = watchdog_path
 
         sessions = SessionStore(session_dir())
-        sessions.create(
-            repository,
-            f"{config.profile} managed web bridge",
-            config.access_profile,
-            session_id=session_id,
-        )
-        session_created = True
-        credential = BridgeCredentialStore().set(session_id)
-        credential_created = True
-        secret = credential.get("secret")
+        state_exists = sessions.state_path(session_id).exists()
+        if persistent_session and state_exists:
+            try:
+                record = sessions.load(session_id)
+                sessions.validate_repository(record, repository)
+            except SessionError as exc:
+                raise WebBridgeLaunchError(
+                    f"saved bridge session is invalid: {exc}"
+                ) from exc
+            if record.revoked:
+                raise WebBridgeLaunchError(
+                    "saved bridge session was revoked; delete and recreate the saved profile"
+                )
+            if record.access_profile != config.access_profile.value:
+                raise WebBridgeLaunchError(
+                    "saved bridge access profile changed; delete and recreate the saved profile"
+                )
+        else:
+            sessions.create(
+                repository,
+                f"{config.profile} managed web bridge",
+                config.access_profile,
+                session_id=session_id,
+            )
+            session_created = True
+
+        credential_store = BridgeCredentialStore()
+        if persistent_session:
+            try:
+                secret = credential_store.resolve(
+                    f"os-keyring:bridge/{session_id}"
+                )
+            except CredentialError:
+                credential = credential_store.set(session_id)
+                credential_created = True
+                secret = credential.get("secret")
+        else:
+            credential = credential_store.set(session_id)
+            credential_created = True
+            secret = credential.get("secret")
         if not isinstance(secret, str) or not secret:
             raise WebBridgeLaunchError("bridge credential generator returned no secret")
 
@@ -1404,6 +1885,8 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         # a traceback into replacement characters.
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["KAROX_UI_LANGUAGE"] = config.language
+        if config.browser_headed and config.browser_user_takeover:
+            environment["KAROX_BROWSER_BACKEND"] = "extension"
         diagnostics = web_bridge_diagnostics(
             config, public_url=public_url, session_id=session_id
         )
@@ -1435,6 +1918,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         watchdog_record["bridge_pid"] = _pid_of(bridge)
         write_watchdog(watchdog, watchdog_record)
         _wait_for_bridge(bridge, config.port, output=bridge_output)
+        bridge_ready = True
 
         endpoint = f"{public_url.rstrip('/')}/mcp"
         print(f"KaroX {config.profile} bridge is ready")
@@ -1451,7 +1935,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         for line in web_bridge_connection_instructions(
             config.profile, language=config.language
         ):
-            print(line)
+            _write_console_utf8(line)
         note = ephemeral_url_warning(
             config.profile,
             config.public_url,
@@ -1459,7 +1943,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             tunnel=config.tunnel,
         )
         if note:
-            print(note)
+            _write_console_utf8(note)
         if config.language == "ru":
             print(
                 "Не закрывайте KaroX: мост работает, пока открыто это окно. "
@@ -1506,12 +1990,16 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 watchdog.unlink()
             except OSError:
                 pass
-        if credential_created:
+        if credential_created and (not persistent_session or not bridge_ready):
+            # A durable credential becomes part of the saved connector identity
+            # only after the bridge actually reached readiness. If the first
+            # launch failed earlier, discard that never-used token; the retained
+            # repository-bound session can generate a fresh one on the retry.
             try:
                 BridgeCredentialStore().delete(session_id)
             except Exception:
                 pass
-        if session_created and sessions is not None:
+        if session_created and sessions is not None and not persistent_session:
             try:
                 sessions.revoke(session_id)
             except Exception:

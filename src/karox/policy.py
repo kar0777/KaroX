@@ -26,6 +26,15 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
             Capability.BROWSER_READ,
         }
     ),
+    AccessProfile.BROWSER_CONTROL: frozenset(
+        {
+            Capability.REPO_READ,
+            Capability.GIT_READ,
+            Capability.BROWSER_READ,
+            Capability.BROWSER_INPUT,
+            Capability.NETWORK,
+        }
+    ),
     AccessProfile.WORKSPACE_WRITE: frozenset(
         {
             Capability.REPO_READ,

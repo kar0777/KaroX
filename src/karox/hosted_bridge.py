@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Optional, Protocol, Sequence
 
@@ -35,9 +36,12 @@ CORE_TOOL_NAMES: dict[str, str] = {
     "karox.repo.read_lines": "repo.read_lines",
     "karox.repo.write_file": "repo.write_file",
     "karox.repo.edit_file": "repo.edit_file",
+    "karox.repo.command": "repo.command",
     "karox.repo.list_files": "repo.list_files",
     "karox.repo.search": "repo.search",
     "karox.checks.run": "checks.run",
+    "karox.tests.run": "tests.run",
+    "karox.runtime.status": "runtime.status",
     "karox.git.status": "git.status",
     "karox.git.diff": "git.diff",
     "karox.git.log": "git.log",
@@ -53,7 +57,12 @@ CORE_TOOL_NAMES: dict[str, str] = {
 # allowlist validation, kept here to avoid an import cycle through that module.
 HOSTED_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        "karox.browser.command",
         "karox.browser.open",
+        "karox.browser.tabs",
+        "karox.browser.new_tab",
+        "karox.browser.switch_tab",
+        "karox.browser.close_tab",
         "karox.browser.snapshot",
         "karox.browser.click",
         "karox.browser.fill",
@@ -64,6 +73,9 @@ HOSTED_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
         "karox.browser.screenshot",
         "karox.browser.console",
         "karox.browser.network_failures",
+        "karox.browser.network_requests",
+        "karox.browser.request_user_takeover",
+        "karox.browser.resume_after_user_takeover",
         "karox.browser.close",
         "karox.dev_server.start",
         "karox.dev_server.status",
@@ -80,6 +92,13 @@ KNOWN_HOSTED_TOOL_NAMES: frozenset[str] = frozenset(CORE_TOOL_NAMES) | HOSTED_EX
 # A hosted call's deadline is also the ceiling on how long checks.run may take,
 # and no real repository verifies itself in thirty seconds.
 DEFAULT_HOSTED_DEADLINE_SECONDS = 600.0
+
+# Mutation leases are intentionally short and kept alive by a heartbeat while
+# a hosted call is actually running. A disconnected client or killed worker can
+# therefore block the next write only briefly instead of for the remote request
+# deadline (ClickUp commonly supplies about fifteen minutes).
+_MUTATION_LEASE_TTL_SECONDS = 60.0
+_MUTATION_LEASE_HEARTBEAT_SECONDS = 20.0
 
 
 class HostedToolRuntime(Protocol):
@@ -243,14 +262,47 @@ class CoreToolBridge:
             deadline_seconds=deadline_seconds,
         )
         lease = None
+        heartbeat_stop: Optional[threading.Event] = None
+        heartbeat_thread: Optional[threading.Thread] = None
+        heartbeat_errors: list[Exception] = []
         if definition.mutates:
-            ttl = max(30.0, min(3600.0, float(deadline_seconds) + 10.0))
             lease = self.sessions.acquire(
-                self.session_id, f"hosted-{os.getpid()}", ttl_seconds=ttl
+                self.session_id,
+                f"hosted-{os.getpid()}",
+                ttl_seconds=_MUTATION_LEASE_TTL_SECONDS,
             )
+            heartbeat_stop = threading.Event()
+
+            def keep_lease_alive() -> None:
+                assert lease is not None
+                assert heartbeat_stop is not None
+                while not heartbeat_stop.wait(_MUTATION_LEASE_HEARTBEAT_SECONDS):
+                    try:
+                        self.sessions.heartbeat(
+                            lease, ttl_seconds=_MUTATION_LEASE_TTL_SECONDS
+                        )
+                    except Exception as exc:  # fail closed after the command returns
+                        heartbeat_errors.append(exc)
+                        return
+
+            heartbeat_thread = threading.Thread(
+                target=keep_lease_alive,
+                name=f"karox-mutation-lease-{self.session_id}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
         try:
-            return self._core().execute(command, lease=lease).to_dict()
+            result = self._core().execute(command, lease=lease).to_dict()
+            if heartbeat_errors:
+                raise HostedBridgeAccessDenied(
+                    "mutation lease heartbeat failed; the write result is not trusted"
+                )
+            return result
         finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=2.0)
             if lease is not None:
                 self.sessions.release(lease)
 

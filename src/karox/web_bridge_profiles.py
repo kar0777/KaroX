@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from .browser_access import BrowserAccessPolicy
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     KNOWN_HOSTED_TOOL_NAMES,
@@ -65,6 +66,20 @@ def _https_origin(value: Optional[str]) -> Optional[str]:
             "fragment, or user information"
         )
     return origin
+
+
+def _json_boolean(value: dict[str, Any], name: str, default: bool = False) -> bool:
+    raw = value.get(name, default)
+    if not isinstance(raw, bool):
+        raise WebBridgeProfileError(f"saved {name} must be boolean")
+    return raw
+
+
+def _json_string_tuple(value: dict[str, Any], name: str) -> tuple[str, ...]:
+    raw = value.get(name, [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise WebBridgeProfileError(f"saved {name} must be a string list")
+    return tuple(raw)
 
 
 def _command(value: Any) -> tuple[str, ...]:
@@ -148,6 +163,14 @@ class SavedWebBridgeProfile:
     # ``ManagedServerProfile`` on load to keep the dataclass free of runtime
     # objects in the JSON store.
     server_profiles: tuple[dict[str, Any], ...] = ()
+    browser_external_https: bool = False
+    browser_allowed_domains: tuple[str, ...] = ()
+    browser_denied_domains: tuple[str, ...] = ()
+    browser_headed: bool = False
+    browser_user_takeover: bool = False
+    browser_network_inspection: bool = False
+    browser_payment_confirmation: bool = False
+    browser_allowed_emails: tuple[str, ...] = ()
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS
     tunnel: str = "cloudflare"
     public_url: Optional[str] = None
@@ -190,6 +213,24 @@ class SavedWebBridgeProfile:
                     f"duplicate saved server profile: {profile['name']}"
                 )
             seen.add(profile["name"])
+        try:
+            browser_policy = BrowserAccessPolicy(
+                session_id=f"saved-{self.name}",
+                localhost=True,
+                external_https=self.browser_external_https,
+                allowed_domains=tuple(self.browser_allowed_domains),
+                denied_domains=tuple(self.browser_denied_domains),
+                headed=self.browser_headed,
+                user_takeover=self.browser_user_takeover,
+                network_inspection=self.browser_network_inspection,
+                payment_confirmation=self.browser_payment_confirmation,
+                allowed_emails=tuple(self.browser_allowed_emails),
+            )
+        except ValueError as exc:
+            raise WebBridgeProfileError(f"saved browser policy is invalid: {exc}") from exc
+        object.__setattr__(self, "browser_allowed_domains", browser_policy.allowed_domains)
+        object.__setattr__(self, "browser_denied_domains", browser_policy.denied_domains)
+        object.__setattr__(self, "browser_allowed_emails", browser_policy.allowed_emails)
         if self.repository is not None:
             repository = str(self.repository).strip()
             if not repository:
@@ -215,6 +256,10 @@ class SavedWebBridgeProfile:
             except ValueError as exc:
                 raise WebBridgeProfileError("saved access profile is invalid") from exc
             object.__setattr__(self, "access_profile", profile)
+        if self.browser_external_https and self.access_profile == AccessProfile.READ_ONLY:
+            raise WebBridgeProfileError(
+                "saved external browser profile requires browser_control, workspace_write, or elevated access"
+            )
         if not 1 <= int(self.port) <= 65_535:
             raise WebBridgeProfileError("saved bridge port must be between 1 and 65535")
         if not 0.1 <= float(self.deadline_seconds) <= 3600.0:
@@ -233,6 +278,9 @@ class SavedWebBridgeProfile:
         value["verification_commands"] = [
             list(command) for command in self.verification_commands
         ]
+        value["browser_allowed_domains"] = list(self.browser_allowed_domains)
+        value["browser_denied_domains"] = list(self.browser_denied_domains)
+        value["browser_allowed_emails"] = list(self.browser_allowed_emails)
         return value
 
     @classmethod
@@ -246,6 +294,14 @@ class SavedWebBridgeProfile:
             "repository",
             "verification_commands",
             "server_profiles",
+            "browser_external_https",
+            "browser_allowed_domains",
+            "browser_denied_domains",
+            "browser_headed",
+            "browser_user_takeover",
+            "browser_network_inspection",
+            "browser_payment_confirmation",
+            "browser_allowed_emails",
             "deadline_seconds",
             "tunnel",
             "public_url",
@@ -279,6 +335,24 @@ class SavedWebBridgeProfile:
                 repository=value.get("repository"),
                 verification_commands=commands,
                 server_profiles=server_profiles,
+                browser_external_https=_json_boolean(value, "browser_external_https"),
+                browser_allowed_domains=_json_string_tuple(
+                    value, "browser_allowed_domains"
+                ),
+                browser_denied_domains=_json_string_tuple(
+                    value, "browser_denied_domains"
+                ),
+                browser_headed=_json_boolean(value, "browser_headed"),
+                browser_user_takeover=_json_boolean(value, "browser_user_takeover"),
+                browser_network_inspection=_json_boolean(
+                    value, "browser_network_inspection"
+                ),
+                browser_payment_confirmation=_json_boolean(
+                    value, "browser_payment_confirmation"
+                ),
+                browser_allowed_emails=_json_string_tuple(
+                    value, "browser_allowed_emails"
+                ),
                 deadline_seconds=float(
                     value.get("deadline_seconds", DEFAULT_HOSTED_DEADLINE_SECONDS)
                 ),

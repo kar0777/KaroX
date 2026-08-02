@@ -377,7 +377,13 @@ class McpProxyTests(unittest.TestCase):
             url=f"http://127.0.0.1:{port}/mcp",
             credential_ref=info["reference"],
             credential_target="Authorization",
-            read_only_tools=("mcp.echo.echo",),
+            # Read-only names are matched against what the peer advertises in
+            # ``tools/list``, and this peer is a KaroX bridge -- which now spells
+            # its tools with underscores, because a dotted name cannot be handed
+            # to a model API at all (Anthropic requires ``^[a-zA-Z0-9_-]{1,64}$``).
+            # The internal identifier is still ``mcp.echo.echo``; only the wire
+            # encoding changed, and this record is on the wire side of it.
+            read_only_tools=("mcp_echo_echo",),
             timeout_seconds=15.0,
         )
         wire_registry = McpRegistry(self.root / "wire-registry.json")
@@ -389,7 +395,7 @@ class McpProxyTests(unittest.TestCase):
                 namespace="unauthorized",
                 transport="streamable_http",
                 url=f"http://127.0.0.1:{port}/mcp",
-                read_only_tools=("mcp.echo.echo",),
+                read_only_tools=("mcp_echo_echo",),
                 timeout_seconds=15.0,
             )
             with self.assertRaises(McpTransportError):
@@ -397,13 +403,19 @@ class McpProxyTests(unittest.TestCase):
                     unauthorized, self.repository
                 )
             descriptors = wire_client.discover("wire", self.repository)
+            # A KaroX bridge advertises underscore names on the wire, because a
+            # dot is illegal in an Anthropic/OpenAI tool definition and a client
+            # that maps ``tools/list`` onto model tools drops every dotted one.
+            # The internal identifier is still ``mcp.echo.echo`` -- see
+            # ``proxy.descriptors()`` above -- so only what a *peer* reads over
+            # HTTP carries the underscore spelling.
             descriptor = next(
-                item for item in descriptors if item.remote_name == "mcp.echo.echo"
+                item for item in descriptors if item.remote_name == "mcp_echo_echo"
             )
             mutating = next(
                 item
                 for item in descriptors
-                if item.remote_name == "mcp.echo.write_note"
+                if item.remote_name == "mcp_echo_write_note"
             )
             # A mutating call without a client-supplied idempotency key is served
             # under a key derived from the call itself, so the retry that follows a

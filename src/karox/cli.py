@@ -23,11 +23,19 @@ from .agent import (
     ContextBudget,
     SYSTEM_PROMPT,
 )
+from .browser_access import BrowserAccessPolicy
 from .bridge import (
     BridgeCredentialStore,
     BridgeError,
     BridgeRegistry,
 )
+# Aliased on import: ``connections.ConnectionError`` is a ``RuntimeError``
+# subclass, not the builtin, so binding it to the builtin's name here would
+# shadow the builtin for the whole module -- and the builtin is caught via
+# ``OSError`` in ``main``, while this one needs naming explicitly.
+from .connections import ConnectionError as SavedConnectionError
+from .connection_controller import connection_controller
+from .connection_runtime import ConnectionRuntimeError
 from .core import CoreError, CoreRuntime
 from .core_tools import ExtendedCoreRuntime
 from .credentials import CredentialError, CredentialStore
@@ -96,6 +104,7 @@ from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
 from .proxy import McpProxy
 from .proxy_server import build_proxy_asgi_app, normalize_host
+from .provider_controller import ProviderController
 from .provider_factory import ProviderFactory
 from .provider_presets import provider_preset, provider_presets
 from .providers import (
@@ -136,8 +145,12 @@ from .web_bridge_launcher import (
     WEB_BRIDGE_PROFILES,
     WebBridgeConnectConfig,
     WebBridgeLaunchError,
+    _include_stable_worker_commands,
+    delete_saved_web_bridge_identity,
     reap_orphaned_web_bridges,
     run_web_bridge,
+    saved_web_bridge_identity_exists,
+    saved_web_bridge_session_id,
     web_bridge_diagnostics,
 )
 from .web_bridge_profiles import (
@@ -146,8 +159,26 @@ from .web_bridge_profiles import (
 )
 
 
+def _write_line(text: str) -> None:
+    """Print one line, degrading characters the console cannot encode.
+
+    Windows gives a redirected or legacy-code-page stdout the system encoding,
+    and ``cp866`` has no ``•``: printing a masked secret there raised
+    ``UnicodeEncodeError`` and took the whole command down with exit code 2 --
+    a display command failing over a decorative character.  Russian help text
+    and model output are the same hazard on the same streams.  ``_stream_progress``
+    already made this trade for stderr; this is the stdout half of it, so an
+    unencodable character degrades to a replacement and the line still arrives.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(text.encode(encoding, "replace").decode(encoding, "replace"))
+
+
 def _json(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+    _write_line(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def _verification_command(value: str) -> tuple[str, ...]:
@@ -306,6 +337,53 @@ def _record_summary(record: SessionRecord) -> dict[str, Any]:
     }
 
 
+def _add_browser_policy_arguments(command: argparse.ArgumentParser) -> None:
+    """Add the explicit external-browser policy shared by bridge launch paths."""
+    command.add_argument(
+        "--browser-external-https",
+        action="store_true",
+        help="allow public HTTPS sites after DNS/private-address validation",
+    )
+    command.add_argument(
+        "--browser-domain",
+        action="append",
+        default=[],
+        help="allow one external domain and its subdomains for this browser session",
+    )
+    command.add_argument(
+        "--browser-deny-domain",
+        action="append",
+        default=[],
+        help="deny one domain and its subdomains for this browser session",
+    )
+    command.add_argument(
+        "--browser-headed",
+        action="store_true",
+        help="show a dedicated Chromium window owned by this KaroX session",
+    )
+    command.add_argument(
+        "--browser-user-takeover",
+        action="store_true",
+        help="allow pausing agent input while the user completes sensitive steps",
+    )
+    command.add_argument(
+        "--browser-network-inspection",
+        action="store_true",
+        help="expose redacted request metadata and selected billing/model fields",
+    )
+    command.add_argument(
+        "--browser-payment-confirmation",
+        action="store_true",
+        help="explicitly permit payment/checkout confirmation actions (off by default)",
+    )
+    command.add_argument(
+        "--browser-allowed-email",
+        action="append",
+        default=[],
+        help="email address the agent may fill in this browser session",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karox", description="KaroX hybrid runtime")
     # `karox --version` is the first thing anyone types to find out what they have
@@ -417,12 +495,35 @@ def _parser() -> argparse.ArgumentParser:
     provider_remove = providers.add_parser("remove", help="remove a provider")
     provider_remove.add_argument("provider_id")
     provider_remove.add_argument("--cascade", action="store_true")
+    provider_remove.add_argument(
+        "--delete-credential",
+        action="store_true",
+        help="delete an unshared OS-keyring credential after registry removal",
+    )
     provider_remove.add_argument("--json", action="store_true")
     provider_list = providers.add_parser("list", help="list providers")
     provider_list.add_argument("--json", action="store_true")
     provider_show = providers.add_parser("show", help="show a provider")
     provider_show.add_argument("provider_id")
     provider_show.add_argument("--json", action="store_true")
+    provider_details = providers.add_parser(
+        "details", help="show provider, models, selection, and credential status"
+    )
+    provider_details.add_argument("provider_id")
+    provider_details.add_argument("--json", action="store_true")
+    provider_credential_set = providers.add_parser(
+        "credential-set", help="attach or rotate a provider credential"
+    )
+    provider_credential_set.add_argument("provider_id")
+    provider_credential_set.add_argument("--name")
+    provider_credential_set.add_argument("--stdin", action="store_true")
+    provider_credential_set.add_argument("--json", action="store_true")
+    provider_credential_clear = providers.add_parser(
+        "credential-clear", help="detach a provider credential reference"
+    )
+    provider_credential_clear.add_argument("provider_id")
+    provider_credential_clear.add_argument("--delete-stored", action="store_true")
+    provider_credential_clear.add_argument("--json", action="store_true")
     provider_test = providers.add_parser("test", help="send a minimal model request")
     provider_test.add_argument("provider_id")
     provider_test.add_argument("--model")
@@ -504,6 +605,12 @@ def _parser() -> argparse.ArgumentParser:
     model_map.add_argument("model_id")
     model_map.add_argument("--provider", required=True)
     model_map.add_argument("--json", action="store_true")
+    model_repair = models.add_parser(
+        "repair-selection",
+        help="select the first deterministic model when no default is selected",
+    )
+    model_repair.add_argument("--provider")
+    model_repair.add_argument("--json", action="store_true")
 
     def add_ecosystem_commands(
         name: str, help_text: str, *, target: bool = False
@@ -735,6 +842,77 @@ def _parser() -> argparse.ArgumentParser:
     )
     mcp_credential_doctor.add_argument("--json", action="store_true")
 
+    # The saved MCP *client* connections (ClickUp and friends) were reachable
+    # only from the TUI's Connections screens.  That made the one value a user
+    # cannot retype from memory -- an auto-generated bridge secret -- readable
+    # nowhere: the card masks it, and a masked secret plus a clipboard button is
+    # not enough when the paste target is another application's form field.
+    connections = commands.add_parser(
+        "connections",
+        help="inspect saved MCP client connections outside the TUI",
+    )
+    connection_commands = connections.add_subparsers(
+        dest="connections_command", required=True
+    )
+    connections_list = connection_commands.add_parser(
+        "list", help="list saved connections"
+    )
+    connections_list.add_argument("--json", action="store_true")
+    connections_show = connection_commands.add_parser(
+        "show", help="show one connection, with the secret masked by default"
+    )
+    connections_show.add_argument("connection_id")
+    connections_show.add_argument(
+        "--reveal-secret",
+        action="store_true",
+        help=(
+            "print the secret value instead of its mask; it is written to "
+            "standard output, so redirect or clear the scrollback afterwards"
+        ),
+    )
+    connections_show.add_argument("--json", action="store_true")
+    connections_test = connection_commands.add_parser(
+        "test", help="run the MCP handshake against a connection"
+    )
+    connections_test.add_argument("connection_id")
+    connections_test.add_argument(
+        "--url",
+        help="override the endpoint URL (defaults to the connection's own)",
+    )
+    connections_test.add_argument("--timeout-seconds", type=float, default=15.0)
+    connections_test.add_argument("--json", action="store_true")
+    connections_support = connection_commands.add_parser(
+        "launch-support",
+        help="explain whether the saved connection has a managed launcher",
+    )
+    connections_support.add_argument("connection_id")
+    connections_support.add_argument("--json", action="store_true")
+    connections_start = connection_commands.add_parser(
+        "start", help="idempotently start a saved connection"
+    )
+    connections_start.add_argument("connection_id")
+    connections_start.add_argument("--json", action="store_true")
+    connections_restart = connection_commands.add_parser(
+        "restart", help="safely stop and relaunch a saved connection"
+    )
+    connections_restart.add_argument("connection_id")
+    connections_restart.add_argument("--json", action="store_true")
+    connections_status = connection_commands.add_parser(
+        "status", help="show managed runtime state for one connection"
+    )
+    connections_status.add_argument("connection_id")
+    connections_status.add_argument("--json", action="store_true")
+    connections_stop = connection_commands.add_parser(
+        "stop", help="stop a connection runtime owned by this KaroX process"
+    )
+    connections_stop.add_argument("connection_id")
+    connections_stop.add_argument("--json", action="store_true")
+    connections_remove = connection_commands.add_parser(
+        "remove", help="remove a connection and its stored secret"
+    )
+    connections_remove.add_argument("connection_id")
+    connections_remove.add_argument("--json", action="store_true")
+
     bridge = commands.add_parser(
         "bridge", help="manage hosted-client bridge profiles and credentials"
     )
@@ -779,9 +957,32 @@ def _parser() -> argparse.ArgumentParser:
     bridge_saved_validate.add_argument("--repository", type=Path)
     bridge_saved_validate.add_argument("--json", action="store_true")
 
+    bridge_saved_developer = bridge_saved_commands.add_parser(
+        "ensure-developer",
+        help="create or update a durable full workspace developer profile",
+    )
+    bridge_saved_developer.add_argument("name")
+    bridge_saved_developer.add_argument("--repository", type=Path, required=True)
+    bridge_saved_developer.add_argument(
+        "--target-profile",
+        choices=WEB_BRIDGE_PROFILES,
+        default="chatgpt-web",
+    )
+    bridge_saved_developer.add_argument(
+        "--tunnel",
+        choices=("tailscale", "custom"),
+        default="tailscale",
+    )
+    bridge_saved_developer.add_argument("--public-url")
+    bridge_saved_developer.add_argument("--language", choices=("en", "ru"), default="ru")
+    bridge_saved_developer.add_argument("--port", type=int, default=8765)
+    bridge_saved_developer.add_argument("--reset-identity", action="store_true")
+    bridge_saved_developer.add_argument("--json", action="store_true")
+
     bridge_saved_create = bridge_saved_commands.add_parser(
         "create", help="create a saved connection profile"
     )
+    _add_browser_policy_arguments(bridge_saved_create)
     bridge_saved_create.add_argument("name")
     bridge_saved_create.add_argument(
         "--target-profile",
@@ -870,12 +1071,21 @@ def _parser() -> argparse.ArgumentParser:
     bridge_saved_edit.add_argument(
         "--clear-verification-commands", action="store_true"
     )
+    bridge_saved_edit.add_argument(
+        "--reset-identity",
+        action="store_true",
+        help=(
+            "revoke the durable session/keyring identity before changing the "
+            "repository or access profile; the external connector needs the new secret"
+        ),
+    )
     bridge_saved_edit.add_argument("--json", action="store_true")
 
     bridge_connect = bridge_commands.add_parser(
         "connect",
         help="launch a complete ChatGPT or Claude web bridge",
     )
+    _add_browser_policy_arguments(bridge_connect)
     bridge_connect.add_argument(
         "profile",
         nargs="?",
@@ -954,6 +1164,7 @@ def _parser() -> argparse.ArgumentParser:
     bridge_serve = bridge_commands.add_parser(
         "serve", help="serve selected Core/MCP tools over authenticated HTTP"
     )
+    _add_browser_policy_arguments(bridge_serve)
     bridge_serve.add_argument("--repository", type=Path, required=True)
     bridge_serve.add_argument("--session-id", required=True)
     bridge_serve.add_argument(
@@ -1071,16 +1282,25 @@ def _parser() -> argparse.ArgumentParser:
     # sensible defaults so a user types one word, not eight flags.
     connect = commands.add_parser(
         "connect",
-        help="one-command web-bridge launch (ChatGPT/Claude/HyperAgent + Tailscale)",
+        help=(
+            "one-command bridge launch (ChatGPT/Claude/HyperAgent + Tailscale, "
+            "or ClickUp + Cloudflare)"
+        ),
     )
+    _add_browser_policy_arguments(connect)
     connect.add_argument(
         "connector",
         nargs="?",
-        choices=("chatgpt", "claude", "hyperagent"),
+        choices=("chatgpt", "claude", "clickup", "hyperagent"),
         default="chatgpt",
         help="target connector (defaults to chatgpt)",
     )
     connect.add_argument("--repository", type=Path)
+    connect.add_argument(
+        "--name",
+        default="ClickUp",
+        help="saved connection name for the ClickUp launcher",
+    )
     connect.add_argument("--session-id")
     connect.add_argument(
         "--access-profile",
@@ -1090,8 +1310,10 @@ def _parser() -> argparse.ArgumentParser:
     connect.add_argument(
         "--tunnel",
         choices=("cloudflare", "tailscale", "custom"),
-        default="tailscale",
-        help="defaults to tailscale (stable URL); cloudflare is ephemeral",
+        default=None,
+        help=(
+            "defaults to tailscale for web OAuth clients and cloudflare for ClickUp"
+        ),
     )
     connect.add_argument(
         "--public-url",
@@ -1285,7 +1507,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _print_mapping(value: dict[str, Any]) -> None:
     for key, item in value.items():
-        print(f"{key}: {item}")
+        _write_line(f"{key}: {item}")
 
 
 def _stream_progress() -> Callable[[AgentEvent], None]:
@@ -1396,6 +1618,10 @@ def _print_agent_report(report: AgentReport) -> None:
 
 def _registry() -> ProviderRegistry:
     return ProviderRegistry(config_dir() / "vnext" / "providers.json")
+
+
+def _provider_controller() -> ProviderController:
+    return ProviderController(registry=_registry(), credentials=CredentialStore())
 
 
 def _mcp_registry() -> McpRegistry:
@@ -1636,11 +1862,11 @@ def _emit(value: Any, *, json_output: bool) -> None:
                 identifier = item.get("provider_id", "")
                 if item.get("model_id") is not None:
                     identifier = f"{identifier}/{item['model_id']}"
-                print(identifier or json.dumps(item, ensure_ascii=False))
+                _write_line(identifier or json.dumps(item, ensure_ascii=False))
             else:
-                print(item)
+                _write_line(str(item))
     else:
-        print(value)
+        _write_line(str(value))
 
 
 def _test_registered_model(
@@ -2144,6 +2370,31 @@ def _web_bridge_tools(
     return tools
 
 
+def _web_bridge_access_profile(
+    explicit: Optional[str], *, write: bool, external_browser: bool
+) -> AccessProfile:
+    if explicit:
+        return AccessProfile(explicit)
+    if write:
+        return AccessProfile.WORKSPACE_WRITE
+    if external_browser:
+        return AccessProfile.BROWSER_CONTROL
+    return AccessProfile.READ_ONLY
+
+
+def _browser_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "browser_external_https": bool(getattr(args, "browser_external_https", False)),
+        "browser_allowed_domains": tuple(getattr(args, "browser_domain", []) or []),
+        "browser_denied_domains": tuple(getattr(args, "browser_deny_domain", []) or []),
+        "browser_headed": bool(getattr(args, "browser_headed", False)),
+        "browser_user_takeover": bool(getattr(args, "browser_user_takeover", False)),
+        "browser_network_inspection": bool(getattr(args, "browser_network_inspection", False)),
+        "browser_payment_confirmation": bool(getattr(args, "browser_payment_confirmation", False)),
+        "browser_allowed_emails": tuple(getattr(args, "browser_allowed_email", []) or []),
+    }
+
+
 def _web_bridge_repository(value: Optional[Path], saved: Optional[str] = None) -> Path:
     repository = value or (Path(saved) if saved else Path.cwd())
     resolved = repository.expanduser().resolve(strict=True)
@@ -2171,6 +2422,14 @@ def _saved_profile_connect_config(
     deadline_preset: Optional[str] = None,
     tunnel_timeout_seconds: Optional[float] = None,
     language: Optional[str] = None,
+    browser_external_https: bool = False,
+    browser_domain: Sequence[str] = (),
+    browser_deny_domain: Sequence[str] = (),
+    browser_headed: bool = False,
+    browser_user_takeover: bool = False,
+    browser_network_inspection: bool = False,
+    browser_payment_confirmation: bool = False,
+    browser_allowed_email: Sequence[str] = (),
 ) -> WebBridgeConnectConfig:
     effective_tunnel = tunnel or profile.tunnel
     effective_public_url = public_url
@@ -2198,13 +2457,18 @@ def _saved_profile_connect_config(
             for item in profile.server_profiles
         )
     tools = _web_bridge_tools(tool, write=write, fallback=profile.tools)
+    effective_external_browser = profile.browser_external_https or browser_external_https
     effective_access = (
         AccessProfile(access_profile)
         if access_profile
         else (
             AccessProfile.WORKSPACE_WRITE
             if write
-            else profile.access_profile
+            else (
+                AccessProfile.BROWSER_CONTROL
+                if effective_external_browser and profile.access_profile == AccessProfile.READ_ONLY
+                else profile.access_profile
+            )
         )
     )
     return WebBridgeConnectConfig(
@@ -2230,6 +2494,28 @@ def _saved_profile_connect_config(
         ),
         verification_commands=commands,
         server_profiles=profiles,
+        browser_external_https=effective_external_browser,
+        browser_allowed_domains=(
+            tuple(browser_domain) if browser_domain else profile.browser_allowed_domains
+        ),
+        browser_denied_domains=(
+            tuple(browser_deny_domain)
+            if browser_deny_domain
+            else profile.browser_denied_domains
+        ),
+        browser_headed=profile.browser_headed or browser_headed,
+        browser_user_takeover=profile.browser_user_takeover or browser_user_takeover,
+        browser_network_inspection=(
+            profile.browser_network_inspection or browser_network_inspection
+        ),
+        browser_payment_confirmation=(
+            profile.browser_payment_confirmation or browser_payment_confirmation
+        ),
+        browser_allowed_emails=(
+            tuple(browser_allowed_email)
+            if browser_allowed_email
+            else profile.browser_allowed_emails
+        ),
         language=language or profile.language,
         saved_profile_name=profile.name,
     )
@@ -2250,14 +2536,11 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
     # FACEBOOK_LIVE_ENABLED=false) so the connect command stays one-liner.
     if "karox.dev_server.start" in tools and not profiles:
         profiles = default_server_profiles()
-    access = (
-        AccessProfile(args.access_profile)
-        if args.access_profile
-        else (
-            AccessProfile.WORKSPACE_WRITE
-            if args.write
-            else AccessProfile.READ_ONLY
-        )
+    browser_kwargs = _browser_config_kwargs(args)
+    access = _web_bridge_access_profile(
+        args.access_profile,
+        write=args.write,
+        external_browser=browser_kwargs["browser_external_https"],
     )
     return WebBridgeConnectConfig(
         profile=args.profile,
@@ -2280,6 +2563,7 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
         ),
         verification_commands=commands,
         server_profiles=profiles,
+        **browser_kwargs,
         language=(
             args.language
             or (
@@ -2291,6 +2575,146 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
     )
 
 
+def _connection_summary(
+    target: Any,
+    *,
+    secret: str,
+    reveal: bool,
+    runtime: Optional[dict[str, Any]] = None,
+    endpoint: Optional[str] = None,
+) -> dict[str, Any]:
+    """Describe a connection the way an external client has to be configured.
+
+    The fields are the ones a person retypes into another application's form:
+    the endpoint URL, the auth scheme, the exact header, and the secret.  The
+    secret is masked unless ``reveal`` is set, so the default output of every
+    command here is safe to paste into a bug report.
+    """
+    from .connections import auth_headers, connection_test_endpoint, mask_secret
+
+    if endpoint is None:
+        endpoint = connection_test_endpoint(target)
+    headers = auth_headers(target, secret) if secret else {}
+    header_name = next(iter(headers), "")
+    payload: dict[str, Any] = {
+        "connection_id": target.connection_id,
+        "name": target.name,
+        "preset_id": target.preset_id,
+        "transport": target.transport,
+        "auth_scheme": target.auth_scheme,
+        "tunnel": target.tunnel,
+        "url_stability": target.url_stability,
+        "url": endpoint or "",
+        "endpoint_path": target.endpoint_path,
+        "port": target.port,
+        "credential_ref": target.credential_ref or "",
+        "credential_fingerprint": target.credential_fingerprint or "",
+        "header_name": header_name,
+        "secret": (secret if reveal else mask_secret(secret)),
+        "secret_revealed": bool(secret) and reveal,
+        "runtime": dict(runtime or {}),
+    }
+    if header_name:
+        value = headers[header_name]
+        # The header line is what actually gets pasted, so it carries the same
+        # masking decision as the secret rather than leaking the value through
+        # the one field a reader would not think to check.
+        payload["header"] = (
+            f"{header_name}: {value}"
+            if reveal
+            else f"{header_name}: {value[: len(value) - len(secret)]}{mask_secret(secret)}"
+        )
+    return payload
+
+
+def _handle_connections(args: argparse.Namespace) -> int:
+    command = args.connections_command
+    controller = connection_controller()
+
+    if command == "list":
+        rows = [
+            _connection_summary(
+                state.target,
+                secret="",
+                reveal=False,
+                runtime=dict(state.runtime),
+                endpoint=state.endpoint,
+            )
+            for state in controller.list()
+        ]
+        if args.json:
+            _json(rows)
+        else:
+            for row in rows:
+                _write_line(
+                    f"{row['connection_id']}\t{row['name']}\t"
+                    f"{row['auth_scheme']}\t{row['tunnel']}\t"
+                    f"{row['url'] or '-'}"
+                )
+        return 0
+
+    state = controller.get(args.connection_id)
+    target = state.target
+
+    if command == "launch-support":
+        support = controller.launch_support(args.connection_id)
+        _emit(support.to_dict(), json_output=args.json)
+        return 0 if support.supported else 1
+
+    if command == "start":
+        _emit(controller.start(args.connection_id).to_dict(), json_output=args.json)
+        return 0
+
+    if command == "restart":
+        _emit(controller.restart(args.connection_id).to_dict(), json_output=args.json)
+        return 0
+
+    if command == "status":
+        _emit(dict(state.runtime), json_output=args.json)
+        return 0
+
+    if command == "stop":
+        _emit(controller.stop(args.connection_id), json_output=args.json)
+        return 0
+
+    if command == "remove":
+        _emit(controller.remove(args.connection_id), json_output=args.json)
+        return 0
+
+    secret = ""
+    secret_error = ""
+    if target.credential_ref:
+        try:
+            secret = controller.secret(args.connection_id)
+        except CredentialError as exc:
+            secret_error = str(exc)
+
+    if command == "show":
+        payload = _connection_summary(
+            target,
+            secret=secret,
+            reveal=args.reveal_secret,
+            runtime=dict(state.runtime),
+            endpoint=state.endpoint,
+        )
+        if secret_error:
+            payload["secret_error"] = secret_error
+        if target.instructions:
+            payload["instructions"] = target.instructions
+        _emit(payload, json_output=args.json)
+        return 0 if not secret_error else 1
+
+    if secret_error:
+        raise CredentialError(secret_error)
+    result = controller.test(
+        args.connection_id,
+        endpoint_url=args.url,
+        timeout_seconds=args.timeout_seconds,
+    )
+    _emit(result, json_output=args.json)
+    return 0 if result.get("state") == "ok" else 1
+
+
 def _handle_bridge_saved(args: argparse.Namespace) -> int:
     store = WebBridgeProfileStore()
     command = args.bridge_saved_command
@@ -2299,9 +2723,16 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
     elif command == "show":
         payload = store.get(args.name).to_dict()
     elif command == "delete":
+        # Durable profiles own a repository-bound session and keyring secret.
+        # Clean those first so a running launcher can refuse deletion without
+        # losing the user-visible profile needed to stop it.
+        profile = store.get(args.name)
+        identity = delete_saved_web_bridge_identity(args.name)
         payload = {
             "status": "deleted",
             "profile": store.delete(args.name).to_dict(),
+            "identity_cleanup": identity,
+            "session_id": saved_web_bridge_session_id(profile.name),
         }
     elif command == "validate":
         profile = store.get(args.name)
@@ -2315,6 +2746,73 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
         }
         if config.tunnel == "tailscale":
             payload["tailscale"] = tailscale_doctor()
+    elif command == "ensure-developer":
+        repository = str(_web_bridge_repository(args.repository))
+        tools = tuple(
+            dict.fromkeys(
+                (*DEFAULT_WEB_TOOLS, *WRITE_WEB_TOOLS, "karox.checks.run")
+            )
+        )
+        commands = (
+            ("python", "-m", "ruff", "check", "src", "tests", "scripts"),
+            ("python", "-m", "mypy", "src/karox"),
+            ("python", "-m", "build", "--wheel"),
+        )
+        profile = SavedWebBridgeProfile(
+            name=args.name,
+            target_profile=args.target_profile,
+            repository=repository,
+            tools=tools,
+            verification_commands=commands,
+            server_profiles=tuple(
+                item.to_public_dict() for item in default_server_profiles()
+            ),
+            deadline_seconds=_WEB_BRIDGE_DEADLINE_PRESETS["full-suite"],
+            tunnel=args.tunnel,
+            public_url=args.public_url,
+            language=args.language,
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            port=args.port,
+            tunnel_timeout_seconds=30.0,
+        )
+        previous = next(
+            (item for item in store.list() if item.name == args.name),
+            None,
+        )
+        identity_reset = None
+        reasons: list[str] = []
+        if previous is not None:
+            binding_changed = (
+                previous.repository != profile.repository
+                or previous.access_profile != profile.access_profile
+            )
+            identity_exists = saved_web_bridge_identity_exists(previous.name)
+            if binding_changed and identity_exists and not args.reset_identity:
+                raise ValueError(
+                    "developer profile is bound to a different repository or "
+                    "access profile; rerun with --reset-identity"
+                )
+            if args.reset_identity:
+                identity_reset = delete_saved_web_bridge_identity(previous.name)
+                if identity_reset.get("credential") != "not_found":
+                    reasons.append("credential_rotated")
+            if previous.tunnel != profile.tunnel or previous.public_url != profile.public_url:
+                reasons.append("public_endpoint_changed")
+            if previous.target_profile != profile.target_profile:
+                reasons.append("target_profile_changed")
+            store.put(profile)
+            status = "updated"
+        else:
+            store.put(profile, replace_existing=False)
+            status = "created"
+        payload = {
+            "status": status,
+            "profile": profile.to_dict(),
+            "launch_command": f"karox bridge connect --saved {profile.name}",
+            "identity_reset": identity_reset,
+            "connector_reconfigure_required": bool(reasons),
+            "connector_reconfigure_reasons": reasons,
+        }
     elif command == "create":
         commands = tuple(
             _verification_command(value) for value in args.verification_command
@@ -2325,14 +2823,11 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
         )
         if "karox.dev_server.start" in tools and not profiles:
             profiles = default_server_profiles()
-        access = (
-            AccessProfile(args.access_profile)
-            if args.access_profile
-            else (
-                AccessProfile.WORKSPACE_WRITE
-                if args.write
-                else AccessProfile.READ_ONLY
-            )
+        browser_kwargs = _browser_config_kwargs(args)
+        access = _web_bridge_access_profile(
+            args.access_profile,
+            write=args.write,
+            external_browser=browser_kwargs["browser_external_https"],
         )
         repository = (
             str(_web_bridge_repository(args.repository))
@@ -2346,6 +2841,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             tools=tools,
             verification_commands=commands,
             server_profiles=tuple(p.to_public_dict() for p in profiles),
+            **browser_kwargs,
             deadline_seconds=_web_bridge_deadline(
                 args.deadline_seconds, args.deadline_preset
             ),
@@ -2441,39 +2937,186 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
                 else current.tunnel_timeout_seconds
             ),
         )
+        binding_changed = (
+            updated.repository != current.repository
+            or updated.access_profile != current.access_profile
+        )
+        identity_exists = saved_web_bridge_identity_exists(current.name)
+        if binding_changed and identity_exists and not args.reset_identity:
+            raise ValueError(
+                "changing a launched saved profile's repository or access profile "
+                "requires --reset-identity; this rotates the connector secret"
+            )
+        identity_reset = None
+        if args.reset_identity:
+            identity_reset = delete_saved_web_bridge_identity(current.name)
         store.put(updated)
         payload = {
             "status": "updated",
             "profile": updated.to_dict(),
             "launch_command": f"karox bridge connect --saved {updated.name}",
+            "identity_reset": identity_reset,
+            "connector_reconfigure_required": bool(
+                identity_reset
+                and identity_reset.get("credential") != "not_found"
+            ),
         }
     _emit(payload, json_output=args.json)
     return 0
 
 
-def _handle_connect(args: argparse.Namespace) -> int:
-    """One-command web-bridge launch: connector + Tailscale with sensible defaults.
+def _handle_clickup_connect(args: argparse.Namespace) -> int:
+    """Run ClickUp as an independent foreground bridge on Cloudflare.
 
-    `karox connect` (or `karox connect chatgpt|claude|hyperagent`) builds the
-    same ``WebBridgeConnectConfig`` ``bridge connect`` does, but with Tailscale
-    as the default tunnel and the connector short name resolved to its full
-    profile. Bringing Tailscale online -- including restarting its service when
-    the engine is stuck -- happens inside ``run_web_bridge`` so this command is
-    the single thing a user types to publish a ChatGPT/Claude bridge.
+    This process deliberately owns its own bridge and tunnel lifecycle instead
+    of using the TUI's single ``bridge_process`` slot.  A ChatGPT OAuth bridge
+    can therefore keep running on 8765 while a second terminal owns ClickUp on
+    8766.  Ctrl+C in this terminal stops only the ClickUp children.
     """
+    from .clickup_setup import CLICKUP_DEVELOPER_TOOLS, setup_clickup_connection
+    from .connections import (
+        ClickupDefaults,
+        remove_connection,
+        resolve_connection_secret,
+    )
+
+    tunnel = args.tunnel or "cloudflare"
+    if tunnel != "cloudflare":
+        raise ValueError("karox connect clickup currently requires --tunnel cloudflare")
+    if args.public_url:
+        raise ValueError("ClickUp Cloudflare quick tunnels do not use --public-url")
+    if args.session_id:
+        raise ValueError("ClickUp creates and manages its own bridge session")
+    if args.tool or args.write or args.verification_command or args.access_profile:
+        raise ValueError(
+            "ClickUp uses its fixed guarded workspace developer profile; "
+            "--tool/--write/--verification-command/--access-profile do not apply"
+        )
+    browser_options = _browser_config_kwargs(args)
+    if any(bool(value) for value in browser_options.values()):
+        raise ValueError("browser policy flags do not apply to the ClickUp bridge")
+
+    repository = _web_bridge_repository(args.repository)
+    port = args.port if args.port is not None else 8766
+    if not 1 <= port <= 65_535:
+        raise ValueError("ClickUp bridge port must be between 1 and 65535")
+    name = str(args.name or "ClickUp").strip()
+    if not name:
+        raise ValueError("ClickUp connection name must not be empty")
+
+    defaults = ClickupDefaults(
+        transport="streamable_http",
+        auth_scheme="bearer",
+        tunnel="cloudflare",
+        port=port,
+        endpoint_path="/mcp",
+        url_stability="temporary",
+        secret_source="generate",
+        tunnel_reason="separate Cloudflare quick tunnel selected by karox connect clickup",
+        tunnel_action="none",
+    )
+    if args.diagnostics_only:
+        _json(
+            {
+                "connector": "clickup",
+                "repository": str(repository),
+                "name": name,
+                "transport": defaults.transport,
+                "auth_scheme": defaults.auth_scheme,
+                "authentication_method": "Authorization header",
+                "tunnel": defaults.tunnel,
+                "port": defaults.port,
+                "endpoint_path": defaults.endpoint_path,
+                "url_stability": defaults.url_stability,
+                "independent_process": True,
+                "public_verification_required": True,
+                "temporary_connection": True,
+                "tools": list(CLICKUP_DEVELOPER_TOOLS),
+                "verification_commands": [
+                    [sys.executable, "-m", "pytest", "-q"]
+                ],
+            }
+        )
+        return 0
+
+    def progress(step: str, state: str, detail: Optional[str]) -> None:
+        suffix = f": {detail}" if detail else ""
+        print(f"[{step}] {state}{suffix}", file=sys.stderr, flush=True)
+
+    outcome = setup_clickup_connection(
+        defaults,
+        name=name,
+        repository=repository,
+        on_progress=progress,
+        keep_public_pending=True,
+    )
+    if not outcome.success or outcome.target is None or not outcome.public_endpoint:
+        detail = outcome.failure_detail or "ClickUp setup failed"
+        remediation = f"; action: {outcome.remediation}" if outcome.remediation else ""
+        raise SavedConnectionError(
+            f"{outcome.failure_kind or 'setup_failed'}: {detail}{remediation}"
+        )
+
+    secret = resolve_connection_secret(outcome.target)
+    handshake_state = str((outcome.handshake or {}).get("state", ""))
+    _write_line("")
+    if handshake_state == "ok":
+        _write_line("ClickUp MCP bridge is publicly verified and ready.")
+    else:
+        _write_line("ClickUp MCP bridge is locally verified and kept online.")
+        _write_line(
+            "This PC could not verify the fresh public hostname yet. Create the "
+            "new connector now and use ClickUp's connection test as the "
+            "authoritative external verification."
+        )
+    _write_line(f"URL: {outcome.public_endpoint}")
+    _write_line("Authentication Method: Authorization header")
+    _write_line(f"Secret: {secret}")
+    _write_line(f"Local port: {port}")
+    _write_line(
+        "This Cloudflare Quick Tunnel URL is temporary and changes after restart."
+    )
+    _write_line("Create a new ClickUp connector for this URL and token.")
+    _write_line("Keep this terminal open. Press Ctrl+C to stop only ClickUp.")
+
+    try:
+        while True:
+            time.sleep(3600.0)
+    except KeyboardInterrupt:
+        _write_line("Stopping ClickUp bridge and Cloudflare tunnel...")
+    finally:
+        if outcome.stop is not None:
+            with contextlib.suppress(Exception):
+                outcome.stop()
+        with contextlib.suppress(Exception):
+            remove_connection(outcome.target.connection_id)
+    _write_line(
+        "ClickUp bridge stopped and its temporary KaroX connection was removed. "
+        "The current ChatGPT bridge was not touched."
+    )
+    return 0
+
+
+def _handle_connect(args: argparse.Namespace) -> int:
+    """Launch either a web OAuth bridge or the independent ClickUp bridge."""
+    if args.connector == "clickup":
+        return _handle_clickup_connect(args)
+
     profile = _CONNECTOR_PROFILES[args.connector]
     commands = tuple(
         _verification_command(value) for value in (args.verification_command or [])
     )
     tools = _web_bridge_tools(args.tool, write=args.write)
-    access = (
-        AccessProfile(args.access_profile)
-        if args.access_profile
-        else (
-            AccessProfile.WORKSPACE_WRITE
-            if args.write
-            else AccessProfile.READ_ONLY
-        )
+    profiles = (
+        default_server_profiles()
+        if "karox.dev_server.start" in tools
+        else ()
+    )
+    browser_kwargs = _browser_config_kwargs(args)
+    access = _web_bridge_access_profile(
+        args.access_profile,
+        write=args.write,
+        external_browser=browser_kwargs["browser_external_https"],
     )
     language = args.language or (
         "ru"
@@ -2487,7 +3130,7 @@ def _handle_connect(args: argparse.Namespace) -> int:
         tools=tools,
         session_id=args.session_id,
         access_profile=access,
-        tunnel=args.tunnel,
+        tunnel=args.tunnel or "tailscale",
         public_url=args.public_url,
         cloudflared=args.cloudflared,
         tailscale=args.tailscale,
@@ -2500,6 +3143,8 @@ def _handle_connect(args: argparse.Namespace) -> int:
             args.deadline_seconds, args.deadline_preset
         ),
         verification_commands=commands,
+        server_profiles=profiles,
+        **browser_kwargs,
         language=language,
     )
     if args.diagnostics_only:
@@ -2534,6 +3179,14 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 deadline_preset=args.deadline_preset,
                 tunnel_timeout_seconds=args.tunnel_timeout_seconds,
                 language=args.language,
+                browser_external_https=args.browser_external_https,
+                browser_domain=args.browser_domain,
+                browser_deny_domain=args.browser_deny_domain,
+                browser_headed=args.browser_headed,
+                browser_user_takeover=args.browser_user_takeover,
+                browser_network_inspection=args.browser_network_inspection,
+                browser_payment_confirmation=args.browser_payment_confirmation,
+                browser_allowed_email=args.browser_allowed_email,
             )
         else:
             config = _direct_connect_config(args)
@@ -2588,12 +3241,23 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         # different runtimes composed into one bridge, so split the selection
         # along that boundary: CoreToolBridge would reject an extra name as
         # unknown, and HostedToolsRuntime would reject a Core name.
-        core_tools = [name for name in args.tool if name in CORE_TOOL_NAMES]
-        extra_tools = [name for name in args.tool if name in HOSTED_EXTRA_TOOL_NAMES]
+        access_profile = AccessProfile(record.access_profile)
+        parsed_verification_commands = tuple(
+            _verification_command(value) for value in args.verification_command
+        )
+        effective_tools = _include_stable_worker_commands(
+            tuple(args.tool),
+            access_profile=access_profile,
+            verification_commands=parsed_verification_commands,
+        )
+        core_tools = [name for name in effective_tools if name in CORE_TOOL_NAMES]
+        extra_tools = [
+            name for name in effective_tools if name in HOSTED_EXTRA_TOOL_NAMES
+        ]
         if core_tools:
             verification_commands = (
-                [_verification_command(value) for value in args.verification_command]
-                if args.verification_command
+                parsed_verification_commands
+                if parsed_verification_commands
                 else None
             )
             runtimes.append(
@@ -2618,7 +3282,19 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             )
             if "karox.dev_server.start" in extra_tools and not server_profiles:
                 server_profiles = default_server_profiles()
-            access_profile = AccessProfile(record.access_profile)
+            browser_policy = BrowserAccessPolicy(
+                session_id=record.session_id,
+                localhost=True,
+                external_https=args.browser_external_https,
+                allowed_domains=tuple(args.browser_domain or []),
+                denied_domains=tuple(args.browser_deny_domain or []),
+                headed=args.browser_headed,
+                user_takeover=args.browser_user_takeover,
+                network_inspection=args.browser_network_inspection,
+                payment_confirmation=args.browser_payment_confirmation,
+                allowed_emails=tuple(args.browser_allowed_email or []),
+                backend=os.environ.get("KAROX_BROWSER_BACKEND", "playwright"),
+            )
             runtimes.append(
                 HostedToolsRuntime(
                     repository,
@@ -2631,6 +3307,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                         f"{args.profile}-tools-{record.session_id}",
                     ),
                     server_profiles=server_profiles,
+                    browser_policy=browser_policy,
                     audit_path=audit_path,
                 )
             )
@@ -2697,6 +3374,15 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 bridge_runtime,
                 credential,
                 deadline_seconds=args.deadline_seconds,
+                # RFC 6750 requires a 401 from a bearer-protected resource to
+                # name the scheme it wants; without it the response says only
+                # "no" and a client cannot tell bearer from OAuth from an API
+                # key.  The OAuth profile has always sent this header (pointing
+                # at its resource metadata) and the OpenAPI bridge sends a bare
+                # ``Bearer``; only this path, the one every generic MCP client
+                # uses, stayed silent.  A client that probes a server to decide
+                # which auth methods it supports therefore learned nothing here.
+                unauthorized_headers={"WWW-Authenticate": "Bearer"},
             )
         else:
             app = build_openapi_bridge_app(
@@ -2727,7 +3413,12 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 app,
                 host=args.host,
                 port=args.port,
-                log_level="info",
+                # The TUI already shows bridge lifecycle and actionable errors.
+                # Per-request access lines (POST /mcp 200 OK) turn normal MCP
+                # polling into hundreds of useless transcript rows, so keep
+                # warnings/errors while disabling only the access log.
+                log_level="warning",
+                access_log=False,
                 ssl_certfile=args.tls_certfile,
                 ssl_keyfile=args.tls_keyfile,
             )
@@ -3009,7 +3700,7 @@ def _handle_credential(args: argparse.Namespace) -> int:
 
 
 def _handle_provider(args: argparse.Namespace) -> int:
-    registry = _registry()
+    controller = _provider_controller()
     command = args.provider_command
     if command == "presets":
         payload = [item.to_dict() for item in provider_presets()]
@@ -3025,90 +3716,112 @@ def _handle_provider(args: argparse.Namespace) -> int:
                 f"preset {preset.display_name} requires --base-url from the provider documentation"
             )
         provider_id = args.provider_id or preset.preset_id
-        record = ProviderRecord(
-            provider_id=provider_id,
-            adapter_kind=str(preset.adapter_kind),
-            base_url=base_url,
-            credential_ref=args.credential_ref,
-            privacy_class=preset.privacy_class,
+        mutation = controller.put_provider(
+            ProviderRecord(
+                provider_id=provider_id,
+                adapter_kind=str(preset.adapter_kind),
+                base_url=base_url,
+                credential_ref=args.credential_ref,
+                privacy_class=preset.privacy_class,
+            )
         )
+        assert mutation.provider is not None
         payload = {
-            **asdict(registry.put_provider(record)),
+            **asdict(mutation.provider),
             "preset": preset.preset_id,
             "preset_status": preset.status,
             "privacy_note": preset.privacy_note,
         }
     elif command == "add":
-        record = ProviderRecord(
-            provider_id=args.provider_id,
-            adapter_kind=args.adapter,
-            base_url=args.base_url,
-            credential_ref=args.credential_ref,
-            headers=_pairs(args.header, "header"),
-            query=_pairs(args.query, "query"),
-            privacy_class=args.privacy_class,
-            timeout_seconds=args.timeout_seconds,
-            max_transport_retries=args.max_transport_retries,
+        mutation = controller.put_provider(
+            ProviderRecord(
+                provider_id=args.provider_id,
+                adapter_kind=args.adapter,
+                base_url=args.base_url,
+                credential_ref=args.credential_ref,
+                headers=_pairs(args.header, "header"),
+                query=_pairs(args.query, "query"),
+                privacy_class=args.privacy_class,
+                timeout_seconds=args.timeout_seconds,
+                max_transport_retries=args.max_transport_retries,
+            )
         )
-        payload = asdict(registry.put_provider(record))
+        assert mutation.provider is not None
+        payload = asdict(mutation.provider)
     elif command == "edit":
-        current = registry.provider(args.provider_id)
         if args.credential_ref and args.clear_credential:
             raise ValueError(
                 "--credential-ref cannot be combined with --clear-credential"
             )
-        credential_ref = current.credential_ref
-        if args.credential_ref is not None:
-            credential_ref = args.credential_ref
-        elif args.clear_credential:
-            credential_ref = None
-        record = ProviderRecord(
-            provider_id=current.provider_id,
-            adapter_kind=args.adapter or current.adapter_kind,
-            base_url=args.base_url or current.base_url,
-            credential_ref=credential_ref,
+        mutation = controller.edit_provider(
+            args.provider_id,
+            adapter_kind=args.adapter,
+            base_url=args.base_url,
+            credential_ref=(None if args.clear_credential else args.credential_ref),
+            credential_ref_supplied=(
+                args.clear_credential or args.credential_ref is not None
+            ),
             headers=(
                 _pairs(args.header, "header")
                 if args.header is not None
-                else current.headers
+                else None
             ),
             query=(
-                _pairs(args.query, "query") if args.query is not None else current.query
+                _pairs(args.query, "query")
+                if args.query is not None
+                else None
             ),
-            privacy_class=args.privacy_class or current.privacy_class,
-            timeout_seconds=(
-                args.timeout_seconds
-                if args.timeout_seconds is not None
-                else current.timeout_seconds
-            ),
-            max_transport_retries=(
-                args.max_transport_retries
-                if args.max_transport_retries is not None
-                else current.max_transport_retries
-            ),
+            privacy_class=args.privacy_class,
+            timeout_seconds=args.timeout_seconds,
+            max_transport_retries=args.max_transport_retries,
         )
-        payload = asdict(registry.put_provider(record))
+        assert mutation.provider is not None
+        payload = asdict(mutation.provider)
     elif command == "remove":
-        removed = registry.remove_provider(args.provider_id, cascade=args.cascade)
+        mutation = controller.remove_provider(
+            args.provider_id,
+            cascade=args.cascade,
+            delete_credential=args.delete_credential,
+        )
+        assert mutation.provider is not None
         payload = {
-            "provider_id": removed.provider_id,
+            "provider_id": mutation.provider.provider_id,
             "status": "removed",
             "cascade": args.cascade,
+            "credential_cleanup": mutation.credential_cleanup,
+            "selected_model": (
+                asdict(mutation.selected_model)
+                if mutation.selected_model is not None
+                else None
+            ),
         }
     elif command == "list":
-        payload = [asdict(item) for item in registry.providers()]
+        payload = [asdict(item.provider) for item in controller.list()]
     elif command == "show":
-        payload = asdict(registry.provider(args.provider_id))
+        payload = asdict(controller.details(args.provider_id).provider)
+    elif command == "details":
+        payload = controller.details(args.provider_id).to_dict()
+    elif command == "credential-set":
+        secret = (
+            sys.stdin.readline().rstrip("\r\n")
+            if args.stdin
+            else getpass.getpass("Provider credential: ")
+        )
+        payload = controller.set_credential(
+            args.provider_id,
+            secret,
+            credential_name=args.name,
+        ).to_dict()
+    elif command == "credential-clear":
+        payload = controller.clear_credential(
+            args.provider_id,
+            delete_stored=args.delete_stored,
+        ).to_dict()
     else:
-        model_name = args.model
-        if model_name is None:
-            candidates = registry.models(args.provider_id)
-            if not candidates:
-                raise RegistryError(
-                    f"provider has no registered models: {args.provider_id}"
-                )
-            model_name = candidates[0].model_id
-        payload = _test_registered_model(registry, args.provider_id, model_name)
+        payload = controller.test_provider(
+            args.provider_id,
+            model_or_alias=args.model,
+        )
     _emit(payload, json_output=args.json)
     return 0
 
@@ -3210,7 +3923,8 @@ def _handle_ecosystem(args: argparse.Namespace, kind: str) -> int:
 
 
 def _handle_model(args: argparse.Namespace) -> int:
-    registry = _registry()
+    controller = _provider_controller()
+    registry = controller.registry
     command = args.model_command
     if command == "discover":
         provider = registry.provider(args.provider)
@@ -3225,13 +3939,9 @@ def _handle_model(args: argparse.Namespace) -> int:
             )
         )
         if result.base_url != provider.base_url:
-            registry.put_provider(
-                ProviderRecord(
-                    **{
-                        **asdict(provider),
-                        "base_url": result.base_url,
-                    }
-                )
+            controller.edit_provider(
+                provider.provider_id,
+                base_url=result.base_url,
             )
         payload = {
             "provider_id": provider.provider_id,
@@ -3240,28 +3950,39 @@ def _handle_model(args: argparse.Namespace) -> int:
             "saved": False,
         }
     elif command == "map":
-        payload = asdict(registry.map_alias(args.provider, args.alias, args.model_id))
+        mutation = controller.map_alias(args.provider, args.alias, args.model_id)
+        assert mutation.model is not None
+        payload = asdict(mutation.model)
     elif command == "add":
-        record = ModelRecord(
-            provider_id=args.provider_id,
-            model_id=args.model_id,
-            aliases=tuple(args.alias),
-            context_window=args.context_window,
-            max_output_tokens=args.max_output_tokens,
-            tools=args.tools,
-            vision=args.vision,
-            structured_output=args.structured_output,
-            streaming=args.streaming,
-            pricing=_pricing(args),
-            provenance=args.provenance,
+        mutation = controller.put_model(
+            ModelRecord(
+                provider_id=args.provider_id,
+                model_id=args.model_id,
+                aliases=tuple(args.alias),
+                context_window=args.context_window,
+                max_output_tokens=args.max_output_tokens,
+                tools=args.tools,
+                vision=args.vision,
+                structured_output=args.structured_output,
+                streaming=args.streaming,
+                pricing=_pricing(args),
+                provenance=args.provenance,
+            )
         )
-        payload = asdict(registry.put_model(record))
+        assert mutation.model is not None
+        payload = asdict(mutation.model)
     elif command == "remove":
-        removed = registry.remove_model(args.provider_id, args.model)
+        mutation = controller.remove_model(args.provider_id, args.model)
+        assert mutation.model is not None
         payload = {
-            "provider_id": removed.provider_id,
-            "model_id": removed.model_id,
+            "provider_id": mutation.model.provider_id,
+            "model_id": mutation.model.model_id,
             "status": "removed",
+            "selected_model": (
+                asdict(mutation.selected_model)
+                if mutation.selected_model is not None
+                else None
+            ),
         }
     elif command == "list":
         selected = registry.selected_model()
@@ -3276,14 +3997,24 @@ def _handle_model(args: argparse.Namespace) -> int:
     elif command == "inspect":
         payload = asdict(registry.model(args.provider_id, args.model))
     elif command == "select":
-        selected = registry.select_model(args.provider_id, args.model)
+        mutation = controller.select_model(args.provider_id, args.model)
+        assert mutation.selected_model is not None
         payload = {
-            "provider_id": selected.provider_id,
-            "model_id": selected.model_id,
+            "provider_id": mutation.selected_model.provider_id,
+            "model_id": mutation.selected_model.model_id,
             "status": "selected",
         }
+    elif command == "repair-selection":
+        selected = controller.repair_selection(preferred_provider=args.provider)
+        payload = {
+            "status": "selected" if selected is not None else "no_models",
+            "selected_model": asdict(selected) if selected is not None else None,
+        }
     else:
-        payload = _test_registered_model(registry, args.provider_id, args.model)
+        payload = controller.test_provider(
+            args.provider_id,
+            model_or_alias=args.model,
+        )
     _emit(payload, json_output=args.json)
     return 0
 
@@ -3337,6 +4068,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "mcp":
             return _handle_mcp(args)
+
+        if args.command == "connections":
+            return _handle_connections(args)
 
         if args.command == "bridge":
             return _handle_bridge(args)
@@ -3423,6 +4157,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         AgentError,
         BridgeError,
         CredentialError,
+        SavedConnectionError,
+        ConnectionRuntimeError,
         CoreError,
         HostedBridgeError,
         MigrationError,

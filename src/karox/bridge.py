@@ -192,7 +192,7 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             ),
             limitations=(
                 "OAuth/DCR/PKCE is covered locally; no live ChatGPT workspace run is recorded.",
-                "Dynamic clients and grants are process-local and require reconnection after restart.",
+                "Dynamic clients, pending approvals, authorization codes, and refresh grants persist for the same stable MCP resource; changing the public origin requires reconnection.",
             ),
         ),
         BridgeProfile(
@@ -212,7 +212,7 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             ),
             limitations=(
                 "OAuth/DCR/PKCE is covered locally; no live Claude account run is recorded.",
-                "Dynamic clients and grants are process-local and require reconnection after restart.",
+                "Dynamic clients, pending approvals, authorization codes, and refresh grants persist for the same stable MCP resource; changing the public origin requires reconnection.",
             ),
         ),
         BridgeProfile(

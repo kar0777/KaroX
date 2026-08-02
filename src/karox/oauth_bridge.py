@@ -22,7 +22,7 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
 from .proxy_server import (
@@ -105,29 +105,15 @@ def _redirect_uri(
     return value
 
 
-def _form_action(client: "_Client") -> str:
-    """Build ``form-action`` covering where the POST's redirect lands.
+def _form_action(form_origin: str) -> str:
+    """Allow the approval form to POST only to this KaroX origin.
 
-    The approval form posts back to ``/oauth/authorize`` -- same origin -- but that
-    handler answers 303 to the client's registered ``redirect_uri``, and Chromium
-    applies ``form-action`` to *every hop* of a form submission's redirect chain,
-    not just the first. With ``'self'`` alone, Chrome and Edge silently refused the
-    return to ``claude.ai`` or ``chatgpt.com``: the OAuth tab went blank and never
-    came back, with only a console message to say why.
-
-    Only the origins this client registered are added, and registration already
-    rejects anything but HTTPS unless the host is loopback, so this permits exactly
-    the redirect the protocol is about to perform and nothing else.
+    The external OAuth callback is intentionally not part of this form submission.
+    After approval KaroX returns a separate completion document which performs an
+    ordinary browser navigation to the exact registered redirect URI. This avoids
+    Chromium applying ``form-action`` to a cross-origin 303 redirect chain.
     """
-    origins: list[str] = []
-    for uri in sorted(client.redirect_uris):
-        parts = urlsplit(uri)
-        if not parts.scheme or not parts.netloc:
-            continue
-        origin = f"{parts.scheme}://{parts.netloc}"
-        if origin not in origins:
-            origins.append(origin)
-    return " ".join(["'self'", *origins])
+    return f"'self' {form_origin}"
 
 
 def _single(values: Mapping[str, list[str]], name: str, *, required: bool = True) -> str:
@@ -137,6 +123,16 @@ def _single(values: Mapping[str, list[str]], name: str, *, required: bool = True
     if len(items) != 1 or not items[0]:
         raise OAuthBridgeError(f"{name} must occur exactly once")
     return items[0]
+
+
+def _single_resource(values: Mapping[str, list[str]]) -> str:
+    items = values.get("resource", [])
+    if not items or any(not item for item in items):
+        raise OAuthBridgeError("resource must occur at least once")
+    unique = tuple(dict.fromkeys(items))
+    if len(unique) != 1:
+        raise OAuthBridgeError("resource must identify exactly one MCP server")
+    return unique[0]
 
 
 def _scopes(value: str) -> tuple[str, ...]:
@@ -266,6 +262,129 @@ def _grant_from_state(
     return _Grant(client_id, resource, tuple(scopes), family, float(expires_at))
 
 
+def _stored_digest(value: object) -> Optional[str]:
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value.lower()
+
+
+def _stored_scopes(value: object) -> Optional[tuple[str, ...]]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item in _SCOPES for item in value)
+    ):
+        return None
+    return tuple(value)
+
+
+def _valid_challenge(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and 43 <= len(value) <= 128
+        and all(
+            char in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+            for char in value
+        )
+    )
+
+
+def _pending_from_state(
+    entry: object,
+    *,
+    resource: str,
+    now: float,
+    clients: Mapping[str, _Client],
+    allowed_redirect_hosts: Optional[frozenset[str]],
+) -> Optional[_Pending]:
+    if not isinstance(entry, dict):
+        return None
+    client_id = entry.get("client_id")
+    if not isinstance(client_id, str):
+        return None
+    client = clients.get(client_id)
+    if client is None:
+        return None
+    try:
+        redirect_uri = _redirect_uri(
+            entry.get("redirect_uri"), allowed_redirect_hosts
+        )
+    except OAuthBridgeError:
+        return None
+    state = entry.get("state")
+    challenge = entry.get("challenge")
+    scopes = _stored_scopes(entry.get("scopes"))
+    expires_at = entry.get("expires_at")
+    if (
+        redirect_uri not in client.redirect_uris
+        or not isinstance(state, str)
+        or not state
+        or not _valid_challenge(challenge)
+        or entry.get("resource") != resource
+        or scopes is None
+        or not isinstance(expires_at, (int, float))
+        or expires_at <= now
+    ):
+        return None
+    return _Pending(
+        client_id,
+        redirect_uri,
+        state,
+        str(challenge),
+        resource,
+        scopes,
+        float(expires_at),
+    )
+
+
+def _code_from_state(
+    entry: object,
+    *,
+    resource: str,
+    now: float,
+    clients: Mapping[str, _Client],
+    allowed_redirect_hosts: Optional[frozenset[str]],
+) -> Optional[_Code]:
+    if not isinstance(entry, dict):
+        return None
+    client_id = entry.get("client_id")
+    if not isinstance(client_id, str):
+        return None
+    client = clients.get(client_id)
+    if client is None:
+        return None
+    try:
+        redirect_uri = _redirect_uri(
+            entry.get("redirect_uri"), allowed_redirect_hosts
+        )
+    except OAuthBridgeError:
+        return None
+    challenge = entry.get("challenge")
+    scopes = _stored_scopes(entry.get("scopes"))
+    expires_at = entry.get("expires_at")
+    if (
+        redirect_uri not in client.redirect_uris
+        or not _valid_challenge(challenge)
+        or entry.get("resource") != resource
+        or scopes is None
+        or not isinstance(expires_at, (int, float))
+        or expires_at <= now
+    ):
+        return None
+    return _Code(
+        client_id,
+        redirect_uri,
+        str(challenge),
+        resource,
+        scopes,
+        float(expires_at),
+    )
+
+
 class OAuthBridgeService:
     """Small in-process OAuth authorization server bound to one MCP resource."""
 
@@ -300,6 +419,9 @@ class OAuthBridgeService:
         self._clients: dict[str, _Client] = {}
         self._pending: dict[str, _Pending] = {}
         self._codes: dict[str, _Code] = {}
+        # Browser clients may submit an approval form twice. Keep the first
+        # redirect briefly so a duplicate POST is idempotent.
+        self._approved: dict[str, tuple[str, float]] = {}
         self._access: dict[str, _Grant] = {}
         self._refresh: dict[str, _Grant] = {}
         self._used_refresh: dict[str, tuple[str, float]] = {}
@@ -335,7 +457,7 @@ class OAuthBridgeService:
         keyed by their SHA-256 digest, exactly as in memory -- so what survives is
         the ability to recognise a token, never the token itself.
 
-        Authorization codes and pending approvals are deliberately not restored.
+        Pending approvals and authorization codes are restored for short-lived browser flows.
         They live for minutes and belong to a browser flow that a restart has
         already interrupted.
         """
@@ -386,6 +508,32 @@ class OAuthBridgeService:
                 except OAuthBridgeError:
                     continue
                 self._clients[client_id] = _Client(client_id, parsed, name, created)
+        pending = payload.get("pending")
+        if isinstance(pending, dict):
+            for key, entry in pending.items():
+                digest = _stored_digest(key)
+                item = _pending_from_state(
+                    entry,
+                    resource=self.resource,
+                    now=now,
+                    clients=self._clients,
+                    allowed_redirect_hosts=self.allowed_redirect_hosts,
+                )
+                if digest is not None and item is not None:
+                    self._pending[digest] = item
+        codes = payload.get("codes")
+        if isinstance(codes, dict):
+            for key, entry in codes.items():
+                digest = _stored_digest(key)
+                item = _code_from_state(
+                    entry,
+                    resource=self.resource,
+                    now=now,
+                    clients=self._clients,
+                    allowed_redirect_hosts=self.allowed_redirect_hosts,
+                )
+                if digest is not None and item is not None:
+                    self._codes[digest] = item
         grants = payload.get("refresh")
         if isinstance(grants, dict):
             for key, entry in grants.items():
@@ -422,6 +570,29 @@ class OAuthBridgeService:
                         "created_at": client.created_at,
                     }
                     for client_id, client in self._clients.items()
+                },
+                "pending": {
+                    key: {
+                        "client_id": item.client_id,
+                        "redirect_uri": item.redirect_uri,
+                        "state": item.state,
+                        "challenge": item.challenge,
+                        "resource": item.resource,
+                        "scopes": list(item.scopes),
+                        "expires_at": item.expires_at,
+                    }
+                    for key, item in self._pending.items()
+                },
+                "codes": {
+                    key: {
+                        "client_id": item.client_id,
+                        "redirect_uri": item.redirect_uri,
+                        "challenge": item.challenge,
+                        "resource": item.resource,
+                        "scopes": list(item.scopes),
+                        "expires_at": item.expires_at,
+                    }
+                    for key, item in self._codes.items()
                 },
                 "refresh": {
                     key: {
@@ -469,6 +640,9 @@ class OAuthBridgeService:
         now = time.time()
         self._pending = {
             key: item for key, item in self._pending.items() if item.expires_at > now
+        }
+        self._approved = {
+            key: item for key, item in self._approved.items() if item[1] > now
         }
         self._codes = {
             key: item for key, item in self._codes.items() if item.expires_at > now
@@ -585,7 +759,7 @@ class OAuthBridgeService:
             or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~" for char in challenge)
         ):
             raise OAuthBridgeError("PKCE S256 code challenge is invalid")
-        resource = _single(values, "resource")
+        resource = _single_resource(values) if values.get("resource") else self.resource
         if resource != self.resource:
             raise OAuthBridgeError("OAuth resource does not match this MCP server")
         scopes = _scopes(_single(values, "scope", required=False))
@@ -604,15 +778,20 @@ class OAuthBridgeService:
                 scopes,
                 time.time() + _PENDING_TTL_SECONDS,
             )
+        # Persist before the approval page is returned. If the bridge restarts
+        # while the user is typing, the hidden request_id remains valid.
+        self._persist()
         return request_id, client
 
     def approve(self, request_id: str, password: str) -> str:
         if not request_id or not password:
             raise OAuthBridgeError("authorization request and password are required")
+        request_key = _digest(request_id)
         with self._lock:
             self._prune()
-            pending = self._pending.get(_digest(request_id))
-            if pending is None:
+            pending = self._pending.get(request_key)
+            approved = self._approved.get(request_key)
+            if pending is None and approved is None:
                 raise OAuthBridgeError("authorization request expired or is invalid")
         # compare_digest rejects a non-ASCII str with TypeError, which turned a
         # typed password into an unauthenticated 500 on this open endpoint.
@@ -621,23 +800,35 @@ class OAuthBridgeService:
         ):
             raise OAuthBridgeError("authorization password is incorrect")
         with self._lock:
-            pending = self._pending.pop(_digest(request_id), None)
+            self._prune()
+            approved = self._approved.get(request_key)
+            if approved is not None:
+                return approved[0]
+            pending = self._pending.pop(request_key, None)
             if pending is None or pending.expires_at <= time.time():
                 raise OAuthBridgeError("authorization request expired or is invalid")
             code = _token()
+            code_expires_at = time.time() + _CODE_TTL_SECONDS
             self._codes[_digest(code)] = _Code(
                 pending.client_id,
                 pending.redirect_uri,
                 pending.challenge,
                 pending.resource,
                 pending.scopes,
-                time.time() + _CODE_TTL_SECONDS,
+                code_expires_at,
             )
         separator = "&" if urlsplit(pending.redirect_uri).query else "?"
-        return (
+        location = (
             f"{pending.redirect_uri}{separator}"
             + urlencode({"code": code, "state": pending.state})
         )
+        with self._lock:
+            self._approved[request_key] = (
+                location,
+                min(code_expires_at, time.time() + 30.0),
+            )
+        self._persist()
+        return location
 
     @staticmethod
     def _pkce(verifier: str) -> str:
@@ -679,7 +870,7 @@ class OAuthBridgeService:
             _single(values, "redirect_uri"), self.allowed_redirect_hosts
         )
         verifier = _single(values, "code_verifier")
-        resource = _single(values, "resource")
+        resource = _single_resource(values) if values.get("resource") else self.resource
         if not 43 <= len(verifier) <= 128 or not verifier.isascii():
             raise OAuthBridgeError("PKCE code verifier is invalid")
         with self._lock:
@@ -695,6 +886,8 @@ class OAuthBridgeService:
             ):
                 raise OAuthBridgeError("authorization code binding is invalid")
             self._codes.pop(_digest(code), None)
+            # Do not let a consumed one-time code reappear after a crash.
+            self._persist()
         return self._issue(
             _Grant(
                 client_id,
@@ -708,7 +901,7 @@ class OAuthBridgeService:
     def refresh(self, values: Mapping[str, list[str]]) -> dict[str, Any]:
         supplied = _single(values, "refresh_token")
         client_id = _single(values, "client_id")
-        resource = _single(values, "resource")
+        resource = _single_resource(values) if values.get("resource") else self.resource
         key = _digest(supplied)
         with self._lock:
             self._prune()
@@ -756,6 +949,13 @@ class OAuthBridgeService:
 
     def authorize_access_token(self, token: str) -> bool:
         if not isinstance(token, str) or not token or len(token) > 512:
+            return False
+        try:
+            if hmac.compare_digest(
+                token.encode("utf-8"), self._secret().encode("utf-8")
+            ):
+                return True
+        except (OAuthBridgeError, UnicodeError):
             return False
         with self._lock:
             self._prune()
@@ -823,6 +1023,24 @@ code{{overflow-wrap:anywhere;color:#d9bd7b}}small{{color:#aaa}}</style></head>
 <input type="hidden" name="request_id" value="{html.escape(request_id)}">
 <label>{password_label}<input type="password" name="password" required autocomplete="current-password"></label>
 <button type="submit">{button}</button></form></main></body></html>"""
+
+
+def _approval_complete_page(location: str) -> str:
+    """Return a new document that navigates to the exact registered callback.
+
+    A 303 directly from the form POST makes Chromium apply the approval page's
+    ``form-action`` policy to the whole external redirect chain. A separate 200
+    document ends the form submission first; its meta refresh is then an ordinary
+    navigation. The visible link is a no-script fallback.
+    """
+    target = html.escape(location, quote=True)
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<meta http-equiv="refresh" content="0;url={target}"><title>OAuth approved</title>
+<style>body{{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:0 1rem;background:#111;color:#eee}}
+main{{border:1px solid #555;border-radius:12px;padding:1.5rem}}a{{color:#d9bd7b}}</style></head>
+<body><main><h1>Authorization approved</h1><p>Returning to the client…</p>
+<p><a href="{target}" rel="noreferrer">Continue</a></p></main></body></html>"""
 
 
 def build_oauth_proxy_asgi_app(
@@ -939,7 +1157,7 @@ def build_oauth_proxy_asgi_app(
                         "Cache-Control": "no-store",
                         "Content-Security-Policy": (
                             "default-src 'none'; style-src 'unsafe-inline'; "
-                            f"form-action {_form_action(client)}; "
+                            f"form-action {_form_action(service.public_url)}; "
                             "base-uri 'none'; frame-ancestors 'none'"
                         ),
                         "X-Frame-Options": "DENY",
@@ -958,7 +1176,19 @@ def build_oauth_proxy_asgi_app(
                     _single(values, "request_id"),
                     _single(values, "password"),
                 )
-                response = RedirectResponse(location, status_code=303)
+                response = HTMLResponse(
+                    _approval_complete_page(location),
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Content-Security-Policy": (
+                            "default-src 'none'; style-src 'unsafe-inline'; "
+                            "base-uri 'none'; frame-ancestors 'none'"
+                        ),
+                        "Referrer-Policy": "no-referrer",
+                        "Refresh": f"0; url={location}",
+                        "X-Frame-Options": "DENY",
+                    },
+                )
             elif request_path == "/oauth/token" and method == "POST":
                 response = JSONResponse(
                     service.token(await _form(request)),

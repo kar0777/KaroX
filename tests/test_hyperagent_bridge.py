@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr
+from html import unescape
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlsplit
@@ -53,6 +54,30 @@ from karox.web_bridge_profiles import SavedWebBridgeProfile
 
 
 HYPERAGENT_REDIRECT = "https://hyperagent.com/api/mcp-serve"
+
+
+def approved_location(response: httpx.Response) -> str:
+    """Read the callback URL out of the approval-complete document.
+
+    The approval POST deliberately answers with a 200 document instead of a 303.
+    A redirect issued directly from the form POST makes Chromium apply the
+    approval page's form-action policy to the whole external redirect chain,
+    which blocks the return to the client. The document ends the form submission
+    first, so its navigation is an ordinary one.
+
+    The Refresh header, the meta refresh and the no-script link must all name the
+    same target, so a client honouring any one of them lands in the same place.
+    """
+
+    assert response.status_code == 200, response.text
+    assert "location" not in response.headers, "the approval POST must not redirect"
+    header_target = response.headers["refresh"].split("url=", 1)[1].strip()
+    meta = re.search(r'content="0;url=([^"]+)"', response.text)
+    link = re.search(r'<a href="([^"]+)"', response.text)
+    assert meta is not None and link is not None, response.text
+    assert unescape(meta.group(1)) == header_target, response.text
+    assert unescape(link.group(1)) == header_target, response.text
+    return header_target
 
 
 class _Runtime:
@@ -462,8 +487,8 @@ class HyperagentOAuthWireTests(unittest.TestCase):
             data={"request_id": request_id.group(1), "password": "approval-password"},
             follow_redirects=False,
         )
-        self.assertEqual(approved.status_code, 303, approved.text)
-        query = parse_qs(urlsplit(approved.headers["location"]).query)
+        location = approved_location(approved)
+        query = parse_qs(urlsplit(location).query)
         self.assertEqual(query["state"], [state])
         return client_id, verifier, query["code"][0]
 
@@ -579,7 +604,8 @@ class HyperagentOAuthWireTests(unittest.TestCase):
                       "password": "approval-password"},
                 follow_redirects=False,
             )
-        self.assertEqual(parse_qs(urlsplit(approved.headers["location"]).query)["state"],
+        query = parse_qs(urlsplit(approved_location(approved)).query)
+        self.assertEqual(query["state"],
                          ["xyz-123"])
 
     def test_anonymous_mcp_gets_an_oauth_challenge(self) -> None:

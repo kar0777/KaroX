@@ -20,6 +20,7 @@ marked ``expectedFailure`` is an open entry there.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 from textual.geometry import Offset
 from textual.selection import Selection
@@ -223,11 +224,8 @@ class TranscriptWidthTests(unittest.IsolatedAsyncioTestCase):
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
     async def test_copying_is_possible_while_a_task_is_running(self) -> None:
-        # UX-005: Ctrl+C is bound to ``stop_or_copy``, which returns early to
-        # ``stop_agent`` whenever the agent is busy. So during the one period a
-        # user most wants to copy something -- a path or an error scrolling past
-        # while a task runs -- the copy key aborts the task instead, and there is
-        # no second binding that copies.
+        # Copy has its own binding, so it remains usable while Ctrl+C keeps
+        # its normal terminal meaning and stops the running task.
         async with karox_app(size=STANDARD) as (app, pilot):
             await _conversation(app, pilot)
             node, line, column = _node_holding(app, "ALPHA")
@@ -236,7 +234,7 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
             )
             app.agent_busy = True
 
-            await pilot.press("ctrl+c")
+            await pilot.press("ctrl+shift+c")
             await pilot.pause(0.2)
 
             self.assertIn("ALPHA", app.clipboard or "")
@@ -244,13 +242,29 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
                 app._stop_requested, "the copy key stopped the running task"
             )
 
+    async def test_ctrl_c_copies_selection_without_stopping_the_bridge(self) -> None:
+        async with karox_app(size=STANDARD) as (app, pilot):
+            await _conversation(app, pilot)
+            node, line, column = _node_holding(app, "ALPHA")
+            app.screen.selections[node] = Selection(
+                Offset(column, line), Offset(column + 16, line)
+            )
+            process = Mock()
+            process.poll.return_value = None
+            app.bridge_process = process
+
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.2)
+
+            self.assertIn("ALPHA", app.clipboard or "")
+            process.send_signal.assert_not_called()
+            process.terminate.assert_not_called()
+
     async def test_copying_the_last_answer_is_distinguishable_from_copying_a_selection(
         self,
     ) -> None:
-        # UX-008: with no selection, ``action_stop_or_copy`` falls back to the last
-        # assistant answer and reports the same "Скопировано" as a real selection
-        # copy, so a user who selects a line, presses copy and is told it worked
-        # cannot tell which of the two happened.
+        # With no selection, Ctrl+Shift+C deliberately falls back to the
+        # latest assistant answer and the notice identifies that fallback.
         async with karox_app(size=STANDARD) as (app, pilot):
             await _conversation(app, pilot)
             app.screen.clear_selection()
@@ -258,7 +272,7 @@ class CopyBindingTests(unittest.IsolatedAsyncioTestCase):
             notices: list[str] = []
             app.notify = lambda message, *a, **k: notices.append(str(message))
 
-            await pilot.press("ctrl+c")
+            await pilot.press("ctrl+shift+c")
             await pilot.pause(0.2)
 
             self.assertEqual(app.clipboard, "DELTA EPSILON ZETA")

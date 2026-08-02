@@ -99,7 +99,10 @@ dev = [
 # failure across repeated runs and still cut the suite from 202s to under 45s;
 # most of the remaining time is booting real Textual apps and child interpreters,
 # so the extra workers were buying very little anyway.
-addopts = "-q -n 6 -p no:cacheprovider"
+# Keep the default runner self-contained. Parallel execution remains available
+# to contributors who installed pytest-xdist (`pytest -n 6`), but the canonical
+# verification command must not fail at argument parsing on a clean runtime.
+addopts = "-q -p no:cacheprovider"
 testpaths = ["tests"]
 
 [tool.setuptools]
@@ -111,6 +114,9 @@ version = { attr = "karox.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["karox*"]
+
+[tool.setuptools.package-data]
+"karox.browser_extension" = ["*.json", "*.js", "*.html", "*.css"]
 
 [tool.ruff]
 target-version = "py310"

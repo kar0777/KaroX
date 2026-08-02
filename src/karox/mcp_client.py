@@ -11,7 +11,7 @@ import re
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from pathlib import Path
@@ -619,6 +619,89 @@ def _descriptor(record: McpServerRecord, tool: Any) -> McpToolDescriptor:
     )
 
 
+def _resolved_read_only_remote_names(
+    record: McpServerRecord, remote_names: Iterable[str]
+) -> frozenset[str]:
+    """Resolve configured tool IDs against their MCP wire spellings.
+
+    KaroX keeps dotted internal identifiers such as ``karox.repo.read_file``,
+    while its public MCP wire replaces dots with underscores because model tool
+    APIs reject dotted function names.  A saved MCP record still uses the
+    internal identifier in ``read_only_tools``.  Prefer an exact server name;
+    only fall back to the dot-to-underscore spelling when the exact name is not
+    present, so an unrelated external tool is never shadowed by an alias.
+    """
+    discovered = tuple(remote_names)
+    resolved: set[str] = set()
+    missing: list[str] = []
+    for configured in record.read_only_tools:
+        if configured in discovered:
+            resolved.add(configured)
+            continue
+        wire_name = configured.replace(".", "_")
+        if wire_name in discovered:
+            resolved.add(wire_name)
+            continue
+        missing.append(configured)
+    if missing:
+        raise McpProtocolError(
+            f"configured read-only MCP tools do not exist: {sorted(missing)}"
+        )
+    return frozenset(resolved)
+
+
+def _normalize_discovered_tools(
+    record: McpServerRecord, tools: Iterable[McpToolDescriptor]
+) -> list[McpToolDescriptor]:
+    """Restore KaroX's dotted IDs while preserving arbitrary MCP names.
+
+    The KaroX wire encodes dots as underscores for model API compatibility, but
+    its registry, permission selections, and retry-safe call path use the dotted
+    identifiers.  Detect that contract only for the canonical ``karox-core``
+    record or when its configured read-only IDs prove the alias relationship.
+    Other MCP servers keep their names byte-for-byte.
+    """
+    items = list(tools)
+    raw_names = {item.remote_name for item in items}
+    karox_contract = (
+        record.server_id == "karox-core" and record.namespace == "karox-core"
+    ) or any(
+        configured.startswith("karox.")
+        and configured.replace(".", "_") in raw_names
+        for configured in record.read_only_tools
+    )
+    if karox_contract:
+        from .hosted_bridge import KNOWN_HOSTED_TOOL_NAMES
+
+        known_names = set(KNOWN_HOSTED_TOOL_NAMES)
+        known_names.add("karox.bridge.diagnostics")
+        wire_to_internal: dict[str, str] = {}
+        for internal_name in known_names:
+            wire_name = internal_name.replace(".", "_")
+            previous = wire_to_internal.get(wire_name)
+            if previous is not None and previous != internal_name:
+                raise McpProtocolError(
+                    f"ambiguous KaroX MCP wire tool name: {wire_name}"
+                )
+            wire_to_internal[wire_name] = internal_name
+        items = [
+            replace(
+                item,
+                remote_name=wire_to_internal.get(item.remote_name, item.remote_name),
+            )
+            for item in items
+        ]
+
+    names = [item.remote_name for item in items]
+    if len(names) != len(set(names)):
+        raise McpProtocolError("MCP server returned duplicate tool names")
+    read_only_remote_names = _resolved_read_only_remote_names(record, names)
+    return [
+        replace(item, read_only=item.remote_name in read_only_remote_names)
+        for item in items
+    ]
+
+
 def _http_client_factory(
     headers: Optional[dict[str, str]] = None,
     timeout: Optional[httpx.Timeout] = None,
@@ -631,6 +714,50 @@ def _http_client_factory(
         follow_redirects=False,
         trust_env=False,
     )
+
+
+@asynccontextmanager
+async def streamable_http_transport(
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    timeout_seconds: float = 30.0,
+    terminate_on_close: bool = True,
+) -> AsyncIterator[Any]:
+    """Open the installed MCP SDK's Streamable HTTP transport safely.
+
+    MCP 1.27 renamed ``streamablehttp_client`` and moved caller-supplied HTTP
+    policy behind an explicit ``http_client``.  Keeping that compatibility seam
+    here prevents runtime probes and test helpers from silently falling back to
+    the deprecated function, while older supported development environments can
+    still use their legacy signature.
+    """
+
+    if _MODERN_STREAMABLE_HTTP:
+        async with _http_client_factory(
+            headers=headers,
+            timeout=httpx.Timeout(timeout_seconds),
+        ) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as streams:
+                try:
+                    yield streams
+                finally:
+                    # The modern context manager currently leaves the memory
+                    # object streams to its caller. Closing both is idempotent
+                    # and avoids retaining SDK task-group resources.
+                    await streams[0].aclose()
+                    await streams[1].aclose()
+        return
+
+    async with streamable_http_client(
+        url,
+        headers=headers,
+        timeout=timeout_seconds,
+        sse_read_timeout=timeout_seconds,
+        terminate_on_close=terminate_on_close,
+        httpx_client_factory=_http_client_factory,
+    ) as streams:
+        yield streams
 
 
 class McpClient:
@@ -705,29 +832,10 @@ class McpClient:
             if record.credential_scheme:
                 value = f"{record.credential_scheme} {secret}"
             headers[record.credential_target] = value
-        if _MODERN_STREAMABLE_HTTP:
-            async with _http_client_factory(
-                headers=headers,
-                timeout=httpx.Timeout(record.timeout_seconds),
-            ) as http_client:
-                async with streamable_http_client(
-                    record.url or "", http_client=http_client
-                ) as streams:
-                    try:
-                        async with ClientSession(
-                            streams[0], streams[1], read_timeout_seconds=read_timeout
-                        ) as session:
-                            yield session
-                    finally:
-                        await streams[0].aclose()
-                        await streams[1].aclose()
-            return
-        async with streamable_http_client(
+        async with streamable_http_transport(
             record.url or "",
             headers=headers,
-            timeout=record.timeout_seconds,
-            sse_read_timeout=record.timeout_seconds,
-            httpx_client_factory=_http_client_factory,
+            timeout_seconds=record.timeout_seconds,
         ) as streams:
             async with ClientSession(
                 streams[0], streams[1], read_timeout_seconds=read_timeout
@@ -742,18 +850,9 @@ class McpClient:
                 await session.initialize()
                 response = await session.list_tools()
         self._validate_discovery_size(record, response)
-        tools = [_descriptor(record, item) for item in response.tools]
-        names = [item.name for item in tools]
-        if len(names) != len(set(names)):
-            raise McpProtocolError("MCP server returned duplicate tool names")
-        unknown_read_only = set(record.read_only_tools).difference(
-            item.remote_name for item in tools
+        return _normalize_discovered_tools(
+            record, (_descriptor(record, item) for item in response.tools)
         )
-        if unknown_read_only:
-            raise McpProtocolError(
-                f"configured read-only MCP tools do not exist: {sorted(unknown_read_only)}"
-            )
-        return tools
 
     @staticmethod
     def _classified(
@@ -823,12 +922,9 @@ class McpClient:
                 await session.initialize()
                 listed = await session.list_tools()
                 self._validate_discovery_size(record, listed)
-                discovered = [_descriptor(record, tool) for tool in listed.tools]
-                names = [item.remote_name for item in discovered]
-                if len(names) != len(set(names)):
-                    raise McpProtocolError(
-                        "MCP server returned duplicate tool names"
-                    )
+                discovered = _normalize_discovered_tools(
+                    record, (_descriptor(record, tool) for tool in listed.tools)
+                )
                 current = {
                     item.remote_name: item for item in discovered
                 }.get(descriptor.remote_name)

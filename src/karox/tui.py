@@ -31,6 +31,7 @@ from .bridge import BridgeCredentialStore
 from .credentials import CredentialStore
 from .models import AccessProfile
 from .paths import config_dir, session_dir
+from .provider_controller import ProviderController
 from .provider_factory import ProviderFactory
 from .provider_presets import (
     ProviderPreset,
@@ -90,6 +91,9 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/clear": "clear the conversation",
     "/help": "show command help",
     "/quit": "exit KaroX",
+    "/connections": "manage connections (MCP clients and API providers)",
+    "/providers": "manage API providers",
+    "/mcp-clients": "manage MCP client targets",
 }
 
 _COMMANDS_RU: Dict[str, str] = {
@@ -108,13 +112,16 @@ _COMMANDS_RU: Dict[str, str] = {
     "/clear": "очистить диалог",
     "/help": "показать справку по командам",
     "/quit": "выйти из KaroX",
+    "/connections": "управление подключениями (MCP-клиенты и API-провайдеры)",
+    "/providers": "управление API-провайдерами",
+    "/mcp-clients": "управление MCP-клиентами",
 }
 
 _TEXT: Dict[str, Dict[str, str]] = {
     "ru": {
         "brand": "KaroX\n[dim]API-модели • локальные инструменты • сайты и MCP[/dim]",
         "placeholder": "Опишите задачу для KaroX или введите / для команд…",
-        "hint": "Enter — отправить • / — команды • /connect — подключения • Ctrl+C — стоп/копировать",
+        "hint": "Enter — отправить • / — команды • Ctrl+C — остановить/выйти • Ctrl+Shift+C — копировать",
         "welcome_ready": "[bold #e0dccc]KaroX готов.[/]\nНапишите задачу обычным текстом.\nВведите [#d4b676]/[/], чтобы увидеть все команды.",
         "welcome_unconfigured": "[bold #e0dccc]KaroX запущен, но модель не подключена.[/]\nПодключите API-провайдера командой [#d4b676]/connect[/].\nВведите [#d4b676]/[/], чтобы увидеть все команды.",
         "repo": "репозиторий",
@@ -136,7 +143,7 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "en": {
         "brand": "KaroX\n[dim]API models • local tools • websites and MCP[/dim]",
         "placeholder": "Describe a task for KaroX or type / for commands…",
-        "hint": "Enter — send • / — commands • /connect — connections • Ctrl+C — stop/copy",
+        "hint": "Enter — send • / — commands • Ctrl+C — stop/exit • Ctrl+Shift+C — copy",
         "welcome_ready": "[bold #e0dccc]KaroX is ready.[/]\nDescribe a task in plain language.\nEnter [#d4b676]/[/] to see every command.",
         "welcome_unconfigured": "[bold #e0dccc]KaroX is running, but no model is connected.[/]\nConnect an API provider with [#d4b676]/connect[/].\nEnter [#d4b676]/[/] to see every command.",
         "repo": "repository",
@@ -483,6 +490,10 @@ class BridgeLaunch:
 
 def _registry() -> ProviderRegistry:
     return ProviderRegistry(config_dir() / "vnext" / "providers.json")
+
+
+def _provider_controller() -> ProviderController:
+    return ProviderController(registry=_registry(), credentials=CredentialStore())
 
 
 def _pids_listening_on(address: str, port: int) -> List[int]:
@@ -1118,29 +1129,24 @@ def _save_provider(setup: ProviderSetup, *, activate: bool = True) -> ModelRecor
     if not provider_id or not model_id or not base_url:
         raise ValueError("provider, base URL, and model are required")
 
-    registry = _registry()
+    controller = _provider_controller()
     credential_ref: Optional[str] = None
     try:
-        credential_ref = registry.provider(provider_id).credential_ref
+        credential_ref = controller.details(provider_id).provider.credential_ref
     except Exception:
         pass
-    if setup.api_key:
-        CredentialStore().set(provider_id, setup.api_key)
-        credential_ref = f"os-keyring:provider/{provider_id}"
     is_local = base_url.startswith(("http://127.0.0.1", "http://localhost"))
-    if credential_ref is None and not is_local:
+    if not setup.api_key and credential_ref is None and not is_local:
         raise ValueError("an API key is required for a remote provider")
 
-    registry.put_provider(
+    mutation = controller.configure_provider_model(
         ProviderRecord(
             provider_id=provider_id,
             adapter_kind=setup.adapter,
             base_url=base_url,
             credential_ref=credential_ref,
             privacy_class="local" if is_local else "public",
-        )
-    )
-    registry.put_model(
+        ),
         ModelRecord(
             provider_id=provider_id,
             model_id=model_id,
@@ -1150,24 +1156,53 @@ def _save_provider(setup: ProviderSetup, *, activate: bool = True) -> ModelRecor
             tools="true",
             streaming="true",
             provenance="interactive-setup",
-        )
+        ),
+        secret=setup.api_key or None,
+        activate=activate,
     )
-    model = registry.model(provider_id, model_id)
-    return registry.select_model(provider_id, model_id) if activate else model
+    model = mutation.selected_model if activate else mutation.model
+    if model is None:
+        raise RuntimeError("provider setup did not return a saved model")
+    return model
 
 
 def _probe_provider(setup: ProviderSetup) -> Dict[str, Any]:
-    """Perform one minimal real request before making a configured model active."""
+    """Perform one real request without persisting a newly entered API key."""
+
     provider_id = setup.provider_id.strip()
     base_url = setup.base_url.strip().rstrip("/")
     credential_ref: Optional[str] = None
-    try:
-        credential_ref = _registry().provider(provider_id).credential_ref
-    except Exception:
-        pass
+    factory = ProviderFactory()
+
     if setup.api_key:
-        CredentialStore().set(provider_id, setup.api_key)
-        credential_ref = f"os-keyring:provider/{provider_id}"
+        # ProviderFactory accepts an injected CredentialStore, so the setup key
+        # can be exercised without touching the OS keyring.  Persistence happens
+        # only after the probe succeeds in ``_save_provider``.
+        class _ProbeCredentialBackend:
+            def __init__(self) -> None:
+                self.value: Optional[str] = None
+
+            def set(self, service: str, account: str, secret: str) -> None:
+                del service, account
+                self.value = secret
+
+            def get(self, service: str, account: str) -> Optional[str]:
+                del service, account
+                return self.value
+
+            def delete(self, service: str, account: str) -> None:
+                del service, account
+                self.value = None
+
+        probe_credentials = CredentialStore(_ProbeCredentialBackend())
+        credential_ref = probe_credentials.set(provider_id, setup.api_key)["reference"]
+        factory = ProviderFactory(probe_credentials)
+    else:
+        try:
+            credential_ref = _provider_controller().details(provider_id).provider.credential_ref
+        except Exception:
+            credential_ref = None
+
     is_local = base_url.startswith(("http://127.0.0.1", "http://localhost"))
     if credential_ref is None and not is_local:
         raise ValueError("для удалённого API требуется ключ")
@@ -1178,16 +1213,12 @@ def _probe_provider(setup: ProviderSetup) -> Dict[str, Any]:
         credential_ref=credential_ref,
         privacy_class="local" if is_local else "public",
     )
-    response = (
-        ProviderFactory()
-        .create(provider_record)
-        .complete(
-            ModelRequest(
-                model=setup.model_id.strip(),
-                messages=(ModelMessage("user", "Reply with exactly OK."),),
-                max_output_tokens=8,
-                deadline_seconds=min(30.0, provider_record.timeout_seconds),
-            )
+    response = factory.create(provider_record).complete(
+        ModelRequest(
+            model=setup.model_id.strip(),
+            messages=(ModelMessage("user", "Reply with exactly OK."),),
+            max_output_tokens=8,
+            deadline_seconds=min(30.0, provider_record.timeout_seconds),
         )
     )
     return {
@@ -1584,6 +1615,12 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
     if setup.tunnel_provider not in {"cloudflare", "tailscale"}:
         raise ValueError("ChatGPT/Claude web bridges require a public HTTPS tunnel")
     sid = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    # The TUI passes an explicit --tool list, which replaces DEFAULT_WEB_TOOLS
+    # in the CLI. Stable read-only runtime diagnostics must therefore be merged
+    # here rather than relying on the fallback bundle that this path bypasses.
+    effective_tools = tuple(
+        dict.fromkeys(("karox.runtime.status", *setup.tools))
+    )
     # The WRITE_WEB_TOOLS bundle (browser input + dev_server start/stop + file
     # writes) is gated behind --write in the connect command, so any tool that
     # mutates state or drives a UI surfaces as WORKSPACE_WRITE access here.
@@ -1629,6 +1666,22 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
         # --tool selections, so the read-only browser/dev_server checks still
         # come from the checkbox tools while the mutating ones come from --write.
         argv.append("--write")
+    # A TUI web connection is explicitly confirmed by the local user. Give the
+    # hosted client the external-browser contract it needs for real verification:
+    # public HTTPS, redacted network metadata, a visible browser, and user takeover.
+    argv.extend(
+        (
+            "--browser-external-https",
+            "--browser-network-inspection",
+            "--browser-headed",
+            "--browser-user-takeover",
+        )
+    )
+    # A click or Enter can finish before the next document becomes observable.
+    # Expose the existing guarded wait tool so hosted agents can synchronize on
+    # a selector/state instead of racing snapshot/get_text and retrying blindly.
+    if "karox.browser.wait_for" not in setup.tools:
+        argv.extend(("--tool", "karox.browser.wait_for"))
     if "karox.checks.run" in setup.tools:
         # karox.checks.run requires an approved verification allowlist; supply
         # the workspace's discovered default set (npm test / npm run ci /
@@ -1641,7 +1694,7 @@ def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLa
             argv.extend(
                 ("--verification-command", json.dumps(list(command), ensure_ascii=False))
             )
-    for tool in setup.tools:
+    for tool in effective_tools:
         argv.extend(("--tool", tool))
     return BridgeLaunch(
         session_id=sid,
@@ -3098,6 +3151,13 @@ if _HAS_TEXTUAL:
                         "ChatGPT Web (OAuth MCP)", id="profile-chatgpt-web"
                     )
                     yield RadioButton(
+                        self._label(
+                            "ClickUp (MCP, отдельный Cloudflare-процесс)",
+                            "ClickUp (MCP, separate Cloudflare process)",
+                        ),
+                        id="profile-clickup",
+                    )
+                    yield RadioButton(
                         "Claude Web (OAuth MCP)", id="profile-claude-web"
                     )
                     yield RadioButton(
@@ -3106,6 +3166,7 @@ if _HAS_TEXTUAL:
                     yield RadioButton(
                         "HyperAgent (MCP, experimental)", id="profile-hyperagent"
                     )
+                yield Static("", id="bridge-profile-note", classes="hint", markup=False)
                 yield Static(
                     self._label("Локальный порт", "Local port"),
                     classes="section",
@@ -3239,8 +3300,23 @@ if _HAS_TEXTUAL:
             # ``value = True`` does not reliably deselect its siblings inside a
             # RadioSet (the set's internal ``pressed_button`` can desync), so
             # we set all three explicitly to guarantee exactly one is selected.
-            target = "tailscale" if self._profile_value() == "notion" else "cloudflare"
+            profile = self._profile_value()
+            target = "tailscale" if profile == "notion" else "cloudflare"
             self._default_tunnel = target
+            self.query_one("#bridge-port", Input).value = (
+                "8766" if profile == "clickup" else "8765"
+            )
+            note = self.query_one("#bridge-profile-note", Static)
+            note.update(
+                self._label(
+                    "ClickUp откроется в отдельном терминале на порту 8766 через "
+                    "Cloudflare. Текущий ChatGPT-мост продолжит работать.",
+                    "ClickUp opens in a separate terminal on port 8766 through "
+                    "Cloudflare. The current ChatGPT bridge keeps running.",
+                )
+                if profile == "clickup"
+                else ""
+            )
             states = {
                 "tunnel-none": target == "none",
                 "tunnel-cloudflare": target == "cloudflare",
@@ -3329,6 +3405,14 @@ if _HAS_TEXTUAL:
                 return
             profile = self._profile_value()
             tunnel = self._tunnel_value()
+            if profile == "clickup" and tunnel != "cloudflare":
+                self.query_one("#bridge-error", Label).update(
+                    self._label(
+                        "ClickUp запускается отдельным процессом через Cloudflare Tunnel.",
+                        "ClickUp runs as a separate process through Cloudflare Tunnel.",
+                    )
+                )
+                return
             if profile in WEB_BRIDGE_PROFILES and tunnel == "none":
                 self.query_one("#bridge-error", Label).update(
                     self._label(
@@ -3369,6 +3453,7 @@ if _HAS_TEXTUAL:
                 "profile-promptql": "promptql",
                 "profile-notion": "notion",
                 "profile-chatgpt-web": "chatgpt-web",
+                "profile-clickup": "clickup",
                 "profile-claude-web": "claude-web",
                 "profile-generic": "generic-streamable-http",
                 "profile-hyperagent": "hyperagent",
@@ -3622,11 +3707,10 @@ if _HAS_TEXTUAL:
             Binding("ctrl+l", "clear_log", "Очистить", show=False),
             Binding("ctrl+q", "quit", "Выход", show=False),
             Binding("escape", "stop_agent", "Стоп", show=False, priority=True),
-            # Ctrl+C copies. It used to mean "stop the task, or copy if idle",
-            # which meant the copy key destroyed work in progress during exactly
-            # the period a user most wants to copy an error scrolling past. Esc
-            # already stops, and now says so instead of sharing a key.
-            Binding("ctrl+c", "copy_selection", "Копировать", show=False, priority=True),
+            # Ctrl+C follows terminal convention: stop active work first,
+            # otherwise stop the bridge, and exit only when nothing is running.
+            # Copying remains available on Ctrl+Shift+C.
+            Binding("ctrl+c", "interrupt", "Остановить / выйти", show=False, priority=True),
             Binding(
                 "ctrl+shift+c",
                 "copy_selection",
@@ -4204,6 +4288,12 @@ if _HAS_TEXTUAL:
                 self._write("\n".join(lines))
             elif command in {"/connect", "/setup"}:
                 self.action_onboarding()
+            elif command == "/connections":
+                self.action_connect()
+            elif command == "/mcp-clients":
+                self._open_connections_screen("McpClientsScreen")
+            elif command == "/providers":
+                self._open_connections_screen("ModelProvidersScreen")
             elif command == "/ask":
                 self._run_ask(argument.strip())
             elif command == "/language":
@@ -4298,8 +4388,69 @@ if _HAS_TEXTUAL:
                 self._write(f"[#e0a3a3]{message}[/]")
 
         def action_onboarding(self) -> None:
+            # ``/connect`` and Ctrl+S keep the legacy ConnectionChoiceScreen
+            # wizard (api/web/both) for backward compatibility with existing
+            # flows and tests. The reworked universal Connections hub -- which
+            # lists and edits both MCP clients and API providers and launches
+            # this same wizard from its "new API provider" entry -- lives behind
+            # ``/connections`` (see ``action_connect``).
             self.push_screen(
                 ConnectionChoiceScreen(self.language), self._connection_choice_done
+            )
+
+        def action_connect(self) -> None:
+            """Open the reworked universal Connections hub."""
+            screens = self._connections_screens_cached()
+            self.push_screen(
+                screens["ConnectionHubScreen"](self.language), self._connection_hub_done
+            )
+
+        def _connections_screens_cached(self):
+            cached = getattr(self, "_connections_screens", None)
+            if cached is None:
+                from .tui_connections import build_connections_screens
+
+                cached = build_connections_screens(self)
+                self._connections_screens = cached
+            return cached
+
+        def _connection_hub_done(self, choice: Optional[str]) -> None:
+            screens = self._connections_screens_cached()
+            if choice == "mcp_clients":
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["McpClientsScreen"](self.language),
+                        self._connections_screen_closed,
+                    )
+                )
+            elif choice == "model_providers":
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["ModelProvidersScreen"](self.language),
+                        self._connections_screen_closed,
+                    )
+                )
+            elif choice == "new_provider":
+                self.call_after_refresh(self.action_provider_preset)
+            else:
+                self.query_one("#composer", Input).focus()
+
+        def _connections_screen_closed(self, result: Optional[Any]) -> None:
+            self._refresh_status()
+            if result == "add_provider":
+                self.call_after_refresh(self.action_provider_preset)
+                return
+            self.query_one("#composer", Input).focus()
+
+        def _open_connections_screen(self, name: str) -> None:
+            screens = self._connections_screens_cached()
+            screen_cls = screens[name]
+            self.push_screen(screen_cls(self.language), self._connections_screen_closed)
+
+        def _open_provider_preset_screen(self, _ignored: Optional[str]) -> None:
+            """Hook used by the Model Providers screen to launch the wizard."""
+            self.push_screen(
+                ProviderPresetScreen(self.language), self._provider_preset_done
             )
 
         def _connection_choice_done(self, choice: Optional[str]) -> None:
@@ -4378,25 +4529,96 @@ if _HAS_TEXTUAL:
                 self._submit_task(task)
 
         def action_bridge(self) -> None:
-            if self.bridge_process is not None and self.bridge_process.poll() is None:
-                self._write(
-                    "[#c6a56b]"
-                    + self._label(
-                        "Мост уже работает.", "The bridge is already running."
-                    )
-                    + "[/] "
-                    + self._label(
-                        "Сначала выполните /bridge stop.",
-                        "Run /bridge stop first.",
-                    )
+            # Always allow the picker to open. ClickUp is launched in its own
+            # terminal and may run beside the bridge already owned by this TUI.
+            # The single-process guard is applied later only to profiles that
+            # would reuse ``self.bridge_process``.
+            self.push_screen(BridgeSetupScreen(self.language), self._bridge_setup_done)
+
+        def _launch_clickup_terminal(self, setup: BridgeSetup) -> None:
+            """Launch ClickUp in a separate console without touching this bridge."""
+            argv = [
+                sys.executable,
+                "-m",
+                "karox.cli",
+                "connect",
+                "clickup",
+                "--repository",
+                str(self.repository),
+                "--tunnel",
+                "cloudflare",
+                "--port",
+                str(setup.port),
+                "--name",
+                "ClickUp",
+            ]
+            src = Path(__file__).resolve().parent.parent
+            child_env = _child_environment(src)
+            child_env["KAROX_UI_LANGUAGE"] = self.language
+            if os.name == "nt":
+                flags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+                subprocess.Popen(
+                    argv,
+                    cwd=self.repository,
+                    env=child_env,
+                    creationflags=flags,
+                    close_fds=False,
+                )
+                self._write_notice(
+                    self._label(
+                        "ClickUp запускается в новом терминале через Cloudflare "
+                        f"на порту {setup.port}. Текущий мост продолжает работу.",
+                        "ClickUp is starting in a new terminal through Cloudflare "
+                        f"on port {setup.port}. The current bridge keeps running.",
+                    ),
+                    "success",
                 )
                 return
-            self.push_screen(BridgeSetupScreen(self.language), self._bridge_setup_done)
+
+            command = shlex.join(argv)
+            self._write_notice(
+                self._label(
+                    "Откройте новый терминал и выполните:\n" + command,
+                    "Open a new terminal and run:\n" + command,
+                ),
+                "warning",
+            )
 
         def _bridge_setup_done(self, setup: Optional[BridgeSetup]) -> None:
             if setup is None:
                 self.query_one("#composer", Input).focus()
                 return
+            if setup.profile == "clickup":
+                try:
+                    self._launch_clickup_terminal(setup)
+                except Exception as exc:
+                    self._write_notice(
+                        self._label(
+                            "Не удалось запустить отдельный процесс ClickUp: ",
+                            "Could not launch the separate ClickUp process: ",
+                        ) + str(exc),
+                        "error",
+                    )
+                self.query_one("#composer", Input).focus()
+                return
+
+            current = self.bridge_process
+            if current is not None and current.poll() is None:
+                self._write_notice(
+                    self._label(
+                        "Текущий мост уже работает. Для параллельного запуска выберите ClickUp; "
+                        "для замены сначала выполните /bridge stop.",
+                        "The current bridge is already running. Choose ClickUp for a parallel "
+                        "launch, or run /bridge stop before replacing it.",
+                    ),
+                    "warning",
+                )
+                self.query_one("#composer", Input).focus()
+                return
+
             # A previous KaroX run (or a bridge left running from an earlier
             # session in this TUI lifetime) can leave an orphan process holding
             # the loopback port.  When that happens the new ``bridge serve``
@@ -5176,6 +5398,35 @@ if _HAS_TEXTUAL:
                 self.call_from_thread(self._agent_finished, code, output)
 
             self.run_worker(execute, thread=True, exclusive=True, group="agent")
+
+        def check_action(self, action: str, parameters: Any) -> bool:
+            # ``KaroXApp`` binds ``escape`` to ``stop_agent`` with ``priority=True``.
+            # A priority binding is checked from the App down, so it swallows the
+            # key before any modal screen's own ``escape`` binding (cancel/close)
+            # can run -- and since the agent is almost always idle while a modal is
+            # open, ``stop_agent`` returns immediately and the key simply vanishes,
+            # making every modal impossible to close with Esc. Disable that binding
+            # only when a modal screen is active and there is nothing to stop; the
+            # key then falls through to the modal's binding chain as expected.
+            if action == "stop_agent" and not self.agent_busy:
+                if isinstance(self.screen, ModalScreen):
+                    return False
+            return True
+
+        def action_interrupt(self) -> None:
+            """Copy a selection; otherwise stop active work or exit when idle."""
+            selected = self.screen.get_selected_text() or ""
+            if selected:
+                self.action_copy_selection()
+                return
+            if self.agent_busy:
+                self.action_stop_agent()
+                return
+            process = self.bridge_process
+            if process is not None and process.poll() is None:
+                self._stop_bridge()
+                return
+            self.exit(0)
 
         def action_stop_agent(self) -> None:
             if not self.agent_busy:

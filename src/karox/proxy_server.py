@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import sys
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
 import anyio
@@ -93,6 +93,49 @@ def derive_idempotency_key(tool_name: str, arguments: Mapping[str, object]) -> s
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"derived-{digest}"
+
+
+# MCP itself puts no constraint on a tool's name, but the model APIs behind the
+# clients that consume a remote MCP server do: an Anthropic tool definition must
+# match ``^[a-zA-Z0-9_-]{1,64}$``, and OpenAI's function names are the same
+# shape.  A name containing a dot therefore cannot be handed to the model at all.
+#
+# KaroX names its tools ``karox.repo.read_file``, and that spelling is an
+# identifier throughout the codebase -- session allowlists, launch profiles,
+# stored policy, and the hosted-bridge catalogue all key on it.  A client that
+# turns our ``tools/list`` into model tools drops every one of them, and the
+# symptom is the worst kind: the handshake succeeds, the connector shows as
+# connected, and the model reports that it can see no tools.
+#
+# The dot is a wire-encoding problem, not an identity problem, so it is fixed at
+# the wire and nowhere else.  Outbound names swap dots for underscores; inbound
+# calls accept either spelling, so a client holding the old name keeps working
+# and the internal identifier never changes.
+_DIAGNOSTICS_TOOL_NAME = "karox.bridge.diagnostics"
+
+
+def wire_tool_name(internal_name: str) -> str:
+    """Return the ``tools/list`` spelling of an internal tool name."""
+    return internal_name.replace(".", "_")
+
+
+def resolve_wire_tool_name(
+    supplied: str, internal_names: Iterable[str]
+) -> Optional[str]:
+    """Return the internal tool name a ``tools/call`` name refers to.
+
+    An exact internal name wins, so a caller that speaks the dotted spelling is
+    unaffected.  Failing that, the supplied name is matched against the wire
+    spelling of each candidate.  Returns ``None`` when nothing matches, which the
+    caller reports as ``tool_not_exposed``.
+    """
+    candidates = list(internal_names)
+    if supplied in candidates:
+        return supplied
+    for name in candidates:
+        if wire_tool_name(name) == supplied:
+            return name
+    return None
 
 
 def _idna_normalize(host: str) -> str:
@@ -412,7 +455,7 @@ def build_proxy_asgi_app(
         descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
         tools = [
             Tool(
-                name=item.name,
+                name=wire_tool_name(item.name),
                 description=item.description,
                 inputSchema=item.input_schema,
                 annotations=ToolAnnotations(
@@ -427,7 +470,7 @@ def build_proxy_asgi_app(
         if diagnostics_payload is not None:
             tools.append(
                 Tool(
-                    name="karox.bridge.diagnostics",
+                    name=wire_tool_name(_DIAGNOSTICS_TOOL_NAME),
                     description=(
                         "Return the effective KaroX bridge contract: available and "
                         "disabled tools with reasons, verification allowlist, "
@@ -449,7 +492,10 @@ def build_proxy_asgi_app(
         name: str, arguments: dict[str, object]
     ) -> dict[str, Any] | CallToolResult:
         try:
-            if name == "karox.bridge.diagnostics" and diagnostics_payload is not None:
+            if (
+                diagnostics_payload is not None
+                and resolve_wire_tool_name(name, (_DIAGNOSTICS_TOOL_NAME,)) is not None
+            ):
                 if arguments:
                     return bridge_error_result("invalid_request")
                 return CallToolResult(
@@ -467,11 +513,20 @@ def build_proxy_asgi_app(
                     isError=False,
                 )
             descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
+            # The client calls whichever spelling it read from ``tools/list``,
+            # which is now the underscore one.  Resolving back to the internal
+            # name here keeps every layer below this line -- the descriptor
+            # lookup, the derived idempotency key, and ``proxy.execute`` -- on
+            # the single dotted identifier the rest of KaroX uses.
+            internal_name = resolve_wire_tool_name(
+                name, (item.name for item in descriptors)
+            )
             descriptor = next(
-                (item for item in descriptors if item.name == name), None
+                (item for item in descriptors if item.name == internal_name), None
             )
             if descriptor is None:
                 return bridge_error_result("tool_not_exposed")
+            name = descriptor.name
             idempotency_key = None
             if not descriptor.read_only:
                 meta = server.request_context.meta
@@ -522,10 +577,35 @@ def build_proxy_asgi_app(
         if len(values) != 1:
             return False
         try:
-            scheme, supplied = values[0].decode("utf-8").split(" ", 1)
-        except (UnicodeDecodeError, ValueError):
+            raw = values[0].decode("utf-8").strip()
+        except UnicodeDecodeError:
             return False
-        if scheme.lower() != "bearer" or not supplied:
+        # Accept both ``Bearer <token>`` and a bare ``<token>``.
+        #
+        # RFC 6750 spells the scheme, and this used to require it -- a bare token
+        # raised ValueError on the split and became a 401 with no explanation.
+        # But real MCP clients ask the user for a *token*, not for a header
+        # value: ClickUp's "Authorization header" option says "you'll paste in a
+        # token generated from your MCP server's settings", so what lands on the
+        # wire depends on whether that client prepends the scheme itself.  A
+        # connection that works or 401s based on an undocumented detail of the
+        # peer is not a contract we can ask a user to debug, and the failure is
+        # indistinguishable from a wrong secret.
+        #
+        # This widens only the *encoding* of the credential, never the check: the
+        # token must still match exactly under compare_digest below.  A non-Bearer
+        # scheme (``Basic``, ``Token``) is still refused rather than being
+        # misread as a bare token that happens to contain a space, and the 401
+        # still advertises ``WWW-Authenticate: Bearer`` so a conforming client is
+        # told which scheme to use.
+        scheme, _, remainder = raw.partition(" ")
+        if remainder:
+            if scheme.lower() != "bearer":
+                return False
+            supplied = remainder.strip()
+        else:
+            supplied = scheme
+        if not supplied:
             return False
         if bearer_authorizer is not None:
             try:

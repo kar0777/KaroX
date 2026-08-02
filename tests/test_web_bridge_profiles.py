@@ -8,7 +8,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -17,6 +17,7 @@ from _support import SRC  # noqa: F401 - inserts src on sys.path
 
 from karox.cli import main
 from karox.models import AccessProfile
+from karox.sessions import SessionStore
 from karox.tailscale import (
     TailscaleError,
     classify_funnel_failure,
@@ -28,7 +29,11 @@ from karox.tailscale import (
 )
 from karox.web_bridge_launcher import (
     WebBridgeConnectConfig,
+    _legacy_saved_web_bridge_session_id,
+    _session_id,
     WebBridgeLaunchError,
+    delete_saved_web_bridge_identity,
+    saved_web_bridge_session_id,
     start_tailscale_foreground_funnel,
     web_bridge_diagnostics,
 )
@@ -151,6 +156,46 @@ class SavedWebBridgeProfileTests(unittest.TestCase):
             self.assertEqual([item.name for item in store.list()], ["one", "two"])
             self.assertEqual(store.delete("one"), first)
             self.assertEqual([item.name for item in store.list()], ["two"])
+
+            # Durable saved-profile deletion is fenced by the watchdog and then
+            # reclaims both the repository-bound session and keyring account.
+            repository = Path(tmp) / "repo"
+            repository.mkdir()
+            session_root = Path(tmp) / "sessions"
+            watchdog_root = Path(tmp) / "watchdogs"
+            sessions = SessionStore(session_root)
+            session_id = saved_web_bridge_session_id("two")
+            sessions.create(
+                repository,
+                "saved profile",
+                AccessProfile.WORKSPACE_WRITE,
+                session_id=session_id,
+            )
+            watchdog_root.mkdir()
+            watchdog = watchdog_root / f"{session_id}.json"
+            watchdog.write_text(
+                json.dumps({"owner_pid": os.getpid(), "session_id": session_id}),
+                encoding="utf-8",
+            )
+            credential_store = Mock()
+            with patch(
+                "karox.web_bridge_launcher.session_dir", return_value=session_root
+            ), patch(
+                "karox.web_bridge_launcher.watchdog_dir", return_value=watchdog_root
+            ), patch(
+                "karox.web_bridge_launcher.BridgeCredentialStore",
+                return_value=credential_store,
+            ):
+                with self.assertRaisesRegex(WebBridgeLaunchError, "is running"):
+                    delete_saved_web_bridge_identity("two")
+                self.assertTrue(sessions.state_path(session_id).exists())
+                watchdog.unlink()
+                cleanup = delete_saved_web_bridge_identity("two")
+            self.assertEqual(cleanup["session"], "deleted")
+            self.assertEqual(cleanup["credential"], "deleted")
+            self.assertFalse(sessions.session_dir(session_id).exists())
+            credential_store.delete.assert_called_once_with(session_id)
+
             path.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(WebBridgeProfileError, "unknown format"):
                 store.list()
@@ -223,6 +268,161 @@ class SavedWebBridgeProfileTests(unittest.TestCase):
                 diagnostics["verification_commands"][0],
                 ["python", "scripts/run_v5_preflight.py", "--full"],
             )
+            self.assertEqual(
+                diagnostics["session_expiration"],
+                "persists across managed launcher restarts",
+            )
+
+            rebound_repository = root / "rebound-repo"
+            rebound_repository.mkdir()
+            edit_error = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "karox.cli.saved_web_bridge_identity_exists",
+                return_value=True,
+            ), redirect_stderr(edit_error):
+                code = main(
+                    (
+                        "bridge",
+                        "saved",
+                        "edit",
+                        "full-dev",
+                        "--repository",
+                        str(rebound_repository),
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("requires --reset-identity", edit_error.getvalue())
+            with patch.dict(os.environ, environment, clear=False):
+                self.assertEqual(
+                    WebBridgeProfileStore().get("full-dev").repository,
+                    str(repository.resolve()),
+                )
+
+            reset_cleanup = {
+                "profile_name": "full-dev",
+                "session_id": saved_web_bridge_session_id("full-dev"),
+                "session": "deleted",
+                "credential": "deleted",
+                "identities": [],
+            }
+            edit_output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "karox.cli.saved_web_bridge_identity_exists",
+                return_value=True,
+            ), patch(
+                "karox.cli.delete_saved_web_bridge_identity",
+                return_value=reset_cleanup,
+            ) as reset_identity, redirect_stdout(edit_output):
+                code = main(
+                    (
+                        "bridge",
+                        "saved",
+                        "edit",
+                        "full-dev",
+                        "--repository",
+                        str(rebound_repository),
+                        "--reset-identity",
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            edited = json.loads(edit_output.getvalue())
+            self.assertEqual(edited["identity_reset"], reset_cleanup)
+            self.assertTrue(edited["connector_reconfigure_required"])
+            self.assertEqual(
+                edited["profile"]["repository"],
+                str(rebound_repository.resolve()),
+            )
+            reset_identity.assert_called_once_with("full-dev")
+
+            cleanup = {
+                "profile_name": "full-dev",
+                "session_id": saved_web_bridge_session_id("full-dev"),
+                "session": "deleted",
+                "credential": "deleted",
+            }
+            delete_output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "karox.cli.delete_saved_web_bridge_identity",
+                return_value=cleanup,
+            ) as delete_identity, redirect_stdout(delete_output):
+                code = main(
+                    (
+                        "bridge",
+                        "saved",
+                        "delete",
+                        "full-dev",
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            deleted = json.loads(delete_output.getvalue())
+            self.assertEqual(deleted["identity_cleanup"], cleanup)
+            self.assertEqual(
+                deleted["session_id"],
+                saved_web_bridge_session_id("full-dev"),
+            )
+            delete_identity.assert_called_once_with("full-dev")
+            with patch.dict(os.environ, environment, clear=False):
+                self.assertEqual(WebBridgeProfileStore().list(), ())
+
+            developer_output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), redirect_stdout(
+                developer_output
+            ):
+                code = main(
+                    (
+                        "bridge",
+                        "saved",
+                        "ensure-developer",
+                        "clickup-opus",
+                        "--repository",
+                        str(repository),
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            developer = json.loads(developer_output.getvalue())
+            self.assertEqual(developer["status"], "created")
+            self.assertEqual(developer["profile"]["tunnel"], "tailscale")
+            self.assertEqual(
+                developer["profile"]["access_profile"],
+                AccessProfile.WORKSPACE_WRITE.value,
+            )
+            self.assertIn("karox.repo.write_file", developer["profile"]["tools"])
+            self.assertIn("karox.repo.command", developer["profile"]["tools"])
+            self.assertIn("karox.tests.run", developer["profile"]["tools"])
+            self.assertIn("karox.checks.run", developer["profile"]["tools"])
+            self.assertEqual(
+                developer["profile"]["verification_commands"],
+                [
+                    ["python", "-m", "ruff", "check", "src", "tests", "scripts"],
+                    ["python", "-m", "mypy", "src/karox"],
+                    ["python", "-m", "build", "--wheel"],
+                ],
+            )
+
+            repeated_output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "karox.cli.saved_web_bridge_identity_exists",
+                return_value=False,
+            ), redirect_stdout(repeated_output):
+                code = main(
+                    (
+                        "bridge",
+                        "saved",
+                        "ensure-developer",
+                        "clickup-opus",
+                        "--repository",
+                        str(repository),
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            repeated = json.loads(repeated_output.getvalue())
+            self.assertEqual(repeated["status"], "updated")
+            self.assertFalse(repeated["connector_reconfigure_required"])
 
     def test_saved_connect_overrides_reach_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,6 +469,36 @@ class SavedWebBridgeProfileTests(unittest.TestCase):
             self.assertEqual(config.deadline_seconds, 1200.0)
             self.assertEqual(config.language, "en")
             self.assertEqual(config.saved_profile_name, "dev")
+            self.assertEqual(_session_id(config), saved_web_bridge_session_id("dev"))
+            self.assertEqual(
+                saved_web_bridge_session_id("dev"),
+                saved_web_bridge_session_id("dev"),
+            )
+            self.assertNotEqual(
+                saved_web_bridge_session_id("dev"),
+                saved_web_bridge_session_id("other"),
+            )
+
+            # A profile launched by the first durable-ID implementation keeps
+            # its existing session/secret even after the target profile changes.
+            legacy_root = root / "legacy-sessions"
+            legacy_watchdogs = root / "legacy-watchdogs"
+            legacy_id = _legacy_saved_web_bridge_session_id(
+                "dev", "chatgpt-web"
+            )
+            SessionStore(legacy_root).create(
+                saved_repository,
+                "legacy saved bridge",
+                AccessProfile.READ_ONLY,
+                session_id=legacy_id,
+            )
+            with patch(
+                "karox.web_bridge_launcher.session_dir", return_value=legacy_root
+            ), patch(
+                "karox.web_bridge_launcher.watchdog_dir",
+                return_value=legacy_watchdogs,
+            ):
+                self.assertEqual(_session_id(config), legacy_id)
 
 
 class TailscaleAndDiagnosticsTests(unittest.TestCase):
@@ -582,6 +812,32 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["tunnel"], "tailscale")
             self.assertEqual(report["url_stability"], "stable_device_hostname")
             self.assertEqual(report["access_profile"], "read_only")
+
+            # The short alias must be as complete as `bridge connect`: --write
+            # exposes dev_server.start, so it also supplies the bundled safe
+            # server profile instead of failing before the bridge launches.
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    (
+                        "connect",
+                        "chatgpt",
+                        "--repository",
+                        str(repository),
+                        "--write",
+                        "--verification-command",
+                        '["python","-m","ruff","check","src","tests","scripts"]',
+                        "--diagnostics-only",
+                    )
+                )
+            self.assertEqual(code, 0)
+            writable = json.loads(output.getvalue())
+            self.assertEqual(writable["access_profile"], "workspace_write")
+            self.assertTrue(writable["write_permission"])
+            self.assertIn("karox.dev_server.start", writable["available_tools"])
+            self.assertIn("karox.checks.run", writable["available_tools"])
+            self.assertIn("karox.tests.run", writable["available_tools"])
+            self.assertTrue(writable["server_profiles"])
 
     def test_connect_command_maps_short_connector_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

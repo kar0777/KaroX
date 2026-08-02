@@ -262,13 +262,13 @@ class BackendDelegationTests(unittest.TestCase):
 
     def test_provider_setup_stores_secret_and_selects_model(self) -> None:
         selected = ModelRecord("openai", "gpt-test", tools="true")
-        with (
-            patch.object(tui, "_registry") as registry_factory,
-            patch.object(tui, "CredentialStore") as credentials,
-        ):
-            registry = registry_factory.return_value
-            registry.provider.side_effect = RuntimeError("new provider")
-            registry.select_model.return_value = selected
+        controller = Mock()
+        controller.details.side_effect = RuntimeError("new provider")
+        controller.configure_provider_model.return_value = Mock(
+            selected_model=selected,
+            model=selected,
+        )
+        with patch.object(tui, "_provider_controller", return_value=controller):
             result = tui._save_provider(
                 tui.ProviderSetup(
                     "openai",
@@ -279,12 +279,17 @@ class BackendDelegationTests(unittest.TestCase):
                 )
             )
         self.assertEqual(result, selected)
-        credentials.return_value.set.assert_called_once_with("openai", "secret-value")
+        provider, model = controller.configure_provider_model.call_args.args
+        self.assertEqual(provider.provider_id, "openai")
+        self.assertIsNone(provider.credential_ref)
+        self.assertEqual(model.model_id, "gpt-test")
         self.assertEqual(
-            registry.put_provider.call_args.args[0].credential_ref,
-            "os-keyring:provider/openai",
+            controller.configure_provider_model.call_args.kwargs["secret"],
+            "secret-value",
         )
-        self.assertEqual(registry.put_model.call_args.args[0].model_id, "gpt-test")
+        self.assertTrue(
+            controller.configure_provider_model.call_args.kwargs["activate"]
+        )
 
     def test_model_discovery_reads_ids_and_token_limits(self) -> None:
         response = Mock()
@@ -538,7 +543,14 @@ class BackendDelegationTests(unittest.TestCase):
         self.assertIn("--session-id", launch.argv)
         self.assertIn("workspace_write", launch.argv)
         self.assertNotIn("--public-url", launch.argv)
-        self.assertEqual(launch.argv.count("--tool"), 2)
+        self.assertIn("--browser-external-https", launch.argv)
+        self.assertIn("--browser-network-inspection", launch.argv)
+        self.assertIn("--browser-headed", launch.argv)
+        self.assertIn("--browser-user-takeover", launch.argv)
+        self.assertIn("karox.browser.wait_for", launch.argv)
+        self.assertIn("karox.runtime.status", launch.argv)
+        self.assertEqual(launch.argv.count("karox.runtime.status"), 1)
+        self.assertEqual(launch.argv.count("--tool"), 4)
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
@@ -656,7 +668,10 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(app._filtered_commands), set(tui._commands("ru")))
                 await pilot.press("c", "o", "n")
                 await pilot.pause()
-                self.assertEqual(app._filtered_commands, ["/connect"])
+                # ``/connect`` remains the legacy wizard; ``/connections`` is the
+                # reworked universal hub. Both legitimately match the ``/con``
+                # prefix, in declaration order.
+                self.assertEqual(app._filtered_commands, ["/connect", "/connections"])
                 self.assertEqual(
                     app.query_one("#command-menu", tui.Static).styles.display,
                     "block",
@@ -1427,7 +1442,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
                 app.agent_busy = False
                 app._last_assistant_content = "OLD ANSWER"
-                await pilot.press("ctrl+c")
+                await pilot.press("ctrl+shift+c")
                 await pilot.pause(0.2)
 
                 self.assertEqual(app.clipboard, "BETA")
@@ -1439,11 +1454,8 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.screen.get_selected_text())
 
     async def test_escape_stops_the_running_agent(self) -> None:
-        # Esc stops, and is now the only key that does. Ctrl+C used to stop as
-        # well, which meant the copy key aborted the task whenever one was
-        # running -- during exactly the period a user most wants to copy an error
-        # scrolling past. The pair is asserted here and in the test below so a
-        # future change cannot re-merge them without one of the two failing.
+        # Esc remains a stop key. Ctrl+C now follows terminal convention and
+        # stops active work too; copying has its own Ctrl+Shift+C binding.
         selected = ModelRecord("openai", "model-a", tools="true")
         process = Mock()
         with patch.object(tui, "_selected_model", return_value=selected):
@@ -1456,7 +1468,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 process.terminate.assert_called_once()
                 self.assertTrue(app._stop_requested)
 
-    async def test_ctrl_c_does_not_stop_a_running_agent(self) -> None:
+    async def test_ctrl_c_stops_a_running_agent(self) -> None:
         selected = ModelRecord("openai", "model-a", tools="true")
         process = Mock()
         with patch.object(tui, "_selected_model", return_value=selected):
@@ -1466,10 +1478,10 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.agent_process = process
                 await pilot.press("ctrl+c")
                 await pilot.pause()
-                process.terminate.assert_not_called()
-                self.assertFalse(app._stop_requested)
+                process.terminate.assert_called_once()
+                self.assertTrue(app._stop_requested)
 
-    async def test_ctrl_c_with_nothing_selected_copies_the_last_answer(self) -> None:
+    async def test_ctrl_shift_c_with_nothing_selected_copies_the_last_answer(self) -> None:
         # A convenience, but an announced one: the notice has to say a fallback
         # happened, because being told "Copied" after selecting a line and
         # receiving a different message is worse than being told nothing.
@@ -1481,7 +1493,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.notify = lambda message, *a, **k: notices.append(str(message))
                 app.agent_busy = False
                 app._last_assistant_content = "ответ ассистента"
-                await pilot.press("ctrl+c")
+                await pilot.press("ctrl+shift+c")
                 await pilot.pause()
                 self.assertEqual(app.clipboard, "ответ ассистента")
                 self.assertIn("последний ответ", notices[-1])

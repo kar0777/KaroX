@@ -41,6 +41,7 @@ from .core import (
     InvalidPath,
     ToolDefinition,
 )
+from .hot_worker import hot_worker_supervisor
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .security import contains_credential, redact_content
 from .sessions import MutationLease, SessionRecord
@@ -97,6 +98,9 @@ class ExtendedCoreRuntime(CoreRuntime):
         handlers = dict(self._handlers)
         handlers["repo.edit_file"] = self._edit_file
         handlers["repo.read_lines"] = self._read_lines
+        handlers["repo.command"] = self._repo_command
+        handlers["tests.run"] = self._tests_run
+        handlers["runtime.status"] = self._runtime_status
         handlers["git.log"] = self._git_log
         self._handlers = handlers
         additional = {
@@ -148,6 +152,52 @@ class ExtendedCoreRuntime(CoreRuntime):
                     "additionalProperties": False,
                 },
             ),
+            "repo.command": ToolDefinition(
+                "repo.command",
+                "Apply an atomic patch or batch through the hot-reload worker.",
+                Capability.REPO_WRITE,
+                True,
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "payload": {"type": "object"},
+                    },
+                    "required": ["action", "payload"],
+                    "additionalProperties": False,
+                },
+                external_schema=True,
+            ),
+            "tests.run": ToolDefinition(
+                "tests.run",
+                "Run focused, full, or deterministic split pytest without changing repository configuration.",
+                Capability.CHECKS_RUN,
+                True,
+                {
+                    "type": "object",
+                    "properties": {
+                        "suite": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}},
+                        "split": {"type": "number"},
+                        "part": {"type": "number"},
+                        "timeout_seconds": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+                (Capability.PROCESS_RUN,),
+                replayable=False,
+            ),
+            "runtime.status": ToolDefinition(
+                "runtime.status",
+                "Read hot-worker generation, source digest, and reload health.",
+                Capability.REPO_READ,
+                False,
+                {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            ),
             "git.log": ToolDefinition(
                 "git.log",
                 "Read recent commit history.",
@@ -189,6 +239,38 @@ class ExtendedCoreRuntime(CoreRuntime):
             },
         )
 
+    # -- hot developer worker ---------------------------------------------
+
+    def _repo_command(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        return hot_worker_supervisor().execute_repo(self, arguments, deadline_seconds)
+
+    def _tests_run(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        return hot_worker_supervisor().execute_tests(self, arguments, deadline_seconds)
+
+    def _runtime_status(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        if arguments:
+            raise InvalidCommand("runtime.status takes no arguments")
+        return hot_worker_supervisor().status()
+
+    def _prepare_repo_command(self, arguments: Dict[str, Any], deadline_seconds: float) -> None:
+        del deadline_seconds
+        action = arguments.get("action")
+        payload = arguments.get("payload")
+        if action not in {"apply_patch", "batch"} or not isinstance(payload, dict):
+            raise InvalidCommand("repo.command requires apply_patch or batch with object payload")
+        hot_worker_supervisor().validate_repo(arguments)
+        # The handler builds and validates one complete WorkspaceTransaction
+        # before its first filesystem mutation. Running a separate dry-run here
+        # created a second transaction, widened the preflight/commit race, and
+        # made an immediate idempotent replay re-apply patch context to the
+        # already-updated tree before the stored result could be returned.
+
+    @staticmethod
+    def _prepare_tests_run(arguments: Dict[str, Any]) -> None:
+        if arguments.get("suite", "focused") not in {"focused", "full", "split"}:
+            raise InvalidCommand("tests.run suite must be focused, full, or split")
+
     # -- result honesty ---------------------------------------------------
 
     def execute(
@@ -201,7 +283,7 @@ class ExtendedCoreRuntime(CoreRuntime):
         # git.log is a read-only process call, so the base class does not treat a
         # non-zero exit as a failure. It has no idempotency record, so adjusting
         # the flag here cannot desynchronise a stored replay.
-        if command.name == "git.log" and (
+        if command.name in {"git.log", "tests.run"} and (
             result.data.get("timed_out") or result.data.get("exit_code") != 0
         ):
             result.ok = False
@@ -216,12 +298,38 @@ class ExtendedCoreRuntime(CoreRuntime):
         if command_name == "repo.edit_file":
             self._prepare_edit(arguments)
             return
+        if command_name == "repo.command":
+            self._prepare_repo_command(arguments, deadline_seconds)
+            return
+        if command_name == "tests.run":
+            self._prepare_tests_run(arguments)
+            return
         super()._preflight_mutation(command_name, arguments, deadline_seconds)
 
     def _record_mutation(
         self, record: SessionRecord, command: CoreCommand, result: CoreResult
     ) -> None:
         super()._record_mutation(record, command, result)
+        if command.name == "repo.command":
+            for changed_path in result.data.get("changed_files", []):
+                if isinstance(changed_path, str) and changed_path not in record.changed_files:
+                    record.changed_files.append(changed_path)
+            return
+        if command.name == "tests.run":
+            record.checks.append(
+                {
+                    "correlation_id": command.correlation_id,
+                    "ok": not result.data.get("timed_out", False)
+                    and result.data.get("exit_code") == 0,
+                    "argv": result.data.get("argv", []),
+                    "exit_code": result.data.get("exit_code"),
+                    "timed_out": result.data.get("timed_out", False),
+                    "suite": result.data.get("suite"),
+                    "split": result.data.get("split"),
+                    "part": result.data.get("part"),
+                }
+            )
+            return
         if command.name != "repo.edit_file":
             return
         path = result.data.get("path")
@@ -231,6 +339,40 @@ class ExtendedCoreRuntime(CoreRuntime):
             and path not in record.changed_files
         ):
             record.changed_files.append(path)
+
+    def _validate_idempotent_replay(
+        self, command: CoreCommand, result: CoreResult
+    ) -> None:
+        super()._validate_idempotent_replay(command, result)
+        if command.name != "repo.command" or result.data.get("dry_run") is True:
+            return
+        post_state = result.data.get("post_state")
+        if not isinstance(post_state, dict):
+            raise InvalidCommand("stored repo.command result has no post_state")
+        for relative, expected in post_state.items():
+            if not isinstance(relative, str) or (
+                expected is not None and not isinstance(expected, str)
+            ):
+                raise InvalidCommand("stored repo.command post_state is invalid")
+            path = self.safe_path(relative)
+            current = self._file_sha256(path) if path.is_file() else None
+            if current != expected:
+                raise InvalidCommand(
+                    "stored repo.command result no longer matches repository state; "
+                    "use a new idempotency key"
+                )
+        post_directories = result.data.get("post_directories", {})
+        if not isinstance(post_directories, dict):
+            raise InvalidCommand("stored repo.command post_directories is invalid")
+        for relative, expected_exists in post_directories.items():
+            if not isinstance(relative, str) or not isinstance(expected_exists, bool):
+                raise InvalidCommand("stored repo.command post_directories is invalid")
+            path = self.safe_path(relative, for_write=True)
+            if path.is_dir() != expected_exists:
+                raise InvalidCommand(
+                    "stored repo.command result no longer matches repository state; "
+                    "use a new idempotency key"
+                )
 
     # -- repo.edit_file ---------------------------------------------------
 

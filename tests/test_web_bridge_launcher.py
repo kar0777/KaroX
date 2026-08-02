@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 from _support import SRC
 
 from karox.cli import _verification_command, main
+from karox.credentials import CredentialError
 from karox.models import AccessProfile
 from karox.web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
@@ -37,6 +38,7 @@ from karox.web_bridge_launcher import (
     run_web_bridge,
     start_cloudflare_quick_tunnel,
     web_bridge_connection_instructions,
+    web_bridge_diagnostics,
     windows_cloudflared_candidates,
 )
 
@@ -119,6 +121,76 @@ class CloudflareQuickTunnelTests(unittest.TestCase):
 
 
 class WebBridgeConfigTests(unittest.TestCase):
+    def test_stable_browser_command_is_read_capable_in_default_profile(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+        )
+        self.assertIn("karox.browser.command", DEFAULT_WEB_TOOLS)
+        self.assertNotIn("karox.browser.command", WRITE_WEB_TOOLS)
+        diagnostics = web_bridge_diagnostics(config)
+        self.assertTrue(diagnostics["browser_permission"]["read"])
+        self.assertFalse(diagnostics["browser_permission"]["input"])
+
+    def test_runtime_status_is_available_in_read_only_and_workspace_write_profiles(
+        self,
+    ) -> None:
+        for access_profile in (
+            AccessProfile.READ_ONLY,
+            AccessProfile.WORKSPACE_WRITE,
+        ):
+            with self.subTest(access_profile=access_profile.value):
+                diagnostics = web_bridge_diagnostics(
+                    WebBridgeConnectConfig(
+                        profile="chatgpt-web",
+                        repository=Path.cwd(),
+                        access_profile=access_profile,
+                    )
+                )
+                self.assertIn("karox.runtime.status", diagnostics["available_tools"])
+                disabled = {
+                    item["name"] for item in diagnostics["disabled_tools"]
+                }
+                self.assertNotIn("karox.runtime.status", disabled)
+
+    def test_explicit_legacy_tool_families_keep_stable_worker_commands(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            tools=(
+                "karox.repo.write_file",
+                "karox.checks.run",
+                "karox.browser.snapshot",
+            ),
+            verification_commands=((sys.executable, "-m", "pytest", "-q"),),
+        )
+        expected = {
+            "karox.repo.command",
+            "karox.tests.run",
+            "karox.browser.command",
+        }
+        self.assertTrue(expected.issubset(config.tools))
+        diagnostics = web_bridge_diagnostics(config)
+        self.assertTrue(expected.issubset(diagnostics["available_tools"]))
+        child_argv = _bridge_argv(
+            config,
+            session_id="web-stable-tools",
+            public_url="https://bridge.example.com",
+        )
+        for name in expected:
+            self.assertIn(name, child_argv)
+
+    def test_read_only_browser_family_does_not_gain_workspace_commands(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            tools=("karox.browser.snapshot",),
+        )
+        self.assertIn("karox.browser.command", config.tools)
+        self.assertNotIn("karox.repo.command", config.tools)
+        self.assertNotIn("karox.tests.run", config.tools)
+
     def test_custom_tunnel_requires_https_origin(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires --public-url"):
             WebBridgeConnectConfig(
@@ -296,6 +368,10 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                             WebBridgeConnectConfig(
                                 profile="chatgpt-web",
                                 repository=repository,
+                                access_profile=AccessProfile.BROWSER_CONTROL,
+                                browser_external_https=True,
+                                browser_headed=True,
+                                browser_user_takeover=True,
                             )
                         )
         session_id = sessions.create.call_args.kwargs["session_id"]
@@ -309,6 +385,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         self.assertEqual(spawned["stderr"], subprocess.STDOUT)
         self.assertEqual(spawned["encoding"], "utf-8")
         self.assertEqual(spawned["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(spawned["env"]["KAROX_BROWSER_BACKEND"], "extension")
 
     def test_watchdog_records_the_tunnel_before_the_bridge_is_spawned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,7 +396,10 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel.public_url = "https://small-tree.trycloudflare.com"
             tunnel.process.pid = 4242
             credentials = MagicMock()
+            credentials.resolve.side_effect = CredentialError("missing")
             credentials.set.return_value = {"secret": "approval-secret"}
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
             seen: dict[str, Any] = {}
 
             def popen(*args: object, **kwargs: object) -> None:
@@ -348,7 +428,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                     "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
                     return_value=tunnel,
                 ),
-                patch("karox.web_bridge_launcher.SessionStore", return_value=MagicMock()),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
                 patch(
                     "karox.web_bridge_launcher.BridgeCredentialStore",
                     return_value=credentials,
@@ -361,7 +441,9 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                     ):
                         run_web_bridge(
                             WebBridgeConnectConfig(
-                                profile="chatgpt-web", repository=repository
+                                profile="chatgpt-web",
+                                repository=repository,
+                                saved_profile_name="durable-dev",
                             )
                         )
         self.assertEqual(len(seen["records"]), 1)
@@ -369,6 +451,10 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         self.assertEqual(record["tunnel_pid"], 4242)
         self.assertIsNone(record["bridge_pid"])
         self.assertEqual(record["public_url"], "https://small-tree.trycloudflare.com")
+        self.assertTrue(record["persistent_session"])
+        session_id = sessions.create.call_args.kwargs["session_id"]
+        credentials.delete.assert_called_once_with(session_id)
+        sessions.revoke.assert_not_called()
 
 
 class CloudflaredLookupTests(unittest.TestCase):

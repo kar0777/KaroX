@@ -85,8 +85,16 @@ class ExecutableResolutionTests(unittest.TestCase):
         # ``Popen(shell=False)`` could only fail with WinError 2 somewhere deeper.
         # Failing here, naming the command, is the whole reason this resolver
         # exists; passing the bare name through would hide it.
+        #
+        # "no executable on PATH" is a fact about the host, not about KaroX: a
+        # machine with Git for Windows has ``C:\Program Files\Git\usr\bin\echo.EXE``
+        # on PATH, the resolver rightly finds it, and this test then failed while
+        # reporting nothing about the resolver.  Skip on such a host instead of
+        # asserting the host's PATH.
         if not _is_windows():
             self.skipTest("echo is a real executable on POSIX hosts")
+        if shutil.which("echo"):
+            self.skipTest("this host has a real echo executable on PATH")
         with self.assertRaises(ExecutableResolutionError) as cm:
             resolve_executable(["echo", "hello"])
         self.assertEqual(cm.exception.executable, "echo")

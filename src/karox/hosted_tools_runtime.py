@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,12 +37,14 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .artifacts import ArtifactStore
+from .browser_access import BrowserAccessPolicy, SecureBrowserSessionManager
+from .extension_browser import ChromeExtensionBrowserSessionManager
 from .browser_session import (
     BrowserError,
     BrowserSecurityError,
-    BrowserSessionManager,
     _validate_local_url,
 )
+from .hot_worker import hot_worker_supervisor
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     HOSTED_EXTRA_TOOL_NAMES,
@@ -149,7 +152,12 @@ def default_server_profiles() -> tuple[ManagedServerProfile, ...]:
 # Tool catalogue
 # ---------------------------------------------------------------------------
 
+BROWSER_COMMAND = "karox.browser.command"
 BROWSER_OPEN = "karox.browser.open"
+BROWSER_TABS = "karox.browser.tabs"
+BROWSER_NEW_TAB = "karox.browser.new_tab"
+BROWSER_SWITCH_TAB = "karox.browser.switch_tab"
+BROWSER_CLOSE_TAB = "karox.browser.close_tab"
 BROWSER_SNAPSHOT = "karox.browser.snapshot"
 BROWSER_CLICK = "karox.browser.click"
 BROWSER_FILL = "karox.browser.fill"
@@ -160,7 +168,22 @@ BROWSER_GET_TEXT = "karox.browser.get_text"
 BROWSER_SCREENSHOT = "karox.browser.screenshot"
 BROWSER_CONSOLE = "karox.browser.console"
 BROWSER_NETWORK = "karox.browser.network_failures"
+BROWSER_NETWORK_REQUESTS = "karox.browser.network_requests"
+BROWSER_REQUEST_TAKEOVER = "karox.browser.request_user_takeover"
+BROWSER_RESUME_TAKEOVER = "karox.browser.resume_after_user_takeover"
 BROWSER_CLOSE = "karox.browser.close"
+BROWSER_COMMAND_READ_ACTIONS = frozenset(
+    {
+        "tabs",
+        "snapshot",
+        "wait_for",
+        "get_text",
+        "screenshot",
+        "console",
+        "network_failures",
+        "network_requests",
+    }
+)
 DEV_SERVER_START = "karox.dev_server.start"
 DEV_SERVER_STATUS = "karox.dev_server.status"
 DEV_SERVER_LOGS = "karox.dev_server.logs"
@@ -190,11 +213,32 @@ def _selector_schema(required: bool = True) -> dict[str, Any]:
 
 
 _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
+    BROWSER_COMMAND: _ToolMeta(
+        description=(
+            "Stable hot-reload browser command. The schema remains fixed while "
+            "new guarded actions can be added inside the worker without "
+            "reconnecting the hosted client."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "payload": {"type": "object"},
+            },
+            "required": ["action", "payload"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        # Per-action authorization happens in _browser_command. The stable
+        # descriptor itself is available to read-only sessions for tabs,
+        # snapshot and other observation actions.
+        capability=Capability.BROWSER_READ,
+    ),
     BROWSER_OPEN: _ToolMeta(
         description=(
-            "Open a localhost URL in a headless browser and start a stateful "
-            "session bound to this KaroX session.  Only http(s) URLs on "
-            "127.0.0.1/localhost are accepted; file: and data: are refused."
+            "Open a URL in a browser context owned by this KaroX session. "
+            "Legacy policies accept localhost only; an explicit external-browser "
+            "policy also accepts public HTTPS after domain, DNS and private-address checks."
         ),
         input_schema={
             "type": "object",
@@ -204,6 +248,44 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
                 "height": {"type": "integer"},
             },
             "required": ["url"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_TABS: _ToolMeta(
+        description="List tabs owned by this KaroX browser session. Other sessions are never visible.",
+        input_schema={**_OBJ, "additionalProperties": False},
+        read_only=True,
+        capability=Capability.BROWSER_READ,
+    ),
+    BROWSER_NEW_TAB: _ToolMeta(
+        description="Open a new tab in this session-owned browser context, optionally navigating to an allowed URL.",
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_SWITCH_TAB: _ToolMeta(
+        description="Switch to a tab owned by this KaroX session.",
+        input_schema={
+            "type": "object",
+            "properties": {"tab_id": {"type": "string"}},
+            "required": ["tab_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_CLOSE_TAB: _ToolMeta(
+        description="Close one tab owned by this KaroX session without touching other sessions or the last tab.",
+        input_schema={
+            "type": "object",
+            "properties": {"tab_id": {"type": "string"}},
+            "required": ["tab_id"],
             "additionalProperties": False,
         },
         read_only=False,
@@ -307,14 +389,61 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         capability=Capability.BROWSER_READ,
     ),
     BROWSER_NETWORK: _ToolMeta(
-        description="Return failed network requests (status >= 400) collected since open.",
+        description="Return failed network requests collected since open, with URLs and errors redacted.",
         input_schema={**_OBJ, "additionalProperties": False},
         read_only=True,
         capability=Capability.BROWSER_READ,
     ),
-    BROWSER_CLOSE: _ToolMeta(
-        description="Close the browser session and release the Chromium process.",
+    BROWSER_NETWORK_REQUESTS: _ToolMeta(
+        description=(
+            "Return safe network metadata filtered by URL, method, resource type, and allowed JSON fields. "
+            "Authorization, cookies, tokens, session IDs, card data, and high-entropy values are never returned."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url_contains": {"type": "string"},
+                "method": {"type": "string"},
+                "resource_type": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        },
+        read_only=True,
+        capability=Capability.BROWSER_READ,
+    ),
+    BROWSER_REQUEST_TAKEOVER: _ToolMeta(
+        description=(
+            "Pause agent browser input and hand the visible headed browser to the user for login, CAPTCHA, password, 2FA, consent, or payment review."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_RESUME_TAKEOVER: _ToolMeta(
+        description="Resume agent browser input in the same tab and browser context after the user finishes takeover.",
         input_schema={**_OBJ, "additionalProperties": False},
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_CLOSE: _ToolMeta(
+        description=(
+            "Destructively close the browser context and Chromium process owned by this KaroX session. "
+            "Call this only after the user explicitly asks to end the browser session; never call it as automatic cleanup, after an answer, or while user takeover is active."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "user_confirmed": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["user_confirmed"],
+            "additionalProperties": False,
+        },
         read_only=False,
         capability=Capability.BROWSER_INPUT,
     ),
@@ -442,6 +571,64 @@ def _text_call_result(payload: dict[str, Any], *, is_error: bool = False) -> Cal
     )
 
 
+# A hosted client may reconnect or cause the wire runtime to be rebuilt between
+# two assistant turns while the managed bridge process itself remains alive.
+# Keep one browser manager per durable KaroX session so the new runtime sees the
+# same Chromium context, tabs, cookies and takeover state instead of silently
+# creating a second isolated context.
+_BROWSER_MANAGERS_LOCK = threading.RLock()
+_BROWSER_MANAGERS: dict[
+    str,
+    tuple[BrowserAccessPolicy, SecureBrowserSessionManager | ChromeExtensionBrowserSessionManager],
+] = {}
+
+
+def _browser_manager_for_session(
+    artifacts: ArtifactStore,
+    policy: BrowserAccessPolicy,
+) -> SecureBrowserSessionManager | ChromeExtensionBrowserSessionManager:
+    with _BROWSER_MANAGERS_LOCK:
+        current = _BROWSER_MANAGERS.get(policy.session_id)
+        if current is not None:
+            current_policy, manager = current
+            if current_policy != policy:
+                if manager.is_open:
+                    raise HostedBridgeAccessDenied(
+                        "an open browser session cannot be rebound to a different policy"
+                    )
+                manager.close(force=True)
+                _BROWSER_MANAGERS.pop(policy.session_id, None)
+            else:
+                if manager._artifacts.root == artifacts.root:
+                    return manager
+                if manager.is_open:
+                    raise HostedBridgeAccessDenied(
+                        "an open browser session cannot move to a different artifact store"
+                    )
+                manager.close(force=True)
+                _BROWSER_MANAGERS.pop(policy.session_id, None)
+        manager = (
+            ChromeExtensionBrowserSessionManager(artifacts, policy)
+            if policy.backend == "extension"
+            else SecureBrowserSessionManager(artifacts, policy)
+        )
+        _BROWSER_MANAGERS[policy.session_id] = (policy, manager)
+        return manager
+
+
+def _release_browser_manager(
+    session_id: str,
+    manager: SecureBrowserSessionManager | ChromeExtensionBrowserSessionManager,
+) -> dict[str, Any]:
+    with _BROWSER_MANAGERS_LOCK:
+        current = _BROWSER_MANAGERS.get(session_id)
+        if current is not None and current[1] is manager:
+            _BROWSER_MANAGERS.pop(session_id, None)
+    if isinstance(manager, ChromeExtensionBrowserSessionManager):
+        return manager.detach()
+    return manager.close(force=True)
+
+
 class HostedToolsRuntime:
     """Expose browser, dev-server and artifact tools to one hosted session."""
 
@@ -455,6 +642,7 @@ class HostedToolsRuntime:
         access_profile: AccessProfile,
         hosted_origin: Origin,
         server_profiles: Sequence[ManagedServerProfile] = (),
+        browser_policy: Optional[BrowserAccessPolicy] = None,
         audit_path: Optional[Path] = None,
         artifact_store: Optional[ArtifactStore] = None,
         popen_factory: Optional[Callable[..., Any]] = None,
@@ -489,6 +677,15 @@ class HostedToolsRuntime:
             meta = _HOSTED_EXTRA_TOOLS[name]
             if meta.capability is not None:
                 grants.add(meta.capability)
+        if BROWSER_COMMAND in self._allowed and access_profile in {
+            AccessProfile.BROWSER_CONTROL,
+            AccessProfile.WORKSPACE_WRITE,
+            AccessProfile.ELEVATED,
+        }:
+            # The command descriptor is read-capable, while mutating actions are
+            # checked dynamically. Grant input only to profiles that already
+            # carry it; READ_ONLY keeps a genuinely read-only command surface.
+            grants.add(Capability.BROWSER_INPUT)
         self.policy.set_grants(hosted_origin, grants)
         for capability in grants:
             if not self.policy.decide(hosted_origin, capability).allowed:
@@ -497,7 +694,13 @@ class HostedToolsRuntime:
                 )
 
         self._artifacts = artifact_store or ArtifactStore(session_id)
-        self._browser = BrowserSessionManager(self._artifacts)
+        self._browser_policy = browser_policy or BrowserAccessPolicy(session_id=session_id)
+        if self._browser_policy.session_id != session_id:
+            raise HostedBridgeAccessDenied("browser policy belongs to a different KaroX session")
+        self._browser = _browser_manager_for_session(
+            self._artifacts,
+            self._browser_policy,
+        )
         self._process_store = ManagedProcessStore(session_id)
 
     # -- HostedToolRuntime protocol ----------------------------------------
@@ -517,6 +720,19 @@ class HostedToolsRuntime:
     def session_info(self) -> dict[str, Any]:
         return {
             "browser_open": self._browser.is_open,
+            "browser_takeover_active": self._browser.takeover_active,
+            "browser_context_id": self._browser.context_id,
+            "browser_engine": getattr(self._browser, "engine", "playwright_chromium"),
+            "browser_profile_persistent": isinstance(
+                self._browser, ChromeExtensionBrowserSessionManager
+            ),
+            "browser_persistent_across_calls": True,
+            "browser_permission": self._browser_policy.to_diagnostics(),
+            "browser_isolation": {
+                "context_per_session": True,
+                "cross_session_control": False,
+                "session_id": self.session_id,
+            },
             "server_profiles": [p.to_public_dict() for p in self._server_profiles],
             "artifacts": [a.to_dict() for a in self._artifacts.list()],
         }
@@ -542,6 +758,20 @@ class HostedToolsRuntime:
         if handler is None:
             raise HostedBridgeAccessDenied(f"hosted tool has no handler: {tool_name}")
         try:
+            if (
+                tool_name.startswith("karox.browser.")
+                and self._browser.is_open
+                and not self._browser.takeover_active
+                and tool_name
+                not in {
+                    BROWSER_COMMAND,
+                    BROWSER_OPEN,
+                    BROWSER_CLOSE,
+                    BROWSER_REQUEST_TAKEOVER,
+                    BROWSER_RESUME_TAKEOVER,
+                }
+            ):
+                self._browser.recover_if_blank(deadline_seconds)
             result = handler(self, arguments, deadline_seconds)
         except BrowserSecurityError as exc:
             return _text_call_result(
@@ -576,8 +806,8 @@ class HostedToolsRuntime:
             raise HostedBridgeAccessDenied("session access has been revoked")
 
     def cleanup_session(self) -> dict[str, Any]:
-        """Tear down browser + stop every dev server this session started."""
-        browser = self._browser.close()
+        """Tear down browser + stop every dev server when the bridge itself exits."""
+        browser = _release_browser_manager(self.session_id, self._browser)
         stopped: list[str] = []
         for record in self._process_store.list():
             if _pid_alive(record.pid):
@@ -588,8 +818,49 @@ class HostedToolsRuntime:
 
     # -- browser handlers ---------------------------------------------------
 
+    def _browser_command(
+        self,
+        arguments: dict[str, Any],
+        deadline_seconds: float,
+    ) -> dict[str, Any] | CallToolResult:
+        action = arguments.get("action")
+        required_capability = (
+            Capability.BROWSER_READ
+            if action in BROWSER_COMMAND_READ_ACTIONS
+            else Capability.BROWSER_INPUT
+        )
+        try:
+            self.policy.require(self.hosted_origin, required_capability)
+        except PolicyDenied as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+        payload = hot_worker_supervisor().execute_browser(
+            self,
+            arguments,
+            deadline_seconds,
+        )
+        result = {"ok": True, **payload}
+        if arguments.get("action") == "screenshot":
+            artifact_id = result.get("artifact_id")
+            if not isinstance(artifact_id, str):
+                raise BrowserError("browser screenshot returned no artifact_id")
+            png_bytes, _mime = self._artifacts.read_image(artifact_id)
+            return _image_call_result(result, png_bytes)
+        return result
+
     def _browser_open(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         return {"ok": True, **self._browser.open(arguments, deadline_seconds)}
+
+    def _browser_tabs(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.tabs(arguments, deadline_seconds)}
+
+    def _browser_new_tab(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.new_tab(arguments, deadline_seconds)}
+
+    def _browser_switch_tab(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.switch_tab(arguments, deadline_seconds)}
+
+    def _browser_close_tab(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.close_tab(arguments, deadline_seconds)}
 
     def _browser_snapshot(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         return {"ok": True, **self._browser.snapshot(arguments, deadline_seconds)}
@@ -625,7 +896,23 @@ class HostedToolsRuntime:
     def _browser_network(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         return {"ok": True, **self._browser.network_failures(arguments, deadline_seconds)}
 
+    def _browser_network_requests(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.network_requests(arguments, deadline_seconds)}
+
+    def _browser_request_takeover(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.request_user_takeover(arguments, deadline_seconds)}
+
+    def _browser_resume_takeover(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        return {"ok": True, **self._browser.resume_after_user_takeover(arguments, deadline_seconds)}
+
     def _browser_close(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        if arguments.get("user_confirmed") is not True:
+            raise BrowserSecurityError(
+                "browser.close requires explicit user confirmation and is never automatic cleanup"
+            )
+        reason = arguments.get("reason", "")
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+            raise BrowserError("browser close reason must be a string up to 500 characters")
         return {"ok": True, **self._browser.close()}
 
     # -- dev server handlers ------------------------------------------------
@@ -881,7 +1168,12 @@ class HostedToolsRuntime:
 # Bind the dispatch table once the class body is complete.  Keeping it as a
 # class attribute lets tests introspect the handler map without an instance.
 HostedToolsRuntime._dispatch = {
+    BROWSER_COMMAND: HostedToolsRuntime._browser_command,
     BROWSER_OPEN: HostedToolsRuntime._browser_open,
+    BROWSER_TABS: HostedToolsRuntime._browser_tabs,
+    BROWSER_NEW_TAB: HostedToolsRuntime._browser_new_tab,
+    BROWSER_SWITCH_TAB: HostedToolsRuntime._browser_switch_tab,
+    BROWSER_CLOSE_TAB: HostedToolsRuntime._browser_close_tab,
     BROWSER_SNAPSHOT: HostedToolsRuntime._browser_snapshot,
     BROWSER_CLICK: HostedToolsRuntime._browser_click,
     BROWSER_FILL: HostedToolsRuntime._browser_fill,
@@ -892,6 +1184,9 @@ HostedToolsRuntime._dispatch = {
     BROWSER_SCREENSHOT: HostedToolsRuntime._browser_screenshot,
     BROWSER_CONSOLE: HostedToolsRuntime._browser_console,
     BROWSER_NETWORK: HostedToolsRuntime._browser_network,
+    BROWSER_NETWORK_REQUESTS: HostedToolsRuntime._browser_network_requests,
+    BROWSER_REQUEST_TAKEOVER: HostedToolsRuntime._browser_request_takeover,
+    BROWSER_RESUME_TAKEOVER: HostedToolsRuntime._browser_resume_takeover,
     BROWSER_CLOSE: HostedToolsRuntime._browser_close,
     DEV_SERVER_START: HostedToolsRuntime._dev_server_start,
     DEV_SERVER_STATUS: HostedToolsRuntime._dev_server_status,

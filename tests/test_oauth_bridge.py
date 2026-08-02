@@ -121,6 +121,26 @@ class OAuthBridgeServiceTests(unittest.TestCase):
         self.assertIn("S256", authorization["code_challenge_methods_supported"])
         self.assertIn("refresh_token", authorization["grant_types_supported"])
 
+        redirect_uri = "https://search.clickup-prod.com/connect/mcp"
+        client_id = service.register(
+            {"client_name": "ClickUp", "redirect_uris": [redirect_uri]}
+        )["client_id"]
+        values = {
+            "response_type": ["code"],
+            "client_id": [client_id],
+            "redirect_uri": [redirect_uri],
+            "state": ["state-clickup"],
+            "code_challenge": ["a" * 43],
+            "code_challenge_method": ["S256"],
+            "resource": [service.resource, service.resource],
+        }
+        request_id, _client = service.begin_authorization(values)
+        self.assertTrue(request_id)
+
+        values["resource"] = [service.resource, "https://other.example/mcp"]
+        with self.assertRaisesRegex(OAuthBridgeError, "exactly one MCP server"):
+            service.begin_authorization(values)
+
 
 class OAuthBridgeWireTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -186,8 +206,11 @@ class OAuthBridgeWireTests(unittest.TestCase):
             },
             follow_redirects=False,
         )
-        self.assertEqual(approved.status_code, 303, approved.text)
-        redirect = urlsplit(approved.headers["location"])
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertNotIn("form-action", approved.headers["content-security-policy"])
+        refresh = approved.headers["refresh"]
+        self.assertTrue(refresh.startswith("0; url="), refresh)
+        redirect = urlsplit(refresh.split("url=", 1)[1])
         values = parse_qs(redirect.query)
         self.assertEqual(values["state"], [state])
         return client_id, verifier, values["code"][0]
@@ -200,6 +223,21 @@ class OAuthBridgeWireTests(unittest.TestCase):
                 "oauth-protected-resource/mcp",
                 unauthorized.headers["www-authenticate"],
             )
+            direct_bearer = client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer approval-password"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "direct-bearer-test", "version": "1"},
+                    },
+                },
+            )
+            self.assertNotEqual(direct_bearer.status_code, 401, direct_bearer.text)
             protected = client.get("/.well-known/oauth-protected-resource/mcp")
             self.assertEqual(protected.status_code, 200)
             self.assertEqual(
@@ -214,7 +252,6 @@ class OAuthBridgeWireTests(unittest.TestCase):
                     "client_id": client_id,
                     "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
                     "code_verifier": verifier,
-                    "resource": "https://karox.example/mcp",
                 },
             )
             self.assertEqual(token.status_code, 200, token.text)
@@ -243,7 +280,6 @@ class OAuthBridgeWireTests(unittest.TestCase):
                     "grant_type": "refresh_token",
                     "refresh_token": first["refresh_token"],
                     "client_id": client_id,
-                    "resource": "https://karox.example/mcp",
                 },
             )
             self.assertEqual(refreshed.status_code, 200, refreshed.text)
@@ -256,7 +292,6 @@ class OAuthBridgeWireTests(unittest.TestCase):
                     "grant_type": "refresh_token",
                     "refresh_token": first["refresh_token"],
                     "client_id": client_id,
-                    "resource": "https://karox.example/mcp",
                 },
             )
             self.assertEqual(replay.status_code, 400)
@@ -302,7 +337,8 @@ class OAuthBridgeWireTests(unittest.TestCase):
 
         self.assertEqual(page.status_code, 200, page.text)
         policy = page.headers["content-security-policy"]
-        self.assertIn("form-action 'self' https://claude.ai;", policy)
+        self.assertIn("form-action 'self' https://karox.example;", policy)
+        self.assertNotIn("https://claude.ai", policy)
         # Widened for the redirect and nothing else: no scripts, no framing.
         self.assertIn("default-src 'none'", policy)
         self.assertIn("base-uri 'none'", policy)
@@ -508,6 +544,138 @@ class OAuthStatePersistenceTests(unittest.TestCase):
             }
         )
         self.assertTrue(request_id)
+
+    def test_pending_approval_outlives_a_bridge_restart(self) -> None:
+        first = self._service()
+        redirect_uri = "https://app.clickup.com/mcp/oauth/callback"
+        client_id = first.register(
+            {
+                "client_name": "ClickUp",
+                "redirect_uris": [redirect_uri],
+            }
+        )["client_id"]
+        verifier = "v" * 64
+        request_id, _client = first.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "state": ["state-clickup"],
+                "code_challenge": [_pkce(verifier)],
+                "code_challenge_method": ["S256"],
+                "resource": [first.resource],
+                "scope": ["mcp:tools offline_access"],
+            }
+        )
+
+        restarted = self._service()
+        location = restarted.approve(request_id, "approval-password")
+        values = parse_qs(urlsplit(location).query)
+        self.assertEqual(values["state"], ["state-clickup"])
+        tokens = restarted.exchange_code(
+            {
+                "code": [values["code"][0]],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "code_verifier": [verifier],
+                "resource": [restarted.resource],
+            }
+        )
+        self.assertTrue(tokens["access_token"])
+
+    def test_authorization_code_outlives_a_bridge_restart(self) -> None:
+        first = self._service()
+        redirect_uri = "https://app.clickup.com/mcp/oauth/callback"
+        client_id = first.register(
+            {
+                "client_name": "ClickUp",
+                "redirect_uris": [redirect_uri],
+            }
+        )["client_id"]
+        verifier = "v" * 64
+        request_id, _client = first.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "state": ["state-clickup"],
+                "code_challenge": [_pkce(verifier)],
+                "code_challenge_method": ["S256"],
+                "resource": [first.resource],
+                "scope": ["mcp:tools"],
+            }
+        )
+        location = first.approve(request_id, "approval-password")
+        code = parse_qs(urlsplit(location).query)["code"][0]
+
+        restarted = self._service()
+        tokens = restarted.exchange_code(
+            {
+                "code": [code],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "code_verifier": [verifier],
+                "resource": [restarted.resource],
+            }
+        )
+        self.assertTrue(tokens["access_token"])
+
+    def test_duplicate_approval_submission_returns_the_same_redirect(self) -> None:
+        service = self._service()
+        redirect_uri = "https://app.clickup.com/mcp/oauth/callback"
+        client_id = service.register(
+            {
+                "client_name": "ClickUp",
+                "redirect_uris": [redirect_uri],
+            }
+        )["client_id"]
+        request_id, _client = service.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "state": ["state-clickup"],
+                "code_challenge": [_pkce("v" * 64)],
+                "code_challenge_method": ["S256"],
+                "resource": [service.resource],
+                "scope": ["mcp:tools"],
+            }
+        )
+        first = service.approve(request_id, "approval-password")
+        second = service.approve(request_id, "approval-password")
+        self.assertEqual(second, first)
+
+    def test_pending_and_code_state_contains_only_digests(self) -> None:
+        service = self._service()
+        redirect_uri = "https://app.clickup.com/mcp/oauth/callback"
+        client_id = service.register(
+            {
+                "client_name": "ClickUp",
+                "redirect_uris": [redirect_uri],
+            }
+        )["client_id"]
+        request_id, _client = service.begin_authorization(
+            {
+                "response_type": ["code"],
+                "client_id": [client_id],
+                "redirect_uri": [redirect_uri],
+                "state": ["state-clickup"],
+                "code_challenge": [_pkce("v" * 64)],
+                "code_challenge_method": ["S256"],
+                "resource": [service.resource],
+                "scope": ["mcp:tools"],
+            }
+        )
+        location = service.approve(request_id, "approval-password")
+        code = parse_qs(urlsplit(location).query)["code"][0]
+        assert service.state_path is not None
+        saved = service.state_path.read_text(encoding="utf-8")
+        self.assertNotIn(request_id, saved)
+        self.assertNotIn(code, saved)
+        self.assertIn(
+            hashlib.sha256(code.encode("utf-8")).hexdigest(),
+            saved,
+        )
 
     def test_the_saved_state_holds_no_bearer_token(self) -> None:
         service = self._service()

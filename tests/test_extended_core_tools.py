@@ -140,6 +140,33 @@ class ExtendedCoreToolTests(unittest.TestCase):
         self.assertTrue(second["idempotent_replay"])
         self.assertEqual(self._text(), "after\n")
 
+    def test_edit_replay_is_rejected_after_a_later_file_change(self) -> None:
+        bridge = self._bridge("karox.repo.edit_file")
+        arguments = {
+            "path": "sample.txt",
+            "old_string": "before",
+            "new_string": "after",
+        }
+        first = bridge.execute(
+            "karox.repo.edit_file",
+            arguments,
+            idempotency_key="edit-stale-replay",
+        )
+        self.assertTrue(first["data"]["changed"])
+
+        # The key still names the first completed mutation, but repository state
+        # has moved on. Replaying that old success would tell the caller its edit
+        # just landed while leaving this later content untouched.
+        (self.repository / "sample.txt").write_text("later\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(Exception, "no longer matches repository state"):
+            bridge.execute(
+                "karox.repo.edit_file",
+                arguments,
+                idempotency_key="edit-stale-replay",
+            )
+        self.assertEqual(self._text(), "later\n")
+
     def test_edit_refuses_a_file_that_changed_since_it_was_read(self) -> None:
         import hashlib
 

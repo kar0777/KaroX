@@ -27,6 +27,7 @@ from karox.mcp_client import (
     McpClient,
     McpCredentialStore,
     McpRegistry,
+    McpRemoteToolError,
     McpServerRecord,
 )
 from karox.models import AccessProfile
@@ -92,14 +93,14 @@ async def _call_mcp_tool_async(
     from datetime import timedelta
 
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+
+    from karox.mcp_client import streamable_http_transport
 
     headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(
+    async with streamable_http_transport(
         url,
         headers=headers,
-        timeout=15.0,
-        sse_read_timeout=15.0,
+        timeout_seconds=15.0,
     ) as streams:
         async with ClientSession(
             streams[0],
@@ -326,9 +327,26 @@ class HostedCoreBridgeTests(unittest.TestCase):
         arguments = {"path": "sample.txt", "content": "after\n"}
         with self.assertRaisesRegex(HostedBridgeAccessDenied, "idempotency"):
             bridge.execute("karox.repo.write_file", arguments)
-        first = bridge.execute(
-            "karox.repo.write_file", arguments, idempotency_key="hosted-write-1"
-        )
+        real_core = bridge._core()
+
+        class _SlowCore:
+            def tools(self):
+                return real_core.tools()
+
+            def execute(self, command, lease=None):
+                time.sleep(0.05)
+                return real_core.execute(command, lease=lease)
+
+        with patch.object(bridge, "_core", return_value=_SlowCore()), patch(
+            "karox.hosted_bridge._MUTATION_LEASE_HEARTBEAT_SECONDS", 0.01
+        ), patch.object(
+            self.sessions, "heartbeat", wraps=self.sessions.heartbeat
+        ) as heartbeat:
+            first = bridge.execute(
+                "karox.repo.write_file", arguments, idempotency_key="hosted-write-1"
+            )
+        self.assertGreaterEqual(heartbeat.call_count, 1)
+        self.assertFalse(self.sessions.lease_path("hosted").exists())
         second = bridge.execute(
             "karox.repo.write_file", arguments, idempotency_key="hosted-write-1"
         )
@@ -658,15 +676,26 @@ class HostedBridgeWireTests(unittest.TestCase):
                 (self.repository / "sample.txt").read_text(encoding="utf-8"),
                 "no-meta-A\n",
             )
-            (self.repository / "sample.txt").write_text("clobbered\n", encoding="utf-8")
             second = client.call_record(
                 record, descriptor, dict(arguments), self.repository
             )
             self.assertTrue(
                 second["result"]["structuredContent"]["idempotent_replay"]
             )
-            # The replay did not touch the file, which is precisely why the result
-            # has to say so rather than read as a write that just happened.
+            self.assertEqual(
+                (self.repository / "sample.txt").read_text(encoding="utf-8"),
+                "no-meta-A\n",
+            )
+
+            # A later external rewrite is no longer the state described by the
+            # stored result. Replaying that result as a fresh success would lie to
+            # the caller, so Core rejects the stale replay without overwriting the
+            # newer bytes.
+            (self.repository / "sample.txt").write_text("clobbered\n", encoding="utf-8")
+            with self.assertRaises(McpRemoteToolError):
+                client.call_record(
+                    record, descriptor, dict(arguments), self.repository
+                )
             self.assertEqual(
                 (self.repository / "sample.txt").read_text(encoding="utf-8"),
                 "clobbered\n",
@@ -1008,6 +1037,55 @@ class BridgeWireSecurityTests(unittest.TestCase):
             self.assertNotIn(fragment, missing.text)
             self.assertNotIn(fragment, failed.text)
 
+    def test_bare_token_and_bearer_token_both_authorize(self) -> None:
+        # ClickUp's "Authorization header" option asks the user for a *token*
+        # ("you'll paste in a token generated from your MCP server's settings"),
+        # so whether ``Bearer `` reaches the wire is the peer's decision, not the
+        # user's.  Requiring the scheme made that peer detail the difference
+        # between a working connection and a 401 that reads exactly like a wrong
+        # secret.  Both spellings must authorize -- and a different scheme must
+        # still be refused rather than misread as a bare token with a space.
+        def _authorized_as(value: str) -> dict[str, Any]:
+            request = _tools_call(
+                self.token, "karox.repo.read_file", {"path": "sample.txt"}
+            )
+            request["headers"] = [
+                (name, value if name == "authorization" else existing)
+                for name, existing in request["headers"]
+            ]
+            return request
+
+        cases: list[tuple[str, str, int]] = [
+            # Both accepted spellings of the same credential.
+            ("prefixed token", f"Bearer {self.token}", 200),
+            ("bare token", self.token, 200),
+            # Case-insensitive scheme, and surrounding whitespace tolerated.
+            ("lowercase scheme", f"bearer {self.token}", 200),
+            ("padded value", f"  Bearer  {self.token}  ", 200),
+            # A wrong secret is still rejected in either spelling -- widening the
+            # encoding must not widen the check.
+            ("prefixed wrong secret", "Bearer wrong-secret", 401),
+            ("bare wrong secret", "wrong-secret", 401),
+            # A different scheme is refused, not read as a bare token with a space.
+            ("basic scheme", f"Basic {self.token}", 401),
+            ("token scheme", f"Token {self.token}", 401),
+            # Nothing at all is refused.
+            ("empty header", "", 401),
+            ("scheme with no credential", "Bearer ", 401),
+        ]
+
+        # One app and one _wire_requests call: the session manager underneath
+        # refuses to run twice, and driving the lifespan per case would test the
+        # harness rather than the header parsing.
+        responses = _wire_requests(
+            build_proxy_asgi_app(self.runtime, self.token),
+            [_authorized_as(value) for _, value, _ in cases],
+        )
+
+        for (label, _, expected), response in zip(cases, responses):
+            with self.subTest(authorization=label):
+                self.assertEqual(response.status, expected)
+
     def test_non_ascii_bearer_credential_is_unauthorized(self) -> None:
         app = build_proxy_asgi_app(self.runtime, self.token)
         mcp_request = _tools_call(
@@ -1036,6 +1114,35 @@ class BridgeWireSecurityTests(unittest.TestCase):
             ],
         )
         self.assertEqual(openapi_response.status, 401)
+
+    def test_unauthorized_declares_the_scheme_it_wants(self) -> None:
+        """A 401 on a bearer-protected wire must name its scheme.
+
+        RFC 6750 requires ``WWW-Authenticate`` on a 401 from a bearer-protected
+        resource, and a client that discovers auth by probing reads exactly that
+        header. Without it the bridge answers "no" without saying what a "yes"
+        would look like: ClickUp's connector, set to its default OAuth, probed
+        the discovery endpoints, got 404s and a bare 401, and reported
+        "Authentication method not supported by this MCP Server" with nothing
+        pointing at the scheme that would have worked.
+        """
+        app = build_proxy_asgi_app(
+            self.runtime,
+            self.token,
+            unauthorized_headers={"WWW-Authenticate": 'Bearer realm="KaroX bridge"'},
+        )
+        request = _tools_call(self.token, "karox.repo.read_file", {"path": "sample.txt"})
+        request["headers"] = [
+            (name, "Bearer wrong-secret" if name == "authorization" else value)
+            for name, value in request["headers"]
+        ]
+        (response,) = _wire_requests(app, [request])
+        self.assertEqual(response.status, 401)
+        headers = {
+            name.decode("latin-1").lower(): value.decode("latin-1")
+            for name, value in response.headers
+        }
+        self.assertEqual(headers.get("www-authenticate"), 'Bearer realm="KaroX bridge"')
 
 
 class DerivedIdempotencyKeyTests(unittest.TestCase):
