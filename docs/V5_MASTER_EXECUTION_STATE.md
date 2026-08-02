@@ -456,6 +456,34 @@ Why those parts: the splitter assigns file *i* to part `i % n`, so 8-way part
 as 8-way; parts 4-8 were each covered by their two 16-way halves. Aggregate:
 **1105 passed, 4 skipped, 1 xfailed**, no failures anywhere.
 
+### Smart Stop is now live for hosted clients — 2026-08-02, after the commits
+
+The gate existed but nothing switched it on: `CoreRuntime` only enforced it
+when an embedder passed an engine, and no embedder did. So Smart Stop was
+correct, tested, and dead.
+
+`CoreToolBridge` now defaults to the process-wide `risk_engine()` and
+`event_bus()`. That is the right place to turn it on first, because the hosted
+bridge is exactly how ChatGPT Web, Claude Web, an MCP client and an external
+coding agent reach the machine: the most remote agent source gets the same stop
+line as a local one. A caller may still inject its own engine for tests.
+
+The bridge deliberately offers **no channel for a confirmation token**. It
+builds the `CoreCommand` itself and leaves `confirmation_token` unset, and a
+token smuggled into the tool arguments is rejected by schema validation before
+risk is even consulted. A hosted agent therefore cannot approve its own action
+by any path; approval belongs to the human-facing layer.
+
+`tests/test_hosted_bridge_smart_stop.py`: reads and single writes still pass, a
+bulk `git.commit` from a hosted client stops as high risk, the smuggled-token
+path is refused, and the decision appears on the event stream. 6 passed.
+Regression: hosted bridge plus bridge, 64 passed / 10 subtests.
+
+Note for the next session: the running bridge process will not pick this up
+until it is relaunched, because hot reload only watches the workspace worker
+modules. After the next `bridge connect`, this control session itself becomes
+subject to Smart Stop, which is intended.
+
 ### Wheel builds, and building it found a packaging defect
 
 `python -m build --wheel` now succeeds and produces

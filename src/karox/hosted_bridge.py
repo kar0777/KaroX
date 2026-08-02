@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Protocol, Sequence
 
 from .core import CoreRuntime, ToolDefinition
+from .event_bus import EventBus, event_bus
+from .risk_engine import RiskEngine, risk_engine
 from .core_tools import ExtendedCoreRuntime
 from .models import Capability, CoreCommand, Origin, OriginKind
 from .policy import CapabilityPolicy
@@ -127,6 +129,8 @@ class CoreToolBridge:
         hosted_origin: Optional[Origin] = None,
         audit_path: Optional[Path] = None,
         verification_commands: Optional[Iterable[Iterable[str]]] = None,
+        risk: Optional[RiskEngine] = None,
+        events: Optional[EventBus] = None,
     ) -> None:
         if hosted_origin is None:
             hosted_origin = Origin(OriginKind.HOSTED_CLIENT, f"core-bridge-{session_id}")
@@ -148,6 +152,11 @@ class CoreToolBridge:
         self.hosted_origin = hosted_origin
         self.audit_path = audit_path
         self._allowed = tuple(allowed_tool_names)
+        # A hosted client is the most remote agent source there is, so it gets
+        # the same Smart Stop as a local one. Passing ``risk=None`` explicitly
+        # is how a caller opts out; omitting it uses the process-wide engine.
+        self._risk = risk_engine() if risk is None else risk
+        self._events = event_bus() if events is None else events
         self._verification_commands = (
             None
             if verification_commands is None
@@ -189,6 +198,8 @@ class CoreToolBridge:
             self.sessions,
             self.audit_path,
             verification_commands=self._verification_commands,
+            risk=self._risk,
+            events=self._events,
         )
 
     def _definitions(self) -> dict[str, ToolDefinition]:

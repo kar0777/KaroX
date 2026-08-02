@@ -23,10 +23,10 @@ fact is repeated in the canonical current documents above.
 ## Historical test-count evidence
 
 The development record reached a suite where the documented `unittest` runner
-reported `Ran 1117 tests`.
+reported `Ran 1123 tests`.
 
-1117 is also what the corresponding test collection under `tests` reports. The
-repository root collects 1122 because it additionally finds five legacy KaroX 4
+1123 is also what the corresponding test collection under `tests` reports. The
+repository root collects 1128 because it additionally finds five legacy KaroX 4
 checks under `scripts/`.
 
 These figures remain checked by `scripts/check_test_count.py`; they describe the

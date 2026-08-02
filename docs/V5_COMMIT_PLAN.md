@@ -116,6 +116,22 @@ git add docs/KAROX_V5_RECOVERY_PLAN_2026-08-01.md docs/research/
 git commit -m "chore(release): verify the wheel against source and republish real counts"
 ```
 
+## 9. Activate Smart Stop for hosted clients (after commit 8)
+
+This was written after the first eight commits were already applied, so it is
+its own commit rather than a rewrite of history.
+
+```powershell
+git add src/karox/hosted_bridge.py tests/test_hosted_bridge_smart_stop.py
+git add README.md README_RU.md docs/IMPLEMENTATION_STATUS.md
+git add docs/RELEASE_CHECKLIST.md docs/vNext/README.md
+git add docs/V5_MASTER_EXECUTION_STATE.md docs/V5_COMMIT_PLAN.md
+git commit -m "feat(bridge): enforce Smart Stop for hosted clients by default"
+```
+
+After this commit the running bridge must be relaunched for the change to take
+effect; hot reload only watches the workspace worker modules.
+
 ## After the last commit
 
 ```powershell

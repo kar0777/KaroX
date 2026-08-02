@@ -241,7 +241,7 @@ still require recorded runs on Windows, macOS, and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 1117 tests under:
+The canonical documented suite is now 1123 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -296,7 +296,7 @@ closed P0 defects as current blockers.
 ### Source and automated verification
 
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
-- run the complete 1117-test suite;
+- run the complete 1123-test suite;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
   gates;
 - validate the edited release workflow in GitHub Actions;

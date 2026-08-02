@@ -89,7 +89,7 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [ ] Complete 1117-test suite passes on the current release-candidate commit.
+- [ ] Complete 1123-test suite passes on the current release-candidate commit.
 - [ ] `python scripts/check_wheel_contents.py` passes on the built wheel, after
       deleting `build/` so no removed module can ship from a stale copy.
 - [ ] Ruff passes without suppressing new defects.
