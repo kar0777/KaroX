@@ -10,7 +10,7 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 
 <br>
 
-[![Direct support](https://img.shields.io/badge/direct_project_support-13_teams-7C3AED?style=for-the-badge)](#personal-acknowledgements)
+[![Direct support](https://img.shields.io/badge/direct_project_support-14_teams-7C3AED?style=for-the-badge)](#personal-acknowledgements)
 [![Student led](https://img.shields.io/badge/student_led-open_source-111827?style=for-the-badge)](https://github.com/kar0777/KaroX)
 
 </div>
@@ -95,7 +95,11 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 <strong><a href="https://langfuse.com">Langfuse</a></strong><br>
 <sub>RESEARCH OBSERVABILITY & EVALS</sub>
 </td>
-<td></td>
+<td align="center">
+<a href="https://aireiter.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=aireiter.com" width="64" height="64" alt="AIReiter logo"></a><br><br>
+<strong><a href="https://aireiter.com">AIReiter</a></strong><br>
+<sub>CLAUDE OPUS 5 & FABLE 5 API</sub>
+</td>
 <td></td>
 </tr>
 </table>
@@ -183,7 +187,11 @@ Their help lets KaroX move beyond mocks and toy examples: real providers, real f
 <h3 align="center"><a href="https://langfuse.com">Langfuse</a></h3>
 <p><strong>Thank you to Ashmita Bohara and the Langfuse team for Research & Education access.</strong> The cloud support gives KaroX room to trace agent workflows, evaluate tool-call reliability, compare providers, measure latency and cost, and preserve reproducible evidence while keeping the work non-commercial and research-focused.</p>
 </td>
-<td></td>
+<td valign="top">
+<p align="center"><a href="https://aireiter.com"><img src="https://www.google.com/s2/favicons?sz=256&domain=aireiter.com" width="58" height="58" alt="AIReiter logo"></a></p>
+<h3 align="center"><a href="https://aireiter.com">AIReiter</a></h3>
+<p><strong>Thank you to the AIReiter technical team for substantial complimentary Claude Opus 5 and Fable 5 model credits and continued discounted Claude-series access.</strong> This support gives KaroX room to run repeated coding-agent benchmarks covering streaming, tool use, recovery, permission boundaries, cost, and test-backed verification with real frontier-model traffic.</p>
+</td>
 </tr>
 </table>
 
