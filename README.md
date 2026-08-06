@@ -35,7 +35,8 @@ KaroX is deeply grateful to the organizations and people who provided model, API
 <a href="https://tavily.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=tavily.com" width="40" height="40" alt="Tavily logo"></a>&nbsp;
 <a href="https://cohere.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=cohere.com" width="40" height="40" alt="Cohere logo"></a>&nbsp;
 <a href="https://chutes.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=chutes.ai" width="40" height="40" alt="Chutes logo"></a>&nbsp;
-<a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=empiriolabs.ai" width="40" height="40" alt="EmpirioLabs logo"></a>
+<a href="https://empiriolabs.ai"><img src="https://www.google.com/s2/favicons?sz=128&domain=empiriolabs.ai" width="40" height="40" alt="EmpirioLabs logo"></a>&nbsp;
+<a href="https://scoutapm.com"><img src="https://www.google.com/s2/favicons?sz=128&domain=scoutapm.com" width="40" height="40" alt="Scout APM logo"></a>
 
 [**Read the individual acknowledgements and thank-you notes →**](SUPPORTERS.md)
 
