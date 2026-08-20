@@ -45,24 +45,30 @@ class LiveChromeExtensionSmoke(unittest.TestCase):
                     {"reason": "live smoke"}, 10
                 )
                 resumed = manager.resume_after_user_takeover({}, 10)
+                snapshot_text = (snapshot.get("snapshot") or {}).get("text", "")
                 payload = {
                     "engine": opened.get("engine"),
                     "background": opened.get("background"),
                     "profile_persistent": opened.get("profile_persistent"),
                     "title": snapshot.get("title"),
                     "heading": (snapshot.get("snapshot") or {}).get("headings", [{}])[0].get("text"),
+                    "snapshot_text_len": len(snapshot_text),
                     "tabs": tabs.get("count"),
-                    "branding_tab_id": tabs.get("branding_tab_id"),
-                    "screenshot_artifact_id": screenshot.get("artifact_id"),
+                    "takeover_paused": takeover.get("agent_input_paused"),
                     "takeover_tab_id": takeover.get("tab_id"),
+                    "resume_paused": resumed.get("agent_input_paused"),
                     "resume_tab_id": resumed.get("tab_id"),
+                    "screenshot_artifact_id": screenshot.get("artifact_id"),
                 }
                 print("KAROX_EXTENSION_SMOKE=" + json.dumps(payload, sort_keys=True))
                 self.assertEqual(payload["engine"], "chrome_extension_mv3")
                 self.assertEqual(payload["title"], "Example Domain")
                 self.assertEqual(payload["heading"], "Example Domain")
                 self.assertTrue(payload["profile_persistent"])
-                self.assertTrue(payload["branding_tab_id"])
+                # Live visible-Chrome test: snapshot must be non-empty (real DOM).
+                self.assertGreater(payload["snapshot_text_len"], 0)
+                self.assertTrue(payload["takeover_paused"])
+                self.assertFalse(payload["resume_paused"])
                 self.assertEqual(payload["takeover_tab_id"], payload["resume_tab_id"])
                 self.assertTrue(payload["screenshot_artifact_id"])
             finally:

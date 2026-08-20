@@ -8,8 +8,9 @@ DevTools Protocol (CDP).
 
 The everyday Chrome profile is never opened.  Cookies in the dedicated profile
 survive a KaroX restart, while the browser still routes traffic through KaroX's
-session proxy.  A tiny unpacked extension supplies proxy credentials and owns a
-branded dark new-tab page; it does not read page contents or browsing history.
+session proxy.  A tiny unpacked extension supplies proxy credentials; it does
+not read page contents or browsing history, and it does not override the user's
+new-tab page.
 """
 
 from __future__ import annotations
@@ -107,12 +108,11 @@ def _extension_manifest() -> str:
     payload = {
         "manifest_version": 3,
         "name": "KaroX Browser",
-        "description": "Local KaroX browser profile, proxy authentication, and branded new tab.",
+        "description": "Local KaroX browser profile and proxy authentication.",
         "version": "1.0.0",
         "permissions": ["webRequest", "webRequestAuthProvider"],
         "host_permissions": ["<all_urls>"],
         "background": {"service_worker": "background.js"},
-        "chrome_url_overrides": {"newtab": "newtab.html"},
         "action": {"default_title": "KaroX Browser"},
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -143,89 +143,6 @@ chrome.webRequest.onAuthRequired.addListener(
 """
 
 
-def _extension_new_tab() -> str:
-    return r'''<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>✦ KaroX Browser ✦</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-  body {
-    display: grid;
-    place-items: center;
-    background:
-      radial-gradient(circle at 18% 18%, rgba(123,92,255,.20), transparent 28%),
-      radial-gradient(circle at 82% 72%, rgba(0,214,255,.12), transparent 34%),
-      linear-gradient(145deg, #05060a 0%, #0a0c14 45%, #030408 100%);
-    color: #f7f8ff;
-    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  }
-  #stars, #stars::before, #stars::after {
-    position: fixed; inset: -20%; content: ""; pointer-events: none;
-    background-image:
-      radial-gradient(circle, rgba(255,255,255,.95) 0 1px, transparent 1.5px),
-      radial-gradient(circle, rgba(143,205,255,.8) 0 1px, transparent 1.6px),
-      radial-gradient(circle, rgba(202,172,255,.75) 0 1px, transparent 1.4px);
-    background-size: 83px 83px, 137px 137px, 191px 191px;
-    background-position: 11px 19px, 43px 71px, 107px 29px;
-    animation: drift 34s linear infinite;
-    opacity: .52;
-  }
-  #stars::before { transform: scale(1.3) rotate(9deg); animation-duration: 51s; opacity: .34; }
-  #stars::after { transform: scale(.72) rotate(-7deg); animation-duration: 25s; opacity: .24; }
-  @keyframes drift { to { transform: translate3d(120px, 80px, 0) rotate(.001deg); } }
-  .shell {
-    position: relative;
-    width: min(760px, calc(100vw - 48px));
-    padding: 58px 48px 46px;
-    border: 1px solid rgba(255,255,255,.12);
-    border-radius: 28px;
-    background: linear-gradient(145deg, rgba(18,21,34,.82), rgba(7,9,16,.72));
-    box-shadow: 0 24px 90px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08);
-    backdrop-filter: blur(20px);
-    text-align: center;
-  }
-  .mark {
-    display: inline-flex; align-items: center; gap: 12px;
-    font-size: clamp(54px, 9vw, 96px); font-weight: 850; letter-spacing: -.07em;
-    line-height: .9;
-    background: linear-gradient(90deg, #ffffff 0%, #a9bbff 23%, #c989ff 46%, #72e8ff 70%, #ffffff 100%);
-    background-size: 240% auto;
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    animation: shimmer 4.8s linear infinite;
-    filter: drop-shadow(0 0 24px rgba(139,144,255,.18));
-  }
-  @keyframes shimmer { to { background-position: -240% center; } }
-  .spark { font-size: .48em; color: #d8dcff; animation: pulse 2.4s ease-in-out infinite; }
-  @keyframes pulse { 50% { transform: scale(1.22) rotate(18deg); opacity: .58; } }
-  .subtitle { margin-top: 22px; color: rgba(232,235,255,.72); font-size: 17px; letter-spacing: .025em; }
-  .status {
-    margin: 34px auto 0; display: inline-flex; align-items: center; gap: 10px;
-    padding: 10px 15px; border-radius: 999px;
-    border: 1px solid rgba(126,229,255,.18); background: rgba(41,91,108,.13);
-    color: #bcefff; font-size: 13px;
-  }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #62f4b5; box-shadow: 0 0 15px #62f4b5; }
-  .note { margin-top: 28px; color: rgba(217,221,242,.48); font-size: 12px; }
-</style>
-</head>
-<body>
-<div id="stars"></div>
-<main class="shell">
-  <div class="mark"><span class="spark">✦</span><span>KaroX</span><span class="spark">✦</span></div>
-  <div class="subtitle">Отдельный защищённый профиль для браузерных задач</div>
-  <div class="status"><span class="dot"></span><span>Браузер готов · управление ограничено сессией KaroX</span></div>
-  <div class="note">Обычный профиль Chrome, его cookies и вкладки не используются.</div>
-</main>
-</body>
-</html>
-'''
-
-
 def write_karo_extension(username: str, password: str) -> Path:
     root = (runtime_dir() / "vnext" / "browser-extension").resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -233,7 +150,6 @@ def write_karo_extension(username: str, password: str) -> Path:
     (root / "background.js").write_text(
         _extension_background(username, password), encoding="utf-8"
     )
-    (root / "newtab.html").write_text(_extension_new_tab(), encoding="utf-8")
     return root
 
 
@@ -292,6 +208,37 @@ def terminate_chrome_process(process: Optional[subprocess.Popen[Any]]) -> None:
         pass
 
 
+def activate_chrome_window(process: Optional[subprocess.Popen[Any]]) -> bool:
+    """Restore and focus the top-level window owned by this Chrome process on Windows."""
+    if process is None or process.poll() is not None or os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        windows: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        @callback_type
+        def collect(hwnd: int, _lparam: int) -> bool:
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == process.pid and user32.IsWindowVisible(hwnd):
+                windows.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(collect, 0)
+        if not windows:
+            return False
+        hwnd = windows[0]
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.BringWindowToTop(hwnd)
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:
+        return False
+
+
 def launch_system_chrome(
     playwright_ctx: Any,
     *,
@@ -324,8 +271,10 @@ def launch_system_chrome(
         f"--load-extension={extension}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--new-window",
+        "--window-position=40,40",
         f"--window-size={width},{height}",
-        "chrome://newtab/",
+        "about:blank",
     ]
     creationflags = 0
     if os.name == "nt":

@@ -204,21 +204,39 @@ class TuiToCapabilitiesEndToEndTests(unittest.TestCase):
             ),
             tunnel_provider="cloudflare",
         )
-        launch = tui._managed_web_bridge_launch(Path.cwd(), setup)
-        self.assertIn("--write", launch.argv)
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError(
+                "saved bridge profile does not exist: test"
+            )
+            tui._persist_tui_saved_bridge_profile(Path.cwd(), setup, language="en")
+        saved = store.return_value.put.call_args.args[0]
+        self.assertEqual(saved.access_profile, AccessProfile.WORKSPACE_WRITE)
 
         # Parse the generated argv back through the same parser the bridge
         # subprocess uses, so the test proves the capability gate would now
         # pass on the real launched process (not just on a hand-built config).
         from karox.cli import _parser
-        argv = list(launch.argv)
+        from karox.web_bridge_launcher import WebBridgeConnectConfig, _bridge_argv
+
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            port=9901,
+            tools=tuple(saved.tools),
+            access_profile=saved.access_profile,
+            tunnel="cloudflare",
+        )
+        argv = list(
+            _bridge_argv(config, session_id="e2e", public_url="https://e2e.example")
+        )
         # strip the interpreter + "-m karox.cli" prefix argparse never sees
         while argv and argv[0] != "bridge":
             argv.pop(0)
         args = _parser().parse_args(argv)
         self.assertEqual(args.command, "bridge")
-        self.assertEqual(args.bridge_command, "connect")
-        self.assertTrue(args.write)
+        self.assertEqual(args.bridge_command, "serve")
         self.assertIn("karox.browser.open", args.tool)
 
         # Build the effective session capabilities from the selected tools and
@@ -250,11 +268,18 @@ class TuiToCapabilitiesEndToEndTests(unittest.TestCase):
             ("karox.repo.read_file", "karox.repo.write_file", "karox.browser.snapshot"),
             tunnel_provider="cloudflare",
         )
-        launch = tui._managed_web_bridge_launch(Path.cwd(), setup)
-        self.assertIn("--write", launch.argv)
-        self.assertNotIn("karox.browser.open", launch.argv)
-        self.assertNotIn("karox.browser.click", launch.argv)
-        self.assertIn("karox.browser.snapshot", launch.argv)
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError(
+                "saved bridge profile does not exist: test"
+            )
+            tui._persist_tui_saved_bridge_profile(Path.cwd(), setup, language="en")
+        saved = store.return_value.put.call_args.args[0]
+        self.assertEqual(saved.access_profile, AccessProfile.WORKSPACE_WRITE)
+        self.assertNotIn("karox.browser.open", saved.tools)
+        self.assertNotIn("karox.browser.click", saved.tools)
+        self.assertIn("karox.browser.snapshot", saved.tools)
 
 
 if __name__ == "__main__":
