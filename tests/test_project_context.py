@@ -12,6 +12,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 from karox.project_context import (
@@ -172,6 +173,168 @@ class ProjectContextTests(unittest.TestCase):
                 context = discover_project_context(self.repository)
 
                 self.assertEqual([item.path for item in context.sources], [name])
+
+    def test_task_goal_adds_a_compact_automatic_project_map(self) -> None:
+        inspection = {
+            "likely_change_points": [{"path": "src/app.py"}, {"path": "src/router.py"}],
+            "relevant_tests": [{"path": "tests/test_router.py"}],
+            "relevant_docs": [{"path": "docs/routing.md"}],
+            "summary": {"files_considered": 240, "matches": 19},
+            "artifact_id": "art-map",
+            "cache_hit": True,
+        }
+        with (
+            patch("karox.project_context.ArtifactStore"),
+            patch("karox.project_context.RepositoryContextEngine") as engine,
+        ):
+            engine.return_value.inspect.return_value = inspection
+            context = discover_project_context(
+                self.repository,
+                goal="fix provider routing",
+                session_id="session-map",
+            )
+
+        self.assertIn("<project-map>", context.prompt_suffix)
+        self.assertIn("src/router.py", context.prompt_suffix)
+        self.assertIn("tests/test_router.py", context.prompt_suffix)
+        self.assertIn("Do not re-scan the whole repository", context.prompt_suffix)
+        engine.return_value.inspect.assert_called_once_with(
+            "fix provider routing", "focused", include_dependency_hints=False
+        )
+
+    def test_recursive_context_auto_expands_a_complex_map_once(self) -> None:
+        initial = {
+            "likely_change_points": [
+                {"path": "src/karox/agent.py"},
+                {"path": "src/karox/project_context.py"},
+                {"path": "src/karox/repo_context.py"},
+                {"path": "src/karox/routing.py"},
+                {"path": "src/karox/providers.py"},
+                {"path": "src/karox/verification.py"},
+            ],
+            "relevant_tests": [{"path": "tests/test_agent.py"}],
+            "relevant_docs": [],
+            "dependency_hints": {
+                "implementation": ["src/karox/smart_stop.py"],
+                "tests": ["tests/test_client_capabilities.py"],
+                "edge_count": 4,
+            },
+            "summary": {"files_considered": 40, "matches": 30},
+            "artifact_id": "art-root",
+            "cache_hit": False,
+        }
+        with (
+            patch("karox.project_context.ArtifactStore"),
+            patch("karox.project_context.RepositoryContextEngine") as engine,
+        ):
+            engine.return_value.inspect.return_value = initial
+            context = discover_project_context(
+                self.repository,
+                goal="improve a complex coding-agent flow",
+                session_id="session-recursive",
+                recursive_context="auto",
+            )
+
+        self.assertIn('<recursive-context depth="1">', context.prompt_suffix)
+        self.assertIn("src/karox/smart_stop.py", context.prompt_suffix)
+        self.assertIn("tests/test_client_capabilities.py", context.prompt_suffix)
+        recursive = context.project_map_metadata["recursive"]
+        self.assertTrue(recursive["enabled"])
+        self.assertEqual(recursive["depth"], 1)
+        self.assertEqual(recursive["strategy"], "dependency_graph")
+        self.assertEqual(recursive["edge_count"], 4)
+        engine.return_value.inspect.assert_called_once_with(
+            "improve a complex coding-agent flow",
+            "focused",
+            include_dependency_hints=True,
+        )
+        self.assertTrue(context.to_dict()["project_map"]["recursive"]["enabled"])
+
+    def test_recursive_context_stays_off_by_default_for_speed(self) -> None:
+        initial = {
+            "likely_change_points": [
+                {"path": f"src/module_{index}.py"} for index in range(6)
+            ],
+            "relevant_tests": [],
+            "relevant_docs": [],
+            "dependency_hints": {
+                "implementation": ["src/neighbor.py"],
+                "tests": ["tests/test_neighbor.py"],
+                "edge_count": 2,
+            },
+            "summary": {"files_considered": 100, "matches": 50},
+            "artifact_id": "art-root",
+            "cache_hit": False,
+        }
+        with (
+            patch("karox.project_context.ArtifactStore"),
+            patch("karox.project_context.RepositoryContextEngine") as engine,
+        ):
+            engine.return_value.inspect.return_value = initial
+            context = discover_project_context(
+                self.repository,
+                goal="complex repository task",
+                session_id="session-default-off",
+            )
+
+        self.assertNotIn("<recursive-context", context.prompt_suffix)
+        self.assertFalse(context.project_map_metadata["recursive"]["enabled"])
+        self.assertEqual(context.project_map_metadata["recursive"]["mode"], "off")
+        engine.return_value.inspect.assert_called_once_with(
+            "complex repository task", "focused", include_dependency_hints=False
+        )
+
+    def test_research_mode_keeps_the_fast_root_map_and_skips_broad_dependency_index(self) -> None:
+        initial = {
+            "likely_change_points": [{"path": "src/karox/agent.py"}],
+            "relevant_tests": [{"path": "tests/test_agent.py"}],
+            "relevant_docs": [],
+            "summary": {"files_considered": 40, "matches": 30},
+            "artifact_id": "art-root",
+            "cache_hit": False,
+        }
+        with (
+            patch("karox.project_context.ArtifactStore"),
+            patch("karox.project_context.RepositoryContextEngine") as engine,
+        ):
+            engine.return_value.inspect.return_value = initial
+            context = discover_project_context(
+                self.repository,
+                goal="research a complex coding task",
+                session_id="session-research",
+                recursive_context="research",
+            )
+
+        self.assertNotIn("<recursive-context", context.prompt_suffix)
+        engine.return_value.inspect.assert_called_once_with(
+            "research a complex coding task",
+            "focused",
+            include_dependency_hints=False,
+        )
+
+    def test_project_map_loads_relevant_nested_instructions(self) -> None:
+        scoped = self.repository / "src" / "payments"
+        unrelated = self.repository / "src" / "ui"
+        scoped.mkdir(parents=True)
+        unrelated.mkdir(parents=True)
+        (scoped / "AGENTS.md").write_text("payments-only rule", encoding="utf-8")
+        (unrelated / "AGENTS.md").write_text("ui-only rule", encoding="utf-8")
+        inspection = {
+            "likely_change_points": [{"path": "src/payments/service.py"}],
+            "relevant_tests": [], "relevant_docs": [],
+            "summary": {"files_considered": 10, "matches": 3},
+            "artifact_id": "art-map", "cache_hit": False,
+        }
+        with patch("karox.project_context.ArtifactStore"), patch(
+            "karox.project_context.RepositoryContextEngine"
+        ) as engine:
+            engine.return_value.inspect.return_value = inspection
+            context = discover_project_context(
+                self.repository, goal="fix payments", session_id="session-map"
+            )
+        self.assertIn("payments-only rule", context.instructions)
+        self.assertNotIn("ui-only rule", context.instructions)
+        self.assertIn("src/payments/AGENTS.md", [item.path for item in context.sources])
 
     def test_the_report_payload_names_what_was_read_and_what_was_refused(self) -> None:
         self.write("AGENTS.md", "a" * (32 * 1024 + 10))
