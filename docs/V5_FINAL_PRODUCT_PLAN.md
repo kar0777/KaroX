@@ -125,6 +125,26 @@ Local commits after each green subsystem. Checkpoint before any compaction.
 - 2026-08-20: P0.1 KaroXMemory + P0.2 karox.memory.* protocol landed (commits 9698b61/3ec3180);
   cross-client recall proven by acceptance test without shared transcripts.
 - 2026-08-20: P0.3 ProjectFactMap landed, bootstrap now returns the onboarding digest (commit 1aa718e).
+- 2026-08-20 (pass 3, live): Unicode/Cyrillic memory retrieval fixed (NFKC+casefold, ё→е, snake_case
+  key parts, deterministic multilingual alias map, exact/key boosts); Russian and mixed-language
+  queries now reach USER memory under the same budget. RU/mixed regression suite added.
+- 2026-08-20 (pass 3, live): stale-client catalog handling: stateless wire cannot deliver
+  tools/list_changed (listChanged honestly false), so tool_not_exposed now answers with the one
+  correct fix: reconnect this client, same bridge/credential/URL; upgrade-path regressions added.
+- 2026-08-20 (pass 3): P1.5 landed (deterministic core/task/memory/browser/devserver/admin catalog
+  groups, exposed in diagnostics). P1.4 landed as policy module (adaptive/concise/standard/detailed/
+  learning renderer over TurnReport; failures/warnings survive every mode; measured >40% concise
+  reduction); full native-turn narration wiring remains a bounded follow-up.
+- 2026-08-20 (pass 3): P1 decisions recorded: P1.1 defer (contract live-proven by 3 clients on one
+  bridge; first-class model + migration exceeds pass budget and is not in the P1.3/4/5-first order);
+  P1.2 defer to POST-V5 (High/High/Medium security migration, minimal-safe subset not reachable in
+  this pass); P1.3 defer (desktop TUI work; UI verification needs the same human seat as the pending
+  Ctrl+W smoke); P1.6/P1.7 defer within frozen order (P1.3/4/5 first; budget spent on P0-grade
+  Cyrillic fix and stale-catalog handling).
+- 2026-08-20 (pass 3): v5 release-contract gate wrapped in pytest (test_v5_release_contract.py), so
+  the contract runs machine-side on every approved test surface; coverage/RC checksums remain with
+  canonical CI (quality.yml/release.yml) or a profile allowlist extension at the next owner-approved
+  restart -- the hosted policy correctly refuses non-allowlisted argv.
 - Remaining before RC: live exposure of the new catalogue (saved-profile upgrade + canonical bridge
   restart), Ctrl+W multi-project UI smoke, Luna provider smoke, cross-client live memory demo,
   full-suite/coverage/wheel gates, docs truthfulness pass.

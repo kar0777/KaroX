@@ -5,6 +5,31 @@ All notable changes to KaroX 5 are documented here. The format follows
 
 ## [5.0.0-dev] — Unreleased
 
+### Release pass 3 live continuation (2026-08-20, evening)
+- **Unicode/Cyrillic memory retrieval**: NFKC + casefold normalization with
+  ё→е collapse, snake_case key parts as tokens, and a small deterministic
+  multilingual alias map (name/preference/user concepts) with exact-key and
+  key-overlap boosts. "Как меня зовут?", "МОЁ ИМЯ?", "what is my name?" and
+  mixed-language queries now retrieve the same USER memory under the same
+  retrieval budget. Russian/mixed regression suite added.
+- **Stale-client catalog handling**: the stateless MCP wire cannot deliver
+  `notifications/tools/list_changed`, so a call naming a tool outside the
+  current catalog now answers with the one correct fix -- reconnect this
+  client (same bridge, same credential, same URL) -- and, when the cached
+  catalog is known, the exact count of newly available tools. Regressions
+  cover the schema-snapshot upgrade path and both tool-name spellings.
+- **P1.5 tool catalog economy**: deterministic core/task/memory/browser/
+  devserver/admin groups as a pure function of the tool name, exposed under
+  `tool_catalog.groups` in bridge diagnostics; equal catalogs render
+  byte-identical payloads.
+- **P1.4 adaptive/concise output policy** (module): TurnReport renderer with
+  adaptive/concise/standard/detailed/learning modes and progressive
+  disclosure; failures and warnings survive every mode by contract; measured
+  >40% character reduction on verbose green reports.
+- **Release contract machine-side**: `scripts/check_v5_release.py` now runs
+  in-process through pytest (`tests/test_v5_release_contract.py`) on every
+  approved test surface.
+
 ### Release pass 3: Universal memory, project intelligence, quality economy (2026-08-20)
 - **Universal memory layer** (`karox.memory`): USER/PROJECT/WORKSTREAM/SESSION
   scoped local store — inspectable, forgettable, credential-shaped content
