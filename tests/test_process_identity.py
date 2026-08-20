@@ -28,6 +28,7 @@ from karox.process_identity import (
     capture_process_identity,
     executable_digest,
     owner_digest,
+    process_is_running,
     read_process_create_time_ns,
     verify_process_identity,
 )
@@ -182,6 +183,7 @@ class ProcessIdentityVerifyTests(unittest.TestCase):
 
 class PlatformReaderTests(unittest.TestCase):
     def test_own_process_creation_time_is_stable_or_honestly_unavailable(self) -> None:
+        self.assertTrue(process_is_running(os.getpid()))
         first = read_process_create_time_ns(os.getpid())
         second = read_process_create_time_ns(os.getpid())
         self.assertEqual(first, second)
