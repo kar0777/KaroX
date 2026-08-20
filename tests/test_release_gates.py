@@ -250,5 +250,13 @@ class CheckTestCountTests(unittest.TestCase):
         )
 
 
+class SupportBundleConfidentialityTests(unittest.TestCase):
+    """The support ZIP is diagnostics, never a transcript or credential dump."""
+
+    def test_adversarial_support_bundle_is_fail_closed(self) -> None:
+        support_gate = _load_gate("test_admin_cli")
+        support_gate.test_support_bundle_confidentiality()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
