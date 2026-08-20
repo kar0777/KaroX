@@ -5,6 +5,27 @@ All notable changes to KaroX 5 are documented here. The format follows
 
 ## [5.0.0-dev] — Unreleased
 
+### Release pass 3: Universal memory, project intelligence, quality economy (2026-08-20)
+- **Universal memory layer** (`karox.memory`): USER/PROJECT/WORKSTREAM/SESSION
+  scoped local store — inspectable, forgettable, credential-shaped content
+  refused, keyed upserts, TTL expiry, deterministic budgeted recall,
+  source-hash revalidation.
+- **Memory protocol for every client**: `karox.memory.remember/recall/context/
+  list/forget` served by the autonomy runtime and registered in the default
+  web bundle, CLI bundle completion, TUI read family, and capability
+  negotiation. Cross-client recall proven without shared transcripts.
+- **Project fact map**: deterministic local onboarding facts with evidence
+  hashes (project type, build/test commands, package manager, entrypoints,
+  languages) plus AGENTS.md/CLAUDE.md/.cursorrules ingestion and incremental
+  refresh; `karox.task.bootstrap` now returns the compact digest.
+- **Quality economy wired, not asserted**: the native agent turn now drives
+  StablePrefixCache (prefix-hash-aware provider cache keys),
+  ToolSchemaDeduplicator (advertised vs unique schema bytes), ReadCache
+  (repeated unchanged reads), CostLedger (every round trip) and a
+  shadow-mode CostGovernor; `task.execute_plan` reports counted
+  round-trips-avoided batch economy. Acceptance tests assert the production
+  paths invoke the stack.
+
 ### Phase 0: Safe Bridge Recovery
 - **Secret-safe credential rotation**: `karox bridge credential rotate-key`
   no longer prints the secret to stdout. New `--copy` flag delivers
