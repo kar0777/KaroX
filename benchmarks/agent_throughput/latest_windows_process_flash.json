@@ -1,0 +1,104 @@
+{
+  "duration_seconds": 30.0,
+  "poll_ms": 25.0,
+  "new_processes": [
+    {
+      "pid": 19356,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 914.8
+    },
+    {
+      "pid": 24880,
+      "name": "conhost.exe",
+      "parent_pid": 19356,
+      "parent_name": "tailscale.exe",
+      "first_seen_ms": 945.7
+    },
+    {
+      "pid": 25172,
+      "name": "chrome.exe",
+      "parent_pid": 12816,
+      "parent_name": "chrome.exe",
+      "first_seen_ms": 4890.9
+    },
+    {
+      "pid": 13396,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 5979.7
+    },
+    {
+      "pid": 23152,
+      "name": "conhost.exe",
+      "parent_pid": 13396,
+      "parent_name": "tailscale.exe",
+      "first_seen_ms": 6010.5
+    },
+    {
+      "pid": 3320,
+      "name": "audiodg.exe",
+      "parent_pid": 3084,
+      "parent_name": "svchost.exe",
+      "first_seen_ms": 8215.9
+    },
+    {
+      "pid": 21764,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 11059.8
+    },
+    {
+      "pid": 680,
+      "name": "conhost.exe",
+      "parent_pid": 21764,
+      "parent_name": "tailscale.exe",
+      "first_seen_ms": 11090.7
+    },
+    {
+      "pid": 3208,
+      "name": "ipconfig.exe",
+      "parent_pid": 5064,
+      "parent_name": "tailscaled.exe",
+      "first_seen_ms": 13430.5
+    },
+    {
+      "pid": 24876,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 16143.6
+    },
+    {
+      "pid": 4616,
+      "name": "conhost.exe",
+      "parent_pid": 24876,
+      "parent_name": "tailscale.exe",
+      "first_seen_ms": 16175.1
+    },
+    {
+      "pid": 23044,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 21195.7
+    },
+    {
+      "pid": 12040,
+      "name": "conhost.exe",
+      "parent_pid": 23044,
+      "parent_name": "tailscale.exe",
+      "first_seen_ms": 21226.6
+    },
+    {
+      "pid": 3644,
+      "name": "tailscale.exe",
+      "parent_pid": 13892,
+      "parent_name": "python.exe",
+      "first_seen_ms": 26289.9
+    }
+  ]
+}

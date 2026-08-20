@@ -1,0 +1,15 @@
+{
+  "benchmark": "gpt-web-tool-telemetry-overhead",
+  "isolation": {
+    "disposable_repository": true,
+    "in_process_asgi": true,
+    "live_bridge_touched": false
+  },
+  "repeats_per_round": 50,
+  "rounds": 3,
+  "schema_version": 1,
+  "telemetry_off_per_call_ms": 6.9575,
+  "telemetry_on_per_call_ms": 15.6934,
+  "telemetry_overhead_ms": 8.7359,
+  "telemetry_overhead_pct_of_on": 55.7
+}

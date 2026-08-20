@@ -1,0 +1,32 @@
+{
+  "median_ms": 197.706,
+  "repository": "live-current-repository-read-only",
+  "samples": [
+    {
+      "dirty_count": 219,
+      "elapsed_ms": 197.706,
+      "revision": "1b013500007927b8439fbb09f6db90f9adb2cd36"
+    },
+    {
+      "dirty_count": 219,
+      "elapsed_ms": 196.861,
+      "revision": "1b013500007927b8439fbb09f6db90f9adb2cd36"
+    },
+    {
+      "dirty_count": 219,
+      "elapsed_ms": 198.414,
+      "revision": "1b013500007927b8439fbb09f6db90f9adb2cd36"
+    },
+    {
+      "dirty_count": 219,
+      "elapsed_ms": 199.255,
+      "revision": "1b013500007927b8439fbb09f6db90f9adb2cd36"
+    },
+    {
+      "dirty_count": 219,
+      "elapsed_ms": 195.167,
+      "revision": "1b013500007927b8439fbb09f6db90f9adb2cd36"
+    }
+  ],
+  "schema_version": 1
+}

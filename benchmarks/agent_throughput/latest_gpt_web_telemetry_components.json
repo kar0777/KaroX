@@ -1,0 +1,21 @@
+{
+  "benchmark": "gpt-web-tool-telemetry-components",
+  "estimated_revision_reads_ms": 0.7743,
+  "estimated_sqlite_record_ms": 0.1696,
+  "estimated_trace_compute_ms": 0.2622,
+  "isolation": {
+    "disposable_repository": true,
+    "in_process_asgi": true,
+    "live_bridge_touched": false
+  },
+  "per_call_ms": {
+    "off": 6.7244,
+    "on": 8.085,
+    "on_no_sqlite_record": 7.9153,
+    "on_static_revision": 7.3106,
+    "on_static_revision_no_record": 6.9866
+  },
+  "repeats_per_round": 40,
+  "rounds": 3,
+  "schema_version": 1
+}

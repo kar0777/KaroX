@@ -1,0 +1,14 @@
+{
+  "benchmark": "gpt-web-proxy-descriptor-hot-path",
+  "calls": 100,
+  "descriptor_calls": 100,
+  "execute_calls": 100,
+  "isolation": {
+    "in_process_asgi": true,
+    "live_bridge_touched": false,
+    "saved_profile_touched": false
+  },
+  "per_call_ms": 2.2233,
+  "schema_version": 1,
+  "wall_ms": 222.33
+}

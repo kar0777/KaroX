@@ -1,0 +1,80 @@
+{
+  "benchmark": "search-backend-cold-crossover",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "schema_version": 1,
+  "sizes": {
+    "100": {
+      "git_grep_median_ms": 104.217,
+      "git_samples_ms": [
+        123.434,
+        104.217,
+        100.43
+      ],
+      "small_samples_ms": [
+        111.451,
+        108.062,
+        113.006
+      ],
+      "small_tree_median_ms": 111.451
+    },
+    "150": {
+      "git_grep_median_ms": 110.545,
+      "git_samples_ms": [
+        110.545,
+        111.268,
+        105.763
+      ],
+      "small_samples_ms": [
+        169.342,
+        164.028,
+        170.539
+      ],
+      "small_tree_median_ms": 169.342
+    },
+    "200": {
+      "git_grep_median_ms": 103.576,
+      "git_samples_ms": [
+        103.576,
+        100.488,
+        107.668
+      ],
+      "small_samples_ms": [
+        219.793,
+        220.374,
+        218.605
+      ],
+      "small_tree_median_ms": 219.793
+    },
+    "250": {
+      "git_grep_median_ms": 99.565,
+      "git_samples_ms": [
+        103.971,
+        97.073,
+        99.565
+      ],
+      "small_samples_ms": [
+        328.315,
+        270.661,
+        248.299
+      ],
+      "small_tree_median_ms": 270.661
+    },
+    "40": {
+      "git_grep_median_ms": 109.946,
+      "git_samples_ms": [
+        109.946,
+        118.188,
+        106.544
+      ],
+      "small_samples_ms": [
+        49.3,
+        48.353,
+        51.255
+      ],
+      "small_tree_median_ms": 49.3
+    }
+  }
+}

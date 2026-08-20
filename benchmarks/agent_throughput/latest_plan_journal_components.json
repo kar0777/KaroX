@@ -1,0 +1,58 @@
+{
+  "benchmark": "plan-journal-components",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "median": {
+    "atomic_json_ms": 4.334,
+    "checksum_ms": 0.082,
+    "journal_mutate_ms": 9.717,
+    "journal_save_ms": 3.115,
+    "redact_ms": 0.266,
+    "wall_ms": 34.456
+  },
+  "samples": [
+    {
+      "atomic_json_ms": 4.52919999952428,
+      "checksum_ms": 0.08459999662591144,
+      "journal_mutate_ms": 9.861,
+      "journal_save_ms": 3.115,
+      "redact_ms": 0.2716000017244369,
+      "wall_ms": 34.041
+    },
+    {
+      "atomic_json_ms": 4.112800001166761,
+      "checksum_ms": 0.08189999789465219,
+      "journal_mutate_ms": 9.717,
+      "journal_save_ms": 2.696,
+      "redact_ms": 0.2657000004546717,
+      "wall_ms": 33.439
+    },
+    {
+      "atomic_json_ms": 4.623200002242811,
+      "checksum_ms": 0.10140000813407823,
+      "journal_mutate_ms": 9.308,
+      "journal_save_ms": 3.463,
+      "redact_ms": 0.3097000080742873,
+      "wall_ms": 35.519
+    },
+    {
+      "atomic_json_ms": 4.3337000024621375,
+      "checksum_ms": 0.08189999789465219,
+      "journal_mutate_ms": 10.258,
+      "journal_save_ms": 3.136,
+      "redact_ms": 0.26249999791616574,
+      "wall_ms": 34.456
+    },
+    {
+      "atomic_json_ms": 4.305300004489254,
+      "checksum_ms": 0.0785000083851628,
+      "journal_mutate_ms": 9.553,
+      "journal_save_ms": 2.717,
+      "redact_ms": 0.26140000409213826,
+      "wall_ms": 34.661
+    }
+  ],
+  "schema_version": 1
+}

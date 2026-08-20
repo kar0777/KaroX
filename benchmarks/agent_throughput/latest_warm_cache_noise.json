@@ -1,0 +1,33 @@
+{
+  "baseline": {
+    "changed": true,
+    "failed": false,
+    "identity": {
+      "dirty": [],
+      "revision": "bebdae189dd1c8f2f7b11d879d37289b7e905724"
+    },
+    "paths": [
+      ".git\\objects"
+    ],
+    "quiet": false
+  },
+  "guards": [
+    {
+      "changed": false,
+      "closed": true,
+      "failed": false,
+      "paths": []
+    },
+    {
+      "changed": false,
+      "closed": false,
+      "failed": false,
+      "paths": []
+    }
+  ],
+  "plan": {
+    "error": null,
+    "ok": true
+  },
+  "schema_version": 1
+}

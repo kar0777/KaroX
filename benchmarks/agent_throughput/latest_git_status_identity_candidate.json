@@ -1,0 +1,34 @@
+{
+  "benchmark": "git-status-fast-identity-no-renames",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "results": {
+    "clean": {
+      "change_pct": 1.0,
+      "default_median_ms": 52.878,
+      "no_renames_median_ms": 53.429,
+      "paths": []
+    },
+    "dirty": {
+      "change_pct": -2.4,
+      "default_median_ms": 54.335,
+      "no_renames_median_ms": 53.042,
+      "paths": [
+        "scratch/",
+        "tracked.txt"
+      ]
+    },
+    "rename": {
+      "change_pct": -2.3,
+      "default_median_ms": 54.085,
+      "no_renames_median_ms": 52.816,
+      "paths": [
+        "renamed.txt",
+        "tracked.txt"
+      ]
+    }
+  },
+  "schema_version": 1
+}

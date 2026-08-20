@@ -1,0 +1,215 @@
+{
+  "benchmark": "core-read-search-component-breakdown",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "median_wall_ms": 15.5763,
+  "rows": [
+    {
+      "calls": [
+        {
+          "duration_ms": 9.903,
+          "result_bytes": 1049,
+          "tool": "karox.repo.search"
+        },
+        {
+          "duration_ms": 2.997,
+          "result_bytes": 593,
+          "tool": "karox.repo.read_file"
+        },
+        {
+          "duration_ms": 2.723,
+          "result_bytes": 695,
+          "tool": "karox.repo.read_file"
+        }
+      ],
+      "components": {
+        "core._apply_smart_stop": {
+          "count": 3,
+          "median_ms": 0.1386,
+          "total_ms": 0.4191
+        },
+        "core._audit": {
+          "count": 6,
+          "median_ms": 0.5438,
+          "total_ms": 3.5659
+        },
+        "core._load_session": {
+          "count": 3,
+          "median_ms": 0.8213,
+          "total_ms": 2.4458
+        },
+        "core._validate_arguments": {
+          "count": 3,
+          "median_ms": 0.0064,
+          "total_ms": 0.0202
+        },
+        "handler:repo.read_file": {
+          "count": 2,
+          "median_ms": 0.7829,
+          "total_ms": 1.5657
+        },
+        "handler:repo.search": {
+          "count": 1,
+          "median_ms": 7.3602,
+          "total_ms": 7.3602
+        },
+        "policy.require": {
+          "count": 3,
+          "median_ms": 0.0084,
+          "total_ms": 0.0255
+        },
+        "sessions.load": {
+          "count": 3,
+          "median_ms": 0.2159,
+          "total_ms": 0.6484
+        },
+        "sessions.validate_repository": {
+          "count": 3,
+          "median_ms": 0.5872,
+          "total_ms": 1.7827
+        }
+      },
+      "iteration": 0,
+      "wall_ms": 15.6915
+    },
+    {
+      "calls": [
+        {
+          "duration_ms": 9.451,
+          "result_bytes": 1049,
+          "tool": "karox.repo.search"
+        },
+        {
+          "duration_ms": 3.137,
+          "result_bytes": 593,
+          "tool": "karox.repo.read_file"
+        },
+        {
+          "duration_ms": 2.734,
+          "result_bytes": 695,
+          "tool": "karox.repo.read_file"
+        }
+      ],
+      "components": {
+        "core._apply_smart_stop": {
+          "count": 3,
+          "median_ms": 0.1182,
+          "total_ms": 0.3609
+        },
+        "core._audit": {
+          "count": 6,
+          "median_ms": 0.5433,
+          "total_ms": 3.5
+        },
+        "core._load_session": {
+          "count": 3,
+          "median_ms": 0.7923,
+          "total_ms": 2.4167
+        },
+        "core._validate_arguments": {
+          "count": 3,
+          "median_ms": 0.0052,
+          "total_ms": 0.0173
+        },
+        "handler:repo.read_file": {
+          "count": 2,
+          "median_ms": 0.8818,
+          "total_ms": 1.7636
+        },
+        "handler:repo.search": {
+          "count": 1,
+          "median_ms": 7.0357,
+          "total_ms": 7.0357
+        },
+        "policy.require": {
+          "count": 3,
+          "median_ms": 0.0085,
+          "total_ms": 0.026
+        },
+        "sessions.load": {
+          "count": 3,
+          "median_ms": 0.2173,
+          "total_ms": 0.6657
+        },
+        "sessions.validate_repository": {
+          "count": 3,
+          "median_ms": 0.5748,
+          "total_ms": 1.7378
+        }
+      },
+      "iteration": 1,
+      "wall_ms": 15.3899
+    },
+    {
+      "calls": [
+        {
+          "duration_ms": 9.916,
+          "result_bytes": 1049,
+          "tool": "karox.repo.search"
+        },
+        {
+          "duration_ms": 2.925,
+          "result_bytes": 593,
+          "tool": "karox.repo.read_file"
+        },
+        {
+          "duration_ms": 2.67,
+          "result_bytes": 695,
+          "tool": "karox.repo.read_file"
+        }
+      ],
+      "components": {
+        "core._apply_smart_stop": {
+          "count": 3,
+          "median_ms": 0.1146,
+          "total_ms": 0.3493
+        },
+        "core._audit": {
+          "count": 6,
+          "median_ms": 0.5301,
+          "total_ms": 3.4886
+        },
+        "core._load_session": {
+          "count": 3,
+          "median_ms": 0.7995,
+          "total_ms": 2.3982
+        },
+        "core._validate_arguments": {
+          "count": 3,
+          "median_ms": 0.0051,
+          "total_ms": 0.0163
+        },
+        "handler:repo.read_file": {
+          "count": 2,
+          "median_ms": 0.7865,
+          "total_ms": 1.5731
+        },
+        "handler:repo.search": {
+          "count": 1,
+          "median_ms": 7.4585,
+          "total_ms": 7.4585
+        },
+        "policy.require": {
+          "count": 3,
+          "median_ms": 0.0105,
+          "total_ms": 0.0322
+        },
+        "sessions.load": {
+          "count": 3,
+          "median_ms": 0.2203,
+          "total_ms": 0.6472
+        },
+        "sessions.validate_repository": {
+          "count": 3,
+          "median_ms": 0.5747,
+          "total_ms": 1.7373
+        }
+      },
+      "iteration": 2,
+      "wall_ms": 15.5763
+    }
+  ],
+  "schema_version": 1
+}

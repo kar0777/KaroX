@@ -1,0 +1,458 @@
+{
+  "plans": [
+    {
+      "current_operation": null,
+      "error_code": "delegate_error",
+      "file": "52882648c10be0bb0bd5b393605153ae458d16f810e7b54b3da715113a799ecd.json",
+      "operations": {
+        "restart2-invalid-read": "failed"
+      },
+      "started_at": 1786462191.0528324,
+      "status": "blocked",
+      "updated_at": 1786462192.1776643
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "0baa909173d9d377c9e5c220cdeb9e2cd1442c86aa28d2155a0753e2c1814288.json",
+      "operations": {
+        "restart2-read": "success",
+        "restart2-search": "success"
+      },
+      "started_at": 1786462049.0916135,
+      "status": "complete",
+      "updated_at": 1786462050.2894866
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "ce7d33d88ac987e838dc2ad7de3fbba7c14e541736cc9c3688d00d0cfc43660f.json",
+      "operations": {},
+      "started_at": 1786460700.986732,
+      "status": "running",
+      "updated_at": 1786460700.9867322
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "09c061d2645f16685dd3e10bf9b9623a18ac2da0e862c21369dd5b4c7dcd21c5.json",
+      "operations": {
+        "dedup_tryai": "success"
+      },
+      "started_at": 1786445596.6307163,
+      "status": "complete",
+      "updated_at": 1786445623.0491364
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "965eb7355ccc69741fd6d474b609ebbc5efa63692543fa598881fd7591f6b9e3.json",
+      "operations": {
+        "dedup-lagora": "success"
+      },
+      "started_at": 1786441165.8243144,
+      "status": "complete",
+      "updated_at": 1786441191.1277606
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "ca2dc09b4f43cce06b2e3d517f1f7ae43d57ccd934f681e1e2124943455d5aee.json",
+      "operations": {
+        "dedup-relaycode": "success"
+      },
+      "started_at": 1786440704.5286765,
+      "status": "complete",
+      "updated_at": 1786440730.2659116
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "bf5437357b7d20e42d7afa4878ddee6de029f5ce2d7a428edec8f147d7865be5.json",
+      "operations": {
+        "dedup-snowflake-cortex": "success"
+      },
+      "started_at": 1786440447.1909444,
+      "status": "complete",
+      "updated_at": 1786440474.3745239
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "890b915ca8bf194ff3d994cc28b85ce97dedf6d4d9d4aaf2ba40e0a3b3ecea58.json",
+      "operations": {
+        "dedup-github-models": "success"
+      },
+      "started_at": 1786439999.5766478,
+      "status": "complete",
+      "updated_at": 1786440025.244562
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "7c0b4fe6f2d5cf311a5005cd63e57fa5a7b1e4a18239f15c3a5b4a54b476d08e.json",
+      "operations": {
+        "dedup-playcode": "success"
+      },
+      "started_at": 1786439699.9343762,
+      "status": "complete",
+      "updated_at": 1786439724.968692
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "9aa22cd71fdf4e71f8e1c1fbb250679f4e928ac3894e90233fcee698b3669cc3.json",
+      "operations": {
+        "dedup-codexapi-chatplus": "success"
+      },
+      "started_at": 1786439568.0101087,
+      "status": "complete",
+      "updated_at": 1786439593.733749
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "4cae23cbdcd174b64b13f4496371d94508ac208daa2462463ae0a3d30451e411.json",
+      "operations": {
+        "dedup-masidy": "success"
+      },
+      "started_at": 1786439305.3392336,
+      "status": "complete",
+      "updated_at": 1786439330.3243618
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "06981c7db2bbe06abbce4b061511c19f6040e719d8a2a0cd7115e751f04c424a.json",
+      "operations": {
+        "dedup-adal-exact": "success"
+      },
+      "started_at": 1786439068.661412,
+      "status": "complete",
+      "updated_at": 1786439095.2505336
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "2841215d26bbe714386a07eb18833b4ec104bf5aa2941a19d6f95a3a87b918f4.json",
+      "operations": {
+        "dedup-adal": "success"
+      },
+      "started_at": 1786439014.5253677,
+      "status": "complete",
+      "updated_at": 1786439040.4050608
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "11d0b80cb17fb83eb4e537129dcbc57d168d616d8b3424546837a93ceb733522.json",
+      "operations": {
+        "read-hosted-bridge": "success",
+        "read-plan-executor": "success",
+        "search-plan-executor": "success"
+      },
+      "started_at": 1786437818.6201518,
+      "status": "complete",
+      "updated_at": 1786437820.668849
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "4bda6629f86f7833d5ed7c352dfeac86c47eb64c2f7962f0aaca1853b1bc6c5e.json",
+      "operations": {
+        "restart-smoke-readme": "success"
+      },
+      "started_at": 1786437646.1302776,
+      "status": "complete",
+      "updated_at": 1786437646.844934
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "fb70102533d9cdd6dc5171cfdf6c33caa26f2e66601b13db0824dd554776dc33.json",
+      "operations": {
+        "post-upgrade-soak-search-only": "success"
+      },
+      "started_at": 1786427100.298206,
+      "status": "complete",
+      "updated_at": 1786427101.8263116
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "a6b6d5fd4907d06c67beabf496c6aab99a0d7cc43cbc0a3d0748465687838595.json",
+      "operations": {},
+      "started_at": 1786427090.1670997,
+      "status": "running",
+      "updated_at": 1786427090.1671
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "5fb91d6ce17c396fc0024a99827715dd7167dc8cd5be1179618be660fee6d5a1.json",
+      "operations": {
+        "soak-a-read1": "success",
+        "soak-a-read2": "success",
+        "soak-a-search": "success"
+      },
+      "started_at": 1786366698.6777828,
+      "status": "complete",
+      "updated_at": 1786366701.0481431
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "316ae1e4ef4c0f49e2f8455aed1f22649e712bb52326268f1d275ea5bd6d492b.json",
+      "operations": {
+        "stable-replay-read": "success",
+        "stable-replay-search": "success"
+      },
+      "started_at": 1786366571.2299404,
+      "status": "complete",
+      "updated_at": 1786366573.0622315
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "db299c783ffbc59a737711f1013e48bdec0002c660aa1da73ab9c47c03846a24.json",
+      "operations": {
+        "soak_read1": "success",
+        "soak_read2": "success",
+        "soak_read3": "success",
+        "soak_read4": "success",
+        "soak_search": "success"
+      },
+      "started_at": 1786365189.379947,
+      "status": "complete",
+      "updated_at": 1786365192.0884655
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "be7edbd198f07ecb300238b24d10754f0af70386d05861d43879f8a5ce38683c.json",
+      "operations": {
+        "probe_read_launcher": "success",
+        "probe_read_route_health": "success",
+        "probe_search": "success"
+      },
+      "started_at": 1786364473.016926,
+      "status": "complete",
+      "updated_at": 1786364475.3924603
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "465633d14b2e0bdac1a2ff6398bddd95bf58efefc794c57128589eb17ae80592.json",
+      "operations": {
+        "bench_search_gitgrep_final_retry": "success"
+      },
+      "started_at": 1786359792.6923125,
+      "status": "complete",
+      "updated_at": 1786359794.2915587
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "f2a3bbef9f4f966cc22a1bb6ca7b48910986eb88c2cedd79cff668a8dedc7b83.json",
+      "operations": {
+        "bench_search_fastpath_post_restart_retry": "success"
+      },
+      "started_at": 1786358809.863636,
+      "status": "complete",
+      "updated_at": 1786358853.9946203
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "05c4130f1b9a6518be0c531471169203d81dc375e9f08dde829856e02cd39b16.json",
+      "operations": {
+        "bench_search_only": "success"
+      },
+      "started_at": 1786357696.491534,
+      "status": "complete",
+      "updated_at": 1786357753.790586
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "b72b0a26eb3a283a543cbc94931706df46da637096e5f05ab39bb57136db24cf.json",
+      "operations": {
+        "bench_mix_read1": "success",
+        "bench_mix_read2": "success",
+        "bench_mix_search": "success"
+      },
+      "started_at": 1786357585.097286,
+      "status": "complete",
+      "updated_at": 1786357643.9284976
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "14353972fcae5d7a96a96470ebbb12f320eb3928188941004e7609ca20307000.json",
+      "operations": {
+        "bench3_read1": "success",
+        "bench3_read2": "success",
+        "bench3_read3": "success"
+      },
+      "started_at": 1786357557.3239267,
+      "status": "complete",
+      "updated_at": 1786357561.5509582
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "4f7fac48e0807329774b9a1a3a1a82ff1f0888e222a9145b0b4ee64d44449721.json",
+      "operations": {
+        "bench1_final_compact": "success"
+      },
+      "started_at": 1786357523.0045195,
+      "status": "complete",
+      "updated_at": 1786357525.3165402
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "0a8cbd8c55ec6aaf3182a3e2388d06da82a1ca96e5db5f445639efdeb4d593ad.json",
+      "operations": {
+        "read1": "success",
+        "read2": "success",
+        "search1": "success"
+      },
+      "started_at": 1786357191.819957,
+      "status": "complete",
+      "updated_at": 1786357197.3847163
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "5b05e6916fd26c4c7352d23a54bc7d74cdcdd2e013cf92dda69e2fae0614f3f6.json",
+      "operations": {
+        "read1": "success",
+        "read2": "success",
+        "read3": "success"
+      },
+      "started_at": 1786357174.8376534,
+      "status": "complete",
+      "updated_at": 1786357180.5268638
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "c7ad0fa18fc1eb0872ecc12f3137e804cf394efded987294d8d94dc5b8801222.json",
+      "operations": {
+        "bench1": "success"
+      },
+      "started_at": 1786357158.5730221,
+      "status": "complete",
+      "updated_at": 1786357161.330209
+    },
+    {
+      "current_operation": null,
+      "error_code": null,
+      "file": "8a1b17541ff86c143f0ac3d8ade268725c621fa8c2b1c254a7e3196713379e43.json",
+      "operations": {},
+      "started_at": 1786357144.252765,
+      "status": "running",
+      "updated_at": 1786357144.2527652
+    },
+    {
+      "current_operation": "run_plan_executor_tests",
+      "error_code": null,
+      "file": "e53e1aef6b6481b2338baf4f5bf414ca865bd7573b84f6b1e31ca0a237de406c.json",
+      "operations": {
+        "run_plan_executor_tests": "success"
+      },
+      "started_at": 1786356937.0108178,
+      "status": "complete",
+      "updated_at": 1786356964.9076834
+    },
+    {
+      "current_operation": "read_c_perf",
+      "error_code": null,
+      "file": "d5f1953b659274fffc1fea957d121d6d4b1fa22424b2c44341cb8e2432e2f5bc.json",
+      "operations": {
+        "read_a_perf": "success",
+        "read_b_perf": "success",
+        "read_c_perf": "success"
+      },
+      "started_at": 1786356738.8343449,
+      "status": "complete",
+      "updated_at": 1786356742.580746
+    },
+    {
+      "current_operation": "benchmark_read_jobs_final",
+      "error_code": null,
+      "file": "eca73d23e769b8a87afe799b8eecc05ffd57eda7e9136ef85d42052be1dd5fa0.json",
+      "operations": {
+        "benchmark_read_jobs_final": "success",
+        "benchmark_read_supervisor_final": "success",
+        "benchmark_search_final": "success"
+      },
+      "started_at": 1786356713.6323667,
+      "status": "complete",
+      "updated_at": 1786356718.9236321
+    },
+    {
+      "current_operation": "benchmark_one_read_final",
+      "error_code": null,
+      "file": "41eea618dab04f83c29250f5f00878a1f073197569dff6c586ffcd452584a506.json",
+      "operations": {
+        "benchmark_one_read_final": "success"
+      },
+      "started_at": 1786356699.5019972,
+      "status": "complete",
+      "updated_at": 1786356701.0052664
+    },
+    {
+      "current_operation": "benchmark_one_read_after_fast_revision",
+      "error_code": null,
+      "file": "045b1dc1a17e8065e95d66a9ed185d5b73cdb9e037cca82fbcbdd9b7c44218cb.json",
+      "operations": {
+        "benchmark_one_read_after_fast_revision": "success"
+      },
+      "started_at": 1786356203.8393555,
+      "status": "complete",
+      "updated_at": 1786356211.3530614
+    },
+    {
+      "current_operation": "baseline_one_read",
+      "error_code": null,
+      "file": "eb4666ac8694cc451b9c31a08a29a92f1eee1ab3fd33a7dcf5dd816ba6e8b05d.json",
+      "operations": {
+        "baseline_one_read": "success"
+      },
+      "started_at": 1786355675.0870776,
+      "status": "complete",
+      "updated_at": 1786355680.197785
+    },
+    {
+      "current_operation": "read_jobs",
+      "error_code": null,
+      "file": "898b20b9cfa5a0ca7b24def0780363f6696a90e5db701b23122953a67187d731.json",
+      "operations": {
+        "find_route_health": "success",
+        "read_jobs": "success",
+        "read_supervisor": "success"
+      },
+      "started_at": 1786355505.30538,
+      "status": "complete",
+      "updated_at": 1786355515.769263
+    },
+    {
+      "current_operation": "read_check_jobs",
+      "error_code": null,
+      "file": "b3c57e97976c0c28f74c5dcde4f3455282bcf23c42a170e8752020e3ddcdc069.json",
+      "operations": {
+        "read_check_jobs": "running",
+        "search_bridge_transport": "success",
+        "search_jobs": "success",
+        "search_resume": "success"
+      },
+      "started_at": 1786350939.5778904,
+      "status": "running",
+      "updated_at": 1786350996.3927555
+    }
+  ],
+  "schema_version": 1,
+  "session_id": "web-saved-877046fafcba4c7dfb81c6b0"
+}

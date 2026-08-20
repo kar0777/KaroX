@@ -1,0 +1,70 @@
+{
+  "benchmark": "parallel-search-cold-crossover",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "schema_version": 1,
+  "sizes": {
+    "100": {
+      "git_grep_median_ms": 92.008,
+      "git_samples_ms": [
+        97.114,
+        92.008,
+        91.845
+      ],
+      "parallel_8_median_ms": 29.895,
+      "parallel_samples_ms": [
+        32.345,
+        29.119,
+        29.895
+      ],
+      "semantic_match": true
+    },
+    "200": {
+      "git_grep_median_ms": 93.142,
+      "git_samples_ms": [
+        92.71,
+        93.457,
+        93.142
+      ],
+      "parallel_8_median_ms": 47.058,
+      "parallel_samples_ms": [
+        49.961,
+        46.749,
+        47.058
+      ],
+      "semantic_match": true
+    },
+    "350": {
+      "git_grep_median_ms": 96.402,
+      "git_samples_ms": [
+        96.402,
+        98.902,
+        96.145
+      ],
+      "parallel_8_median_ms": 87.269,
+      "parallel_samples_ms": [
+        92.005,
+        87.269,
+        86.524
+      ],
+      "semantic_match": true
+    },
+    "500": {
+      "git_grep_median_ms": 104.383,
+      "git_samples_ms": [
+        104.383,
+        100.88,
+        105.919
+      ],
+      "parallel_8_median_ms": 132.43,
+      "parallel_samples_ms": [
+        129.409,
+        144.256,
+        132.43
+      ],
+      "semantic_match": true
+    }
+  }
+}

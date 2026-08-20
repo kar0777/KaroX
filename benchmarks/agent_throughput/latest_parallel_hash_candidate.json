@@ -1,0 +1,9 @@
+{
+  "benchmark": "repo-inspect-parallel-content-hash-candidate",
+  "change_pct": -52.0,
+  "current_median_ms": 443.962,
+  "noise_files": 250,
+  "parallel_median_ms": 212.955,
+  "samples": 3,
+  "schema_version": 1
+}

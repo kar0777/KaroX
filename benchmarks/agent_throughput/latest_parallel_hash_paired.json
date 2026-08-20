@@ -1,0 +1,24 @@
+{
+  "benchmark": "repo-inspect-parallel-hash-paired",
+  "noise_files": 250,
+  "samples_per_strategy": 3,
+  "schema_version": 1,
+  "summary": {
+    "parallel": {
+      "cold": 513.933,
+      "cold_change_pct": -71.2,
+      "identity_cold": 225.791,
+      "identity_cold_change_pct": -54.2,
+      "identity_warm": 208.13,
+      "identity_warm_change_pct": -17.0,
+      "warm": 219.489,
+      "warm_change_pct": -16.0
+    },
+    "sequential": {
+      "cold": 1785.44,
+      "identity_cold": 493.059,
+      "identity_warm": 250.621,
+      "warm": 261.37
+    }
+  }
+}

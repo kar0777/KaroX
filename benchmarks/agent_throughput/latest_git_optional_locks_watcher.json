@@ -1,0 +1,42 @@
+{
+  "benchmark": "git-status-no-optional-locks-watcher-noise",
+  "clean_default": {
+    "error": 0,
+    "events": [
+      {
+        "action": 3,
+        "path": ".git\\objects"
+      }
+    ],
+    "status_ms": 57.944,
+    "stdout_bytes": 0
+  },
+  "clean_no_optional_locks": {
+    "error": 0,
+    "events": [],
+    "status_ms": 55.911,
+    "stdout_bytes": 0
+  },
+  "dirty_default": {
+    "error": 0,
+    "events": [
+      {
+        "action": 1,
+        "path": ".git\\index.lock"
+      }
+    ],
+    "status_ms": 58.479,
+    "stdout_bytes": 15
+  },
+  "dirty_no_optional_locks": {
+    "error": 0,
+    "events": [],
+    "status_ms": 55.577,
+    "stdout_bytes": 15
+  },
+  "isolation": {
+    "live_bridge_touched": false,
+    "temporary_repository": true
+  },
+  "schema_version": 1
+}

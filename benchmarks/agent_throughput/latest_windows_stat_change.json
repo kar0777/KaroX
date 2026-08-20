@@ -1,0 +1,16 @@
+{
+  "after": {
+    "birthtime_ns": 1786448905472010600,
+    "ctime_ns": 1786448905472010600,
+    "mtime_ns": 1786448905473012000,
+    "size": 6
+  },
+  "before": {
+    "birthtime_ns": 1786448905472010600,
+    "ctime_ns": 1786448905472010600,
+    "mtime_ns": 1786448905473012000,
+    "size": 6
+  },
+  "birthtime_changed": false,
+  "ctime_changed": false
+}

@@ -1,0 +1,48 @@
+{
+  "benchmark": "windows-unborn-repository-change-guard-noise",
+  "isolation": {
+    "live_bridge_touched": false,
+    "temporary_repository": true
+  },
+  "schema_version": 1,
+  "stages": {
+    "after_fast_identity": {
+      "changed": true,
+      "changed_paths": [
+        "src"
+      ],
+      "failed": false,
+      "ignored_git_events": 3
+    },
+    "after_finish": {
+      "changed": true,
+      "changed_paths": [
+        "src"
+      ],
+      "failed": false,
+      "ignored_git_events": 3
+    },
+    "after_git_control": {
+      "changed": true,
+      "changed_paths": [
+        "src"
+      ],
+      "failed": false,
+      "ignored_git_events": 3
+    },
+    "after_read": {
+      "changed": true,
+      "changed_paths": [
+        "src"
+      ],
+      "failed": false,
+      "ignored_git_events": 3
+    },
+    "started": {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "ignored_git_events": 0
+    }
+  }
+}

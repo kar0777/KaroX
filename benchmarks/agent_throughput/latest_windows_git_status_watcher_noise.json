@@ -1,0 +1,53 @@
+{
+  "benchmark": "windows-git-status-watcher-noise",
+  "clean_first": {
+    "bytes_returned": 36,
+    "error": 0,
+    "events": [
+      {
+        "action": 3,
+        "path": ".git\\objects"
+      }
+    ],
+    "paths": [
+      ".git\\objects"
+    ],
+    "status_ms": 55.718,
+    "watcher_changed": true
+  },
+  "clean_second": {
+    "bytes_returned": 42,
+    "error": 0,
+    "events": [
+      {
+        "action": 1,
+        "path": ".git\\index.lock"
+      }
+    ],
+    "paths": [
+      ".git\\index.lock"
+    ],
+    "status_ms": 52.042,
+    "watcher_changed": true
+  },
+  "dirty": {
+    "bytes_returned": 42,
+    "error": 0,
+    "events": [
+      {
+        "action": 1,
+        "path": ".git\\index.lock"
+      }
+    ],
+    "paths": [
+      ".git\\index.lock"
+    ],
+    "status_ms": 51.811,
+    "watcher_changed": true
+  },
+  "isolation": {
+    "live_bridge_touched": false,
+    "temporary_repository": true
+  },
+  "schema_version": 1
+}

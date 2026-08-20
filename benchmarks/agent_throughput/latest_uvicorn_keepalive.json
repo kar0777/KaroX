@@ -1,0 +1,5 @@
+{
+  "timeout_keep_alive": 5,
+  "timeout_notify": 30,
+  "uvicorn_version": "0.52.0"
+}

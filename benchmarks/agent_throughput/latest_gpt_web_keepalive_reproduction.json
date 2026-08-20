@@ -1,0 +1,24 @@
+{
+  "benchmark": "gpt-web-uvicorn-keepalive-reproduction",
+  "isolation": {
+    "live_bridge_touched": false,
+    "localhost_only": true,
+    "saved_profile_touched": false
+  },
+  "long": {
+    "first_ok": true,
+    "pause_seconds": 6.25,
+    "second_error": null,
+    "second_ok": true,
+    "timeout_keep_alive": 300
+  },
+  "schema_version": 1,
+  "short": {
+    "first_ok": true,
+    "pause_seconds": 6.25,
+    "second_error": "ConnectionAbortedError",
+    "second_ok": false,
+    "timeout_keep_alive": 5
+  },
+  "uvicorn_version": "0.52.0"
+}

@@ -1,0 +1,53 @@
+{
+  "median_finish_ms": 0.155,
+  "median_start_ms": 0.965,
+  "repository": "live-current-repository-read-only",
+  "samples": [
+    {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "finish_ms": 0.183,
+      "quiet": true,
+      "start_ms": 1.226,
+      "supported": true
+    },
+    {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "finish_ms": 0.163,
+      "quiet": true,
+      "start_ms": 1.055,
+      "supported": true
+    },
+    {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "finish_ms": 0.144,
+      "quiet": true,
+      "start_ms": 0.965,
+      "supported": true
+    },
+    {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "finish_ms": 0.141,
+      "quiet": true,
+      "start_ms": 0.872,
+      "supported": true
+    },
+    {
+      "changed": false,
+      "changed_paths": [],
+      "failed": false,
+      "finish_ms": 0.155,
+      "quiet": true,
+      "start_ms": 0.751,
+      "supported": true
+    }
+  ],
+  "schema_version": 1
+}

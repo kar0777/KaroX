@@ -1,0 +1,1098 @@
+{
+  "benchmark": "karox-agent-throughput",
+  "cases": [
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 130.8,
+        "plan_round_trip_reduction_pct": 66.7,
+        "plan_server_wall_change_pct": 196.1
+      },
+      "noise_files": 0,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 3,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 2338,
+          "server_tool_calls": 3,
+          "server_tool_ms": 116.12,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 116.193
+        },
+        {
+          "artifact_bytes": 1114,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 203.878,
+          "result_json_bytes": 620,
+          "server_tool_calls": 3,
+          "server_tool_ms": 116.618,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 344.007
+        },
+        {
+          "artifact_bytes": 9252,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 6,
+          "result_json_bytes": 5021,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 102.681,
+          "wall_ms": 268.127
+        },
+        {
+          "artifact_bytes": 9252,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 6,
+          "result_json_bytes": 5020,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 102.115,
+          "wall_ms": 110.659
+        }
+      ],
+      "scenario": "clean",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1114.0,
+          "median_fast_identity_ms": 203.878,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 620.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 116.618,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 344.007,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 3.0,
+          "median_result_json_bytes": 2338.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 116.12,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 116.193,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 9252.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 5021.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 102.681,
+          "median_wall_ms": 268.127,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 9252.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 5020.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 102.115,
+          "median_wall_ms": 110.659,
+          "samples": 1
+        }
+      },
+      "task_id": "01",
+      "title": "Repository orientation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 90.7,
+        "plan_round_trip_reduction_pct": 80.0,
+        "plan_server_wall_change_pct": 136.1
+      },
+      "noise_files": 0,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 5,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 4240,
+          "server_tool_calls": 5,
+          "server_tool_ms": 153.294,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 153.403
+        },
+        {
+          "artifact_bytes": 1678,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 200.897,
+          "result_json_bytes": 778,
+          "server_tool_calls": 5,
+          "server_tool_ms": 126.449,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 362.221
+        },
+        {
+          "artifact_bytes": 23157,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 22,
+          "result_json_bytes": 7664,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 125.049,
+          "wall_ms": 292.48
+        },
+        {
+          "artifact_bytes": 23157,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 22,
+          "result_json_bytes": 7663,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 100.826,
+          "wall_ms": 108.514
+        }
+      ],
+      "scenario": "clean",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1678.0,
+          "median_fast_identity_ms": 200.897,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 778.0,
+          "median_server_tool_calls": 5.0,
+          "median_server_tool_ms": 126.449,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 362.221,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 5.0,
+          "median_result_json_bytes": 4240.0,
+          "median_server_tool_calls": 5.0,
+          "median_server_tool_ms": 153.294,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 153.403,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 23157.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7664.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 125.049,
+          "median_wall_ms": 292.48,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 23157.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7663.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 100.826,
+          "median_wall_ms": 108.514,
+          "samples": 1
+        }
+      },
+      "task_id": "02",
+      "title": "Call-flow investigation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 175.2,
+        "plan_round_trip_reduction_pct": 66.7,
+        "plan_server_wall_change_pct": 197.0
+      },
+      "noise_files": 0,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 3,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 1717,
+          "server_tool_calls": 3,
+          "server_tool_ms": 115.634,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 115.697
+        },
+        {
+          "artifact_bytes": 1114,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 207.38,
+          "result_json_bytes": 620,
+          "server_tool_calls": 3,
+          "server_tool_ms": 112.545,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 343.635
+        },
+        {
+          "artifact_bytes": 17693,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 15,
+          "result_json_bytes": 6809,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 126.741,
+          "wall_ms": 318.396
+        },
+        {
+          "artifact_bytes": 17693,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 15,
+          "result_json_bytes": 6808,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 108.492,
+          "wall_ms": 117.046
+        }
+      ],
+      "scenario": "clean",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1114.0,
+          "median_fast_identity_ms": 207.38,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 620.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 112.545,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 343.635,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 3.0,
+          "median_result_json_bytes": 1717.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 115.634,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 115.697,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 17693.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 6809.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 126.741,
+          "median_wall_ms": 318.396,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 17693.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 6808.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 108.492,
+          "median_wall_ms": 117.046,
+          "samples": 1
+        }
+      },
+      "task_id": "03",
+      "title": "Bug diagnosis"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 119.3,
+        "plan_round_trip_reduction_pct": 83.3,
+        "plan_server_wall_change_pct": 170.1
+      },
+      "noise_files": 0,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 6,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 5862,
+          "server_tool_calls": 6,
+          "server_tool_ms": 138.311,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 138.444
+        },
+        {
+          "artifact_bytes": 1962,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 198.683,
+          "result_json_bytes": 857,
+          "server_tool_calls": 6,
+          "server_tool_ms": 135.354,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 373.87
+        },
+        {
+          "artifact_bytes": 24217,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 36,
+          "result_json_bytes": 7399,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 115.951,
+          "wall_ms": 303.556
+        },
+        {
+          "artifact_bytes": 24217,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 36,
+          "result_json_bytes": 7398,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 119.861,
+          "wall_ms": 128.415
+        }
+      ],
+      "scenario": "clean",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1962.0,
+          "median_fast_identity_ms": 198.683,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 857.0,
+          "median_server_tool_calls": 6.0,
+          "median_server_tool_ms": 135.354,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 373.87,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 6.0,
+          "median_result_json_bytes": 5862.0,
+          "median_server_tool_calls": 6.0,
+          "median_server_tool_ms": 138.311,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 138.444,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 24217.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7399.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 115.951,
+          "median_wall_ms": 303.556,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 24217.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7398.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 119.861,
+          "median_wall_ms": 128.415,
+          "samples": 1
+        }
+      },
+      "task_id": "05",
+      "title": "Multi-file change orientation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 128.0,
+        "plan_round_trip_reduction_pct": 75.0,
+        "plan_server_wall_change_pct": 192.9
+      },
+      "noise_files": 0,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 4,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 3381,
+          "server_tool_calls": 4,
+          "server_tool_ms": 122.354,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 122.439
+        },
+        {
+          "artifact_bytes": 1396,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 213.179,
+          "result_json_bytes": 699,
+          "server_tool_calls": 4,
+          "server_tool_ms": 119.673,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 358.584
+        },
+        {
+          "artifact_bytes": 22587,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 24,
+          "result_json_bytes": 7755,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 106.857,
+          "wall_ms": 279.149
+        },
+        {
+          "artifact_bytes": 22587,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 24,
+          "result_json_bytes": 7754,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 106.724,
+          "wall_ms": 114.88
+        }
+      ],
+      "scenario": "clean",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1396.0,
+          "median_fast_identity_ms": 213.179,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 699.0,
+          "median_server_tool_calls": 4.0,
+          "median_server_tool_ms": 119.673,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 358.584,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 4.0,
+          "median_result_json_bytes": 3381.0,
+          "median_server_tool_calls": 4.0,
+          "median_server_tool_ms": 122.354,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 122.439,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 22587.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7755.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 106.857,
+          "median_wall_ms": 279.149,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 22587.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7754.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 106.724,
+          "median_wall_ms": 114.88,
+          "samples": 1
+        }
+      },
+      "task_id": "06",
+      "title": "Medium refactor orientation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 469.6,
+        "plan_round_trip_reduction_pct": 66.7,
+        "plan_server_wall_change_pct": 235.5
+      },
+      "noise_files": 200,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 3,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 2338,
+          "server_tool_calls": 3,
+          "server_tool_ms": 121.638,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 121.705
+        },
+        {
+          "artifact_bytes": 1219,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 233.88,
+          "result_json_bytes": 620,
+          "server_tool_calls": 3,
+          "server_tool_ms": 149.766,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 408.372
+        },
+        {
+          "artifact_bytes": 35852,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 6,
+          "result_json_bytes": 5024,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 306.926,
+          "wall_ms": 693.196
+        },
+        {
+          "artifact_bytes": 35852,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 6,
+          "result_json_bytes": 5023,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 176.314,
+          "wall_ms": 185.624
+        }
+      ],
+      "scenario": "dirty",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1219.0,
+          "median_fast_identity_ms": 233.88,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 620.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 149.766,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 408.372,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 3.0,
+          "median_result_json_bytes": 2338.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 121.638,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 121.705,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 35852.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 5024.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 306.926,
+          "median_wall_ms": 693.196,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 35852.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 5023.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 176.314,
+          "median_wall_ms": 185.624,
+          "samples": 1
+        }
+      },
+      "task_id": "01",
+      "title": "Repository orientation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 373.6,
+        "plan_round_trip_reduction_pct": 80.0,
+        "plan_server_wall_change_pct": 186.0
+      },
+      "noise_files": 200,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 5,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 4240,
+          "server_tool_calls": 5,
+          "server_tool_ms": 132.499,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 132.603
+        },
+        {
+          "artifact_bytes": 1785,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 214.611,
+          "result_json_bytes": 777,
+          "server_tool_calls": 5,
+          "server_tool_ms": 129.571,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 379.306
+        },
+        {
+          "artifact_bytes": 49756,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 22,
+          "result_json_bytes": 7665,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 296.059,
+          "wall_ms": 627.946
+        },
+        {
+          "artifact_bytes": 49756,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 22,
+          "result_json_bytes": 7664,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 174.618,
+          "wall_ms": 182.615
+        }
+      ],
+      "scenario": "dirty",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1785.0,
+          "median_fast_identity_ms": 214.611,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 777.0,
+          "median_server_tool_calls": 5.0,
+          "median_server_tool_ms": 129.571,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 379.306,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 5.0,
+          "median_result_json_bytes": 4240.0,
+          "median_server_tool_calls": 5.0,
+          "median_server_tool_ms": 132.499,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 132.603,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 49756.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7665.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 296.059,
+          "median_wall_ms": 627.946,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 49756.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7664.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 174.618,
+          "median_wall_ms": 182.615,
+          "samples": 1
+        }
+      },
+      "task_id": "02",
+      "title": "Call-flow investigation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 429.8,
+        "plan_round_trip_reduction_pct": 66.7,
+        "plan_server_wall_change_pct": 208.8
+      },
+      "noise_files": 200,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 3,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 1717,
+          "server_tool_calls": 3,
+          "server_tool_ms": 117.614,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 117.676
+        },
+        {
+          "artifact_bytes": 1222,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 220.169,
+          "result_json_bytes": 620,
+          "server_tool_calls": 3,
+          "server_tool_ms": 118.059,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 363.386
+        },
+        {
+          "artifact_bytes": 44292,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 15,
+          "result_json_bytes": 6810,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 295.782,
+          "wall_ms": 623.45
+        },
+        {
+          "artifact_bytes": 44292,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 15,
+          "result_json_bytes": 6809,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 174.787,
+          "wall_ms": 182.757
+        }
+      ],
+      "scenario": "dirty",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1222.0,
+          "median_fast_identity_ms": 220.169,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 620.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 118.059,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 363.386,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 3.0,
+          "median_result_json_bytes": 1717.0,
+          "median_server_tool_calls": 3.0,
+          "median_server_tool_ms": 117.614,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 117.676,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 44292.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 6810.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 295.782,
+          "median_wall_ms": 623.45,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 44292.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 6809.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 174.787,
+          "median_wall_ms": 182.757,
+          "samples": 1
+        }
+      },
+      "task_id": "03",
+      "title": "Bug diagnosis"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 288.3,
+        "plan_round_trip_reduction_pct": 83.3,
+        "plan_server_wall_change_pct": 169.6
+      },
+      "noise_files": 200,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 6,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 5862,
+          "server_tool_calls": 6,
+          "server_tool_ms": 164.771,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 164.956
+        },
+        {
+          "artifact_bytes": 2067,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 223.761,
+          "result_json_bytes": 857,
+          "server_tool_calls": 6,
+          "server_tool_ms": 179.578,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 444.731
+        },
+        {
+          "artifact_bytes": 50815,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 36,
+          "result_json_bytes": 7399,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 309.5,
+          "wall_ms": 640.496
+        },
+        {
+          "artifact_bytes": 50815,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 36,
+          "result_json_bytes": 7398,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 175.347,
+          "wall_ms": 185.002
+        }
+      ],
+      "scenario": "dirty",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 2067.0,
+          "median_fast_identity_ms": 223.761,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 857.0,
+          "median_server_tool_calls": 6.0,
+          "median_server_tool_ms": 179.578,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 444.731,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 6.0,
+          "median_result_json_bytes": 5862.0,
+          "median_server_tool_calls": 6.0,
+          "median_server_tool_ms": 164.771,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 164.956,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 50815.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7399.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 309.5,
+          "median_wall_ms": 640.496,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 50815.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7398.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 175.347,
+          "median_wall_ms": 185.002,
+          "samples": 1
+        }
+      },
+      "task_id": "05",
+      "title": "Multi-file change orientation"
+    },
+    {
+      "derived": {
+        "inspect_cold_vs_manual_wall_change_pct": 378.2,
+        "plan_round_trip_reduction_pct": 75.0,
+        "plan_server_wall_change_pct": 186.1
+      },
+      "noise_files": 200,
+      "samples": [
+        {
+          "artifact_bytes": 0,
+          "conceptual_mcp_round_trips": 4,
+          "fast_identity_ms": 0,
+          "result_json_bytes": 3381,
+          "server_tool_calls": 4,
+          "server_tool_ms": 130.64,
+          "strategy": "manual_low_level",
+          "strict_identity_ms": 0,
+          "wall_ms": 130.753
+        },
+        {
+          "artifact_bytes": 1503,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 217.94,
+          "result_json_bytes": 699,
+          "server_tool_calls": 4,
+          "server_tool_ms": 130.449,
+          "strategy": "execute_plan",
+          "strict_identity_ms": 0,
+          "wall_ms": 374.053
+        },
+        {
+          "artifact_bytes": 49186,
+          "cache_hit": false,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 24,
+          "result_json_bytes": 7756,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_cold",
+          "strict_identity_ms": 296.906,
+          "wall_ms": 625.254
+        },
+        {
+          "artifact_bytes": 49186,
+          "cache_hit": true,
+          "conceptual_mcp_round_trips": 1,
+          "fast_identity_ms": 0,
+          "matches": 24,
+          "result_json_bytes": 7755,
+          "server_tool_calls": 0,
+          "server_tool_ms": 0.0,
+          "strategy": "repo_inspect_warm",
+          "strict_identity_ms": 177.471,
+          "wall_ms": 186.423
+        }
+      ],
+      "scenario": "dirty",
+      "summary": {
+        "execute_plan": {
+          "median_artifact_bytes": 1503.0,
+          "median_fast_identity_ms": 217.94,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 699.0,
+          "median_server_tool_calls": 4.0,
+          "median_server_tool_ms": 130.449,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 374.053,
+          "samples": 1
+        },
+        "manual_low_level": {
+          "median_artifact_bytes": 0.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 4.0,
+          "median_result_json_bytes": 3381.0,
+          "median_server_tool_calls": 4.0,
+          "median_server_tool_ms": 130.64,
+          "median_strict_identity_ms": 0.0,
+          "median_wall_ms": 130.753,
+          "samples": 1
+        },
+        "repo_inspect_cold": {
+          "median_artifact_bytes": 49186.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7756.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 296.906,
+          "median_wall_ms": 625.254,
+          "samples": 1
+        },
+        "repo_inspect_warm": {
+          "median_artifact_bytes": 49186.0,
+          "median_fast_identity_ms": 0.0,
+          "median_mcp_round_trips": 1.0,
+          "median_result_json_bytes": 7755.0,
+          "median_server_tool_calls": 0.0,
+          "median_server_tool_ms": 0.0,
+          "median_strict_identity_ms": 177.471,
+          "median_wall_ms": 186.423,
+          "samples": 1
+        }
+      },
+      "task_id": "06",
+      "title": "Medium refactor orientation"
+    }
+  ],
+  "configuration": {
+    "case_ids": [
+      "01",
+      "02",
+      "03",
+      "05",
+      "06"
+    ],
+    "noise_files": 200,
+    "repeats": 1,
+    "scenarios": [
+      "clean",
+      "dirty"
+    ]
+  },
+  "duration_ms": 38354.396,
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false,
+    "production_files_mutated_by_benchmark": false,
+    "saved_profiles_touched": false
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,36 @@
+{
+  "benchmark": "windows-execute-plan-change-guard-diagnostic",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "scenarios": {
+    "clean": {
+      "changed_paths": [
+        ".git\\hooks"
+      ],
+      "control_all_equal": false,
+      "control_samples": 0,
+      "fast_identity_ms": 55.155,
+      "guard_changed": true,
+      "guard_failed": false,
+      "guard_supported": true,
+      "ignored_git_events": 0,
+      "wall_ms": 106.457
+    },
+    "dirty": {
+      "changed_paths": [
+        ".git\\hooks"
+      ],
+      "control_all_equal": false,
+      "control_samples": 0,
+      "fast_identity_ms": 67.357,
+      "guard_changed": true,
+      "guard_failed": false,
+      "guard_supported": true,
+      "ignored_git_events": 0,
+      "wall_ms": 215.09
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,18 @@
+{
+  "benchmark": "gpt-web-end-to-end-latency-breakdown",
+  "composite_median_ms": 3.2893,
+  "core_bridge_median_ms": 3.2373,
+  "estimated_composite_overhead_ms": 0.052,
+  "estimated_http_overhead_ms": 0.5342,
+  "estimated_mcp_asgi_overhead_ms": 4.787,
+  "isolation": {
+    "disposable_repository": true,
+    "live_bridge_touched": false,
+    "localhost_only": true,
+    "saved_profile_touched": false
+  },
+  "localhost_http_median_ms": 8.6105,
+  "mcp_asgi_per_call_ms": 8.0763,
+  "repeats": 50,
+  "schema_version": 1
+}

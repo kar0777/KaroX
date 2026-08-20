@@ -1,0 +1,15 @@
+{
+  "benchmark": "windows-read-directory-changes-hard-case",
+  "isolation": {
+    "live_bridge_touched": false,
+    "temporary_directory": true
+  },
+  "result": {
+    "bytes_returned": 38,
+    "detection_ms": 0.5167,
+    "errors": [],
+    "handle_open_ms": 0.0544,
+    "same_size_restored_mtime_detected": true
+  },
+  "schema_version": 1
+}

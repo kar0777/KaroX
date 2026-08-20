@@ -1,0 +1,66 @@
+{
+  "benchmark": "read-only-plan-guard-components",
+  "isolation": {
+    "disposable_repositories": true,
+    "live_bridge_touched": false
+  },
+  "scenarios": {
+    "clean": {
+      "median": {
+        "git_control_ms": 0.0,
+        "guard_finish_ms": 0.177,
+        "guard_start_ms": 0.551,
+        "wall_ms": 109.873
+      },
+      "samples": [
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.17600000137463212,
+          "guard_start_ms": 0.5512999996426515,
+          "wall_ms": 109.873
+        },
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.17730000035953708,
+          "guard_start_ms": 0.50800000099116,
+          "wall_ms": 104.492
+        },
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.1770999988366384,
+          "guard_start_ms": 0.5530000016733538,
+          "wall_ms": 301.661
+        }
+      ]
+    },
+    "dirty": {
+      "median": {
+        "git_control_ms": 0.0,
+        "guard_finish_ms": 0.196,
+        "guard_start_ms": 0.514,
+        "wall_ms": 191.551
+      },
+      "samples": [
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.19320000137668103,
+          "guard_start_ms": 0.4836999978579115,
+          "wall_ms": 191.551
+        },
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.2037999984167982,
+          "guard_start_ms": 0.5509999973583035,
+          "wall_ms": 203.349
+        },
+        {
+          "git_control_ms": 0.0,
+          "guard_finish_ms": 0.1959000001079403,
+          "guard_start_ms": 0.5141999972693156,
+          "wall_ms": 188.693
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,14 @@
+{
+  "benchmark": "windows-small-search-components",
+  "cold_first_search_ms": 82.2871,
+  "current_ms": 32.4001,
+  "estimated_file_is_symlink_ms": 0.0,
+  "estimated_is_junction_ms": 1.057,
+  "isolation": {
+    "disposable_repository": true,
+    "live_bridge_touched": false
+  },
+  "no_path_is_junction_ms": 31.3431,
+  "no_path_is_symlink_ms": 33.3955,
+  "schema_version": 1
+}

@@ -1,0 +1,13 @@
+{
+  "benchmark": "gpt-web-composite-routing",
+  "cached_owner_median_ms": 0.0008,
+  "isolation": {
+    "disposable_repository": true,
+    "live_bridge_touched": false,
+    "saved_profile_touched": false
+  },
+  "legacy_owner_median_ms": 0.7281,
+  "median_reduction_pct": 99.9,
+  "samples": 100,
+  "schema_version": 1
+}
