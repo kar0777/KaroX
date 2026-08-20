@@ -13,7 +13,8 @@ Design contract:
 * forgettable: forget() removes entries permanently, on disk, immediately;
 * scope-isolated: one scope's file never contains another scope's entries;
 * secret-free: content that looks like a credential is refused, never stored;
-* honest retrieval: deterministic token-overlap ranking under a byte budget,
+* honest retrieval: deterministic Unicode-aware lexical ranking (token
+  overlap plus a small curated multilingual alias map) under a byte budget,
   never a memory dump.
 """
 
@@ -24,6 +25,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from enum import Enum
 from pathlib import Path
@@ -68,17 +70,80 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
 )
 
-_WORD = re.compile(r"[a-zA-Zа-яА-ЯёЁ0-9_]{2,}")
+# Unicode-aware tokenization: letters and digits from any script count, so
+# Cyrillic, Latin, and mixed-language queries rank identically. Text is
+# NFKC-normalized and casefolded first; Russian ё collapses to е. Tokens that
+# contain underscores (snake_case keys) also contribute their parts, so a
+# query saying "name" can reach the key "preferred_name".
+_WORD = re.compile(r"\w{2,}")
 
 _SENSITIVITIES = frozenset({"normal", "personal"})
+
+# Deterministic multilingual aliases: a small curated concept map so a
+# Russian question reaches an English-keyed entry (and vice versa) without an
+# embedding subsystem. Keys must already be normalized (casefold, ё→е).
+# Extend deliberately; keep it small, reviewable, and deterministic.
+_CONCEPT_ALIASES: dict[str, str] = {
+    # the "name" concept
+    "name": "name",
+    "named": "name",
+    "nickname": "name",
+    "имя": "name",
+    "имени": "name",
+    "именем": "name",
+    "зовут": "name",
+    "зовет": "name",
+    "звать": "name",
+    "называть": "name",
+    "называют": "name",
+    "называюсь": "name",
+    "называется": "name",
+    "никнейм": "name",
+    # the "preference" concept
+    "prefer": "preference",
+    "prefers": "preference",
+    "preferred": "preference",
+    "preference": "preference",
+    "preferences": "preference",
+    "предпочитает": "preference",
+    "предпочитаю": "preference",
+    "предпочтение": "preference",
+    "предпочтения": "preference",
+    # the "user"/self concept
+    "user": "user",
+    "my": "user",
+    "me": "user",
+    "пользователь": "user",
+    "пользователя": "user",
+    "пользователю": "user",
+    "меня": "user",
+    "мне": "user",
+    "мое": "user",
+    "мой": "user",
+    "моя": "user",
+}
 
 
 def _now() -> float:
     return time.time()
 
 
+def _normalize(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).casefold().replace("ё", "е")
+
+
 def _tokens(text: str) -> set[str]:
-    return {match.group(0).lower() for match in _WORD.finditer(text)}
+    tokens: set[str] = set()
+    for match in _WORD.finditer(_normalize(text)):
+        token = match.group(0)
+        tokens.add(token)
+        if "_" in token:
+            tokens.update(part for part in token.split("_") if len(part) >= 2)
+    return tokens
+
+
+def _concepts(tokens: set[str]) -> set[str]:
+    return {_CONCEPT_ALIASES[token] for token in tokens if token in _CONCEPT_ALIASES}
 
 
 def reject_secret_like(content: str) -> None:
@@ -292,20 +357,38 @@ class KaroXMemory:
         """Deterministic ranked recall: overlap, recency, confidence, budget."""
 
         query_tokens = _tokens(query)
+        query_concepts = _concepts(query_tokens)
+        normalized_query = _normalize(query)
         now = _now()
         scored: list[tuple[float, MemoryEntry]] = []
         for scope, scope_id in scopes:
             for entry in self._load(scope, scope_id):
                 if entry.sensitivity == "personal" and not include_personal:
                     continue
-                overlap = len(query_tokens & _tokens(entry.content))
-                if entry.key is not None:
-                    overlap += len(query_tokens & _tokens(entry.key))
-                if query_tokens and overlap == 0:
+                content_tokens = _tokens(entry.content)
+                key_tokens = _tokens(entry.key) if entry.key is not None else set()
+                content_overlap = len(query_tokens & content_tokens)
+                key_overlap = len(query_tokens & key_tokens)
+                concept_overlap = len(
+                    query_concepts & _concepts(content_tokens | key_tokens)
+                )
+                exact_key = (
+                    entry.key is not None
+                    and _normalize(entry.key) in normalized_query
+                )
+                evidence = content_overlap + key_overlap + concept_overlap
+                if query_tokens and not evidence and not exact_key:
                     continue
                 age_days = max(0.0, (now - entry.updated_at) / 86_400.0)
                 recency = 1.0 / (1.0 + age_days)
-                score = overlap * 10.0 + recency * 2.0 + entry.confidence
+                score = (
+                    content_overlap * 10.0
+                    + key_overlap * 15.0
+                    + concept_overlap * 6.0
+                    + (20.0 if exact_key else 0.0)
+                    + recency * 2.0
+                    + entry.confidence
+                )
                 scored.append((score, entry))
         scored.sort(key=lambda item: (-item[0], item[1].entry_id))
         selected: list[MemoryEntry] = []
