@@ -27,6 +27,7 @@ from .bridge import (
 )
 from .browser_access import BrowserAccessPolicy
 from .client_capabilities import negotiate_client_capabilities
+from .tool_catalog import catalog_groups
 from .credentials import CredentialError
 from .detached_process import spawn_detached
 from .hosted_bridge import (
@@ -3282,6 +3283,13 @@ def web_bridge_diagnostics(
             ),
             "schema_snapshot_version": client_capabilities.tool_schema_snapshot_version,
             "advertised_tool_count": len(config.tools),
+            # P1.5 deterministic groups: a pure function of the tool name, so
+            # operators can predict availability per profile with no hidden
+            # magic. Sorted members keep equal catalogs byte-identical.
+            "groups": {
+                group: list(names)
+                for group, names in catalog_groups(config.tools).items()
+            },
             "permission_toggle_changes_tool_catalog": config.profile != "hyperagent-web",
             "legacy_cached_catalog_compatible": config.profile == "hyperagent-web",
             "legacy_fallbacks": (
