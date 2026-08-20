@@ -55,6 +55,13 @@ from .launch_support import (
 )
 
 
+# B5. Why a launch was refused, in the same vocabulary as the launch-support
+# blockers above. It lives here rather than in `launch_support` on purpose:
+# every other blocker says the configuration *cannot* be served, while this one
+# says the user decided it should not be. Same shape, different kind of no.
+BLOCKER_CONNECTION_DISABLED = "connection_disabled"
+
+
 class ConnectionTester(Protocol):
     def __call__(
         self,
@@ -287,9 +294,56 @@ class ConnectionController:
             stopped_previous=stopped_previous,
         )
 
+    def set_enabled(self, connection_id: str, enabled: bool) -> dict[str, Any]:
+        """Persist the enabled flag, and stop nothing.
+
+        B5. Disable is a configuration change, not a process operation. A live
+        bridge keeps serving the URL its user already pasted into a service
+        until somebody explicitly says otherwise, because a registry write that
+        killed a running endpoint would be exactly the silent side effect this
+        contract forbids. The surface above asks first and calls :meth:`stop`
+        separately when the answer is yes.
+        """
+
+        record = self.registry.set_enabled(connection_id, enabled)
+        return {
+            "connection_id": record.connection_id,
+            "name": record.name,
+            "enabled": record.enabled,
+            "status": "enabled" if record.enabled else "disabled",
+            "runtime": dict(self.runtime_manager.status(connection_id)),
+        }
+
+    def set_bypass(self, connection_id: str, enabled: bool) -> dict[str, Any]:
+        """Persist the Bypass mode, and start or stop nothing.
+
+        The mode is read when a runtime is next started for this connection,
+        so a live bridge is left exactly as it is. The alternative -- silently
+        restarting somebody's working endpoint to widen its permissions -- is
+        the surprise the surrounding contracts exist to prevent.
+        """
+
+        record = self.registry.set_bypass(connection_id, enabled)
+        return {
+            "connection_id": record.connection_id,
+            "name": record.name,
+            "bypass": record.bypass,
+            "status": "bypass_on" if record.bypass else "bypass_off",
+            "runtime": dict(self.runtime_manager.status(connection_id)),
+        }
+
     def start(self, connection_id: str) -> ManagedConnectionLaunch:
         state = self.get(connection_id)
         current = state.state
+        # B5. What makes "disabled" true rather than decorative. The flag is
+        # checked on the one path that puts a connection into service, so a
+        # parked connection cannot be launched by the TUI, the CLI, or a
+        # convenience call somebody adds later without reading this.
+        if not state.target.enabled:
+            raise ConnectionLaunchError(
+                "this connection is disabled; enable it before starting it",
+                blockers=(BLOCKER_CONNECTION_DISABLED,),
+            )
         support = self._require_launch_support(connection_id)
         if current == "running":
             return ManagedConnectionLaunch(
@@ -324,6 +378,20 @@ class ConnectionController:
             stopped_previous=False,
         )
 
+    def repair(self, connection_id: str) -> ManagedConnectionLaunch:
+        """Restore an enabled saved connection without restarting a healthy one.
+
+        Healthy runtimes are reused, degraded managed runtimes are restarted,
+        and stopped/configured runtimes are started. Unmanaged live processes
+        still fail closed through the existing start/restart guards.
+        """
+        state = self.get(connection_id)
+        if state.state == "running":
+            return self.start(connection_id)
+        if state.state == "degraded":
+            return self.restart(connection_id)
+        return self.start(connection_id)
+
     def restart(self, connection_id: str) -> ManagedConnectionLaunch:
         state = self.get(connection_id)
         support = self._require_launch_support(connection_id)
@@ -343,6 +411,84 @@ class ConnectionController:
             status="restarted" if stopped_previous else "started",
             stopped_previous=stopped_previous,
         )
+
+    def update_running_connection(
+        self,
+        connection_id: str,
+        updated_target: McpClientTarget,
+        *,
+        restart: bool = True,
+    ) -> dict[str, Any]:
+        """Apply a configuration change to a connection, restarting when needed.
+
+        B5 section 4. What this replaces: the Advanced screen asked "restart the
+        connection?", the user said yes, and the callback then called
+        ``registry.put`` and nothing else. The saved configuration moved, the
+        live bridge kept serving the old one, and the screen closed reporting
+        success. Three states that must agree -- what is saved, what is
+        running, and what the user was told -- and all three disagreed.
+
+        The transaction lives here rather than in the screen because it owns
+        state the screen cannot: the previous record, the decision to stop, and
+        the restore. A Textual screen holding a half-applied runtime change is
+        a transaction whose commit depends on a window staying open.
+
+        Honest about its guarantees. The *configuration* rollback is exact: the
+        previous record is written back on any failure. The *runtime* rollback
+        is best-effort, and says so in the result -- ``restart`` stops the old
+        process before launching the new one, so once a replacement launch has
+        failed there is no live process left to preserve, only one to try to
+        recreate. ``runtime_restored`` reports whether that succeeded rather
+        than assuming it.
+        """
+
+        previous = self.registry.get(connection_id)
+        if previous.connection_id != updated_target.connection_id:
+            raise ConnectionError(
+                "a connection update must keep the same connection ID"
+            )
+        running = str(
+            self.runtime_manager.status(connection_id).get("state") or ""
+        ) in {"running", "degraded"}
+        self.registry.put(updated_target)
+        if not (restart and running):
+            # Nothing is live, so there is nothing to reconcile and no claim to
+            # make about a process.
+            return {
+                "connection_id": connection_id,
+                "status": "saved",
+                "restarted": False,
+                "runtime": dict(self.runtime_manager.status(connection_id)),
+            }
+        try:
+            launch = self.restart(connection_id)
+        except Exception as exc:
+            self.registry.put(previous)
+            runtime_restored = False
+            try:
+                self.restart(connection_id)
+                runtime_restored = True
+            except Exception:
+                # The old process is gone and could not be recreated. Saying so
+                # is the whole point: the caller must not report success, and
+                # the user needs to know the endpoint is down.
+                runtime_restored = False
+            raise ConnectionLaunchError(
+                f"the connection could not be restarted with the new "
+                f"configuration: {exc}",
+                remediation=(
+                    "the previous configuration was restored"
+                    if runtime_restored
+                    else "the previous configuration was restored, but its "
+                    "bridge is not running; start it again"
+                ),
+            ) from exc
+        return {
+            "connection_id": connection_id,
+            "status": "restarted",
+            "restarted": True,
+            "runtime": dict(launch.runtime),
+        }
 
     def stop(self, connection_id: str) -> dict[str, Any]:
         # Resolve the config first so status/stop cannot operate on an orphaned

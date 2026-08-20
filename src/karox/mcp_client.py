@@ -319,6 +319,7 @@ class McpServerRecord:
     credential_ref: Optional[str] = None
     credential_target: Optional[str] = None
     credential_scheme: str = "Bearer"
+    oauth: bool = False
     read_only_tools: tuple[str, ...] = ()
     timeout_seconds: float = 30.0
     max_result_bytes: int = 1_000_000
@@ -377,6 +378,12 @@ class McpServerRecord:
                     raise ValueError("MCP credential target collides with headers")
         elif self.credential_target is not None:
             raise ValueError("MCP credential target requires a credential reference")
+        if not isinstance(self.oauth, bool):
+            raise ValueError("MCP OAuth flag must be boolean")
+        if self.oauth and self.transport != "streamable_http":
+            raise ValueError("MCP OAuth requires Streamable HTTP transport")
+        if self.oauth and (self.credential_ref is not None or self.credential_target is not None):
+            raise ValueError("MCP OAuth cannot be combined with a static credential")
         if (
             not isinstance(self.credential_scheme, str)
             or _SAFE_SCHEME.fullmatch(self.credential_scheme) is None
@@ -723,6 +730,7 @@ async def streamable_http_transport(
     headers: Optional[dict[str, str]] = None,
     timeout_seconds: float = 30.0,
     terminate_on_close: bool = True,
+    auth: Optional[httpx.Auth] = None,
 ) -> AsyncIterator[Any]:
     """Open the installed MCP SDK's Streamable HTTP transport safely.
 
@@ -737,6 +745,7 @@ async def streamable_http_transport(
         async with _http_client_factory(
             headers=headers,
             timeout=httpx.Timeout(timeout_seconds),
+            auth=auth,
         ) as http_client:
             async with streamable_http_client(url, http_client=http_client) as streams:
                 try:
@@ -832,10 +841,20 @@ class McpClient:
             if record.credential_scheme:
                 value = f"{record.credential_scheme} {secret}"
             headers[record.credential_target] = value
+        oauth_auth: Optional[httpx.Auth] = None
+        if record.oauth:
+            from .mcp_oauth import noninteractive_oauth_provider
+
+            oauth_auth = noninteractive_oauth_provider(
+                record.server_id,
+                record.url or "",
+                timeout_seconds=max(30.0, record.timeout_seconds),
+            )
         async with streamable_http_transport(
             record.url or "",
             headers=headers,
             timeout_seconds=record.timeout_seconds,
+            auth=oauth_auth,
         ) as streams:
             async with ClientSession(
                 streams[0], streams[1], read_timeout_seconds=read_timeout
@@ -860,6 +879,10 @@ class McpClient:
     ) -> McpError:
         if isinstance(exc, McpError):
             return exc
+        from .mcp_oauth import McpOAuthAuthorizationRequired
+
+        if isinstance(exc, McpOAuthAuthorizationRequired):
+            return McpAccessDenied(str(exc))
         message = str(redact(str(exc), secrets=secrets))
         if mutation:
             return McpUnknownOutcome(

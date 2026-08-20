@@ -35,7 +35,7 @@ import re
 import secrets
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urlsplit
@@ -235,15 +235,20 @@ def _mcp_client_presets() -> tuple[McpClientPreset, ...]:
             status="stable",
             runtime_profile="notion",
             transport="streamable_http",
-            auth_scheme="bearer",
-            description="Notion Custom Agent bridge to the local KaroX runtime.",
+            auth_scheme="oauth",
+            description="Notion Custom Agent OAuth bridge to the local KaroX runtime.",
             instructions=(
-                "Configure the Notion Custom Agent MCP endpoint to the KaroX "
-                "bridge URL and use the bridge credential as the bearer token."
+                "Paste the stable KaroX /mcp URL into Notion. KaroX publishes OAuth "
+                "protected-resource and authorization-server metadata and supports "
+                "Dynamic Client Registration, so no static bearer token, Client ID, "
+                "or Client Secret is entered in Notion. Complete the KaroX approval "
+                "page when the OAuth flow opens."
             ),
             limitations=(
-                "Per-session key protects both the MCP and REST paths.",
+                "A stable public HTTPS URL is required for the OAuth callback flow.",
             ),
+            persistent_url=True,
+            tunnel_default="tailscale",
         ),
         McpClientPreset(
             preset_id="chatgpt-web",
@@ -283,6 +288,61 @@ def _mcp_client_presets() -> tuple[McpClientPreset, ...]:
             ),
             limitations=(
                 "OAuth/DCR/PKCE is covered locally; no live Claude run is recorded.",
+            ),
+            persistent_url=True,
+            tunnel_default="tailscale",
+        ),
+        McpClientPreset(
+            preset_id="hyperagent-web",
+            display_name="Hyperagent",
+            status="experimental",
+            runtime_profile="hyperagent-web",
+            transport="streamable_http",
+            auth_scheme="oauth",
+            description=(
+                "OAuth remote MCP bridge from Hyperagent to selected KaroX tools."
+            ),
+            instructions=(
+                "In Hyperagent open Settings > Integrations and add a custom MCP "
+                "server using the stable KaroX /mcp URL. Let Hyperagent use the "
+                "server's OAuth discovery/Dynamic Client Registration flow and "
+                "complete the KaroX password approval page when it opens."
+            ),
+            limitations=(
+                "Hyperagent publicly supports custom MCP servers; the KaroX "
+                "OAuth/DCR/PKCE wire contract is covered locally, but a recorded "
+                "live Hyperagent workspace run is still pending.",
+            ),
+            persistent_url=True,
+            tunnel_default="tailscale",
+        ),
+        McpClientPreset(
+            preset_id="adapt",
+            display_name="Adapt",
+            status="stable",
+            runtime_profile="generic-streamable-http",
+            transport="streamable_http",
+            auth_scheme="bearer",
+            description=(
+                "Adapt custom integration connected to KaroX over the stable "
+                "Streamable HTTP MCP bridge."
+            ),
+            instructions=(
+                "In Adapt open Settings -> Integrations -> Custom Integration. "
+                "Name it KaroX and describe the MCP endpoint as the stable KaroX "
+                "public URL ending in /mcp. Add credential key "
+                "KAROX_AUTHORIZATION and paste the KaroX Authorization value "
+                "(Bearer <bridge secret>) into its protected Value field. "
+                "Personal scope is recommended unless the bridge is intentionally "
+                "shared with the whole Adapt organization. Tell the Adapt agent to "
+                "initialize a KaroX workstream before project-scoped work and never "
+                "invent local filesystem paths."
+            ),
+            limitations=(
+                "Adapt stores this as a custom integration rather than a dedicated "
+                "KaroX connector, so the MCP endpoint is supplied in the integration "
+                "description/instructions while the bearer value stays in Adapt's "
+                "protected credential field.",
             ),
             persistent_url=True,
             tunnel_default="tailscale",
@@ -393,6 +453,24 @@ class McpClientTarget:
     port: int = 8765
     created_at: float = 0.0
     updated_at: float = 0.0
+    # B5. Whether this saved connection may be started for new work.
+    #
+    # Recorded gap, closed here rather than simulated in the UI: the registry
+    # previously had exactly two states, present and absent, so the only way to
+    # stop using a connection was to remove it -- which also removes its saved
+    # secret. A "disabled" drawn over that model would survive until the next
+    # read of the file and no longer.
+    #
+    # It is a field on the record the registry already writes, not a second
+    # store. Absent in a file written before B5, which therefore reads as
+    # enabled -- the only honest reading of a file that predates the question.
+    enabled: bool = True
+    # Shared Bypass mode preference (see access_mode.py) for connections whose
+    # runtime is started from this record rather than from a saved web-bridge
+    # profile -- ClickUp, PromptQL, generic and custom MCP clients. Same
+    # additive discipline as ``enabled``: absent in an older file, which
+    # therefore reads OFF, and never coerced.
+    bypass: bool = False
 
     def __post_init__(self) -> None:
         _safe_id(self.connection_id, "connection ID")
@@ -433,6 +511,14 @@ class McpClientTarget:
             raise ConnectionConfigurationError("connection created_at is invalid")
         if not isinstance(self.updated_at, (int, float)) or self.updated_at < 0:
             raise ConnectionConfigurationError("connection updated_at is invalid")
+        if not isinstance(self.enabled, bool):
+            raise ConnectionConfigurationError(
+                "connection enabled flag must be true or false"
+            )
+        if not isinstance(self.bypass, bool):
+            raise ConnectionConfigurationError(
+                "connection bypass flag must be true or false"
+            )
         # OAuth requires a stable public URL by construction of the bridge; a
         # temporary cloudflare URL cannot complete the redirect dance, so the
         # form is prevented from saving that combination.
@@ -484,6 +570,16 @@ class McpClientTarget:
             port=value.get("port", 8765),
             created_at=value.get("created_at", 0.0),
             updated_at=value.get("updated_at", 0.0),
+            # Deliberately *not* ``bool(...)``. Coercing defeats the validation
+            # boundary below: ``bool("false")`` is ``True``, so a corrupted or
+            # hand-edited registry would silently read as enabled -- the one
+            # direction a mistake must never fall, because it re-arms a
+            # connection the user switched off. The raw value goes to
+            # ``__post_init__``, which takes a JSON boolean and nothing else.
+            enabled=value.get("enabled", True),
+            # Same discipline, same reason: a missing key is the only default,
+            # so a record written before the mode existed reads OFF.
+            bypass=value.get("bypass", False),
         )
 
     @property
@@ -721,6 +817,53 @@ class ConnectionRegistry:
         records.append(record)
         self._save(records)
         return record
+
+    def set_bypass(self, connection_id: str, enabled: bool) -> McpClientTarget:
+        """Persist the Bypass mode on one saved connection, changing nothing else.
+
+        The endpoint, transport, tunnel, port, and credential reference are
+        untouched, so switching the mode can never rotate a secret or move a
+        URL. Nothing is started or stopped either: the record is what the next
+        Start/Repair reads, and a live bridge keeps serving until somebody
+        explicitly restarts it.
+        """
+
+        current = self.get(connection_id)
+        if not isinstance(enabled, bool):
+            raise ConnectionConfigurationError(
+                "connection bypass flag must be true or false"
+            )
+        if current.bypass == enabled:
+            # Idempotent, for the same reason ``set_enabled`` is.
+            return current
+        return self.put(replace(current, bypass=enabled))
+
+    def set_enabled(self, connection_id: str, enabled: bool) -> McpClientTarget:
+        """Persist the enabled flag on one saved connection, changing nothing else.
+
+        B5. Disable is not delete and must not behave like it: this rewrites a
+        single field on the record that already exists. The endpoint, the
+        transport, the tunnel and the stored secret reference are all still
+        there afterwards, which is exactly what lets re-enabling ask for
+        nothing.
+
+        It also does not touch a running process. Stopping one is a separate,
+        visible decision the caller confirms with the user; a registry write
+        that silently killed a live bridge would be the surprise this contract
+        exists to prevent.
+        """
+
+        current = self.get(connection_id)
+        if not isinstance(enabled, bool):
+            raise ConnectionConfigurationError(
+                "connection enabled flag must be true or false"
+            )
+        if current.enabled == enabled:
+            # Idempotent by contract: setting the state it already has is not
+            # an error and does not rewrite the file, so a double press cannot
+            # churn `updated_at` or race a concurrent reader.
+            return current
+        return self.put(replace(current, enabled=enabled))
 
     def remove(self, connection_id: str) -> McpClientTarget:
         removed = self.get(connection_id)

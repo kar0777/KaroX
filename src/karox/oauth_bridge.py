@@ -1,9 +1,10 @@
 """OAuth 2.1 facade for a hosted Streamable HTTP MCP bridge.
 
 The implementation is intentionally narrow: Authorization Code with PKCE S256,
-Dynamic Client Registration, refresh-token rotation, and RFC 9728 protected
-resource metadata.  It is designed for web MCP clients such as ChatGPT and
-Claude, not as a general-purpose identity provider.
+OAuth Client ID Metadata Documents (CIMD), Dynamic Client Registration fallback,
+refresh-token rotation, and RFC 9728 protected resource metadata.  It is designed
+for web MCP clients such as ChatGPT and Claude, not as a general-purpose identity
+provider.
 """
 
 from __future__ import annotations
@@ -38,9 +39,17 @@ _CODE_TTL_SECONDS = 300
 _PENDING_TTL_SECONDS = 600
 _REFRESH_TTL_SECONDS = 30 * 24 * 3600
 _MAX_BODY_BYTES = 65_536
+_MAX_CLIENT_METADATA_BYTES = 5 * 1024
+_CLIENT_METADATA_TIMEOUT_SECONDS = 5.0
 _MAX_CLIENTS = 256
 _SCOPES = frozenset({"mcp:tools", "offline_access"})
 _STATE_VERSION = 1
+# A rename loses to any concurrent reader on Windows. Retry briefly, because
+# dropping this write is invisible until the next restart and then costs the user
+# a re-add of every connector: the registration would have lived only in RAM.
+_STATE_REPLACE_TIMEOUT_SECONDS = 5.0
+_STATE_REPLACE_INITIAL_DELAY_SECONDS = 0.02
+_STATE_REPLACE_MAX_DELAY_SECONDS = 0.25
 
 
 class OAuthBridgeError(RuntimeError):
@@ -102,6 +111,31 @@ def _redirect_uri(
     # behaviour for chatgpt-web/claude-web and the library callers behind it.
     if allowed_hosts is not None and not local and host not in allowed_hosts:
         raise OAuthBridgeError("redirect URI host is not allowed for this profile")
+    return value
+
+
+def _client_metadata_url(value: object, allowed_hosts: Optional[frozenset[str]]) -> str:
+    """Validate a CIMD client_id URL before any network request is made."""
+    if allowed_hosts is None:
+        raise OAuthBridgeError("client metadata documents are not enabled for this profile")
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        raise OAuthBridgeError("client_id metadata URL is invalid")
+    parts = urlsplit(value)
+    if (
+        parts.scheme.lower() != "https"
+        or not parts.netloc
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+        or parts.query
+        or parts.path in {"", "/"}
+        or "/./" in parts.path
+        or "/../" in parts.path
+    ):
+        raise OAuthBridgeError("client_id metadata URL must be a stable HTTPS document URL")
+    host = normalize_host(parts.hostname or "")
+    if not host or host not in allowed_hosts:
+        raise OAuthBridgeError("client_id metadata host is not allowed for this profile")
     return value
 
 
@@ -396,6 +430,8 @@ class OAuthBridgeService:
         path: str = "/mcp",
         state_dir: Optional[Path] = None,
         allowed_redirect_hosts: Optional[frozenset[str]] = None,
+        allowed_client_metadata_hosts: Optional[frozenset[str]] = None,
+        client_metadata_get: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.public_url = _public_origin(public_url)
         if not isinstance(path, str) or not path.startswith("/") or "?" in path:
@@ -412,6 +448,19 @@ class OAuthBridgeService:
                 raise OAuthBridgeError("allowed redirect hosts must not be empty")
             allowed_redirect_hosts = normalized
         self.allowed_redirect_hosts = allowed_redirect_hosts
+        if allowed_client_metadata_hosts is not None:
+            if not isinstance(allowed_client_metadata_hosts, frozenset):
+                raise OAuthBridgeError("allowed client metadata hosts must be a frozenset")
+            normalized_client_hosts = frozenset(
+                normalize_host(item)
+                for item in allowed_client_metadata_hosts
+                if normalize_host(item)
+            )
+            if not normalized_client_hosts:
+                raise OAuthBridgeError("allowed client metadata hosts must not be empty")
+            allowed_client_metadata_hosts = normalized_client_hosts
+        self.allowed_client_metadata_hosts = allowed_client_metadata_hosts
+        self._client_metadata_get = client_metadata_get
         self.resource = f"{self.public_url}{path}"
         self.path = path
         self._approval_secret = approval_secret
@@ -448,7 +497,7 @@ class OAuthBridgeService:
         return value
 
     def _load(self) -> None:
-        """Restore the registrations and refresh grants of an earlier run.
+        """Restore registrations and unexpired access/refresh grants of an earlier run.
 
         Everything here used to live only in RAM, so restarting the bridge made
         every connector's stored ``client_id`` unknown and every refresh token
@@ -534,6 +583,12 @@ class OAuthBridgeService:
                 )
                 if digest is not None and item is not None:
                     self._codes[digest] = item
+        access_grants = payload.get("access")
+        if isinstance(access_grants, dict):
+            for key, entry in access_grants.items():
+                grant = _grant_from_state(key, entry, self.resource, now)
+                if grant is not None:
+                    self._access[key] = grant
         grants = payload.get("refresh")
         if isinstance(grants, dict):
             for key, entry in grants.items():
@@ -594,6 +649,16 @@ class OAuthBridgeService:
                     }
                     for key, item in self._codes.items()
                 },
+                "access": {
+                    key: {
+                        "client_id": grant.client_id,
+                        "resource": grant.resource,
+                        "scopes": list(grant.scopes),
+                        "family": grant.family,
+                        "expires_at": grant.expires_at,
+                    }
+                    for key, grant in self._access.items()
+                },
                 "refresh": {
                     key: {
                         "client_id": grant.client_id,
@@ -610,7 +675,10 @@ class OAuthBridgeService:
                 },
             }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        # The pid alone is not unique: two threads of one bridge that register
+        # concurrently would otherwise share a temp path and interleave bytes
+        # into it, and the survivor of the race would publish a truncated file.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # 0600 before a byte is written: the digests here recognise a live
@@ -622,7 +690,17 @@ class OAuthBridgeService:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            deadline = time.monotonic() + _STATE_REPLACE_TIMEOUT_SECONDS
+            delay = _STATE_REPLACE_INITIAL_DELAY_SECONDS
+            while True:
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2.0, _STATE_REPLACE_MAX_DELAY_SECONDS)
         except OSError as exc:
             try:
                 temporary.unlink()
@@ -657,9 +735,75 @@ class OAuthBridgeService:
             key: item for key, item in self._used_refresh.items() if item[1] > now
         }
 
+    def _client_from_metadata(self, client_id: str) -> _Client:
+        """Resolve one allowlisted OAuth Client ID Metadata Document."""
+        url = _client_metadata_url(client_id, self.allowed_client_metadata_hosts)
+        get = self._client_metadata_get
+        if get is None:
+            import httpx
+
+            get = httpx.get
+        try:
+            response = get(
+                url,
+                timeout=_CLIENT_METADATA_TIMEOUT_SECONDS,
+                follow_redirects=False,
+                headers={"Accept": "application/json"},
+            )
+        except Exception as exc:
+            raise OAuthBridgeError("client metadata document could not be fetched") from exc
+        if int(getattr(response, "status_code", 0)) != 200:
+            raise OAuthBridgeError("client metadata document did not return 200")
+        raw = getattr(response, "content", b"")
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) > _MAX_CLIENT_METADATA_BYTES:
+            raise OAuthBridgeError("client metadata document is too large")
+        headers = getattr(response, "headers", {})
+        content_type = str(headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+        if content_type and content_type != "application/json" and not content_type.endswith("+json"):
+            raise OAuthBridgeError("client metadata document must be JSON")
+        payload = _json_object(bytes(raw))
+        if payload.get("client_id") != url:
+            raise OAuthBridgeError("client metadata document client_id does not match its URL")
+        client_name = payload.get("client_name")
+        if (
+            not isinstance(client_name, str)
+            or not client_name.strip()
+            or len(client_name) > 128
+            or any(char in client_name for char in ("\x00", "\r", "\n"))
+        ):
+            raise OAuthBridgeError("client metadata document client_name is invalid")
+        raw_redirects = payload.get("redirect_uris")
+        if (
+            not isinstance(raw_redirects, list)
+            or not raw_redirects
+            or len(raw_redirects) > 16
+        ):
+            raise OAuthBridgeError("client metadata document redirect_uris are invalid")
+        redirects = tuple(
+            _redirect_uri(item, self.allowed_redirect_hosts) for item in raw_redirects
+        )
+        if len(set(redirects)) != len(redirects):
+            raise OAuthBridgeError("client metadata document redirect_uris must be unique")
+        if payload.get("token_endpoint_auth_method", "none") != "none":
+            raise OAuthBridgeError("client metadata document must describe a public client")
+        grants = payload.get("grant_types", ["authorization_code"])
+        if (
+            not isinstance(grants, list)
+            or "authorization_code" not in grants
+            or any(item not in {"authorization_code", "refresh_token"} for item in grants)
+        ):
+            raise OAuthBridgeError("client metadata document grant type is unsupported")
+        responses = payload.get("response_types", ["code"])
+        if responses != ["code"]:
+            raise OAuthBridgeError("client metadata document response type is unsupported")
+        return _Client(url, redirects, client_name.strip(), int(time.time()))
+
     def protected_resource_metadata(self) -> dict[str, Any]:
         return {
             "resource": self.resource,
+            "resource_name": "KaroX MCP",
             "authorization_servers": [self.public_url],
             "bearer_methods_supported": ["header"],
             "scopes_supported": sorted(_SCOPES),
@@ -668,13 +812,17 @@ class OAuthBridgeService:
     def authorization_server_metadata(self) -> dict[str, Any]:
         return {
             "issuer": self.public_url,
+            "resource": self.resource,
+            "resource_metadata": f"{self.public_url}/.well-known/oauth-protected-resource{self.path}",
             "authorization_endpoint": f"{self.public_url}/oauth/authorize",
             "token_endpoint": f"{self.public_url}/oauth/token",
             "registration_endpoint": f"{self.public_url}/oauth/register",
             "response_types_supported": ["code"],
+            "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
+            "client_id_metadata_document_supported": self.allowed_client_metadata_hosts is not None,
             "scopes_supported": sorted(_SCOPES),
             "resource_indicators_supported": True,
         }
@@ -682,6 +830,42 @@ class OAuthBridgeService:
     def register(self, payload: object) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise OAuthBridgeError("client metadata must be a JSON object")
+        # Temporary compatibility probe for the live Notion MCP OAuth detector.
+        # It records only schema-level metadata and redirect hostnames — never
+        # client IDs, authorization codes, tokens, cookies, or raw redirect URLs.
+        if self.state_path is not None:
+            raw_probe_redirects = payload.get("redirect_uris")
+            probe_hosts = []
+            if isinstance(raw_probe_redirects, list):
+                for raw_uri in raw_probe_redirects[:16]:
+                    if isinstance(raw_uri, str):
+                        probe_hosts.append(urlsplit(raw_uri).hostname or "")
+            probe_redirect_parts = [
+                urlsplit(raw_uri)
+                for raw_uri in (raw_probe_redirects or [])[:16]
+                if isinstance(raw_uri, str)
+            ] if isinstance(raw_probe_redirects, list) else []
+            raw_client_name = payload.get("client_name")
+            probe = {
+                "keys": sorted(str(key) for key in payload.keys()),
+                "redirect_hosts": sorted(set(probe_hosts)),
+                "redirect_paths": [item.path for item in probe_redirect_parts],
+                "redirect_has_query": [bool(item.query) for item in probe_redirect_parts],
+                "redirect_has_fragment": [bool(item.fragment) for item in probe_redirect_parts],
+                "redirect_count": len(raw_probe_redirects) if isinstance(raw_probe_redirects, list) else None,
+                "client_name_type": type(raw_client_name).__name__,
+                "client_name_length": len(raw_client_name) if isinstance(raw_client_name, str) else None,
+                "token_endpoint_auth_method": payload.get("token_endpoint_auth_method"),
+                "grant_types": payload.get("grant_types"),
+                "response_types": payload.get("response_types"),
+                "scope_present": "scope" in payload,
+            }
+            try:
+                self.state_path.with_suffix(".register-probe.json").write_text(
+                    json.dumps(probe, indent=2, sort_keys=True), encoding="utf-8"
+                )
+            except OSError:
+                pass
         raw_redirects = payload.get("redirect_uris")
         if (
             not isinstance(raw_redirects, list)
@@ -763,9 +947,16 @@ class OAuthBridgeService:
         if resource != self.resource:
             raise OAuthBridgeError("OAuth resource does not match this MCP server")
         scopes = _scopes(_single(values, "scope", required=False))
+        metadata_client: Optional[_Client] = None
+        if self.allowed_client_metadata_hosts is not None and client_id.startswith("https://"):
+            metadata_client = self._client_from_metadata(client_id)
         with self._lock:
             self._prune()
-            client = self._clients.get(client_id)
+            if metadata_client is not None:
+                if client_id not in self._clients and len(self._clients) >= _MAX_CLIENTS:
+                    raise OAuthBridgeError("OAuth client registry is full")
+                self._clients[client_id] = metadata_client
+            client = metadata_client or self._clients.get(client_id)
             if client is None or redirect_uri not in client.redirect_uris:
                 raise OAuthBridgeError("OAuth client or redirect URI is not registered")
             request_id = _token()
@@ -906,6 +1097,10 @@ class OAuthBridgeService:
         with self._lock:
             self._prune()
             record = self._refresh.pop(key, None)
+            if record is None and self.state_path is not None and self.state_path.exists():
+                self._load()
+                self._prune()
+                record = self._refresh.pop(key, None)
             if record is None:
                 replay = self._used_refresh.get(key)
                 if replay is not None:
@@ -960,6 +1155,10 @@ class OAuthBridgeService:
         with self._lock:
             self._prune()
             grant = self._access.get(_digest(token))
+            if not grant and self.state_path is not None and self.state_path.exists():
+                self._load()
+                self._prune()
+                grant = self._access.get(_digest(token))
             return bool(grant and grant.resource == self.resource)
 
 
@@ -1052,6 +1251,7 @@ def build_oauth_proxy_asgi_app(
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     state_dir: Optional[Path] = None,
     allowed_redirect_hosts: Optional[frozenset[str]] = None,
+    allowed_client_metadata_hosts: Optional[frozenset[str]] = None,
 ) -> Any:
     """Expose an MCP bridge with OAuth discovery, DCR, PKCE, and refresh.
 
@@ -1065,12 +1265,16 @@ def build_oauth_proxy_asgi_app(
     chatgpt-web/claude-web profiles and library callers rely on.
     """
 
+    effective_client_metadata_hosts = allowed_client_metadata_hosts
+    if effective_client_metadata_hosts is None and path == "/karox/mcp":
+        effective_client_metadata_hosts = allowed_redirect_hosts
     service = OAuthBridgeService(
         public_url,
         approval_secret,
         path=path,
         state_dir=state_dir,
         allowed_redirect_hosts=allowed_redirect_hosts,
+        allowed_client_metadata_hosts=effective_client_metadata_hosts,
     )
     metadata_url = (
         f"{service.public_url}/.well-known/oauth-protected-resource{service.path}"
@@ -1085,7 +1289,12 @@ def build_oauth_proxy_asgi_app(
         deadline_seconds=deadline_seconds,
         bearer_authorizer=service.authorize_access_token,
         unauthorized_headers={
-            "WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'
+            "WWW-Authenticate": (
+                'Bearer realm="OAuth", '
+                f'resource_metadata="{metadata_url}", '
+                'error="invalid_token", '
+                'error_description="Missing or invalid access token"'
+            )
         },
         allowed_hosts=(public_host,),
     )
@@ -1107,6 +1316,23 @@ def build_oauth_proxy_asgi_app(
         request = Request(scope, receive=receive)
         request_path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
+        # Opt-in diagnostic trace for connector interoperability work. It records
+        # only the HTTP method and URL path: never query strings, headers, bodies,
+        # cookies, client IDs, authorization codes, or tokens.
+        trace_notion = bool(
+            service.allowed_redirect_hosts
+            and {"notion.so", "www.notion.so", "app.notion.com"}.intersection(
+                service.allowed_redirect_hosts
+            )
+        )
+        if trace_notion and service.state_path is not None:
+            try:
+                with service.state_path.with_suffix(".request-probe.jsonl").open(
+                    "a", encoding="utf-8"
+                ) as handle:
+                    handle.write(json.dumps({"method": method, "path": str(request_path)}) + "\n")
+            except OSError:
+                pass
         try:
             if request_path in {
                 "/.well-known/oauth-protected-resource",
@@ -1116,22 +1342,18 @@ def build_oauth_proxy_asgi_app(
                     service.protected_resource_metadata(),
                     headers={"Cache-Control": "no-store"},
                 )
-            elif request_path == "/.well-known/oauth-authorization-server" and method == "GET":
+            elif request_path in {
+                "/.well-known/oauth-authorization-server",
+                # OpenID-style alias: HyperAgent's connector discovers the
+                # authorization server through this path, and its removal left
+                # the hyperagent-web profile with no working discovery route.
+                "/.well-known/openid-configuration",
+            } and method == "GET":
                 response = JSONResponse(
                     service.authorization_server_metadata(),
                     headers={"Cache-Control": "no-store"},
                 )
-            elif request_path == "/.well-known/openid-configuration" and method == "GET":
-                # KaroX is not an OIDC provider: it issues no ID tokens and has no
-                # userinfo endpoint. Some MCP clients probe this path during
-                # discovery regardless, so it is served as an explicit
-                # compatibility alias for the authorization-server metadata --
-                # the same fields, never an OIDC claim that is not honoured.
-                response = JSONResponse(
-                    service.authorization_server_metadata(),
-                    headers={"Cache-Control": "no-store"},
-                )
-            elif request_path == "/oauth/register" and method == "POST":
+            elif request_path in {"/register", "/oauth/register"} and method == "POST":
                 if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
                     raise OAuthBridgeError("client registration must use application/json")
                 raw = await _body(request)
@@ -1141,7 +1363,7 @@ def build_oauth_proxy_asgi_app(
                     status_code=201,
                     headers={"Cache-Control": "no-store"},
                 )
-            elif request_path == "/oauth/authorize" and method == "GET":
+            elif request_path in {"/authorize", "/oauth/authorize"} and method == "GET":
                 values: dict[str, list[str]] = {}
                 for key, value in request.query_params.multi_items():
                     values.setdefault(key, []).append(value)
@@ -1170,7 +1392,7 @@ def build_oauth_proxy_asgi_app(
                         "Referrer-Policy": "same-origin",
                     },
                 )
-            elif request_path == "/oauth/authorize" and method == "POST":
+            elif request_path in {"/authorize", "/oauth/authorize"} and method == "POST":
                 values = await _form(request)
                 location = service.approve(
                     _single(values, "request_id"),
@@ -1189,7 +1411,7 @@ def build_oauth_proxy_asgi_app(
                         "X-Frame-Options": "DENY",
                     },
                 )
-            elif request_path == "/oauth/token" and method == "POST":
+            elif request_path in {"/token", "/oauth/token"} and method == "POST":
                 response = JSONResponse(
                     service.token(await _form(request)),
                     headers={"Cache-Control": "no-store", "Pragma": "no-cache"},

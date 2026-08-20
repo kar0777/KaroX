@@ -196,6 +196,7 @@ def default_server_launcher(
     session_dir: Optional[Path] = None,
     spawn: Optional[Callable[..., Any]] = None,
     reuse_existing_session: bool = False,
+    bypass: bool = False,
 ) -> ServerHandle:
     """Start the real ``karox bridge serve`` child and wait for its port.
 
@@ -209,7 +210,7 @@ def default_server_launcher(
     import subprocess
 
     from .bridge import BridgeCredentialStore
-    from .sessions import AccessProfile, SessionStore
+    from .sessions import SessionStore
 
     # Lazy import to keep the launcher seam importable without the whole
     # web-bridge runtime on the path.
@@ -236,6 +237,13 @@ def default_server_launcher(
             f"port in Advanced"
         )
 
+    # The shared Bypass mode maps onto the capability profile the session is
+    # created with -- the same contract every other connection family uses.
+    from types import SimpleNamespace
+
+    from .access_mode import provider_access_profile
+
+    session_profile = provider_access_profile(SimpleNamespace(bypass=bool(bypass)))
     sid = credential_name or f"clickup-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     store_dir = session_dir or _session_dir()
     sessions = SessionStore(store_dir)
@@ -248,7 +256,7 @@ def default_server_launcher(
             sessions.create(
                 repository,
                 "ClickUp hosted bridge",
-                AccessProfile.WORKSPACE_WRITE,
+                session_profile,
                 session_id=sid,
             )
         else:
@@ -261,7 +269,7 @@ def default_server_launcher(
         sessions.create(
             repository,
             "ClickUp hosted bridge",
-            AccessProfile.WORKSPACE_WRITE,
+            session_profile,
             session_id=sid,
         )
     # The bridge credential holds the secret the server will validate bearers
