@@ -197,6 +197,43 @@ def read_process_create_time_ns(pid: int) -> Optional[int]:
     return None
 
 
+def process_is_running(pid: int) -> bool:
+    """Return whether a PID is executing, not merely still queryable by handle."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+            query_limited = 0x1000
+            still_active = 259
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            open_process.restype = wintypes.HANDLE
+            handle = open_process(query_limited, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                return bool(ok) and int(exit_code.value) == still_active
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 CreateTimeReader = Callable[[int], Optional[int]]
 PidAlive = Callable[[int], bool]
 
@@ -374,6 +411,7 @@ __all__ = [
     "current_owner",
     "executable_digest",
     "owner_digest",
+    "process_is_running",
     "read_process_create_time_ns",
     "verify_process_identity",
 ]
