@@ -1,0 +1,298 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from _support import SRC, initialize_git_repository  # noqa: F401
+from karox.artifacts import ArtifactStore
+from karox.repo_context import RepositoryContextEngine, _safe_relative
+
+
+class RepositoryContextTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.repo = root / "repo"
+        initialize_git_repository(self.repo)
+        for name in ("src", "tests", "docs"):
+            (self.repo / name).mkdir()
+        (self.repo / "src" / "service.py").write_text(
+            "class BridgeService:\n"
+            "    def start_saved_bridge(self):\n"
+            "        return launch_profile()\n\n"
+            "def launch_profile():\n"
+            "    return 'started'\n",
+            encoding="utf-8",
+        )
+        (self.repo / "src" / "cli.py").write_text(
+            "from .service import BridgeService\n\n"
+            "def connect_command():\n"
+            "    return BridgeService().start_saved_bridge()\n",
+            encoding="utf-8",
+        )
+        (self.repo / "tests" / "test_service.py").write_text(
+            "from src.service import BridgeService\n\n"
+            "def test_start_saved_bridge():\n"
+            "    assert BridgeService().start_saved_bridge() == 'started'\n",
+            encoding="utf-8",
+        )
+        (self.repo / "docs" / "connect.md").write_text(
+            "# Connect\nSaved bridge profile flow.\n", encoding="utf-8"
+        )
+        self.old_runtime = os.environ.get("KAROX_RUNTIME_DIR")
+        os.environ["KAROX_RUNTIME_DIR"] = str(root / "runtime")
+        self.artifacts = ArtifactStore("inspect-session")
+        self.engine = RepositoryContextEngine(
+            self.repo, self.artifacts, policy_profile="workspace_write"
+        )
+
+    def tearDown(self) -> None:
+        if self.old_runtime is None:
+            os.environ.pop("KAROX_RUNTIME_DIR", None)
+        else:
+            os.environ["KAROX_RUNTIME_DIR"] = self.old_runtime
+        self.temp.cleanup()
+
+    def test_inspect_ranks_flow_and_writes_artifact(self) -> None:
+        result = self.engine.inspect(
+            "BridgeService start_saved_bridge launch_profile flow tests", "focused"
+        )
+        self.assertTrue(result["ok"])
+        paths = [item["path"] for item in result["important_findings"]]
+        self.assertIn("src/service.py", paths)
+        self.assertIn("tests/test_service.py", paths)
+        data, record = self.artifacts.read(result["artifact_id"])
+        full = json.loads(data)
+        names = [item["name"] for item in full["symbols"]["definitions"]]
+        self.assertIn("BridgeService", names)
+        self.assertIn("start_saved_bridge", names)
+        self.assertEqual(record.sha256, result["content_hash"])
+
+    def test_dependency_hints_add_one_hop_local_imports_and_callers(self) -> None:
+        (self.repo / "src" / "helper.py").write_text(
+            "def format_state(value):\n    return value\n", encoding="utf-8"
+        )
+        service = self.repo / "src" / "service.py"
+        service.write_text(
+            "from .helper import format_state\n" + service.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        result = self.engine.inspect(
+            "BridgeService start_saved_bridge",
+            "focused",
+            include_dependency_hints=True,
+        )
+        hints = result["dependency_hints"]
+
+        self.assertIn("src/helper.py", hints["implementation"])
+        self.assertIn("tests/test_service.py", hints["tests"])
+        self.assertGreaterEqual(hints["edge_count"], 2)
+
+    def test_default_inspect_never_builds_the_broad_import_index(self) -> None:
+        with mock.patch.object(
+            self.engine,
+            "_lightweight_imports",
+            side_effect=AssertionError("broad import index entered default inspect"),
+        ) as broad_index:
+            result = self.engine.inspect("BridgeService start_saved_bridge", "focused")
+
+        self.assertTrue(result["ok"])
+        broad_index.assert_not_called()
+
+    def test_typescript_symbol_is_indexed(self) -> None:
+        (self.repo / "src" / "panel.ts").write_text(
+            "export function buildPanel() {}\n", encoding="utf-8"
+        )
+        result = self.engine.inspect("buildPanel", "focused")
+        data, _ = self.artifacts.read(result["artifact_id"])
+        definitions = json.loads(data)["symbols"]["definitions"]
+        self.assertTrue(any(item["name"] == "buildPanel" for item in definitions))
+
+    def test_noisy_markdown_is_not_a_change_point(self) -> None:
+        (self.repo / "NOISY.md").write_text(
+            "BridgeService project map\n" * 500, encoding="utf-8"
+        )
+        (self.repo / "src" / "rare.py").write_text(
+            "def rare_handler():\n    return 'BridgeService'\n", encoding="utf-8"
+        )
+        result = self.engine.inspect("BridgeService rare_handler project map", "focused")
+        paths = [item["path"] for item in result["likely_change_points"]]
+        self.assertNotIn("NOISY.md", paths)
+        self.assertIn("src/rare.py", paths)
+        data, _ = self.artifacts.read(result["artifact_id"])
+        matches = json.loads(data)["matches"]
+        noisy_matches = [item for item in matches if item["path"] == "NOISY.md"]
+        self.assertLessEqual(len(noisy_matches), 10)
+
+    def test_cache_hit_then_dirty_hash_invalidation(self) -> None:
+        first = self.engine.inspect("BridgeService start_saved_bridge", "focused")
+        cached = self.engine.inspect("BridgeService start_saved_bridge", "focused")
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(first["artifact_id"], cached["artifact_id"])
+        path = self.repo / "src" / "service.py"
+        path.write_text(path.read_text(encoding="utf-8") + "\ndef stop_bridge():\n    return True\n", encoding="utf-8")
+        changed = self.engine.inspect("BridgeService start_saved_bridge", "focused")
+        self.assertFalse(changed["cache_hit"])
+        self.assertNotEqual(first["artifact_id"], changed["artifact_id"])
+
+    def test_selective_definition_read(self) -> None:
+        result = self.engine.inspect("BridgeService", "focused")
+        selected = self.artifacts.read_selection(
+            result["artifact_id"], {"kind": "json_path", "path": "symbols.definitions"}
+        )
+        self.assertTrue(any(item["name"] == "BridgeService" for item in selected["content"]))
+
+    def test_tracked_porcelain_path_keeps_first_character(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "."],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "-c",
+                "user.name=KaroX Test",
+                "-c",
+                "user.email=karox@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        path = self.repo / "src" / "service.py"
+        path.write_text(path.read_text(encoding="utf-8") + "\nTRACKED = True\n", encoding="utf-8")
+        identity = self.engine._revision_identity()
+        dirty_paths = [item["path"] for item in identity["dirty"]]
+        self.assertIn("src/service.py", dirty_paths)
+        self.assertNotIn("rc/service.py", dirty_paths)
+
+    def test_fast_identity_compacts_wholly_untracked_directory(self) -> None:
+        tree = self.repo / "scratch-tree"
+        tree.mkdir()
+        for index in range(20):
+            (tree / f"file-{index}.txt").write_text(f"value-{index}\n", encoding="utf-8")
+        identity = self.engine._fast_revision_identity()
+        entries = [item for item in identity["dirty"] if item["path"].startswith("scratch-tree")]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["path"], "scratch-tree")
+
+    def test_fast_identity_detects_change_inside_existing_untracked_directory(self) -> None:
+        tree = self.repo / "scratch-tree"
+        tree.mkdir()
+        nested = tree / "nested.txt"
+        nested.write_text("before\n", encoding="utf-8")
+        before = self.engine._fast_revision_identity()
+        nested.write_text("after-with-different-size\n", encoding="utf-8")
+        after = self.engine._fast_revision_identity()
+        self.assertNotEqual(before, after)
+        before_entry = next(item for item in before["dirty"] if item["path"] == "scratch-tree")
+        after_entry = next(item for item in after["dirty"] if item["path"] == "scratch-tree")
+        self.assertNotEqual(before_entry["sha256"], after_entry["sha256"])
+
+    def test_compact_content_identity_compacts_untracked_tree_but_remains_content_aware(self) -> None:
+        tree = self.repo / "scratch-strict-tree"
+        tree.mkdir()
+        nested = tree / "nested.txt"
+        nested.write_text("alpha\n", encoding="utf-8")
+        before_stat = nested.stat()
+        before = self.engine._compact_content_revision_identity()
+        before_entries = [item for item in before["dirty"] if item["path"] == "scratch-strict-tree"]
+        self.assertEqual(len(before_entries), 1)
+
+        nested.write_text("omega\n", encoding="utf-8")
+        os.utime(
+            nested,
+            ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns),
+        )
+        after = self.engine._compact_content_revision_identity()
+        after_entries = [item for item in after["dirty"] if item["path"] == "scratch-strict-tree"]
+        self.assertEqual(len(after_entries), 1)
+        self.assertNotEqual(before_entries[0]["sha256"], after_entries[0]["sha256"])
+
+    def test_identity_reads_normal_head_without_rev_parse_subprocess(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "."],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "-c",
+                "user.name=KaroX Test",
+                "-c",
+                "user.email=karox@example.invalid",
+                "commit",
+                "-m",
+                "head fixture",
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        with mock.patch.object(self.engine, "_git", wraps=self.engine._git) as git_call:
+            identity = self.engine._fast_revision_identity()
+        self.assertIn("revision", identity)
+        self.assertFalse(
+            any(call.args and call.args[0] == "rev-parse" for call in git_call.call_args_list)
+        )
+
+    def test_fast_identity_ignores_generated_runtime_trees(self) -> None:
+        generated = self.repo / ".netlify" / "functions-serve"
+        generated.mkdir(parents=True, exist_ok=True)
+        (generated / "generated.ts").write_text("runtime churn\n", encoding="utf-8")
+        vite = self.repo / "node_modules" / ".vite-temp"
+        vite.mkdir(parents=True, exist_ok=True)
+        (vite / "config.mjs").write_text("runtime churn\n", encoding="utf-8")
+        identity = self.engine._fast_revision_identity()
+        dirty_paths = [item["path"] for item in identity["dirty"]]
+        self.assertFalse(any(path.startswith(".netlify") for path in dirty_paths))
+        self.assertFalse(any(path.startswith("node_modules") for path in dirty_paths))
+
+    def test_inspect_uses_git_grep_when_ripgrep_is_unavailable(self) -> None:
+        with (
+            mock.patch("karox.repo_context.shutil.which", return_value=None),
+            mock.patch.object(
+                self.engine,
+                "_python_search",
+                side_effect=AssertionError("python full scan should not run"),
+            ),
+        ):
+            result = self.engine.inspect(
+                "BridgeService fallback-native-search-unique", "focused"
+            )
+        self.assertTrue(result["ok"])
+        paths = [item["path"] for item in result["important_findings"]]
+        self.assertIn("src/service.py", paths)
+        self.assertTrue(result["summary"]["matches"] >= 1)
+
+    def test_rejects_parent_escape_and_invalid_depth(self) -> None:
+        self.assertIsNone(_safe_relative(self.repo, "../outside.txt"))
+        self.assertIsNone(_safe_relative(self.repo, "./../outside.txt"))
+        self.assertEqual(_safe_relative(self.repo, "./src/service.py"), "src/service.py")
+        with self.assertRaisesRegex(ValueError, "focused, standard, or deep"):
+            self.engine.inspect("BridgeService", "unbounded")
+
+
+if __name__ == "__main__":
+    unittest.main()

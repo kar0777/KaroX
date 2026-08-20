@@ -270,7 +270,10 @@ class SessionLockCliTests(unittest.TestCase):
             {
                 "PYTHONPATH": str(SRC),
                 "KAROX_CONFIG_DIR": str(self.root / "config"),
+                "KAROX_VNEXT_CONFIG_DIR": str(self.root / "config"),
                 "KAROX_RUNTIME_DIR": str(self.runtime_dir),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.runtime_dir),
+                "KAROX_LEGACY_CONFIG_DIR": str(self.root / "legacy-config"),
             }
         )
         proc = subprocess.run(
