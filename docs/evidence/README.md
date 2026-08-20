@@ -28,3 +28,4 @@ operating system, is worth recording only if it says so.
 | Date | Commit | What it covers |
 |---|---|---|
 | [2026-07-31](baseline-2026-07-31.md) | `dee041c` | Starting state for the 5.0 work: suite, 12 static gates, lint, types, coverage, and the live evidence still open. |
+| [2026-08-07 local acceptance](local-autonomy-acceptance-2026-08-07.md) | `1b01350` + explicitly dirty working tree | Managed full suite, branch coverage, lifecycle survival, wheel/install autonomy, support-bundle gate, and remaining user/remote gates. |
