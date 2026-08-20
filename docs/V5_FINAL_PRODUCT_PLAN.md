@@ -78,10 +78,10 @@ Feature | Priority | Foundation | Wired | Measured | Live | Release blocker
 Bypass unified access mode | P0-done | yes | yes | n/a | yes (ELEVATED live) | no
 Test isolation (keyring/paths/profiles) | P0-done | yes | yes | yes (guard tests) | yes | no
 Multi-project registry/leases/workspace | P0.5 | yes | yes | partial | UI smoke pending | yes
-Universal Memory Layer | P0.1 | partial (task_state/checkpoints/repo_context) | no | no | no | yes
-Memory Protocol (MCP tools) | P0.2 | no | no | no | no | yes
-karox init + Project Map | P0.3 | partial (repo_context) | no | no | no | yes
-Quality economy (cache/batch/artifact-first) | P0.4 | yes (classes) | unproven | no | partial (artifact-first observed live) | yes
+Universal Memory Layer | P0.1 | yes (memory.py, 2026-08-20) | yes | yes (12 tests) | pending live | yes
+Memory Protocol (MCP tools) | P0.2 | yes (karox.memory.*) | yes (catalogue+bundles) | yes (cross-client acceptance test) | pending live (needs bridge catalog upgrade) | yes
+karox init + Project Map | P0.3 | yes (project_map.py) | yes (task.bootstrap digest) | yes (7 tests) | pending live | yes
+Quality economy (cache/batch/artifact-first) | P0.4 | yes | yes (agent turn + execute_plan, 2026-08-20) | yes (counters in usage events + envelope) | partial (artifact-first observed live) | yes
 Handoff / compaction recovery | P0.1 | yes | partial (task.resume/checkpoint live) | no | partial | yes
 Provider live (Luna bounded) | P0.5 | yes | yes | n/a | pending | yes
 Cross-client memory demo | P0.5 | no | no | no | no | yes
@@ -118,3 +118,13 @@ karox insights (minimal) | P1.7 | partial (telemetry/usage_analytics) | no | no 
 7. Feature freeze → gates → RC artifacts (no tag/push/publish without approval).
 
 Local commits after each green subsystem. Checkpoint before any compaction.
+
+## 6. Execution log
+
+- 2026-08-20: P0.4 wired and measured (agent turn + execute_plan economy, commits 3e43a65/7e98bc7).
+- 2026-08-20: P0.1 KaroXMemory + P0.2 karox.memory.* protocol landed (commits 9698b61/3ec3180);
+  cross-client recall proven by acceptance test without shared transcripts.
+- 2026-08-20: P0.3 ProjectFactMap landed, bootstrap now returns the onboarding digest (commit 1aa718e).
+- Remaining before RC: live exposure of the new catalogue (saved-profile upgrade + canonical bridge
+  restart), Ctrl+W multi-project UI smoke, Luna provider smoke, cross-client live memory demo,
+  full-suite/coverage/wheel gates, docs truthfulness pass.
