@@ -27,6 +27,7 @@ from karox.tailscale import (
     query_funnel_ownership,
     query_tailscale_status,
 )
+from karox.tailscale_routes import TailscaleRoute
 from karox.web_bridge_launcher import (
     WebBridgeConnectConfig,
     _legacy_saved_web_bridge_session_id,
@@ -113,11 +114,93 @@ class SavedWebBridgeProfileTests(unittest.TestCase):
             store.put(profile, replace_existing=False)
             self.assertEqual(store.get("full-dev"), profile)
             raw = path.read_text(encoding="utf-8")
-            self.assertNotIn("credential", raw.lower())
+            self.assertNotIn("password", raw.lower())
             self.assertNotIn("secret", raw.lower())
+            self.assertNotIn("username", raw.lower())
             self.assertEqual(json.loads(raw)["version"], 1)
             if os.name != "nt":
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_browser_credential_refs_round_trip_without_raw_login_values(self) -> None:
+        profile = SavedWebBridgeProfile(
+            name="browser-test",
+            target_profile="chatgpt-web",
+            tools=("karox.repo.read_file",),
+            access_profile=AccessProfile.BROWSER_CONTROL,
+            browser_external_https=True,
+            browser_credential_refs=("os-keyring:browser/gmail-test",),
+        )
+        restored = SavedWebBridgeProfile.from_dict(profile.to_dict())
+        self.assertEqual(
+            restored.browser_credential_refs,
+            ("os-keyring:browser/gmail-test",),
+        )
+        self.assertEqual(
+            WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path.cwd(),
+                tools=("karox.repo.read_file",),
+                access_profile=AccessProfile.BROWSER_CONTROL,
+                browser_external_https=True,
+                browser_credential_refs=restored.browser_credential_refs,
+            ).browser_credential_refs,
+            ("os-keyring:browser/gmail-test",),
+        )
+        with self.assertRaisesRegex(WebBridgeProfileError, "credential reference"):
+            SavedWebBridgeProfile(
+                name="bad-browser-ref",
+                target_profile="chatgpt-web",
+                tools=("karox.repo.read_file",),
+                access_profile=AccessProfile.BROWSER_CONTROL,
+                browser_external_https=True,
+                browser_credential_refs=("plaintext:browser/nope",),
+            )
+
+    def test_external_mcp_server_ids_round_trip_secret_free(self) -> None:
+        profile = SavedWebBridgeProfile(
+            name="with-notion",
+            target_profile="chatgpt-web",
+            tools=("karox.repo.read_file",),
+            mcp_servers=("notion", "docs_mcp"),
+        )
+        restored = SavedWebBridgeProfile.from_dict(profile.to_dict())
+        self.assertEqual(restored.mcp_servers, ("notion", "docs_mcp"))
+        with self.assertRaisesRegex(WebBridgeProfileError, "MCP server IDs"):
+            SavedWebBridgeProfile(
+                name="bad-mcp",
+                target_profile="chatgpt-web",
+                tools=("karox.repo.read_file",),
+                mcp_servers=("notion", "notion"),
+            )
+
+    def test_cli_create_and_edit_external_mcp_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_root = Path(tmp) / "config"
+            environment = {"KAROX_VNEXT_CONFIG_DIR": str(config_root)}
+            output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), redirect_stdout(output):
+                code = main(
+                    (
+                        "bridge", "saved", "create", "mcp-dev",
+                        "--target-profile", "chatgpt-web",
+                        "--mcp-server", "notion",
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["profile"]["mcp_servers"], ["notion"])
+
+            output = io.StringIO()
+            with patch.dict(os.environ, environment, clear=False), redirect_stdout(output):
+                code = main(
+                    (
+                        "bridge", "saved", "edit", "mcp-dev",
+                        "--clear-mcp-servers",
+                        "--json",
+                    )
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["profile"]["mcp_servers"], [])
 
     def test_checks_run_requires_a_typed_allowlist(self) -> None:
         with self.assertRaisesRegex(WebBridgeProfileError, "approved verification"):
@@ -573,6 +656,50 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             with self.assertRaisesRegex(TailscaleError, "ownership_unknown"):
                 prepare_tailscale_funnel(8765, run=unknown_run)
 
+    def test_prepare_preserves_sibling_path_on_same_https_listener(self) -> None:
+        status = json.dumps(
+            {
+                "BackendState": "Running",
+                "Self": {"DNSName": "workstation.tailnet.ts.net."},
+            }
+        )
+        root = TailscaleRoute(
+            host="workstation.tailnet.ts.net",
+            path="/",
+            protocol="https",
+            local_target="http://127.0.0.1:8765",
+            mode="funnel",
+            raw_key="workstation.tailnet.ts.net:443/",
+        )
+        notion = TailscaleRoute(
+            host="workstation.tailnet.ts.net",
+            path="/karox-notion",
+            protocol="https",
+            local_target="http://127.0.0.1:8767",
+            mode="funnel",
+            raw_key="workstation.tailnet.ts.net:443/karox-notion",
+        )
+
+        def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            del kwargs
+            if argv[1:3] == ["status", "--json"]:
+                return _completed(argv, stdout=status)
+            if argv[1:4] == ["serve", "status", "--json"]:
+                return _completed(argv, stdout=json.dumps({"TCP": {"443": {"HTTPS": True}}}))
+            return _completed(argv)
+
+        with (
+            patch("karox.tailscale.find_tailscale", return_value="tailscale"),
+            patch(
+                "karox.tailscale_routes.inventory_tailscale_routes",
+                side_effect=[[root, notion], [notion]],
+            ),
+        ):
+            plan = prepare_tailscale_funnel(8765, run=run)
+
+        self.assertEqual(plan.public_url, "https://workstation.tailnet.ts.net")
+        self.assertEqual(plan.argv[-1], "http://127.0.0.1:8765")
+
     def test_prepare_returns_stable_foreground_plan(self) -> None:
         status = json.dumps(
             {
@@ -636,6 +763,46 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
                 )
         unconfirmed_process.terminate.assert_called_once()
 
+    def test_prepare_allows_notion_listener_beside_existing_443_funnel(self) -> None:
+        from karox.tailscale_routes import TailscaleRoute
+
+        existing_chatgpt = TailscaleRoute(
+            host="workstation.tailnet.ts.net",
+            path="/",
+            protocol="https",
+            local_target="http://127.0.0.1:8765",
+            mode="funnel",
+            raw_key="workstation.tailnet.ts.net:443/",
+        )
+        ready = {
+            "ready": True,
+            "executable": "tailscale",
+            "public_url": "https://workstation.tailnet.ts.net",
+        }
+        with (
+            patch("karox.tailscale.ensure_tailscale_ready", return_value=ready),
+            patch(
+                "karox.tailscale.query_funnel_ownership",
+                return_value={"known": True, "active": True},
+            ),
+            patch(
+                "karox.tailscale_routes.inventory_tailscale_routes",
+                return_value=[existing_chatgpt],
+            ),
+        ):
+            plan = prepare_tailscale_funnel(
+                8767,
+                https_port=8443,
+                run=Mock(),
+            )
+
+        self.assertEqual(
+            plan.public_url,
+            "https://workstation.tailnet.ts.net:8443",
+        )
+        self.assertIn("--https=8443", plan.argv)
+        self.assertIn("http://127.0.0.1:8767", plan.argv)
+
     def test_diagnostics_explain_tools_deadline_and_url_stability(self) -> None:
         unavailable = WebBridgeConnectConfig(
             profile="chatgpt-web",
@@ -669,6 +836,25 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         self.assertEqual(
             full_report["session_expiration"],
             "when the managed launcher exits",
+        )
+
+    def test_hyperagent_full_diagnostics_advertise_unrestricted_dev_commands(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="hyperagent-web",
+            repository=Path.cwd(),
+            tools=("karox.repo.read_file", "karox.command.run"),
+            access_profile=AccessProfile.ELEVATED,
+            tunnel="tailscale",
+        )
+        report = web_bridge_diagnostics(config)
+        self.assertEqual(
+            report["mode_restrictions"],
+            {
+                "read_only": False,
+                "no_git_push": False,
+                "no_publish": False,
+                "no_auth_commands": False,
+            },
         )
 
     def test_ensure_ready_restarts_service_when_up_leaves_daemon_stuck(self) -> None:
@@ -793,6 +979,51 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         popen.assert_called_once()
         elevated.assert_not_called()
 
+    def test_ensure_ready_launches_gui_when_status_initially_cannot_reach_daemon(self) -> None:
+        ready = json.dumps(
+            {
+                "BackendState": "Running",
+                "Self": {"DNSName": "monsterpc.tail.ts.net."},
+            }
+        )
+        gui_up = [False]
+        calls: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[1:3] == ["status", "--json"]:
+                if gui_up[0]:
+                    return _completed(argv, stdout=ready)
+                return _completed(
+                    argv,
+                    returncode=1,
+                    stderr="failed to connect to local tailscaled",
+                )
+            return _completed(argv)
+
+        popen = Mock()
+
+        def launch_gui(argv, **kwargs):
+            gui_up[0] = True
+            return Mock()
+
+        popen.side_effect = launch_gui
+        with patch("karox.tailscale.os.name", "nt"), patch(
+            "karox.tailscale.find_tailscale_gui",
+            return_value="C:/Program Files/Tailscale/tailscale-ipn.exe",
+        ):
+            status = ensure_tailscale_ready(
+                executable="tailscale",
+                run=run,
+                poll_attempts=2,
+                poll_interval_seconds=0,
+                popen=popen,
+            )
+
+        self.assertTrue(status["ready"])
+        popen.assert_called_once()
+        self.assertFalse(any(argv[1:] == ["up"] for argv in calls))
+
     def test_connect_command_defaults_to_chatgpt_and_tailscale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repository = Path(tmp)
@@ -813,9 +1044,10 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["url_stability"], "stable_device_hostname")
             self.assertEqual(report["access_profile"], "read_only")
 
-            # The short alias must be as complete as `bridge connect`: --write
-            # exposes dev_server.start, so it also supplies the bundled safe
-            # server profile instead of failing before the bridge launches.
+            # The short alias must be as complete as `bridge connect`, but a
+            # repository with no approved local server recipe must not inherit
+            # another project's start:safe profile. Write/check capabilities stay
+            # enabled; managed server mutation is simply not advertised.
             output = io.StringIO()
             with redirect_stdout(output):
                 code = main(
@@ -834,10 +1066,10 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             writable = json.loads(output.getvalue())
             self.assertEqual(writable["access_profile"], "workspace_write")
             self.assertTrue(writable["write_permission"])
-            self.assertIn("karox.dev_server.start", writable["available_tools"])
+            self.assertNotIn("karox.dev_server.start", writable["available_tools"])
             self.assertIn("karox.checks.run", writable["available_tools"])
             self.assertIn("karox.tests.run", writable["available_tools"])
-            self.assertTrue(writable["server_profiles"])
+            self.assertEqual(writable["server_profiles"], [])
 
     def test_connect_command_maps_short_connector_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

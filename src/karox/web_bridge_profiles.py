@@ -20,10 +20,12 @@ from .hosted_bridge import (
 from .hosted_tools_runtime import ManagedServerProfile
 from .models import AccessProfile
 from .paths import config_dir
+from .project_registry import ProjectRegistry, ProjectRegistryError
 
 
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TARGET_PROFILES = {"chatgpt-web", "claude-web", "hyperagent-web"}
+_MCP_SERVER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_TARGET_PROFILES = {"chatgpt-web", "claude-web", "notion", "hyperagent-web", "adapt"}
 _TUNNELS = {"cloudflare", "tailscale", "custom"}
 _LANGUAGES = {"en", "ru"}
 _STORE_VERSION = 1
@@ -156,7 +158,10 @@ class SavedWebBridgeProfile:
     name: str
     target_profile: str
     tools: tuple[str, ...]
+    mcp_servers: tuple[str, ...] = ()
     repository: Optional[str] = None
+    projects: tuple[dict[str, str], ...] = ()
+    default_project_id: Optional[str] = None
     verification_commands: tuple[tuple[str, ...], ...] = ()
     # Server profiles are secret-free recipes (argv + env keys + env allowlist),
     # so they are safe to persist.  Stored as plain dicts and rebuilt into
@@ -171,8 +176,9 @@ class SavedWebBridgeProfile:
     browser_network_inspection: bool = False
     browser_payment_confirmation: bool = False
     browser_allowed_emails: tuple[str, ...] = ()
+    browser_credential_refs: tuple[str, ...] = ()
     deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS
-    tunnel: str = "cloudflare"
+    tunnel: str = "tailscale"
     public_url: Optional[str] = None
     language: str = "en"
     access_profile: AccessProfile = AccessProfile.READ_ONLY
@@ -183,7 +189,7 @@ class SavedWebBridgeProfile:
         object.__setattr__(self, "name", _profile_name(self.name))
         if self.target_profile not in _TARGET_PROFILES:
             raise WebBridgeProfileError(
-                "saved target profile must be chatgpt-web or claude-web"
+                "saved target profile must be chatgpt-web, claude-web, notion, hyperagent-web, or adapt"
             )
         if not self.tools or len(set(self.tools)) != len(self.tools):
             raise WebBridgeProfileError("saved bridge tools must be non-empty and unique")
@@ -191,6 +197,13 @@ class SavedWebBridgeProfile:
         if unknown:
             raise WebBridgeProfileError(
                 "saved bridge profile contains unknown tools: " + ", ".join(unknown)
+            )
+        if len(set(self.mcp_servers)) != len(self.mcp_servers) or not all(
+            isinstance(item, str) and _MCP_SERVER_ID.fullmatch(item)
+            for item in self.mcp_servers
+        ):
+            raise WebBridgeProfileError(
+                "saved MCP server IDs must be unique safe identifiers"
             )
         commands = tuple(_command(value) for value in self.verification_commands)
         object.__setattr__(self, "verification_commands", commands)
@@ -225,17 +238,39 @@ class SavedWebBridgeProfile:
                 network_inspection=self.browser_network_inspection,
                 payment_confirmation=self.browser_payment_confirmation,
                 allowed_emails=tuple(self.browser_allowed_emails),
+                allowed_credential_refs=tuple(self.browser_credential_refs),
             )
         except ValueError as exc:
             raise WebBridgeProfileError(f"saved browser policy is invalid: {exc}") from exc
         object.__setattr__(self, "browser_allowed_domains", browser_policy.allowed_domains)
         object.__setattr__(self, "browser_denied_domains", browser_policy.denied_domains)
         object.__setattr__(self, "browser_allowed_emails", browser_policy.allowed_emails)
-        if self.repository is not None:
-            repository = str(self.repository).strip()
-            if not repository:
-                raise WebBridgeProfileError("saved repository path must not be empty")
-            object.__setattr__(self, "repository", repository)
+        object.__setattr__(
+            self,
+            "browser_credential_refs",
+            browser_policy.allowed_credential_refs,
+        )
+        if self.repository is not None and not str(self.repository).strip():
+            raise WebBridgeProfileError("saved repository path must not be empty")
+        try:
+            project_registry = ProjectRegistry.from_profile(
+                repository=self.repository,
+                projects=self.projects,
+                default_project_id=self.default_project_id,
+            )
+        except (ProjectRegistryError, TypeError) as exc:
+            raise WebBridgeProfileError(f"saved project registry is invalid: {exc}") from exc
+        object.__setattr__(self, "projects", tuple(project_registry.to_payload()))
+        object.__setattr__(self, "default_project_id", project_registry.default_project_id)
+        anchor = (
+            project_registry.entry_for_path(self.repository)
+            if self.repository is not None
+            else project_registry.default
+        )
+        if anchor is not None:
+            # The legacy field remains the durable session anchor. The logical
+            # default may change independently via default_project_id.
+            object.__setattr__(self, "repository", anchor.path)
         if self.tunnel not in _TUNNELS:
             raise WebBridgeProfileError(
                 "saved bridge tunnel must be cloudflare, tailscale, or custom"
@@ -275,12 +310,15 @@ class SavedWebBridgeProfile:
         value = asdict(self)
         value["access_profile"] = self.access_profile.value
         value["tools"] = list(self.tools)
+        value["mcp_servers"] = list(self.mcp_servers)
+        value["projects"] = [dict(item) for item in self.projects]
         value["verification_commands"] = [
             list(command) for command in self.verification_commands
         ]
         value["browser_allowed_domains"] = list(self.browser_allowed_domains)
         value["browser_denied_domains"] = list(self.browser_denied_domains)
         value["browser_allowed_emails"] = list(self.browser_allowed_emails)
+        value["browser_credential_refs"] = list(self.browser_credential_refs)
         return value
 
     @classmethod
@@ -291,7 +329,10 @@ class SavedWebBridgeProfile:
             "name",
             "target_profile",
             "tools",
+            "mcp_servers",
             "repository",
+            "projects",
+            "default_project_id",
             "verification_commands",
             "server_profiles",
             "browser_external_https",
@@ -302,6 +343,7 @@ class SavedWebBridgeProfile:
             "browser_network_inspection",
             "browser_payment_confirmation",
             "browser_allowed_emails",
+            "browser_credential_refs",
             "deadline_seconds",
             "tunnel",
             "public_url",
@@ -318,6 +360,10 @@ class SavedWebBridgeProfile:
             )
         try:
             tools = tuple(value["tools"])
+            raw_projects = value.get("projects", [])
+            if not isinstance(raw_projects, list):
+                raise WebBridgeProfileError("saved projects must be a project list")
+            projects = tuple(raw_projects)
             commands = tuple(
                 _command(command) for command in value.get("verification_commands", [])
             )
@@ -332,7 +378,10 @@ class SavedWebBridgeProfile:
                 name=value["name"],
                 target_profile=value["target_profile"],
                 tools=tools,
+                mcp_servers=_json_string_tuple(value, "mcp_servers"),
                 repository=value.get("repository"),
+                projects=projects,
+                default_project_id=value.get("default_project_id"),
                 verification_commands=commands,
                 server_profiles=server_profiles,
                 browser_external_https=_json_boolean(value, "browser_external_https"),
@@ -353,10 +402,13 @@ class SavedWebBridgeProfile:
                 browser_allowed_emails=_json_string_tuple(
                     value, "browser_allowed_emails"
                 ),
+                browser_credential_refs=_json_string_tuple(
+                    value, "browser_credential_refs"
+                ),
                 deadline_seconds=float(
                     value.get("deadline_seconds", DEFAULT_HOSTED_DEADLINE_SECONDS)
                 ),
-                tunnel=value.get("tunnel", "cloudflare"),
+                tunnel=value.get("tunnel", "tailscale"),
                 public_url=value.get("public_url"),
                 language=value.get("language", "en"),
                 access_profile=access_profile,
@@ -465,7 +517,20 @@ class WebBridgeProfileStore:
         return removed
 
     def doctor(self) -> dict[str, Any]:
-        profiles = self.list()
+        try:
+            profiles = self.list()
+        except WebBridgeProfileError as exc:
+            # Doctor is the recovery surface. Normal list/get/start paths stay
+            # strict, but diagnostics must remain usable when a saved project
+            # was moved or deleted and one profile can no longer canonicalize.
+            return {
+                "status": "degraded",
+                "path": str(self.path),
+                "secret_fields": [],
+                "profile_count": None,
+                "profiles": [],
+                "error": str(exc)[:400],
+            }
         return {
             "status": "ok",
             "path": str(self.path),
