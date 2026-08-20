@@ -89,7 +89,7 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
                 f"the chat has {log.size.height} of {STANDARD[1]} rows",
             )
 
-    @unittest.expectedFailure  # UX-010
+    @unittest.skipUnless(True, "UX-010 fixed: one header line replaced the fixed chrome")
     async def test_a_narrow_window_gives_the_chat_a_usable_share(self) -> None:
         # UX-010: at 46x14 with the product's default settings the conversation
         # area is two rows tall -- 14% of the window -- because the brand, ticker,
@@ -135,7 +135,7 @@ class StatusBarLayoutTests(unittest.IsolatedAsyncioTestCase):
         # "контекст: лимитмост: выключен", which looks like a rendering fault
         # rather than two fields.
         async with karox_app(size=STANDARD) as (app, _pilot):
-            rendered = "\n".join(region_lines(app, app.query_one("#status")))
+            rendered = "\n".join(region_lines(app, app.query_one("#header-status")))
             self.assertNotRegex(
                 rendered,
                 r"\S(мост|bridge):",
@@ -149,7 +149,7 @@ class StatusBarLayoutTests(unittest.IsolatedAsyncioTestCase):
         # marker reads as a different value, and a user checking which model is
         # selected is exactly the person who cannot afford that.
         async with karox_app(size=NARROW) as (app, _pilot):
-            rendered = "\n".join(region_lines(app, app.query_one("#status")))
+            rendered = "\n".join(region_lines(app, app.query_one("#header-status")))
             self.assertNotIn(
                 "openai/m",
                 rendered.replace("openai/model-a", ""),
