@@ -37,7 +37,8 @@ class ClickupConnectionScreenTests(unittest.IsolatedAsyncioTestCase):
                 screen.query_one("#tunnel-cloudflare", tui.RadioButton).value
             )
             note = str(screen.query_one("#bridge-profile-note", tui.Static).render())
-            self.assertIn("separate terminal", note)
+            self.assertIn("inside KaroX", note)
+            self.assertNotIn("separate terminal", note)
 
     async def test_clickup_parallel_launch_does_not_replace_live_chatgpt(self) -> None:
         context = isolated_karox_directories()
@@ -65,11 +66,20 @@ class ClickupConnectionScreenTests(unittest.IsolatedAsyncioTestCase):
                 tools=("karox.repo.read_file",),
                 tunnel_provider="cloudflare",
             )
-            with patch.object(app, "_launch_clickup_terminal") as launch:
+            pushed = []
+            self.assertFalse(hasattr(app, "_launch_clickup_terminal"))
+            with patch.object(
+                app,
+                "push_screen",
+                side_effect=lambda screen, *_args, **_kwargs: pushed.append(screen),
+            ):
                 app._bridge_setup_done(setup)
                 await pilot.pause(0.1)
-                launch.assert_called_once_with(setup)
 
+            self.assertEqual(
+                [type(screen).__name__ for screen in pushed],
+                ["_ClickupAutoScreen"],
+            )
             self.assertIs(app.bridge_process, current)
             self.assertFalse(current.terminated)
             app.bridge_process = None

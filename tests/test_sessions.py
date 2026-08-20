@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 from karox.models import AccessProfile
@@ -17,6 +18,8 @@ from karox.sessions import (
     SessionError,
     SessionStore,
     StaleSessionRevision,
+    current_mutation_lease,
+    mutation_lease_context,
 )
 
 
@@ -70,6 +73,19 @@ class SessionStoreTests(unittest.TestCase):
             self.store.save(stale, 0, lease)
         self.store.release(lease)
 
+    def test_mutation_lease_context_is_explicit_and_does_not_weaken_acquire(self) -> None:
+        lease = self.store.acquire("sample", "outer")
+        try:
+            self.assertIsNone(current_mutation_lease("sample"))
+            with mutation_lease_context(lease):
+                self.assertIs(current_mutation_lease("sample"), lease)
+                self.assertIsNone(current_mutation_lease("different-session"))
+                with self.assertRaises(SessionBusy):
+                    self.store.acquire("sample", "parallel", ttl_seconds=5)
+            self.assertIsNone(current_mutation_lease("sample"))
+        finally:
+            self.store.release(lease)
+
     def test_idempotency_replay_and_conflicting_input(self) -> None:
         lease = self.store.acquire("sample", "owner")
         record = self.store.load("sample")
@@ -101,6 +117,31 @@ class SessionStoreTests(unittest.TestCase):
             secret,
             self.store.state_path("redacted-task").read_text(encoding="utf-8"),
         )
+
+    def test_atomic_session_save_retries_transient_windows_permission_error(self) -> None:
+        lease = self.store.acquire("sample", "owner")
+        record = self.store.load("sample")
+        record.summary = "saved after transient lock"
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source: object, destination: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(13, "transient Windows file lock")
+            real_replace(source, destination)
+
+        try:
+            with patch("karox.sessions.os.replace", side_effect=flaky_replace), patch(
+                "karox.sessions.time.sleep", return_value=None
+            ):
+                saved = self.store.save(record, 0, lease)
+            self.assertEqual(saved.summary, "saved after transient lock")
+            self.assertGreaterEqual(attempts, 2)
+            self.assertEqual(self.store.load("sample").summary, "saved after transient lock")
+        finally:
+            self.store.release(lease)
 
     def test_revoke_atomically_fences_an_active_lease(self) -> None:
         lease = self.store.acquire("sample", "holder")

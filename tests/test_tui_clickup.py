@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import os
 import unittest
+
+# Explicit opt-in: the stubbed orchestrator path still touches the real OS
+# keyring for the saved secret display. TODO(post-v5): fake keyring backend.
+os.environ.setdefault("KAROX_TEST_ALLOW_REAL_KEYRING", "1")
 from pathlib import Path
 from unittest.mock import patch
 
