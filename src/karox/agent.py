@@ -31,6 +31,7 @@ from .providers import (
 )
 from .security import redact, redact_content
 from .sessions import MutationLease, SessionRecord, SessionStore
+from .usage_analytics import merge_response_usage, usage_event_from_response
 
 
 # Core tools a native agent cannot work without. Their absence is a wiring bug,
@@ -117,18 +118,27 @@ only needed an answer, give the answer now and name the tool results it rests on
 If it needed a change, make that change with repo_edit_file or repo_write_file,
 then run a check followed by git_status and git_diff."""
 
-
-def _usage_total(usage: Dict[str, Any]) -> int:
-    total = usage.get("total_tokens")
-    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
-        return total
-    prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
-    completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
-    return sum(
-        item
-        for item in (prompt, completion)
-        if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+# A native coding agent must not spend a second provider turn asking for
+# repository evidence when the user clearly did not ask about the repository at
+# all. Keep this intentionally conservative: only self-contained greetings,
+# thanks and tiny social prompts are admitted. Anything with extra task text
+# falls back to the normal evidence-backed answer contract.
+_SMALL_TALK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^(?:привет(?:ик)?|здравствуй(?:те)?|хай|hello|hi|hey)[\s!,.?…👋🙂😊]*$",
+        r"^(?:доброе\s+(?:утро|день|вечер)|good\s+(?:morning|afternoon|evening))[\s!,.?…🙂😊]*$",
+        r"^(?:спасибо|благодарю|thanks|thank\s+you)[\s!,.?…🙂😊]*$",
+        r"^(?:как\s+дела|how\s+are\s+you|кто\s+ты|who\s+are\s+you|что\s+ты\s+умеешь|what\s+can\s+you\s+do)[\s!,.?…]*$",
     )
+)
+
+
+def _is_small_talk_task(task: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(task).strip())
+    if not normalized or len(normalized) > 80:
+        return False
+    return any(pattern.fullmatch(normalized) is not None for pattern in _SMALL_TALK_PATTERNS)
 
 
 def _reject_json_constant(value: str) -> None:
@@ -464,6 +474,7 @@ class AgentKernel:
         require_change: bool = False,
         max_output_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
+        economy_mode: bool = False,
         on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -497,6 +508,10 @@ class AgentKernel:
                 "reasoning effort must be one of " + ", ".join(sorted(REASONING_EFFORTS))
             )
         self.reasoning_effort = reasoning_effort
+        # Economy is deliberately orthogonal to model choice and reasoning.
+        # It may remove transport/context duplication, but it must not silently
+        # choose a weaker model, lower effort, or shrink the quality ceilings.
+        self.economy_mode = bool(economy_mode)
         # The model's own output ceiling, sent on every request. Leaving it unset
         # here made it something only the routed layer could supply, so a model
         # registered without one -- or any direct endpoint -- was capped by an
@@ -941,6 +956,17 @@ class AgentKernel:
         }
         route_audit = self._route_audit(response)
         reasoning_blocks = self._reasoning_entries(response)
+        usage_event = usage_event_from_response(
+            session_id=session_id,
+            step=self._step,
+            response=response,
+        )
+        reused_chars = int(getattr(self, "_economy_reused_chars_pending", 0))
+        if reused_chars > 0:
+            usage_event["economy_reused_chars"] = reused_chars
+            usage_event["economy_reused_estimated_tokens"] = int(
+                reused_chars / float(self.context.chars_per_token)
+            )
 
         def update(record: SessionRecord) -> None:
             if route_audit is not None:
@@ -954,41 +980,15 @@ class AgentKernel:
                 # block is one the provider refuses.
                 stored["reasoning_blocks"] = reasoning_blocks
             record.provider_history.append(stored)
-            aggregate = dict(record.usage)
-            aggregate["requests"] = int(aggregate.get("requests", 0)) + 1
-            aggregate["transport_attempts"] = int(
-                aggregate.get("transport_attempts", 0)
-            ) + response.transport_attempts
-            previous_total = _usage_total(aggregate)
-            addition_total = _usage_total(response.usage)
-            for name, count in response.usage.items():
-                aggregate[name] = int(aggregate.get(name, 0)) + count
-            aggregate["total_tokens"] = previous_total + addition_total
-            if response.currency is not None and response.cumulative_cost is not None:
-                costs = aggregate.get("costs")
-                if not isinstance(costs, dict):
-                    costs = {}
-                costs = dict(costs)
-                costs[response.currency] = response.cumulative_cost
-                aggregate["costs"] = costs
-            # Context occupancy is a property of a single request, not of the
-            # session total. The aggregate above sums every request and can
-            # exceed a context window many times over, so it cannot answer "how
-            # full is the context". Record the latest request's prompt size
-            # separately so a caller can report real occupancy instead of
-            # presenting cumulative spend as a share of the window.
-            latest_prompt = response.usage.get(
-                "prompt_tokens", response.usage.get("input_tokens")
+            # Root-agent and read-only subagent responses share one accounting
+            # implementation so Recursive Context can never become invisible
+            # spend in the session Usage view.
+            record.usage = merge_response_usage(
+                record.usage,
+                response,
+                event=usage_event,
+                model_fallback=self.model,
             )
-            if isinstance(latest_prompt, bool) or not isinstance(
-                latest_prompt, (int, float)
-            ):
-                latest_prompt = None
-            aggregate["last_request"] = {
-                "prompt_tokens": None if latest_prompt is None else int(latest_prompt),
-                "model": response.selected_model or self.model,
-            }
-            record.usage = aggregate
 
         self._update_session(session_id, lease, update)
 
@@ -1011,6 +1011,8 @@ class AgentKernel:
             "selected_provider": response.selected_provider,
             "selected_model": response.selected_model,
             "cost": response.cost,
+            "uncached_cost": response.uncached_cost,
+            "cache_savings": response.cache_savings,
             "currency": response.currency,
             "pricing_version": response.pricing_version,
             "cumulative_usage": dict(response.cumulative_usage),
@@ -1142,7 +1144,7 @@ class AgentKernel:
     ) -> None:
         result_value = result.to_dict()
         content = json.dumps(
-            {"ok": result.ok, "command": core_name, "result": result_value},
+            result_value,
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -1392,16 +1394,38 @@ class AgentKernel:
         self, history: Iterable[Dict[str, Any]]
     ) -> Iterable[ModelMessage]:
         replaced = False
+        # Economy only removes exact duplication from the retained request. It
+        # does not alter the selected model, reasoning effort, or quality limits.
+        seen_tool_results: Dict[str, str] = {}
+        self._economy_reused_chars_pending = 0
         for message in self._messages(self._compact(list(history))):
             if not replaced and message.role == "system":
                 replaced = True
                 yield ModelMessage("system", self.system_prompt)
             elif message.role == "tool" and message.content is not None:
+                content = self._clip(
+                    message.content, self.context.max_tool_result_chars
+                )
+                if self.economy_mode and len(content) >= 1_000:
+                    previous_call = seen_tool_results.get(content)
+                    if previous_call:
+                        replacement = json.dumps(
+                            {
+                                "karox": "identical_tool_result_reused",
+                                "same_as_tool_call_id": previous_call,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                        self._economy_reused_chars_pending += max(
+                            0, len(content) - len(replacement)
+                        )
+                        content = replacement
+                    elif message.tool_call_id:
+                        seen_tool_results[content] = message.tool_call_id
                 yield ModelMessage(
                     role="tool",
-                    content=self._clip(
-                        message.content, self.context.max_tool_result_chars
-                    ),
+                    content=content,
                     tool_call_id=message.tool_call_id,
                 )
             else:
@@ -1802,13 +1826,13 @@ class AgentKernel:
         return self._verification(record) or self._answer_complete(record)
 
     def _answer_complete(self, record: SessionRecord) -> bool:
-        """True when a read-only task has produced an evidence-backed answer.
+        """True when a read-only task has produced a trustworthy final answer.
 
-        A change must survive the write/check/status/diff chain. An answer has a
-        weaker but still concrete bar: the model must have said something, and
-        that something must follow at least one successful inspection of the
-        repository. An answer produced without ever looking is not accepted, so
-        the run is nudged once more rather than blessed.
+        Repository questions still require at least one successful inspection:
+        narrative is not evidence. A tiny, explicitly conversational task such
+        as ``привет`` is different -- there is no repository fact to inspect, so
+        forcing an ``answer_prompt`` would spend a second provider call only to
+        make the model explain that no repository change was needed.
         """
         if self.require_change or record.changed_files:
             return False
@@ -1822,6 +1846,8 @@ class AgentKernel:
             return False
         if not self._last_provider_message(record):
             return False
+        if _is_small_talk_task(record.task):
+            return True
         return bool(self._answer_basis(record))
 
     @staticmethod

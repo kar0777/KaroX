@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import codecs
 import hashlib
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import locale
 import math
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -132,6 +134,7 @@ class VerificationRule:
 
 
 _WINDOWS_JOB_LIMIT_KILL_ON_CLOSE = 0x2000
+_WINDOWS_JOB_LIMIT_BREAKAWAY_OK = 0x0800
 _WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION = 9
 _WINDOWS_PROCESS_TERMINATE = 0x0001
 _WINDOWS_PROCESS_SET_QUOTA = 0x0100
@@ -210,9 +213,19 @@ def _windows_job_api() -> Optional[tuple[Any, Any]]:
 
 
 def _new_process_group_kwargs() -> Dict[str, Any]:
-    # Windows has no process groups that survive the parent for this purpose, so
-    # containment there comes from the Job Object rather than from spawn flags.
-    return {} if os.name == "nt" else {"start_new_session": True}
+    if os.name == "nt":
+        # A guarded command must not share the bridge console-control lifecycle.
+        # CREATE_NEW_PROCESS_GROUP prevents CTRL_C/CTRL_BREAK intended for an
+        # expired hosted request from becoming a bridge KeyboardInterrupt;
+        # CREATE_NO_WINDOW also prevents a hidden verification job from owning a
+        # console. ProcessTree remains responsible for terminating descendants.
+        return {
+            "creationflags": int(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            )
+        }
+    return {"start_new_session": True}
 
 
 def _kill_posix_process_group(pid: int) -> None:
@@ -275,7 +288,9 @@ class ProcessTree:
         if not job:
             return
         limits = extended_limits()
-        limits.BasicLimitInformation.LimitFlags = _WINDOWS_JOB_LIMIT_KILL_ON_CLOSE
+        limits.BasicLimitInformation.LimitFlags = (
+            _WINDOWS_JOB_LIMIT_KILL_ON_CLOSE | _WINDOWS_JOB_LIMIT_BREAKAWAY_OK
+        )
         # Assignment can only happen once the process exists, so a child that
         # spawns before the handle is opened is not covered. That window is a few
         # microseconds against an interpreter start-up of tens of milliseconds.
@@ -339,6 +354,12 @@ class CapturedStream:
     truncated: bool
     total_bytes: int
     elided_bytes: int
+
+
+@lru_cache(maxsize=1)
+def _ripgrep_executable() -> Optional[str]:
+    """Resolve ripgrep once per process; PATH is stable for a running bridge."""
+    return shutil.which("rg")
 
 
 @lru_cache(maxsize=1)
@@ -464,6 +485,10 @@ class CoreRuntime:
     MAX_COMMIT_MESSAGE_BYTES = 4_000
     MAX_COMMIT_PATHS = 100
     MAX_SEARCH_FILES = 2_000
+    # On Windows, spawning git/rg costs roughly 90-140 ms even for tiny repos.
+    # Probe only a small tree in-process; if it exceeds this bound (or contains
+    # a symlink/scan ambiguity), fall back to the existing native backend.
+    SMALL_SEARCH_FILE_PROBE_LIMIT = 384
     MAX_SEARCH_RESULTS = 200
     MAX_SEARCH_LINE_BYTES = 2_000
     MIN_PROCESS_TIMEOUT_SECONDS = 0.1
@@ -480,6 +505,7 @@ class CoreRuntime:
         verification_commands: Optional[Iterable[Iterable[str]]] = None,
         risk: Optional[RiskEngine] = None,
         events: Optional[EventBus] = None,
+        session_repository_validator: Optional[Callable[[SessionRecord, Path], None]] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         if not self.repository.is_dir():
@@ -488,6 +514,11 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
+        self._session_repository_validator = session_repository_validator
+        # Tool availability is stable for one runtime process. Resolve ripgrep
+        # once during runtime construction so the first user search does not pay
+        # the very high Windows PATH-discovery cost when rg is absent.
+        self._ripgrep_path: Optional[str] = _ripgrep_executable()
         # Capability policy answers whether this origin may ever do this kind of
         # thing; the RiskEngine answers whether this specific instance is safe
         # to do now. Both are required, and neither replaces the other.
@@ -878,7 +909,10 @@ class CoreRuntime:
 
     def _load_session(self, command: CoreCommand) -> SessionRecord:
         record = self.sessions.load(command.session_id)
-        self.sessions.validate_repository(record, self.repository)
+        if self._session_repository_validator is None:
+            self.sessions.validate_repository(record, self.repository)
+        else:
+            self._session_repository_validator(record, self.repository)
         if record.revoked:
             raise SessionError("session access has been revoked")
         if record.access_profile != self.policy.profile.value:
@@ -1436,12 +1470,27 @@ class CoreRuntime:
             raise InvalidCommand("publishing, authentication, and remote Git commands are blocked")
         return values
 
-    def _run(self, argv: List[str], timeout_seconds: float) -> Dict[str, Any]:
+    def _run(
+        self,
+        argv: List[str],
+        timeout_seconds: float,
+        *,
+        inherit_environment: bool = False,
+    ) -> Dict[str, Any]:
         timeout = min(
             max(float(timeout_seconds), self.MIN_PROCESS_TIMEOUT_SECONDS),
             self.MAX_PROCESS_TIMEOUT_SECONDS,
         )
-        env = child_process_environment()
+        if inherit_environment:
+            # Trusted Full developer mode intentionally behaves like a normal
+            # terminal launched by this KaroX process: CLI auth/deploy tools may
+            # rely on inherited SDK/token/config variables. Protected checks and
+            # every other Core process keep the minimal secret-filtered env.
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
+        else:
+            env = child_process_environment()
         started = time.perf_counter()
         # ``shell=False`` on Windows does not consult ``PATHEXT`` for ``.cmd``
         # shims, so ``npm`` (which lives as ``npm.cmd``) would raise WinError 2.
@@ -1454,12 +1503,16 @@ class CoreRuntime:
                 launch_argv,
                 cwd=self.repository,
                 env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
                 shell=False,
                 **_new_process_group_kwargs(),
             )
             tree = ProcessTree(process)
+            interrupted = False
+            cancellation_source: Optional[str] = None
+            signal_sent: Optional[str] = None
             try:
                 try:
                     exit_code: Optional[int] = process.wait(timeout=timeout)
@@ -1467,9 +1520,23 @@ class CoreRuntime:
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     exit_code = None
+                    cancellation_source = "command_timeout"
+                    signal_sent = "terminate_owned_child_tree"
+                    tree.terminate()
+                except KeyboardInterrupt:
+                    # A shared-console control event or expired hosted request is
+                    # a cancellation of this command, never an instruction to
+                    # stop the MCP bridge. Contain it to the owned child tree and
+                    # return structured diagnostics instead of re-raising.
+                    interrupted = True
+                    timed_out = False
+                    exit_code = None
+                    cancellation_source = "request_interrupt"
+                    signal_sent = "terminate_owned_child_tree"
                     tree.terminate()
                 except BaseException:
-                    # An interrupt while waiting must not orphan the tree either.
+                    # SystemExit and other non-user interrupts still receive
+                    # bounded child cleanup, but are not silently converted.
                     tree.terminate()
                     raise
             finally:
@@ -1482,6 +1549,16 @@ class CoreRuntime:
             "stdout": str(redact(stdout.text)),
             "stderr": str(redact(stderr.text)),
             "timed_out": timed_out,
+            "interrupted": interrupted,
+            "child_pid": process.pid,
+            "bridge_pid": os.getpid(),
+            "process_group": (
+                "windows-new-process-group+no-window"
+                if os.name == "nt"
+                else "posix-new-session"
+            ),
+            "cancellation_source": cancellation_source,
+            "signal_sent": signal_sent,
             "stdout_sha256": stdout.sha256,
             "stderr_sha256": stderr.sha256,
             "stdout_truncated": stdout.truncated,
@@ -1745,6 +1822,457 @@ class CoreRuntime:
         ]
         return result
 
+    def _search_ripgrep(
+        self,
+        *,
+        query: str,
+        use_regex: bool,
+        case_sensitive: bool,
+        pattern: str,
+        limit: int,
+        deadline_seconds: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Use ripgrep for repository search when available.
+
+        The legacy Python scanner is intentionally kept as a portability fallback,
+        but opening and decoding up to 2,000 files serially is far too expensive
+        for large workspaces with generated or untracked trees.  Ripgrep provides
+        the same bounded line-oriented result much more efficiently while staying
+        inside the selected repository and without invoking a shell.
+        """
+        rg = self._ripgrep_path
+        if rg is None:
+            return None
+        argv = [
+            rg,
+            "--json",
+            "--line-number",
+            "--no-heading",
+            "--hidden",
+            "--no-ignore",
+            "--glob",
+            "!.git/**",
+            "--glob",
+            "!.karox/**",
+        ]
+        # Repository-wide search should inspect source, not generated copies.
+        # Keep explicit user globs authoritative, but for the default scope skip
+        # dependency/build/runtime directories consistently across backends.
+        if pattern == "**/*":
+            for ignored in sorted(
+                str(item) for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_NAMES", ())
+            ):
+                argv.extend(["--glob", f"!**/{ignored}/**"])
+            for suffix in getattr(self, "SEARCH_IGNORED_DIRECTORY_SUFFIXES", ()):
+                argv.extend(["--glob", f"!**/*{suffix}/**"])
+        argv.extend(
+            [
+                "--max-filesize",
+                str(self.MAX_FILE_BYTES),
+            ]
+        )
+        if not case_sensitive:
+            argv.append("--ignore-case")
+        if not use_regex:
+            argv.append("--fixed-strings")
+        if pattern != "**/*":
+            argv.extend(["--glob", pattern])
+        argv.extend(["--", query, "."])
+
+        result = self._run(argv, deadline_seconds)
+        exit_code = result.get("exit_code")
+        if exit_code not in {0, 1, None}:
+            # Preserve portability and unusual glob behaviour by falling back to
+            # the established Python implementation if ripgrep rejects the run.
+            return None
+
+        matches: List[Dict[str, Any]] = []
+        files_scanned = 0
+        stats_matches: Optional[int] = None
+        for raw_line in str(result.get("stdout", "")).splitlines():
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            if event_type == "summary":
+                stats = data.get("stats")
+                if isinstance(stats, dict):
+                    searches = stats.get("searches")
+                    total_matches = stats.get("matches")
+                    if isinstance(searches, int):
+                        files_scanned = searches
+                    if isinstance(total_matches, int):
+                        stats_matches = total_matches
+                continue
+            if event_type != "match" or len(matches) >= limit:
+                continue
+            path_data = data.get("path")
+            lines_data = data.get("lines")
+            if not isinstance(path_data, dict) or not isinstance(lines_data, dict):
+                continue
+            path_text = path_data.get("text")
+            line_text = lines_data.get("text")
+            line_number = data.get("line_number")
+            if not isinstance(path_text, str) or not isinstance(line_text, str):
+                continue
+            if not isinstance(line_number, int):
+                continue
+            normalized_path = path_text.replace("\\", "/")
+            if normalized_path.startswith("./"):
+                normalized_path = normalized_path[2:]
+            try:
+                safe = self.safe_path(normalized_path)
+                relative = safe.relative_to(self.repository).as_posix()
+            except (InvalidPath, ValueError):
+                continue
+            line = line_text.rstrip("\r\n")
+            encoded = line.encode("utf-8")
+            clipped = len(encoded) > self.MAX_SEARCH_LINE_BYTES
+            if clipped:
+                line = encoded[: self.MAX_SEARCH_LINE_BYTES].decode(
+                    "utf-8", errors="ignore"
+                )
+            matches.append(
+                {
+                    "path": relative,
+                    "line": line_number,
+                    "text": str(redact_content(line)),
+                    "clipped": clipped,
+                }
+            )
+
+        truncated = bool(result.get("stdout_truncated")) or bool(result.get("timed_out"))
+        if len(matches) >= limit:
+            truncated = True
+        if stats_matches is not None and stats_matches > len(matches):
+            truncated = True
+        return {
+            "query": query,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+            "files_scanned": files_scanned,
+            "files_skipped": 0,
+            "match_count": len(matches),
+            "matches": matches,
+            "truncated": truncated,
+            "backend": "ripgrep",
+        }
+
+    def _search_small_tree(
+        self,
+        *,
+        query: str,
+        use_regex: bool,
+        case_sensitive: bool,
+        pattern: str,
+        matcher: re.Pattern[str],
+        limit: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Search a proven-small default tree without spawning a process.
+
+        This fast path is deliberately conservative. It is used only for the
+        default repository-wide pattern after ripgrep is unavailable. If the
+        tree exceeds a small bounded probe, contains a symlink, or cannot be
+        scanned unambiguously, return ``None`` so the established git/Python
+        backends retain their existing semantics.
+        """
+        if pattern != "**/*":
+            return None
+
+        candidates: List[tuple[str, Path]] = []
+        ignored_directory_names = frozenset(
+            str(item).lower()
+            for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_NAMES", ())
+        )
+        ignored_directory_suffixes = tuple(
+            str(item).lower()
+            for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_SUFFIXES", ())
+        )
+        stack: List[Path] = [self.repository]
+        while stack:
+            directory = stack.pop()
+            try:
+                with os.scandir(directory) as iterator:
+                    entries = list(iterator)
+            except OSError:
+                return None
+
+            directories: List[Path] = []
+            for entry in entries:
+                if directory == self.repository and entry.name.lower() in {".git", ".karox"}:
+                    continue
+                path = Path(entry.path)
+                try:
+                    if entry.is_symlink():
+                        return None
+                    if entry.is_dir(follow_symlinks=False):
+                        lowered_name = entry.name.lower()
+                        if (
+                            lowered_name in ignored_directory_names
+                            or any(
+                                lowered_name.endswith(suffix)
+                                for suffix in ignored_directory_suffixes
+                            )
+                        ):
+                            continue
+                        # Windows junctions/reparse points can leave the selected
+                        # repository without being reported as ordinary symlinks.
+                        # Ambiguous traversal always falls back to the established
+                        # safe_path-backed native/Python search path.
+                        is_junction = getattr(path, "is_junction", None)
+                        if callable(is_junction) and is_junction():
+                            return None
+                        directories.append(path)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    return None
+                try:
+                    relative = path.relative_to(self.repository).as_posix()
+                except ValueError:
+                    return None
+                candidates.append((relative, path))
+                if len(candidates) > self.SMALL_SEARCH_FILE_PROBE_LIMIT:
+                    return None
+            directories.sort(key=lambda item: item.as_posix(), reverse=True)
+            stack.extend(directories)
+
+        ordered = sorted(candidates, key=lambda item: item[0])
+
+        def scan_candidate(
+            candidate: tuple[str, Path],
+        ) -> tuple[bool, bool, List[Dict[str, Any]]]:
+            relative, path = candidate
+            try:
+                # Re-check immediately before the read so a file replaced by a
+                # symlink after enumeration cannot silently use this fast path.
+                if path.is_symlink():
+                    return True, False, []
+                if path.stat().st_size > self.MAX_FILE_BYTES:
+                    return False, True, []
+                text = path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                return False, True, []
+            file_matches: List[Dict[str, Any]] = []
+            for number, line in enumerate(text.splitlines(), start=1):
+                if not matcher.search(line):
+                    continue
+                encoded = line.encode("utf-8")
+                clipped = len(encoded) > self.MAX_SEARCH_LINE_BYTES
+                if clipped:
+                    line = encoded[: self.MAX_SEARCH_LINE_BYTES].decode(
+                        "utf-8", errors="ignore"
+                    )
+                file_matches.append(
+                    {
+                        "path": relative,
+                        "line": number,
+                        "text": str(redact_content(line)),
+                        "clipped": clipped,
+                    }
+                )
+                # The public result is globally capped at ``limit``. Keeping at
+                # most that many matches per file bounds worker result memory;
+                # reaching the global cap is already reported as truncated by
+                # the established search contract.
+                if len(file_matches) >= limit:
+                    break
+            return False, False, file_matches
+
+        matches: List[Dict[str, Any]] = []
+        scanned = 0
+        skipped = 0
+        truncated = False
+        worker_count = min(8, len(ordered))
+        if worker_count:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="karox-search",
+            ) as executor:
+                pending: List[
+                    Future[tuple[bool, bool, List[Dict[str, Any]]]]
+                ] = []
+                next_index = 0
+                while next_index < worker_count:
+                    pending.append(executor.submit(scan_candidate, ordered[next_index]))
+                    next_index += 1
+
+                while pending:
+                    future = pending.pop(0)
+                    try:
+                        ambiguous, file_skipped, file_matches = future.result()
+                    except Exception:
+                        for item in pending:
+                            item.cancel()
+                        return None
+                    if ambiguous:
+                        for item in pending:
+                            item.cancel()
+                        return None
+                    if file_skipped:
+                        skipped += 1
+                    else:
+                        scanned += 1
+                    remaining = limit - len(matches)
+                    if len(file_matches) >= remaining:
+                        matches.extend(file_matches[:remaining])
+                        truncated = True
+                        for item in pending:
+                            item.cancel()
+                        break
+                    matches.extend(file_matches)
+                    if next_index < len(ordered):
+                        pending.append(executor.submit(scan_candidate, ordered[next_index]))
+                        next_index += 1
+
+        return {
+            "query": query,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+            "files_scanned": scanned,
+            "files_skipped": skipped,
+            "match_count": len(matches),
+            "matches": matches,
+            "truncated": truncated,
+            "backend": "python",
+        }
+
+    def _search_git_grep(
+        self,
+        *,
+        query: str,
+        use_regex: bool,
+        case_sensitive: bool,
+        pattern: str,
+        matcher: re.Pattern[str],
+        limit: int,
+        deadline_seconds: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Use Git's native grep to shortlist matching files for literal search.
+
+        Git is already a required dependency for a KaroX repository, unlike
+        ripgrep.  For the common default literal search we let ``git grep`` scan
+        tracked and untracked files natively, then read only the matching files
+        in Python so the public line/text/clipping contract remains identical to
+        the legacy scanner.  Regex and explicit-glob searches deliberately stay
+        on the established Python fallback to preserve their exact semantics.
+        """
+        if use_regex or pattern != "**/*":
+            return None
+
+        arguments = [
+            "grep",
+            "--untracked",
+            "--no-exclude-standard",
+            "-I",
+            "-l",
+            "-z",
+            "--full-name",
+            "-F",
+        ]
+        if not case_sensitive:
+            arguments.append("-i")
+        arguments.extend(["-e", query, "--"])
+        result = self._git(arguments, deadline_seconds)
+        exit_code = result.get("exit_code")
+        if exit_code not in {0, 1, None}:
+            return None
+
+        raw_output = str(result.get("stdout", ""))
+        raw_candidates = (
+            raw_output.split("\x00") if "\x00" in raw_output else raw_output.splitlines()
+        )
+        candidates: List[str] = []
+        for raw in raw_candidates:
+            relative = raw.strip().replace("\\", "/")
+            if not relative:
+                continue
+            try:
+                safe = self.safe_path(relative)
+                normalized = safe.relative_to(self.repository).as_posix()
+            except (InvalidPath, ValueError):
+                continue
+            if normalized.startswith(".karox/"):
+                continue
+            parts = [part.lower() for part in Path(normalized).parts[:-1]]
+            ignored_names = {
+                str(item).lower()
+                for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_NAMES", ())
+            }
+            ignored_suffixes = tuple(
+                str(item).lower()
+                for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_SUFFIXES", ())
+            )
+            if any(
+                part in ignored_names
+                or any(part.endswith(suffix) for suffix in ignored_suffixes)
+                for part in parts
+            ):
+                continue
+            candidates.append(normalized)
+            if len(candidates) >= self.MAX_SEARCH_FILES:
+                break
+
+        matches: List[Dict[str, Any]] = []
+        scanned = 0
+        skipped = 0
+        truncated = bool(result.get("stdout_truncated")) or bool(result.get("timed_out"))
+        if len(candidates) >= self.MAX_SEARCH_FILES:
+            truncated = True
+        for relative in candidates:
+            if len(matches) >= limit:
+                truncated = True
+                break
+            try:
+                path = self.safe_path(relative)
+                if path.stat().st_size > self.MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                text = path.read_bytes().decode("utf-8")
+            except (InvalidPath, OSError, UnicodeDecodeError):
+                skipped += 1
+                continue
+            scanned += 1
+            for number, line in enumerate(text.splitlines(), start=1):
+                if not matcher.search(line):
+                    continue
+                encoded = line.encode("utf-8")
+                clipped = len(encoded) > self.MAX_SEARCH_LINE_BYTES
+                if clipped:
+                    line = encoded[: self.MAX_SEARCH_LINE_BYTES].decode(
+                        "utf-8", errors="ignore"
+                    )
+                matches.append(
+                    {
+                        "path": relative,
+                        "line": number,
+                        "text": str(redact_content(line)),
+                        "clipped": clipped,
+                    }
+                )
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+
+        return {
+            "query": query,
+            "regex": use_regex,
+            "case_sensitive": case_sensitive,
+            "files_scanned": scanned,
+            "files_skipped": skipped,
+            "match_count": len(matches),
+            "matches": matches,
+            "truncated": truncated,
+            "backend": "git-grep",
+        }
+
     def _search(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
@@ -1769,9 +2297,54 @@ class CoreRuntime:
         except re.error as exc:
             raise InvalidCommand(f"invalid regular expression: {exc}") from exc
 
-        listing = self._list_files(
-            {"pattern": arguments.get("pattern", "**/*")}, deadline_seconds
+        pattern = arguments.get("pattern", "**/*")
+        raw_pattern = Path(pattern) if isinstance(pattern, str) else None
+        if (
+            raw_pattern is None
+            or not pattern
+            or len(pattern) > 1000
+            or "\x00" in pattern
+            or raw_pattern.is_absolute()
+            or raw_pattern.drive
+            or ".." in raw_pattern.parts
+        ):
+            raise InvalidCommand("pattern must be repository-relative")
+
+        fast = self._search_ripgrep(
+            query=query,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            pattern=pattern,
+            limit=limit,
+            deadline_seconds=deadline_seconds,
         )
+        if fast is not None:
+            return fast
+
+        fast = self._search_small_tree(
+            query=query,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            pattern=pattern,
+            matcher=matcher,
+            limit=limit,
+        )
+        if fast is not None:
+            return fast
+
+        fast = self._search_git_grep(
+            query=query,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            pattern=pattern,
+            matcher=matcher,
+            limit=limit,
+            deadline_seconds=deadline_seconds,
+        )
+        if fast is not None:
+            return fast
+
+        listing = self._list_files({"pattern": pattern}, deadline_seconds)
         candidates = listing["files"][: self.MAX_SEARCH_FILES]
         truncated = bool(listing["truncated"]) or len(listing["files"]) > len(
             candidates
@@ -1825,6 +2398,7 @@ class CoreRuntime:
             "match_count": len(matches),
             "matches": matches,
             "truncated": truncated,
+            "backend": "python",
         }
 
     def _audit(self, event: str, data: Dict[str, Any]) -> None:

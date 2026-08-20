@@ -32,7 +32,7 @@ import hashlib
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .core import (
     CoreError,
@@ -53,17 +53,27 @@ from .sessions import MutationLease, SessionRecord
 IGNORED_DIRECTORY_NAMES = frozenset(
     {
         ".mypy_cache",
+        ".netlify",
+        ".next",
         ".nox",
+        ".nuxt",
+        ".output",
         ".pytest_cache",
         ".ruff_cache",
+        ".svelte-kit",
         ".tox",
+        ".turbo",
         ".venv",
+        ".vite",
         ".zcode",
         "__pycache__",
         "build",
+        "coverage",
         "dist",
         "node_modules",
+        "out",
         "site-packages",
+        "target",
         "venv",
     }
 )
@@ -87,6 +97,12 @@ def is_ignored_path(relative: str) -> bool:
 class ExtendedCoreRuntime(CoreRuntime):
     """Core runtime with editing, windowed reads and history inspection."""
 
+    # The base small-tree search fast path reads these attributes dynamically,
+    # so dependency/build filtering stays owned by this Extended Core module
+    # without creating a core.py -> core_tools.py import cycle.
+    SEARCH_IGNORED_DIRECTORY_NAMES = IGNORED_DIRECTORY_NAMES
+    SEARCH_IGNORED_DIRECTORY_SUFFIXES = _IGNORED_DIRECTORY_SUFFIXES
+
     MAX_READ_LINES = 1_500
     MAX_EDIT_OCCURRENCES = 200
     MAX_LOG_ENTRIES = 200
@@ -99,6 +115,7 @@ class ExtendedCoreRuntime(CoreRuntime):
         handlers["repo.edit_file"] = self._edit_file
         handlers["repo.read_lines"] = self._read_lines
         handlers["repo.command"] = self._repo_command
+        handlers["dev.command"] = self._dev_command
         handlers["tests.run"] = self._tests_run
         handlers["runtime.status"] = self._runtime_status
         handlers["git.log"] = self._git_log
@@ -160,17 +177,90 @@ class ExtendedCoreRuntime(CoreRuntime):
                 {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string"},
-                        "payload": {"type": "object"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["apply_patch", "batch"],
+                            "description": (
+                                "apply_patch applies one unified diff; batch atomically stages "
+                                "write/delete/move/mkdir operations"
+                            ),
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": (
+                                "apply_patch payload: {patch, expected_sha256?, dry_run?, "
+                                "allow_secret_literal?}. batch payload: {operations, dry_run?}; "
+                                "each operation uses op=write|delete|move|mkdir with the "
+                                "corresponding path/content/source/destination fields."
+                            ),
+                            "properties": {
+                                "patch": {"type": "string"},
+                                "expected_sha256": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"},
+                                },
+                                "dry_run": {"type": "boolean"},
+                                "allow_secret_literal": {"type": "boolean"},
+                                "operations": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "op": {
+                                                "type": "string",
+                                                "enum": ["write", "delete", "move", "mkdir"],
+                                            },
+                                            "path": {"type": "string"},
+                                            "content": {"type": "string"},
+                                            "source": {"type": "string"},
+                                            "destination": {"type": "string"},
+                                            "expected_sha256": {"type": "string"},
+                                            "allow_secret_literal": {"type": "boolean"},
+                                            "missing_ok": {"type": "boolean"},
+                                            "overwrite": {"type": "boolean"},
+                                        },
+                                        "required": ["op"],
+                                        # The worker owns action-specific validation and
+                                        # returns more precise unsupported-field errors.
+                                        "additionalProperties": True,
+                                    },
+                                },
+                            },
+                            # Keep this schema descriptive for MCP clients; the
+                            # authoritative action-specific validator lives in
+                            # workspace_worker.validate_repo_command().
+                            "additionalProperties": True,
+                        },
                     },
                     "required": ["action", "payload"],
                     "additionalProperties": False,
                 },
                 external_schema=True,
             ),
+            "dev.command": ToolDefinition(
+                "dev.command",
+                "Run a repository-scoped developer command without a shell. Available only when the hosted Full developer access profile explicitly selects it.",
+                Capability.DEV_COMMAND,
+                True,
+                {
+                    "type": "object",
+                    "properties": {
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Executable and arguments. Shell syntax is not supported.",
+                        },
+                        "timeout_seconds": {"type": "number"},
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": False,
+                },
+                (Capability.PROCESS_RUN,),
+                replayable=False,
+            ),
             "tests.run": ToolDefinition(
                 "tests.run",
-                "Run focused, full, or deterministic split pytest without changing repository configuration.",
+                "Run a short synchronous project test verification. Python repositories use structured pytest; Node/Vite repositories without Python tests use the package test script (Vitest is forced to one-shot mode). Prefer karox.checks.start for long jobs that should survive request or tunnel interruptions.",
                 Capability.CHECKS_RUN,
                 True,
                 {
@@ -244,6 +334,56 @@ class ExtendedCoreRuntime(CoreRuntime):
     def _repo_command(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
         return hot_worker_supervisor().execute_repo(self, arguments, deadline_seconds)
 
+    def _prepare_dev_command(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> tuple[List[str], float]:
+        raw_argv = arguments.get("argv")
+        if not isinstance(raw_argv, list):
+            raise InvalidCommand("dev.command argv must be an array")
+        # Full developer access is intentionally a trusted command surface. It
+        # does not reuse CoreRuntime._validate_process(), because that validator
+        # is the protected Project/checks boundary and deliberately rejects
+        # shells, Git, authentication and publishing. The Full switch is the
+        # explicit user grant that removes those command-class restrictions.
+        #
+        # Popen still receives argv with shell=False, so an argv call is executed
+        # exactly as supplied. A shell is available by explicitly invoking one
+        # (cmd /c, powershell -Command, bash -lc, ...), which is important for
+        # real coding agents and makes the trust boundary unambiguous.
+        argv = list(raw_argv)
+        if not argv or len(argv) > 100 or not all(isinstance(item, str) for item in argv):
+            raise InvalidCommand("dev.command argv must contain 1-100 strings")
+        if any("\x00" in item or len(item) > 10_000 for item in argv):
+            raise InvalidCommand("dev.command argv contains an invalid value")
+
+        raw_timeout = arguments.get("timeout_seconds", deadline_seconds)
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+            raise InvalidCommand("dev.command timeout_seconds must be a number")
+        timeout = float(raw_timeout)
+        if not 0 < timeout <= float(deadline_seconds):
+            raise InvalidCommand("dev.command timeout_seconds must be positive and within the request deadline")
+        return argv, timeout
+
+    def _dev_command(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        argv, timeout = self._prepare_dev_command(arguments, deadline_seconds)
+        result = self._run(argv, timeout, inherit_environment=True)
+        display_argv = result["argv"]
+        result["_evidence"] = [
+            EvidenceRecord(
+                kind="command",
+                summary=("Passed" if result.get("exit_code") == 0 else "Failed")
+                + f": {' '.join(display_argv)}",
+                command=display_argv,
+                exit_code=result.get("exit_code"),
+                metadata={
+                    "timed_out": bool(result.get("timed_out")),
+                    "repository_scoped": True,
+                    "shell": False,
+                },
+            )
+        ]
+        return result
+
     def _tests_run(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
         return hot_worker_supervisor().execute_tests(self, arguments, deadline_seconds)
 
@@ -283,7 +423,7 @@ class ExtendedCoreRuntime(CoreRuntime):
         # git.log is a read-only process call, so the base class does not treat a
         # non-zero exit as a failure. It has no idempotency record, so adjusting
         # the flag here cannot desynchronise a stored replay.
-        if command.name in {"git.log", "tests.run"} and (
+        if command.name in {"git.log", "tests.run", "dev.command"} and (
             result.data.get("timed_out") or result.data.get("exit_code") != 0
         ):
             result.ok = False
@@ -300,6 +440,9 @@ class ExtendedCoreRuntime(CoreRuntime):
             return
         if command_name == "repo.command":
             self._prepare_repo_command(arguments, deadline_seconds)
+            return
+        if command_name == "dev.command":
+            self._prepare_dev_command(arguments, deadline_seconds)
             return
         if command_name == "tests.run":
             self._prepare_tests_run(arguments)
@@ -438,13 +581,35 @@ class ExtendedCoreRuntime(CoreRuntime):
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CoreError("repo.edit_file supports UTF-8 text only") from exc
-        found = text.count(old_string)
+        replacement_old = old_string
+        replacement_new = new_string
+        found = text.count(replacement_old)
+        line_ending_adapted = False
+        if found == 0:
+            if "\r\n" in text and "\r\n" not in old_string and "\n" in old_string:
+                candidate_old = old_string.replace("\n", "\r\n")
+                candidate_new = new_string.replace("\n", "\r\n")
+                candidate_found = text.count(candidate_old)
+                if candidate_found:
+                    replacement_old = candidate_old
+                    replacement_new = candidate_new
+                    found = candidate_found
+                    line_ending_adapted = True
+            elif "\r\n" not in text and "\r\n" in old_string:
+                candidate_old = old_string.replace("\r\n", "\n")
+                candidate_new = new_string.replace("\r\n", "\n")
+                candidate_found = text.count(candidate_old)
+                if candidate_found:
+                    replacement_old = candidate_old
+                    replacement_new = candidate_new
+                    found = candidate_found
+                    line_ending_adapted = True
         if found != expected:
             raise InvalidCommand(
                 f"expected {expected} occurrence(s) of old_string "
                 f"but found {found}"
             )
-        updated = text.replace(old_string, new_string)
+        updated = text.replace(replacement_old, replacement_new)
         # Reuse the audited atomic writer so permissions, fsync, temporary file
         # cleanup and the size ceiling behave exactly as for repo.write_file.
         result = self._write_file(
@@ -458,6 +623,7 @@ class ExtendedCoreRuntime(CoreRuntime):
             deadline_seconds,
         )
         result["replacements"] = found
+        result["line_ending_adapted"] = line_ending_adapted
         result["previous_sha256"] = previous_digest
         result["_evidence"] = [
             EvidenceRecord(
@@ -600,16 +766,37 @@ class ExtendedCoreRuntime(CoreRuntime):
             or ".." in raw_pattern.parts
         ):
             raise InvalidCommand("pattern must be repository-relative")
-        try:
-            matches = self.repository.glob(pattern)
-        except (OSError, ValueError) as exc:
-            raise InvalidCommand(f"invalid glob pattern: {exc}") from exc
-        items: List[str] = []
-        for candidate in matches:
-            if not candidate.is_file():
-                continue
+        # The unqualified default is the hot path for hosted agents. Python's
+        # ``Path.glob('**/*')`` descends into node_modules/.venv *before* our
+        # ignore predicate sees a candidate, so a normal JS repository can hit
+        # the hosted 60s tool timeout just to list files. Git already owns the
+        # repository index and ignore rules; use it for the broad listing and
+        # keep globbing only for an explicitly bounded pattern.
+        candidates: Iterable[str | Path]
+        if pattern == "**/*":
+            result = self._git(
+                ["ls-files", "--cached", "--others", "--exclude-standard"],
+                deadline_seconds,
+            )
+            candidates = [
+                line for line in result.get("stdout", "").splitlines() if line
+            ]
+        else:
             try:
-                lexical = candidate.relative_to(self.repository).as_posix()
+                candidates = self.repository.glob(pattern)
+            except (OSError, ValueError) as exc:
+                raise InvalidCommand(f"invalid glob pattern: {exc}") from exc
+
+        items: List[str] = []
+        truncated = False
+        for candidate in candidates:
+            try:
+                if isinstance(candidate, str):
+                    lexical = candidate.replace("\\", "/")
+                else:
+                    if not candidate.is_file():
+                        continue
+                    lexical = candidate.relative_to(self.repository).as_posix()
                 safe = self.safe_path(lexical)
                 relative = safe.relative_to(self.repository)
             except (InvalidPath, ValueError):
@@ -621,10 +808,11 @@ class ExtendedCoreRuntime(CoreRuntime):
             # directories cannot crowd real source out of a truncated result.
             if is_ignored_path(posix):
                 continue
-            items.append(posix)
             if len(items) >= self.MAX_LISTED_FILES:
+                truncated = True
                 break
+            items.append(posix)
         return {
             "files": sorted(items),
-            "truncated": len(items) >= self.MAX_LISTED_FILES,
+            "truncated": truncated,
         }

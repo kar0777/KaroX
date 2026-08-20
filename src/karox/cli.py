@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import hashlib
 import json
 import os
 import sys
@@ -24,6 +25,8 @@ from .agent import (
     SYSTEM_PROMPT,
 )
 from .browser_access import BrowserAccessPolicy
+from .browser_credentials import BrowserCredentialStore
+from . import clipboard
 from .bridge import (
     BridgeCredentialStore,
     BridgeError,
@@ -46,6 +49,7 @@ from .ecosystem import (
     EcosystemRegistry,
 )
 from .hosted_bridge import (
+    AUTONOMY_TOOL_NAMES,
     CORE_TOOL_NAMES,
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     HOSTED_EXTRA_TOOL_NAMES,
@@ -54,16 +58,19 @@ from .hosted_bridge import (
     CoreToolBridge,
     HostedBridgeError,
 )
+from .autonomy_runtime import AutonomyRuntime
 from .hosted_tools_runtime import (
     HostedToolsRuntime,
     ManagedServerProfile,
     default_server_profiles,
+    server_profiles_for_repository,
 )
 from . import __version__
 from .migration import MigrationError, migrate_legacy_metadata
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
+    McpConfigurationError,
     McpCredentialStore,
     McpError,
     McpRegistry,
@@ -100,6 +107,8 @@ from .paths import (
 )
 from .policy import CapabilityPolicy
 from .project_context import discover_project_context
+from .project_registry import ProjectRegistry, ProjectRegistryError
+from .research_subagent import ResearchLimits, ResearchSubagent, build_research_context
 from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
 from .proxy import McpProxy
@@ -139,6 +148,7 @@ from .skills import (
     validate_selection,
 )
 from .tailscale import tailscale_doctor
+from .verification import discover_verification_commands
 from .web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
     WRITE_WEB_TOOLS,
@@ -382,6 +392,12 @@ def _add_browser_policy_arguments(command: argparse.ArgumentParser) -> None:
         default=[],
         help="email address the agent may fill in this browser session",
     )
+    command.add_argument(
+        "--browser-credential-ref",
+        action="append",
+        default=[],
+        help=argparse.SUPPRESS,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -465,6 +481,33 @@ def _parser() -> argparse.ArgumentParser:
     )
     credential_doctor.add_argument("--json", action="store_true")
 
+    browser_credential = commands.add_parser(
+        "browser-credential",
+        help="manage test-account browser logins in the operating-system keyring",
+    )
+    browser_credentials = browser_credential.add_subparsers(
+        dest="browser_credential_command", required=True
+    )
+    browser_credential_set = browser_credentials.add_parser(
+        "set", help="store a browser username/password bundle locally"
+    )
+    browser_credential_set.add_argument("name")
+    browser_credential_set.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read username and password from two lines of standard input",
+    )
+    browser_credential_set.add_argument("--json", action="store_true")
+    browser_credential_delete = browser_credentials.add_parser(
+        "delete", help="delete a stored browser login bundle"
+    )
+    browser_credential_delete.add_argument("name")
+    browser_credential_delete.add_argument("--json", action="store_true")
+    browser_credential_doctor = browser_credentials.add_parser(
+        "doctor", help="verify secure browser credential storage availability"
+    )
+    browser_credential_doctor.add_argument("--json", action="store_true")
+
     provider = commands.add_parser("provider", help="manage API providers")
     providers = provider.add_subparsers(dest="provider_command", required=True)
     provider_add = providers.add_parser("add", help="add a provider")
@@ -540,6 +583,47 @@ def _parser() -> argparse.ArgumentParser:
     provider_preset_add.add_argument("--base-url")
     provider_preset_add.add_argument("--credential-ref")
     provider_preset_add.add_argument("--json", action="store_true")
+    provider_setup = providers.add_parser(
+        "setup",
+        help="configure, verify, and select one provider/model in a single command",
+    )
+    provider_setup.add_argument(
+        "preset_id",
+        help="provider preset ID (for example openrouter, anthropic, or openai-compatible)",
+    )
+    provider_setup.add_argument("--provider-id")
+    provider_setup.add_argument("--base-url")
+    provider_setup.add_argument("--model", required=True)
+    provider_setup.add_argument("--context-window", type=int)
+    provider_setup.add_argument("--max-output-tokens", type=int)
+    provider_setup_credential = provider_setup.add_mutually_exclusive_group()
+    provider_setup_credential.add_argument(
+        "--credential-ref",
+        help="existing env:NAME or os-keyring:provider/NAME reference",
+    )
+    provider_setup_credential.add_argument(
+        "--stdin-key",
+        action="store_true",
+        help="read the API key from stdin and store it in the OS keyring after verification",
+    )
+    provider_setup.add_argument(
+        "--no-test",
+        action="store_true",
+        help="save without the minimal live model request",
+    )
+    provider_setup.add_argument(
+        "--no-activate",
+        action="store_true",
+        help="save the model without making it the default",
+    )
+    provider_setup.add_argument("--pricing-version")
+    provider_setup.add_argument("--currency")
+    provider_setup.add_argument("--input-per-million", type=float)
+    provider_setup.add_argument("--output-per-million", type=float)
+    provider_setup.add_argument("--cache-read-per-million", type=float)
+    provider_setup.add_argument("--cache-write-per-million", type=float)
+    provider_setup.add_argument("--pricing-source")
+    provider_setup.add_argument("--json", action="store_true")
 
     model = commands.add_parser("model", help="manage provider models")
     models = model.add_subparsers(dest="model_command", required=True)
@@ -732,7 +816,7 @@ def _parser() -> argparse.ArgumentParser:
     mcp_server_add.add_argument(
         "--transport", choices=("stdio", "streamable_http"), required=True
     )
-    mcp_server_add.add_argument("--command")
+    mcp_server_add.add_argument("--command", dest="mcp_stdio_command")
     mcp_server_add.add_argument("--arg", action="append", default=[])
     mcp_server_add.add_argument("--url")
     mcp_server_add.add_argument("--env", action="append", default=[])
@@ -740,6 +824,11 @@ def _parser() -> argparse.ArgumentParser:
     mcp_server_add.add_argument("--credential-ref")
     mcp_server_add.add_argument("--credential-target")
     mcp_server_add.add_argument("--credential-scheme", default="Bearer")
+    mcp_server_add.add_argument(
+        "--oauth",
+        action="store_true",
+        help="authenticate this Streamable HTTP server with OAuth 2.1/PKCE",
+    )
     mcp_server_add.add_argument("--read-only-tool", action="append", default=[])
     mcp_server_add.add_argument("--timeout-seconds", type=float, default=30.0)
     mcp_server_add.add_argument("--max-result-bytes", type=int, default=1_000_000)
@@ -754,6 +843,16 @@ def _parser() -> argparse.ArgumentParser:
     mcp_server_show = mcp_servers.add_parser("show", help="show a server")
     mcp_server_show.add_argument("server_id")
     mcp_server_show.add_argument("--json", action="store_true")
+    mcp_server_authorize = mcp_servers.add_parser(
+        "authorize", help="complete OAuth authorization for a remote MCP server"
+    )
+    mcp_server_authorize.add_argument("server_id")
+    mcp_server_authorize.add_argument(
+        "--force",
+        action="store_true",
+        help="discard the stored OAuth grant and register a fresh client",
+    )
+    mcp_server_authorize.add_argument("--json", action="store_true")
     for name, help_text in (
         ("inspect", "discover and show server tools"),
         ("doctor", "verify server connectivity and discovery"),
@@ -871,6 +970,12 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     connections_show.add_argument("--json", action="store_true")
+    connections_copy_auth = connection_commands.add_parser(
+        "copy-auth",
+        help="copy an authorization value to the clipboard without printing it",
+    )
+    connections_copy_auth.add_argument("connection_id")
+    connections_copy_auth.add_argument("--json", action="store_true")
     connections_test = connection_commands.add_parser(
         "test", help="run the MCP handshake against a connection"
     )
@@ -1026,6 +1131,12 @@ def _parser() -> argparse.ArgumentParser:
             "({name, argv, env_keys, env_allowlist, host_hint}); repeatable"
         ),
     )
+    bridge_saved_create.add_argument(
+        "--mcp-server",
+        action="append",
+        default=[],
+        help="external MCP server ID to proxy through this hosted bridge; repeatable",
+    )
     bridge_saved_create.add_argument("--json", action="store_true")
 
     bridge_saved_edit = bridge_saved_commands.add_parser(
@@ -1069,6 +1180,14 @@ def _parser() -> argparse.ArgumentParser:
         "--clear-server-profiles", action="store_true"
     )
     bridge_saved_edit.add_argument(
+        "--mcp-server",
+        action="append",
+        help="external MCP server ID to proxy; pass once to replace the list",
+    )
+    bridge_saved_edit.add_argument(
+        "--clear-mcp-servers", action="store_true"
+    )
+    bridge_saved_edit.add_argument(
         "--clear-verification-commands", action="store_true"
     )
     bridge_saved_edit.add_argument(
@@ -1080,6 +1199,40 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     bridge_saved_edit.add_argument("--json", action="store_true")
+    # Browser policy flags: tri-state so an edit can both enable and disable.
+    # Neither passed = preserve the current value.
+    for flag, help_en in [
+        ("browser-external-https", "allow external HTTPS browser access"),
+        ("browser-headed", "run browser with a visible window"),
+        ("browser-user-takeover", "allow user takeover for login/CAPTCHA/2FA"),
+        ("browser-network-inspection", "enable network request inspection"),
+        ("browser-payment-confirmation", "require confirmation for payment pages"),
+    ]:
+        group = bridge_saved_edit.add_mutually_exclusive_group()
+        group.add_argument(
+            f"--{flag}", dest=flag.replace("-", "_"), action="store_true", default=None,
+            help=help_en,
+        )
+        group.add_argument(
+            f"--no-{flag}", dest=flag.replace("-", "_"), action="store_false",
+            help=f"disable: {help_en}",
+        )
+    bridge_saved_edit.add_argument(
+        "--browser-domain", action="append",
+        help="allowed browser domain (pass once to replace the list)",
+    )
+    bridge_saved_edit.add_argument(
+        "--browser-deny-domain", action="append",
+        help="denied browser domain (pass once to replace the list)",
+    )
+    bridge_saved_edit.add_argument(
+        "--browser-allowed-email", action="append",
+        help="allowed browser email (pass once to replace the list)",
+    )
+    bridge_saved_edit.add_argument(
+        "--clear-browser-domains", action="store_true",
+        help="clear all browser domain allow/deny lists",
+    )
 
     bridge_connect = bridge_commands.add_parser(
         "connect",
@@ -1161,12 +1314,62 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print effective machine-readable diagnostics without launching",
     )
+    bridge_status = bridge_commands.add_parser(
+        "status", help="report port and process ownership for a saved bridge"
+    )
+    bridge_status.add_argument("--saved", required=True, help="saved profile name")
+    bridge_status.add_argument("--json", action="store_true")
+    bridge_stop = bridge_commands.add_parser(
+        "stop", help="stop a saved bridge that this KaroX owns"
+    )
+    bridge_stop.add_argument("--saved", required=True, help="saved profile name")
+    bridge_stop.add_argument("--json", action="store_true")
+    bridge_restart = bridge_commands.add_parser(
+        "restart", help="controlled restart of a saved bridge this KaroX owns"
+    )
+    bridge_restart.add_argument("--saved", required=True, help="saved profile name")
+    bridge_restart.add_argument("--json", action="store_true")
+    bridge_attach = bridge_commands.add_parser(
+        "attach", help="attach to a live saved bridge this KaroX owns"
+    )
+    bridge_attach.add_argument("--saved", required=True, help="saved profile name")
+    bridge_attach.add_argument("--json", action="store_true")
+    bridge_oauth = bridge_commands.add_parser(
+        "oauth", help="manage OAuth approval password for a saved bridge"
+    )
+    bridge_oauth_commands = bridge_oauth.add_subparsers(
+        dest="bridge_oauth_command", required=True
+    )
+    bridge_oauth_approval = bridge_oauth_commands.add_parser(
+        "approval-password",
+        help="copy the OAuth approval password without printing it",
+    )
+    bridge_oauth_approval.add_argument("--saved", required=True, help="saved profile name")
+    bridge_oauth_approval.add_argument(
+        "--copy", action="store_true", help="copy to clipboard with 120s auto-clear"
+    )
+    bridge_oauth_approval.add_argument("--quiet", action="store_true")
+    bridge_oauth_approval.add_argument("--json", action="store_true")
     bridge_serve = bridge_commands.add_parser(
         "serve", help="serve selected Core/MCP tools over authenticated HTTP"
     )
     _add_browser_policy_arguments(bridge_serve)
     bridge_serve.add_argument("--repository", type=Path, required=True)
     bridge_serve.add_argument("--session-id", required=True)
+    bridge_serve.add_argument(
+        "--saved-profile-name",
+        help=argparse.SUPPRESS,
+    )
+    bridge_serve.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        help=argparse.SUPPRESS,
+    )
+    bridge_serve.add_argument(
+        "--default-project-id",
+        help=argparse.SUPPRESS,
+    )
     bridge_serve.add_argument(
         "--profile",
         choices=tuple(item.name for item in BridgeRegistry().list()),
@@ -1264,11 +1467,44 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_credential_show.add_argument("name")
     bridge_credential_show.add_argument("--json", action="store_true")
+    bridge_credential_copy = bridge_credentials.add_parser(
+        "copy",
+        help="copy the current Bearer credential without printing the secret",
+        description="Copy the current Bearer credential to the clipboard without printing the secret.",
+    )
+    bridge_credential_copy.add_argument("name")
+    bridge_credential_copy.add_argument("--json", action="store_true")
+    bridge_credential_copy.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress clipboard-unavailable notes; the secret is never printed",
+    )
     bridge_credential_rotate = bridge_credentials.add_parser(
-        "rotate-key", help="replace a bridge credential"
+        "rotate-key", help="replace a bridge credential without printing the secret"
     )
     bridge_credential_rotate.add_argument("name")
     bridge_credential_rotate.add_argument("--json", action="store_true")
+    bridge_credential_rotate.add_argument(
+        "--copy",
+        action="store_true",
+        help="copy 'Bearer <secret>' to the clipboard and auto-clear after 120s; the secret is never printed",
+    )
+    bridge_credential_rotate.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress informational notes; still emits the JSON result",
+    )
+    bridge_credential_rotate.add_argument(
+        "--reveal-secret",
+        dest="reveal_secret",
+        action="store_true",
+        help="UNSAFE: include the new secret in output; requires explicit --yes",
+    )
+    bridge_credential_rotate.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm an unsafe --reveal-secret",
+    )
     bridge_credential_revoke = bridge_credentials.add_parser(
         "revoke", help="delete a bridge credential"
     )
@@ -1283,7 +1519,7 @@ def _parser() -> argparse.ArgumentParser:
     connect = commands.add_parser(
         "connect",
         help=(
-            "one-command bridge launch (ChatGPT/Claude/HyperAgent + Tailscale, "
+            "one-command bridge launch (ChatGPT/Claude/Notion/HyperAgent + Tailscale, "
             "or ClickUp + Cloudflare)"
         ),
     )
@@ -1291,7 +1527,7 @@ def _parser() -> argparse.ArgumentParser:
     connect.add_argument(
         "connector",
         nargs="?",
-        choices=("chatgpt", "claude", "clickup", "hyperagent"),
+        choices=("chatgpt", "claude", "notion", "clickup", "hyperagent"),
         default="chatgpt",
         help="target connector (defaults to chatgpt)",
     )
@@ -1422,6 +1658,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--route", action="append", default=[], help="provider/model fallback route"
     )
+    run.add_argument(
+        "--route-strategy",
+        choices=("ordered", "cheapest"),
+        default="ordered",
+        help=(
+            "ordered keeps the declared route order; cheapest reorders only when "
+            "all routes have comparable explicit pricing and output ceilings"
+        ),
+    )
     run.add_argument("--privacy-limit", choices=sorted(PRIVACY_CLASSES), default=None)
     run.add_argument("--max-total-tokens", type=int)
     run.add_argument("--max-cost", type=float)
@@ -1447,6 +1692,24 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--context-utilization",
+        type=float,
+        default=None,
+        help=(
+            "fraction of the model input window KaroX may fill before compacting; "
+            "lower values trade more re-reads for lower repeated prompt cost"
+        ),
+    )
+    run.add_argument(
+        "--max-tool-result-chars",
+        type=int,
+        default=None,
+        help=(
+            "maximum characters from one tool result resent on later model turns; "
+            "use narrower read/search calls to recover omitted detail"
+        ),
+    )
+    run.add_argument(
         "--verification-command",
         action="append",
         required=True,
@@ -1469,6 +1732,13 @@ def _parser() -> argparse.ArgumentParser:
             "how hard the model should think before answering; sent to whichever "
             "provider serves the run, which may cap it at its own top level"
         ),
+    )
+    run.add_argument("--economy", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument(
+        "--recursive-context",
+        choices=("auto", "off", "on", "research"),
+        default="off",
+        help=argparse.SUPPRESS,
     )
     run.add_argument(
         "--no-project-context",
@@ -1896,6 +2166,45 @@ def _test_registered_model(
     }
 
 
+def _agent_access_profile(args: argparse.Namespace) -> AccessProfile:
+    """The session profile for a native agent run, honouring provider Bypass.
+
+    Bypass is a KaroX-local policy recorded on the provider the run is routed
+    to; it never touches provider HTTP auth, the API key, the base URL, the
+    model id, or any SDK option.  Direct ``--base-url`` mode persists no
+    provider record and so has nowhere to carry the preference: it keeps the
+    normal protected profile.  Routed mode elevates only when every provider
+    that could serve the session has Bypass ON (see
+    ``access_mode.session_access_profile``).
+
+    The TUI runs the agent through this same CLI entry point, so CLI, TUI, and
+    a resumed session all read one contract rather than three.
+    """
+
+    from .access_mode import session_access_profile
+
+    if args.model is not None or args.base_url is not None or args.api_key_env:
+        return AccessProfile.WORKSPACE_WRITE
+    registry = _registry()
+    routes = tuple(_route(value) for value in args.route)
+    if not routes:
+        selected = registry.selected_model()
+        if selected is None:
+            return AccessProfile.WORKSPACE_WRITE
+        routes = (RouteTarget(selected.provider_id, selected.model_id),)
+    records = []
+    for target in routes:
+        try:
+            records.append(registry.provider(target.provider_id))
+        except Exception:
+            # An unresolvable route is reported by _agent_provider with a far
+            # better message; refusing to elevate here is the safe reading.
+            return AccessProfile.WORKSPACE_WRITE
+    profile = session_access_profile(records)
+    assert isinstance(profile, AccessProfile)
+    return profile
+
+
 def _agent_provider(
     args: argparse.Namespace, record: SessionRecord | None, limits: AgentLimits
 ) -> tuple[Any, str, int | None, int | None]:
@@ -1985,12 +2294,14 @@ def _agent_provider(
     initial_usage = record.usage if record is not None else {}
     costs = initial_usage.get("costs")
     initial_costs = costs if isinstance(costs, dict) else {}
+    route_strategy = getattr(args, "route_strategy", "ordered")
     provider = RoutedProvider(
         registry,
         ProviderFactory(),
         RoutingPolicy(
             routes=routes,
             privacy_limit=args.privacy_limit or "public",
+            route_strategy=route_strategy,
             max_total_tokens=args.max_total_tokens,
             max_cost=args.max_cost,
             currency=args.currency,
@@ -2079,7 +2390,7 @@ def _handle_mcp_server(args: argparse.Namespace) -> int:
             server_id=args.server_id,
             namespace=args.namespace,
             transport=args.transport,
-            command=args.command,
+            command=args.mcp_stdio_command,
             args=tuple(args.arg),
             url=args.url,
             environment=_pairs(args.env, "MCP environment"),
@@ -2087,6 +2398,7 @@ def _handle_mcp_server(args: argparse.Namespace) -> int:
             credential_ref=args.credential_ref,
             credential_target=args.credential_target,
             credential_scheme=args.credential_scheme,
+            oauth=bool(args.oauth),
             read_only_tools=tuple(args.read_only_tool),
             timeout_seconds=args.timeout_seconds,
             max_result_bytes=args.max_result_bytes,
@@ -2101,6 +2413,27 @@ def _handle_mcp_server(args: argparse.Namespace) -> int:
         payload = [item.to_dict() for item in registry.list()]
     elif command == "show":
         payload = registry.get(args.server_id).to_dict()
+    elif command == "authorize":
+        record = registry.get(args.server_id)
+        if not record.oauth or record.transport != "streamable_http" or record.url is None:
+            raise McpConfigurationError(
+                f"MCP server is not configured for OAuth Streamable HTTP: {record.server_id}"
+            )
+        from .mcp_oauth import authorize_mcp_oauth
+
+        authorization = authorize_mcp_oauth(
+            record.server_id,
+            record.url,
+            timeout_seconds=max(60.0, record.timeout_seconds),
+            force=bool(args.force),
+        )
+        payload = {
+            "server_id": record.server_id,
+            "status": "authorized",
+            "server_name": authorization.server_name,
+            "tool_count": len(authorization.tool_names),
+            "tools": list(authorization.tool_names),
+        }
     else:
         repository = _mcp_repository(args.repository)
         record = registry.get(args.server_id)
@@ -2339,6 +2672,7 @@ _WEB_BRIDGE_DEADLINE_PRESETS = {
 _CONNECTOR_PROFILES = {
     "chatgpt": "chatgpt-web",
     "claude": "claude-web",
+    "notion": "notion",
     "hyperagent": "hyperagent-web",
 }
 
@@ -2370,6 +2704,62 @@ def _web_bridge_tools(
     return tools
 
 
+def _upgrade_saved_profile_tools(profile: SavedWebBridgeProfile) -> tuple[str, ...]:
+    """Add orchestration tools without widening the profile's low-level grants.
+
+    Saved profiles persist an explicit tool snapshot. Without this compatibility
+    upgrade, profiles created before ``task.execute_plan`` existed stay on the
+    old chatty surface forever. The executor itself delegates only to tools the
+    low-level runtime already exposes, so this adds orchestration rather than a
+    new repository capability.
+    """
+    tools = list(profile.tools)
+    names = set(tools)
+
+    # A saved profile records concrete tool names, but these names are only a
+    # projection of the capability family the user approved. Older TUI builds
+    # wrote just read_file/status, which stranded hosted coding agents without
+    # content search, bounded reads, repository inspection, Git history, or the
+    # durable task-state reads. Upgrade those siblings without crossing into a
+    # stronger capability tier.
+    repo_read_surface = {
+        "karox.repo.read_file",
+        "karox.repo.read_lines",
+        "karox.repo.search",
+        "karox.repo.inspect",
+    }
+    if names.intersection(repo_read_surface):
+        for name in (
+            "karox.repo.read_lines",
+            "karox.repo.search",
+            "karox.repo.inspect",
+            "karox.task.bootstrap",
+            "karox.task.status",
+            "karox.task.resume",
+            "karox.task.workstreams",
+        ):
+            if name not in names:
+                tools.append(name)
+                names.add(name)
+
+    if names.intersection({"karox.git.status", "karox.git.diff", "karox.git.log"}):
+        if "karox.git.log" not in names:
+            tools.append("karox.git.log")
+            names.add("karox.git.log")
+
+    if names.intersection({"karox.repo.write_file", "karox.repo.edit_file"}):
+        for name in ("karox.repo.write_file", "karox.repo.edit_file"):
+            if name not in names:
+                tools.append(name)
+                names.add(name)
+
+    can_patch = "karox.repo.command" in names
+    can_verify = bool({"karox.checks.run", "karox.tests.run"}.intersection(names))
+    if can_patch and can_verify and "karox.task.execute_plan" not in names:
+        tools.append("karox.task.execute_plan")
+    return tuple(tools)
+
+
 def _web_bridge_access_profile(
     explicit: Optional[str], *, write: bool, external_browser: bool
 ) -> AccessProfile:
@@ -2392,6 +2782,7 @@ def _browser_config_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "browser_network_inspection": bool(getattr(args, "browser_network_inspection", False)),
         "browser_payment_confirmation": bool(getattr(args, "browser_payment_confirmation", False)),
         "browser_allowed_emails": tuple(getattr(args, "browser_allowed_email", []) or []),
+        "browser_credential_refs": tuple(getattr(args, "browser_credential_ref", []) or []),
     }
 
 
@@ -2435,16 +2826,27 @@ def _saved_profile_connect_config(
     effective_public_url = public_url
     if effective_public_url is None and effective_tunnel == "custom":
         effective_public_url = profile.public_url
-    commands = (
-        tuple(_verification_command(value) for value in verification_command)
-        if verification_command is not None
-        else profile.verification_commands
+    resolved_repository = _web_bridge_repository(repository, profile.repository)
+    tools = _web_bridge_tools(
+        tool, write=write, fallback=_upgrade_saved_profile_tools(profile)
     )
+
+    if verification_command is not None:
+        commands = tuple(_verification_command(value) for value in verification_command)
+    else:
+        commands = tuple(profile.verification_commands)
+        if "karox.checks.run" in tools or "karox.tests.run" in tools:
+            commands = tuple(
+                dict.fromkeys((*commands, *discover_verification_commands(resolved_repository)))
+            )
+
     if server_profile is not None:
         profiles = tuple(_server_profile(value) for value in server_profile)
     else:
-        # Rebuild the persisted secret-free dicts into runtime objects so the
-        # connect config validates them the same way a direct CLI profile does.
+        # Rebuild persisted profiles first, then migrate the one historical
+        # project-specific default. A saved Hyperagent/Notion profile created
+        # while KaroX still assumed Vacancy Control must not keep advertising a
+        # nonexistent `npm run start:safe` after the repository changes.
         profiles = tuple(
             ManagedServerProfile(
                 name=str(item["name"]),
@@ -2456,7 +2858,20 @@ def _saved_profile_connect_config(
             )
             for item in profile.server_profiles
         )
-    tools = _web_bridge_tools(tool, write=write, fallback=profile.tools)
+        discovered_profiles = server_profiles_for_repository(resolved_repository)
+        legacy_vacancy_only = bool(profiles) and all(
+            item.name == "vacancy-control-safe" for item in profiles
+        )
+        if legacy_vacancy_only or (
+            not profiles and "karox.dev_server.start" in tools
+        ):
+            profiles = discovered_profiles
+    if "karox.dev_server.start" in tools and not profiles:
+        tools = tuple(
+            name
+            for name in tools
+            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+        )
     effective_external_browser = profile.browser_external_https or browser_external_https
     effective_access = (
         AccessProfile(access_profile)
@@ -2473,9 +2888,14 @@ def _saved_profile_connect_config(
     )
     return WebBridgeConnectConfig(
         profile=profile.target_profile,
-        repository=_web_bridge_repository(repository, profile.repository),
+        repository=resolved_repository,
+        projects=profile.projects if repository is None else (),
+        default_project_id=(
+            profile.default_project_id if repository is None else None
+        ),
         port=port if port is not None else profile.port,
         tools=tools,
+        mcp_servers=profile.mcp_servers,
         session_id=session_id,
         access_profile=effective_access,
         tunnel=effective_tunnel,
@@ -2516,6 +2936,7 @@ def _saved_profile_connect_config(
             if browser_allowed_email
             else profile.browser_allowed_emails
         ),
+        browser_credential_refs=profile.browser_credential_refs,
         language=language or profile.language,
         saved_profile_name=profile.name,
     )
@@ -2524,18 +2945,30 @@ def _saved_profile_connect_config(
 def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
     if args.profile is None:
         raise ValueError("bridge connect requires PROFILE or --saved NAME")
-    commands = tuple(
-        _verification_command(value) for value in (args.verification_command or [])
-    )
+    repository = _web_bridge_repository(args.repository)
     tools = _web_bridge_tools(args.tool, write=args.write)
+    commands = (
+        tuple(_verification_command(value) for value in args.verification_command)
+        if args.verification_command
+        else (
+            discover_verification_commands(repository)
+            if "karox.checks.run" in tools
+            else ()
+        )
+    )
     profiles = tuple(
         _server_profile(value) for value in (args.server_profile or [])
     )
-    # If the caller exposed karox.dev_server.start but passed no
-    # --server-profile, supply the bundled safe defaults (start:safe with
-    # FACEBOOK_LIVE_ENABLED=false) so the connect command stays one-liner.
+    # Auto-discovery is repository-aware: never advertise Vacancy Control's
+    # start:safe recipe to an unrelated Vite/React project.
     if "karox.dev_server.start" in tools and not profiles:
-        profiles = default_server_profiles()
+        profiles = server_profiles_for_repository(repository)
+    if "karox.dev_server.start" in tools and not profiles:
+        tools = tuple(
+            name
+            for name in tools
+            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+        )
     browser_kwargs = _browser_config_kwargs(args)
     access = _web_bridge_access_profile(
         args.access_profile,
@@ -2544,7 +2977,7 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
     )
     return WebBridgeConnectConfig(
         profile=args.profile,
-        repository=_web_bridge_repository(args.repository),
+        repository=repository,
         port=args.port if args.port is not None else 8765,
         tools=tools,
         session_id=args.session_id,
@@ -2706,6 +3139,24 @@ def _handle_connections(args: argparse.Namespace) -> int:
 
     if secret_error:
         raise CredentialError(secret_error)
+    if command == "copy-auth":
+        if not secret:
+            raise CredentialError("connection has no stored authorization credential")
+        copied = clipboard.write_text(clipboard.bearer_value(secret))
+        if copied:
+            clipboard.schedule_clear()
+        payload = {
+            "status": "copied" if copied else "clipboard_unavailable",
+            "connection_id": target.connection_id,
+            "credential_fingerprint": (
+                target.credential_fingerprint or CredentialStore.fingerprint(secret)
+            ),
+            "auto_clear_seconds": (
+                clipboard.CLIPBOARD_AUTO_CLEAR_SECONDS if copied else 0
+            ),
+        }
+        _emit(payload, json_output=args.json)
+        return 0 if copied else 1
     result = controller.test(
         args.connection_id,
         endpoint_url=args.url,
@@ -2713,6 +3164,186 @@ def _handle_connections(args: argparse.Namespace) -> int:
     )
     _emit(result, json_output=args.json)
     return 0 if result.get("state") == "ok" else 1
+
+
+def _handle_bridge_lifecycle(args: argparse.Namespace) -> int:
+    """status / stop / restart / attach --saved NAME.
+
+    All four are ownership-gated: only a proven KaroX-owned bridge may be
+    stopped or restarted, and the verdict is reported before any action so a
+    run never terminates a process it cannot prove it started.
+    """
+    from .port_ownership import check_port_ownership
+
+    profile_name = args.saved
+    # The port is part of the saved profile, not the command line. Read it so
+    # the ownership check probes the port this profile actually uses.
+    saved_profile = WebBridgeProfileStore().get(profile_name)
+    port = saved_profile.port
+    verdict = check_port_ownership(profile_name, port=port)
+
+    command = args.bridge_command
+    if command == "status":
+        _emit(verdict.to_dict(), json_output=args.json)
+        return 0
+    if command == "attach":
+        # Attach is the read-only "reuse" signal: it reports the live bridge's
+        # metadata so a caller can point a client at it. It never starts or
+        # stops anything.
+        if verdict.verdict in {"reuse_same_profile"}:
+            _emit(verdict.to_dict(), json_output=args.json)
+            return 0
+        _emit(verdict.to_dict(), json_output=args.json)
+        return 1
+    if command == "stop":
+        # Only a proven, owned bridge may be stopped. An unrelated process or a
+        # stale PID is left alone: the verdict explains why.
+        if verdict.verdict != "reuse_same_profile":
+            _emit(verdict.to_dict(), json_output=args.json)
+            return 1 if verdict.verdict != "free" else 0
+        # Controlled stop of the proven owner. The watchdog record's owner_pid
+        # is the KaroX process that launched the bridge; terminating it lets
+        # its finally-block clean up the tunnel and the watchdog file.
+        metadata = verdict.metadata
+        pid = metadata.pid
+        if pid is None or not metadata.pid_proven:
+            _emit(verdict.to_dict(), json_output=args.json)
+            return 1
+        import os
+        import signal
+
+        if os.name == "nt":
+            # Windows has no SIGTERM equivalent for arbitrary PIDs; use the
+            # same taskkill the launcher's own shutdown would, targeting only
+            # this proven PID.
+            import subprocess
+
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError as exc:
+                result = {"state": "failed", "reason": str(exc), **verdict.to_dict()}
+                _emit(result, json_output=args.json)
+                return 1
+        result = {
+            "state": "ok",
+            "action": "stopped",
+            "profile": profile_name,
+            "pid": pid,
+        }
+        _emit(result, json_output=args.json)
+        return 0
+    if command == "restart":
+        # A controlled restart stops the proven owned bridge, then relaunches
+        # the saved profile. It does not rotate the credential (Phase 0 rule).
+        if verdict.verdict == "reuse_same_profile":
+            stop_args = argparse.Namespace(**vars(args))
+            stop_args.bridge_command = "stop"
+            stop_code = _handle_bridge_lifecycle(stop_args)
+            if stop_code != 0:
+                return stop_code
+        elif verdict.verdict not in {"free", "stale_owned_process"}:
+            _emit(verdict.to_dict(), json_output=args.json)
+            return 1
+        # A dead owner can leave this profile's own bridge child holding the
+        # port. It is provably ours, so the port is reclaimed before relaunching;
+        # a holder that cannot prove it is ours is never touched.
+        orphan_pid = getattr(verdict, "owned_orphan_pid", None)
+        if isinstance(orphan_pid, int) and orphan_pid > 0:
+            from .web_bridge_launcher import _reclaim_orphaned_bridge_listener
+
+            orphan_session = verdict.metadata.session_id or saved_web_bridge_session_id(
+                profile_name
+            )
+            if not _reclaim_orphaned_bridge_listener(
+                orphan_pid, port=port, session_id=orphan_session
+            ):
+                failure = {
+                    "state": "failed",
+                    "reason": (
+                        f"could not reclaim port {port} from this profile's "
+                        "orphaned bridge process"
+                    ),
+                    **verdict.to_dict(),
+                }
+                _emit(failure, json_output=args.json)
+                return 1
+        # Relaunch: delegate to the existing connect --saved path.
+        connect_args = argparse.Namespace(**vars(args))
+        connect_args.bridge_command = "connect"
+        connect_args.profile = None
+        connect_args.diagnostics_only = False
+        connect_args.repository = None
+        connect_args.session_id = None
+        connect_args.tool = None
+        connect_args.write = False
+        connect_args.access_profile = None
+        connect_args.tunnel = None
+        connect_args.public_url = None
+        connect_args.cloudflared = None
+        connect_args.tailscale = None
+        connect_args.port = None
+        connect_args.verification_command = None
+        connect_args.server_profile = None
+        connect_args.deadline_seconds = None
+        connect_args.deadline_preset = None
+        connect_args.tunnel_timeout_seconds = None
+        connect_args.language = None
+        connect_args.browser_external_https = False
+        connect_args.browser_domain = None
+        connect_args.browser_deny_domain = None
+        connect_args.browser_headed = False
+        connect_args.browser_user_takeover = False
+        connect_args.browser_network_inspection = False
+        connect_args.browser_payment_confirmation = False
+        connect_args.browser_allowed_email = None
+        return _handle_bridge(connect_args)
+    _emit(verdict.to_dict(), json_output=args.json)
+    return 1
+
+
+def _handle_bridge_oauth(args: argparse.Namespace) -> int:
+    """OAuth approval-password management for a saved bridge.
+
+    The approval password IS the bridge credential: the OAuth consent page
+    validates it with ``hmac.compare_digest`` against the same value the
+    bearer proxy checks. Printing it at bridge startup was a leak and went
+    stale after any rotation; this command resolves the CURRENT value at
+    copy time and hands it to the clipboard without ever printing it.
+
+    This CLI handler is a thin wrapper over the canonical
+    :func:`karox.web_bridge_launcher.copy_oauth_approval_password` service,
+    so the TUI P key and the CLI share one typed secret path.
+    """
+    from .web_bridge_launcher import copy_oauth_approval_password
+
+    if args.bridge_oauth_command != "approval-password":
+        _emit({"error": f"unknown oauth command: {args.bridge_oauth_command}"}, json_output=args.json)
+        return 1
+
+    result = copy_oauth_approval_password(args.saved)
+    payload: dict[str, Any] = {
+        "reference": result.reference,
+        "fingerprint": result.fingerprint,
+    }
+    if getattr(args, "copy", False):
+        payload["clipboard"] = "copied" if result.copied else "unavailable"
+        if not getattr(args, "quiet", False) and not result.copied:
+            if result.error:
+                sys.stderr.write(result.error + "\n")
+            else:
+                sys.stderr.write(
+                    "clipboard unavailable; the approval password was not printed\n"
+                )
+    if result.error and not result.copied:
+        payload["error"] = result.error
+    _emit(payload, json_output=args.json)
+    return 0 if result.copied or result.reference else 1
 
 
 def _handle_bridge_saved(args: argparse.Namespace) -> int:
@@ -2839,6 +3470,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             target_profile=args.target_profile,
             repository=repository,
             tools=tools,
+            mcp_servers=tuple(args.mcp_server or []),
             verification_commands=commands,
             server_profiles=tuple(p.to_public_dict() for p in profiles),
             **browser_kwargs,
@@ -2872,11 +3504,23 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             raise ValueError(
                 "choose --server-profile or --clear-server-profiles"
             )
+        if args.clear_mcp_servers and args.mcp_server is not None:
+            raise ValueError("choose --mcp-server or --clear-mcp-servers")
         repository = current.repository
+        projects = current.projects
+        default_project_id = current.default_project_id
         if args.clear_repository:
             repository = None
+            projects = ()
+            default_project_id = None
         elif args.repository is not None:
+            # The legacy CLI edit means "rebind this saved identity to another
+            # repository", not "change the multi-project default". Keep that
+            # historical contract by rebuilding a one-project registry here;
+            # Ctrl+W manages the allowlist/default without rebinding identity.
             repository = str(_web_bridge_repository(args.repository))
+            projects = ()
+            default_project_id = None
         tools = _web_bridge_tools(
             args.tool,
             write=args.write,
@@ -2908,17 +3552,68 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             )
         if "karox.dev_server.start" in tools and not profiles:
             profiles = tuple(p.to_public_dict() for p in default_server_profiles())
+        mcp_servers = current.mcp_servers
+        if args.clear_mcp_servers:
+            mcp_servers = ()
+        elif args.mcp_server is not None:
+            mcp_servers = tuple(args.mcp_server)
         effective_tunnel = args.tunnel or current.tunnel
         public_url = current.public_url
         if args.clear_public_url or effective_tunnel != "custom":
             public_url = None
         elif args.public_url is not None:
             public_url = args.public_url
+        # Browser policy: tri-state merge. None = preserve current.
+        browser_external_https = (
+            args.browser_external_https
+            if args.browser_external_https is not None
+            else current.browser_external_https
+        )
+        browser_headed = (
+            args.browser_headed
+            if args.browser_headed is not None
+            else current.browser_headed
+        )
+        browser_user_takeover = (
+            args.browser_user_takeover
+            if args.browser_user_takeover is not None
+            else current.browser_user_takeover
+        )
+        browser_network_inspection = (
+            args.browser_network_inspection
+            if args.browser_network_inspection is not None
+            else current.browser_network_inspection
+        )
+        browser_payment_confirmation = (
+            args.browser_payment_confirmation
+            if args.browser_payment_confirmation is not None
+            else current.browser_payment_confirmation
+        )
+        if getattr(args, "clear_browser_domains", False):
+            browser_allowed_domains: tuple[str, ...] = ()
+            browser_denied_domains: tuple[str, ...] = ()
+            browser_allowed_emails: tuple[str, ...] = ()
+        else:
+            browser_allowed_domains = (
+                tuple(args.browser_domain) if args.browser_domain is not None
+                else current.browser_allowed_domains
+            )
+            browser_denied_domains = (
+                tuple(args.browser_deny_domain) if args.browser_deny_domain is not None
+                else current.browser_denied_domains
+            )
+            browser_allowed_emails = (
+                tuple(args.browser_allowed_email) if args.browser_allowed_email is not None
+                else current.browser_allowed_emails
+            )
         updated = replace(
             current,
             target_profile=args.target_profile or current.target_profile,
             repository=repository,
+            projects=projects,
+            default_project_id=default_project_id,
             tools=tools,
+            mcp_servers=mcp_servers,
             verification_commands=commands,
             server_profiles=profiles,
             deadline_seconds=_web_bridge_deadline(
@@ -2936,6 +3631,14 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
                 if args.tunnel_timeout_seconds is not None
                 else current.tunnel_timeout_seconds
             ),
+            browser_external_https=browser_external_https,
+            browser_headed=browser_headed,
+            browser_user_takeover=browser_user_takeover,
+            browser_network_inspection=browser_network_inspection,
+            browser_payment_confirmation=browser_payment_confirmation,
+            browser_allowed_domains=browser_allowed_domains,
+            browser_denied_domains=browser_denied_domains,
+            browser_allowed_emails=browser_allowed_emails,
         )
         binding_changed = (
             updated.repository != current.repository
@@ -3097,21 +3800,80 @@ def _handle_clickup_connect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _persist_auto_hosted_profile(
+    config: WebBridgeConnectConfig, *, prefix: str
+) -> WebBridgeConnectConfig:
+    """Persist a secret-free hosted OAuth launch so the TUI can rediscover it."""
+    repository_key = str(config.repository).casefold().encode("utf-8")
+    digest = hashlib.sha256(repository_key).hexdigest()[:10]
+    profile_name = f"{prefix}-auto-{digest}-{config.access_profile.value}"
+    profile = SavedWebBridgeProfile(
+        name=profile_name,
+        target_profile=config.profile,
+        repository=str(config.repository),
+        tools=tuple(config.tools),
+        verification_commands=tuple(config.verification_commands),
+        server_profiles=tuple(
+            item.to_public_dict() for item in config.server_profiles
+        ),
+        browser_external_https=config.browser_external_https,
+        browser_allowed_domains=tuple(config.browser_allowed_domains),
+        browser_denied_domains=tuple(config.browser_denied_domains),
+        browser_headed=config.browser_headed,
+        browser_user_takeover=config.browser_user_takeover,
+        browser_network_inspection=config.browser_network_inspection,
+        browser_payment_confirmation=config.browser_payment_confirmation,
+        browser_allowed_emails=tuple(config.browser_allowed_emails),
+        deadline_seconds=config.deadline_seconds,
+        tunnel=config.tunnel,
+        public_url=config.public_url,
+        language=config.language,
+        access_profile=config.access_profile,
+        port=config.port,
+        tunnel_timeout_seconds=config.tunnel_timeout_seconds,
+    )
+    WebBridgeProfileStore().put(profile)
+    return replace(config, saved_profile_name=profile_name)
+
+
+def _persist_auto_notion_profile(config: WebBridgeConnectConfig) -> WebBridgeConnectConfig:
+    return _persist_auto_hosted_profile(config, prefix="notion")
+
+
+def _persist_auto_hyperagent_profile(
+    config: WebBridgeConnectConfig,
+) -> WebBridgeConnectConfig:
+    return _persist_auto_hosted_profile(config, prefix="hyperagent")
+
+
 def _handle_connect(args: argparse.Namespace) -> int:
-    """Launch either a web OAuth bridge or the independent ClickUp bridge."""
+    """Launch a hosted-client bridge or the independent ClickUp bridge."""
     if args.connector == "clickup":
         return _handle_clickup_connect(args)
 
     profile = _CONNECTOR_PROFILES[args.connector]
-    commands = tuple(
-        _verification_command(value) for value in (args.verification_command or [])
-    )
+    repository = _web_bridge_repository(args.repository)
     tools = _web_bridge_tools(args.tool, write=args.write)
+    commands = (
+        tuple(_verification_command(value) for value in args.verification_command)
+        if args.verification_command
+        else (
+            discover_verification_commands(repository)
+            if "karox.checks.run" in tools
+            else ()
+        )
+    )
     profiles = (
-        default_server_profiles()
+        server_profiles_for_repository(repository)
         if "karox.dev_server.start" in tools
         else ()
     )
+    if "karox.dev_server.start" in tools and not profiles:
+        tools = tuple(
+            name
+            for name in tools
+            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+        )
     browser_kwargs = _browser_config_kwargs(args)
     access = _web_bridge_access_profile(
         args.access_profile,
@@ -3125,7 +3887,7 @@ def _handle_connect(args: argparse.Namespace) -> int:
     )
     config = WebBridgeConnectConfig(
         profile=profile,
-        repository=_web_bridge_repository(args.repository),
+        repository=repository,
         port=args.port if args.port is not None else 8765,
         tools=tools,
         session_id=args.session_id,
@@ -3150,12 +3912,20 @@ def _handle_connect(args: argparse.Namespace) -> int:
     if args.diagnostics_only:
         _json(web_bridge_diagnostics(config))
         return 0
+    if args.connector == "notion":
+        config = _persist_auto_notion_profile(config)
+    elif args.connector == "hyperagent":
+        config = _persist_auto_hyperagent_profile(config)
     return run_web_bridge(config)
 
 
 def _handle_bridge(args: argparse.Namespace) -> int:
     if args.bridge_command == "saved":
         return _handle_bridge_saved(args)
+    if args.bridge_command in {"status", "stop", "restart", "attach"}:
+        return _handle_bridge_lifecycle(args)
+    if args.bridge_command == "oauth":
+        return _handle_bridge_oauth(args)
     if args.bridge_command == "connect":
         if args.saved and args.profile:
             raise ValueError("choose a positional PROFILE or --saved NAME, not both")
@@ -3231,6 +4001,44 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         elif args.public_url:
             raise ValueError("--public-url is only valid for OAuth web bridge profiles")
         repository = _mcp_repository(args.repository)
+        raw_projects: list[dict[str, Any]] = []
+        for raw_project in args.project:
+            try:
+                decoded_project = json.loads(raw_project)
+            except json.JSONDecodeError as exc:
+                raise ValueError("--project must be a JSON object") from exc
+            if not isinstance(decoded_project, dict):
+                raise ValueError("--project must be a JSON object")
+            raw_projects.append(decoded_project)
+        try:
+            project_registry = ProjectRegistry.from_profile(
+                repository=str(repository),
+                projects=raw_projects,
+                default_project_id=args.default_project_id,
+            )
+        except ProjectRegistryError as exc:
+            raise ValueError(f"invalid bridge project registry: {exc}") from exc
+        project_registry_loader: Optional[Callable[[], ProjectRegistry]] = None
+        if args.saved_profile_name:
+            try:
+                saved_project_profile = WebBridgeProfileStore().get(args.saved_profile_name)
+                saved_anchor = (
+                    Path(saved_project_profile.repository).expanduser().resolve(strict=True)
+                    if saved_project_profile.repository
+                    else None
+                )
+            except (OSError, ValueError):
+                saved_anchor = None
+            if saved_anchor is not None and os.path.normcase(str(saved_anchor)) == os.path.normcase(str(repository)):
+                def load_saved_project_registry() -> ProjectRegistry:
+                    current = WebBridgeProfileStore().get(args.saved_profile_name)
+                    return ProjectRegistry.from_profile(
+                        repository=current.repository,
+                        projects=current.projects,
+                        default_project_id=current.default_project_id,
+                    )
+
+                project_registry_loader = load_saved_project_registry
         sessions = SessionStore(session_dir())
         record = sessions.load(args.session_id)
         sessions.validate_repository(record, repository)
@@ -3254,6 +4062,9 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         extra_tools = [
             name for name in effective_tools if name in HOSTED_EXTRA_TOOL_NAMES
         ]
+        autonomy_tools = [
+            name for name in effective_tools if name in AUTONOMY_TOOL_NAMES
+        ]
         if core_tools:
             verification_commands = (
                 parsed_verification_commands
@@ -3272,6 +4083,9 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                     ),
                     audit_path=audit_path,
                     verification_commands=verification_commands,
+                    advertise_unavailable=(args.profile == "hyperagent-web"),
+                    project_registry=project_registry,
+                    project_registry_loader=project_registry_loader,
                 )
             )
         elif args.verification_command:
@@ -3293,7 +4107,9 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 network_inspection=args.browser_network_inspection,
                 payment_confirmation=args.browser_payment_confirmation,
                 allowed_emails=tuple(args.browser_allowed_email or []),
+                allowed_credential_refs=tuple(args.browser_credential_ref or []),
                 backend=os.environ.get("KAROX_BROWSER_BACKEND", "playwright"),
+                saved_profile_id=args.saved_profile_name or "ad-hoc",
             )
             runtimes.append(
                 HostedToolsRuntime(
@@ -3308,7 +4124,31 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                     ),
                     server_profiles=server_profiles,
                     browser_policy=browser_policy,
+                    verification_commands=parsed_verification_commands,
                     audit_path=audit_path,
+                    saved_profile_name=args.saved_profile_name,
+                )
+            )
+        if autonomy_tools:
+            runtimes.append(
+                AutonomyRuntime(
+                    repository,
+                    sessions,
+                    record.session_id,
+                    autonomy_tools,
+                    access_profile=access_profile,
+                    hosted_origin=Origin(
+                        OriginKind.HOSTED_CLIENT,
+                        f"{args.profile}-autonomy-{record.session_id}",
+                    ),
+                    connection_profile=args.profile,
+                    verification_commands=parsed_verification_commands,
+                    operation_runtime=(
+                        CompositeHostedBridge(tuple(runtimes)) if runtimes else None
+                    ),
+                    client_kind=args.profile,
+                    project_registry=project_registry,
+                    project_registry_loader=project_registry_loader,
                 )
             )
         if args.server:
@@ -3363,6 +4203,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 bridge_runtime,
                 credential,
                 public_url=args.public_url,
+                path="/mcp",
                 deadline_seconds=args.deadline_seconds,
                 # Without this the connector the user just added in ChatGPT or
                 # Claude stops working when this process exits.
@@ -3383,6 +4224,11 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 # uses, stayed silent.  A client that probes a server to decide
                 # which auth methods it supports therefore learned nothing here.
                 unauthorized_headers={"WWW-Authenticate": "Bearer"},
+                # ChatGPT Web pays for large tool output twice: across the hosted
+                # transport and again in model context. Keep its inline ceiling
+                # aligned with execute_plan's 32 KiB budget; larger results stay
+                # fully available through the session-scoped artifact store.
+                inline_result_bytes=(32 * 1024 if args.profile == "chatgpt-web" else None),
             )
         else:
             app = build_openapi_bridge_app(
@@ -3419,6 +4265,14 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 # warnings/errors while disabling only the access log.
                 log_level="warning",
                 access_log=False,
+                # GPT Web and other hosted MCP clients may keep several pooled
+                # HTTP/1.1 connections while the model reasons between tool calls.
+                # A one-minute timeout is still short enough for an idle pooled
+                # socket to go stale while other connections stay active, so keep
+                # bridge sockets reusable across normal multi-minute agent gaps.
+                # Five minutes is bounded while avoiding the observed ~60-second
+                # stale-socket failures on the hosted connector path.
+                timeout_keep_alive=300,
                 ssl_certfile=args.tls_certfile,
                 ssl_keyfile=args.tls_keyfile,
             )
@@ -3453,8 +4307,61 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                 "fingerprint": store.fingerprint(secret),
                 "status": "available",
             }
+        elif command == "copy":
+            reference = f"os-keyring:bridge/{args.name}"
+            secret = store.resolve(reference)
+            copied = clipboard.write_text(clipboard.bearer_value(secret))
+            if copied:
+                clipboard.schedule_clear()
+            elif not getattr(args, "quiet", False):
+                sys.stderr.write(
+                    "clipboard unavailable; the bridge secret remains in the OS keyring and was not printed\n"
+                )
+            payload = {
+                "reference": reference,
+                "fingerprint": store.fingerprint(secret),
+                "status": "copied" if copied else "clipboard_unavailable",
+                "auto_clear_seconds": (
+                    clipboard.CLIPBOARD_AUTO_CLEAR_SECONDS if copied else 0
+                ),
+            }
+            if not copied:
+                _emit(payload, json_output=args.json)
+                return 1
         elif command == "rotate-key":
-            payload = store.rotate(args.name)
+            # ``--reveal-secret`` is the only path that may surface the new
+            # value, and it is gated on an explicit second flag so a stray
+            # toggle or a copied command cannot leak it. Validate before we
+            # generate so a refused run leaves the previous credential intact.
+            if getattr(args, "reveal_secret", False) and not getattr(
+                args, "yes", False
+            ):
+                raise SystemExit(
+                    "--reveal-secret requires explicit --yes confirmation; "
+                    "the new secret is not printed"
+                )
+            new_secret = store.generate()
+            # ``set`` with an explicit value writes atomically (the backend
+            # either replaces the entry or raises, leaving the old value) and,
+            # crucially, does NOT echo the secret back in its result.
+            payload = store.set(args.name, new_secret)
+            payload["status"] = "rotated"
+            if getattr(args, "copy", False):
+                copied = clipboard.write_text(clipboard.bearer_value(new_secret))
+                clipboard.schedule_clear()
+                payload["clipboard"] = "copied" if copied else "unavailable"
+                if not getattr(args, "quiet", False) and not copied:
+                    sys.stderr.write(
+                        "clipboard unavailable; the new bridge secret was "
+                        "stored in the OS keyring and not printed\n"
+                    )
+            if getattr(args, "reveal_secret", False):
+                if not getattr(args, "quiet", False):
+                    sys.stderr.write(
+                        "WARNING: --reveal-secret prints the bridge secret "
+                        "to stdout\n"
+                    )
+                payload["secret"] = new_secret
         else:
             payload = store.delete(args.name)
     _emit(payload, json_output=args.json)
@@ -3565,7 +4472,10 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     if args.session_id and store.state_path(args.session_id).exists():
         record = store.load(args.session_id)
         store.validate_repository(record, repository)
-        if record.access_profile != AccessProfile.WORKSPACE_WRITE.value:
+        if record.access_profile not in {
+            AccessProfile.WORKSPACE_WRITE.value,
+            AccessProfile.ELEVATED.value,
+        }:
             raise SessionError("native agent requires a workspace_write session")
         if record.task != str(redact(args.task)):
             raise SessionError("resume task differs from the existing session task")
@@ -3590,11 +4500,19 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             )
         selection = skill_selection(content.metadata, decisions, previous=previous)
 
+    # A resumed session keeps the profile it was created with: changing a
+    # provider's Bypass mode must never silently re-permission a run already
+    # in flight.  Only a new session picks up the current preference.
+    access_profile = (
+        AccessProfile(record.access_profile)
+        if record is not None
+        else _agent_access_profile(args)
+    )
     if record is None:
         record = store.create(
             repository,
             args.task,
-            AccessProfile.WORKSPACE_WRITE,
+            access_profile,
             session_id=args.session_id,
         )
 
@@ -3602,18 +4520,27 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
 
     native_origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
     origin = native_origin
-    policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
-    policy.set_grants(
-        native_origin,
-        {
-            Capability.REPO_READ,
-            Capability.REPO_WRITE,
-            Capability.PROCESS_RUN,
-            Capability.CHECKS_RUN,
-            Capability.GIT_READ,
-            Capability.MCP_CALL,
-        },
-    )
+    policy = CapabilityPolicy(access_profile)
+    grants = {
+        Capability.REPO_READ,
+        Capability.REPO_WRITE,
+        Capability.PROCESS_RUN,
+        Capability.CHECKS_RUN,
+        Capability.GIT_READ,
+        Capability.MCP_CALL,
+    }
+    if access_profile == AccessProfile.ELEVATED:
+        # Bypass grants the elevated developer capabilities the policy layer
+        # already defines -- and nothing beyond it.  Push, publish, and auth
+        # commands stay outside every profile by design.
+        grants.update(
+            {
+                Capability.DEV_COMMAND,
+                Capability.GIT_COMMIT,
+                Capability.NETWORK,
+            }
+        )
+    policy.set_grants(native_origin, grants)
     verification_commands = [
         _verification_command(value) for value in args.verification_command
     ]
@@ -3628,6 +4555,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             repository,
             branch=record.branch,
             verification_commands=verification_commands,
+            goal=args.task,
+            session_id=record.session_id,
+            recursive_context=getattr(args, "recursive_context", "off"),
         )
         system_prompt += project.prompt_suffix
         project_context = {"enabled": True, **project.to_dict()}
@@ -3658,6 +4588,84 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         mcp_binding=mcp_binding,
         verification_commands=verification_commands,
     )
+    if getattr(args, "recursive_context", "off") == "research" and project_context.get(
+        "enabled"
+    ):
+        raw_map = project_context.get("project_map")
+        map_metadata = raw_map if isinstance(raw_map, dict) else {}
+        raw_focuses = map_metadata.get("implementation")
+        focuses = tuple(
+            item
+            for item in raw_focuses
+            if isinstance(item, str) and item.strip()
+        ) if isinstance(raw_focuses, list) else ()
+        research_metadata: dict[str, Any] = {
+            "enabled": False,
+            "strategy": "read_only_subagent",
+            "depth": 0,
+            "requested_branches": 0,
+            "successful_branches": 0,
+            "branches": [],
+        }
+        if focuses:
+            branch_count = min(2, len(focuses))
+            research_total_seconds = min(
+                60.0, max(1.0, float(args.max_seconds) * 0.10)
+            )
+            research_branch_seconds = research_total_seconds / branch_count
+            research_limits = ResearchLimits(
+                max_steps=3,
+                max_seconds=research_branch_seconds,
+                max_output_tokens=min(2_000, max_output_tokens or 2_000),
+            )
+            try:
+                research_block, research_metadata = build_research_context(
+                    ResearchSubagent(
+                        provider=provider,
+                        model=model,
+                        core=core,
+                        limits=research_limits,
+                        reasoning_effort=getattr(args, "effort", None),
+                    ),
+                    session_id=record.session_id,
+                    goal=args.task,
+                    focuses=focuses,
+                    parent_origin=origin,
+                    max_branches=2,
+                )
+            except Exception as exc:
+                research_block = ""
+                research_metadata = {
+                    **research_metadata,
+                    "error": type(exc).__name__,
+                }
+            research_metadata["budget"] = {
+                "branches": branch_count,
+                "total_seconds": research_total_seconds,
+                "per_branch_seconds": research_branch_seconds,
+                "max_steps_per_branch": research_limits.max_steps,
+                "max_output_tokens_per_branch": research_limits.max_output_tokens,
+            }
+            if research_block:
+                system_prompt += "\n\n" + research_block
+        project_context["research"] = research_metadata
+    # Phase 3 shadow mode: publish typed events to the transcript store
+    # alongside the existing stream observer. The typed stream runs in
+    # parallel with _poll_agent_history; parity evidence decides when the
+    # poll path can be removed.
+    from .transcript_shadow import make_transcript_observer
+
+    base_observer = _stream_progress() if getattr(args, "stream", False) else None
+    transcript_observer = make_transcript_observer(
+        record.session_id,
+        next_observer=base_observer,
+    )
+    context_options: dict[str, Any] = {}
+    if args.context_utilization is not None:
+        context_options["utilization"] = args.context_utilization
+    if args.max_tool_result_chars is not None:
+        context_options["max_tool_result_chars"] = args.max_tool_result_chars
+
     return AgentKernel(
         provider=provider,
         model=model,
@@ -3666,12 +4674,13 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         origin=origin,
         limits=limits,
         system_prompt=system_prompt,
-        context=ContextBudget(max_input_tokens=context_window),
+        context=ContextBudget(max_input_tokens=context_window, **context_options),
         max_output_tokens=max_output_tokens,
         project_context=project_context,
         require_change=args.expect == "change",
         reasoning_effort=getattr(args, "effort", None),
-        on_event=_stream_progress() if getattr(args, "stream", False) else None,
+        economy_mode=bool(getattr(args, "economy", False)),
+        on_event=transcript_observer,
     ).run(record.session_id)
 
 
@@ -3699,11 +4708,152 @@ def _handle_credential(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_browser_credential(args: argparse.Namespace) -> int:
+    store = BrowserCredentialStore()
+    command = args.browser_credential_command
+    warning = (
+        "Use only fake/test/non-important accounts in KaroX Browser. Never store "
+        "primary, personal, financial, work-critical, or otherwise high-value credentials."
+    )
+    if command == "set":
+        if args.stdin:
+            username = sys.stdin.readline().rstrip("\r\n")
+            password = sys.stdin.readline().rstrip("\r\n")
+            if not username or not password:
+                raise ValueError("stdin must contain username and password on two non-empty lines")
+        else:
+            if not args.json:
+                print(warning, file=sys.stderr)
+            username = input("Test account username/email: ").strip()
+            password = getpass.getpass("Test account password: ")
+        payload = store.set(args.name, username=username, password=password)
+        payload = {**payload, "warning": warning}
+        # Drop local references promptly; Python strings are immutable so this is
+        # best-effort lifetime reduction rather than a memory-erasure guarantee.
+        username = ""
+        password = ""
+    elif command == "delete":
+        payload = store.delete(args.name)
+    else:
+        payload = {**store.doctor(), "warning": warning}
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _handle_provider_setup(
+    args: argparse.Namespace,
+    controller: ProviderController,
+) -> dict[str, Any]:
+    """Configure, verify, persist, and optionally select one provider/model.
+
+    The live probe runs before any new secret is written to the OS keyring. An
+    existing environment/keyring reference is resolved only for that probe and
+    the raw value is never emitted or stored in provider JSON.
+    """
+    preset = provider_preset(args.preset_id)
+    if not preset.installable:
+        raise ValueError(
+            f"provider preset requires a documented specialized adapter: {preset.display_name}"
+        )
+
+    base_url = (args.base_url or preset.base_url or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError(
+            f"preset {preset.display_name} requires --base-url from the provider documentation"
+        )
+    provider_id = (args.provider_id or preset.preset_id).strip()
+    model_id = args.model.strip()
+    if not provider_id or not model_id:
+        raise ValueError("provider ID and model ID must not be blank")
+
+    existing_reference: Optional[str] = None
+    try:
+        existing_reference = controller.details(provider_id).provider.credential_ref
+    except Exception:
+        existing_reference = None
+
+    secret: Optional[str] = None
+    probe_secret: Optional[str] = None
+    if args.stdin_key:
+        secret = sys.stdin.readline().rstrip("\r\n")
+        if not secret.strip():
+            raise ValueError("stdin did not contain an API key")
+        probe_secret = secret
+    elif args.credential_ref:
+        probe_secret = controller.credentials.resolve(args.credential_ref)
+    elif existing_reference:
+        probe_secret = controller.credentials.resolve(existing_reference)
+
+    is_local = base_url.startswith(("http://127.0.0.1", "http://localhost"))
+    if not is_local and not (probe_secret or existing_reference):
+        raise ValueError(
+            "remote provider setup requires --stdin-key, --credential-ref, "
+            "or an existing saved credential"
+        )
+
+    verification: dict[str, Any] = {"status": "skipped"}
+    if not args.no_test:
+        from .tui import ProviderSetup, _probe_provider
+
+        verification = {
+            "status": "ok",
+            **_probe_provider(
+                ProviderSetup(
+                    provider_id=provider_id,
+                    adapter=str(preset.adapter_kind),
+                    base_url=base_url,
+                    model_id=model_id,
+                    api_key=probe_secret or "",
+                    context_window=args.context_window,
+                    max_output_tokens=args.max_output_tokens,
+                )
+            ),
+        }
+
+    mutation = controller.configure_provider_model(
+        ProviderRecord(
+            provider_id=provider_id,
+            adapter_kind=str(preset.adapter_kind),
+            base_url=base_url,
+            credential_ref=args.credential_ref or existing_reference,
+            privacy_class="local" if is_local else preset.privacy_class,
+        ),
+        ModelRecord(
+            provider_id=provider_id,
+            model_id=model_id,
+            aliases=(),
+            context_window=args.context_window,
+            max_output_tokens=args.max_output_tokens,
+            tools="true",
+            streaming="true",
+            pricing=_pricing(args),
+            provenance=f"preset-setup:{preset.preset_id}",
+        ),
+        secret=secret,
+        activate=not args.no_activate,
+    )
+    return {
+        "status": mutation.status,
+        "preset": preset.preset_id,
+        "provider": asdict(mutation.provider) if mutation.provider is not None else None,
+        "model": asdict(mutation.model) if mutation.model is not None else None,
+        "selected_model": (
+            asdict(mutation.selected_model)
+            if mutation.selected_model is not None
+            else None
+        ),
+        "verification": verification,
+        "credential_fingerprint": mutation.credential_fingerprint or "",
+    }
+
+
 def _handle_provider(args: argparse.Namespace) -> int:
     controller = _provider_controller()
     command = args.provider_command
     if command == "presets":
         payload = [item.to_dict() for item in provider_presets()]
+    elif command == "setup":
+        payload = _handle_provider_setup(args, controller)
     elif command == "add-preset":
         preset = provider_preset(args.preset_id)
         if not preset.installable:
@@ -4053,6 +5203,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "credential":
             return _handle_credential(args)
+
+        if args.command == "browser-credential":
+            return _handle_browser_credential(args)
 
         if args.command == "provider":
             return _handle_provider(args)

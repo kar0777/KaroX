@@ -135,32 +135,45 @@ class BridgeProfile:
 
 
 # Declarative registry of known hosted clients.  Statuses are honest:
-# - Notion: tested_legacy.  The only evidence, scripts/test_notion_mcp_transport.py,
-#   drives server/notion_gateway.py -- a different HTTP server from this runtime's
-#   bridge -- so it proves the legacy gateway and says nothing about src/karox.
+# - Notion: protocol-compatible.  The old live evidence still belongs to the
+#   legacy server/notion_gateway.py, but the current Notion Custom Agent contract
+#   is public HTTPS Streamable HTTP MCP with OAuth or header-based authentication.
+#   KaroX now uses the same OAuth 2.1 facade as its ChatGPT/Claude bridges:
+#   protected-resource discovery, Dynamic Client Registration, PKCE S256, refresh
+#   rotation, and a local KaroX approval page.  This is still protocol evidence,
+#   not a claim that a live Notion product run has completed.
 # - Generic Streamable HTTP: protocol-compatible transport, client-dependent.
 # - ChatGPT/Claude Web: OAuth/DCR/PKCE contract tested locally, no live account run.
 # - PromptQL: local OpenAPI/Core wire E2E, no recorded live product run.
-# - HyperAgent: experimental (no verified dedicated path in repository).
+# - Hyperagent: OAuth/DCR/PKCE path is contract-tested and wired into /connect;
+#   a real external Hyperagent workspace run is still pending. The old bearer
+#   profile remains only for backward compatibility.
 def known_bridge_profiles() -> List[BridgeProfile]:
     return [
         BridgeProfile(
             name="notion",
             transport="streamable_http",
-            status=BridgeStatus.TESTED_LEGACY,
-            description="Notion Custom Agent bridge to the local KaroX runtime.",
-            tunnel="cloudflare or tailscale funnel",
-            persistent_url=False,
+            status=BridgeStatus.PROTOCOL_COMPATIBLE,
+            auth_scheme="oauth",
+            description="Notion Custom Agent OAuth bridge to the local KaroX runtime.",
+            tunnel="tailscale funnel or stable public HTTPS",
+            persistent_url=True,
             instructions=(
-                "Configure the Notion Custom Agent MCP endpoint to the KaroX "
-                "bridge URL and use the bridge credential as the bearer token."
+                "Configure the Notion Custom Agent MCP endpoint to the stable KaroX "
+                "bridge URL. Notion discovers KaroX OAuth metadata and registers "
+                "itself through Dynamic Client Registration; complete the KaroX "
+                "approval page when Notion opens it."
             ),
             limitations=(
-                "Per-session key protects both the MCP and REST paths.",
-                "Verified against the legacy server/notion_gateway.py only; no "
-                "recorded Notion run against this runtime's bridge.",
+                "Notion custom MCP connections require a workspace where custom MCP "
+                "servers are enabled by an administrator.",
+                "OAuth uses authorization-code + PKCE S256, Dynamic Client Registration, "
+                "resource indicators, and rotating refresh tokens.",
+                "Use a stable public HTTPS URL for a saved Notion connection; a "
+                "Cloudflare Quick Tunnel URL changes after restart.",
+                "The current KaroX OAuth wire is covered end to end; no live Notion "
+                "Custom Agent run against this runtime is recorded yet.",
             ),
-            verified_versions=("4.x-legacy-gateway",),
         ),
         BridgeProfile(
             name="generic-streamable-http",
@@ -216,6 +229,28 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             ),
         ),
         BridgeProfile(
+            name="adapt",
+            transport="streamable_http",
+            status=BridgeStatus.PROTOCOL_COMPATIBLE,
+            auth_scheme="bearer",
+            description=(
+                "Adapt Custom Integration bridge to selected KaroX tools over "
+                "authenticated Streamable HTTP MCP."
+            ),
+            tunnel="stable public HTTPS URL or supported secure MCP tunnel",
+            persistent_url=True,
+            instructions=(
+                "In Adapt create a Custom Integration named KaroX, describe the "
+                "stable /mcp endpoint, and store the KaroX Authorization value "
+                "under the protected KAROX_AUTHORIZATION credential key."
+            ),
+            limitations=(
+                "Adapt exposes KaroX through its generic Custom Integration surface; "
+                "KaroX can verify the bridge locally, while the Adapt side is proven "
+                "only after Adapt actually calls the endpoint.",
+            ),
+        ),
+        BridgeProfile(
             name="promptql",
             transport="openapi",
             status=BridgeStatus.EXPERIMENTAL,
@@ -240,11 +275,16 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             name="hyperagent",
             transport="streamable_http",
             status=BridgeStatus.EXPERIMENTAL,
-            description="HyperAgent hosted agent bridge.",
+            description="Legacy bearer Hyperagent bridge kept for compatibility.",
             tunnel="cloudflare or tailscale funnel",
             persistent_url=False,
-            instructions="Connect HyperAgent to the bridge URL with the bridge credential.",
-            limitations=("No verified dedicated path in the repository yet.",),
+            instructions=(
+                "Legacy profile only. New Hyperagent connections should use the "
+                "hyperagent-web OAuth profile from /connect."
+            ),
+            limitations=(
+                "This compatibility profile does not use the dedicated hosted OAuth flow.",
+            ),
         ),
         BridgeProfile(
             name="hyperagent-web",
@@ -252,17 +292,16 @@ def known_bridge_profiles() -> List[BridgeProfile]:
             status=BridgeStatus.EXPERIMENTAL,
             auth_scheme="oauth",
             description=(
-                "OAuth remote MCP bridge from HyperAgent to selected KaroX tools."
+                "OAuth remote MCP bridge from Hyperagent to selected KaroX tools."
             ),
-            tunnel="public HTTPS URL or supported secure MCP tunnel",
+            tunnel="stable public HTTPS URL or supported secure MCP tunnel",
             persistent_url=True,
             instructions=(
-                "Publish the bridge on a stable HTTPS URL (Tailscale Funnel is "
-                "the recommended way), then add its /mcp URL as an MCP server in "
-                "HyperAgent. Leave \"Bring my own OAuth app\" off -- KaroX "
-                "advertises OAuth discovery metadata and Dynamic Client "
-                "Registration, so HyperAgent registers its own client. Complete "
-                "the KaroX password approval page when HyperAgent starts OAuth."
+                "Publish KaroX on a stable HTTPS URL, then in Hyperagent open "
+                "Settings > Integrations and add a Custom MCP server using the "
+                "/mcp URL. Use the server-provided OAuth flow when offered; KaroX "
+                "publishes OAuth discovery metadata and Dynamic Client Registration. "
+                "Complete approval only on the KaroX page."
             ),
             limitations=(
                 "OAuth/DCR/PKCE and the redirect-host allowlist are covered "
@@ -312,6 +351,17 @@ class BridgeCredentialReference:
         if not isinstance(value, str) or not value.startswith(_BRIDGE_REFERENCE_PREFIX):
             raise ValueError("bridge credential reference must use os-keyring:bridge/<name>")
         return cls(value[len(_BRIDGE_REFERENCE_PREFIX):])
+
+
+class BridgeCredentialMissing(CredentialError):
+    """The reference resolved cleanly to "no such credential".
+
+    Distinct from a plain :class:`CredentialError`, which also covers a backend
+    that is momentarily unreadable. Callers that mint a replacement secret on
+    absence must not do so on unavailability: for a durable saved profile that
+    would silently invalidate the bearer token of an already-configured
+    connector, so absence has to be proven rather than assumed.
+    """
 
 
 class BridgeCredentialStore:
@@ -371,11 +421,31 @@ class BridgeCredentialStore:
                 f"cannot read bridge OS credential: {type(exc).__name__}"
             ) from exc
         if not isinstance(value, str) or not value:
-            raise CredentialError(f"bridge credential reference does not exist: {parsed}")
+            raise BridgeCredentialMissing(
+                f"bridge credential reference does not exist: {parsed}"
+            )
         return value
 
     def rotate(self, name: str) -> dict[str, str]:
-        return self.set(name)
+        """Rotate the credential, returning only a safe reference + fingerprint.
+
+        The new secret is deliberately absent from the returned mapping so
+        that library callers, ``_emit`` and any log capture can never leak it.
+        The previous value stays valid if the keyring write raises, because the
+        backend either replaces the entry atomically or leaves the old one in
+        place -- there is no intermediate deleted state.
+
+        Callers that must hand the value somewhere (the clipboard) should call
+        :meth:`generate` followed by :meth:`set` so the secret never has to
+        round-trip through a serialisable structure.
+        """
+        new_secret = self.generate()
+        self.set(name, new_secret)
+        return {
+            "reference": str(BridgeCredentialReference(name)),
+            "fingerprint": self.fingerprint(new_secret),
+            "status": "rotated",
+        }
 
     def delete(self, name: str) -> dict[str, str]:
         reference = BridgeCredentialReference(name)

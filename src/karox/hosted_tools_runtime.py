@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .artifacts import ArtifactStore
+from .check_jobs import CheckJobError, CheckJobManager
 from .browser_access import BrowserAccessPolicy, SecureBrowserSessionManager
 from .extension_browser import ChromeExtensionBrowserSessionManager
 from .browser_session import (
@@ -148,6 +150,61 @@ def default_server_profiles() -> tuple[ManagedServerProfile, ...]:
     )
 
 
+def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfile, ...]:
+    """Return loopback-only dev-server profiles that actually belong to *repository*.
+
+    ``default_server_profiles`` predates multi-repository hosted clients and is
+    intentionally kept for the Vacancy Control compatibility path.  Reusing it
+    for every repository exposed a bogus ``npm run start:safe`` recipe to
+    unrelated projects.  Hosted connectors now discover only scripts present in
+    the selected repository and only auto-approve a direct Vite dev script where
+    KaroX can force the listener onto loopback.
+    """
+
+    package_json = repository / "package.json"
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    scripts_raw = payload.get("scripts") if isinstance(payload, dict) else None
+    if not isinstance(scripts_raw, dict):
+        return ()
+    scripts = {
+        str(name): str(command)
+        for name, command in scripts_raw.items()
+        if isinstance(name, str) and isinstance(command, str)
+    }
+
+    profiles: list[ManagedServerProfile] = []
+    if "start:safe" in scripts:
+        profiles.extend(default_server_profiles())
+
+    # Prefer a client-only Vite script over a composite `dev` script.  Passing
+    # extra argv through npm lets the final --host override any package default,
+    # so the managed process remains loopback-only.  Composite runners (concurrently,
+    # npm-run-all, shell pipelines) are deliberately not auto-approved.
+    for script_name in ("client:dev", "dev"):
+        command = scripts.get(script_name, "").strip()
+        normalized = command.lower()
+        composite = any(
+            marker in normalized
+            for marker in ("&&", "||", ";", "concurrently", "npm-run-all", "run-p ", "run-s ")
+        )
+        if "vite" not in normalized or composite:
+            continue
+        profiles.append(
+            ManagedServerProfile(
+                name=f"vite-{script_name.replace(':', '-')}-loopback",
+                argv=("npm", "run", script_name, "--", "--host", "127.0.0.1"),
+                env={"HOST": "127.0.0.1"},
+                env_allowlist=frozenset({"PORT", "NODE_ENV", "CI"}),
+                host_hint="127.0.0.1",
+            )
+        )
+        break
+    return tuple(profiles)
+
+
 # ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
@@ -161,6 +218,7 @@ BROWSER_CLOSE_TAB = "karox.browser.close_tab"
 BROWSER_SNAPSHOT = "karox.browser.snapshot"
 BROWSER_CLICK = "karox.browser.click"
 BROWSER_FILL = "karox.browser.fill"
+BROWSER_FILL_CREDENTIAL = "karox.browser.fill_credential"
 BROWSER_SELECT = "karox.browser.select"
 BROWSER_PRESS = "karox.browser.press"
 BROWSER_WAIT = "karox.browser.wait_for"
@@ -188,6 +246,11 @@ DEV_SERVER_START = "karox.dev_server.start"
 DEV_SERVER_STATUS = "karox.dev_server.status"
 DEV_SERVER_LOGS = "karox.dev_server.logs"
 DEV_SERVER_STOP = "karox.dev_server.stop"
+CHECKS_START = "karox.checks.start"
+CHECKS_STATUS = "karox.checks.status"
+CHECKS_LOGS = "karox.checks.logs"
+CHECKS_CANCEL = "karox.checks.cancel"
+RUNTIME_RESTART = "karox.runtime.restart"
 ARTIFACT_GET = "karox.artifact.get"
 ARTIFACT_READ_IMAGE = "karox.artifact.read_image"
 
@@ -311,11 +374,32 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         capability=Capability.BROWSER_INPUT,
     ),
     BROWSER_FILL: _ToolMeta(
-        description="Fill an input/textarea by selector with the given value.",
+        description="Fill a non-sensitive input/textarea by selector with the given value. Password/credential fields require local credential injection or user takeover.",
         input_schema={
             "type": "object",
             "properties": {"selector": {"type": "string"}, "value": {"type": "string"}},
             "required": ["selector", "value"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.BROWSER_INPUT,
+    ),
+    BROWSER_FILL_CREDENTIAL: _ToolMeta(
+        description=(
+            "Fill a username/email or password field from an opaque browser credential "
+            "reference stored only in the local OS keyring. The raw value is never "
+            "accepted by or returned to the hosted client. Use only fake/test/non-important "
+            "accounts in KaroX Browser; CAPTCHA, 2FA, OAuth consent and payment actions "
+            "must use user takeover."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string"},
+                "reference": {"type": "string", "pattern": "^os-keyring:browser/"},
+                "field": {"type": "string", "enum": ["username", "password"]},
+            },
+            "required": ["selector", "reference", "field"],
             "additionalProperties": False,
         },
         read_only=False,
@@ -502,11 +586,127 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         read_only=False,
         capability=Capability.PROCESS_RUN,
     ),
-    ARTIFACT_GET: _ToolMeta(
-        description="Return metadata for an artifact created by this KaroX session.",
+    CHECKS_START: _ToolMeta(
+        description=(
+            "Start a durable verification job and return immediately. The worker and "
+            "its child process tree are isolated from the MCP request and bridge lifecycle."
+        ),
         input_schema={
             "type": "object",
-            "properties": {"artifact_id": {"type": "string"}},
+            "properties": {
+                "kind": {"type": "string", "enum": ["pytest", "check"]},
+                "suite": {"type": "string", "enum": ["full", "focused", "split"]},
+                "targets": {"type": "array", "items": {"type": "string"}},
+                "split": {"type": "integer"},
+                "part": {"type": "integer"},
+                "argv": {"type": "array", "items": {"type": "string"}},
+                "timeout_seconds": {"type": "number"},
+            },
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.CHECKS_RUN,
+    ),
+    CHECKS_STATUS: _ToolMeta(
+        description="Return durable status and compact diagnostics for a managed check job.",
+        input_schema={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+        capability=Capability.CHECKS_RUN,
+    ),
+    CHECKS_LOGS: _ToolMeta(
+        description="Return a bounded redacted tail of a managed check job log.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+        capability=Capability.CHECKS_RUN,
+    ),
+    CHECKS_CANCEL: _ToolMeta(
+        description=(
+            "Idempotently request cancellation of an owned managed check job. "
+            "Only the verified worker-owned child tree is terminated."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.CHECKS_RUN,
+    ),
+    RUNTIME_RESTART: _ToolMeta(
+        description=(
+            "Safely recycle only this durable saved bridge's local MCP child after "
+            "the current response is fully sent. The owner, public URL, durable "
+            "session and bridge credential are preserved; an active managed-extension "
+            "browser is preserved too, while an active Playwright browser or user takeover blocks restart."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                    "description": (
+                        "Unique for one intentional restart; keep the same value only when retrying that restart."
+                    ),
+                },
+                "reason": {"type": "string", "maxLength": 500},
+            },
+            "required": ["request_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.PROCESS_RUN,
+    ),
+    ARTIFACT_GET: _ToolMeta(
+        description=(
+            "Return metadata for a session-owned artifact, or selectively read a "
+            "bounded line range, tail, regex match, first failure, JSON path, or section."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "selector": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "line_range",
+                                "tail",
+                                "regex",
+                                "first_failure",
+                                "json_path",
+                                "section",
+                            ],
+                        },
+                        "start": {"type": "integer"},
+                        "count": {"type": "integer"},
+                        "pattern": {"type": "string"},
+                        "max_matches": {"type": "integer"},
+                        "path": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "max_output_bytes": {"type": "integer"},
+            },
             "required": ["artifact_id"],
             "additionalProperties": False,
         },
@@ -646,6 +846,8 @@ class HostedToolsRuntime:
         audit_path: Optional[Path] = None,
         artifact_store: Optional[ArtifactStore] = None,
         popen_factory: Optional[Callable[..., Any]] = None,
+        verification_commands: Sequence[Sequence[str]] = (),
+        saved_profile_name: Optional[str] = None,
     ) -> None:
         if not allowed_tool_names:
             raise HostedBridgeAccessDenied("hosted tools allowlist must not be empty")
@@ -665,12 +867,22 @@ class HostedToolsRuntime:
         self._allowed = tuple(dict.fromkeys(allowed_tool_names))
         self._server_profiles = tuple(server_profiles)
         self._popen_factory = popen_factory
+        if saved_profile_name is not None:
+            if (
+                not isinstance(saved_profile_name, str)
+                or not 1 <= len(saved_profile_name) <= 128
+                or not saved_profile_name[0].isalnum()
+                or not all(ch.isalnum() or ch in "._-" for ch in saved_profile_name)
+            ):
+                raise HostedBridgeAccessDenied("saved profile name is invalid")
+        self._saved_profile_name = saved_profile_name
 
         record = sessions.load(session_id)
         sessions.validate_repository(record, self.repository)
         if record.revoked:
             raise HostedBridgeAccessDenied("session access has been revoked")
 
+        self._access_profile = access_profile
         self.policy = CapabilityPolicy(access_profile)
         grants: set[Capability] = set()
         for name in self._allowed:
@@ -702,6 +914,11 @@ class HostedToolsRuntime:
             self._browser_policy,
         )
         self._process_store = ManagedProcessStore(session_id)
+        self._check_jobs = CheckJobManager(
+            self.repository,
+            session_id,
+            verification_commands,
+        )
 
     # -- HostedToolRuntime protocol ----------------------------------------
 
@@ -719,6 +936,10 @@ class HostedToolsRuntime:
 
     def session_info(self) -> dict[str, Any]:
         return {
+            "session_id": self.session_id,
+            "repository": str(self.repository),
+            "saved_profile": self._saved_profile_name,
+            "access_profile": self._access_profile.value,
             "browser_open": self._browser.is_open,
             "browser_takeover_active": self._browser.takeover_active,
             "browser_context_id": self._browser.context_id,
@@ -727,6 +948,10 @@ class HostedToolsRuntime:
                 self._browser, ChromeExtensionBrowserSessionManager
             ),
             "browser_persistent_across_calls": True,
+            "browser_survives_bridge_restart": isinstance(
+                self._browser, ChromeExtensionBrowserSessionManager
+            ),
+            "browser_local_credential_injection": True,
             "browser_permission": self._browser_policy.to_diagnostics(),
             "browser_isolation": {
                 "context_per_session": True,
@@ -758,6 +983,9 @@ class HostedToolsRuntime:
         if handler is None:
             raise HostedBridgeAccessDenied(f"hosted tool has no handler: {tool_name}")
         try:
+            if tool_name in {CHECKS_START, RUNTIME_RESTART}:
+                arguments = dict(arguments)
+                arguments["_idempotency_key"] = idempotency_key
             if (
                 tool_name.startswith("karox.browser.")
                 and self._browser.is_open
@@ -781,6 +1009,11 @@ class HostedToolsRuntime:
         except BrowserError as exc:
             return _text_call_result(
                 {"ok": False, "error_code": "browser", "error": str(exc)},
+                is_error=True,
+            )
+        except CheckJobError as exc:
+            return _text_call_result(
+                {"ok": False, "error_code": "check_job", "error": str(redact(str(exc)))},
                 is_error=True,
             )
         except HostedBridgeAccessDenied:
@@ -870,6 +1103,11 @@ class HostedToolsRuntime:
 
     def _browser_fill(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         return {"ok": True, **self._browser.fill(arguments, deadline_seconds)}
+
+    def _browser_fill_credential(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        return {"ok": True, **self._browser.fill_credential(arguments, deadline_seconds)}
 
     def _browser_select(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         return {"ok": True, **self._browser.select(arguments, deadline_seconds)}
@@ -1119,6 +1357,91 @@ class HostedToolsRuntime:
             "running": _pid_alive(record.pid),
         }
 
+    def _checks_start(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        idempotency_key = arguments.pop("_idempotency_key", None)
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise CheckJobError("checks.start requires an idempotency key")
+        return {
+            "ok": True,
+            **self._check_jobs.start(
+                arguments,
+                idempotency_key=idempotency_key,
+                bridge_pid=os.getpid(),
+            ),
+        }
+
+    def _checks_status(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        return {"ok": True, **self._check_jobs.status(job_id)}
+
+    def _checks_logs(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        limit = arguments.get("limit", 64 * 1024)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise CheckJobError("limit must be an integer")
+        return {"ok": True, **self._check_jobs.logs(job_id, limit=limit)}
+
+    def _checks_cancel(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        return {"ok": True, **self._check_jobs.cancel(job_id)}
+
+    def _runtime_restart(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        if not self._saved_profile_name:
+            raise HostedBridgeAccessDenied(
+                "runtime restart is available only for a durable saved bridge"
+            )
+        idempotency_key = arguments.pop("_idempotency_key", None)
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise HostedBridgeAccessDenied("runtime restart requires an idempotency key")
+        request_id = arguments.get("request_id")
+        if (
+            not isinstance(request_id, str)
+            or not 1 <= len(request_id) <= 128
+            or not request_id[0].isalnum()
+            or not all(ch.isalnum() or ch in "._-" for ch in request_id)
+        ):
+            raise HostedBridgeAccessDenied("runtime restart requires a safe request_id")
+        reason = arguments.get("reason", "")
+        if self._browser.takeover_active:
+            raise HostedBridgeAccessDenied(
+                "runtime restart is blocked while browser user takeover is active"
+            )
+        browser_open = self._browser.is_open
+        browser_backend = self._browser_policy.backend
+        if browser_open and browser_backend != "extension":
+            raise HostedBridgeAccessDenied(
+                "runtime restart would discard the active Playwright browser; "
+                "finish that browser session or use the managed extension backend"
+            )
+        from .runtime_restart import RuntimeRestartError, schedule_saved_bridge_child_restart
+
+        try:
+            return schedule_saved_bridge_child_restart(
+                session_id=self.session_id,
+                saved_profile=self._saved_profile_name,
+                idempotency_key=idempotency_key,
+                reason=reason,
+                browser_backend=browser_backend,
+                browser_process_preserved=browser_open and browser_backend == "extension",
+            )
+        except RuntimeRestartError as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+
     def _require_own(self, process_id: str) -> ManagedProcessRecord:
         try:
             record = self._process_store.get(process_id)
@@ -1134,11 +1457,42 @@ class HostedToolsRuntime:
 
     def _artifact_get(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         artifact_id = self._required(arguments, "artifact_id", str)
+        selector = arguments.get("selector")
+        if selector is not None and not isinstance(selector, dict):
+            return {
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "selector must be an object",
+            }
+        max_output_bytes = arguments.get("max_output_bytes", 64 * 1024)
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 1024 <= max_output_bytes <= 1024 * 1024
+        ):
+            return {
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "max_output_bytes must be between 1024 and 1048576",
+            }
         try:
             _data, record = self._artifacts.read(artifact_id)
+            if selector is not None:
+                selection = self._artifacts.read_selection(
+                    artifact_id,
+                    selector,
+                    max_output_bytes=max_output_bytes,
+                )
+                return {"ok": True, **record.to_dict(), "selection": selection}
         except FileNotFoundError as exc:
             return {"ok": False, "error_code": "not_found", "error": str(exc)}
-        return {"ok": True, **record.to_dict(), "relative_path": f".karox/artifacts/{self.session_id}/{record.artifact_id}.bin"}
+        except (KeyError, ValueError) as exc:
+            return {"ok": False, "error_code": "invalid_request", "error": str(exc)}
+        return {
+            "ok": True,
+            **record.to_dict(),
+            "relative_path": f".karox/artifacts/{self.session_id}/{record.artifact_id}.bin",
+        }
 
     def _artifact_read_image(self, arguments: dict[str, Any], deadline_seconds: float) -> CallToolResult:
         artifact_id = self._required(arguments, "artifact_id", str)
@@ -1177,6 +1531,7 @@ HostedToolsRuntime._dispatch = {
     BROWSER_SNAPSHOT: HostedToolsRuntime._browser_snapshot,
     BROWSER_CLICK: HostedToolsRuntime._browser_click,
     BROWSER_FILL: HostedToolsRuntime._browser_fill,
+    BROWSER_FILL_CREDENTIAL: HostedToolsRuntime._browser_fill_credential,
     BROWSER_SELECT: HostedToolsRuntime._browser_select,
     BROWSER_PRESS: HostedToolsRuntime._browser_press,
     BROWSER_WAIT: HostedToolsRuntime._browser_wait,
@@ -1192,6 +1547,11 @@ HostedToolsRuntime._dispatch = {
     DEV_SERVER_STATUS: HostedToolsRuntime._dev_server_status,
     DEV_SERVER_LOGS: HostedToolsRuntime._dev_server_logs,
     DEV_SERVER_STOP: HostedToolsRuntime._dev_server_stop,
+    CHECKS_START: HostedToolsRuntime._checks_start,
+    CHECKS_STATUS: HostedToolsRuntime._checks_status,
+    CHECKS_LOGS: HostedToolsRuntime._checks_logs,
+    CHECKS_CANCEL: HostedToolsRuntime._checks_cancel,
+    RUNTIME_RESTART: HostedToolsRuntime._runtime_restart,
     ARTIFACT_GET: HostedToolsRuntime._artifact_get,
     ARTIFACT_READ_IMAGE: HostedToolsRuntime._artifact_read_image,
 }

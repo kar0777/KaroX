@@ -18,6 +18,7 @@ class OriginKind(str, Enum):
     HOSTED_CLIENT = "hosted_client"
     SKILL = "skill"
     PROXIED_MCP = "proxied_mcp"
+    SUBAGENT = "subagent"
     PACK = "pack"
 
 
@@ -32,6 +33,7 @@ class Capability(str, Enum):
     REPO_READ = "repo.read"
     REPO_WRITE = "repo.write"
     PROCESS_RUN = "process.run"
+    DEV_COMMAND = "dev.command"
     CHECKS_RUN = "checks.run"
     GIT_READ = "git.read"
     GIT_COMMIT = "git.commit"
