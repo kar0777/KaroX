@@ -13,6 +13,13 @@ from enum import Enum
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from .core import CoreRuntime, ToolDefinition
+from .cost_intelligence import (
+    CostGovernor,
+    CostLedger,
+    ReadCache,
+    StablePrefixCache,
+    ToolSchemaDeduplicator,
+)
 from .models import CoreCommand, CoreResult, Origin, OriginKind
 from .providers import (
     ModelEvent,
@@ -578,6 +585,42 @@ class AgentKernel:
             for alias, core_name in aliases.items()
             if self._may_call(definitions[core_name])
         )
+        # -- quality economy (P0.4) ---------------------------------------
+        # Same model, same reasoning, same verification: these primitives
+        # measure and remove infrastructure duplication only. Each keeps a
+        # counter the session usage view and tests can read back, so every
+        # economy claim stays provable from this process instead of assumed.
+        self._cost_ledger = CostLedger()
+        self._prefix_cache = StablePrefixCache()
+        self._schema_dedup = ToolSchemaDeduplicator()
+        self._read_cache = ReadCache()
+        # Shadow mode: the governor observes and warns; it never blocks a run
+        # and never downgrades the model. Enforcement stays a user decision.
+        self._cost_governor = CostGovernor(shadow_mode=True)
+        schema_payload = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            }
+            for tool in self._provider_tools
+        ]
+        rendered_schemas = json.dumps(
+            schema_payload, ensure_ascii=False, sort_keys=True
+        )
+        self._tool_schema_bytes_advertised = len(rendered_schemas.encode("utf-8"))
+        self._tool_schema_bytes_unique = len(
+            json.dumps(
+                self._schema_dedup.deduplicate(schema_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        self._tool_schema_digest = hashlib.sha256(
+            rendered_schemas.encode("utf-8")
+        ).hexdigest()
+        self._prefix_stable_steps = 0
+        self._prefix_total_steps = 0
 
     def _emit(self, kind: AgentEventKind, **fields: Any) -> None:
         """Tell the watcher, and never let the watcher end the session.
@@ -725,15 +768,29 @@ class AgentKernel:
                 self.sessions.heartbeat(lease, ttl_seconds=lease_ttl)
                 self._step = steps + 1
                 self._emit(AgentEventKind.STEP_STARTED)
+                previous_prefix_key = self._prefix_cache.last_key
+                prefix_key = self._prefix_cache.compute_key(
+                    system_prompt=self.system_prompt,
+                    tool_schemas=self._tool_schema_digest,
+                    session_id=session_id,
+                )
+                self._prefix_total_steps += 1
+                if (
+                    previous_prefix_key is not None
+                    and previous_prefix_key.key == prefix_key.key
+                ):
+                    self._prefix_stable_steps += 1
                 request = ModelRequest(
                     model=self.model,
                     messages=tuple(self._request_messages(record.provider_history)),
                     tools=self._provider_tools,
                     deadline_seconds=min(remaining, 3600.0),
-                    # Every step resends the whole transcript, so the session id
-                    # is exactly the right cache key: the prefix is stable and
-                    # is otherwise re-billed at full price on every request.
-                    cache_key=f"karox-session-{session_id}",
+                    # Every step resends the whole transcript, so the stable
+                    # prefix (system prompt + tool schemas) plus the session id
+                    # is exactly the right cache key: an unchanged prefix keeps
+                    # billing at cache-read rate, and a changed prefix stops
+                    # advertising a cache entry the provider no longer holds.
+                    cache_key=prefix_key.key,
                     max_output_tokens=self.max_output_tokens,
                     reasoning_effort=self.reasoning_effort,
                 )
@@ -967,6 +1024,39 @@ class AgentKernel:
             usage_event["economy_reused_estimated_tokens"] = int(
                 reused_chars / float(self.context.chars_per_token)
             )
+        # Quality-economy accounting (P0.4): proxy metrics measured in this
+        # process. Token savings are never invented here; provider-native
+        # cached-token counts arrive in the usage payload when they exist.
+        self._cost_ledger.record(
+            session_id=session_id,
+            step=self._step,
+            provider=str(response.selected_provider or self.provider.provider_name),
+            model=str(response.selected_model or self.model),
+            input_tokens=int(usage_event.get("prompt_tokens", 0)),
+            output_tokens=int(usage_event.get("completion_tokens", 0)),
+            cache_read_tokens=int(usage_event.get("cache_read_tokens", 0)),
+            cache_write_tokens=int(usage_event.get("cache_write_tokens", 0)),
+            cost_usd=float(usage_event.get("cost", 0.0) or 0.0),
+            timestamp=float(usage_event["timestamp"]),
+        )
+        usage_event["economy_tool_schema_bytes_advertised"] = (
+            self._tool_schema_bytes_advertised
+        )
+        usage_event["economy_tool_schema_bytes_unique"] = (
+            self._tool_schema_bytes_unique
+        )
+        usage_event["economy_prefix_stable_steps"] = self._prefix_stable_steps
+        usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
+        usage_event["economy_read_cache_hits"] = self._read_cache.hits
+        usage_event["economy_read_cache_misses"] = self._read_cache.misses
+        decision = self._cost_governor.evaluate(
+            current_cost_usd=self._cost_ledger.total_cost(session_id)
+        )
+        if decision.warning:
+            # Advisory only: the governor runs in shadow mode, never blocks a
+            # run, and never downgrades the model. The warning is recorded so
+            # the session usage view can surface it.
+            usage_event["economy_budget_warning"] = decision.warning
 
         def update(record: SessionRecord) -> None:
             if route_audit is not None:
@@ -1143,6 +1233,24 @@ class AgentKernel:
         result: CoreResult,
     ) -> None:
         result_value = result.to_dict()
+        if core_name in {"repo.read_file", "repo.read_lines"} and result.ok:
+            read_data = result.data if isinstance(result.data, dict) else {}
+            read_path = read_data.get("path")
+            read_size = read_data.get("bytes")
+            read_digest = read_data.get("content_sha256") or read_data.get("sha256")
+            if (
+                isinstance(read_path, str)
+                and isinstance(read_size, int)
+                and isinstance(read_digest, str)
+                and read_digest
+            ):
+                # The content digest is the fingerprint: Core reads return no
+                # mtime, and identical bytes are exactly what makes a re-read
+                # redundant. A hit means the transcript already carries this
+                # content, which the request-side reuse pass then elides.
+                self._read_cache.check(
+                    read_path, float(int(read_digest[:12], 16)), read_size
+                )
         content = json.dumps(
             result_value,
             ensure_ascii=False,

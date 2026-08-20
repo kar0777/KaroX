@@ -222,6 +222,14 @@ class ReadCache:
         total = self._hits + self._misses
         return self._hits / total if total > 0 else 0.0
 
+    @property
+    def hits(self) -> int:
+        return self._hits
+
+    @property
+    def misses(self) -> int:
+        return self._misses
+
 
 # --------------------------------------------------------------------------- #
 # CI-2: Reversible compaction                                                 #
