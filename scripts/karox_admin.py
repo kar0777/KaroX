@@ -342,7 +342,8 @@ def tail_text(path: Path, max_bytes: int = 120_000) -> str:
         return f"[unavailable: {exc}]"
 
 
-def create_support_bundle(output: Optional[Path]) -> Path:
+def _legacy_create_support_bundle(output: Optional[Path]) -> Path:
+    raise RuntimeError("Legacy support-bundle exporter is disabled; use the hardened exporter")
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     destination = output or (Path.cwd() / f"KaroX-support-{timestamp}.zip")
     destination = destination.expanduser().resolve()
@@ -393,6 +394,13 @@ def create_support_bundle(output: Optional[Path]) -> Path:
                 destination.unlink(missing_ok=True)
                 raise RuntimeError(f"Support bundle safety check failed in {name}")
     return destination
+
+
+def create_support_bundle(output: Optional[Path]) -> Path:
+    """Compatibility API routed through the fail-closed support exporter."""
+    import support_bundle as hardened_support
+
+    return hardened_support.create_support_bundle(output)
 
 
 def latest_running_session(session_id: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -557,7 +565,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 10 if newer else 0
         return apply_update(args.yes)
     if args.command == "support":
-        path = create_support_bundle(args.output)
+        import support_bundle as hardened_support
+
+        path = hardened_support.create_support_bundle(args.output)
         print(f"Support bundle created: {path}")
         return 0
     if args.command == "dashboard":
