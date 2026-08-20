@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,7 +12,8 @@ dynamic = ["version"]
 description = "Hybrid local runtime for native and hosted AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 # Keep this list in step with requirements.txt. The wheel built in CI is what
 # gets installed and smoke-tested, so a dependency that is only listed in
 # requirements.txt produces an install that looks complete and then fails at
@@ -25,6 +26,10 @@ dependencies = [
   "httpx>=0.27,<1.0",
   "httpx-sse>=0.4,<1.0",
   "keyring>=25,<27",
+  # Browser automation is a first-class KaroX v5 feature. The Python package is
+  # installed with the normal wheel; Chromium itself is provisioned lazily by
+  # karox.browser_bootstrap on first browser use so installation stays fast.
+  "playwright>=1.50,<2.0",
   "mcp>=1.27,<2.0",
   "PyYAML>=6.0,<7.0",
   "textual>=0.89,<7.0",
@@ -46,9 +51,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Browser verification is local and opt-in because Playwright also requires a
-# separately installed browser binary. The core runtime remains usable without it.
-browser = ["playwright>=1.50,<2.0"]
+# Compatibility alias for older install instructions such as `pip install
+# karox-runtime[browser]`. Playwright is a base v5 dependency now; the matching
+# Chromium binary is provisioned lazily on first browser use.
+browser = []
 
 [project.scripts]
 karox = "karox.entrypoint:main"
@@ -163,12 +169,10 @@ module = ["tomli"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# `playwright` is the `browser` extra, so it is absent from a normal install and
-# from CI's type-check environment. remote_tools imports it inside the one
-# function that needs it and raises an actionable CoreError when it is missing,
-# which is the behaviour the runtime promises. Excused by name rather than with a
-# global ignore_missing_imports, so a genuinely missing required dependency still
-# fails this gate.
+# Playwright is a normal KaroX v5 runtime dependency, but some minimal/static
+# type-check environments intentionally resolve the source tree without first
+# installing browser dependencies. Keep this exemption scoped to Playwright
+# rather than hiding missing imports globally.
 module = ["playwright.*"]
 ignore_missing_imports = true
 

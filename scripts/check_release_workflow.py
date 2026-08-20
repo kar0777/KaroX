@@ -25,6 +25,10 @@ REQUIRED_SNIPPETS = (
     "python scripts/check_release_workflow.py",
     "python -m build --wheel",
     'python -m pip install "$WHEEL"',
+    'python "$WORKTREE/scripts/portable_uv_pins.py"',
+    'python "$WORKTREE/scripts/prepare_portable_uv.py"',
+    'gh attestation verify "$UV_ARCHIVE" --repo astral-sh/uv',
+    'python "$WORKTREE/scripts/build_portable_bundle.py"',
     "sha256sum --check",
     "Create and push tag only after artifacts pass",
     "gh release create",
@@ -82,6 +86,13 @@ def collect_problems(root: Path = ROOT) -> list[str]:
         'python -m pip install "$WHEEL"',
         "Create and push tag only after artifacts pass",
     )
+    for portable_marker in (
+        'python "$WORKTREE/scripts/portable_uv_pins.py"',
+        'python "$WORKTREE/scripts/prepare_portable_uv.py"',
+        'gh attestation verify "$UV_ARCHIVE" --repo astral-sh/uv',
+        'python "$WORKTREE/scripts/build_portable_bundle.py"',
+    ):
+        require_before(portable_marker, "Create and push tag only after artifacts pass")
     require_before("sha256sum --check", "Create and push tag only after artifacts pass")
     require_before("Create and push tag only after artifacts pass", "gh release create")
     require_before("gh release create", 'gh release upload "$TAG" dist/* --clobber')
