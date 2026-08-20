@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -39,7 +40,212 @@ def load_modules(root: Path, temp: Path):
     return admin, support, stop
 
 
+def test_support_bundle_confidentiality() -> None:
+    root = Path(__file__).resolve().parents[1]
+    env_name = "KAROX_SYNTHETIC_API_TOKEN"
+    previous_env = os.environ.get(env_name)
+    env_secret = "EnvSynthetic_Q7mZ9pL2vN8xR4cT6kW1sD5hF3jB0aY"
+    known_secret = "SessionSynthetic_A9vK3mQ7xL2pR8tN5dW1zC6hF4jB0sY"
+    generic_entropy = "LooseSynthetic_Q9mV2xR7kP4tN8dL5sW1cF6hJ3bZ0aY"
+    raw_user_message = "RAW USER MESSAGE MUST NEVER ENTER SUPPORT DATA"
+    evidence_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    os.environ[env_name] = env_secret
+    try:
+        with tempfile.TemporaryDirectory(prefix="karox-support-confidentiality-") as raw_temp:
+            temp = Path(raw_temp)
+            admin, support, _stop = load_modules(root, temp)
+            admin.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            (admin.CONFIG_DIR / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "language": "en",
+                        "nested": {
+                            "apiKey": known_secret,
+                            "headers": {
+                                "Authorization": f"Bearer {known_secret}",
+                                "Cookie": f"session={known_secret}",
+                            },
+                        },
+                        "endpoint": (
+                            "https://example.test/api/normal?access_token="
+                            f"{known_secret}&state={env_secret}#private"
+                        ),
+                        "telemetryLabel": generic_entropy,
+                        "customInstructions": raw_user_message,
+                        "clipboard": raw_user_message,
+                        "browserFormValue": raw_user_message,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            secretish_session_name = "SessionDir_A7mQ2xN9pR4tK8vL5sW1cF6hJ3bZ0dY"
+            session_dir = admin.SESSIONS_DIR / secretish_session_name
+            logs_dir = session_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            session = {
+                "id": secretish_session_name,
+                "mode": "build",
+                "branch": "support-bundle-test",
+                "aiClient": "synthetic",
+                "tunnelProvider": "cloudflare",
+                "startedAt": "2026-08-07 08:00:00",
+                "apiKey": known_secret,
+                "approvalPassword": env_secret,
+                "task": raw_user_message,
+                "message": raw_user_message,
+                "fileContent": raw_user_message,
+                "evidence_id": evidence_id,
+                "nested": {
+                    "exception": {
+                        "type": "RuntimeError",
+                        "message": f"boom {known_secret} {generic_entropy}",
+                    },
+                    "stdout": f"{raw_user_message} {known_secret}",
+                    "stderr": f"{raw_user_message} {env_secret}",
+                },
+                "serverPid": 0,
+                "tunnelPid": 0,
+            }
+            (session_dir / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+            structured_name = f"{generic_entropy}.jsonl"
+            structured_rows = [
+                {
+                    "ts": "2026-08-07 08:01:00",
+                    "action": "repo.read_file",
+                    "request_id": "req-support-1",
+                    "task": raw_user_message,
+                    "data": {
+                        "message": raw_user_message,
+                        "stdout": f"{raw_user_message} {known_secret}",
+                        "authorization": f"Bearer {known_secret}",
+                        "evidence_id": evidence_id,
+                    },
+                },
+                {
+                    "ts": "2026-08-07 08:01:01",
+                    "action": "checks.run",
+                    "status": "failed",
+                    "error_code": "synthetic_failure",
+                    "correlation_id": "corr-support-1",
+                    "evidence_ids": [evidence_id],
+                    "message": f"{raw_user_message} {env_secret}",
+                },
+            ]
+            (logs_dir / structured_name).write_text(
+                "\n".join(json.dumps(row) for row in structured_rows) + "\n",
+                encoding="utf-8",
+            )
+            (logs_dir / f"{known_secret}.txt").write_text(
+                f"{raw_user_message}\n{known_secret}\n{env_secret}\n{generic_entropy}\n",
+                encoding="utf-8",
+            )
+
+            output = temp / "support-confidentiality.zip"
+            generated = support.create_support_bundle(output)
+            assert generated == output.resolve()
+            assert output.stat().st_size <= support._MAX_BUNDLE_BYTES
+
+            with zipfile.ZipFile(output, "r") as archive:
+                names = archive.namelist()
+                combined = "\n".join(
+                    archive.read(name).decode("utf-8", errors="ignore") for name in names
+                )
+                for forbidden in (
+                    known_secret,
+                    env_secret,
+                    generic_entropy,
+                    raw_user_message,
+                    secretish_session_name,
+                    structured_name,
+                ):
+                    assert forbidden not in combined
+                    assert all(forbidden not in name for name in names)
+                assert evidence_id in combined
+                assert "[REDACTED" in combined
+                assert "REDACTED_QUERY_VALUE" in combined
+                assert "sessions/session-001/session.redacted.json" in names
+                assert "sessions/session-001/logs/structured-001.json" in names
+                assert "sessions/session-001/logs/manifest.json" in names
+
+                summary = json.loads(archive.read("summary.json"))
+                assert summary["privacy"]["sourceCodeIncluded"] is False
+                assert summary["privacy"]["rawUserMessagesIncluded"] is False
+                assert summary["privacy"]["rawProcessOutputIncluded"] is False
+                assert summary["privacy"]["unstructuredLogContentIncluded"] is False
+                assert summary["privacy"]["knownValuesRemoved"] >= 2
+                assert evidence_id in summary["evidence_ids"]
+
+                structured = json.loads(
+                    archive.read("sessions/session-001/logs/structured-001.json")
+                )
+                assert structured["records"]
+                assert any(row.get("evidence_id") == evidence_id for row in structured["records"])
+                assert all("data" not in row and "task" not in row and "message" not in row for row in structured["records"])
+                manifest = json.loads(archive.read("sessions/session-001/logs/manifest.json"))
+                assert any(item["kind"] == "unstructured" and not item["contentIncluded"] for item in manifest)
+
+            # The public `karox support` admin path must route through the same
+            # hardened exporter, not the legacy compatibility helper.
+            cli_output = temp / "support-cli.zip"
+            assert admin.main(["support", "--output", str(cli_output)]) == 0
+            with zipfile.ZipFile(cli_output, "r") as cli_archive:
+                cli_summary = json.loads(cli_archive.read("summary.json"))
+                assert cli_summary["privacy"]["rawUserMessagesIncluded"] is False
+                cli_combined = "\n".join(
+                    cli_archive.read(name).decode("utf-8", errors="ignore")
+                    for name in cli_archive.namelist()
+                )
+                assert raw_user_message not in cli_combined
+                assert known_secret not in cli_combined
+                assert env_secret not in cli_combined
+
+            # Deterministic bounded fuzz/property coverage for generic credentials.
+            for index in range(64):
+                digest = hashlib.sha256(f"support-secret-{index}".encode()).hexdigest()
+                candidate = f"Aa{index:02d}_{digest}_Z9"
+                scrubbed = support.scrub_text(candidate, ())
+                assert candidate not in scrubbed
+                assert "[REDACTED_HIGH_ENTROPY]" in scrubbed
+
+            # Known provider formats and nested private-content fields remain fail-closed.
+            provider_values = (
+                "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+                "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+                "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+                "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+            )
+            for candidate in provider_values:
+                assert candidate not in support.scrub_text(candidate, ())
+            nested = support.scrub_value(
+                {
+                    "headers": {"Authorization": f"Bearer {known_secret}"},
+                    "exceptionChain": {"message": raw_user_message},
+                    "clipboard": raw_user_message,
+                    "formValue": raw_user_message,
+                    "stdout": raw_user_message,
+                    "stderr": raw_user_message,
+                    "evidence_id": evidence_id,
+                },
+                {known_secret},
+            )
+            assert nested["headers"]["Authorization"] == "[REDACTED]"
+            assert nested["exceptionChain"]["message"] == "[REDACTED_PRIVATE_CONTENT]"
+            assert nested["clipboard"] == "[REDACTED_PRIVATE_CONTENT]"
+            assert nested["formValue"] == "[REDACTED_PRIVATE_CONTENT]"
+            assert nested["stdout"] == "[REDACTED_PRIVATE_CONTENT]"
+            assert nested["stderr"] == "[REDACTED_PRIVATE_CONTENT]"
+            assert nested["evidence_id"] == evidence_id
+    finally:
+        if previous_env is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = previous_env
+
+
 def main() -> int:
+    test_support_bundle_confidentiality()
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="karox-admin-test-") as raw_temp:
         temp = Path(raw_temp)

@@ -95,10 +95,53 @@ def main() -> int:
             ok, detail = compile_file(path)
             add(checks, f"compile scripts/{name}", ok, detail)
 
-    for module in ("fastapi", "uvicorn", "httpx", "mcp", "pydantic"):
+    for module in (
+        "fastapi",
+        "uvicorn",
+        "httpx",
+        "mcp",
+        "pydantic",
+        "keyring",
+        "playwright",
+        "textual",
+    ):
         available = importlib.util.find_spec(module) is not None
         detail = dependency_version(module) if available else "not installed"
         add(checks, f"Python dependency: {module}", available, detail)
+
+    try:
+        from karox.browser_bootstrap import playwright_chromium_status
+
+        browser_status = playwright_chromium_status()
+        if browser_status.ready:
+            add(
+                checks,
+                "Managed Chromium runtime",
+                True,
+                browser_status.executable or "ready",
+            )
+        elif browser_status.package_available:
+            add(
+                checks,
+                "Managed Chromium runtime",
+                True,
+                "Not downloaded yet; KaroX will provision it automatically on first autonomous browser use.",
+                warning=True,
+            )
+        else:
+            add(
+                checks,
+                "Managed Chromium runtime",
+                False,
+                "Playwright package is unavailable; repair the KaroX installation.",
+            )
+    except Exception as exc:
+        add(
+            checks,
+            "Managed Chromium runtime",
+            False,
+            f"Browser runtime diagnostics failed: {type(exc).__name__}",
+        )
 
     gateway_path = server_dir / "notion_gateway.py"
     if gateway_path.is_file():
