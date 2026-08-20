@@ -150,6 +150,20 @@ class ConnectionsRegistryTests(unittest.TestCase):
         loaded = self.registry.list()
         self.assertEqual(len(loaded), len(mcp_client_presets()))
 
+    def test_adapt_preset_is_native_stable_tailscale_bearer_client(self) -> None:
+        preset = mcp_client_preset("adapt")
+        generic = mcp_client_preset("generic-mcp")
+        self.assertEqual(preset.display_name, "Adapt")
+        self.assertEqual(preset.status, "stable")
+        self.assertEqual(preset.runtime_profile, generic.runtime_profile)
+        self.assertEqual(preset.transport, "streamable_http")
+        self.assertEqual(preset.auth_scheme, "bearer")
+        self.assertEqual(preset.endpoint_path, "/mcp")
+        self.assertEqual(preset.tunnel_default, "tailscale")
+        self.assertTrue(preset.persistent_url)
+        self.assertIn("KAROX_AUTHORIZATION", preset.instructions)
+        self.assertIn("Personal", preset.instructions)
+
     def test_effective_url_is_generated_correctly_for_custom_tunnel(self) -> None:
         info = self.credentials.set("demo", "sek-1234567890")
         target = build_target_from_preset(

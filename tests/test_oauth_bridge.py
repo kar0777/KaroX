@@ -14,6 +14,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -118,6 +119,14 @@ class OAuthBridgeServiceTests(unittest.TestCase):
             authorization["registration_endpoint"],
             "https://karox.example/oauth/register",
         )
+        self.assertEqual(
+            authorization["authorization_endpoint"],
+            "https://karox.example/oauth/authorize",
+        )
+        self.assertEqual(
+            authorization["token_endpoint"],
+            "https://karox.example/oauth/token",
+        )
         self.assertIn("S256", authorization["code_challenge_methods_supported"])
         self.assertIn("refresh_token", authorization["grant_types_supported"])
 
@@ -154,6 +163,25 @@ class OAuthBridgeWireTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.server.close()
+
+    def test_canonical_root_oauth_endpoints_and_legacy_alias_are_live(self) -> None:
+        payload = {
+            "client_name": "Notion detector",
+            "redirect_uris": ["https://www.notion.so/external-auth/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            canonical = client.post("/register", json=payload)
+            legacy = client.post("/oauth/register", json=payload)
+            authorize = client.get("/authorize")
+            token = client.post("/token", data={})
+        self.assertEqual(canonical.status_code, 201, canonical.text)
+        self.assertEqual(legacy.status_code, 201, legacy.text)
+        self.assertEqual(legacy.json()["client_id"], canonical.json()["client_id"])
+        self.assertNotEqual(authorize.status_code, 404)
+        self.assertNotEqual(token.status_code, 404)
 
     def _pending_request(
         self, client: httpx.Client, *, state: str = "state-123"
@@ -521,6 +549,10 @@ class OAuthStatePersistenceTests(unittest.TestCase):
 
         # A different instance on the same state: this is what a restart is.
         restarted = self._service()
+        self.assertTrue(
+            restarted.authorize_access_token(tokens["access_token"]),
+            "an unexpired access token must remain valid across a bridge restart",
+        )
         refreshed = restarted.refresh(
             {
                 "refresh_token": [tokens["refresh_token"]],
@@ -788,6 +820,89 @@ class OAuthStatePersistenceTests(unittest.TestCase):
         self._connect(service)
         self.assertIsNone(service.state_path)
         self.assertEqual(list(self.state.iterdir()), [])
+
+    def test_a_contended_rename_is_retried_instead_of_losing_the_client(self) -> None:
+        # Losing this write is silent until the next restart, and then the user
+        # sees only "OAuth client is not registered" from a connector they added
+        # successfully. Windows denies the rename while any reader holds the file.
+        service = self._service()
+        real_replace = os.replace
+        attempts: list[int] = []
+
+        def flaky(src: object, dst: object) -> None:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise PermissionError(5, "Access is denied")
+            real_replace(src, dst)
+
+        with patch("karox.oauth_bridge.os.replace", side_effect=flaky):
+            client_id = service.register(
+                {
+                    "client_name": "Hyperagent",
+                    "redirect_uris": ["https://hyperagent.com/api/mcp"],
+                }
+            )["client_id"]
+
+        self.assertGreaterEqual(len(attempts), 3)
+        assert service.state_path is not None
+        stored = json.loads(service.state_path.read_text(encoding="utf-8"))
+        self.assertIn(client_id, stored["clients"])
+
+    def test_a_permanent_rename_failure_leaves_no_temporary_file(self) -> None:
+        service = self._service()
+        with (
+            patch(
+                "karox.oauth_bridge.os.replace",
+                side_effect=PermissionError(5, "Access is denied"),
+            ),
+            patch("karox.oauth_bridge._STATE_REPLACE_TIMEOUT_SECONDS", 0.05),
+            redirect_stdout(io.StringIO()) as captured,
+        ):
+            service.register(
+                {
+                    "client_name": "Hyperagent",
+                    "redirect_uris": ["https://hyperagent.com/api/mcp"],
+                }
+            )
+
+        # Serving must continue, but the user has to be told the cache was lost.
+        self.assertIn("could not save its OAuth state", captured.getvalue())
+        self.assertEqual(list(self.state.glob("*.tmp")), [])
+
+    def test_concurrent_writers_never_share_a_temporary_path(self) -> None:
+        # A pid-only temp name let two threads of one bridge interleave bytes
+        # into the same file, publishing a truncated state document.
+        service = self._service()
+        observed: list[str] = []
+        real_open = os.open
+        guard = threading.Lock()
+
+        def recording(path: object, *args: Any, **kwargs: Any) -> int:
+            text = str(path)
+            if text.endswith(".tmp"):
+                with guard:
+                    observed.append(text)
+            return real_open(path, *args, **kwargs)
+
+        with patch("karox.oauth_bridge.os.open", side_effect=recording):
+            threads = [
+                threading.Thread(
+                    target=service.register,
+                    args=(
+                        {
+                            "client_name": f"Client {index}",
+                            "redirect_uris": [f"https://hyperagent.com/cb/{index}"],
+                        },
+                    ),
+                )
+                for index in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(len(observed), len(set(observed)))
 
 
 if __name__ == "__main__":

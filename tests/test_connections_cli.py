@@ -185,6 +185,46 @@ class ConnectionsCliTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertEqual(json.loads(stdout)["secret"], SECRET)
 
+    def test_copy_auth_puts_bearer_on_clipboard_without_printing_secret(self) -> None:
+        self._save()
+        copied: list[str] = []
+        cleared: list[int] = []
+        with (
+            patch(
+                "karox.cli.clipboard.write_text",
+                side_effect=lambda value: copied.append(value) or True,
+            ),
+            patch(
+                "karox.cli.clipboard.schedule_clear",
+                side_effect=lambda seconds=120: cleared.append(int(seconds)),
+            ),
+        ):
+            code, stdout, stderr = self.invoke(
+                "connections", "copy-auth", "c-0123456789abcdef", "--json"
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(copied, [f"Bearer {SECRET}"])
+        self.assertEqual(cleared, [120])
+        self.assertNotIn(SECRET, stdout + stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "copied")
+        self.assertEqual(payload["auto_clear_seconds"], 120)
+        self.assertTrue(payload["credential_fingerprint"])
+
+    def test_copy_auth_clipboard_failure_never_prints_secret(self) -> None:
+        self._save()
+        with (
+            patch("karox.cli.clipboard.write_text", return_value=False),
+            patch("karox.cli.clipboard.schedule_clear") as clear,
+        ):
+            code, stdout, stderr = self.invoke(
+                "connections", "copy-auth", "c-0123456789abcdef", "--json"
+            )
+        self.assertEqual(code, 1)
+        self.assertNotIn(SECRET, stdout + stderr)
+        self.assertEqual(json.loads(stdout)["status"], "clipboard_unavailable")
+        clear.assert_not_called()
+
     def test_list_shows_every_saved_connection_with_its_url(self) -> None:
         """Two records with the same display name are only distinguishable here.
 
