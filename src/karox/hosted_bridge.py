@@ -112,6 +112,13 @@ AUTONOMY_TOOL_NAMES: frozenset[str] = frozenset(
         "karox.repo.inspect",
         "karox.task.execute_plan",
         "karox.checks.run_affected",
+        # Universal memory: user/project/workstream/session scoped local
+        # knowledge, served to every client of this runtime through one API.
+        "karox.memory.remember",
+        "karox.memory.recall",
+        "karox.memory.context",
+        "karox.memory.list",
+        "karox.memory.forget",
     }
 )
 

@@ -110,6 +110,14 @@ DEFAULT_WEB_TOOLS = (
     "karox.task.resume",
     "karox.task.status",
     "karox.task.workstreams",
+    # Universal memory ships in the default bundle: cross-client memory only
+    # works when every connected client can remember and recall. These tools
+    # write local memory files only, never the repository.
+    "karox.memory.remember",
+    "karox.memory.recall",
+    "karox.memory.context",
+    "karox.memory.list",
+    "karox.memory.forget",
     "karox.browser.command",
     # Read-only browser/artifact/dev-server tools a hosted client needs to see
     # the interface without mutating it. Tab enumeration is session-scoped and

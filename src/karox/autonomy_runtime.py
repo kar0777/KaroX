@@ -38,6 +38,7 @@ from .repo_context import RepositoryContextEngine
 from .repository_lease import RepositoryLeaseStore
 from .security import redact
 from .sessions import IdempotencyConflict, SessionStore, mutation_lease_context
+from .memory import KaroXMemory, MemoryError, MemoryKind, MemoryScope
 from .task_state import FactOrigin, TaskFact, TaskStateStore, fact
 
 TASK_BOOTSTRAP = "karox.task.bootstrap"
@@ -48,6 +49,11 @@ TASK_WORKSTREAMS = "karox.task.workstreams"
 REPO_INSPECT = "karox.repo.inspect"
 TASK_EXECUTE_PLAN = "karox.task.execute_plan"
 CHECKS_RUN_AFFECTED = "karox.checks.run_affected"
+MEMORY_REMEMBER = "karox.memory.remember"
+MEMORY_RECALL = "karox.memory.recall"
+MEMORY_CONTEXT = "karox.memory.context"
+MEMORY_LIST = "karox.memory.list"
+MEMORY_FORGET = "karox.memory.forget"
 
 _AUTONOMY_MUTATION_LEASE_TTL_SECONDS = 60.0
 _AUTONOMY_MUTATION_LEASE_HEARTBEAT_SECONDS = 20.0
@@ -95,6 +101,11 @@ if AUTONOMY_TOOL_NAMES != frozenset(
         REPO_INSPECT,
         TASK_EXECUTE_PLAN,
         CHECKS_RUN_AFFECTED,
+        MEMORY_REMEMBER,
+        MEMORY_RECALL,
+        MEMORY_CONTEXT,
+        MEMORY_LIST,
+        MEMORY_FORGET,
     }
 ):
     raise RuntimeError("autonomy tool catalogue is out of sync")
@@ -151,7 +162,110 @@ _ORIGIN_ENUM = [
     FactOrigin.PENDING.value,
 ]
 
+_MEMORY_SCOPE_ENUM = ["user", "project", "workstream", "session"]
+_MEMORY_KIND_ENUM = ["fact", "preference", "decision", "note", "todo", "handoff"]
+
 _TOOLS: dict[str, _ToolMeta] = {
+    MEMORY_REMEMBER: _ToolMeta(
+        description=(
+            "Store one durable fact, preference, decision, note, todo, or handoff in "
+            "KaroX memory. Local only, inspectable, forgettable; credential-shaped "
+            "content is refused. A keyed remember replaces the previous entry."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": _MEMORY_SCOPE_ENUM},
+                "kind": {"type": "string", "enum": _MEMORY_KIND_ENUM},
+                "content": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "key": {"type": "string", "maxLength": 200},
+                "sensitivity": {"type": "string", "enum": ["normal", "personal"]},
+                "ttl_seconds": {"type": "number"},
+                "source_path": {"type": "string"},
+                "source_sha256": {"type": "string"},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["scope", "kind", "content"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+    ),
+    MEMORY_RECALL: _ToolMeta(
+        description=(
+            "Recall the most relevant KaroX memory entries for a query. Deterministic "
+            "ranking under a byte budget; never a memory dump."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "scopes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": _MEMORY_SCOPE_ENUM},
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                "budget_chars": {"type": "integer", "minimum": 100, "maximum": 20000},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    MEMORY_CONTEXT: _ToolMeta(
+        description=(
+            "Build a compact prompt-ready block of the memory most relevant to a "
+            "task, across the selected scopes, within a byte budget."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "maxLength": 2000},
+                "scopes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": _MEMORY_SCOPE_ENUM},
+                },
+                "budget_chars": {"type": "integer", "minimum": 100, "maximum": 20000},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    MEMORY_LIST: _ToolMeta(
+        description=(
+            "List every memory entry in one scope so the user can inspect exactly "
+            "what the runtime knows."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": _MEMORY_SCOPE_ENUM},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["scope"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    MEMORY_FORGET: _ToolMeta(
+        description=(
+            "Permanently remove a memory entry by id or key. Deletion is immediate "
+            "and on disk."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": _MEMORY_SCOPE_ENUM},
+                "entry_id": {"type": "string"},
+                "key": {"type": "string"},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["scope"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+    ),
     TASK_BOOTSTRAP: _ToolMeta(
         description=(
             "Create or refresh authoritative task state and return a compact recovery "
@@ -453,6 +567,10 @@ class AutonomyRuntime:
         self._allowed = tuple(dict.fromkeys(allowed_tool_names))
         self.client_kind = client_kind.strip() or "hosted-mcp"
         self.task_states = TaskStateStore(sessions)
+        # Universal memory lives beside the session store: durable across
+        # sessions, shared by every client of this runtime, and isolated in
+        # tests because tests always construct SessionStore on a temp root.
+        self.memory = KaroXMemory(sessions.root / "memory")
         self._project_registry_loader = project_registry_loader
         self.artifacts = ArtifactStore(session_id)
         self.repo_context = RepositoryContextEngine(
@@ -743,7 +861,166 @@ class AutonomyRuntime:
                 idempotency_key,
                 lambda value: self._run_affected(value, idempotency_key),
             )
+        if tool_name == MEMORY_REMEMBER:
+            return self._memory_remember(arguments)
+        if tool_name == MEMORY_RECALL:
+            return self._memory_recall(arguments)
+        if tool_name == MEMORY_CONTEXT:
+            return self._memory_context(arguments)
+        if tool_name == MEMORY_LIST:
+            return self._memory_list(arguments)
+        if tool_name == MEMORY_FORGET:
+            return self._memory_forget(arguments)
         raise HostedBridgeAccessDenied(f"autonomy tool has no handler: {tool_name}")
+
+    # -- universal memory ----------------------------------------------------
+
+    _MEMORY_SCOPES = {
+        "user": MemoryScope.USER,
+        "project": MemoryScope.PROJECT,
+        "workstream": MemoryScope.WORKSTREAM,
+        "session": MemoryScope.SESSION,
+    }
+
+    @staticmethod
+    def _memory_error(exc: Exception) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "schema_version": 1,
+            "error_code": "memory_rejected",
+            "error": str(exc),
+        }
+
+    def _memory_scope_pair(
+        self, scope_name: str, workstream: Optional[str]
+    ) -> tuple[MemoryScope, str]:
+        scope = self._MEMORY_SCOPES.get(scope_name)
+        if scope is None:
+            raise MemoryError(f"unknown memory scope: {scope_name!r}")
+        if scope is MemoryScope.USER:
+            return scope, "default"
+        if scope is MemoryScope.PROJECT:
+            project = self._project_for_workstream(workstream)
+            return scope, project.project_id
+        if scope is MemoryScope.WORKSTREAM:
+            return scope, workstream or "default"
+        return scope, self.session_id
+
+    def _memory_scope_pairs(
+        self, names: Any, workstream: Optional[str]
+    ) -> tuple[tuple[MemoryScope, str], ...]:
+        if names is None:
+            names = list(self._MEMORY_SCOPES)
+        if not isinstance(names, (list, tuple)):
+            raise MemoryError("scopes must be an array of scope names")
+        return tuple(
+            self._memory_scope_pair(str(name), workstream) for name in names
+        )
+
+    def _memory_remember(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._assert_alive()
+        workstream = self._workstream_id(arguments)
+        try:
+            scope, scope_id = self._memory_scope_pair(
+                str(arguments.get("scope", "")), workstream
+            )
+            kind = MemoryKind(str(arguments.get("kind", "note")))
+            ttl_raw = arguments.get("ttl_seconds")
+            entry = self.memory.remember(
+                scope=scope,
+                scope_id=scope_id,
+                kind=kind,
+                content=str(arguments.get("content", "")),
+                key=(
+                    str(arguments["key"]) if arguments.get("key") is not None else None
+                ),
+                provenance=self.client_kind,
+                sensitivity=str(arguments.get("sensitivity", "normal")),
+                ttl_seconds=float(ttl_raw) if ttl_raw is not None else None,
+                source_path=arguments.get("source_path"),
+                source_sha256=arguments.get("source_sha256"),
+            )
+        except (MemoryError, ValueError) as exc:
+            return self._memory_error(exc)
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "entry": dict(redact(entry.to_dict())),
+        }
+
+    def _memory_recall(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._assert_alive()
+        workstream = self._workstream_id(arguments)
+        try:
+            pairs = self._memory_scope_pairs(arguments.get("scopes"), workstream)
+            entries = self.memory.recall(
+                query=str(arguments.get("query", "")),
+                scopes=pairs,
+                limit=max(1, min(20, int(arguments.get("limit", 5)))),
+                budget_chars=max(
+                    100, min(20000, int(arguments.get("budget_chars", 2000)))
+                ),
+            )
+        except (MemoryError, ValueError) as exc:
+            return self._memory_error(exc)
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "count": len(entries),
+            "entries": [dict(redact(entry.to_dict())) for entry in entries],
+        }
+
+    def _memory_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._assert_alive()
+        workstream = self._workstream_id(arguments)
+        try:
+            pairs = self._memory_scope_pairs(arguments.get("scopes"), workstream)
+            block = self.memory.context(
+                scopes=pairs,
+                budget_chars=max(
+                    100, min(20000, int(arguments.get("budget_chars", 1500)))
+                ),
+                task=str(arguments.get("task", "")),
+            )
+        except (MemoryError, ValueError) as exc:
+            return self._memory_error(exc)
+        return {"ok": True, "schema_version": 1, "context": str(redact(block))}
+
+    def _memory_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._assert_alive()
+        workstream = self._workstream_id(arguments)
+        try:
+            scope, scope_id = self._memory_scope_pair(
+                str(arguments.get("scope", "")), workstream
+            )
+            entries = self.memory.list(scope=scope, scope_id=scope_id)
+        except (MemoryError, ValueError) as exc:
+            return self._memory_error(exc)
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "scope": scope.value,
+            "scope_id": scope_id,
+            "count": len(entries),
+            "entries": [dict(redact(entry.to_dict())) for entry in entries],
+        }
+
+    def _memory_forget(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._assert_alive()
+        workstream = self._workstream_id(arguments)
+        try:
+            scope, scope_id = self._memory_scope_pair(
+                str(arguments.get("scope", "")), workstream
+            )
+            removed = self.memory.forget(
+                scope=scope,
+                scope_id=scope_id,
+                entry_id=arguments.get("entry_id"),
+                key=arguments.get("key"),
+            )
+        except (MemoryError, ValueError) as exc:
+            return self._memory_error(exc)
+        return {"ok": True, "schema_version": 1, "removed": removed}
 
     def _assert_alive(self) -> Any:
         record = self.sessions.load(self.session_id)

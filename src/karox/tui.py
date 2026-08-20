@@ -5168,6 +5168,11 @@ if _HAS_TEXTUAL:
                     "karox.task.resume",
                     "karox.task.status",
                     "karox.task.workstreams",
+                    "karox.memory.remember",
+                    "karox.memory.recall",
+                    "karox.memory.context",
+                    "karox.memory.list",
+                    "karox.memory.forget",
                 ),
                 "tool-list": ("karox.repo.list_files",),
                 "tool-write": (

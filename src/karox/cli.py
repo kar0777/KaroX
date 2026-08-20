@@ -2737,6 +2737,11 @@ def _upgrade_saved_profile_tools(profile: SavedWebBridgeProfile) -> tuple[str, .
             "karox.task.status",
             "karox.task.resume",
             "karox.task.workstreams",
+            "karox.memory.remember",
+            "karox.memory.recall",
+            "karox.memory.context",
+            "karox.memory.list",
+            "karox.memory.forget",
         ):
             if name not in names:
                 tools.append(name)

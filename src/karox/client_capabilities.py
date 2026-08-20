@@ -23,6 +23,11 @@ _READ_PREFIXES = (
     "karox.task.resume",
     "karox.task.status",
     "karox.task.workstreams",
+    # Memory tools touch only the local memory store, never the repository or
+    # guarded process state -- the same reasoning that keeps task.bootstrap
+    # out of the write set. remember/forget mutate user-controlled local
+    # knowledge, which must stay available on read-only connections.
+    "karox.memory.",
 )
 # Tools whose selection means the connection can mutate the repository, the
 # workspace, or guarded process state. ``karox.task.bootstrap`` is deliberately
