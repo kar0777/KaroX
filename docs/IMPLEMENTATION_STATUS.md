@@ -239,9 +239,28 @@ Implemented or retained:
 Clean-machine 4.x → 5.0 migration, interrupted update, rollback, and uninstall
 still require recorded runs on Windows, macOS, and Linux.
 
+## Typed session views
+
+`src/karox/session_view.py` is the single reducer between the event bus and any
+interface. It folds typed events into `SessionSummary` and `SessionDetail` view
+models incrementally (`since_seq`), with hard caps on timeline entries, tool
+calls and tracked sessions, and it never raises on a malformed payload.
+
+The layer carries no user-facing prose: statuses, waiting reasons and primary
+actions are stable identifiers, so one row renders in Russian or English and can
+be asserted on without matching translated text. Payloads are not scrubbed a
+second time -- only an explicit per-kind key allowlist is copied, so a
+confirmation token has no path into a view.
+
+The TUI status projection reads that store rather than parsing
+`provider_history`. `SessionStore` is a startup backfill only, `EventBus` is the
+realtime source, and redraws are debounced through `consume_dirty`. The
+transcript and per-tool activity projections still have no typed publishers, so
+their compatibility path remains in place deliberately.
+
 ## Evidence status
 
-The canonical documented suite is now 1123 tests under:
+The canonical documented suite is now 2694 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -295,8 +314,9 @@ closed P0 defects as current blockers.
 
 ### Source and automated verification
 
+- run the complete 2694-test suite on the current release candidate;
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
-- run the complete 1123-test suite;
+- local Windows acceptance did run the then-complete suite and coverage on 2026-08-07; see `docs/evidence/local-autonomy-acceptance-2026-08-07.md`;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
   gates;
 - validate the edited release workflow in GitHub Actions;

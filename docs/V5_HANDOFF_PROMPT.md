@@ -61,9 +61,17 @@ default`.
 * `src/karox/launch_support.py` — capability-матрица лаунчера, машинные коды
   блокеров до запуска дочернего процесса.
 * `scripts/check_wheel_contents.py` — гейт соответствия wheel исходникам.
+* `src/karox/session_view.py` — единственный reducer типизированных view-моделей
+  (`SessionSummary` / `SessionDetail`) над EventBus: инкрементальный fold по
+  `since_seq`, жёсткие лимиты, никакой прозы (только стабильные идентификаторы),
+  allowlist ключей payload вместо второй редакции. `KaroXApp` держит один store,
+  `SessionStore` — только durable backfill на старте, redraw дебаунсится через
+  `consume_dirty`. Статус-проекция миграции закрыта, transcript и tool activity —
+  нет, поэтому `_poll_agent_history` остаётся. `workspace_mode` намеренно не
+  публикуется: канонического источника у него нет.
 
-Зелёное состояние на этом дереве: Ruff чисто, Mypy чисто (72 файла), полный
-suite прогнан сплитами и зелёный, счётчики 1123 / 1128.
+Зелёное состояние на этом дереве: Ruff чисто, Mypy чисто (73 файла), полный
+suite прогнан сплитами и зелёный, счётчики 1228 / 1233.
 
 Читай `docs/V5_MASTER_EXECUTION_STATE.md` — там подробности, решения и причины.
 

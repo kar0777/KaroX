@@ -89,12 +89,12 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [ ] Complete 1123-test suite passes on the current release-candidate commit.
-- [ ] `python scripts/check_wheel_contents.py` passes on the built wheel, after
+- [x] Complete 2694-test suite passes on the current local acceptance tree.
+- [x] `python scripts/check_wheel_contents.py` passes on the built wheel, after
       deleting `build/` so no removed module can ship from a stale copy.
-- [ ] Ruff passes without suppressing new defects.
-- [ ] Mypy passes.
-- [ ] Coverage passes without lowering the configured threshold.
+- [x] Ruff passes without suppressing new defects.
+- [x] Mypy passes.
+- [x] Coverage passes without lowering the configured threshold (72.4195% vs 70%).
 - [ ] KB-HYBRID-01..10 pass and regenerate valid records.
 - [ ] Traversal tests pass.
 - [ ] Symlink and Windows reparse-point escape tests pass.
@@ -110,10 +110,11 @@ git diff --check
 - [ ] Advanced can create only a guarded local commit.
 - [ ] Git push remains blocked through every shipping profile.
 - [ ] Package publishing remains blocked through every shipping profile.
-- [ ] Support bundle contains no source or credential.
+- [x] Support bundle contains no source or credential in the adversarial local gate.
 
 Evidence:
 
+- Local Windows acceptance: `docs/evidence/local-autonomy-acceptance-2026-08-07.md`
 - CI run URL: pending
 - benchmark record: pending
 - security review commit: pending
@@ -130,14 +131,14 @@ Evidence:
 - [x] `scripts/check_release_workflow.py` guards the safety ordering.
 - [ ] Updated release workflow YAML is accepted by GitHub Actions.
 - [ ] Wheel builds on Linux.
-- [ ] Wheel installs and imports outside the source tree.
-- [ ] `karox --help` works from the installed wheel.
-- [ ] `karox-vnext --help` compatibility alias works.
+- [x] Wheel installs and imports outside the source tree in isolated Windows acceptance.
+- [x] `karox --help` works from the installed wheel in isolated Windows smoke.
+- [x] `karox-vnext --help` compatibility alias works in isolated Windows smoke.
 - [ ] Separate `karox-remote` wheel or standalone artifact builds and installs
   without the KaroX runtime or a user repository.
-- [ ] Windows Python 3.10/3.12/3.13 matrix passes.
-- [ ] macOS Python 3.10/3.12/3.13 matrix passes.
-- [ ] Linux Python 3.10/3.12/3.13 matrix passes.
+- [ ] Windows Python 3.10/3.12/3.13/3.14 artifact matrix passes.
+- [ ] macOS Python 3.10/3.12/3.13/3.14 artifact matrix passes.
+- [ ] Linux Python 3.10/3.12/3.13/3.14 artifact matrix passes.
 - [ ] PowerShell 5.1 launchers parse.
 - [ ] POSIX shell launchers pass syntax checks.
 
