@@ -245,10 +245,11 @@ if (!(Test-Path -LiteralPath $PythonExe)) {
 if (!(Test-Path -LiteralPath $PythonExe)) { throw "Could not create virtual environment." }
 if (!$ValidateOnly) {
     & $PythonExe -m pip install --upgrade pip
-    & $PythonExe -m pip install -r (Join-Path $Root "requirements.txt")
-    if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
-    & $PythonExe -m pip install --upgrade --no-deps $Root
-    if ($LASTEXITCODE -ne 0) { throw "KaroX 5 package installation failed." }
+    # Use the package metadata as the single runtime dependency source. This
+    # installs keyring, Playwright, and the rest of KaroX v5 in one transaction
+    # instead of maintaining a second independent dependency path.
+    & $PythonExe -m pip install --upgrade $Root
+    if ($LASTEXITCODE -ne 0) { throw "KaroX 5 package and dependency installation failed." }
 }
 
 Recover-PendingRollback
@@ -271,26 +272,34 @@ if (!(Test-Path -LiteralPath $newCloudflared) -and (Test-Path -LiteralPath $lega
 }
 
 $cloudflaredOnPath = Get-Command cloudflared -ErrorAction SilentlyContinue
+$cloudflaredPinnedVersion = "2026.7.3"
+$cloudflaredPinnedSha256 = "8635da433b6df8194746e88ed9d2589566c20e38bfc2a80e431a348b7c765841"
+$cloudflaredArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$cloudflaredPinnedUrl = "https://github.com/cloudflare/cloudflared/releases/download/$cloudflaredPinnedVersion/cloudflared-windows-amd64.exe"
 $cloudflaredRemedy = "Install it later with 'winget install --id Cloudflare.cloudflared', or rerun this installer. 'karox bridge connect' needs it and will name this path if it is missing."
 if (!(Test-Path -LiteralPath $newCloudflared) -and !$cloudflaredOnPath) {
-    $answer = Read-Host "cloudflared (Cloudflare Tunnel) was not found. Download it automatically from github.com/cloudflare/cloudflared (~60 MB)? [Y/n]"
-    if (!$answer -or $answer -match "^[Yy]") {
-        $partial = "$newCloudflared.part"
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $partial -UseBasicParsing
-            $size = (Get-Item -LiteralPath $partial).Length
-            if ($size -lt 10485760) {
-                throw "downloaded file is only $size bytes, which is not the cloudflared binary"
-            }
-            Move-Item -LiteralPath $partial -Destination $newCloudflared -Force
-            Write-Host "cloudflared: $newCloudflared" -ForegroundColor Green
-        } catch {
-            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
-            Write-Host "cloudflared download failed: $($_.Exception.Message). $cloudflaredRemedy" -ForegroundColor Yellow
-        }
+    if ($cloudflaredArchitecture -ne "X64") {
+        Write-Host "Automatic cloudflared download is pinned only for Windows x64; skipping on $cloudflaredArchitecture. $cloudflaredRemedy" -ForegroundColor Yellow
     } else {
-        Write-Host "Skipped. $cloudflaredRemedy" -ForegroundColor Yellow
+        $answer = Read-Host "cloudflared (Cloudflare Tunnel) was not found. Download pinned cloudflared $cloudflaredPinnedVersion from github.com/cloudflare/cloudflared? [Y/n]"
+        if (!$answer -or $answer -match "^[Yy]") {
+            $partial = "$newCloudflared.part"
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $cloudflaredPinnedUrl -OutFile $partial -UseBasicParsing
+                $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $partial).Hash.ToLowerInvariant()
+                if ($actualSha256 -ne $cloudflaredPinnedSha256) {
+                    throw "downloaded cloudflared SHA-256 did not match the pinned Cloudflare release"
+                }
+                Move-Item -LiteralPath $partial -Destination $newCloudflared -Force
+                Write-Host "cloudflared ${cloudflaredPinnedVersion}: $newCloudflared" -ForegroundColor Green
+            } catch {
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                Write-Host "cloudflared download failed: $($_.Exception.Message). $cloudflaredRemedy" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "Skipped. $cloudflaredRemedy" -ForegroundColor Yellow
+        }
     }
 }
 

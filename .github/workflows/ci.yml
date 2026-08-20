@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -m pip install --group lint && python -m pip install --group typing
+      - run: python -m ruff check src tests scripts
+      - run: python -m mypy src/karox
+
+  test-shard-a:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p "test_[a-h]*.py"
+        timeout-minutes: 10
+
+  test-shard-b:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p "test_[i-z]*.py"
+        timeout-minutes: 15
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build
+      - run: rm -rf build dist && python -m build --wheel
+      - run: python scripts/check_wheel_contents.py
+      - run: python -m unittest discover -s tests -p "test_wheel_contents.py"
+
+  release-gates:
+    runs-on: ubuntu-latest
+    needs: [lint, test-shard-a, test-shard-b, wheel]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - run: python scripts/check_test_count.py
+      - run: python -m unittest discover -s tests -p "test_release_gates.py"
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          ! grep -rnE '(sk-[a-zA-Z0-9]{40,}|ghp_[a-zA-Z0-9]{36}|AKIA[A-Z0-9]{16}|glpat-[a-zA-Z0-9_-]{20})' \
+            --include="*.py" --include="*.md" --include="*.json" --include="*.yml" \
+            src/ docs/ scripts/ || \
+          (echo "Potential real secret detected" && exit 1)

@@ -83,8 +83,10 @@ export KAROX_RUNTIME_DIR="$RUNTIME_DIR"
 
 if [ ! -x "$VENV_PYTHON" ]; then "$BASE_PYTHON" -m venv "$VENV_DIR"; fi
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
-"$VENV_PYTHON" -m pip install -r "$ROOT/requirements.txt" --quiet
-"$VENV_PYTHON" -m pip install --upgrade --no-deps "$ROOT" --quiet
+# Install KaroX once from its package metadata. Runtime dependencies (including
+# keyring and Playwright) are resolved by pip from pyproject.toml; there is no
+# second requirements/no-deps path that can drift from the wheel contract.
+"$VENV_PYTHON" -m pip install --upgrade "$ROOT" --quiet
 
 copy_app
 repair_required

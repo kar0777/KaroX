@@ -29,12 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -185,6 +185,7 @@ jobs:
       - name: Build and smoke-test release artifacts before tagging
         id: artifacts
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
           REQUIRE_WHEEL: ${{ steps.meta.outputs.require_wheel }}
@@ -217,8 +218,6 @@ jobs:
             trap cleanup_worktree EXIT
             git worktree add --detach "$WORKTREE" "$REF"
             python -m build --wheel --outdir "$GITHUB_WORKSPACE/dist" "$WORKTREE"
-            cleanup_worktree
-            trap - EXIT
 
             WHEEL="$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
             test -n "$WHEEL"
@@ -232,7 +231,7 @@ jobs:
             cleanup_smoke() {
               rm -rf "$SMOKE_ROOT"
             }
-            trap cleanup_smoke EXIT
+            trap 'cleanup_smoke; cleanup_worktree' EXIT
             (
               cd "$SMOKE_ROOT"
               "$GITHUB_WORKSPACE/.release-smoke/bin/python" -c \
@@ -241,12 +240,46 @@ jobs:
               "$GITHUB_WORKSPACE/.release-smoke/bin/karox-vnext" --help >/dev/null
             )
             cleanup_smoke
-            trap - EXIT
+            trap cleanup_worktree EXIT
 
             INSTALLED_VERSION="$(
               .release-smoke/bin/python -c 'import karox; print(karox.__version__)'
             )"
             test "$INSTALLED_VERSION" = "$VERSION"
+
+            PORTABLE_ROOT="$(mktemp -d)"
+            cleanup_portable() {
+              rm -rf "$PORTABLE_ROOT"
+            }
+            trap 'cleanup_portable; cleanup_worktree' EXIT
+            while IFS=$'\t' read -r PLATFORM _ARCHIVE _URL _SHA _BINARY; do
+              PREP_DIR="$PORTABLE_ROOT/$PLATFORM"
+              PREP_LINE="$(
+                python "$WORKTREE/scripts/prepare_portable_uv.py" \
+                  --platform "$PLATFORM" \
+                  --pins "$WORKTREE/scripts/portable_uv_pins.json" \
+                  --output-dir "$PREP_DIR" \
+                  --format tsv
+              )"
+              IFS=$'\t' read -r PREP_PLATFORM UV_VERSION UV_ARCHIVE UV_BINARY \
+                UV_BINARY_SHA UV_LICENSE_MIT UV_LICENSE_APACHE <<< "$PREP_LINE"
+              test "$PREP_PLATFORM" = "$PLATFORM"
+              gh attestation verify "$UV_ARCHIVE" --repo astral-sh/uv
+              python "$WORKTREE/scripts/build_portable_bundle.py" \
+                --wheel "$WHEEL" \
+                --uv "$UV_BINARY" \
+                --uv-sha256 "$UV_BINARY_SHA" \
+                --uv-version "$UV_VERSION" \
+                --uv-license-mit "$UV_LICENSE_MIT" \
+                --uv-license-apache "$UV_LICENSE_APACHE" \
+                --platform "$PLATFORM" \
+                --output-dir "$GITHUB_WORKSPACE/dist"
+            done < <(python "$WORKTREE/scripts/portable_uv_pins.py" \
+              --pins "$WORKTREE/scripts/portable_uv_pins.json" --tsv)
+            cleanup_portable
+            trap cleanup_worktree EXIT
+            cleanup_worktree
+            trap - EXIT
           fi
 
           (
@@ -317,6 +350,17 @@ jobs:
           wheel = os.environ.get("WHEEL_NAME", "").strip()
           if wheel:
               expected.add(wheel)
+              version = os.environ["VERSION"]
+              for platform in (
+                  "windows-x64",
+                  "windows-arm64",
+                  "linux-x64",
+                  "linux-arm64",
+                  "macos-x64",
+                  "macos-arm64",
+              ):
+                  suffix = ".zip" if platform.startswith("windows-") else ".tar.gz"
+                  expected.add(f"KaroX-v{version}-{platform}-portable{suffix}")
           assets = sorted(item["name"] for item in release.get("assets", []))
           missing = expected.difference(assets)
           if release.get("tagName") != tag:
@@ -354,6 +398,7 @@ jobs:
             echo "Release published and verified with source archives and SHA-256 checksums."
             if [ -n "${{ steps.artifacts.outputs.wheel_name }}" ]; then
               echo "The installed KaroX wheel was smoke-tested before the tag was pushed."
+              echo "Portable Windows, macOS, and Linux bundles were built from pinned uv archives verified by SHA-256 and GitHub artifact attestations."
             fi
             echo
             echo "### Windows"
