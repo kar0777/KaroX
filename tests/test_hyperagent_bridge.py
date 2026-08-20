@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr
+from unittest.mock import patch
 from html import unescape
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +36,9 @@ import uvicorn
 from _support import SRC  # noqa: F401
 
 from karox.bridge import BridgeProfile, BridgeStatus, known_bridge_profiles
+from karox.cli import _persist_auto_hyperagent_profile, _saved_profile_connect_config
+from karox.hosted_tools_runtime import server_profiles_for_repository
+from karox.models import AccessProfile
 from karox.oauth_bridge import OAuthBridgeError, build_oauth_proxy_asgi_app
 from karox.proxy import ProxyToolDescriptor
 from karox.proxy_server import (
@@ -47,6 +51,7 @@ from karox.web_bridge_launcher import (
     WEB_BRIDGE_PROFILES,
     WebBridgeConnectConfig,
     profile_redirect_hosts,
+    profile_tailscale_https_port,
     web_bridge_connection_instructions,
     web_bridge_diagnostics,
 )
@@ -667,6 +672,32 @@ class HyperagentProfileTests(unittest.TestCase):
                          frozenset({"hyperagent.com"}))
         self.assertIsNone(profile_redirect_hosts("chatgpt-web"))
 
+    def test_hyperagent_uses_its_own_parallel_tailscale_listener(self) -> None:
+        self.assertEqual(profile_tailscale_https_port("chatgpt-web"), 443)
+        self.assertEqual(profile_tailscale_https_port("notion"), 8443)
+        self.assertEqual(profile_tailscale_https_port("hyperagent-web"), 10000)
+        self.assertEqual(profile_tailscale_https_port("adapt"), 10001)
+
+    def test_auto_hyperagent_connect_persists_a_repository_scoped_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "karox.cli.WebBridgeProfileStore"
+        ) as store_type:
+            repository = Path(tmp).resolve()
+            config = WebBridgeConnectConfig(
+                profile="hyperagent-web",
+                repository=repository,
+                port=8768,
+                tools=("karox.repo.read_file",),
+                tunnel="tailscale",
+            )
+            persisted = _persist_auto_hyperagent_profile(config)
+            profile = store_type.return_value.put.call_args.args[0]
+
+        self.assertEqual(profile.target_profile, "hyperagent-web")
+        self.assertEqual(Path(profile.repository).resolve(), repository)
+        self.assertEqual(profile.port, 8768)
+        self.assertTrue(persisted.saved_profile_name.startswith("hyperagent-auto-"))
+
     def test_saved_profile_accepts_hyperagent_web_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             profile = SavedWebBridgeProfile(
@@ -677,6 +708,107 @@ class HyperagentProfileTests(unittest.TestCase):
                 tunnel="tailscale",
             )
             self.assertEqual(profile.target_profile, "hyperagent-web")
+
+    def test_vite_server_profile_is_discovered_from_the_selected_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp)
+            (repository / "package.json").write_text(
+                json.dumps(
+                    {
+                        "scripts": {
+                            "dev": "concurrently npm:server:dev npm:client:dev",
+                            "client:dev": "cross-env NODE_ENV=development vite --host 0.0.0.0",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profiles = server_profiles_for_repository(repository)
+
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0].name, "vite-client-dev-loopback")
+        self.assertEqual(
+            profiles[0].argv,
+            ("npm", "run", "client:dev", "--", "--host", "127.0.0.1"),
+        )
+        self.assertNotEqual(profiles[0].name, "vacancy-control-safe")
+
+    def test_composite_dev_script_is_not_auto_approved_as_a_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp)
+            (repository / "package.json").write_text(
+                json.dumps({"scripts": {"dev": "concurrently vite node api.js"}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(server_profiles_for_repository(repository), ())
+
+    def test_saved_hyperagent_profile_upgrades_tools_checks_and_stale_server_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp).resolve()
+            (repository / "package.json").write_text(
+                json.dumps(
+                    {
+                        "scripts": {
+                            "test": "vitest run",
+                            "verify": "npm run lint && npm run typecheck",
+                            "typecheck": "tsc --noEmit",
+                            "lint": "eslint .",
+                            "build": "vite build",
+                            "client:dev": "vite",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile = SavedWebBridgeProfile(
+                name="hyperagent-legacy-mini-app",
+                target_profile="hyperagent-web",
+                repository=str(repository),
+                tools=(
+                    "karox.repo.read_file",
+                    "karox.repo.list_files",
+                    "karox.repo.write_file",
+                    "karox.git.status",
+                    "karox.git.diff",
+                    "karox.checks.run",
+                    "karox.dev_server.start",
+                ),
+                verification_commands=(("npm", "test"),),
+                server_profiles=(
+                    {
+                        "name": "vacancy-control-safe",
+                        "argv": ["npm", "run", "start:safe"],
+                        "env_keys": ["FACEBOOK_LIVE_ENABLED", "HOST"],
+                        "env_allowlist": ["DB_FILE", "PORT", "NODE_ENV", "CI"],
+                        "host_hint": "127.0.0.1",
+                        "ready_url": None,
+                    },
+                ),
+                tunnel="tailscale",
+                access_profile=AccessProfile.WORKSPACE_WRITE,
+                port=8768,
+            )
+
+            config = _saved_profile_connect_config(profile)
+
+        for tool in (
+            "karox.repo.read_lines",
+            "karox.repo.search",
+            "karox.repo.inspect",
+            "karox.repo.edit_file",
+            "karox.git.log",
+            "karox.task.bootstrap",
+            "karox.task.resume",
+            "karox.task.status",
+        ):
+            self.assertIn(tool, config.tools)
+        self.assertIn(("npm", "run", "verify"), config.verification_commands)
+        self.assertIn(("npm", "run", "typecheck"), config.verification_commands)
+        self.assertIn(("npm", "run", "lint"), config.verification_commands)
+        self.assertIn(("npm", "run", "build"), config.verification_commands)
+        self.assertEqual(len(config.server_profiles), 1)
+        self.assertEqual(config.server_profiles[0].name, "vite-client-dev-loopback")
+        self.assertNotEqual(config.server_profiles[0].name, "vacancy-control-safe")
 
     def test_connect_config_passes_allowed_redirect_hosts_to_argv(self) -> None:
         from karox.web_bridge_launcher import _bridge_argv
@@ -723,12 +855,14 @@ class HyperagentProfileTests(unittest.TestCase):
         self.assertEqual(report["target_profile"], "hyperagent-web")
         self.assertEqual(report["url_stability"], "stable_device_hostname")
 
-    def test_instructions_for_hyperagent_tell_the_user_not_to_use_byo_oauth(self) -> None:
+    def test_instructions_for_hyperagent_use_the_current_integrations_flow(self) -> None:
         en = web_bridge_connection_instructions("hyperagent-web")
-        self.assertTrue(any("Bring my own OAuth app" in line for line in en))
+        self.assertTrue(any("Settings → Integrations" in line for line in en))
+        self.assertTrue(any("Custom MCP server" in line for line in en))
         self.assertTrue(any("Client Secret" in line for line in en))
         ru = web_bridge_connection_instructions("hyperagent-web", language="ru")
-        self.assertTrue(any("Bring my own OAuth app" in line for line in ru))
+        self.assertTrue(any("Settings → Integrations" in line for line in ru))
+        self.assertTrue(any("Custom MCP server" in line for line in ru))
         self.assertTrue(any("Client Secret" in line for line in ru))
 
     def test_metadata_carries_no_localhost_for_an_external_origin(self) -> None:

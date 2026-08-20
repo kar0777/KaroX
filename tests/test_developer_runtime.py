@@ -22,7 +22,7 @@ from karox.models import AccessProfile
 from karox.policy import CapabilityPolicy
 from karox.sessions import SessionStore
 from karox.workspace_transaction import WorkspaceTransaction
-from karox.workspace_worker import _test_files
+from karox.workspace_worker import _test_files, execute_tests
 
 
 class StableDeveloperCommandTests(unittest.TestCase):
@@ -595,6 +595,36 @@ class StableDeveloperCommandTests(unittest.TestCase):
         )
         self.assertNotIn("-q", result["data"]["argv"])
         self.assertIn("1 passed", result["data"]["stdout"])
+
+    def test_structured_tests_run_uses_node_package_script_when_repo_has_no_python_tests(self) -> None:
+        (self.repository / "package.json").write_text(
+            '{"scripts":{"test":"vitest"}}',
+            encoding="utf-8",
+        )
+
+        class FakeRuntime:
+            MAX_PROCESS_TIMEOUT_SECONDS = 600.0
+
+            def __init__(self, repository: Path) -> None:
+                self.repository = repository
+                self.calls: list[tuple[list[str], float]] = []
+
+            def _run(self, argv: list[str], timeout: float) -> dict[str, object]:
+                self.calls.append((list(argv), timeout))
+                return {
+                    "argv": list(argv),
+                    "exit_code": 0,
+                    "stdout": "1 passed",
+                    "stderr": "",
+                    "timed_out": False,
+                }
+
+        runtime = FakeRuntime(self.repository)
+        result = execute_tests(runtime, {}, 90.0)
+        self.assertEqual(result["runner"], "package-script")
+        self.assertEqual(result["package_test_script"], "vitest")
+        self.assertEqual(runtime.calls[0][0], ["npm", "test", "--", "--run"])
+        self.assertEqual(result["exit_code"], 0)
 
     def test_split_discovery_includes_nested_test_modules(self) -> None:
         nested = self.repository / "tests" / "nested"

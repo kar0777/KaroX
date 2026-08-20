@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,7 +53,12 @@ class IgnoredPathTests(unittest.TestCase):
             "src/karox/__pycache__/core.cpython-313.pyc",
             "src/karox_runtime.egg-info/PKG-INFO",
             "node_modules/left-pad/index.js",
+            ".netlify/functions-serve/generated.js",
+            ".next/server/chunk.js",
+            ".vite/deps/cache.js",
             "build/lib/karox/core.py",
+            "dist/bundle.js",
+            "coverage/index.html",
             ".zcode/state.json",
         ):
             with self.subTest(path=path):
@@ -100,8 +106,92 @@ class ExtendedCoreToolTests(unittest.TestCase):
             audit_path=self.root / "audit.jsonl",
         )
 
+    def _full_bridge(self, *tools: str) -> CoreToolBridge:
+        self.sessions.create(
+            self.repository,
+            "full developer access",
+            AccessProfile.ELEVATED,
+            session_id="full-dev",
+        )
+        return CoreToolBridge(
+            self.repository,
+            self.sessions,
+            "full-dev",
+            list(tools),
+            audit_path=self.root / "audit-full.jsonl",
+        )
+
     def _text(self, name: str = "sample.txt") -> str:
         return (self.repository / name).read_text(encoding="utf-8")
+
+    # -- full developer command ------------------------------------------
+
+    def test_full_dev_command_is_elevated_only_and_runs_inline_code(self) -> None:
+        with self.assertRaises(Exception):
+            self._bridge("karox.command.run")
+        bridge = self._full_bridge("karox.command.run")
+        previous = os.environ.get("KAROX_FULL_DEV_TEST")
+        os.environ["KAROX_FULL_DEV_TEST"] = "inherited-ok"
+        try:
+            result = bridge.execute(
+                "karox.command.run",
+                {
+                    "argv": [
+                        sys.executable,
+                        "-c",
+                        "import os; print('full-dev-ok:' + os.environ.get('KAROX_FULL_DEV_TEST','missing'))",
+                    ],
+                    "timeout_seconds": 30,
+                },
+                idempotency_key="dev-command-inline-python",
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("KAROX_FULL_DEV_TEST", None)
+            else:
+                os.environ["KAROX_FULL_DEV_TEST"] = previous
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["exit_code"], 0)
+        self.assertIn("full-dev-ok:inherited-ok", result["data"]["stdout"])
+        self.assertFalse(result["data"]["timed_out"])
+        self.assertTrue(any(item["kind"] == "command" for item in result["evidence"]))
+
+    def test_project_bridge_can_advertise_full_command_without_granting_it(self) -> None:
+        bridge = CoreToolBridge(
+            self.repository,
+            self.sessions,
+            "extended",
+            ["karox.command.run"],
+            audit_path=self.root / "audit-stable-catalog.jsonl",
+            advertise_unavailable=True,
+        )
+        self.assertIn("karox.command.run", {item.name for item in bridge.descriptors()})
+        with self.assertRaises(Exception):
+            bridge.execute(
+                "karox.command.run",
+                {"argv": [sys.executable, "--version"]},
+                idempotency_key="project-must-not-run-full-command",
+            )
+
+    def test_full_dev_command_accepts_trusted_shell_push_publish_auth_deploy_and_global_install(self) -> None:
+        bridge = self._full_bridge("karox.command.run")
+        runtime = bridge._core()
+        candidates = (
+            ["git", "push", "origin", "HEAD"],
+            ["npm", "publish"],
+            ["gh", "auth", "login"],
+            ["vercel", "deploy", "--prod"],
+            ["npm", "install", "-g", "typescript"],
+            ["pip", "install", "--user", "build"],
+            [sys.executable, "-c", "print('inline')"],
+            ["node", "-e", "console.log('inline')"],
+            ["cmd", "/c", "echo full"] if os.name == "nt" else ["bash", "-lc", "echo full"],
+        )
+        for argv in candidates:
+            with self.subTest(argv=argv):
+                prepared, timeout = runtime._prepare_dev_command({"argv": argv}, 60.0)
+                self.assertEqual(prepared, argv)
+                self.assertEqual(timeout, 60.0)
 
     # -- repo.edit_file ---------------------------------------------------
 
@@ -211,6 +301,26 @@ class ExtendedCoreToolTests(unittest.TestCase):
 
         self.assertTrue(result["data"]["changed"])
         self.assertEqual(self._text(), "after\n")
+
+    def test_edit_preserves_crlf_when_anchor_came_from_read_lines(self) -> None:
+        (self.repository / "crlf.txt").write_bytes(b"before\r\nnext\r\n")
+        bridge = self._bridge("karox.repo.edit_file")
+
+        result = bridge.execute(
+            "karox.repo.edit_file",
+            {
+                "path": "crlf.txt",
+                "old_string": "before\nnext",
+                "new_string": "after\nnext",
+            },
+            idempotency_key="edit-crlf-adapt",
+        )
+
+        self.assertTrue(result["data"]["line_ending_adapted"])
+        self.assertEqual(
+            (self.repository / "crlf.txt").read_bytes(),
+            b"after\r\nnext\r\n",
+        )
 
     def test_edit_refuses_an_occurrence_count_mismatch(self) -> None:
         (self.repository / "twice.txt").write_bytes(b"one\none\n")
@@ -386,6 +496,9 @@ class ExtendedCoreToolTests(unittest.TestCase):
         cache = self.repository / "src" / "__pycache__"
         cache.mkdir(parents=True, exist_ok=True)
         (cache / "stale.py").write_bytes(b"needle in a cache\n")
+        netlify = self.repository / ".netlify" / "functions-serve"
+        netlify.mkdir(parents=True, exist_ok=True)
+        (netlify / "generated.ts").write_bytes(b"needle in generated netlify output\n")
         source = self.repository / "src"
         (source / "real.py").write_bytes(b"needle in real source\n")
 

@@ -679,6 +679,54 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
 
         self.assertNotIn("reasoning_effort", client.calls[0]["json"])
 
+    def test_reasoning_families_do_not_receive_temperature(self) -> None:
+        """o-series/gpt-5 models reject temperature with a 400."""
+
+        for model in ("o3-mini", "gpt-5.1", "openai/o4-mini"):
+            with self.subTest(model=model):
+                client = FakeClient(
+                    [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+                )
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                asked = replace(self.request(), model=model, temperature=0.2)
+                with patch("karox.providers.httpx.Client", return_value=client):
+                    provider.complete(asked)
+                self.assertNotIn("temperature", client.calls[0]["json"])
+
+    def test_non_reasoning_models_still_receive_temperature(self) -> None:
+        client = FakeClient(
+            [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+        )
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        asked = replace(self.request(), model="gpt-4o", temperature=0.2)
+        with patch("karox.providers.httpx.Client", return_value=client):
+            provider.complete(asked)
+        self.assertEqual(client.calls[0]["json"]["temperature"], 0.2)
+
+    def test_empty_choices_keepalive_frame_is_tolerated(self) -> None:
+        """Gateways emit ``choices: []`` frames without usage as keepalives."""
+
+        client = FakeClient(
+            [
+                sse_response(
+                    [
+                        {"id": "r", "choices": []},
+                        {
+                            "id": "r",
+                            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+                        },
+                        {"id": "r", "choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}},
+                    ]
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            events = list(provider.stream(self.request()))
+        kinds = [event.kind for event in events]
+        self.assertIn(ModelEventKind.TEXT_DELTA, kinds)
+        self.assertEqual(kinds[-1], ModelEventKind.COMPLETION)
+
 
 if __name__ == "__main__":
     unittest.main()

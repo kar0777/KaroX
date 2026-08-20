@@ -11,9 +11,11 @@ must keep working and must never be bypassed by the no-args dispatch.
 from __future__ import annotations
 
 import contextlib
+import os
 import importlib.metadata as md
 import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -185,14 +187,24 @@ class CliSurfaceTests(unittest.TestCase):
         names = {e.name for e in md.entry_points(group="console_scripts")}
         self.assertIn("karox", names)
 
-    def test_provider_list_is_non_empty(self) -> None:
+    def test_provider_list_command_and_builtin_catalog(self) -> None:
+        # On a clean config the configured-provider list is legitimately
+        # empty; asserting non-empty used to pass only against a developer
+        # machine's real configuration -- the exact dependency the isolation
+        # sandbox removes. The dispatch contract worth pinning: the command
+        # succeeds, returns JSON, and the built-in preset catalog is intact.
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KAROX_CONFIG_DIR": tmp, "KAROX_VNEXT_CONFIG_DIR": tmp},
+        ), contextlib.redirect_stdout(out):
             rc = entrypoint_main(["provider", "list", "--json"])
         self.assertEqual(rc, 0)
         data = json.loads(out.getvalue())
-        self.assertTrue(data, "provider list must not be empty")
-        self.assertIn("empiriolabs", {p.get("provider_id") for p in data})
+        self.assertIsInstance(data, list)
+        from karox.provider_presets import provider_presets
+
+        self.assertIn("empiriolabs", {p.preset_id for p in provider_presets()})
 
     def test_new_bridge_tools_registered_and_imports_clean(self) -> None:
         from karox.hosted_bridge import KNOWN_HOSTED_TOOL_NAMES
@@ -216,60 +228,111 @@ class ManagedBridgeToolSurfaceTests(unittest.TestCase):
     --verification-command as needed."""
 
     def test_input_tools_trigger_write_flag(self) -> None:
-        launch = tui._managed_web_bridge_launch(
-            Path.cwd(),
-            tui.BridgeSetup(
-                "chatgpt-web",
-                9880,
-                (
-                    "karox.repo.read_file",
-                    "karox.browser.snapshot",
-                    "karox.browser.open",
-                    "karox.dev_server.start",
+        # Input/dev-server tools are MUTATING_WEB_TOOLS: the wizard must
+        # persist a saved profile that cannot launch READ_ONLY, and the
+        # selected tools must survive into the profile the bridge child is
+        # launched from (the modern equivalent of passing --write).
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError(
+                "saved bridge profile does not exist: test"
+            )
+            tui._persist_tui_saved_bridge_profile(
+                Path.cwd(),
+                tui.BridgeSetup(
+                    "chatgpt-web",
+                    9880,
+                    (
+                        "karox.repo.read_file",
+                        "karox.browser.snapshot",
+                        "karox.browser.open",
+                    ),
+                    tunnel_provider="cloudflare",
                 ),
-                tunnel_provider="cloudflare",
-            ),
-        )
-        self.assertIn("--write", launch.argv)
-        self.assertIn("karox.browser.snapshot", launch.argv)
-        self.assertIn("karox.browser.open", launch.argv)
-        self.assertIn("karox.dev_server.start", launch.argv)
+                language="en",
+            )
+        saved = store.return_value.put.call_args.args[0]
+        self.assertEqual(saved.access_profile, tui.AccessProfile.WORKSPACE_WRITE)
+        self.assertIn("karox.browser.snapshot", saved.tools)
+        self.assertIn("karox.browser.open", saved.tools)
 
     def test_read_only_tools_do_not_trigger_write_flag(self) -> None:
-        launch = tui._managed_web_bridge_launch(
-            Path.cwd(),
-            tui.BridgeSetup(
-                "chatgpt-web",
-                9881,
-                (
-                    "karox.repo.read_file",
-                    "karox.browser.snapshot",
-                    "karox.browser.screenshot",
-                    "karox.dev_server.status",
-                ),
-                tunnel_provider="cloudflare",
-            ),
+        # An observation-only selection contains no MUTATING_WEB_TOOLS, so
+        # the wizard write decision stays off and a READ_ONLY config launches
+        # with exactly these observation tools exposed (the modern equivalent
+        # of the launcher not passing --write).
+        from karox.web_bridge_launcher import (
+            MUTATING_WEB_TOOLS,
+            WebBridgeConnectConfig,
+            _bridge_argv,
         )
-        self.assertNotIn("--write", launch.argv)
-        self.assertIn("karox.browser.screenshot", launch.argv)
-        self.assertIn("karox.dev_server.status", launch.argv)
+
+        selection = (
+            "karox.repo.read_file",
+            "karox.browser.snapshot",
+            "karox.browser.screenshot",
+            "karox.dev_server.status",
+        )
+        self.assertFalse(any(tool in MUTATING_WEB_TOOLS for tool in selection))
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            port=9881,
+            tools=selection,
+            access_profile=tui.AccessProfile.READ_ONLY,
+            tunnel="cloudflare",
+        )
+        argv = _bridge_argv(
+            config, session_id="dispatch-ro", public_url="https://e2e.example"
+        )
+        self.assertIn("karox.browser.screenshot", argv)
+        self.assertIn("karox.dev_server.status", argv)
+        self.assertNotIn("--write", argv)
 
     def test_checks_run_passes_verification_command(self) -> None:
-        launch = tui._managed_web_bridge_launch(
-            Path.cwd(),
-            tui.BridgeSetup(
-                "chatgpt-web",
-                9882,
-                ("karox.repo.read_file", "karox.checks.run"),
-                tunnel_provider="cloudflare",
+        # Selecting checks.run persists a verification allowlist, and the argv
+        # the saved profile launches with serializes each command as a JSON
+        # array of strings (an allowlist, not arbitrary shell).
+        from karox.web_bridge_launcher import WebBridgeConnectConfig, _bridge_argv
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError(
+                "saved bridge profile does not exist: test"
+            )
+            tui._persist_tui_saved_bridge_profile(
+                Path.cwd(),
+                tui.BridgeSetup(
+                    "chatgpt-web",
+                    9882,
+                    ("karox.repo.read_file", "karox.checks.run"),
+                    tunnel_provider="cloudflare",
+                ),
+                language="en",
+            )
+        saved = store.return_value.put.call_args.args[0]
+        self.assertIn("karox.checks.run", saved.tools)
+        self.assertTrue(saved.verification_commands)
+
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            port=9882,
+            tools=tuple(saved.tools),
+            access_profile=saved.access_profile,
+            tunnel="cloudflare",
+            verification_commands=tuple(
+                tuple(command) for command in saved.verification_commands
             ),
         )
-        self.assertIn("karox.checks.run", launch.argv)
-        self.assertIn("--verification-command", launch.argv)
-        # The verification command is a JSON array of strings (an allowlist,
-        # not arbitrary shell).
-        idx = launch.argv.index("--verification-command")
-        vc = json.loads(launch.argv[idx + 1])
+        argv = _bridge_argv(
+            config, session_id="dispatch-test", public_url="https://e2e.example"
+        )
+        self.assertIn("karox.checks.run", argv)
+        self.assertIn("--verification-command", argv)
+        idx = argv.index("--verification-command")
+        vc = json.loads(argv[idx + 1])
         self.assertIsInstance(vc, list)
         self.assertTrue(all(isinstance(s, str) and s for s in vc))
 

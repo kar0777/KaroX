@@ -627,7 +627,17 @@ class HostedBridgeWireTests(unittest.TestCase):
                 {},
             )
             self.assertFalse(diagnostics_result.isError)
-            self.assertEqual(diagnostics_result.structuredContent, diagnostics)
+            live_diagnostics = diagnostics_result.structuredContent
+            self.assertIsInstance(live_diagnostics, dict)
+            for key, value in diagnostics.items():
+                self.assertEqual(live_diagnostics[key], value)
+            transport_runtime = live_diagnostics["transport_runtime"]
+            self.assertGreaterEqual(transport_runtime["requests_started"], 1)
+            self.assertGreaterEqual(
+                transport_runtime["requests_started"],
+                transport_runtime["responses_started"],
+            )
+            self.assertNotIn(token, json.dumps(live_diagnostics, ensure_ascii=False))
             result = client.call_record(
                 record, descriptor, {"path": "sample.txt"}, self.repository
             )
@@ -636,6 +646,44 @@ class HostedBridgeWireTests(unittest.TestCase):
             self.assertNotIn(token, encoded)
         finally:
             server.close()
+
+    def test_transport_runtime_counts_arrival_before_mcp_handler(self) -> None:
+        token = "transport-telemetry-token"
+        app = build_proxy_asgi_app(
+            self.runtime,
+            token,
+            diagnostics={"schema_version": 1},
+        )
+        unauthorized_request = _tools_call(
+            "wrong-transport-token",
+            "karox.repo.read_file",
+            {"path": "sample.txt"},
+        )
+        diagnostics_request = _tools_call(
+            token,
+            "karox.bridge.diagnostics",
+            {},
+        )
+        unauthorized, diagnostics_response = _wire_requests(
+            app,
+            [unauthorized_request, diagnostics_request],
+        )
+        self.assertEqual(unauthorized.status, 401)
+        result = _jsonrpc_result(diagnostics_response)
+        self.assertFalse(result["isError"], diagnostics_response.text)
+        live = result["structuredContent"]
+        transport = live["transport_runtime"]
+        self.assertEqual(transport["requests_started"], 2)
+        self.assertEqual(transport["authorized_requests"], 1)
+        self.assertEqual(transport["unauthorized_requests"], 1)
+        self.assertEqual(transport["responses_started"], 1)
+        self.assertEqual(transport["responses_completed"], 1)
+        self.assertEqual(transport["last_http_version"], "1.1")
+        self.assertEqual(transport["last_method"], "POST")
+        self.assertEqual(transport["last_status"], 401)
+        encoded = json.dumps(live, ensure_ascii=False)
+        for secret in (token, "wrong-transport-token", "sample.txt"):
+            self.assertNotIn(secret, encoded)
 
     def test_mutating_mcp_call_without_meta_writes_once_over_two_attempts(self) -> None:
         token = "mcp-no-meta-wire-token"
