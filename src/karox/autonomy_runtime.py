@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from .repository_lease import RepositoryLeaseStore
 from .security import redact
 from .sessions import IdempotencyConflict, SessionStore, mutation_lease_context
 from .memory import KaroXMemory, MemoryError, MemoryKind, MemoryScope
+from .project_map import ProjectFactMap
 from .task_state import FactOrigin, TaskFact, TaskStateStore, fact
 
 TASK_BOOTSTRAP = "karox.task.bootstrap"
@@ -873,6 +875,29 @@ class AutonomyRuntime:
             return self._memory_forget(arguments)
         raise HostedBridgeAccessDenied(f"autonomy tool has no handler: {tool_name}")
 
+    # -- project intelligence --------------------------------------------------
+
+    def _project_fact_map_summary(
+        self, project_id: str, repository: Path
+    ) -> str:
+        """A deterministic onboarding digest, built once and refreshed cheaply.
+
+        Failures here must never take bootstrap down: an unreadable submodule
+        or an exotic filesystem costs the digest, not the session.
+        """
+
+        try:
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", project_id) or "default"
+            fact_map = ProjectFactMap(
+                repository,
+                self.sessions.root / "project-maps" / f"{safe}.json",
+            )
+            if fact_map.load() is None:
+                fact_map.build()
+            return fact_map.summary()
+        except OSError:
+            return ""
+
     # -- universal memory ----------------------------------------------------
 
     _MEMORY_SCOPES = {
@@ -1269,6 +1294,9 @@ class AutonomyRuntime:
             "task": state.compact(),
             "project_id": project.project_id,
             "project_name": project.label,
+            "project_fact_map": self._project_fact_map_summary(
+                project.project_id, repository
+            ),
             "repository": str(repository),
             "branch": git["branch"],
             "repository_revision": git["revision"],
