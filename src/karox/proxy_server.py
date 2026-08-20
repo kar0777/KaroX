@@ -186,6 +186,45 @@ def resolve_wire_tool_name(
     return None
 
 
+def stale_catalog_hint(
+    supplied: str,
+    advertised_wire_names: Sequence[str],
+    cached_wire_names: Optional[Sequence[str]] = None,
+) -> str:
+    """One short, actionable line for a client whose cached catalog is stale.
+
+    This proxy answers stateless JSON (no long-lived stream), so the MCP
+    ``notifications/tools/list_changed`` mechanism cannot reach a connected
+    client and ``capabilities.tools.listChanged`` is honestly ``false``. A
+    client that cached an old ``tools/list`` therefore keeps calling names
+    outside the current catalog until it reconnects. When that happens, name
+    exactly one fix: reconnect this client. Never propose a new physical
+    bridge, a credential rotation, or a URL change; none of them refresh a
+    client-side catalog cache and all of them are destructive.
+
+    ``cached_wire_names`` is optional because this stateless wire usually does
+    not know what a given client cached; a caller that does know (a session
+    store, a test, a future stateful transport) gets the precise count of
+    newly available tools.
+    """
+    advertised = set(advertised_wire_names)
+    if cached_wire_names is not None:
+        added = sorted(advertised - set(cached_wire_names))
+        if added:
+            noun = "tool is" if len(added) == 1 else "tools are"
+            return (
+                f"{len(added)} new {noun} available; reconnect this client to "
+                "refresh its tool catalog (same bridge, same credential, "
+                "same URL)"
+            )
+    return (
+        f"the current catalog advertises {len(advertised)} tools; if this "
+        "client connected before the last catalog upgrade its cached tool "
+        "list is stale, and reconnecting this client refreshes it "
+        "(same bridge, same credential, same URL)"
+    )
+
+
 def _idna_normalize(host: str) -> str:
     """Return the punycode form of an internationalized host, or ``""``.
 
@@ -322,12 +361,19 @@ def transport_security_settings(
     )
 
 
-def bridge_error_result(code: str) -> CallToolResult:
-    """Build the only tool-error shape this wire is allowed to send."""
+def bridge_error_result(code: str, *, detail: Optional[str] = None) -> CallToolResult:
+    """Build the only tool-error shape this wire is allowed to send.
+
+    ``detail`` must be server-generated, secret-free text (never raw exception
+    content); it extends the fixed table message with an actionable hint such
+    as the stale-catalog reconnect guidance.
+    """
     # ``get`` with the internal fallback: an error handler that itself raises
     # KeyError replaces the intended tool error with a 500, which is how a
     # benign interrupt once escaped as a crash.
     message = BRIDGE_ERROR_MESSAGES.get(code, BRIDGE_ERROR_MESSAGES["internal"])
+    if detail:
+        message = f"{message}; {detail}"
     return CallToolResult(
         content=[TextContent(type="text", text=f"{code}: {message}")],
         structuredContent={"ok": False, "error_code": code, "error": message},
@@ -818,7 +864,10 @@ def build_proxy_asgi_app(
                     read_only=True,
                     idempotency_key=None,
                 )
-                result = bridge_error_result("tool_not_exposed")
+                result = bridge_error_result(
+                    "tool_not_exposed",
+                    detail=stale_catalog_hint(name, tuple(by_wire.keys())),
+                )
                 finish_trace(span, result)
                 return result
             resolved_name = descriptor.name
