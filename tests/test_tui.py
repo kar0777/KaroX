@@ -60,6 +60,79 @@ class InputRoutingTests(unittest.TestCase):
             ["python", "-m", "pytest", "-q"],
         )
 
+    def test_agent_argv_economy_profile_enables_real_request_savings(self) -> None:
+        argv = tui._agent_argv(
+            "fix it",
+            Path("/repo"),
+            (("git", "diff", "--check"),),
+            "task-economy",
+            run_cost_profile="economy",
+        )
+        self.assertIn("--economy", argv)
+        self.assertEqual(argv[argv.index("--route-strategy") + 1], "ordered")
+        self.assertEqual(argv[argv.index("--context-utilization") + 1], "0.6")
+        self.assertEqual(argv[argv.index("--max-tool-result-chars") + 1], "24000")
+
+    def test_effort_is_independent_of_cost_profile(self) -> None:
+        balanced = tui._agent_argv(
+            "fix it", Path("/repo"), (("git", "diff", "--check"),), "b",
+            run_cost_profile="balanced", reasoning_effort="max",
+        )
+        economy = tui._agent_argv(
+            "fix it", Path("/repo"), (("git", "diff", "--check"),), "e",
+            run_cost_profile="economy", reasoning_effort="max",
+        )
+        self.assertEqual(balanced[balanced.index("--effort") + 1], "max")
+        self.assertEqual(economy[economy.index("--effort") + 1], "max")
+
+    def test_provider_setup_one_shot_cli_persists_local_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("karox.cli.config_dir", return_value=root):
+                code, output = tui._capture_cli(
+                    [
+                        "provider", "setup", "local-openai",
+                        "--provider-id", "one-shot-local",
+                        "--model", "test-model",
+                        "--no-test", "--json",
+                    ]
+                )
+                self.assertEqual(code, 0, output)
+                configured = json.loads(output)
+                self.assertEqual(configured["status"], "configured")
+                self.assertEqual(configured["selected_model"]["model_id"], "test-model")
+
+                code, output = tui._capture_cli(
+                    ["provider", "details", "one-shot-local", "--json"]
+                )
+                self.assertEqual(code, 0, output)
+                details = json.loads(output)
+                self.assertEqual(details["selected_model"]["model_id"], "test-model")
+
+    def test_provider_setup_runs_the_shared_probe_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch("karox.cli.config_dir", return_value=root),
+                patch.object(
+                    tui,
+                    "_probe_provider",
+                    return_value={"finish_reason": "stop", "usage": {}},
+                ) as probe,
+            ):
+                code, output = tui._capture_cli(
+                    [
+                        "provider", "setup", "local-openai",
+                        "--provider-id", "probed-local",
+                        "--model", "test-model",
+                        "--json",
+                    ]
+                )
+                self.assertEqual(code, 0, output)
+                configured = json.loads(output)
+                self.assertEqual(configured["verification"]["status"], "ok")
+                probe.assert_called_once()
+
     def test_agent_argv_emits_one_verification_command_per_approved_command(self) -> None:
         argv = tui._agent_argv(
             "fix it",
@@ -222,7 +295,11 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("KaroX commands", output)
         self.assertIn("/connect", output)
-        self.assertIn("/bridge", output)
+        self.assertIn("/model", output)
+        # The curated menu is the contract: one entry point per scenario.
+        # Retired aliases stay routable but are not advertised as new surface.
+        self.assertNotIn("/connections", output)
+        self.assertNotIn("/providers", output)
 
     def test_lone_dash_does_not_leak_argparse_error(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
@@ -238,6 +315,25 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("Unknown command", output)
         self.assertIn("/help", output)
 
+    def test_typo_suggests_closest_command(self) -> None:
+        code, output = self.run_lines("/cnnection\n/quit\n")
+        self.assertEqual(code, 0)
+        self.assertIn("Unknown command", output)
+        self.assertIn("/connect", output)
+
+    def test_connect_in_line_mode_directs_to_interactive(self) -> None:
+        """Line mode cannot open Textual screens, but /connect is a known command."""
+        code, output = self.run_lines("/connect\n/quit\n")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Unknown command", output)
+        self.assertIn("interactive", output.lower())
+
+    def test_connection_alias_in_line_mode_directs_to_interactive(self) -> None:
+        code, output = self.run_lines("/connection\n/quit\n")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Unknown command", output)
+        self.assertIn("interactive", output.lower())
+
     def test_natural_task_delegates_to_agent_backend(self) -> None:
         selected = ModelRecord("openai", "model-a", tools="true")
         with (
@@ -248,6 +344,49 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         argv = run_cli.call_args.args[0]
         self.assertEqual(argv[argv.index("--task") + 1], "fix the tests")
+
+
+class CommandRoutingContractTests(unittest.TestCase):
+    """Both line mode and full-screen TUI must use the same routing contract.
+
+    A command recognised by one mode must be recognised by the other. The line
+    mode may decline to execute it (it cannot open Textual modal screens), but
+    it must never say "Unknown command" for a command the full-screen app knows.
+    """
+
+    def test_connect_is_canonical_and_listed_first_in_help(self) -> None:
+        self.assertIn("/connect", tui.VISIBLE_COMMANDS)
+        self.assertIn("/connect", tui.SLASH_COMMANDS)
+        # /connect appears before /connection in the command catalog
+        commands = list(tui.SLASH_COMMANDS.keys())
+        self.assertLess(commands.index("/connect"), commands.index("/connections"))
+
+    def test_connection_is_alias_in_deprecated_aliases(self) -> None:
+        self.assertIn("/connection", tui.DEPRECATED_COMMAND_ALIASES)
+        self.assertIsNone(tui.DEPRECATED_COMMAND_ALIASES["/connection"])
+
+    def test_line_interactive_only_is_derived_from_common_contract(self) -> None:
+        # Every VISIBLE_COMMAND that is not a backend slash command must be in
+        # _LINE_INTERACTIVE_ONLY, so line mode recognises it.
+        for cmd in tui.VISIBLE_COMMANDS:
+            if cmd not in tui._BACKEND_SLASH and cmd not in {"/quit", "/help"}:
+                self.assertIn(cmd, tui._LINE_INTERACTIVE_ONLY, f"{cmd} missing from line mode")
+
+    def test_deprecated_aliases_are_in_line_interactive_only(self) -> None:
+        for cmd in tui.DEPRECATED_COMMAND_ALIASES:
+            if cmd not in tui._BACKEND_SLASH:
+                self.assertIn(cmd, tui._LINE_INTERACTIVE_ONLY, f"{cmd} missing from line mode")
+
+    def test_suggest_command_returns_empty_for_no_match(self) -> None:
+        self.assertEqual(tui._suggest_command("/zzzzzzz", "en"), "")
+
+    def test_suggest_command_returns_suggestion_for_typo(self) -> None:
+        result = tui._suggest_command("/cnnection", "en")
+        self.assertIn("/connect", result)
+
+    def test_suggest_command_works_in_russian(self) -> None:
+        result = tui._suggest_command("/cnnection", "ru")
+        self.assertIn("/connection", result)
 
 
 class BackendDelegationTests(unittest.TestCase):
@@ -526,31 +665,127 @@ class BackendDelegationTests(unittest.TestCase):
         self.assertIn("--public-url", launch.argv)
         self.assertIn("https://device.example.ts.net", launch.argv)
 
-    def test_web_bridge_launch_delegates_complete_lifecycle_to_cli(self) -> None:
-        launch = tui._managed_web_bridge_launch(
-            Path.cwd(),
-            tui.BridgeSetup(
-                "chatgpt-web",
-                9878,
-                ("karox.repo.read_file", "karox.repo.write_file"),
-                tunnel_provider="cloudflare",
-            ),
+    def test_tui_saved_bridge_profile_is_the_primary_hosted_connection_model(self) -> None:
+        repository = Path.cwd()
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError("saved bridge profile does not exist: test")
+            profile_name = tui._persist_tui_saved_bridge_profile(
+                repository,
+                tui.BridgeSetup(
+                    "chatgpt-web",
+                    9878,
+                    ("karox.repo.read_file", "karox.repo.write_file"),
+                    tunnel_provider="tailscale",
+                ),
+                language="en",
+            )
+        saved = store.return_value.put.call_args.args[0]
+        self.assertTrue(profile_name.startswith("chatgpt-auto-"))
+        self.assertEqual(saved.name, profile_name)
+        self.assertEqual(saved.target_profile, "chatgpt-web")
+        self.assertEqual(saved.access_profile.value, "workspace_write")
+        self.assertTrue(saved.browser_external_https)
+        self.assertTrue(saved.browser_headed)
+        self.assertTrue(saved.browser_user_takeover)
+        self.assertTrue(saved.browser_network_inspection)
+        self.assertIn("karox.runtime.status", saved.tools)
+        self.assertIn("karox.browser.wait_for", saved.tools)
+
+    def test_tui_saved_notion_profile_does_not_invent_browser_controls(self) -> None:
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError("saved bridge profile does not exist: test")
+            tui._persist_tui_saved_bridge_profile(
+                Path.cwd(),
+                tui.BridgeSetup(
+                    "notion",
+                    9880,
+                    ("karox.repo.read_file",),
+                    tunnel_provider="tailscale",
+                ),
+                language="en",
+            )
+        saved = store.return_value.put.call_args.args[0]
+        self.assertEqual(saved.target_profile, "notion")
+        self.assertFalse(saved.browser_external_https)
+        self.assertFalse(saved.browser_headed)
+        self.assertFalse(saved.browser_user_takeover)
+        self.assertFalse(saved.browser_network_inspection)
+        self.assertNotIn("karox.browser.wait_for", saved.tools)
+
+    def test_repeated_tui_setup_preserves_advanced_browser_policy_and_credentials(self) -> None:
+        import hashlib
+
+        from karox.web_bridge_profiles import SavedWebBridgeProfile
+
+        repository = Path.cwd()
+        digest = hashlib.sha256(
+            str(repository.resolve()).casefold().encode("utf-8")
+        ).hexdigest()[:10]
+        name = f"chatgpt-auto-{digest}-workspace_write"
+        existing = SavedWebBridgeProfile(
+            name=name,
+            target_profile="chatgpt-web",
+            repository=str(repository.resolve()),
+            tools=("karox.repo.read_file", "karox.repo.write_file"),
+            access_profile=tui.AccessProfile.WORKSPACE_WRITE,
+            tunnel="tailscale",
+            port=8765,
+            browser_external_https=True,
+            browser_headed=True,
+            browser_user_takeover=True,
+            browser_network_inspection=False,
+            browser_payment_confirmation=True,
+            browser_allowed_domains=("example.com",),
+            browser_denied_domains=("blocked.example",),
+            browser_allowed_emails=("robot@example.invalid",),
+            browser_credential_refs=("os-keyring:browser/test-account",),
         )
-        self.assertTrue(launch.managed)
-        self.assertEqual(launch.profile, "chatgpt-web")
-        self.assertIn("connect", launch.argv)
-        self.assertIn("chatgpt-web", launch.argv)
-        self.assertIn("--session-id", launch.argv)
-        self.assertIn("workspace_write", launch.argv)
-        self.assertNotIn("--public-url", launch.argv)
-        self.assertIn("--browser-external-https", launch.argv)
-        self.assertIn("--browser-network-inspection", launch.argv)
-        self.assertIn("--browser-headed", launch.argv)
-        self.assertIn("--browser-user-takeover", launch.argv)
-        self.assertIn("karox.browser.wait_for", launch.argv)
-        self.assertIn("karox.runtime.status", launch.argv)
-        self.assertEqual(launch.argv.count("karox.runtime.status"), 1)
-        self.assertEqual(launch.argv.count("--tool"), 4)
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with (
+            patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store,
+            patch("karox.web_bridge_launcher.apply_saved_bridge_profile") as apply,
+        ):
+            def get_profile(candidate: str) -> SavedWebBridgeProfile:
+                if candidate == name:
+                    return existing
+                raise WebBridgeProfileError(f"saved bridge profile does not exist: {candidate}")
+
+            store.return_value.get.side_effect = get_profile
+            profile_name = tui._persist_tui_saved_bridge_profile(
+                repository,
+                tui.BridgeSetup(
+                    "chatgpt-web",
+                    9878,
+                    ("karox.repo.read_file", "karox.repo.write_file"),
+                    tunnel_provider="cloudflare",
+                ),
+                language="ru",
+            )
+
+        self.assertEqual(profile_name, name)
+        store.return_value.put.assert_not_called()
+        updated = apply.call_args.args[1]
+        self.assertEqual(updated.port, 9878)
+        self.assertEqual(updated.tunnel, "cloudflare")
+        self.assertEqual(updated.language, "ru")
+        self.assertEqual(updated.browser_allowed_domains, ("example.com",))
+        self.assertEqual(updated.browser_denied_domains, ("blocked.example",))
+        self.assertEqual(updated.browser_allowed_emails, ("robot@example.invalid",))
+        self.assertEqual(
+            updated.browser_credential_refs,
+            ("os-keyring:browser/test-account",),
+        )
+        self.assertTrue(updated.browser_payment_confirmation)
+        self.assertFalse(updated.browser_network_inspection)
+        self.assertTrue(apply.call_args.kwargs["allow_restart"])
+
+    def test_web_tui_has_no_legacy_cli_launch_builder(self) -> None:
+        self.assertFalse(hasattr(tui, "_managed_web_bridge_launch"))
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
@@ -668,14 +903,107 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(app._filtered_commands), set(tui._commands("ru")))
                 await pilot.press("c", "o", "n")
                 await pilot.pause()
-                # ``/connect`` remains the legacy wizard; ``/connections`` is the
-                # reworked universal hub. Both legitimately match the ``/con``
-                # prefix, in declaration order.
-                self.assertEqual(app._filtered_commands, ["/connect", "/connections"])
+                # One product scenario, one offered command. ``/connections`` is
+                # still routed as a deprecated alias but is deliberately absent
+                # from the menu, so ``/con`` resolves to a single entry.
+                self.assertEqual(app._filtered_commands, ["/connect"])
                 self.assertEqual(
                     app.query_one("#command-menu", tui.Static).styles.display,
                     "block",
                 )
+                self.assertIn("/model", tui._commands("ru"))
+                self.assertNotIn("/home", tui._commands("ru"))
+                self.assertNotIn("/doctor", tui._commands("ru"))
+
+    async def test_model_selection_is_a_direct_chat_control(self) -> None:
+        registry = Mock()
+        with (
+            patch.object(tui, "_selected_model", return_value=None),
+            patch.object(tui, "_registry", return_value=registry),
+        ):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._model_picker_done("model:empiriolabs:glm-5-2")
+                await pilot.pause()
+                registry.select_model.assert_called_once_with("empiriolabs", "glm-5-2")
+                self.assertEqual(getattr(app.focused, "id", None), "composer")
+
+    async def test_model_picker_cannot_change_the_displayed_model_mid_run(self) -> None:
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app.agent_busy = True
+                app.action_model()
+                await pilot.pause()
+                from karox.tui_dashboard import ModelPickerScreen
+                self.assertNotIsInstance(app.screen, ModelPickerScreen)
+
+    async def test_the_picker_binding_is_a_key_terminals_can_send(self) -> None:
+        """Ctrl+G opens the picker; Ctrl+M must not be advertised anywhere.
+
+        Every terminal sends carriage return for Ctrl+M, so Textual can only
+        ever see Enter and the old binding silently submitted the composer
+        instead of opening the picker. The binding now lives on Ctrl+G, a key
+        that arrives intact everywhere, and no hint may promise the dead key.
+        """
+
+        app = tui.KaroXApp(Path.cwd(), language="en")
+        async with app.run_test(size=(120, 42)) as pilot:
+            await pilot.pause()
+            keys = {binding.key for binding in app.BINDINGS}
+            self.assertIn("ctrl+g", keys)
+            self.assertNotIn("ctrl+m", keys)
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            from karox.tui_dashboard import ModelPickerScreen
+            self.assertIsInstance(app.screen, ModelPickerScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+        for language in ("ru", "en"):
+            for name in ("hint", "welcome_ready"):
+                self.assertNotIn("Ctrl+M", tui._TEXT[language][name])
+                self.assertIn("Ctrl+G", tui._TEXT[language][name])
+
+    async def test_effort_choice_from_the_picker_persists_and_reaches_the_header(
+        self,
+    ) -> None:
+        with (
+            patch.object(tui, "_selected_model", return_value=None),
+            patch.object(tui, "_save_preferences") as save_preferences,
+        ):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app._model_picker_done("effort:high")
+                await pilot.pause()
+                self.assertEqual(app.reasoning_effort, "high")
+                save_preferences.assert_called_once_with(reasoning_effort="high")
+                self.assertIn(
+                    "effort high",
+                    str(app.query_one("#header-status", tui.Static).render()),
+                )
+                self.assertEqual(getattr(app.focused, "id", None), "composer")
+                app._model_picker_done("effort:auto")
+                self.assertIsNone(app.reasoning_effort)
+
+    async def test_cost_command_persists_explicit_economy_profile(self) -> None:
+        with (
+            patch.object(tui, "_selected_model", return_value=None),
+            patch.object(tui, "_load_preferences", return_value={}),
+            patch.object(tui, "_save_preferences") as save_preferences,
+        ):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                self.assertEqual(app.run_cost_profile, "balanced")
+                app._handle_command("/cost economy")
+                await pilot.pause()
+                self.assertEqual(app.run_cost_profile, "economy")
+                save_preferences.assert_called_with(run_cost_profile="economy")
+                self.assertIn("Economy", str(app.query_one("#header-status", tui.Static).render()))
+                self.assertNotIn("/cost", tui._commands("en"))
 
     async def test_a_pasted_stack_trace_is_not_truncated_to_one_line(self) -> None:
         trace = (
@@ -698,25 +1026,34 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 # The text the agent receives is the whole trace.
                 self.assertEqual(app._expand_pasted_blocks(composer.value), trace)
 
-    async def test_every_tool_of_a_turn_stays_visible(self) -> None:
+    async def test_a_turn_is_one_line_describing_the_current_action(self) -> None:
+        """A2 replaced the step list with a single human line.
+
+        This used to assert the opposite -- that all three tools of a turn stayed
+        on screen by name. That was the right answer to the wrong question: the
+        person watching wants to know what is happening now, not to audit a call
+        list, and the audit lives in Session Detail where it has room. The one
+        property worth keeping is that the line is *current*, which is what the
+        old single overwritten line got wrong by showing a finished call.
+        """
+
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.pause()
-                app._begin_step("call-1", "reading a file")
-                app._finish_step("call-1", "repo.read_file", "ok", failed=False)
-                app._begin_step("call-2", "editing a file")
-                app._finish_step("call-2", "repo.write_file", "ok", failed=False)
-                app._begin_step("call-3", "running checks")
+                app._begin_step("call-1", "repo.read_file")
+                app._finish_step("call-1", "repo.read_file", failed=False)
+                app._begin_step("call-2", "repo.write_file")
+                app._finish_step("call-2", "repo.write_file", failed=False)
+                app._begin_step("call-3", "checks.run")
                 await pilot.pause()
 
                 rendered = str(app.query_one("#activity", tui.Static).render())
 
-                # One overwritten line showed the third tool and no evidence
-                # that the first two had happened at all.
-                self.assertIn("repo.read_file", rendered)
-                self.assertIn("repo.write_file", rendered)
-                self.assertIn("running checks", rendered)
+                self.assertEqual(rendered, "Running tests")
+                self.assertNotIn("repo.read_file", rendered)
+                self.assertNotIn("repo.write_file", rendered)
+                self.assertNotIn("checks.run", rendered)
 
     async def test_a_no_change_run_does_not_repeat_itself_in_a_second_bubble(self) -> None:
         """A greeting produced a paragraph about the greeting.
@@ -810,7 +1147,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_answer_is_not_drawn_twice(self) -> None:
         """The polling reader and the final report carry the same text.
 
-        `_agent_finished` calls `_poll_agent_history`, which writes the turn's
+        `_agent_finished` calls `_poll_typed_transcript`, which writes the turn's
         answer out of the session record, and then wrote
         `report["provider_message"]` as well -- so every reply appeared twice in
         the chat. `_last_assistant_content` was already being recorded for this
@@ -855,19 +1192,116 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
                 write.assert_called_once_with("the final answer")
 
+    async def test_the_answer_prompt_self_report_is_not_a_second_card(self) -> None:
+        """The internal answer_prompt nudge's reply stays out of the chat.
+
+        After a real answer the agent sends itself an ``answer_prompt`` user
+        entry and the model replies with a ceremonial self-report ("the task
+        was only a greeting..."). The polling reader used to draw that reply as
+        a second assistant card right below the answer the user already read.
+        """
+        from types import SimpleNamespace
+
+        history = [
+            {"role": "assistant", "content": "Here is the real answer."},
+            {"role": "user", "kind": "answer_prompt", "content": "give the answer"},
+            {
+                "role": "assistant",
+                "content": "The task was only a greeting; no change was required.",
+            },
+        ]
+        record = SimpleNamespace(provider_history=history)
+        stat = SimpleNamespace(st_mtime_ns=1, st_size=1)
+        fake_store = SimpleNamespace(
+            state_path=lambda _sid: SimpleNamespace(stat=lambda: stat),
+            load=lambda _sid: record,
+        )
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app.agent_busy = True
+                app.active_session = "session-double-card"
+                with patch.object(
+                    app, "_write_assistant"
+                ) as write, patch.object(
+                    tui, "SessionStore", return_value=fake_store
+                ):
+                    app._poll_assistant_content()
+
+                write.assert_called_once_with("Here is the real answer.")
+
+    async def test_answer_prompt_suppression_survives_separate_poll_ticks(self) -> None:
+        """The nudge and its self-report may be persisted in different writes.
+
+        This is the real race from the native API TUI: one poll observes the
+        internal answer_prompt, a later provider update inserts route audit and
+        the assistant self-report. Suppression must survive that boundary.
+        """
+        from types import SimpleNamespace
+
+        history = [
+            {"role": "assistant", "content": "Привет! 👋"},
+            {"role": "user", "kind": "answer_prompt", "content": "give the answer"},
+        ]
+        record = SimpleNamespace(provider_history=history)
+        stat_state = {"mtime": 1}
+        fake_store = SimpleNamespace(
+            state_path=lambda _sid: SimpleNamespace(
+                stat=lambda: SimpleNamespace(
+                    st_mtime_ns=stat_state["mtime"],
+                    st_size=len(record.provider_history),
+                )
+            ),
+            load=lambda _sid: record,
+        )
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="ru")
+            async with app.run_test(size=(120, 42)) as pilot:
+                await pilot.pause()
+                app.agent_busy = True
+                app.active_session = "session-answer-prompt-race"
+                with patch.object(
+                    app, "_write_assistant"
+                ) as write, patch.object(
+                    tui, "SessionStore", return_value=fake_store
+                ):
+                    app._poll_assistant_content()
+                    write.assert_called_once_with("Привет! 👋")
+
+                    record.provider_history.extend(
+                        [
+                            {"role": "provider_audit", "kind": "route"},
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    "The user only sent a greeting; no repository "
+                                    "change was required."
+                                ),
+                            },
+                        ]
+                    )
+                    stat_state["mtime"] = 2
+                    app._poll_assistant_content()
+
+                self.assertEqual(write.call_count, 1)
+                self.assertEqual(app._last_assistant_content, "Привет! 👋")
+
     async def test_a_failed_tool_is_not_marked_as_done(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.pause()
-                app._begin_step("call-1", "running checks")
-                app._finish_step("call-1", "checks.run", "failed", failed=True)
+                app._begin_step("call-1", "checks.run")
+                app._finish_step("call-1", "checks.run", failed=True)
                 await pilot.pause()
 
                 rendered = str(app.query_one("#activity", tui.Static).render())
 
-                self.assertIn("✕ checks.run", rendered)
-                self.assertNotIn("✓ checks.run", rendered)
+                # A2: the mark and the tool name are gone, the fact is not.
+                self.assertIn("Check failed", rendered)
+                self.assertNotIn("Done", rendered)
+                self.assertNotIn("checks.run", rendered)
 
     async def test_a_single_line_paste_still_goes_in_verbatim(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
@@ -886,18 +1320,21 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.press("/", "c", "o", "n", "enter")
                 await pilot.pause()
-                self.assertIsInstance(app.screen, tui.ConnectionChoiceScreen)
-                web_label = str(
-                    app.screen.query_one("#choice-web", tui.Button).label
-                )
-                self.assertIn("ChatGPT Web", web_label)
-                self.assertIn("Claude Web", web_label)
+                # ``/connect`` is the single connection entry point and opens the
+                # universal hub. The legacy api/web/both wizard asked the user to
+                # classify a connection before showing them what already exists,
+                # which is the question the hub answers for them.
+                self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
+                self.assertIn("Hub", type(app.screen).__name__)
 
     async def test_english_connection_flow_stays_in_english(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
-                await pilot.press("/", "c", "o", "n", "enter", "1")
+                # Driven from the wizard entry point rather than through the
+                # retired api/web/both root: this test is about English surviving
+                # the provider flow, not about how that flow is reached.
+                app.action_provider_preset()
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.ProviderPresetScreen)
                 await pilot.press("enter")
@@ -912,7 +1349,14 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.press("/", "down", "tab")
                 await pilot.pause()
-                self.assertEqual(app.query_one("#composer", tui.Input).value, "/models")
+                # The second entry of the compact menu, whatever it is: the test
+                # is about arrows moving the highlight and tab inserting the
+                # highlighted command, not about which commands are offered.
+                expected = list(tui._commands("en"))[1]
+                self.assertEqual(
+                    app.query_one("#composer", tui.Input).value,
+                    tui.KaroXApp._command_insertion(expected),
+                )
 
     async def test_language_command_reopens_selector(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
@@ -960,8 +1404,15 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             errors = []
             with patch.object(app, "_handle_exception", side_effect=errors.append):
                 async with app.run_test(size=(120, 42)) as pilot:
-                    app.query_one("#composer", tui.Input).value = "/connect"
-                    await pilot.press("enter", "1", "down", "down", "down", "enter")
+                    # Entered through the production wizard entry point rather
+                    # than by pressing a digit. The subject here is discovery and
+                    # the model picker; keying "1" bound this test to a position
+                    # in a menu that no longer exists, and in the unified hub it
+                    # opened the MCP clients screen -- so it stopped exercising
+                    # the provider wizard at all while still looking like it did.
+                    app.action_provider_preset()
+                    await pilot.pause()
+                    await pilot.press("down", "down", "down", "enter")
                     await pilot.pause()
                     await pilot.press("f5")
                     await self.screen(pilot, app, tui.ModelPickerScreen)
@@ -999,8 +1450,11 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 42)) as pilot:
-                app.query_one("#composer", tui.Input).value = "/connect"
-                await pilot.press("enter", "1", "enter")
+                # The wizard entry point, not a digit position: this test is about
+                # progressive fields inside the setup form.
+                app.action_provider_preset()
+                await pilot.pause()
+                await pilot.press("enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
                 dialog = app.screen.query_one("#provider-dialog")
@@ -1042,9 +1496,11 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
             app._write = capture
             async with app.run_test(size=(120, 42)) as pilot:
-                composer = app.query_one("#composer", tui.Input)
-                composer.value = "/models"
-                await pilot.press("enter")
+                # ``/models`` is now a deprecated alias that opens the connections
+                # screen, so the renderer is driven directly. What is under test
+                # is the rendering of an empty model list -- human words, and no
+                # "Running /models" noise -- not the retired route to it.
+                app._inspection_finished("/models", 0, "[]")
                 await pilot.pause(0.3)
                 self.assertTrue(
                     any("Модели ещё не подключены" in item for item in messages)
@@ -1055,7 +1511,22 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     "none",
                 )
 
-    async def test_keyboard_both_flow_verifies_api_then_opens_bridge(self) -> None:
+    async def test_adding_a_provider_returns_to_the_one_hub(self) -> None:
+        """Two connections, one hub, and no implicit chaining between them.
+
+        This replaces a test of the retired "Both" root flow, which verified that
+        saving a provider *automatically* pushed the bridge wizard. That chaining
+        was the product defect: it decided for the user that connecting a model
+        meant they also wanted a web bridge, and it existed only because the
+        entry screen made them classify the connection up front.
+
+        The property that matters now is the opposite one: a provider is saved,
+        the user is returned to the single hub, and adding ChatGPT/Claude/ClickUp
+        is a separate deliberate act from that same hub. Restoring the automatic
+        ProviderSetup -> BridgeSetup transition to make an old assertion pass
+        would reintroduce exactly what was removed.
+        """
+
         selected = None
         model = ModelRecord("openai", "model-manual", tools="true")
 
@@ -1074,32 +1545,48 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 42)) as pilot:
+                # 1. ``/connect`` opens the one hub.
                 app.query_one("#composer", tui.Input).value = "/connect"
-                await pilot.press("enter", "3", "down", "down", "down", "enter")
+                await pilot.press("enter")
                 await pilot.pause()
+                hub = type(app.screen).__name__
+                self.assertIn("Hub", hub, f"/connect opened {hub}")
+                self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
+
+                # 2. An AI provider is added from it.
+                app.action_provider_preset()
+                await pilot.pause()
+                await pilot.press("down", "down", "down", "enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
                 app.screen.query_one(
                     "#provider-model", tui.Input
                 ).value = "model-manual"
                 await pilot.press("f10")
                 await pilot.pause(0.4)
+
+                # 3. It was really saved and really verified ...
                 self.assertTrue(save.called)
                 self.assertTrue(probe.called)
-                self.assertIsInstance(app.screen, tui.BridgeSetupScreen)
-                await self.focus(pilot, app, "bridge-profile")
-                await pilot.press("down", "space")
-                self.assertEqual(
-                    app.screen.query_one(
-                        "#bridge-profile", tui.RadioSet
-                    ).pressed_button.id,
-                    "profile-notion",
-                )
+                # ... and the bridge wizard was *not* pushed on the user's behalf.
+                self.assertNotIsInstance(app.screen, tui.BridgeSetupScreen)
+
+                # 4. Adding a web client is a separate act from the same hub.
+                app._open_connections(tui.CONNECT_FOCUS_CLIENTS)
+                await pilot.pause()
+                self.assertIn("McpClients", type(app.screen).__name__)
+
+                # 5. Neither scenario needed a second root flow.
+                self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
 
     async def test_provider_picker_filters_and_puter_is_explained(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
-                app.query_one("#composer", tui.Input).value = "/connect"
-                await pilot.press("enter", "1")
+                # Opened through the production callback the unified hub uses for
+                # its "new AI provider" entry, so the test exercises the real
+                # route without depending on where that entry sits in a list.
+                app._open_provider_preset_screen(None)
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui.ProviderPresetScreen)
                 await pilot.press("p", "u", "t", "e", "r")
@@ -1149,27 +1636,37 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertTrue(any("KaroX готов" in item for item in messages))
 
-    async def test_sponsor_ticker_is_compact_and_moves(self) -> None:
+    async def test_the_sponsor_ticker_is_not_part_of_the_shell(self) -> None:
+        """It used to scroll on its own row, on by default, forever.
+
+        A minimal coding agent does not spend a permanent row of an ordinary
+        terminal on a marquee, and an animation behind the work is exactly the
+        kind of movement that pulls attention away from it. The ticker is no
+        longer mounted at all, so it costs no height and cannot animate -- which
+        is stronger than hiding it, because a hidden widget still occupies
+        geometry and still ticks.
+        """
+
         with (
             patch.object(tui, "_selected_model", return_value=None),
             patch.object(tui, "_load_sponsors_visible", return_value=True),
         ):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             async with app.run_test(size=(120, 42)) as pilot:
-                ticker = app.query_one("#sponsor-ticker", tui.Static)
                 await pilot.pause(0.3)
-                first = str(ticker.render())
-                await pilot.pause(0.4)
-                second = str(ticker.render())
-                self.assertEqual(ticker.size.height, 1)
-                self.assertNotEqual(first, second)
-                self.assertTrue(
-                    any(name in first + second for name in ("routing.run", "OmniaKey"))
-                )
-                self.assertEqual(ticker.parent.id, "brand")
-                self.assertIn("Weights & Biases", app._sponsor_text)
+                self.assertEqual(len(app.query("#sponsor-ticker")), 0)
+                self.assertEqual(len(app.query("#brand")), 0)
+                # And nothing replaced it: no second promotional row appeared.
+                self.assertEqual(len(app.query("#header-status")), 1)
 
-    async def test_sponsors_command_hides_and_persists_ticker(self) -> None:
+    async def test_the_sponsors_command_still_records_the_preference(self) -> None:
+        """The command survives even though the row it controlled does not.
+
+        ``/sponsors`` is a real command with real users, so it keeps working and
+        keeps persisting the choice; deleting it to tidy the shell would be a
+        regression dressed up as simplification.
+        """
+
         with (
             patch.object(tui, "_selected_model", return_value=None),
             patch.object(tui, "_load_sponsors_visible", return_value=True),
@@ -1177,16 +1674,12 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
-                brand = app.query_one("#brand")
-                visible_height = brand.size.height
                 composer = app.query_one("#composer", tui.Input)
                 composer.value = "/sponsors off"
                 await pilot.press("enter")
                 await pilot.pause()
-                ticker = app.query_one("#sponsor-ticker", tui.Static)
-                self.assertEqual(ticker.styles.display, "none")
-                self.assertLess(brand.size.height, visible_height)
                 save.assert_called_once_with(False)
+                self.assertFalse(app.sponsors_visible)
 
     async def test_app_has_chat_composer_and_status_bar(self) -> None:
         selected = ModelRecord("openai", "model-a", tools="true")
@@ -1196,7 +1689,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertIsNotNone(app.query_one("#composer"))
                 self.assertIn(
-                    "openai/model-a", str(app.query_one("#model-status").render())
+                    "openai/model-a", str(app.query_one("#header-status").render())
                 )
 
     async def test_plain_text_submission_runs_agent_not_argparse(self) -> None:
@@ -1264,7 +1757,8 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Готово", rendered)
                 self.assertNotIn("**Готово**", rendered)
                 activity = str(app.query_one("#activity", tui.Static).render())
-                self.assertIn("Задача завершена и проверена", activity)
+                # A2: completion is a short summary, not a sentence about itself.
+                self.assertTrue(activity.startswith("Готово"), activity)
 
     async def test_workspace_command_changes_project_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1279,7 +1773,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.repository, project.resolve())
                     self.assertIn(
                         project.name,
-                        str(app.query_one("#repo-status", tui.Static).render()),
+                        str(app.query_one("#header-status", tui.Static).render()),
                     )
 
 
@@ -1393,7 +1887,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_audit_does_not_write_model_activity(self) -> None:
         # Regression: the activity line must not show "Модель: …" on every
         # provider turn.  Drive a fake assistant entry with no text plus a
-        # provider_audit entry through _poll_agent_history and assert the
+        # provider_audit entry through _poll_typed_transcript and assert the
         # activity widget stays free of the model identity.
         selected = ModelRecord("openai", "model-a", tools="true")
         store = Mock()
@@ -1413,7 +1907,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(120, 40)) as pilot:
                 app.agent_busy = True
                 app.active_session = "s"
-                app._poll_agent_history()
+                app._poll_typed_transcript()
                 await pilot.pause()
                 activity = str(app.query_one("#activity", tui.Static).render())
                 self.assertNotIn("Модель", activity)
