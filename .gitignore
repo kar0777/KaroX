@@ -71,6 +71,7 @@ Thumbs.db
 NUL
 miraism/
 .commandcode/
+.gitlab/
 *.bak
 OPUS5_*.md
 OUTREACH_*.md
