@@ -264,24 +264,42 @@ class TuiArgvToDiagnosticsEndToEndTests(unittest.TestCase):
             + _INPUT_TOOLS,
             tunnel_provider="cloudflare",
         )
-        launch = tui._managed_web_bridge_launch(Path.cwd(), setup)
-        self.assertIn("--write", launch.argv)
+        from unittest.mock import patch
 
-        argv = list(launch.argv)
+        from karox.web_bridge_launcher import _bridge_argv
+        from karox.web_bridge_profiles import WebBridgeProfileError
+
+        with patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store:
+            store.return_value.get.side_effect = WebBridgeProfileError(
+                "saved bridge profile does not exist: test"
+            )
+            tui._persist_tui_saved_bridge_profile(Path.cwd(), setup, language="en")
+        saved = store.return_value.put.call_args.args[0]
+        self.assertEqual(saved.access_profile, AccessProfile.WORKSPACE_WRITE)
+
+        seed = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            port=9904,
+            tools=tuple(saved.tools),
+            access_profile=saved.access_profile,
+            tunnel="cloudflare",
+        )
+        argv = list(
+            _bridge_argv(seed, session_id="e2e", public_url="https://e2e.example")
+        )
         while argv and argv[0] != "bridge":
             argv.pop(0)
         args = _parser().parse_args(argv)
-        self.assertTrue(args.write)
+        self.assertEqual(args.bridge_command, "serve")
 
         config = WebBridgeConnectConfig(
             profile=args.profile,
             repository=Path.cwd(),
             port=int(args.port),
             tools=tuple(args.tool),
-            access_profile=(
-                AccessProfile.WORKSPACE_WRITE if args.write else AccessProfile.READ_ONLY
-            ),
-            tunnel=args.tunnel,
+            access_profile=saved.access_profile,
+            tunnel="cloudflare",
         )
         diag = web_bridge_diagnostics(config)
         bp = diag["browser_permission"]

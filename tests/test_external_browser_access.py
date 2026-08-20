@@ -408,6 +408,20 @@ class IsolationAndTakeoverTests(unittest.TestCase):
         with self.assertRaisesRegex(BrowserSecurityError, "user has control"):
             manager.click({"selector": "button"}, 5)
 
+    def test_takeover_brings_owned_system_chrome_to_front(self) -> None:
+        manager = self._manager("session-focus", takeover=True)
+        page = _FakePage()
+        manager._handle = _handle(page, "tab-focus")
+        process = mock.Mock()
+        manager._handle.system_chrome = mock.Mock(process=process)
+        with mock.patch(
+            "karox.browser_access.activate_chrome_window", return_value=True
+        ) as activate:
+            result = manager.request_user_takeover({"reason": "login"}, 5)
+        self.assertTrue(page.front)
+        self.assertTrue(result["window_activated"])
+        activate.assert_called_once_with(process)
+
     def test_resume_keeps_same_tab_context_and_cookie_state(self) -> None:
         manager = self._manager("session-a", takeover=True)
         page = _FakePage()
