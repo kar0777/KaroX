@@ -23,12 +23,24 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import httpx
 
 from .bridge import BridgeCredentialStore
 from .credentials import CredentialStore
+from .event_bus import EventBus, EventKind, EventLevel, event_bus
 from .models import AccessProfile
 from .paths import config_dir, session_dir
 from .provider_controller import ProviderController
@@ -39,17 +51,40 @@ from .provider_presets import (
     provider_presets,
     sponsor_messages,
 )
-from .providers import ModelMessage, ModelRequest, ProviderError, ProviderErrorKind
+from .providers import (
+    REASONING_EFFORTS,
+    ModelMessage,
+    ModelRequest,
+    ProviderError,
+    ProviderErrorKind,
+)
 from .registry import ModelRecord, ProviderRecord, ProviderRegistry
+from .session_view import (
+    ACTION_REVIEW_RISK,
+    ACTION_STOP,
+    WAIT_CONFIRMATION,
+    RiskStateView,
+    SessionDetail,
+    SessionSummary,
+    SessionViewStore,
+    TimelineEntry,
+    ToolCallView,
+)
+from .security import redact
 from .sessions import SessionStore
 from .tailscale import TailscaleError, find_tailscale, prepare_tailscale_funnel
-from .web_bridge_launcher import WEB_BRIDGE_PROFILES, find_cloudflared
+from .verification import discover_verification_commands
+from .web_bridge_launcher import (
+    MUTATING_WEB_TOOLS,
+    WEB_BRIDGE_PROFILES,
+    find_cloudflared,
+)
 
 try:
     from rich.markup import escape
     from rich.text import Text
-    from textual import on
-    from textual.app import App, ComposeResult, SkipAction
+    from textual import events, on
+    from textual.app import App, ComposeResult, SkipAction, SystemCommand
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.content import Content
@@ -76,9 +111,15 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 
 
 SLASH_COMMANDS: Dict[str, str] = {
+    "/model": "choose model",
+    "/home": "return to chat",
+    "/usage": "show model usage, cache, and cost",
+    "/cost": "show or switch the run economy profile",
     "/connect": "connect an API model, website, or both",
     "/models": "show configured API models",
-    "/sessions": "show task sessions",
+    "/sessions": "show task sessions (compact browser)",
+    "/sessions --verbose": "show task sessions as text",
+    "/session-log": "alias for /sessions --verbose",
     "/bridge": "connect PromptQL, Notion, or an MCP/OpenAPI client",
     "/bridge stop": "stop the active bridge",
     "/ask TEXT": "ask a configured hosted agent target (PromptQL)",
@@ -97,9 +138,15 @@ SLASH_COMMANDS: Dict[str, str] = {
 }
 
 _COMMANDS_RU: Dict[str, str] = {
+    "/model": "выбрать модель",
+    "/home": "вернуться в чат",
+    "/usage": "показать токены, кэш и расходы",
+    "/cost": "режим расходов",
     "/connect": "подключить API-модель, сайт или оба варианта",
     "/models": "показать настроенные API-модели",
-    "/sessions": "показать сессии задач",
+    "/sessions": "показать сессии задач (компактный браузер)",
+    "/sessions --verbose": "показать сессии задач как текст",
+    "/session-log": "псевдоним для /sessions --verbose",
     "/bridge": "подключить PromptQL, Notion или MCP/OpenAPI-клиент",
     "/bridge stop": "остановить активный мост",
     "/ask ТЕКСТ": "задать вопрос настроенному агенту-цели (PromptQL)",
@@ -120,9 +167,9 @@ _COMMANDS_RU: Dict[str, str] = {
 _TEXT: Dict[str, Dict[str, str]] = {
     "ru": {
         "brand": "KaroX\n[dim]API-модели • локальные инструменты • сайты и MCP[/dim]",
-        "placeholder": "Опишите задачу для KaroX или введите / для команд…",
-        "hint": "Enter — отправить • / — команды • Ctrl+C — остановить/выйти • Ctrl+Shift+C — копировать",
-        "welcome_ready": "[bold #e0dccc]KaroX готов.[/]\nНапишите задачу обычным текстом.\nВведите [#d4b676]/[/], чтобы увидеть все команды.",
+        "placeholder": "Опишите задачу для KaroX…",
+        "hint": "Enter — отправить • Ctrl+G — модель и Effort • / — команды • Ctrl+C — остановить/выйти",
+        "welcome_ready": "[bold #e0dccc]KaroX готов.[/]\nНапишите задачу обычным текстом.\n[#d4b676]Ctrl+G[/] — модель и Effort; [#d4b676]/[/] — остальные действия.",
         "welcome_unconfigured": "[bold #e0dccc]KaroX запущен, но модель не подключена.[/]\nПодключите API-провайдера командой [#d4b676]/connect[/].\nВведите [#d4b676]/[/], чтобы увидеть все команды.",
         "repo": "репозиторий",
         "model": "модель",
@@ -138,13 +185,14 @@ _TEXT: Dict[str, Dict[str, str]] = {
         "off": "выключен",
         "commands": "Команды",
         "unknown": "Неизвестная команда {command}. Введите / для списка команд.",
+        "suggestion": "Возможно, вы имели в виду [#d4b676]{cmd}[/].",
         "connect_first": "Для отправки задачи сначала подключите API-модель через [#d4b676]/connect[/].",
     },
     "en": {
         "brand": "KaroX\n[dim]API models • local tools • websites and MCP[/dim]",
-        "placeholder": "Describe a task for KaroX or type / for commands…",
-        "hint": "Enter — send • / — commands • Ctrl+C — stop/exit • Ctrl+Shift+C — copy",
-        "welcome_ready": "[bold #e0dccc]KaroX is ready.[/]\nDescribe a task in plain language.\nEnter [#d4b676]/[/] to see every command.",
+        "placeholder": "Describe a task for KaroX…",
+        "hint": "Enter — send • Ctrl+G — model and Effort • / — commands • Ctrl+C — stop/exit",
+        "welcome_ready": "[bold #e0dccc]KaroX is ready.[/]\nDescribe a task in plain language.\n[#d4b676]Ctrl+G[/] — model and Effort; [#d4b676]/[/] — every other action.",
         "welcome_unconfigured": "[bold #e0dccc]KaroX is running, but no model is connected.[/]\nConnect an API provider with [#d4b676]/connect[/].\nEnter [#d4b676]/[/] to see every command.",
         "repo": "repository",
         "model": "model",
@@ -160,6 +208,7 @@ _TEXT: Dict[str, Dict[str, str]] = {
         "off": "off",
         "commands": "Commands",
         "unknown": "Unknown command {command}. Enter / to see all commands.",
+        "suggestion": "Did you mean [#d4b676]{cmd}[/]?",
         "connect_first": "Connect an API model with [#d4b676]/connect[/] before sending a task.",
     },
 }
@@ -210,8 +259,127 @@ def _save_sponsors_visible(visible: bool) -> None:
     _save_preferences(sponsors_visible=bool(visible))
 
 
+_RECENT_WORKSPACE_LIMIT = 8
+
+
+def _load_recent_workspaces() -> Tuple[str, ...]:
+    """Return recent workspace paths that still exist, newest first."""
+    raw = _load_preferences().get("recent_workspaces", [])
+    if not isinstance(raw, list):
+        return ()
+    result: List[str] = []
+    seen = set()
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            resolved = str(Path(value).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+        key = os.path.normcase(resolved)
+        if key in seen or not Path(resolved).is_dir():
+            continue
+        seen.add(key)
+        result.append(resolved)
+        if len(result) >= _RECENT_WORKSPACE_LIMIT:
+            break
+    return tuple(result)
+
+
+def _remember_workspace(path: Path) -> None:
+    """Persist one workspace without allowing the recent list to grow forever."""
+    resolved = str(path.expanduser().resolve())
+    key = os.path.normcase(resolved)
+    recent = [
+        item
+        for item in _load_recent_workspaces()
+        if os.path.normcase(item) != key
+    ]
+    _save_preferences(
+        recent_workspaces=[resolved, *recent][:_RECENT_WORKSPACE_LIMIT]
+    )
+
+
+# The commands a person is offered. KaroX is a coding agent, not a control
+# panel: the composer is for describing work, and the slash menu exists so the
+# few things that are *not* work are reachable -- not to advertise the surface.
+#
+# Everything else in SLASH_COMMANDS still runs when typed. Hidden is not removed:
+# `/verify`, `/ask`, `/sponsors`, `/mcp` and `/bridge stop` are real commands with
+# real users, and deleting them to shorten a menu would be a regression dressed
+# up as simplification.
+VISIBLE_COMMANDS: Tuple[str, ...] = (
+    "/model",
+    "/usage",
+    "/connect",
+    "/sessions",
+    "/workspace",
+    "/help",
+    "/quit",
+)
+
+# Where a retired connection command now goes. One product scenario had five
+# entry points -- `/connect`, `/connections`, `/providers`, `/mcp-clients` and
+# `/bridge` -- which is four ways for two screens to disagree about what is
+# connected. They all resolve to the single Connections screen; the value is the
+# section it should open on, so a person who typed `/providers` still lands where
+# they meant to go.
+#
+# Deliberately no per-use warning in the chat: a message on every invocation is
+# noise, and the alias is not a mistake the user made -- it is a path the product
+# used to offer.
+CONNECT_FOCUS_MODELS = "ai_models"
+CONNECT_FOCUS_CLIENTS = "external_clients"
+
+DEPRECATED_COMMAND_ALIASES: Dict[str, Optional[str]] = {
+    "/connection": None,
+    "/connections": None,
+    "/providers": CONNECT_FOCUS_MODELS,
+    "/mcp-clients": CONNECT_FOCUS_CLIENTS,
+    "/bridge": CONNECT_FOCUS_CLIENTS,
+}
+
+
 def _commands(language: str) -> Dict[str, str]:
-    return _COMMANDS_RU if language == "ru" else SLASH_COMMANDS
+    """The slash menu and ``/help``, in the user's language.
+
+    Filtered to :data:`VISIBLE_COMMANDS` rather than assembled separately, so the
+    descriptions cannot drift from the routing table and a command cannot be
+    listed in one language and missing in the other.
+
+    A prefix match is used for ``/workspace`` because the catalogs spell it with
+    its argument (``/workspace PATH``, ``/workspace ПУТЬ``), which is what makes
+    the menu entry self-explanatory.
+    """
+
+    catalog = _COMMANDS_RU if language == "ru" else SLASH_COMMANDS
+    visible: Dict[str, str] = {}
+    for name, description in catalog.items():
+        head = name.split(" ", 1)[0]
+        if head in VISIBLE_COMMANDS:
+            visible[name] = description
+    return visible
+
+
+def _suggest_command(typed: str, language: str) -> str:
+    """Return a 'Did you mean ...' suggestion for an unknown slash command.
+
+    Uses difflib.get_close_matches against every routable command so a typo
+    like ``/connections`` suggests ``/connection`` and ``/cnnection`` suggests
+    ``/connection``. Returns an empty string when no close match exists.
+    """
+    import difflib
+
+    candidates: set[str] = {
+        name.split(" ", 1)[0] for name in SLASH_COMMANDS
+    } | set(DEPRECATED_COMMAND_ALIASES) | {"/setup", "/browser", "/exit"}
+    matches = difflib.get_close_matches(typed, sorted(candidates), n=1, cutoff=0.6)
+    if not matches:
+        return ""
+    suggested = matches[0]
+    if language == "ru":
+        return _TEXT["ru"].get("suggestion", "Возможно, вы имели в виду {cmd}.").format(cmd=suggested)
+    return _TEXT["en"].get("suggestion", "Did you mean {cmd}?").format(cmd=suggested)
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -252,6 +420,15 @@ _BACKEND_SLASH: Dict[str, List[str]] = {
     "/doctor": ["doctor", "--json"],
 }
 
+# Commands that are valid but need the interactive Textual TUI — they open
+# modal screens the line-mode fallback cannot render. Derived from the same
+# routing contract as the full-screen app, not a divergent hand-maintained list.
+_LINE_INTERACTIVE_ONLY: frozenset[str] = (
+    frozenset(VISIBLE_COMMANDS)
+    | frozenset(DEPRECATED_COMMAND_ALIASES.keys())
+    | {"/setup", "/browser", "/clear", "/verify", "/ask"}
+) - frozenset(_BACKEND_SLASH) - {"/quit", "/help"}
+
 _MCP_LIVENESS_TEXT: Dict[str, Tuple[str, str]] = {
     "live": ("живой", "live"),
     "failed": ("недоступен", "unreachable"),
@@ -280,6 +457,1276 @@ _MCP_LOCATION_TEXT: Dict[str, Tuple[str, str]] = {
     "local": ("локальный", "local"),
     "remote": ("удалённый", "remote"),
 }
+
+# SessionSummary carries stable machine identifiers, never localized prose, so
+# the words a user reads live here in the UI catalog. An unknown identifier is
+# shown verbatim rather than hidden: a status nobody translated yet is still a
+# fact about the run.
+def _identifier(value: Any) -> str:
+    """Normalise a persisted field to the stable identifier a view model wants.
+
+    Session records hold Enum members for fields such as ``access_profile``.
+    Passing one straight through renders ``AccessProfile.WORKSPACE_WRITE`` in
+    the interface, which is an internal enum leaking into user-facing text and
+    also fails every identifier comparison in the store. The boundary adapter
+    unwraps ``.value`` so events and durable records agree on one vocabulary.
+    """
+
+    if value is None:
+        return ""
+    inner = getattr(value, "value", value)
+    return inner if isinstance(inner, str) else str(inner)
+
+
+# Which UI projections typed events actually own today. The migration is per
+# projection: a SESSION_STATE event proves the status row and proves nothing
+# about the transcript, so anything not listed here still reads the legacy
+# provider_history path. Add a name here only when a real typed publisher for
+# it exists, otherwise the compatibility fallback goes silent and the user
+# watches a frozen screen while the agent is still working.
+PROJECTION_STATUS = "status"
+PROJECTION_TRANSCRIPT = "transcript"
+PROJECTION_TOOL_ACTIVITY = "tool_activity"
+PROJECTION_USAGE = "usage"
+PROJECTION_EVIDENCE = "evidence"
+PROJECTION_ERRORS = "errors"
+
+_EVENT_BACKED_PROJECTIONS: frozenset[str] = frozenset({PROJECTION_STATUS})
+
+# The parent TUI process owns the agent lifecycle: it starts the child, reads its
+# structured result and decides that a run succeeded, failed or was cancelled.
+# EventBus is a process-local singleton, so a typed event published inside the
+# child never reaches this process. Until a framed child transport exists these
+# lifecycle transitions are published here, by the same methods the product runs,
+# which is what makes the status projection a real production path rather than a
+# test fixture.
+EVENT_SOURCE_TUI_AGENT = "tui.agent"
+
+# A stable, machine-readable error code. A UI switches on this; the human words
+# stay in the localisation catalogs and never become the contract.
+ERROR_AGENT_FAILED = "agent_failed"
+
+
+class RunIdentity(NamedTuple):
+    """Which run a completion callback belongs to.
+
+    A session id alone is not enough. One session can be run again -- a resume,
+    or the same task submitted twice -- and the worker callback of the previous
+    attempt can arrive after the next one has already started. Keyed only by
+    session, that late callback would clear ``agent_busy``, drop the new child's
+    process handle, re-enable the composer and publish a terminal status over a
+    run that is still working.
+
+    The generation is a monotonic counter on the application, not on the
+    session: two different sessions therefore also get two different
+    identities, and a counter that never reuses a value cannot be confused by a
+    session id that repeats.
+    """
+
+    session_id: str
+    generation: int
+
+# Lifecycle statuses this process may publish. Constants rather than inline
+# literals so the publisher, the localisation contract test and the session
+# browser share one vocabulary instead of three copies of it.
+STATUS_RUNNING = "running"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
+# A run that reached its own end without a verified change and without an
+# evidence-backed answer. Neither success nor crash: the session is saved and
+# resumable, so it gets a neutral status and never a typed ERROR. ``stopped``
+# is already in the store's waiting vocabulary, which is what makes the row
+# offer ``resume`` rather than ``open``.
+STATUS_STOPPED = "stopped"
+
+# The CLI exit code and the structured report disagreeing is itself a defect:
+# exit 0 beside a failed report, or exit 1 beside ``verified``. Guessing which
+# half is honest is how a broken run gets a green row, so the disagreement is
+# reported under its own code instead.
+ERROR_AGENT_CONTRACT = "agent_contract_mismatch"
+
+# A child that printed no parseable structured report at all. Distinct from a
+# contract mismatch: there the two halves disagreed, here there is nothing to
+# disagree with, and the two need different words and different diagnostics.
+ERROR_AGENT_MALFORMED = "agent_malformed_report"
+
+# ``Event.summary`` is a stable machine-readable message identifier, never a
+# sentence. One field, not two: a second ``message_id`` beside a prose summary
+# would inevitably drift, and the drifting copy would be the one a screen reads.
+# The words a person sees come from _EVENT_SUMMARY_TEXT below, in their own
+# language; the free-form diagnostic detail stays in the bounded ``data.reason``
+# and, for an ERROR, ``data.code`` remains the machine contract.
+SUMMARY_RUN_STARTED = "agent_run_started"
+SUMMARY_RUN_COMPLETED = "agent_run_completed"
+SUMMARY_RUN_STOPPED = "agent_run_stopped"
+SUMMARY_RUN_FAILED = "agent_run_failed"
+SUMMARY_RUN_CANCELLED = "agent_run_cancelled"
+SUMMARY_RUN_USAGE = "agent_run_usage"
+SUMMARY_CONTRACT_MISMATCH = "agent_contract_mismatch"
+SUMMARY_MALFORMED_REPORT = "agent_malformed_report"
+
+# Every lifecycle identifier this process can publish, with both languages. A
+# separate catalog from _SESSION_STATUS_TEXT on purpose: a status describes what
+# a session *is*, an event summary describes what just *happened*, and
+# overloading one dictionary with both would make "stopped" mean two things.
+_EVENT_SUMMARY_TEXT: Dict[str, Tuple[str, str]] = {
+    SUMMARY_RUN_STARTED: ("запуск задачи", "run started"),
+    SUMMARY_RUN_COMPLETED: ("задача завершена", "run completed"),
+    SUMMARY_RUN_STOPPED: ("задача остановлена", "run stopped"),
+    SUMMARY_RUN_FAILED: ("задача завершилась ошибкой", "run failed"),
+    SUMMARY_RUN_CANCELLED: ("задача отменена пользователем", "run cancelled"),
+    SUMMARY_RUN_USAGE: ("расход токенов", "token usage"),
+    SUMMARY_CONTRACT_MISMATCH: (
+        "противоречивый результат запуска",
+        "inconsistent run result",
+    ),
+    SUMMARY_MALFORMED_REPORT: (
+        "нет структурированного отчёта",
+        "no structured report",
+    ),
+}
+
+
+def _event_summary_text(identifier: str, english: bool) -> str:
+    """Localize one event summary identifier, safely for unknown values.
+
+    An identifier nobody has translated yet is returned verbatim rather than
+    blanked or raised on: a message the catalog has not caught up with is still
+    a fact about the run, and a diagnostic fallback beats an empty line.
+    """
+
+    words = _EVENT_SUMMARY_TEXT.get(identifier)
+    if words is None:
+        return identifier
+    return words[1] if english else words[0]
+
+
+# Every status identifier SessionViewStore can produce must be translatable:
+# the release scope forbids showing a raw internal enum as the primary UI text.
+# Kept in sync with _RUNNING_STATUSES / _WAITING_STATUSES / _TERMINAL_STATUSES
+# in session_view.py, and asserted by a contract test.
+_SESSION_STATUS_TEXT: Dict[str, Tuple[str, str]] = {
+    "running": ("выполняется", "running"),
+    "active": ("выполняется", "running"),
+    "working": ("выполняется", "running"),
+    "executing": ("выполняется", "running"),
+    "planning": ("планирование", "planning"),
+    "waiting": ("ожидание", "waiting"),
+    "paused": ("пауза", "paused"),
+    "blocked": ("заблокирована", "blocked"),
+    "finished": ("завершена", "finished"),
+    "completed": ("завершена", "completed"),
+    "failed": ("ошибка", "failed"),
+    "revoked": ("отозвана", "revoked"),
+    "cancelled": ("отменена", "cancelled"),
+    "stopped": ("остановлена", "stopped"),
+    "unknown": ("неизвестно", "unknown"),
+}
+
+# The one thing the row asks the user to do. `review_risk` outranks the rest
+# because it is the only state where the agent is stopped and waiting.
+_SESSION_ACTION_TEXT: Dict[str, Tuple[str, str]] = {
+    "review_risk": ("нужно подтверждение", "confirmation needed"),
+    "resume": ("продолжить", "resume"),
+    "stop": ("остановить", "stop"),
+    "open": ("открыть", "open"),
+}
+
+# Why a run is not moving, in words. The identifiers are the reasons
+# :mod:`karox.agent` puts in ``AgentReport.reason`` (``step_limit``,
+# ``wall_time_limit``, ``budget_exceeded``, ``repeated_action``,
+# ``unverified_changes``, ``no_changes``, ``provider_error``), plus the two this
+# process publishes itself (``stopped_by_user`` and the store's
+# ``confirmation_required``). A status word alone said "stopped" and left the
+# user to guess whether the agent hit a limit, changed nothing, or was stopped
+# by hand -- three different next actions.
+_WAITING_REASON_TEXT: Dict[str, Tuple[str, str]] = {
+    "no_changes": ("изменений нет", "no changes"),
+    "unverified_changes": ("изменения не проверены", "unverified changes"),
+    "step_limit": ("достигнут лимит шагов", "step limit reached"),
+    "wall_time_limit": ("достигнут лимит времени", "time limit reached"),
+    "budget_exceeded": ("превышен бюджет", "budget exceeded"),
+    "repeated_action": ("повторное действие", "repeated action"),
+    "provider_error": ("ошибка провайдера", "provider error"),
+    "already_verified": ("уже проверено", "already verified"),
+    "stopped": ("остановлена", "stopped"),
+    "stopped_by_user": ("остановлена пользователем", "stopped by user"),
+    WAIT_CONFIRMATION: ("нужно подтверждение", "confirmation needed"),
+}
+
+
+def _catalog_text(
+    catalog: Dict[str, Tuple[str, str]], identifier: str, english: bool
+) -> str:
+    """One catalog lookup, with the identifier itself as the fallback.
+
+    Every catalog in this module shares the rule: a value nobody has translated
+    yet is rendered verbatim rather than blanked. A screen that silently drops an
+    unknown identifier hides a real fact about the run, and one that raises takes
+    the interface down over a missing dictionary entry.
+    """
+
+    words = catalog.get(identifier)
+    if words is None:
+        return identifier
+    return words[1] if english else words[0]
+
+
+def _session_status_words(status: str, english: bool) -> str:
+    return _catalog_text(_SESSION_STATUS_TEXT, status, english)
+
+
+def _session_action_words(action: str, english: bool) -> str:
+    return _catalog_text(_SESSION_ACTION_TEXT, action, english)
+
+
+# C. Whole shorter spellings of the same actions, for the narrow browser footer.
+#
+# The alternative was character truncation, and it does not survive contact with
+# a reader: `Enter: нужно подтверж…` and `Enter: confirmatio…` both make
+# the person guess what the key is about to do, which is precisely the guess a
+# confirmation exists to prevent. Every entry here is a complete word for the
+# same action, so the footer degrades in vocabulary and never in meaning.
+#
+# ``review_risk`` says "review" rather than "confirm": Enter opens the decision,
+# it does not approve it, and a short form that promises approval would be a
+# more dangerous lie than the long one it replaced.
+_SESSION_ACTION_SHORT: Dict[str, Tuple[str, str]] = {
+    "review_risk": ("проверить", "review"),
+}
+
+
+def _session_action_spellings(action: str, english: bool) -> Tuple[str, ...]:
+    """Every whole way to name one action, longest first.
+
+    Ordered so a caller with a width budget can walk it and stop at the first
+    thing that fits. Duplicates are dropped, so an action whose long form is
+    already short contributes one spelling rather than the same word twice.
+    """
+
+    spellings = [_session_action_words(action, english)]
+    short = _SESSION_ACTION_SHORT.get(action)
+    if short is not None:
+        candidate = short[1] if english else short[0]
+        if candidate and candidate not in spellings:
+            spellings.append(candidate)
+    return tuple(spellings)
+
+
+# C. What an empty browser says, long and short. Same rule as the actions: the
+# narrow form is a complete sentence, not the wide one with its instruction cut
+# in half. "No sessions yet" is still true and still actionable; "No sessions
+# yet. Start a ta…" is neither.
+_BROWSER_EMPTY_TEXT: Tuple[Tuple[str, str], ...] = (
+    (
+        "Сессий пока нет. Начните задачу в чате.",
+        "No sessions yet. Start a task in chat.",
+    ),
+    ("Сессий пока нет.", "No sessions yet."),
+)
+
+
+def _browser_empty_text(english: bool, width: int = 0) -> str:
+    """The widest whole empty-state sentence that fits.
+
+    Goes through the same policy as everything else in the footer instead of
+    being written straight into the screen class, which is how this branch
+    escaped the width budget in the first place and could wrap the one line the
+    footer is allowed.
+    """
+
+    forms = [pair[1] if english else pair[0] for pair in _BROWSER_EMPTY_TEXT]
+    if width <= 0:
+        return forms[0]
+    for form in forms:
+        if len(form) <= width:
+            return form
+    # Narrower than the shortest sentence. Still whole: a cut instruction is
+    # worse than a short one, and the binding works either way.
+    return forms[-1]
+
+
+def _waiting_reason_text(identifier: str, english: bool) -> str:
+    """Localize a waiting reason, including the compound ones.
+
+    ``budget_exceeded:output_tokens`` is a real value: :mod:`karox.agent`
+    appends the specific budget to the reason. Only the part before the colon is
+    a catalog key, so the qualifier is stripped for the lookup rather than
+    turning the whole reason into an untranslated identifier on screen.
+    """
+
+    if not identifier:
+        return ""
+    if identifier in _WAITING_REASON_TEXT:
+        return _catalog_text(_WAITING_REASON_TEXT, identifier, english)
+    base = identifier.split(":", 1)[0]
+    if base in _WAITING_REASON_TEXT:
+        return _catalog_text(_WAITING_REASON_TEXT, base, english)
+    return identifier
+
+
+def _session_detail_words(row: SessionSummary, english: bool) -> str:
+    """The single extra fact shown beside the status word.
+
+    One detail, not three. A pending confirmation outranks everything because it
+    is the only state waiting on the person reading the screen; a live step is
+    next because it is the most recent thing that happened; a waiting reason is
+    last and is what makes a finished-but-unverified run explain itself.
+    """
+
+    if row.primary_action == ACTION_REVIEW_RISK:
+        return _session_action_words(ACTION_REVIEW_RISK, english)
+    if row.current_step:
+        return row.current_step
+    return _waiting_reason_text(row.waiting_reason, english)
+
+
+# What a row shows for a fact that has no canonical source. ``workspace_mode`` is
+# the one that matters: no persisted or configuration field of that name exists in
+# the product, so a row must neither invent a value nor refuse to draw itself.
+UNKNOWN_FIELD = "\u2014"
+
+
+def _elapsed_text(seconds: float) -> str:
+    """How long a run has been going, short enough for a row.
+
+    Digits and unit letters only: a duration is the same fact in either language,
+    and putting it through the catalogs would buy nothing but two more entries to
+    keep in step.
+    """
+
+    total = max(int(seconds), 0)
+    if total < 60:
+        return f"{total}s"
+    minutes, remaining = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{remaining:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _identity_fields(row: SessionSummary) -> List[str]:
+    """Which run this is: task, model, access profile, workspace mode.
+
+    Only what a publisher actually reported. ``workspace_mode`` is rendered as a
+    neutral dash when nothing reported it, because a plausible default renders
+    identically to a fact and nothing on the screen would distinguish the two.
+    """
+
+    fields: List[str] = []
+    if row.title:
+        fields.append(row.title if len(row.title) <= 48 else row.title[:47] + "\u2026")
+    model = "/".join(part for part in (row.provider, row.model) if part)
+    if model:
+        fields.append(model)
+    if row.access_profile:
+        fields.append(row.access_profile)
+    fields.append(row.workspace_mode or UNKNOWN_FIELD)
+    return fields
+
+
+def _measurement_fields(row: SessionSummary, english: bool) -> List[str]:
+    """What the run has spent, and only where somebody measured it.
+
+    A zero is not published as a measurement: "this run cost nothing" and "nobody
+    counted" are different claims, and the second one must not look like the
+    first.
+    """
+
+    fields: List[str] = []
+    if row.changed_files:
+        label = "files" if english else "файлов"
+        fields.append(f"{label}={row.changed_files}")
+    if row.elapsed_seconds > 0:
+        fields.append(_elapsed_text(row.elapsed_seconds))
+    if row.token_budget.used > 0:
+        label = "tokens" if english else "токенов"
+        fields.append(f"{label}={int(row.token_budget.used)}")
+    if row.cost_budget.used > 0:
+        label = "cost" if english else "стоимость"
+        amount = f"{row.cost_budget.used:.4f}".rstrip("0").rstrip(".")
+        unit = f" {row.cost_budget.unit}" if row.cost_budget.unit else ""
+        fields.append(f"{label}={amount}{unit}")
+    return fields
+
+
+def _session_row_text(
+    row: SessionSummary, english: bool, *, verbose: bool = False
+) -> str:
+    """One technical session line, rendered from a typed view model only.
+
+    This is the ``/sessions`` live block and the technical detail surfaces. It
+    is *not* the Session Browser: C gave the browser its own contract in
+    :func:`_session_browser_row_text`, because a chooser and a record of what
+    happened want opposite things from the same facts, and one renderer asked
+    to be both serves neither.
+
+    What the two still share is the source. Both read one ``SessionSummary``
+    and both spell a status, an action and a waiting reason out of the same
+    catalogs, so a run cannot be "Stopped" in one surface and "Paused" in the
+    other. Only the selection and the ordering of fields differ.
+
+    ``verbose`` selects the wide form: identity, measurements and both of step
+    and waiting reason. It is kept for the detail surfaces that pin it.
+
+    Built entirely from the catalogs above, so the same row renders in either
+    language and a test can assert on it without matching prose. Nothing here
+    parses ``session.json`` or ``provider_history``: if a fact is not in the
+    view model, it does not reach the row.
+
+    ``last_event_summary`` is the reason the event summary catalog exists. The
+    publishers send stable identifiers such as ``agent_run_stopped``, which is
+    exactly what a row must not show verbatim, and the words for it live in
+    :data:`_EVENT_SUMMARY_TEXT` in both languages.
+    """
+
+    fields = [row.session_id]
+    if verbose:
+        fields.extend(_identity_fields(row))
+    fields.append(_session_status_words(row.status, english))
+    if verbose:
+        # Both facts, not the better of the two. `_session_detail_words` picks
+        # one on purpose because a status *bar* has room for one, while a browser
+        # row is where a person decides what to do next and needs to see that a
+        # run is on `apply_patch` *and* waiting on a confirmation.
+        if row.current_step:
+            fields.append(row.current_step)
+        reason = _waiting_reason_text(row.waiting_reason, english)
+        if reason:
+            fields.append(reason)
+    else:
+        detail = _session_detail_words(row, english)
+        if detail:
+            fields.append(detail)
+    if row.last_event_summary:
+        fields.append(_event_summary_text(row.last_event_summary, english))
+    if verbose:
+        fields.extend(_measurement_fields(row, english))
+    if row.error_count:
+        label = "errors" if english else "ошибок"
+        fields.append(f"{label}={row.error_count}")
+    fields.append(_session_action_words(row.primary_action, english))
+    return " • ".join(fields)
+
+
+# ------------------------------------------------- C. compact browser rows
+#
+# A separate presentation contract, deliberately beside `_session_row_text`
+# rather than a third mode inside it. The verbose form is what `/sessions`
+# publishes and what several tests pin; widening that function's job to also
+# mean "but smaller" is how one renderer ends up serving two products badly.
+#
+# This layer is pure: it reads a `SessionSummary`, holds no state, reduces
+# nothing, and reuses the existing catalogs so a status cannot mean one thing
+# here and another in the status bar.
+
+# How wide a terminal has to be before a field earns its place. Fields are
+# dropped whole and in a fixed order, because half a model name is worse than
+# no model name: `openai/claude-op...` cannot be acted on.
+# Measured against the *content* width a row actually gets, which after the
+# dialog max-width, the border, the padding and the scrollbar is well short of
+# the terminal. 88 is what a 120-column terminal leaves once the browser stops
+# stretching, so the model appears there and nowhere narrower.
+BROWSER_WIDE = 88
+BROWSER_STANDARD = 64
+
+# The fewest columns worth giving a task before an optional field is dropped
+# instead. Below this the headline stops identifying anything and the row is
+# just decoration with a status on the end.
+TASK_MIN_COLUMNS = 16
+
+# What a row may not become. A task is a person's sentence, and a person's
+# sentence can contain newlines, escape sequences and Rich markup.
+_ROW_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _browser_task_text(row: SessionSummary, english: bool, budget: int) -> str:
+    """The row's headline: the task, or a short stand-in for it.
+
+    Control characters are stripped rather than escaped. A task carrying a
+    newline would otherwise draw a second visual line inside a one-line row and
+    push every following row down; an ANSI sequence would repaint the terminal.
+    ``markup=False`` on the widget covers Rich markup, and this covers the rest.
+
+    With no task the row falls back to a short suffix of the session id. The
+    full id is an internal identifier that means nothing to a person choosing a
+    session, and Session Detail is where it belongs.
+    """
+
+    title = _ROW_CONTROL.sub(" ", row.title or "").strip()
+    title = " ".join(title.split())
+    if not title:
+        # A short id is shown whole. Slicing the tail off `s-summary` gave
+        # "ummary" -- a truncated word that reads as a name and is not one.
+        # A long minted id (`task-<epoch>-<suffix>`) keeps its final segment,
+        # which is the part that distinguishes it.
+        identifier = row.session_id or ""
+        if len(identifier) <= 14:
+            suffix = identifier or "?"
+        else:
+            suffix = identifier.rsplit("-", 1)[-1] or identifier[-8:]
+        title = f"Session {suffix}" if english else f"\u0421\u0435\u0441\u0441\u0438\u044f {suffix}"
+    if budget > 1 and len(title) > budget:
+        title = title[: budget - 1] + "\u2026"
+    return title
+
+
+def _browser_activity_kind(step: Any) -> str:
+    """What a live step means, or nothing at all.
+
+    Deliberately not :func:`_activity_kind_for_tool`. That function is fail-soft
+    towards ``ACTIVITY_WORKING`` because the activity line always has to say
+    something -- it is the only indicator ordinary mode has. A browser row is
+    under no such obligation: resolving every uncatalogued tool to "Working"
+    would put the same word beside every running session, which distinguishes
+    nothing and costs a column that the task could have used.
+
+    So the lookup is the same catalog and the same spelling rules as A2, and
+    only the fallback differs. Aliases matter here: the model is shown
+    ``repo_edit_file`` while the audit log records ``repo.edit_file``, and
+    ``current_step`` can carry either.
+    """
+
+    return _TOOL_ACTIVITY_KINDS.get(_canonical_tool_name(_identifier(step)), "")
+
+
+def _browser_activity_text(row: SessionSummary, english: bool) -> str:
+    """What the run is doing or waiting on, in words, or nothing.
+
+    Priority is the product's, not this function's: a pending confirmation is
+    the only state waiting on the reader, so it wins; then a waiting reason,
+    which explains a stopped run; and a live step only if it can be said
+    humanly.
+
+    A raw ``current_step`` such as ``repo_edit_file`` is *omitted* rather than
+    shown. The browser exists to choose a session, and a tool identifier does
+    not help choose -- it only leaks vocabulary the user never agreed to learn.
+    An unclassified step therefore contributes nothing: silence is a smaller
+    lie than a word the reader cannot act on.
+    """
+
+    if row.primary_action == ACTION_REVIEW_RISK:
+        return _session_action_words(ACTION_REVIEW_RISK, english)
+    reason = _waiting_reason_text(row.waiting_reason, english)
+    if reason and reason != row.waiting_reason:
+        # Translated: safe to show. An untranslated identifier is not.
+        return reason
+    kind = _browser_activity_kind(row.current_step)
+    if kind:
+        russian, plain_english = _ACTIVITY_WORDS[kind]
+        return plain_english if english else russian
+    return ""
+
+
+def _session_browser_fields(
+    row: SessionSummary, english: bool, width: int
+) -> List[str]:
+    """The fields one browser row shows at this width, already in order.
+
+    Everything a person needs to choose a session, and nothing they would need
+    only after choosing it. No tokens, no cost, no budgets, no access profile,
+    no workspace mode, no error count, no per-row action: those live in Session
+    Detail, and repeating them here is what turned the browser into a report.
+    """
+
+    # The task gets whatever the terminal can spare, so a narrow window loses
+    # the tail of a long sentence rather than the status that follows it.
+    # The tail is built first and the task is given what is left, because the
+    # task is the only elastic field: it can be shortened and still identify
+    # the session, while half a status word identifies nothing. A fixed task
+    # budget was the earlier bug -- 48 columns fitted in English and pushed a
+    # long Russian row past 80 into a wrap.
+    tail = [_session_status_words(row.status, english)]
+    activity = _browser_activity_text(row, english)
+    if activity:
+        tail.append(activity)
+    if width >= BROWSER_STANDARD and row.elapsed_seconds > 0:
+        tail.append(_elapsed_text(row.elapsed_seconds))
+    if width >= BROWSER_WIDE:
+        model = "/".join(part for part in (row.provider, row.model) if part)
+        if model:
+            tail.append(model)
+
+    def spent(fields: List[str]) -> int:
+        return sum(len(field) for field in fields) + 3 * len(fields)
+
+    # Optional fields are dropped whole, from the least important end, until
+    # the task has a readable share. The status is never dropped.
+    while len(tail) > 1 and width - spent(tail) < TASK_MIN_COLUMNS:
+        tail.pop()
+    return [_browser_task_text(row, english, max(width - spent(tail), 1)), *tail]
+
+
+def _session_browser_row_text(
+    row: SessionSummary, english: bool, width: int
+) -> str:
+    return " \u00b7 ".join(_session_browser_fields(row, english, width))
+
+
+def _session_browser_footer(
+    row: Optional[SessionSummary],
+    english: bool,
+    width: int = 0,
+    *,
+    shown: int = 0,
+    hidden: int = 0,
+) -> str:
+    """One footer line, assembled to fit the width it is given.
+
+    A browser that repeats Stop/Resume/Open on every line is a list of buttons
+    rather than a list of sessions. The action still comes from the store, so
+    this changes where it is shown and never what it is.
+
+    Priority, and fields are dropped whole from the bottom of it: the selected
+    row's action, then what the list is not showing, then the Esc hint. Two
+    rules follow from the fact that this has to stay on one line. An action is
+    never half-printed, because ``Enter: \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u2026`` asks the reader to guess what
+    key does what. And the Esc hint is the first thing to go, because Escape
+    keeps working whether or not the footer advertises it, while the count of
+    hidden sessions exists nowhere else on the screen.
+
+    That last point is why the overflow field has a short form. Dropping it on
+    a narrow terminal would leave the browser silently claiming to show every
+    session it has, which is the one thing this footer must not do.
+    """
+
+    variants: List[Tuple[str, ...]] = []
+    if row is not None:
+        spellings = _session_action_spellings(row.primary_action, english)
+        variants.append(
+            tuple(
+                [f"Enter: {spellings[0]}"]
+                + [spelling for spelling in spellings]
+            )
+        )
+    if hidden > 0:
+        variants.append(
+            (
+                f"showing latest {shown} \u00b7 {hidden} older hidden"
+                if english
+                else f"\u043f\u043e\u043a\u0430\u0437\u0430\u043d\u044b {shown} \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0445 \u00b7 {hidden} \u0441\u0442\u0430\u0440\u044b\u0445 \u0441\u043a\u0440\u044b\u0442\u043e",
+                f"+{hidden} older" if english else f"+{hidden} \u0441\u0442\u0430\u0440\u044b\u0445",
+            )
+        )
+    variants.append(("Esc: close" if english else "Esc: \u0437\u0430\u043a\u0440\u044b\u0442\u044c",))
+
+    if width <= 0:
+        return " \u00b7 ".join(field[0] for field in variants)
+
+    text = ""
+    for field in variants:
+        chosen = ""
+        for spelling in field:
+            candidate = f"{text} \u00b7 {spelling}" if text else spelling
+            if len(candidate) <= width:
+                chosen = candidate
+                break
+        if not chosen:
+            # Lower-priority fields are not tried once one has been dropped:
+            # a footer reading "Enter: stop \u00b7 Esc: close" while twelve sessions
+            # are hidden spends its last columns on the least useful fact.
+            break
+        text = chosen
+    if text:
+        return text
+    # Narrower than even the shortest whole spelling of the highest-priority
+    # field. Return it anyway, whole. Truncating it would print `подтверж…`
+    # and ask the reader to guess what Enter is about to do, and the layout
+    # minimum is what actually keeps this branch unreachable in production:
+    # the dialog gives the footer forty columns at the narrowest supported
+    # terminal, against a longest short action of ten.
+    return variants[0][-1]
+
+
+# ---------------------------------------------------------------- detail view
+#
+# Everything below renders SessionDetail. The same rule as above applies: the
+# view models carry identifiers and numbers, the words live here, and an
+# identifier nobody has translated yet is shown verbatim rather than dropped.
+
+# Which event family a timeline row belongs to. Kept in sync with EventKind by a
+# contract test rather than by hope.
+_EVENT_KIND_TEXT: Dict[str, Tuple[str, str]] = {
+    "agent_action": ("шаг агента", "agent step"),
+    "tool_call": ("инструмент", "tool call"),
+    "browser_action": ("браузер", "browser"),
+    "session_state": ("состояние", "state"),
+    "connection_state": ("подключение", "connection"),
+    "risk_decision": ("проверка риска", "risk decision"),
+    "confirmation": ("подтверждение", "confirmation"),
+    "performance_span": ("замер", "span"),
+    "health_change": ("здоровье", "health"),
+    "evidence": ("доказательство", "evidence"),
+    "error": ("ошибка", "error"),
+}
+
+_EVENT_LEVEL_TEXT: Dict[str, Tuple[str, str]] = {
+    "info": ("инфо", "info"),
+    "warning": ("предупреждение", "warning"),
+    "error": ("ошибка", "error"),
+}
+
+# Section headings, and the words for the facts inside them.
+_DETAIL_TEXT: Dict[str, Tuple[str, str]] = {
+    "timeline": ("Хронология", "Timeline"),
+    "tools": ("Инструменты", "Tool calls"),
+    "risk": ("Smart Stop", "Smart Stop"),
+    "errors": ("Ошибки", "Errors"),
+    "usage": ("Расход", "Usage"),
+    "workspace": ("Рабочая копия", "Workspace"),
+    "browser": ("Браузер", "Browser"),
+    "evidence": ("Доказательства", "Evidence"),
+    "performance": ("Производительность", "Performance"),
+    "empty": ("нет данных", "no data"),
+    "running": ("выполняется", "running"),
+    "ok": ("успех", "ok"),
+    "failed": ("ошибка", "failed"),
+    "risk_level": ("уровень риска", "risk level"),
+    "action_digest": ("действие", "action"),
+    "reasons": ("причины", "reasons"),
+    "awaiting": ("ожидает подтверждения", "awaiting confirmation"),
+    "allowed": ("разрешено", "allowed"),
+    "blocked": ("заблокировано", "blocked"),
+    "dropped": ("события потеряны", "events dropped"),
+    "truncated": ("строк не показано", "entries not shown"),
+    "cost": ("стоимость", "cost"),
+    "limit": ("лимит", "limit"),
+    "spent": ("израсходовано", "spent"),
+    "no_risk": (
+        "Подтверждение не требуется.",
+        "No confirmation is pending.",
+    ),
+    # D. The overview-first vocabulary.
+    "overview": ("Обзор", "Overview"),
+    "attention": ("Требует внимания", "Needs attention"),
+    "progress": ("Изменения и проверки", "Changes and checks"),
+    "diagnostics": ("Диагностика", "Diagnostics"),
+    "needs_confirmation": (
+        "Требуется ваше подтверждение.",
+        "Your confirmation is required.",
+    ),
+    # Three outcomes, and the third is the default. "Not confirmed" is not a
+    # softer way of saying failed: it says nobody published a result, which is
+    # the honest answer far more often than either of the other two.
+    "checks_passed": ("Проверки пройдены.", "Checks passed."),
+    "checks_failed": ("Проверки не пройдены.", "Checks failed."),
+    "checks_unknown": (
+        "Проверка не подтверждена.",
+        "Verification is not confirmed.",
+    ),
+    "changed_files": ("изменено файлов", "files changed"),
+    "no_changes": ("Изменений пока нет.", "No changes yet."),
+    "has_diff": ("есть diff", "a diff was recorded"),
+    "details_below": (
+        "Технические подробности ниже.",
+        "Technical details are below.",
+    ),
+    "no_live_activity": (
+        "Живой активности пока нет: сессия восстановлена из записи.",
+        "No live activity yet: this session was restored from a record.",
+    ),
+    "next_step": ("дальше", "next"),
+    "errors_count": ("ошибок", "errors"),
+    "evidence_count": ("доказательств", "evidence records"),
+}
+
+
+def _detail_words(name: str, english: bool) -> str:
+    return _catalog_text(_DETAIL_TEXT, name, english)
+
+
+def _event_kind_words(kind: str, english: bool) -> str:
+    return _catalog_text(_EVENT_KIND_TEXT, kind, english)
+
+
+def _event_level_words(level: str, english: bool) -> str:
+    return _catalog_text(_EVENT_LEVEL_TEXT, level, english)
+
+
+def _clock_text(timestamp: float) -> str:
+    """A wall-clock time for one row, or nothing when none was recorded.
+
+    Local time and seconds only: a timeline is read against "what happened just
+    now", and a date on every row would cost width without answering that. A
+    zero timestamp means no publisher recorded one, which is not 1970.
+    """
+
+    if timestamp <= 0:
+        return ""
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(timestamp))
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _duration_text(milliseconds: Optional[float]) -> str:
+    """A measured duration, in the coarsest unit that stays readable."""
+
+    if milliseconds is None or milliseconds < 0:
+        return ""
+    if milliseconds < 1000:
+        return f"{int(milliseconds)}ms"
+    return _elapsed_text(milliseconds / 1000.0)
+
+
+def _timeline_entry_text(entry: TimelineEntry, english: bool) -> str:
+    """One timeline row, from a typed entry and the catalogs only.
+
+    ``TimelineEntry.data`` is already an explicit per-kind allowlist built by the
+    reducer, so the whole mapping can be shown: there is no payload here that
+    nobody asked for. It is still rendered key by key rather than as a ``dict``
+    repr, because a repr is how a field added later reaches a screen unreviewed.
+    """
+
+    fields: List[str] = [f"#{entry.seq}"]
+    clock = _clock_text(entry.timestamp)
+    if clock:
+        fields.append(clock)
+    fields.append(_event_kind_words(entry.kind, english))
+    # Only worth saying when it is not the ordinary case.
+    if entry.level and entry.level != "info":
+        fields.append(_event_level_words(entry.level, english))
+    if entry.summary:
+        fields.append(_event_summary_text(entry.summary, english))
+    for key, value in entry.data.items():
+        if key == "duration_ms":
+            # ``bool`` is an ``int`` in Python, and a duration of ``True`` is not
+            # a duration, so the flag case is excluded explicitly.
+            measured = (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
+            duration = _duration_text(measured)
+            if duration:
+                fields.append(duration)
+            continue
+        if isinstance(value, bool):
+            fields.append(f"{key}={'yes' if value else 'no'}")
+        else:
+            fields.append(f"{key}={value}")
+    return " · ".join(fields)
+
+
+def _tool_call_text(call: ToolCallView, english: bool) -> str:
+    """One tool call: what ran, whether it finished, and how long it took."""
+
+    fields: List[str] = [call.name or call.call_id]
+    if call.running:
+        fields.append(_detail_words("running", english))
+    elif call.ok is None:
+        # Finished, but no publisher said whether it succeeded. Reporting "ok"
+        # here would be an invention.
+        fields.append(UNKNOWN_FIELD)
+    else:
+        fields.append(_detail_words("ok" if call.ok else "failed", english))
+    clock = _clock_text(call.started_at)
+    if clock:
+        fields.append(clock)
+    duration = _duration_text(call.duration_ms)
+    if duration:
+        fields.append(duration)
+    if call.detail:
+        fields.append(call.detail)
+    return " · ".join(fields)
+
+
+def _usage_lines(row: SessionSummary, detail: SessionDetail, english: bool) -> List[str]:
+    """Measured tokens, money and budgets -- and nothing when unmeasured.
+
+    A zero is never printed for an absent measurement: "this run was free" and
+    "nobody counted" are different claims, and the second must not look like the
+    first.
+    """
+
+    lines: List[str] = []
+    for name, value in sorted(detail.usage.items()):
+        lines.append(f"{name}: {int(value) if float(value).is_integer() else value}")
+    for currency, amount in sorted(detail.costs.items()):
+        lines.append(f"{_detail_words('cost', english)} {currency}: {amount:g}")
+    for label, budget in (
+        ("tokens" if english else "токены", row.token_budget),
+        (_detail_words("cost", english), row.cost_budget),
+    ):
+        if budget.used <= 0 and budget.limit is None:
+            continue
+        text = f"{label}: {_detail_words('spent', english)} {budget.used:g}"
+        if budget.limit is not None:
+            text += f" / {_detail_words('limit', english)} {budget.limit:g}"
+        lines.append(text)
+    return lines
+
+
+def _mapping_lines(values: Mapping[str, Any], limit: int = 12) -> List[str]:
+    """Named fields of an already-bounded view mapping, one per line.
+
+    Used for the git, diff and browser blocks. The reducer copied only allowed
+    keys into these, so the mapping is safe to show -- key by key, never as a
+    repr, and never more lines than a block can hold.
+    """
+
+    lines: List[str] = []
+    for key, value in list(values.items())[:limit]:
+        if isinstance(value, bool):
+            lines.append(f"{key}: {'yes' if value else 'no'}")
+        else:
+            lines.append(f"{key}: {value}")
+    return lines
+
+
+def _evidence_lines(items: Sequence[Mapping[str, Any]], english: bool) -> List[str]:
+    lines: List[str] = []
+    for item in items:
+        parts = [
+            str(item[key])
+            for key in ("kind", "evidence_id", "summary")
+            if item.get(key)
+        ]
+        if parts:
+            lines.append(" · ".join(parts))
+    return lines
+
+
+def _performance_lines(
+    spans: Mapping[str, Mapping[str, float]], english: bool
+) -> List[str]:
+    lines: List[str] = []
+    for component, values in spans.items():
+        count = int(values.get("count", 0))
+        total = _duration_text(values.get("total_ms"))
+        worst = _duration_text(values.get("max_ms"))
+        lines.append(f"{component}: {count} · {total} · max {worst}")
+    return lines
+
+
+def _risk_lines(risk: Optional[RiskStateView], english: bool) -> List[str]:
+    """Describe a risk verdict without carrying anything secret.
+
+    Named fields only. The ledger keeps confirmation tokens out of events by
+    construction and this layer has no key for one, so there is nothing here to
+    leak; assembling the text field by field is what keeps that true if a
+    publisher ever changes. There is deliberately no Approve control: approving
+    must go through the ledger, and a button that only looked like it did would
+    be worse than no button.
+    """
+
+    if risk is None:
+        return [_detail_words("no_risk", english)]
+    lines = [
+        f"{_detail_words('risk_level', english)}: {risk.level or UNKNOWN_FIELD}",
+        f"{_detail_words('allowed' if risk.allowed else 'blocked', english)}",
+    ]
+    if risk.reason:
+        lines.append(_waiting_reason_text(risk.reason, english))
+    if risk.action_digest:
+        lines.append(
+            f"{_detail_words('action_digest', english)}: {risk.action_digest[:16]}"
+        )
+    if risk.reasons:
+        lines.append(f"{_detail_words('reasons', english)}: " + "; ".join(risk.reasons))
+    if risk.awaiting_confirmation:
+        lines.append(_detail_words("awaiting", english))
+    return lines
+
+
+def _detail_header_lines(detail: SessionDetail, english: bool) -> List[str]:
+    """Who this session is, above the sections.
+
+    The first line is `_session_row_text` verbatim, in its verbose form. Detail
+    is a technical surface, so it wants the technical renderer: identity,
+    measurements, step and waiting reason all at once.
+
+    It is deliberately *wider* than the browser row the user pressed Enter on,
+    and that is the point of opening it. The two cannot contradict each other
+    because both are rendered from the same ``SessionSummary`` and the same
+    catalogs; Detail simply keeps the fields the browser dropped.
+    """
+
+    row = detail.summary
+    lines = [_session_row_text(row, english, verbose=True)]
+    fields: List[str] = []
+    if row.agent:
+        fields.append(f"agent: {row.agent}")
+    if row.source:
+        fields.append(f"source: {row.source}")
+    if row.last_event_seq:
+        fields.append(f"seq: {row.last_event_seq}")
+    if fields:
+        lines.append(" · ".join(fields))
+    return lines
+
+
+# ------------------------------------------------- D. overview-first detail
+#
+# A separate presentation contract over the same `SessionDetail`, for the same
+# reason C gave the browser one: the technical renderer above answers "what
+# exactly happened", and these answer "what is this, and does it need me".
+#
+# The screen used to open on `_session_row_text(verbose=True)` -- an internal
+# session id, an access profile and a raw tool name, before any sentence a
+# person could act on. Nothing is deleted here; the identity line simply moved
+# to the bottom, into diagnostics, where somebody debugging will look for it.
+#
+# Pure: reads one `SessionDetail`, holds no state, reduces nothing, and reuses
+# the catalogs so a status cannot mean one thing here and another in the
+# browser row the user pressed Enter on.
+
+# How much of a task headline the detail screen shows. Wider than a browser row
+# because there is no status column competing for the same line.
+_DETAIL_TASK_COLUMNS = 72
+
+
+def _detail_check_outcome(detail: SessionDetail) -> Optional[bool]:
+    """Whether a verification actually reported a result, and which.
+
+    ``True`` passed, ``False`` failed, ``None`` nobody said. The third case is
+    the common one and must not collapse into either of the others.
+
+    Only a *finished* tool call belonging to the testing family, carrying an
+    explicit ``ok``, counts. The name selects which call is a verification; the
+    published ``ok`` supplies the verdict. Neither is inferred from the other,
+    and none of the tempting proxies are used: a run without an exception, a
+    diff that exists, a command whose name contains "test", or a call that
+    started. Starting a test is not passing it, and a screen that says
+    otherwise is worse than one that says nothing.
+    """
+
+    outcome: Optional[bool] = None
+    for call in detail.tool_calls:
+        kind = _TOOL_ACTIVITY_KINDS.get(_canonical_tool_name(_identifier(call.name)))
+        if kind != ACTIVITY_TESTING or call.running or call.ok is None:
+            continue
+        outcome = bool(call.ok)
+    return outcome
+
+
+def _detail_overview_lines(detail: SessionDetail, english: bool) -> List[str]:
+    """What this session is and what is happening to it, in that order.
+
+    Only facts the view model actually carries. No access profile, no workspace
+    mode, no budgets, no raw step, no identifiers -- every one of those is a
+    thing a person needs *after* choosing to look, and every one of them is
+    still on this screen further down.
+    """
+
+    row = detail.summary
+    lines = [_browser_task_text(row, english, _DETAIL_TASK_COLUMNS)]
+
+    facts = [_session_status_words(row.status, english)]
+    activity = _browser_activity_text(row, english)
+    if activity:
+        facts.append(activity)
+    if row.elapsed_seconds > 0:
+        facts.append(_elapsed_text(row.elapsed_seconds))
+    model = "/".join(part for part in (row.provider, row.model) if part)
+    if model:
+        # Whole or not at all: half a model name cannot be acted on.
+        facts.append(model)
+    lines.append(" \u00b7 ".join(facts))
+
+    if row.changed_files:
+        lines.append(
+            f"{_detail_words('changed_files', english)}: {row.changed_files}"
+        )
+    action = _session_action_words(row.primary_action, english)
+    if action:
+        lines.append(f"{_detail_words('next_step', english)}: {action}")
+    return lines
+
+
+def _detail_attention_lines(detail: SessionDetail, english: bool) -> List[str]:
+    """Whatever is waiting on the reader, or nothing at all.
+
+    Nothing at all is the point. The screen used to carry a permanent "No
+    confirmation is pending" card, which trains a reader to skip the exact
+    region that will one day matter. An absent problem is better said by an
+    absent block.
+
+    One state is reported, not a digest of all of them, in the order a person
+    would act: a confirmation is blocking the agent right now; a failure has
+    already happened; a verification came back negative; a run is waiting on
+    something explainable.
+    """
+
+    row = detail.summary
+    risk = detail.pending_confirmation or row.risk
+    if risk is not None and risk.awaiting_confirmation:
+        lines = [_detail_words("needs_confirmation", english)]
+        if risk.level:
+            lines.append(f"{_detail_words('risk_level', english)}: {risk.level}")
+        if risk.reasons:
+            lines.append(
+                f"{_detail_words('reasons', english)}: " + "; ".join(risk.reasons)
+            )
+        # Deliberately no action digest and no token. The digest is a hash a
+        # person cannot check and the token is a credential; both belong to the
+        # ledger, and the reasons above are what the decision is actually made
+        # on.
+        return lines
+
+    if detail.errors:
+        latest = detail.errors[-1]
+        lines = [_event_summary_text(latest.summary, english)] if latest.summary else []
+        code = _identifier(latest.data.get("code"))
+        if code:
+            lines.append(code)
+        if lines:
+            lines.append(_detail_words("details_below", english))
+            return lines
+
+    if _detail_check_outcome(detail) is False:
+        return [
+            _detail_words("checks_failed", english),
+            _detail_words("details_below", english),
+        ]
+
+    reason = _waiting_reason_text(row.waiting_reason, english)
+    if reason and reason != row.waiting_reason:
+        # Translated only. An untranslated identifier is a leak, not a warning.
+        return [reason]
+    return []
+
+
+def _detail_progress_lines(detail: SessionDetail, english: bool) -> List[str]:
+    """What the run changed and whether anything proved it.
+
+    Above the timeline because "did it work" is a question, and a timeline is
+    an answer only to somebody willing to read sixty rows to find out.
+    """
+
+    row = detail.summary
+    lines: List[str] = []
+    if row.changed_files:
+        lines.append(
+            f"{_detail_words('changed_files', english)}: {row.changed_files}"
+        )
+    elif not detail.diff:
+        lines.append(_detail_words("no_changes", english))
+    if detail.diff:
+        lines.append(_detail_words("has_diff", english))
+
+    outcome = _detail_check_outcome(detail)
+    if outcome is True:
+        lines.append(_detail_words("checks_passed", english))
+    elif outcome is False:
+        lines.append(_detail_words("checks_failed", english))
+    else:
+        lines.append(_detail_words("checks_unknown", english))
+
+    errors = row.error_count or len(detail.errors)
+    if errors:
+        lines.append(f"{_detail_words('errors_count', english)}: {errors}")
+    if detail.evidence:
+        lines.append(
+            f"{_detail_words('evidence_count', english)}: {len(detail.evidence)}"
+        )
+    if not detail.timeline and row.last_event_seq <= 0:
+        # Restored from a durable record and never seen live. Saying so is what
+        # stops the empty technical sections below reading as measurements.
+        lines.append(_detail_words("no_live_activity", english))
+    return lines
+
+
+def _detail_footer_text(english: bool, width: int = 0) -> str:
+    """One footer line for Session Detail, assembled to fit.
+
+    Same policy as the browser's: whole hints, dropped in priority order, never
+    a second line. Esc is last to be *kept* rather than first to go, because it
+    is the only one of the three a reader cannot guess from the scrollbar.
+    """
+
+    fields = [
+        "Esc: back" if english else "Esc: \u043d\u0430\u0437\u0430\u0434",
+        "\u2191\u2193 scroll" if english else "\u2191\u2193 \u043f\u0440\u043e\u043a\u0440\u0443\u0442\u043a\u0430",
+        "PgUp/PgDn pages" if english else "PgUp/PgDn \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b",
+    ]
+    # Read left to right in the order a person expects, but dropped from the
+    # least important end.
+    order = [fields[1], fields[2], fields[0]]
+    keep = list(order)
+    while len(keep) > 1:
+        text = " \u00b7 ".join(keep)
+        if width <= 0 or len(text) <= width:
+            return text
+        # Drop the lowest-priority field that is still present.
+        for candidate in (fields[2], fields[1]):
+            if candidate in keep:
+                keep.remove(candidate)
+                break
+        else:  # pragma: no cover - defensive
+            break
+    return keep[0] if keep else ""
+
+
+class SessionAction(NamedTuple):
+    """What a person chose to do about one session in the browser.
+
+    A stable action identifier rather than a callback, so the row, the test and
+    the application all name the same four outcomes and the screen decides
+    nothing about how they are carried out.
+    """
+
+    session_id: str
+    action: str
+
+
+# The one header line, and the widths at which fields stop fitting.
+#
+# Five equal columns were the old shell. At an 80-column window each got 16
+# cells, so "контекст: лимит" filled its column exactly and ran into the next
+# field, and a model name was cut to "openai/m" -- which reads as a *different*
+# model to the person checking which one is selected. One line with explicit
+# breakpoints replaces them: when something does not fit it is dropped whole,
+# never abbreviated into a plausible lie.
+HEADER_WIDE_COLUMNS = 76
+HEADER_MEDIUM_COLUMNS = 52
+
+# Context occupancy is not shown until it matters. Below this it is noise on
+# every single redraw; above it, it is the one thing that explains a truncated
+# answer, so it earns its place.
+CONTEXT_WARNING_FRACTION = 0.75
+
+
+def _header_line(
+    *,
+    repository: str,
+    model: str,
+    activity: str,
+    width: int,
+    effort: str = "auto",
+    economy: bool = False,
+    context_note: str = "",
+) -> str:
+    """Render the run state with the model as the primary fact.
+
+    A coding-agent header is not branding. The first thing a person needs to know
+    is which model will answer the next prompt, then its reasoning level, then
+    the project, then what the agent is doing right now. Fields disappear whole
+    -- never cut into a different-looking value -- from the right as the width
+    shrinks; the model itself is never dropped in favour of product chrome.
+    """
+
+    model_id = model.split("/", 1)[-1] if "/" in model else model
+    effort_text = f"effort {effort or 'auto'}"
+    repo_text = f"@{repository}" if repository else ""
+    economy_text = "Economy" if economy else ""
+    if width < HEADER_MEDIUM_COLUMNS:
+        # Smallest tier: the agent state outranks the project name, and the
+        # provider prefix gives way to the model id. Dropping a whole field is
+        # what keeps "openai…" from reading as a different model.
+        candidates = [model_id, activity, effort_text, repo_text]
+    elif width < HEADER_WIDE_COLUMNS:
+        candidates = [model, effort_text, repo_text, activity]
+    else:
+        candidates = [model, effort_text, repo_text, activity, economy_text, context_note]
+    kept = [field for field in candidates if field]
+    while len(kept) > 1 and len(" · ".join(kept)) > width:
+        kept.pop()
+    line = " · ".join(kept)
+    if len(line) <= width:
+        return line
+    return line[: max(1, width - 1)] + "…"
 
 
 def _mcp_status_text(payload: Any, english: bool) -> str:
@@ -427,6 +1874,55 @@ class ProviderSetup:
     api_key: str = ""
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ProviderEdit:
+    """A saved provider, loaded for editing. Never carries the secret.
+
+    B5.1. The form needs the record's non-secret values and its identity. It
+    deliberately does not receive the API key: the key is resolved by the
+    controller at save time from the reference already on the record, so it has
+    no reason to exist in a widget, a snapshot, or a traceback.
+
+    ``has_secret`` is the only thing the form learns about the credential --
+    enough to say "saved" and to treat an empty replacement field as "keep it".
+    """
+
+    provider_id: str
+    adapter: str
+    base_url: str
+    model_id: str = ""
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    has_secret: bool = False
+
+
+def load_provider_edit(provider_id: str) -> Optional[ProviderEdit]:
+    """Read one saved provider into an edit view model, or ``None``.
+
+    Reads through the same controller the rest of the product writes with, so
+    an edit form cannot be populated from a source that disagrees with what a
+    save would update.
+    """
+
+    try:
+        details = _provider_controller().details(provider_id)
+    except Exception:
+        return None
+    provider = details.provider
+    model = details.selected_model
+    if model is None and len(details.models) == 1:
+        model = details.models[0]
+    return ProviderEdit(
+        provider_id=provider.provider_id,
+        adapter=provider.adapter_kind,
+        base_url=provider.base_url,
+        model_id=str(model.model_id) if model is not None else "",
+        context_window=model.context_window if model is not None else None,
+        max_output_tokens=model.max_output_tokens if model is not None else None,
+        has_secret=bool(details.credential.get("configured")),
+    )
 
 
 @dataclass(frozen=True)
@@ -732,37 +2228,8 @@ def _tailscale_funnel_available(status_payload: Dict[str, Any]) -> bool:
 
 
 def _default_verification(repository: Path) -> tuple[tuple[str, ...], ...]:
-    """Safe verification commands for a repository, as a set of argv tuples.
-
-    The TUI launches both the managed web bridge and the native agent with
-    these commands as the approved verification allowlist; ``checks.run`` may
-    only run a command that matches one of them.  For a Node project the
-    common CI scripts are returned **only when they exist in ``package.json``**
-    so an allowlist never advertises a script the project does not define.
-    """
-    package_json = repository / "package.json"
-    if package_json.is_file():
-        try:
-            data = json.loads(package_json.read_text(encoding="utf-8"))
-            scripts = data.get("scripts") if isinstance(data, dict) else None
-        except (OSError, ValueError):
-            scripts = None
-        if isinstance(scripts, dict):
-            # Each candidate is only included when the project defines it, so the
-            # allowlist never advertises a script that does not exist.
-            commands: list[tuple[str, ...]] = []
-            for candidate in (("npm", "test"), ("npm", "run", "ci"),
-                              ("npm", "run", "test:smoke")):
-                script_name = candidate[2] if candidate[1] == "run" else candidate[1]
-                if isinstance(script_name, str) and script_name in scripts:
-                    commands.append(candidate)
-            if commands:
-                return tuple(commands)
-    if (repository / "pyproject.toml").exists() and (repository / "tests").is_dir():
-        return ((sys.executable, "-m", "pytest", "-q"),)
-    if package_json.is_file():
-        return (("npm", "test"),)
-    return (("git", "diff", "--check"),)
+    """Compatibility wrapper around the shared project-aware discovery."""
+    return discover_verification_commands(repository)
 
 
 def _optional_positive_int(value: Any) -> Optional[int]:
@@ -1119,7 +2586,15 @@ def _friendly_probe_error(
         else "The test request failed."
     )
     checked = "Проверенный Base URL:" if not english else "Checked Base URL:"
-    return f"{heading}\n{checked} {base}\n{str(error).strip()}"
+    # B2. The unclassified branch is the one that ends up on screen when a
+    # provider raises something KaroX has no case for -- an SDK error, a proxy
+    # error, an httpx error. Interpolating `str(error)` raw is how a key reaches
+    # the terminal: several SDKs echo the Authorization header or the query
+    # string in their message, and this is the last hop before a widget. The
+    # classified branch above is safe because it uses `error.safe_message`; this
+    # one had no such guarantee, so it goes through the same redaction the rest
+    # of the product uses at its boundaries.
+    return f"{heading}\n{checked} {base}\n{str(redact(str(error))).strip()}"
 
 
 def _save_provider(setup: ProviderSetup, *, activate: bool = True) -> ModelRecord:
@@ -1233,6 +2708,10 @@ def _agent_argv(
     repository: Path,
     verification: Sequence[Sequence[str]],
     session_id: str,
+    *,
+    run_cost_profile: str = "balanced",
+    reasoning_effort: Optional[str] = None,
+    token_ceiling: Optional[int] = None,
 ) -> List[str]:
     argv = [
         "agent",
@@ -1251,6 +2730,33 @@ def _agent_argv(
         argv.extend(
             ("--verification-command", json.dumps(list(command), ensure_ascii=False))
         )
+    if reasoning_effort is None:
+        stored_effort = _load_preferences().get("reasoning_effort")
+        if stored_effort in REASONING_EFFORTS:
+            reasoning_effort = str(stored_effort)
+    if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError("unknown reasoning effort")
+        argv.extend(("--effort", reasoning_effort))
+    if run_cost_profile not in {"balanced", "economy"}:
+        raise ValueError("run cost profile must be balanced or economy")
+    if run_cost_profile == "economy":
+        argv.append("--economy")
+        # Quality-neutral by contract: Economy keeps the selected model, Effort,
+        # route order, context threshold, and tool-result ceiling unchanged.
+        # Savings come from exact duplicate reuse and provider prompt caching.
+        argv.extend(
+            (
+                "--route-strategy", "ordered",
+                "--context-utilization", "0.6",
+                "--max-tool-result-chars", "24000",
+            )
+        )
+    token_limit = token_ceiling if token_ceiling is not None else None
+    if token_limit is not None:
+        if isinstance(token_limit, bool) or token_limit <= 0:
+            raise ValueError("run token limit must be a positive integer")
+        argv.extend(("--max-total-tokens", str(token_limit)))
     argv.append("--json")
     return argv
 
@@ -1608,103 +3114,145 @@ def _bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLaunch:
     )
 
 
-def _managed_web_bridge_launch(repository: Path, setup: BridgeSetup) -> BridgeLaunch:
-    """Build a one-command ChatGPT/Claude bridge owned by the CLI launcher."""
+def _persist_tui_saved_bridge_profile(
+    repository: Path,
+    setup: BridgeSetup,
+    *,
+    language: str,
+) -> str:
+    """Persist the TUI wizard result as the one canonical saved-bridge model.
+
+    The TUI must not maintain a second process/CLI lifecycle.  Once this returns,
+    Start/Repair, Restart, Stop, Delete and Advanced all operate on exactly the
+    same ``SavedWebBridgeProfile`` through ``start_saved_bridge`` and friends.
+    """
     if setup.profile not in WEB_BRIDGE_PROFILES:
-        raise ValueError("managed web bridge requires a ChatGPT or Claude profile")
-    if setup.tunnel_provider not in {"cloudflare", "tailscale"}:
-        raise ValueError("ChatGPT/Claude web bridges require a public HTTPS tunnel")
-    sid = f"web-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    # The TUI passes an explicit --tool list, which replaces DEFAULT_WEB_TOOLS
-    # in the CLI. Stable read-only runtime diagnostics must therefore be merged
-    # here rather than relying on the fallback bundle that this path bypasses.
+        raise ValueError("saved hosted bridge requires a supported web profile")
+    if setup.tunnel_provider not in {"cloudflare", "tailscale", "custom"}:
+        raise ValueError("hosted bridges require cloudflare, tailscale, or custom tunnel")
+
+    import hashlib
+
+    from .hosted_tools_runtime import server_profiles_for_repository
+    from .web_bridge_profiles import SavedWebBridgeProfile, WebBridgeProfileStore
+
+    browser_capable = setup.profile in {"chatgpt-web", "claude-web", "hyperagent-web"}
     effective_tools = tuple(
-        dict.fromkeys(("karox.runtime.status", *setup.tools))
+        dict.fromkeys(
+            (
+                "karox.runtime.status",
+                *setup.tools,
+                *(("karox.browser.wait_for",) if browser_capable else ()),
+            )
+        )
     )
-    # The WRITE_WEB_TOOLS bundle (browser input + dev_server start/stop + file
-    # writes) is gated behind --write in the connect command, so any tool that
-    # mutates state or drives a UI surfaces as WORKSPACE_WRITE access here.
-    mutating_tools = {
-        "karox.repo.edit_file",
-        "karox.repo.write_file",
-        "karox.git.commit",
-        "karox.checks.run",
-        "karox.browser.open",
-        "karox.browser.click",
-        "karox.browser.fill",
-        "karox.browser.select",
-        "karox.browser.press",
-        "karox.browser.close",
-        "karox.dev_server.start",
-        "karox.dev_server.stop",
-    }
-    needs_write = any(tool in mutating_tools for tool in setup.tools)
+    needs_write = any(tool in MUTATING_WEB_TOOLS for tool in effective_tools)
     access_profile = (
         AccessProfile.WORKSPACE_WRITE if needs_write else AccessProfile.READ_ONLY
     )
-    argv = [
-        sys.executable,
-        "-m",
-        "karox.cli",
-        "bridge",
-        "connect",
-        setup.profile,
-        "--repository",
-        str(repository),
-        "--session-id",
-        sid,
-        "--access-profile",
-        access_profile.value,
-        "--tunnel",
-        setup.tunnel_provider,
-        "--port",
-        str(setup.port),
-    ]
-    if needs_write:
-        # --write tells the connect command to add the browser-input and
-        # dev_server-start tools from WRITE_WEB_TOOLS on top of the explicit
-        # --tool selections, so the read-only browser/dev_server checks still
-        # come from the checkbox tools while the mutating ones come from --write.
-        argv.append("--write")
-    # A TUI web connection is explicitly confirmed by the local user. Give the
-    # hosted client the external-browser contract it needs for real verification:
-    # public HTTPS, redacted network metadata, a visible browser, and user takeover.
-    argv.extend(
-        (
-            "--browser-external-https",
-            "--browser-network-inspection",
-            "--browser-headed",
-            "--browser-user-takeover",
+    prefix = {
+        "chatgpt-web": "chatgpt",
+        "claude-web": "claude",
+        "hyperagent-web": "hyperagent",
+        "notion": "notion",
+        "adapt": "adapt",
+    }[setup.profile]
+    repository_key = str(repository.resolve()).casefold().encode("utf-8")
+    digest = hashlib.sha256(repository_key).hexdigest()[:10]
+    canonical_name = f"{prefix}-auto-{digest}"
+    verification_commands = (
+        tuple(_default_verification(repository))
+        if "karox.checks.run" in effective_tools
+        else ()
+    )
+    server_profiles = (
+        tuple(item.to_public_dict() for item in server_profiles_for_repository(repository))
+        if any(
+            tool in {"karox.dev_server.start", "karox.dev_server.stop"}
+            for tool in effective_tools
         )
+        else ()
     )
-    # A click or Enter can finish before the next document becomes observable.
-    # Expose the existing guarded wait tool so hosted agents can synchronize on
-    # a selector/state instead of racing snapshot/get_text and retrying blindly.
-    if "karox.browser.wait_for" not in setup.tools:
-        argv.extend(("--tool", "karox.browser.wait_for"))
-    if "karox.checks.run" in setup.tools:
-        # karox.checks.run requires an approved verification allowlist; supply
-        # the workspace's discovered default set (npm test / npm run ci /
-        # npm run test:smoke for a Node project, or the pytest/git fallbacks)
-        # so the bridge starts without a manual command.  Each approved
-        # command becomes a separate --verification-command, matching the
-        # repeatable CLI flag; the external agent can only run a command in
-        # this allowlist, not arbitrary shell.
-        for command in _default_verification(repository):
-            argv.extend(
-                ("--verification-command", json.dumps(list(command), ensure_ascii=False))
-            )
-    for tool in effective_tools:
-        argv.extend(("--tool", tool))
-    return BridgeLaunch(
-        session_id=sid,
-        profile=setup.profile,
-        protocol="mcp",
-        endpoint="",
-        secret="",
-        argv=tuple(argv),
-        managed=True,
+    from .web_bridge_profiles import WebBridgeProfileError
+
+    store = WebBridgeProfileStore()
+    candidates = (
+        canonical_name,
+        *(f"{canonical_name}-{item.value}" for item in AccessProfile),
     )
+    existing_profiles: list[SavedWebBridgeProfile] = []
+    for candidate in candidates:
+        try:
+            candidate_profile = store.get(candidate)
+        except WebBridgeProfileError as exc:
+            if "does not exist" not in str(exc):
+                raise
+            continue
+        existing_profiles.append(candidate_profile)
+    if len(existing_profiles) > 1:
+        raise ValueError(
+            "multiple legacy auto profiles exist for this service/repository; "
+            "open /connect and delete the obsolete duplicate before re-running setup"
+        )
+    existing = existing_profiles[0] if existing_profiles else None
+    profile_name = existing.name if existing is not None else canonical_name
+    if existing is not None and existing.access_profile != access_profile:
+        raise ValueError(
+            "changing the permission level of an existing durable connection would rotate "
+            "its connector identity; delete/recreate that connection from /connect instead"
+        )
+
+    if existing is not None:
+        # The setup wizard intentionally exposes only connection-level choices.
+        # Preserve browser/domain/keyring policy edited later in Advanced instead
+        # of resetting it merely because the user re-ran setup.
+        from dataclasses import replace as _replace
+
+        profile = _replace(
+            existing,
+            repository=str(repository.resolve()),
+            tools=effective_tools,
+            verification_commands=verification_commands,
+            server_profiles=server_profiles,
+            tunnel=setup.tunnel_provider,
+            public_url=setup.public_url,
+            language=language,
+            access_profile=access_profile,
+            port=setup.port,
+        )
+    else:
+        profile = SavedWebBridgeProfile(
+            name=profile_name,
+            target_profile=setup.profile,
+            repository=str(repository.resolve()),
+            tools=effective_tools,
+            verification_commands=verification_commands,
+            server_profiles=server_profiles,
+            browser_external_https=browser_capable,
+            browser_headed=browser_capable,
+            browser_user_takeover=browser_capable,
+            browser_network_inspection=browser_capable,
+            browser_payment_confirmation=False,
+            deadline_seconds=3600.0,
+            tunnel=setup.tunnel_provider,
+            public_url=setup.public_url,
+            language=language,
+            access_profile=access_profile,
+            port=setup.port,
+        )
+
+    from .web_bridge_launcher import apply_saved_bridge_profile
+
+    if existing is None:
+        # Bootstrap has no prior identity/runtime to preserve.
+        store.put(profile)
+    else:
+        apply_saved_bridge_profile(
+            profile_name,
+            profile,
+            allow_restart=True,
+        )
+    return profile_name
 
 
 if _HAS_TEXTUAL:
@@ -1929,7 +3477,6 @@ if _HAS_TEXTUAL:
         """Searchable, keyboard-first provider picker."""
 
         BINDINGS = [
-            Binding("enter", "choose", "Choose", priority=True),
             Binding("up", "previous_preset", show=False, priority=True),
             Binding("down", "next_preset", show=False, priority=True),
             Binding("escape", "cancel", "Cancel", priority=True),
@@ -2043,6 +3590,14 @@ if _HAS_TEXTUAL:
         def preset_changed(self) -> None:
             self._update_note()
 
+        @on(Input.Submitted, "#preset-search")
+        def preset_search_submitted(self, _event: Input.Submitted) -> None:
+            self.action_choose()
+
+        @on(OptionList.OptionSelected, "#provider-presets")
+        def preset_selected(self, _event: OptionList.OptionSelected) -> None:
+            self.action_choose()
+
         def action_choose(self) -> None:
             item = self._selected()
             if item is not None:
@@ -2077,7 +3632,6 @@ if _HAS_TEXTUAL:
         """Explain Puter's verified browser contract instead of skipping it."""
 
         BINDINGS = [
-            Binding("enter", "close", "Close", priority=True),
             Binding("escape", "close", "Close", priority=True),
         ]
         DEFAULT_CSS = """
@@ -2464,12 +4018,32 @@ if _HAS_TEXTUAL:
 
         BINDINGS = [
             Binding("f5", "discover", "Найти модели", priority=True),
+            # B2. Advanced settings and the limits editor are both reachable
+            # without a mouse. `f2` keeps `_open_limits` on a production path
+            # after the button it used to own became the advanced toggle: a
+            # working editor must not become unreachable because its entry point
+            # was renamed.
+            Binding("f2", "advanced", "Дополнительные настройки", priority=True),
+            Binding("f3", "limits", "Лимиты", priority=True),
             Binding("f10", "save", "Проверить и сохранить", priority=True),
             Binding("escape", "cancel", "Отмена", priority=True),
         ]
         DEFAULT_CSS = """
         ProviderSetupScreen { align: center middle; background: #0e0c08 92%; }
-        #provider-dialog { width: 82; height: 31; max-height: 94%; background: #1a1712;
+        /* B2. The width was a fixed 82, so in a 46-column terminal the dialog
+           was wider than the screen and the API key field ran off the edge --
+           the one field the standard path exists to collect. `100%` with a
+           `max-width` keeps the comfortable size on a real window and fits the
+           small one.
+
+           The height deliberately stays fixed with a percentage ceiling. That
+           pair already handled both cases: 31 rows keeps the form compact on a
+           tall terminal, and `94%` is what shrinks it on a short one. `height:
+           auto` looks tidier and is wrong -- `#provider-fields` is `1fr`, so the
+           dialog grows to fill whatever it is given and a connection form eats a
+           42-row window. */
+        #provider-dialog { width: 100%; max-width: 82; height: 31;
+          max-height: 94%; background: #1a1712;
           border: round #c6a56b; padding: 1 2; }
         #provider-dialog .title { text-style: bold; color: #e5e5e5; }
         #provider-dialog .hint { color: #7a6f5e; margin-bottom: 1; }
@@ -2496,27 +4070,106 @@ if _HAS_TEXTUAL:
         #provider-buttons Button { margin-left: 1; }
         """
 
+        # B2. Which fields the standard path keeps out of sight, and the ids the
+        # advanced toggle reveals. Named here rather than inline so the CSS, the
+        # toggle and the tests cannot drift about what "advanced" means.
+        ADVANCED_FIELD_IDS: Tuple[str, ...] = (
+            "#provider-context-label",
+            "#provider-context",
+            "#provider-output-label",
+            "#provider-output",
+        )
+
         def __init__(
-            self, language: str = "ru", preset: Optional[ProviderPreset] = None
+            self,
+            language: str = "ru",
+            preset: Optional[ProviderPreset] = None,
+            *,
+            existing: Optional[ProviderEdit] = None,
         ) -> None:
             super().__init__()
             self.language = language
-            self.preset = preset
+            # B5.1. Editing a saved provider is the same form, opened on a
+            # record instead of on a preset. `preset` is forced to None in that
+            # case on purpose: the preset styling hides the connection name and
+            # the Base URL behind `preset-technical`, and those are exactly the
+            # two fields somebody opening "Edit" came to change.
+            self.existing = existing
+            self.preset = None if existing is not None else preset
+            # B2. Advanced settings start closed for a known preset and are a
+            # deliberate second step, never a prerequisite.
+            self._advanced_open = False
 
         def _label(self, russian: str, english: str) -> str:
             return english if self.language == "en" else russian
 
+        def advanced_open(self) -> bool:
+            """Whether the technical fields are currently revealed."""
+
+            return self._advanced_open
+
+        def _toggle_advanced(self) -> None:
+            """Show or hide base URL, adapter, connection name and the limits.
+
+            B2. The defect this closes: for a known preset those fields were
+            hidden by `preset-technical` and there was **no** way to reveal them.
+            Hiding a field is progressive disclosure; hiding it with no path back
+            is a missing feature wearing the same clothes. A person whose
+            provider moved to a regional endpoint had to abandon the preset and
+            re-enter everything as a custom provider.
+
+            The reverse mistake is the one this avoids: showing the base URL by
+            default. A preset already knows its endpoint, and an input holding
+            the right answer still reads as a question the user must answer.
+            """
+
+            self._advanced_open = not self._advanced_open
+            visibility = "block" if self._advanced_open else "none"
+            for widget in self.query(".preset-technical"):
+                widget.styles.display = visibility
+            for selector in self.ADVANCED_FIELD_IDS:
+                with contextlib.suppress(Exception):
+                    self.query_one(selector).styles.display = visibility
+            # The adapter radio set is technical for a preset and essential for a
+            # custom provider, so it is only ever toggled in the preset case.
+            if self.preset is not None:
+                with contextlib.suppress(Exception):
+                    self.query_one("#provider-adapter").styles.display = visibility
+            with contextlib.suppress(Exception):
+                self.query_one("#provider-advanced", Button).label = (
+                    self._label("Скрыть настройки", "Hide settings")
+                    if self._advanced_open
+                    else self._label("Дополнительные настройки", "Advanced settings")
+                )
+
         def compose(self) -> ComposeResult:
-            adapter = self.preset.adapter_kind if self.preset else "openai_responses"
-            provider_id = self.preset.preset_id if self.preset else "openai"
-            base_url = (
-                self.preset.base_url if self.preset else "https://api.openai.com/v1"
+            # A custom provider should start from the broad compatibility path,
+            # not from OpenAI's first-party contract. Most third-party gateways
+            # expose /chat/completions, while /responses is opt-in and has its own
+            # explicit OpenAI preset. Keep custom identity/endpoint blank so the
+            # form never looks configured before the user supplies their service.
+            adapter = (
+                self.preset.adapter_kind if self.preset else "openai_compatible_chat"
             )
+            provider_id = self.preset.preset_id if self.preset else ""
+            base_url = self.preset.base_url if self.preset else ""
+            # B5.1. A saved record overrides the new-provider defaults. Its id
+            # goes into the same field a new provider names itself in, which is
+            # what makes the save an update: `configure_provider_model` writes
+            # by provider_id, so an unchanged id cannot produce a second row.
+            if self.existing is not None:
+                adapter = self.existing.adapter
+                provider_id = self.existing.provider_id
+                base_url = self.existing.base_url
             with Vertical(id="provider-dialog"):
                 yield Static(
                     self._label(
-                        f"Подключить {self.preset.display_name if self.preset else 'API-провайдера'}",
-                        f"Connect {self.preset.display_name if self.preset else 'an API provider'}",
+                        f"Изменить {provider_id}"
+                        if self.existing is not None
+                        else f"Подключить {self.preset.display_name if self.preset else 'API-провайдера'}",
+                        f"Edit {provider_id}"
+                        if self.existing is not None
+                        else f"Connect {self.preset.display_name if self.preset else 'an API provider'}",
                     ),
                     classes="title",
                 )
@@ -2606,9 +4259,26 @@ if _HAS_TEXTUAL:
                     )
                     yield Input(
                         password=True,
-                        placeholder=self._label(
-                            "Вставьте ключ; он сохранится в системном хранилище",
-                            "Paste the key; it will be stored in the system keyring",
+                        # B5.1/5.7. On an edit the field starts *empty* and the
+                        # placeholder says the key is saved. Two things this is
+                        # not: it is not the secret, and it is not a row of
+                        # dots pretending to be one. A masked placeholder that
+                        # looks like a value invites the user to clear it,
+                        # which would read as "remove the key".
+                        #
+                        # Empty means keep. The controller resolves the stored
+                        # reference at save time, so nothing has to travel
+                        # through this widget to survive.
+                        placeholder=(
+                            self._label(
+                                "Ключ сохранён. Оставьте пустым, чтобы не менять его",
+                                "Key saved. Leave empty to keep it",
+                            )
+                            if self.existing is not None and self.existing.has_secret
+                            else self._label(
+                                "Вставьте ключ; он сохранится в системном хранилище",
+                                "Paste the key; it will be stored in the system keyring",
+                            )
                         ),
                         id="provider-key",
                     )
@@ -2622,8 +4292,16 @@ if _HAS_TEXTUAL:
                             self._label("Ввести вручную", "Enter manually"),
                             id="provider-manual",
                         )
+                        # B2. "Limits" named one of the things behind this
+                        # button and hid the rest. Base URL, adapter and the
+                        # connection name were unreachable for a known preset,
+                        # so the label now names the step and the button opens
+                        # all of it. The limits screen is still reachable from
+                        # the fields this reveals.
                         yield Button(
-                            self._label("Лимиты", "Limits"),
+                            self._label(
+                                "Дополнительные настройки", "Advanced settings"
+                            ),
                             id="provider-advanced",
                         )
                     yield Static(
@@ -2695,6 +4373,29 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
+            if self.existing is not None:
+                # The model and its limits live on a different record than the
+                # provider, so they are filled here rather than in `compose`.
+                # `_update_summary` also enables Save, which is right for an
+                # edit: the record already has a model, so there is nothing to
+                # discover before the user may save a changed Base URL.
+                self.query_one("#provider-model", Input).value = (
+                    self.existing.model_id
+                )
+                self.query_one("#provider-context", Input).value = (
+                    str(self.existing.context_window)
+                    if self.existing.context_window
+                    else ""
+                )
+                self.query_one("#provider-output", Input).value = (
+                    str(self.existing.max_output_tokens)
+                    if self.existing.max_output_tokens
+                    else ""
+                )
+                if self.existing.model_id:
+                    self._update_summary()
+                self.query_one("#provider-url", Input).focus()
+                return
             target = "#provider-key" if self.preset is not None else "#provider-adapter"
             self.query_one(target).focus()
 
@@ -3074,6 +4775,12 @@ if _HAS_TEXTUAL:
                 "Повторить проверку", "Retry verification"
             )
 
+        def action_advanced(self) -> None:
+            self._toggle_advanced()
+
+        def action_limits(self) -> None:
+            self._open_limits()
+
         def action_cancel(self) -> None:
             self.dismiss(None)
 
@@ -3087,7 +4794,7 @@ if _HAS_TEXTUAL:
             elif event.button.id == "provider-manual":
                 self._show_manual_fields()
             elif event.button.id == "provider-advanced":
-                self._open_limits()
+                self._toggle_advanced()
             elif event.button.id == "provider-choose-model":
                 self._open_model_picker()
             elif event.button.id == "provider-save":
@@ -3114,10 +4821,18 @@ if _HAS_TEXTUAL:
         #bridge-buttons Button { margin-left: 1; }
         """
 
-        def __init__(self, language: str = "ru", default_tunnel: str = "cloudflare") -> None:
+        def __init__(
+            self,
+            language: str = "ru",
+            default_tunnel: str = "cloudflare",
+            default_profile: str = "promptql",
+            locked_profile: Optional[str] = None,
+        ) -> None:
             super().__init__()
             self.language = language
             self._default_tunnel = default_tunnel
+            self._locked_profile = locked_profile
+            self._default_profile = locked_profile or default_profile
 
         def _label(self, russian: str, english: str) -> str:
             return english if self.language == "en" else russian
@@ -3142,30 +4857,63 @@ if _HAS_TEXTUAL:
                     self._label("Тип подключения", "Connection type"),
                     classes="section",
                 )
-                with RadioSet(id="bridge-profile"):
-                    yield RadioButton(
-                        "PromptQL (OpenAPI)", value=True, id="profile-promptql"
-                    )
-                    yield RadioButton("Notion Custom Agent (MCP)", id="profile-notion")
-                    yield RadioButton(
-                        "ChatGPT Web (OAuth MCP)", id="profile-chatgpt-web"
-                    )
-                    yield RadioButton(
-                        self._label(
+                if self._locked_profile is not None:
+                    profile_labels = {
+                        "notion": "Notion Custom Agent (MCP)",
+                        "chatgpt-web": "ChatGPT Web (OAuth MCP)",
+                        "claude-web": "Claude Web (OAuth MCP)",
+                        "hyperagent-web": "Hyperagent (OAuth MCP)",
+                        "adapt": "Adapt (MCP bearer)",
+                        "clickup": self._label(
                             "ClickUp (MCP, отдельный Cloudflare-процесс)",
                             "ClickUp (MCP, separate Cloudflare process)",
                         ),
-                        id="profile-clickup",
+                    }
+                    yield Static(
+                        profile_labels.get(self._locked_profile, self._locked_profile),
+                        id="bridge-profile-locked",
+                        classes="hint",
                     )
-                    yield RadioButton(
-                        "Claude Web (OAuth MCP)", id="profile-claude-web"
-                    )
-                    yield RadioButton(
-                        "Generic Streamable HTTP MCP", id="profile-generic"
-                    )
-                    yield RadioButton(
-                        "HyperAgent (MCP, experimental)", id="profile-hyperagent"
-                    )
+                else:
+                    with RadioSet(id="bridge-profile"):
+                        yield RadioButton(
+                            "PromptQL (OpenAPI)",
+                            value=self._default_profile == "promptql",
+                            id="profile-promptql",
+                        )
+                        yield RadioButton(
+                            "Notion Custom Agent (MCP)",
+                            value=self._default_profile == "notion",
+                            id="profile-notion",
+                        )
+                        yield RadioButton(
+                            "ChatGPT Web (OAuth MCP)",
+                            value=self._default_profile == "chatgpt-web",
+                            id="profile-chatgpt-web",
+                        )
+                        yield RadioButton(
+                            self._label(
+                                "ClickUp (MCP, отдельный Cloudflare-процесс)",
+                                "ClickUp (MCP, separate Cloudflare process)",
+                            ),
+                            value=self._default_profile == "clickup",
+                            id="profile-clickup",
+                        )
+                        yield RadioButton(
+                            "Claude Web (OAuth MCP)",
+                            value=self._default_profile == "claude-web",
+                            id="profile-claude-web",
+                        )
+                        yield RadioButton(
+                            "Generic Streamable HTTP MCP",
+                            value=self._default_profile == "generic-streamable-http",
+                            id="profile-generic",
+                        )
+                        yield RadioButton(
+                            "Hyperagent (OAuth MCP)",
+                            value=self._default_profile == "hyperagent-web",
+                            id="profile-hyperagent",
+                        )
                 yield Static("", id="bridge-profile-note", classes="hint", markup=False)
                 yield Static(
                     self._label("Локальный порт", "Local port"),
@@ -3288,35 +5036,70 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
-            self.query_one("#bridge-profile", RadioSet).focus()
-            # Default tunnel tracks the profile: Notion (cloud agent) prefers
-            # Tailscale Funnel; everything else defaults to Cloudflare.
+            if self._locked_profile is None:
+                self.query_one("#bridge-profile", RadioSet).focus()
+            else:
+                self.query_one("#bridge-tunnel-kind", RadioSet).focus()
+            # Defaults are service-specific: Notion uses the durable parallel
+            # Tailscale listener, while ClickUp keeps its Cloudflare quick tunnel.
             self._apply_default_tunnel_for_profile()
 
         def _apply_default_tunnel_for_profile(self) -> None:
-            # Default tunnel tracks the profile: Notion (a cloud-hosted agent)
-            # needs a public URL, so it defaults to Tailscale Funnel; the other
-            # profiles default to Cloudflare.  Setting a single RadioButton's
+            # Notion defaults to its durable Tailscale listener; the launcher
+            # publishes it on HTTPS 8443 so it can run beside the main bridge on
+            # HTTPS 443. ClickUp keeps its independent Cloudflare quick tunnel.
+            # Setting a single RadioButton's
             # ``value = True`` does not reliably deselect its siblings inside a
             # RadioSet (the set's internal ``pressed_button`` can desync), so
             # we set all three explicitly to guarantee exactly one is selected.
             profile = self._profile_value()
-            target = "tailscale" if profile == "notion" else "cloudflare"
+            # Hosted OAuth services need a durable callback URL. Keep each
+            # concurrently useful service on its own supported Funnel HTTPS port:
+            # ChatGPT/Claude use 443, Notion uses 8443, Hyperagent uses 10000.
+            target = "tailscale" if profile in {"notion", "hyperagent-web", "adapt"} else "cloudflare"
             self._default_tunnel = target
             self.query_one("#bridge-port", Input).value = (
-                "8766" if profile == "clickup" else "8765"
+                "8766"
+                if profile == "clickup"
+                else "8767"
+                if profile == "notion"
+                else "8768"
+                if profile == "hyperagent-web"
+                else "8769"
+                if profile == "adapt"
+                else "8765"
             )
             note = self.query_one("#bridge-profile-note", Static)
-            note.update(
-                self._label(
-                    "ClickUp откроется в отдельном терминале на порту 8766 через "
-                    "Cloudflare. Текущий ChatGPT-мост продолжит работать.",
-                    "ClickUp opens in a separate terminal on port 8766 through "
-                    "Cloudflare. The current ChatGPT bridge keeps running.",
+            if profile == "clickup":
+                note.update(
+                    self._label(
+                        "ClickUp настроится внутри KaroX на порту 8766 через Cloudflare. Текущий ChatGPT-мост продолжит работать.",
+                        "ClickUp will be configured inside KaroX on port 8766 through Cloudflare. The current ChatGPT bridge keeps running.",
+                    )
                 )
-                if profile == "clickup"
-                else ""
-            )
+            elif profile == "notion":
+                note.update(
+                    self._label(
+                        "Notion запустится отдельно на порту 8767 через Tailscale Funnel (HTTPS 8443). Текущий ChatGPT-мост на HTTPS 443 продолжит работать; адрес Notion останется стабильным после перезапуска.",
+                        "Notion starts separately on port 8767 through Tailscale Funnel (HTTPS 8443). The current ChatGPT bridge on HTTPS 443 keeps running, and the Notion address stays stable across restarts.",
+                    )
+                )
+            elif profile == "hyperagent-web":
+                note.update(
+                    self._label(
+                        "Hyperagent запустится отдельным мостом на порту 8768 через Tailscale Funnel (HTTPS 10000). ChatGPT на HTTPS 443 и Notion на HTTPS 8443 можно оставить работающими; Hyperagent будет привязан к выбранной сейчас папке проекта.",
+                        "Hyperagent starts as a separate bridge on port 8768 through Tailscale Funnel (HTTPS 10000). ChatGPT on HTTPS 443 and Notion on HTTPS 8443 may keep running; Hyperagent binds to the project folder currently selected in KaroX.",
+                    )
+                )
+            elif profile == "adapt":
+                note.update(
+                    self._label(
+                        "Adapt запустится минимальным bearer MCP-мостом на порту 8769 через Tailscale Funnel (HTTPS 10001). Если в этом проекте уже работает совместимый ChatGPT bridge, экран Adapt переиспользует его вместо запуска второго процесса.",
+                        "Adapt starts as a minimal bearer MCP bridge on port 8769 through Tailscale Funnel (HTTPS 10001). If this project already has a compatible ChatGPT bridge, the Adapt screen reuses it instead of launching a second process.",
+                    )
+                )
+            else:
+                note.update("")
             states = {
                 "tunnel-none": target == "none",
                 "tunnel-cloudflare": target == "cloudflare",
@@ -3324,6 +5107,19 @@ if _HAS_TEXTUAL:
             }
             for widget_id, is_on in states.items():
                 self.query_one(f"#{widget_id}", RadioButton).value = is_on
+            if profile == "adapt":
+                # Adapt's first-run profile is deliberately smaller than the
+                # general bridge wizard. Repository/Git/check capabilities stay
+                # enabled; browser and managed-server control require an explicit
+                # user opt-in instead of arriving by accident with a Custom
+                # Integration credential.
+                for widget_id in (
+                    "tool-browser-read",
+                    "tool-browser-input",
+                    "tool-server-read",
+                    "tool-server-input",
+                ):
+                    self.query_one(f"#{widget_id}", Checkbox).value = False
 
         @on(RadioSet.Changed, "#bridge-profile")
         def profile_changed(self, event: RadioSet.Changed) -> None:  # noqa: ARG002
@@ -3356,15 +5152,38 @@ if _HAS_TEXTUAL:
                     )
                 )
                 return
+            # Each checkbox is a capability family, not one arbitrarily chosen
+            # primitive.  The hosted CLI receives an explicit --tool list, so
+            # omitting siblings here *replaces* DEFAULT_WEB_TOOLS and leaves a
+            # coding agent unable to navigate an unfamiliar repository.  Keep
+            # the UI compact while granting the complete low-level family the
+            # user actually selected.
             tool_ids = {
-                "tool-read": ("karox.repo.read_file",),
+                "tool-read": (
+                    "karox.repo.read_file",
+                    "karox.repo.read_lines",
+                    "karox.repo.search",
+                    "karox.repo.inspect",
+                    "karox.task.bootstrap",
+                    "karox.task.resume",
+                    "karox.task.status",
+                    "karox.task.workstreams",
+                ),
                 "tool-list": ("karox.repo.list_files",),
-                "tool-write": ("karox.repo.write_file",),
-                "tool-status": ("karox.git.status",),
+                "tool-write": (
+                    "karox.repo.write_file",
+                    "karox.repo.edit_file",
+                ),
+                "tool-status": (
+                    "karox.git.status",
+                    "karox.git.log",
+                ),
                 "tool-diff": ("karox.git.diff",),
                 "tool-checks": ("karox.checks.run",),
                 "tool-browser-read": (
+                    "karox.browser.tabs",
                     "karox.browser.snapshot",
+                    "karox.browser.wait_for",
                     "karox.browser.get_text",
                     "karox.browser.console",
                     "karox.browser.network_failures",
@@ -3408,8 +5227,8 @@ if _HAS_TEXTUAL:
             if profile == "clickup" and tunnel != "cloudflare":
                 self.query_one("#bridge-error", Label).update(
                     self._label(
-                        "ClickUp запускается отдельным процессом через Cloudflare Tunnel.",
-                        "ClickUp runs as a separate process through Cloudflare Tunnel.",
+                        "ClickUp в автоматическом TUI-режиме использует Cloudflare Tunnel.",
+                        "ClickUp uses Cloudflare Tunnel in the automatic TUI flow.",
                     )
                 )
                 return
@@ -3448,6 +5267,8 @@ if _HAS_TEXTUAL:
             return self._default_tunnel
 
         def _profile_value(self) -> str:
+            if self._locked_profile is not None:
+                return self._locked_profile
             pressed = self.query_one("#bridge-profile", RadioSet).pressed_button
             values = {
                 "profile-promptql": "promptql",
@@ -3456,7 +5277,7 @@ if _HAS_TEXTUAL:
                 "profile-clickup": "clickup",
                 "profile-claude-web": "claude-web",
                 "profile-generic": "generic-streamable-http",
-                "profile-hyperagent": "hyperagent",
+                "profile-hyperagent": "hyperagent-web",
             }
             if pressed is None or pressed.id not in values:
                 raise ValueError(
@@ -3469,7 +5290,8 @@ if _HAS_TEXTUAL:
         side-effecting actions like installing or launching Tailscale."""
 
         BINDINGS = [
-            Binding("enter", "yes", "Да", priority=True),
+            # The focused button owns Enter. This matters after Tab moves from
+            # Yes to No: Enter must activate No rather than a priority Yes action.
             Binding("escape", "no", "Нет", priority=True),
         ]
         DEFAULT_CSS = """
@@ -3694,6 +5516,882 @@ if _HAS_TEXTUAL:
             with contextlib.suppress(Exception):
                 self.screen.clear_selection()
 
+    class SessionBrowserScreen(ModalScreen[Optional[SessionAction]]):
+        """Every run this process knows about, in one live list.
+
+        The screen renders :class:`SessionViewStore` and folds nothing itself. The
+        store is the only reducer, the bus is the realtime source and the durable
+        records were merged once at startup, so a browser that recomputed a status
+        from files would be a second source of truth that is free to disagree with
+        the status bar three rows above it.
+
+        Rows come from :func:`_session_browser_row_text`, the compact contract C
+        gave this screen. It is not the ``/sessions`` renderer and is not meant
+        to be: this list answers "which session do I open", so it carries the
+        task, a human status, a human activity and little else, while the
+        technical record stays in ``/sessions`` and Session Detail.
+
+        The two contracts still share their source. One ``SessionSummary``, one
+        set of status and action catalogs, so the words cannot disagree between
+        surfaces even though the field sets do.
+
+        **Ordering is by session id, not by activity.** The store sorts by most
+        recent event, which is right for a status line and wrong for a list a
+        person is moving a cursor through: an event about any session would
+        reorder the list and move a row out from under the selection. Session ids
+        are minted as ``task-<epoch>-<suffix>``, so sorting by id is stable *and*
+        reads chronologically.
+
+        Redraws are incremental. :meth:`apply_changes` is handed the dirty set the
+        application already consumed and re-renders exactly those rows, so an
+        event about one session touches no other row and cannot disturb the
+        selection.
+        """
+
+        # A hard bound, not a scrolling hint. The store tracks up to
+        # DEFAULT_SESSION_LIMIT sessions and one widget per session is what makes
+        # a long-lived process slow to draw. The newest ids are kept and the
+        # remainder is reported as a count rather than silently dropped.
+        MAX_ROWS = 100
+
+        BINDINGS = [
+            Binding("up", "previous_session", "Up", priority=True),
+            Binding("down", "next_session", "Down", priority=True),
+            Binding("enter", "primary", "Action", priority=True),
+            Binding("escape", "cancel", "Close", priority=True),
+        ]
+        DEFAULT_CSS = """
+        SessionBrowserScreen { align: center middle; background: #0e0c08 92%; }
+        /* C. `width: 100%` with a ceiling, the same shape the connection hub
+           uses. A percentage alone gave a 120-column terminal a 113-column
+           list whose rows were mostly whitespace between the status and the
+           model -- wide enough to read as a table, which is the impression
+           this screen must not make. The ceiling is what stops it. */
+        #session-browser { width: 100%; max-width: 100; height: 80%;
+          background: #1a1712; border: round #c6a56b; padding: 1 2; }
+        #session-browser-title { height: 1; text-style: bold; color: #e5e5e5; }
+        #session-rows { height: 1fr; scrollbar-color: #6b5c3e; }
+        #session-rows Static { width: 1fr; padding: 0 1; color: #c6bca8; }
+        #session-rows Static.selected { background: #2a251c; color: #e5e5e5;
+          text-style: bold; }
+        /* One line, enforced. `height: auto` let a long Russian action plus
+           an overflow count wrap and eat a session row. */
+        #session-browser-hint { height: 1; color: #8a7e6a; }
+        """
+
+        def __init__(
+            self,
+            store: SessionViewStore,
+            language: str = "ru",
+            *,
+            initial_selection: Optional[str] = None,
+        ) -> None:
+            super().__init__()
+            self._store = store
+            self.language = language
+            # Which row the cursor starts on. The application passes the session
+            # the user was last looking at, so returning from the detail screen
+            # puts the cursor back where they left it rather than at the top.
+            self._selected = initial_selection
+            # The rows on screen, in display order, and the widget drawing each.
+            # Two structures rather than one because the selection is held by
+            # session id and the DOM order has to match the sorted order.
+            self._rows: "OrderedDict[str, SessionSummary]" = OrderedDict()
+            self._widgets: Dict[str, Static] = {}
+            # The display order as of the last refresh. Needed to answer "which
+            # row was next to the one that vanished" -- afterwards nothing can
+            # reconstruct where it used to be.
+            self._previous_order: Tuple[str, ...] = ()
+            self._overflow = 0
+            # Whether the footer has ever been drawn. Without it the very first
+            # refresh of an empty store would skip the update and leave the
+            # empty-state sentence unwritten.
+            self._hint_drawn = False
+
+        # ------------------------------------------------------------- rendering
+
+        def _label(self, russian: str, english: str) -> str:
+            return english if self.language != "ru" else russian
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="session-browser"):
+                yield Static(
+                    # The shell already shows the brand; repeating it in every
+                    # modal title spends width on something the user knows.
+                    self._label("Сессии", "Sessions"),
+                    id="session-browser-title",
+                    markup=False,
+                )
+                yield VerticalScroll(id="session-rows")
+                yield Static("", id="session-browser-hint", markup=False)
+
+        def on_mount(self) -> None:
+            # No dirty set on the first draw: every row is new.
+            self.apply_changes(())
+
+        def content_width(self) -> int:
+            """How many columns a row's *text* actually gets.
+
+            C. Not `app.size.width`, which was the earlier mistake. Between the
+            terminal and the text sit the modal width, a border, dialog
+            padding, the scroll container, row padding and possibly a
+            scrollbar. Handing the renderer the terminal width gave it several
+            columns that do not exist, so it decided the activity fitted and
+            Textual then wrapped the line -- turning a one-line row into two
+            and pushing every row below it down.
+
+            Measured from the row container after mount, which accounts for all
+            of the above at once and needs no hand-counted `-2`s scattered
+            across the class. Before mount there is nothing to measure, so a
+            conservative fallback is used: guessing high is what caused the
+            wrap, and guessing low only drops an optional field.
+            """
+
+            # `#session-rows Static` carries `padding: 0 1`.
+            return self._measured_width("#session-rows", padding=2)
+
+        def footer_width(self) -> int:
+            """How many columns the footer's text gets.
+
+            Not the same number as :meth:`content_width`: the hint is a direct
+            child of the dialog, so it pays the border and the dialog padding
+            but neither the scroll container's scrollbar nor the per-row
+            padding. Measuring it separately is the whole reason this class has
+            no hand-counted offsets left in it.
+            """
+
+            return self._measured_width("#session-browser-hint", padding=0)
+
+        def _measured_width(self, selector: str, *, padding: int) -> int:
+            """The one place a usable text width is decided."""
+
+            try:
+                width = int(self.query_one(selector, Static).content_size.width)
+            except Exception:
+                try:
+                    width = int(
+                        self.query_one(selector, VerticalScroll).content_size.width
+                    )
+                except Exception:
+                    width = 0
+            if width > 0:
+                return max(width - padding, 16)
+            try:
+                # Pre-mount: the dialog is not laid out yet, so this subtracts
+                # the border and padding it is about to have. Guessing high is
+                # what caused the wrap; guessing low only drops a field.
+                return max(int(self.app.size.width) - 8 - padding, 16)
+            except Exception:
+                return BROWSER_STANDARD
+
+        def _row_text(self, row: SessionSummary) -> str:
+            # C. The compact contract, not the verbose one `/sessions` uses.
+            # The browser answers "which session"; every field it drops is a
+            # field Session Detail still shows to whoever chose.
+            return _session_browser_row_text(
+                row, self.language != "ru", self.content_width()
+            )
+
+        def _visible(self) -> Tuple[SessionSummary, ...]:
+            """The rows this screen may draw, ordered and bounded.
+
+            A store fault costs the refresh and never the screen: the browser is
+            an observer, and an observer must not take the interface down with it.
+            """
+
+            try:
+                rows = sorted(self._store.summaries(), key=lambda row: row.session_id)
+            except Exception:
+                return tuple(self._rows.values())
+            self._overflow = max(len(rows) - self.MAX_ROWS, 0)
+            if self._overflow:
+                rows = rows[-self.MAX_ROWS :]
+            return tuple(rows)
+
+        def apply_changes(self, changed: Sequence[str] = ()) -> None:
+            """Redraw the rows named in ``changed``, plus any structural change.
+
+            ``changed`` is the dirty set the application consumed from the store.
+            This screen deliberately never calls ``consume_dirty`` itself:
+            consuming clears, so a second consumer would steal the set from the
+            first and whichever ran second would quietly stop updating.
+            """
+
+            previous_ids = tuple(self._rows)
+            previous_selected = self._selected
+            previous_overflow = self._overflow
+            incoming = OrderedDict((row.session_id, row) for row in self._visible())
+            container = self.query_one("#session-rows", VerticalScroll)
+            for session_id in [key for key in self._widgets if key not in incoming]:
+                self._widgets.pop(session_id).remove()
+            dirty = set(changed)
+            order = list(incoming)
+            for index, (session_id, row) in enumerate(incoming.items()):
+                if session_id not in self._widgets:
+                    widget = Static(self._row_text(row), markup=False)
+                    self._widgets[session_id] = widget
+                    self._mount_in_order(container, widget, order, index)
+                elif session_id in dirty:
+                    self._update_row(row)
+            self._rows = incoming
+            self._restore_selection()
+            # C. The footer describes the *selected* row and the shape of the
+            # list. An event about some other session changes neither, and
+            # repainting it anyway would undo half the point of the incremental
+            # row redraw directly above.
+            if (
+                not self._hint_drawn
+                or tuple(incoming) != previous_ids
+                or self._selected != previous_selected
+                or self._overflow != previous_overflow
+                or (self._selected is not None and self._selected in dirty)
+            ):
+                self._update_hint()
+
+        def _mount_in_order(
+            self,
+            container: Any,
+            widget: Static,
+            order: List[str],
+            index: int,
+        ) -> None:
+            """Mount a new row where the ordering says it belongs.
+
+            Appending would be correct only while ids arrive in ascending order.
+            That holds for a freshly minted session and fails for a durable record
+            read after a later one, which is exactly the startup case.
+            """
+
+            for following in order[index + 1 :]:
+                anchor = self._widgets.get(following)
+                if anchor is not None:
+                    container.mount(widget, before=anchor)
+                    return
+            container.mount(widget)
+
+        def _update_row(self, row: SessionSummary) -> None:
+            widget = self._widgets.get(row.session_id)
+            if widget is not None:
+                widget.update(self._row_text(row))
+
+        def _redraw_rows(self) -> None:
+            """Re-render every mounted row from the view models already held."""
+
+            for session_id, row in self._rows.items():
+                widget = self._widgets.get(session_id)
+                if widget is not None:
+                    widget.update(self._row_text(row))
+
+        def refresh_language(self, language: str) -> None:
+            """Re-say every word on this screen in the other language.
+
+            One method rather than a caller poking at fields, because a
+            language change makes *all* of it stale at once and the title was
+            the piece that kept being forgotten: it is written in ``compose``,
+            which never runs again, so a browser left open through a switch
+            read "Sessions" above Russian rows.
+
+            Deliberately not ``apply_changes``: nothing about the data changed.
+            No widget is created or removed, the store is not read, the dirty
+            set is not touched, and the selection and scroll survive because
+            each existing widget is simply told to say something else.
+            """
+
+            self.language = language
+            with contextlib.suppress(Exception):
+                self.query_one("#session-browser-title", Static).update(
+                    self._label("\u0421\u0435\u0441\u0441\u0438\u0438", "Sessions")
+                )
+            with contextlib.suppress(Exception):
+                self._redraw_rows()
+            with contextlib.suppress(Exception):
+                # Covers the footer, the empty state and the overflow line,
+                # all three of which are decided in one place.
+                self._update_hint()
+
+        def _update_hint(self) -> None:
+            """One footer: the selected row's action, and what is hidden.
+
+            C. The action moved here from every row. It is still whatever the
+            store decided -- this changes where it is said, not what it says --
+            but saying it once beside the cursor is the difference between a
+            list of sessions and a list of buttons.
+            """
+
+            if not self._rows:
+                # C. Through the policy, not around it. Written inline this
+                # branch ignored the width budget entirely, and the Russian
+                # sentence is long enough to wrap the one line the footer has.
+                text = _browser_empty_text(
+                    self.language != "ru", self.footer_width()
+                )
+            else:
+                text = _session_browser_footer(
+                    self._selected_row(),
+                    self.language != "ru",
+                    self.footer_width(),
+                    shown=len(self._rows),
+                    hidden=self._overflow,
+                )
+            self.query_one("#session-browser-hint", Static).update(text)
+            self._hint_drawn = True
+
+        # ------------------------------------------------------------- selection
+
+        @property
+        def selected_session(self) -> Optional[str]:
+            return self._selected
+
+        def rows(self) -> Tuple[SessionSummary, ...]:
+            """The view models on screen, in display order."""
+
+            return tuple(self._rows.values())
+
+        def row_text(self, session_id: str) -> str:
+            """What one row actually says, read back from its widget."""
+
+            widget = self._widgets.get(session_id)
+            return "" if widget is None else str(widget.render())
+
+        def _selected_row(self) -> Optional[SessionSummary]:
+            if self._selected is None:
+                return None
+            return self._rows.get(self._selected)
+
+        def _restore_selection(self) -> None:
+            """Keep the selected session across a refresh.
+
+            Selection is a session id rather than an index, which is what makes an
+            update to a different row -- or a new session appearing above this one
+            -- leave the cursor where the user put it.
+            """
+
+            if self._selected not in self._rows:
+                # C. The nearest surviving neighbour, not always the first row.
+                # A session ending under the cursor used to throw the user to
+                # the top of the list, which on a long list means losing their
+                # place entirely.
+                previous = list(self._previous_order)
+                candidate: Optional[str] = None
+                if self._selected in previous:
+                    index = previous.index(self._selected)
+                    for following in previous[index + 1 :]:
+                        if following in self._rows:
+                            candidate = following
+                            break
+                    if candidate is None:
+                        for preceding in reversed(previous[:index]):
+                            if preceding in self._rows:
+                                candidate = preceding
+                                break
+                self._selected = candidate or next(iter(self._rows), None)
+            self._previous_order = tuple(self._rows)
+            self._highlight()
+
+        def _highlight(self) -> None:
+            for session_id, widget in self._widgets.items():
+                widget.set_class(session_id == self._selected, "selected")
+
+        def on_resize(self, _event: Any = None) -> None:
+            """Re-render every visible row under the new width policy.
+
+            A resize is the one event that legitimately touches all rows: the
+            fields a row may show changed. The store and its dirty set are not
+            involved, so this costs a redraw and nothing else.
+            """
+
+            self._redraw_rows()
+            with contextlib.suppress(Exception):
+                # The footer has its own width budget and its own fields to
+                # drop, so a resize is one of the few events that legitimately
+                # repaints it.
+                self._update_hint()
+
+        def _move(self, direction: int) -> None:
+            order = list(self._rows)
+            if not order:
+                return
+            index = order.index(self._selected) if self._selected in order else 0
+            self._selected = order[(index + direction) % len(order)]
+            self._highlight()
+            # The footer names the *selected* row's action, so moving the
+            # cursor has to refresh it or it would describe the previous row.
+            with contextlib.suppress(Exception):
+                self._update_hint()
+            widget = self._widgets.get(self._selected)
+            if widget is not None:
+                with contextlib.suppress(Exception):
+                    widget.scroll_visible()
+
+        def action_previous_session(self) -> None:
+            self._move(-1)
+
+        def action_next_session(self) -> None:
+            self._move(1)
+
+        def action_primary(self) -> None:
+            """Take the one action this row offers.
+
+            Exactly one, chosen by the store: a row with four buttons is a row
+            nobody reads, and the browser must not invent a fifth outcome.
+            """
+
+            row = self._selected_row()
+            if row is None:
+                return
+            self.dismiss(SessionAction(row.session_id, row.primary_action))
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class SessionDetailScreen(ModalScreen[None]):
+        """Everything one session is doing, from typed view models only.
+
+        The browser answers "which session"; this answers "what is it actually
+        doing, what did it cost, and what is it waiting on". It reads
+        :meth:`SessionViewStore.detail` and nothing else: no ``provider_history``,
+        no ``session.json``, no subprocess output, no raw payload dumps. The store
+        stays the only reducer, and this screen keeps no store of its own.
+
+        Sections are one widget each rather than one widget per row. A timeline of
+        two hundred entries as two hundred widgets is what makes a long-lived
+        process slow to draw, and rebuilding a widget list is also what loses the
+        scroll position on every event. Each section is bounded and says how many
+        rows it did not show.
+
+        Updates arrive from the application's single dirty-set drain. An event
+        about another session is ignored here, so it cannot cost a redraw or move
+        the scroll.
+        """
+
+        # Bounds, not hints. The store's own history is already capped; these cap
+        # what one screen draws out of it, and the difference is reported.
+        MAX_TIMELINE_ROWS = 60
+        MAX_TOOL_ROWS = 20
+        MAX_LIST_ROWS = 10
+
+        BINDINGS = [
+            Binding("escape", "back", "Back", priority=True),
+            Binding("up", "scroll_up", "Up", show=False),
+            Binding("down", "scroll_down", "Down", show=False),
+            Binding("pageup", "page_up", "PgUp", show=False),
+            Binding("pagedown", "page_down", "PgDn", show=False),
+        ]
+        DEFAULT_CSS = """
+        SessionDetailScreen { align: center middle; background: #0e0c08 92%; }
+        /* D. A ceiling, like the browser and the hub. Technical text at 113
+           columns is a telemetry grid; at 100 it is still a document. */
+        #session-detail { width: 100%; max-width: 100; height: 88%;
+          background: #1a1712; border: round #c6a56b; padding: 1 2; }
+        /* The overview is pinned above the scroll, so "what is this and what is
+           happening" cannot end up below the fold on a short terminal. Bounded,
+           because a header that grows is a header that eats the body. */
+        #session-detail-header { height: auto; max-height: 5; color: #e5e5e5;
+          text-style: bold; }
+        #session-detail-body { height: 1fr; scrollbar-color: #6b5c3e; }
+        #session-detail-body .section-title { color: #d4b676; text-style: bold; }
+        #session-detail-body .section-body { color: #c6bca8; margin-bottom: 1; }
+        #session-detail-body .section-risk { color: #d6c49a; }
+        #session-detail-hint { height: 1; color: #8a7e6a; }
+        """
+
+        # D. The order sections are drawn in, and the only names the screen
+        # knows. Attention first because it is the only thing that can be
+        # waiting on the reader; then what the run did; then, in descending
+        # order of how rarely anybody needs it, the technical record. Nothing
+        # was removed -- `risk` became `attention` and the old technical header
+        # became `diagnostics` at the very bottom.
+        SECTIONS: Tuple[str, ...] = (
+            "attention",
+            "progress",
+            "errors",
+            "timeline",
+            "tools",
+            "usage",
+            "workspace",
+            "browser",
+            "evidence",
+            "performance",
+            "diagnostics",
+        )
+
+        # Sections that stay on screen even with nothing in them, because their
+        # emptiness is itself a fact the reader asked for. Everything else is
+        # hidden when empty: nine `no data` blocks taught people to scroll past
+        # the region where the real answer appears.
+        ALWAYS_SHOWN: frozenset = frozenset({"progress", "diagnostics"})
+
+        def __init__(
+            self,
+            store: SessionViewStore,
+            session_id: str,
+            language: str = "ru",
+            *,
+            focus_risk: bool = False,
+        ) -> None:
+            super().__init__()
+            self._store = store
+            self.session_id = session_id
+            self.language = language
+            self._focus_risk = focus_risk
+            # What each section currently says, so a test can assert on rendered
+            # text and a redraw can compare against it.
+            self._text: Dict[str, str] = {}
+            self._bodies: Dict[str, Static] = {}
+            # Instrumentation and contract: a redraw happens for this session and
+            # for no other, and a test can prove the second half.
+            self.redraws = 0
+            # Which pending confirmation the reader has already been scrolled
+            # to. `focus_risk` must fire on arrival and when a *new* decision
+            # appears, and never on the ordinary tick in between: a screen that
+            # jumps every second is one nobody can read.
+            self._focused_confirmation: Optional[str] = None
+
+        # ------------------------------------------------------------- rendering
+
+        @property
+        def english(self) -> bool:
+            return self.language != "ru"
+
+        def _label(self, russian: str, english: str) -> str:
+            return english if self.english else russian
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="session-detail"):
+                yield Static("", id="session-detail-header", markup=False)
+                with VerticalScroll(id="session-detail-body"):
+                    for name in self.SECTIONS:
+                        yield Static(
+                            "",
+                            id=f"section-title-{name}",
+                            classes="section-title",
+                            markup=False,
+                        )
+                        yield Static(
+                            "",
+                            id=f"section-{name}",
+                            classes=(
+                                "section-body section-risk"
+                                if name == "risk"
+                                else "section-body"
+                            ),
+                            markup=False,
+                        )
+
+            yield Static("", id="session-detail-hint", markup=False)
+
+        def on_mount(self) -> None:
+            for name in self.SECTIONS:
+                with contextlib.suppress(Exception):
+                    self._bodies[name] = self.query_one(f"#section-{name}", Static)
+            self.refresh_detail()
+            if self._focus_risk:
+                # ``review_risk`` brought the user here to look at one thing.
+                # D. `attention`, not the retired `risk` name. Scrolling to a
+                # section this screen no longer composes put the one reader who
+                # was *sent here to decide something* in front of nothing.
+                self.scroll_to_section("attention")
+                self._focused_confirmation = self._confirmation_key()
+
+        def _confirmation_key(self) -> Optional[str]:
+            """An identity for the decision currently waiting, if any.
+
+            The digest is used because it is what changes when the agent asks
+            about a *different* action, and it never reaches the screen: this
+            compares it, it does not render it.
+            """
+
+            detail = self._detail()
+            if detail is None:
+                return None
+            risk = detail.pending_confirmation or detail.summary.risk
+            if risk is None or not risk.awaiting_confirmation:
+                return None
+            return risk.action_digest or "pending"
+
+        def _detail(self) -> Optional[SessionDetail]:
+            """The snapshot to draw, or nothing when the store has no session.
+
+            A store fault costs the refresh, never the screen: this is an
+            observer, and an observer must not take the interface down with it.
+            """
+
+            try:
+                return self._store.detail(self.session_id)
+            except Exception:
+                return None
+
+        def _bounded(
+            self, items: Sequence[Any], limit: int
+        ) -> Tuple[Sequence[Any], int]:
+            """The newest ``limit`` items, and how many were left out."""
+
+            hidden = max(len(items) - limit, 0)
+            return (items[-limit:] if hidden else items), hidden
+
+        def _block(self, lines: Sequence[str], hidden: int = 0) -> str:
+            """One section body: bounded lines, or an explicit "no data".
+
+            An empty block says so. It must not show a zero or a blank, because
+            both read as a measured fact rather than as an absent one.
+            """
+
+            if not lines:
+                return _detail_words("empty", self.english)
+            text = "\n".join(lines)
+            if hidden:
+                text += (
+                    f"\n… {hidden} {_detail_words('truncated', self.english)}"
+                )
+            return text
+
+        def _section_lines(self, name: str, detail: SessionDetail) -> Tuple[List[str], int]:
+            english = self.english
+            if name == "attention":
+                return _detail_attention_lines(detail, english), 0
+            if name == "progress":
+                return _detail_progress_lines(detail, english), 0
+            if name == "diagnostics":
+                # Where the old technical header went. The full session id, the
+                # access profile, the workspace mode and the raw step are all
+                # still here, verbatim, for whoever is debugging rather than
+                # deciding.
+                lines = _detail_header_lines(detail, english)
+                risk = detail.pending_confirmation or detail.summary.risk
+                if risk is not None:
+                    lines.extend(_risk_lines(risk, english))
+                return lines, 0
+            if name == "timeline":
+                entries, hidden = self._bounded(detail.timeline, self.MAX_TIMELINE_ROWS)
+                lines = [_timeline_entry_text(entry, english) for entry in entries]
+                # The reducer's own drop counts belong here: a timeline that
+                # silently lost events is worse than one that says it did.
+                if detail.truncated_timeline:
+                    lines.append(
+                        f"… {detail.truncated_timeline} "
+                        f"{_detail_words('truncated', english)}"
+                    )
+                if detail.dropped_events:
+                    lines.append(
+                        f"… {detail.dropped_events} {_detail_words('dropped', english)}"
+                    )
+                return lines, hidden
+            if name == "tools":
+                calls, hidden = self._bounded(detail.tool_calls, self.MAX_TOOL_ROWS)
+                return [_tool_call_text(call, english) for call in calls], hidden
+            if name == "errors":
+                errors, hidden = self._bounded(detail.errors, self.MAX_LIST_ROWS)
+                return [_timeline_entry_text(entry, english) for entry in errors], hidden
+            if name == "usage":
+                return _usage_lines(detail.summary, detail, english), 0
+            if name == "workspace":
+                return _mapping_lines(detail.git) + _mapping_lines(detail.diff), 0
+            if name == "browser":
+                return _mapping_lines(detail.browser), 0
+            if name == "evidence":
+                items, hidden = self._bounded(detail.evidence, self.MAX_LIST_ROWS)
+                return _evidence_lines(items, english), hidden
+            if name == "performance":
+                return _performance_lines(detail.performance, english), 0
+            return [], 0
+
+        def refresh_detail(self) -> None:
+            """Redraw the header and every section from the current snapshot."""
+
+            self.redraws += 1
+            detail = self._detail()
+            english = self.english
+            self._empty = set()
+            if detail is None:
+                # A session the store does not know. One sentence, and every
+                # optional section hidden: eleven `no data` blocks would look
+                # like measured emptiness rather than an absent session.
+                header = self._label(
+                    f"{self.session_id}: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u043e \u0441\u0435\u0441\u0441\u0438\u0438.",
+                    f"{self.session_id}: no data for this session.",
+                )
+                self._text = {
+                    name: _detail_words("empty", english) for name in self.SECTIONS
+                }
+                self._empty = set(self.SECTIONS)
+            else:
+                # D. The overview, not the identity line. What this is and what
+                # is happening to it, above the fold and above everything
+                # technical.
+                header = "\n".join(_detail_overview_lines(detail, english))
+                for name in self.SECTIONS:
+                    try:
+                        lines, hidden = self._section_lines(name, detail)
+                    except Exception:
+                        # One malformed section must not cost the other ten.
+                        lines, hidden = [], 0
+                    if not lines:
+                        self._empty.add(name)
+                    self._text[name] = self._block(lines, hidden)
+            self._write_widgets(header)
+
+            # D. A confirmation that appears while the reader is already here
+            # earns one scroll, and only one. Comparing the decision's identity
+            # rather than its presence is what stops a live run dragging the
+            # viewport back to the top on every tick.
+            pending = self._confirmation_key()
+            if pending is not None and pending != self._focused_confirmation:
+                self._focused_confirmation = pending
+                with contextlib.suppress(Exception):
+                    self.scroll_to_section("attention")
+            elif pending is None:
+                self._focused_confirmation = None
+            return
+
+        def _write_widgets(self, header: str) -> None:
+            with contextlib.suppress(Exception):
+                self.query_one("#session-detail-header", Static).update(header)
+            for name in self.SECTIONS:
+                widget = self._bodies.get(name)
+                if widget is None:
+                    continue
+                # D. Hidden rather than unmounted. The DOM stays fixed, so a
+                # section appearing or disappearing costs a visibility flag and
+                # not a rebuild -- which is what keeps the scroll position and
+                # keeps a live update cheap.
+                visible = name in self.ALWAYS_SHOWN or name not in self._empty
+                with contextlib.suppress(Exception):
+                    title = self.query_one(f"#section-title-{name}", Static)
+                    title.update(_detail_words(name, self.english))
+                    title.display = visible
+                with contextlib.suppress(Exception):
+                    widget.update(self._text.get(name, ""))
+                    widget.display = visible
+            with contextlib.suppress(Exception):
+                self.query_one("#session-detail-hint", Static).update(
+                    _detail_footer_text(self.english, self.footer_width())
+                )
+
+        def visible_sections(self) -> Tuple[str, ...]:
+            """Which sections a reader can actually see, in screen order."""
+
+            return tuple(
+                name
+                for name in self.SECTIONS
+                if name in self.ALWAYS_SHOWN or name not in self._empty
+            )
+
+        # ------------------------------------------------------------- width
+
+        def content_width(self) -> int:
+            """How many columns a section body's text actually gets."""
+
+            return self._measured_width("#session-detail-body")
+
+        def footer_width(self) -> int:
+            """How many columns the footer gets.
+
+            A different number from :meth:`content_width`: the hint is a direct
+            child of the dialog and pays neither the scroll container nor its
+            scrollbar. Measuring both from the real content region is what
+            keeps hand-counted offsets out of this class.
+            """
+
+            return self._measured_width("#session-detail-hint")
+
+        def _measured_width(self, selector: str) -> int:
+            """The one place a usable text width is decided."""
+
+            for widget_type in (Static, VerticalScroll):
+                try:
+                    width = int(
+                        self.query_one(selector, widget_type).content_size.width
+                    )
+                except Exception:
+                    continue
+                if width > 0:
+                    return width
+            try:
+                # Pre-mount: subtract the border and padding the dialog is
+                # about to have. Guessing low only drops an optional hint.
+                return max(int(self.app.size.width) - 8, 16)
+            except Exception:
+                return BROWSER_STANDARD
+
+        def refresh_language(self, language: str) -> None:
+            """Re-say every word on this screen in the other language.
+
+            One method, because a language change makes the overview, the
+            section titles, the bodies and the footer stale at once. It is a
+            redraw from the snapshot already in the store: no second screen, no
+            new widget, no dirty set touched, and the browser underneath keeps
+            its selection because it is never consulted.
+            """
+
+            self.language = language
+            self.refresh_detail()
+
+        # --------------------------------------------------------------- updates
+
+        def apply_changes(self, changed: Sequence[str] = ()) -> bool:
+            """Redraw only when this session is the one that changed.
+
+            Returns whether a redraw happened, which is the property a test
+            needs: an event about another session must cost nothing here.
+            """
+
+            if changed and self.session_id not in set(changed):
+                return False
+            self.refresh_detail()
+            return True
+
+        # ------------------------------------------------------------ inspection
+
+        def sections(self) -> Dict[str, str]:
+            """What every section currently says. Rendered text, not view models."""
+
+            return dict(self._text)
+
+        def section_text(self, name: str) -> str:
+            return self._text.get(name, "")
+
+        def header_text(self) -> str:
+            try:
+                return str(self.query_one("#session-detail-header", Static).render())
+            except Exception:
+                return ""
+
+        def rendered_text(self) -> str:
+            """Everything on screen as one string, for a leak assertion."""
+
+            return "\n".join([self.header_text(), *self._text.values()])
+
+        # ----------------------------------------------------------- navigation
+
+        def scroll_to_section(self, name: str) -> None:
+            widget = self._bodies.get(name)
+            if widget is None:
+                return
+            with contextlib.suppress(Exception):
+                widget.scroll_visible()
+
+        def _body(self) -> Any:
+            return self.query_one("#session-detail-body", VerticalScroll)
+
+        def action_scroll_up(self) -> None:
+            with contextlib.suppress(Exception):
+                self._body().scroll_up()
+
+        def action_scroll_down(self) -> None:
+            with contextlib.suppress(Exception):
+                self._body().scroll_down()
+
+        def action_page_up(self) -> None:
+            with contextlib.suppress(Exception):
+                self._body().scroll_page_up()
+
+        def action_page_down(self) -> None:
+            with contextlib.suppress(Exception):
+                self._body().scroll_page_down()
+
+        def action_back(self) -> None:
+            self.dismiss(None)
+
     class KaroXApp(App[int]):
         """Human-facing KaroX terminal application."""
 
@@ -3702,8 +6400,18 @@ if _HAS_TEXTUAL:
         ENABLE_COMMAND_PALETTE = True
         BINDINGS = [
             Binding("ctrl+p", "command_palette", "Команды", show=False),
+            # Ctrl+M is not bindable in a real terminal: every terminal sends
+            # carriage return for it, so Textual can only see Enter. The model
+            # picker therefore lives on Ctrl+G, a key that arrives intact
+            # everywhere. Advertised in the welcome and the command palette.
+            Binding("ctrl+g", "model", "Модель", show=False),
+            # No Ctrl+U binding: the composer Input owns ctrl+u for "delete to
+            # the start of the line", and an app-level shortcut that only works
+            # while the user is *not* typing is a trap. Usage & Cost stays on
+            # /usage and in the command palette.
             Binding("ctrl+s", "onboarding", "Подключения", show=False),
-            Binding("ctrl+b", "bridge", "Сайт / MCP", show=False),
+            Binding("ctrl+o", "session_browser", "Сессии", show=False),
+            Binding("ctrl+w", "workspace", "Папка", show=False, priority=True),
             Binding("ctrl+l", "clear_log", "Очистить", show=False),
             Binding("ctrl+q", "quit", "Выход", show=False),
             Binding("escape", "stop_agent", "Стоп", show=False, priority=True),
@@ -3719,32 +6427,34 @@ if _HAS_TEXTUAL:
                 priority=True,
             ),
         ]
-        # The activity panel is four lines tall, so more than a few steps would
-        # scroll the oldest out of sight anyway.
-        MAX_VISIBLE_STEPS = 6
+        # A2. There is no step list any more, so there is no cap on one. The
+        # `#activity` pane holds a single line, and the second row exists only
+        # for a critical failure.
         CSS = """
         Screen { background: #121212; color: #dcdcdc; }
+        /* Keyboard focus must be unmistakable. Tab used to move focus while the
+           screen gave almost no visual feedback, making Enter feel random even
+           when dispatch was correct. Keep geometry unchanged: only paint. */
+        Button:focus { background: #d4b676; color: #121212; text-style: bold; }
+        Input:focus { border: round #d4b676; }
+        OptionList:focus { border: round #d4b676; }
+        RadioSet:focus { border: round #d4b676; }
         /* The chrome above and below the chat came to seventeen rows before a
            single word of conversation, which in a small window left the answer a
            few lines to live in. The blank row over the title and the one under
            the composer were the two that bought nothing. */
-        #brand { height: auto; padding: 0 2; background: #181511;
-          border-bottom: solid #4a4338; color: #e5e5e5; }
-        #brand-title { height: 1; color: #d4b676; text-style: bold; }
-        #status { height: 3; padding: 0 2; background: #1c1916;
-          border-bottom: solid #2e2820; }
-        /* `padding-right` is the gutter. Five columns at `1fr` with none of it
-           put "контекст: лимит" -- exactly 15 cells at an 80-column window -- flush
-           against the field after it, so the row read "контекст: лимитмост:
-           выключен" and looked like a rendering fault rather than two fields.
-           `text-overflow: ellipsis` marks a value that did not fit: at 46 columns
-           each field gets 8 cells, and "openai/model-a" drawn as "openai/m" reads
-           as a different model to the person checking which one is selected. */
-        #status Static { width: 1fr; content-align: left middle; color: #968a7a;
-          padding-right: 1; text-overflow: ellipsis; }
-        #model-status, #session-status { color: #c6bca8; }
-        #sponsor-ticker { height: 1; padding: 0; background: #181511;
-          color: #8f8170; text-style: dim; overflow: hidden; }
+        /* One line of chrome above the conversation, and nothing else.
+           This replaced a brand block plus a three-row grid of five equal
+           status columns. Two defects came from that grid and both are gone
+           with it: at 80 columns each column got 16 cells, so "контекст: лимит"
+           filled its own column exactly and ran flush into the next field --
+           the row read "контекст: лимитмост: выключен" and looked like a
+           rendering fault; and `text-overflow: ellipsis` drew "openai/model-a"
+           as "openai/m", which reads as a *different* model to the person
+           checking which one is selected. `_header_line` drops a field whole
+           instead, so nothing on screen is ever a half-truth. */
+        #header-status { height: 1; padding: 0 2; background: #181511;
+          color: #e0dccc; }
         #conversation { height: 1fr; padding: 1 2; scrollbar-color: #6b5c3e; }
         /* The frame around a message is CSS rather than a Rich Panel, and that is
            what makes the message selectable: Widget.get_selection returns None for
@@ -3767,7 +6477,13 @@ if _HAS_TEXTUAL:
            stray blank line, so only that one is removed. */
         .message-assistant > *:last-of-type { margin-bottom: 0; }
         #busy { height: 1; display: none; color: #c6a56b; }
-        #activity { display: none; height: auto; min-height: 2; max-height: 4;
+        /* A2. One row, and a second only for a critical failure. The four-row
+           panel this replaces held a list of raw tool calls; it now holds one
+           sentence, and the three rows it stops reserving go to the
+           conversation, which is the thing the user came for. `max-height: 2`
+           is the contract stated where the layout engine can enforce it: even
+           if a line escaped `_fit_activity_line`, it cannot eat the chat. */
+        #activity { display: none; height: auto; min-height: 1; max-height: 2;
           margin: 0 2; padding: 0 1; background: #1a1712;
           border-left: thick #c6a56b; color: #d4b676; }
         #activity.activity-success { border-left: thick #8aab7e; color: #b7c2b0; }
@@ -3776,11 +6492,9 @@ if _HAS_TEXTUAL:
         #command-menu { display: none; height: auto; max-height: 14; margin: 0 2;
           padding: 0 1; background: #191612; border: round #4a4338;
           color: #c6bca8; }
-        #composer-wrap { height: 4; padding: 0 2; background: #181511;
-          border-top: solid #2e2820; }
+        #composer-wrap { height: 3; padding: 0 2; background: #181511; }
         #composer { border: round #4a4338; background: #20201c; color: #e5e5e5; }
         #composer:focus { border: round #c6a56b; }
-        #composer-hint { height: 1; color: #8a7e6a; }
         """
 
         def __init__(
@@ -3818,15 +6532,68 @@ if _HAS_TEXTUAL:
             self.verification = _default_verification(self.repository)
             self.pending_task: Optional[str] = None
             self._setup_both = False
+            # B1. Whether the provider wizard was entered from the Connection
+            # Hub, and should therefore hand the user back to it. The wizard is
+            # also reachable on its own (Ctrl+S used to, `action_setup` still
+            # does), and those callers must keep landing in the chat -- so this
+            # is a property of the journey, not of the wizard.
+            self._connect_return_to_hub = False
+            # B5. Where the hub should put the cursor when it next opens, and
+            # which record the open detail screen is about. Both are journey
+            # state rather than connection state -- the registries own the
+            # latter -- so they live here and are cleared as soon as they are
+            # spent, rather than lingering to steer an unrelated flow.
+            self._connection_detail_id: Optional[str] = None
+            self._hub_select: Optional[str] = None
+            self._hub_select_after_delete: Optional[str] = None
+            self._hub_neighbour: Optional[str] = None
             self.agent_busy = False
             self.agent_process: Optional[subprocess.Popen[str]] = None
             self._stop_requested = False
             self._history_seen = 0
             self._history_fingerprint: Optional[Tuple[int, int]] = None
-            # One entry per tool call of the current turn, in the order they
-            # started, so the whole turn stays visible instead of each call
-            # overwriting the one before it.
-            self._steps: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+            # The single typed view layer for this application instance. The TUI
+            # folds no events itself: EventBus is the realtime truth, this store
+            # is the only reducer, and widgets render its view models. One store
+            # per app, attached on mount and detached on unmount.
+            self._view_store = SessionViewStore()
+            # Which session the Session Browser should start on. Remembered
+            # across the detail screen so returning does not send the cursor
+            # back to the top of the list.
+            self._browser_selection: Optional[str] = None
+            self._view_detach: Optional[Callable[[], None]] = None
+            self._view_bus: Optional[EventBus] = None
+            # Run identity, not session identity. A monotonic counter bumped by
+            # every real submission, the run the application currently owns, and
+            # the single terminal claim belonging to that run.
+            #
+            # This replaced an unbounded ``set`` of session ids, which grew for
+            # the life of the process and still could not tell two runs of one
+            # session apart. Two values bounded by definition say more: a late
+            # callback from a previous generation is recognised and dropped, and
+            # a duplicate callback of the current run claims the terminal
+            # transition only once.
+            self._run_generation = 0
+            self._active_run: Optional[RunIdentity] = None
+            self._terminal_claimed: Optional[RunIdentity] = None
+            # A2. The single activity line, and everything it is derived from.
+            #
+            # `_activity_calls` maps a call id to the *kind* of action it is, so
+            # a result arriving after its call can be classified without
+            # consulting the tool name again. `_activity_changed` is a set of
+            # paths kept only to be counted -- the count reaches the screen, the
+            # names never do. Nothing here is free-form text destined for a
+            # widget; see the activity-line catalogs for why that is the whole
+            # security argument.
+            self._activity_calls: "OrderedDict[str, str]" = OrderedDict()
+            self._activity_changed: "OrderedDict[str, None]" = OrderedDict()
+            self._activity_tests: Optional[int] = None
+            self._activity_kind = ""
+            self._activity_reason = ""
+            self._activity_started: Optional[float] = None
+            # The text currently on screen, so a tick that changes nothing costs
+            # a string compare instead of a repaint.
+            self._activity_rendered = ""
             # Multi-line pastes held aside while the composer shows a short
             # marker for each. Pasting a stack trace or a diff is the most
             # common way a coding agent is handed context, and a one-line widget
@@ -3846,19 +6613,26 @@ if _HAS_TEXTUAL:
             self._sponsor_text = ""
             self._sponsor_widget: Optional[Static] = None
             self.sponsors_visible = _load_sponsors_visible()
+            self.run_cost_profile = str(
+                _load_preferences().get("run_cost_profile", "balanced")
+            )
+            if self.run_cost_profile not in {"balanced", "economy"}:
+                self.run_cost_profile = "balanced"
+            raw_effort = _load_preferences().get("reasoning_effort")
+            self.reasoning_effort = (
+                str(raw_effort) if raw_effort in REASONING_EFFORTS else None
+            )
             self._last_assistant_content = ""
             self._task_started_at: Optional[float] = None
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="brand"):
-                yield Static("KaroX", id="brand-title")
-                yield Static("", id="sponsor-ticker", markup=False)
-            with Horizontal(id="status"):
-                yield Static("", id="repo-status")
-                yield Static("", id="model-status")
-                yield Static("", id="session-status")
-                yield Static("", id="context-status")
-                yield Static("bridge: off", id="bridge-status")
+            # One permanent line of chrome. The brand block, the five status
+            # columns and the sponsor ticker are gone: seventeen rows of chrome
+            # stood between the top of the window and the first word of the
+            # conversation, and in a 14-row terminal that left the answer almost
+            # nowhere to live. The sponsor ticker in particular is not mounted at
+            # all now, so it costs no height and cannot animate behind the work.
+            yield Static("", id="header-status", markup=False)
             # A scroll container of per-message widgets rather than a RichLog. The
             # RichLog needed a min_width to stop it laying the chat out at 78
             # columns in a narrower window and clipping words mid-letter; a widget
@@ -3873,18 +6647,30 @@ if _HAS_TEXTUAL:
                     placeholder=_TEXT[self.language]["placeholder"],
                     id="composer",
                 )
-                yield Static(
-                    _TEXT[self.language]["hint"],
-                    id="composer-hint",
-                )
 
         def on_mount(self) -> None:
+            self._start_session_view()
             self._refresh_status()
             self.query_one("#composer", Input).focus()
-            self._sponsor_widget = self.query_one("#sponsor-ticker", Static)
-            self.set_interval(0.35, self._poll_agent_history)
-            self.set_interval(0.18, self._tick_sponsor_ticker)
-            self._reset_sponsor_ticker()
+            # The sponsor ticker is no longer part of the ordinary shell, so
+            # there is no widget to bind and no scrolling timer to start. The
+            # helpers below stay because ``/sponsors`` is still a real command;
+            # they simply have nothing to draw into and return immediately.
+            self._sponsor_widget = None
+            # Phase 3: typed transcript replaces _poll_agent_history. The
+            # transcript store (SQLite WAL) is the process-boundary source;
+            # the agent subprocess writes events and this timer reads them.
+            self.set_interval(0.35, self._poll_typed_transcript)
+            # A separate, slower timer than the history poll: events arrive on
+            # the publisher's thread and mark sessions dirty, and this drains
+            # that set. A burst of two hundred events therefore costs one
+            # redraw here rather than two hundred.
+            self.set_interval(0.25, self._drain_session_view)
+            # The elapsed number, and nothing else. Slower than either poll
+            # above because a second is the resolution the line shows, and
+            # `_show_activity` returns without touching the widget when the
+            # rendered text has not changed.
+            self.set_interval(1.0, self._tick_activity)
             if self._needs_language:
                 self.call_after_refresh(
                     lambda: self.push_screen(
@@ -3892,13 +6678,662 @@ if _HAS_TEXTUAL:
                     )
                 )
             else:
+                # Start in the chat, not behind another modal. Home remains one
+                # key away (Ctrl+H / /home), but an automatic dashboard stole
+                # focus from the composer and made the first command feel broken.
                 self._show_welcome()
             reason = _unsafe_workspace_reason(self.repository, self.language)
             if reason:
                 self._write_notice(reason, "error")
 
         def on_unmount(self) -> None:
+            # Detach before the bridge stops: a subscriber that outlives the UI
+            # would hold this application object alive and fold events into
+            # widgets that no longer exist.
+            self._stop_session_view()
             self._stop_bridge(quiet=True)
+
+        # ------------------------------------------------- typed event view layer
+
+        def _start_session_view(self) -> None:
+            """Attach the view store to the process-wide bus and backfill it.
+
+            Order matters and is deliberate. Subscribing first and syncing after
+            means an event published between the two is folded twice, which the
+            store discards by sequence number. The reverse order would drop it
+            entirely.
+
+            Nothing here is allowed to prevent the interface from starting: a
+            missing bus or an unreadable session directory costs typed status,
+            not the application.
+            """
+
+            # Contract: start is transactional and stop is idempotent. A repeated
+            # start first stops the previous subscription, so a successful start
+            # always leaves exactly one subscriber and a failed one leaves none.
+            self._stop_session_view()
+            detach: Optional[Callable[[], None]] = None
+            try:
+                bus = event_bus()
+                # Held locally, not published to self, until initialisation has
+                # fully succeeded. Assigning the handle first meant that a merge
+                # or sync failure reset the attribute while the subscriber stayed
+                # registered on the bus -- an unreachable, un-detachable leak.
+                detach = self._view_store.attach(bus)
+                # Fold the in-process event ring immediately; disk history is
+                # intentionally backfilled after first paint on a worker. Reading
+                # every saved session here made the composer feel frozen on a
+                # long-lived install even though none of that history is needed
+                # to type the next task.
+                self._view_store.sync(bus)
+            except Exception:
+                if detach is not None:
+                    try:
+                        detach()
+                    except Exception:
+                        pass
+                self._view_bus = None
+                self._view_detach = None
+                return
+            self._view_bus = bus
+            self._view_detach = detach
+            self._view_store.consume_dirty()
+            self.run_worker(
+                self._merge_persisted_sessions_safely,
+                thread=True,
+                exclusive=True,
+                group="session-history-backfill",
+            )
+
+        def _merge_persisted_sessions_safely(self) -> None:
+            """Backfill on a worker without letting a disk fault break the app.
+
+            ``_merge_persisted_sessions`` is itself fail-soft, but it runs in a
+            Textual worker thread: an unexpected raise there would surface as a
+            worker crash and, under ``run_test``, as an app exception. A history
+            backfill failure costs persisted rows, never the live subscription
+            or the interface, so the wrapper guarantees exactly that.
+            """
+
+            try:
+                self._merge_persisted_sessions()
+            except Exception:
+                pass
+
+        def _stop_session_view(self) -> None:
+            detach = self._view_detach
+            self._view_detach = None
+            self._view_bus = None
+            if detach is None:
+                return
+            try:
+                detach()
+            except Exception:
+                # An unsubscribe that raises is not a reason to fail shutdown.
+                pass
+
+        def _publish_event(
+            self,
+            kind: EventKind,
+            *,
+            session_id: str,
+            summary: str,
+            data: Dict[str, Any],
+            level: EventLevel = EventLevel.INFO,
+        ) -> None:
+            """Publish one typed lifecycle event, never at the cost of the run.
+
+            Publishing is observability. An agent run that completed must not be
+            reported as failed, and must not fail at all, because a bus was
+            missing or a subscriber raised -- so every fault here is swallowed.
+            The durable ``SessionStore`` remains the recovery source; this is the
+            realtime projection on top of it.
+
+            ``session_id`` is required by the view store: an event without one
+            cannot appear in any per-session view, so an empty id publishes
+            nothing rather than a row nobody can find.
+            """
+
+            if not session_id:
+                return
+            try:
+                bus = self._view_bus or event_bus()
+            except Exception:
+                return
+            try:
+                bus.publish(
+                    kind,
+                    session_id=session_id,
+                    summary=summary,
+                    source=EVENT_SOURCE_TUI_AGENT,
+                    level=level,
+                    data=data,
+                )
+            except Exception:
+                # A broken view layer is not allowed to stop an agent.
+                return
+
+        def _claim_terminal(self, run: Optional[RunIdentity]) -> bool:
+            """Claim the single terminal transition one run may publish.
+
+            Keyed on the run, not the session. ``_agent_finished`` runs once per
+            run, but a stop racing the child's own exit could reach two terminal
+            publishers for the same run, and a *later* run of the same session
+            must not inherit the earlier run's spent claim. The first claim of a
+            given identity wins; the next generation starts unclaimed.
+            """
+
+            if run is None or not run.session_id:
+                return False
+            if self._terminal_claimed == run:
+                return False
+            self._terminal_claimed = run
+            return True
+
+        def _lifecycle_identity(self, session_id: str) -> Dict[str, Any]:
+            """Facts about this run, from their real sources, or nothing.
+
+            Every field here used to be a convenient guess: ``workspace_write``
+            was hardcoded whatever the session was actually created with, and
+            ``workspace_mode`` was published as ``repository`` although no
+            canonical field or enum of that name exists anywhere in the product.
+            A guess that renders identically to a fact is worse than a blank,
+            because nothing on the screen distinguishes the two.
+
+            So the rule is: publish what the parent knows, read what the durable
+            record knows, and omit the rest. Reading the record is fail-soft --
+            a ``SessionStore`` fault costs identity fields, never the run.
+            """
+
+            data: Dict[str, Any] = {}
+            try:
+                record = SessionStore(session_dir()).load(session_id)
+            except Exception:
+                record = None
+            if record is not None:
+                profile = _identifier(getattr(record, "access_profile", ""))
+                if profile:
+                    data["access_profile"] = profile
+                task = _identifier(getattr(record, "task", ""))
+                if task:
+                    data["task"] = task
+            try:
+                selected = _selected_model()
+            except Exception:
+                selected = None
+            if selected is not None:
+                provider = _identifier(getattr(selected, "provider_id", ""))
+                model = _identifier(getattr(selected, "model_id", ""))
+                if provider:
+                    data["provider"] = provider
+                if model:
+                    data["model"] = model
+            return data
+
+        def _publish_agent_started(self, run: RunIdentity, task: str) -> None:
+            """Announce a run that this process just started.
+
+            Every field is something the parent knows for certain at this point:
+            the task it is about to send, the model selection the run will use,
+            and the access profile the durable session was created with. Nothing
+            is parsed out of human-readable log text and nothing is invented.
+            """
+
+            session_id = run.session_id
+            data: Dict[str, Any] = {
+                "status": STATUS_RUNNING,
+                "phase": STATUS_RUNNING,
+                "task": task,
+                # Only this publisher may say ``karox``: it is the native KaroX
+                # agent that ``_submit_task`` dispatches. A future publisher for
+                # a different agent must name that agent instead of inheriting
+                # this one.
+                "agent": "karox",
+                # A fresh run has no step yet. Published explicitly so a resumed
+                # session cannot keep showing the step of its previous attempt.
+                "current_step": "",
+            }
+            # Durable and selection-sourced facts. The submitted task stays
+            # authoritative over the recorded one: it is what this run was given.
+            identity = self._lifecycle_identity(session_id)
+            identity.pop("task", None)
+            data.update(identity)
+            self._publish_event(
+                EventKind.SESSION_STATE,
+                session_id=session_id,
+                summary=SUMMARY_RUN_STARTED,
+                data=data,
+            )
+
+        def _publish_agent_completed(
+            self, run: RunIdentity, report: Optional[Dict[str, Any]]
+        ) -> None:
+            """Announce a run this process observed finishing successfully."""
+
+            if not self._claim_terminal(run):
+                return
+            session_id = run.session_id
+            data: Dict[str, Any] = {
+                "status": STATUS_COMPLETED,
+                "phase": STATUS_COMPLETED,
+                "current_step": "",
+            }
+            if isinstance(report, dict):
+                changed = report.get("changed_files")
+                if isinstance(changed, (list, tuple)):
+                    data["changed_files"] = len(changed)
+            # Identity is read here rather than only at start. ``_submit_task``
+            # mints a fresh session id and the *child* is what creates the
+            # durable record, so at start time there is nothing on disk to read
+            # and ``access_profile`` is genuinely unprovable. By the terminal
+            # event the record exists, so the browser gets the real profile
+            # instead of a hardcoded guess. Still fail-soft: no record, no field.
+            data.update(self._lifecycle_identity(session_id))
+            self._publish_event(
+                EventKind.SESSION_STATE,
+                session_id=session_id,
+                summary=SUMMARY_RUN_COMPLETED,
+                data=data,
+            )
+            self._publish_agent_usage(session_id, report)
+
+        def _publish_agent_usage(
+            self, session_id: str, report: Optional[Dict[str, Any]]
+        ) -> None:
+            """Publish measured token usage as the event kind that folds it.
+
+            SessionViewStore reads usage, cost and budgets in its AGENT_ACTION
+            fold and nowhere else, so usage attached to a SESSION_STATE payload
+            was silently dropped: the publisher looked correct and the number
+            never reached a row. Usage is a separate typed event for that reason.
+
+            Only real measurements are published. A report with no usage block
+            produces no event at all, because a zero here would be read as "this
+            run cost nothing" rather than "nobody measured it".
+            """
+
+            if not isinstance(report, dict):
+                return
+            raw = report.get("usage")
+            if not isinstance(raw, dict):
+                return
+            usage: Dict[str, Any] = {}
+            for key, value in raw.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                usage[str(key)] = value
+            if not usage:
+                return
+            self._publish_event(
+                EventKind.AGENT_ACTION,
+                session_id=session_id,
+                summary=SUMMARY_RUN_USAGE,
+                data={"usage": usage},
+            )
+
+        def _publish_agent_stopped(self, run: RunIdentity, reason: str) -> None:
+            """Announce a run that ended without a verified outcome and without a crash.
+
+            ``no_changes`` and the bounded limits land here. The CLI exits
+            non-zero for these because nothing was verified, but nothing failed
+            either, so publishing an ERROR would put a red row on a session the
+            user can simply resume. The reason travels as a stable identifier in
+            ``waiting_reason``; the words come from the UI catalog.
+            """
+
+            if not self._claim_terminal(run):
+                return
+            self._publish_event(
+                EventKind.SESSION_STATE,
+                session_id=run.session_id,
+                summary=SUMMARY_RUN_STOPPED,
+                level=EventLevel.WARNING,
+                data={
+                    "status": STATUS_STOPPED,
+                    "phase": STATUS_STOPPED,
+                    "current_step": "",
+                    "waiting_reason": reason or "stopped",
+                },
+            )
+
+        def _publish_agent_failed(
+            self, run: RunIdentity, reason: str, *, code: str = ERROR_AGENT_FAILED
+        ) -> None:
+            """Announce a failed run as a typed error plus a terminal status.
+
+            Two events, not one: the error carries a stable code for the error
+            list, and the state change moves the session out of ``running``. A
+            failure that only logged text would leave the row running forever.
+
+            ``code`` distinguishes an honestly failed agent from a report that
+            could not be parsed and from a report contradicting its own exit
+            code. The free-form diagnostic stays in ``data.reason``; the summary
+            is an identifier, never the reason text, because a reason can carry
+            arbitrary child output and a summary is rendered as a message.
+            """
+
+            if not self._claim_terminal(run):
+                return
+            session_id = run.session_id
+            summary = {
+                ERROR_AGENT_CONTRACT: SUMMARY_CONTRACT_MISMATCH,
+                ERROR_AGENT_MALFORMED: SUMMARY_MALFORMED_REPORT,
+            }.get(code, SUMMARY_RUN_FAILED)
+            self._publish_event(
+                EventKind.ERROR,
+                session_id=session_id,
+                summary=summary,
+                level=EventLevel.ERROR,
+                data={"code": code, "reason": reason},
+            )
+            self._publish_event(
+                EventKind.SESSION_STATE,
+                session_id=session_id,
+                summary=SUMMARY_RUN_FAILED,
+                level=EventLevel.ERROR,
+                data={
+                    "status": STATUS_FAILED,
+                    "phase": STATUS_FAILED,
+                    "current_step": "",
+                },
+            )
+
+        def _publish_agent_cancelled(self, run: RunIdentity) -> None:
+            """Announce a run the user stopped.
+
+            Cancelled is not failed: the session was saved and can be resumed, so
+            it gets its own terminal status and a reason the browser can show.
+            """
+
+            if not self._claim_terminal(run):
+                return
+            self._publish_event(
+                EventKind.SESSION_STATE,
+                session_id=run.session_id,
+                summary=SUMMARY_RUN_CANCELLED,
+                level=EventLevel.WARNING,
+                data={
+                    "status": STATUS_CANCELLED,
+                    "phase": STATUS_CANCELLED,
+                    "current_step": "",
+                    "waiting_reason": "stopped_by_user",
+                },
+            )
+
+        def _merge_persisted_sessions(self) -> None:
+            """Seed the store with what is on disk, as durable startup facts only.
+
+            This is a one-shot backfill, not a realtime source. After mount the
+            store is fed by events; nothing re-reads these files to learn a
+            current status.
+            """
+
+            try:
+                records = SessionStore(session_dir()).list()
+                iterator = iter(records)
+            except (Exception, TypeError):
+                return
+            payloads: List[Dict[str, Any]] = []
+            for record in iterator:
+                try:
+                    payloads.append(
+                        {
+                            "session_id": record.session_id,
+                            "task": record.task,
+                            "status": _identifier(record.status),
+                            "phase": _identifier(record.phase),
+                            "access_profile": _identifier(record.access_profile),
+                            "created_at": record.created_at,
+                            "updated_at": record.updated_at,
+                            "changed_files": record.changed_files,
+                        }
+                    )
+                except Exception:
+                    continue
+            if not payloads:
+                return
+            try:
+                self.call_from_thread(self._apply_persisted_sessions, payloads)
+            except Exception:
+                # The app may have closed while the disk snapshot was loading.
+                return
+
+        def _apply_persisted_sessions(self, payloads: Sequence[Mapping[str, Any]]) -> None:
+            """Merge a disk snapshot on Textual's UI thread."""
+
+            self._view_store.merge_records(payloads)
+
+        def _drain_session_view(self) -> None:
+            """Redraw once per refresh tick for the sessions that actually changed.
+
+            ``consume_dirty`` is the debounce primitive, so this costs one status
+            update per burst rather than one per event. A render fault must not
+            propagate: the publisher is the agent, and a broken widget is not
+            allowed to stop it.
+            """
+
+            try:
+                changed = self._view_store.consume_dirty()
+            except Exception:
+                return
+            if not changed:
+                return
+            if self.active_session and self.active_session in changed:
+                try:
+                    self._refresh_status()
+                except Exception:
+                    pass
+            self._update_session_browser(changed)
+
+        def _update_session_browser(self, changed: Sequence[str]) -> None:
+            """Hand the dirty set to an open Session Browser.
+
+            This tick is the single consumer of ``consume_dirty``, because
+            consuming clears: a browser that consumed the set itself would steal
+            it from the status bar, and whichever ran second would quietly stop
+            updating. So the set travels from here instead of being read twice.
+            """
+
+            for screen in list(self.screen_stack):
+                if not isinstance(screen, (SessionBrowserScreen, SessionDetailScreen)):
+                    continue
+                try:
+                    screen.apply_changes(changed)
+                except Exception:
+                    # An observer is never allowed to take the interface down.
+                    pass
+
+        def action_session_browser(self) -> None:
+            """Open the Session Browser over the conversation.
+
+            The screen is handed the application's own store rather than building
+            one: a second store would have its own cursor, re-fold the whole ring
+            and disagree with the status bar. The detail screen is handed the same
+            one for the same reason.
+            """
+
+            self.push_screen(
+                SessionBrowserScreen(
+                    self._view_store,
+                    self.language,
+                    initial_selection=self._browser_selection,
+                ),
+                self._session_browser_done,
+            )
+
+        @on(events.Click, "#activity")
+        def _activity_clicked(self, event: events.Click) -> None:
+            """Open technical session detail when the visible failure row is clicked."""
+            if self._activity_kind != ACTIVITY_FAILED or not self.active_session:
+                return
+            event.stop()
+            self._open_session_detail(self.active_session)
+
+        def _open_session_detail(
+            self, session_id: str, *, focus_risk: bool = False
+        ) -> None:
+            """Open the Session Detail screen for one session.
+
+            ``focus_risk`` is what ``review_risk`` means for now: bring the person
+            to the risk block of the session that is waiting on them. Approving
+            still has to go through the ledger, so no control here claims to do it.
+            """
+
+            self._browser_selection = session_id
+            self.push_screen(
+                SessionDetailScreen(
+                    self._view_store,
+                    session_id,
+                    self.language,
+                    focus_risk=focus_risk,
+                ),
+                self._session_detail_done,
+            )
+
+        def _session_detail_done(self, _result: Optional[None] = None) -> None:
+            """Escape from the detail screen returns to the browser.
+
+            The browser is re-opened with the session the user was looking at, so
+            the cursor is where they left it. Re-opening rather than keeping the
+            old screen alive means one screen owns the list at a time and there is
+            no hidden observer still being handed dirty sets.
+            """
+
+            self.action_session_browser()
+
+        def _session_browser_done(self, choice: Optional[SessionAction]) -> None:
+            """Carry out the one action a row offered.
+
+            ``stop`` is the only outcome that touches a process, and it is refused
+            unless this application actually owns the run: a row can describe a
+            session started by a different process, and pretending to stop that
+            one would be a false statement on screen.
+            """
+
+            if choice is None:
+                return
+            if choice.action == ACTION_STOP:
+                if self.agent_busy and self.active_session == choice.session_id:
+                    self.action_stop_agent()
+                else:
+                    self._write_notice(
+                        self._label(
+                            "Этот запуск ведёт другой процесс — отсюда его не остановить.",
+                            "Another process owns this run, so it cannot be stopped here.",
+                        ),
+                        "warning",
+                    )
+                return
+            if choice.action == ACTION_REVIEW_RISK:
+                # The session is stopped and waiting on this person, so take them
+                # to it rather than printing one line about it. The active session
+                # is deliberately not switched: reviewing a risk is not the same
+                # act as choosing which session the composer talks to.
+                self._write_notice(self._risk_review_text(choice.session_id), "warning")
+                self._open_session_detail(choice.session_id, focus_risk=True)
+                return
+            # ``resume`` and ``open`` are the same act from the user's side: make
+            # this the session on screen and show what it is doing. Resuming the
+            # work itself stays an explicit task the person types, so nothing here
+            # starts an agent.
+            self.active_session = choice.session_id
+            self._history_seen = 0
+            self._history_fingerprint = None
+            self._refresh_status()
+            self._open_session_detail(choice.session_id)
+
+        def _risk_review_text(self, session_id: str) -> str:
+            """Describe a pending confirmation without carrying its token.
+
+            The ledger keeps tokens out of events by construction and the view
+            layer has no key for one, so there is nothing here to leak. The text
+            is still assembled from named fields rather than a payload dump, which
+            is what keeps that true if a publisher ever changes.
+            """
+
+            row = self._view_store.summary(session_id)
+            risk = row.risk if row is not None else None
+            if risk is None:
+                return self._label(
+                    "Подтверждение больше не требуется.",
+                    "This session is no longer waiting for a confirmation.",
+                )
+            level = risk.level or self._label("неизвестный", "unknown")
+            digest = risk.action_digest[:12]
+            return self._label(
+                f"{session_id}: нужно подтверждение, риск {level}, действие {digest}.",
+                f"{session_id}: confirmation needed, risk {level}, action {digest}.",
+            )
+
+        def _session_is_event_backed(self, session_id: str) -> bool:
+            """Whether any typed event has been folded for this session.
+
+            This answers one narrow question and must not be read as "the whole
+            session is migrated". Use :meth:`_projection_is_event_backed` to
+            decide whether a specific projection may skip the legacy path.
+            """
+
+            try:
+                row = self._view_store.summary(session_id)
+            except Exception:
+                return False
+            # Asked of the store rather than a cached set: a set updated on the
+            # refresh timer would still report "legacy" for a session whose event
+            # arrived between two ticks, and the fallback would re-parse the
+            # whole document on exactly the ticks that matter.
+            return row is not None and row.last_event_seq > 0
+
+        def _projection_is_event_backed(self, session_id: str, projection: str) -> bool:
+            """Whether typed events own one named UI projection of a session.
+
+            The migration is per projection, not per session. A SESSION_STATE
+            event proves the status row and proves nothing about the transcript,
+            so one global boolean was wrong: it silenced the compatibility path
+            for data that path is still the only source of.
+
+            A projection is event-backed only when it is listed as migrated and
+            the session has actually produced a typed event.
+            """
+
+            if projection not in _EVENT_BACKED_PROJECTIONS:
+                return False
+            return self._session_is_event_backed(session_id)
+
+        def _active_session_view(self) -> Optional[SessionSummary]:
+            """The typed view model for the session on screen, if events cover it."""
+
+            if not self.active_session:
+                return None
+            try:
+                return self._view_store.summary(self.active_session)
+            except Exception:
+                return None
+
+        def _session_status_text(self) -> str:
+            """The session field of the status bar, from typed events when present.
+
+            The view model supplies stable identifiers; the words come from the
+            UI catalogs above. A session with no events yet keeps the plain id,
+            which is the pre-existing behaviour and the compatibility fallback.
+            """
+
+            text = _TEXT[self.language]
+            if not self.active_session:
+                return text["session"] + ": " + text["new_task"]
+            label = text["session"] + ": " + self.active_session
+            row = self._active_session_view()
+            if row is None or row.last_event_seq <= 0:
+                return label
+            english = self.language != "ru"
+            parts = [_session_status_words(row.status, english)]
+            # One detail, chosen by :func:`_session_detail_words`. The waiting
+            # reason it now falls back to is what a stopped run was missing: the
+            # publisher already sends ``no_changes`` or ``step_limit``, and the
+            # bar showed a bare "stopped" that gave the user nothing to act on.
+            detail = _session_detail_words(row, english)
+            if detail:
+                parts.append(detail)
+            return f"{label} ({' • '.join(parts)})"
 
         def _transcript(self) -> Any:
             return self.query_one("#conversation", TranscriptView)
@@ -3941,6 +7376,10 @@ if _HAS_TEXTUAL:
             if kind == "idle":
                 activity.styles.display = "none"
                 activity.update("")
+                # The cache exists to skip a repaint that would draw the same
+                # text. Hiding the widget is a repaint it did not see, so a
+                # stale cache here would suppress the next real line.
+                self._activity_rendered = ""
                 return
             activity.styles.display = "block"
             activity.set_class(kind == "success", "activity-success")
@@ -3965,6 +7404,10 @@ if _HAS_TEXTUAL:
             self._set_language(language)
             self._needs_language = False
             self._show_welcome()
+            # First-run language selection must land in the same chat-first shell
+            # as every later launch. Home is explicit (Ctrl+H / /home); pushing it
+            # here steals focus from the composer just after the user chose a
+            # language and recreates the old two-root onboarding confusion.
             self.query_one("#composer", Input).focus()
 
         def _set_language(self, language: str) -> None:
@@ -3973,11 +7416,29 @@ if _HAS_TEXTUAL:
             text = _TEXT[language]
             composer = self.query_one("#composer", Input)
             composer.placeholder = text["placeholder"]
-            self.query_one("#composer-hint", Static).update(text["hint"])
-            self._reset_sponsor_ticker()
             self._refresh_status()
             if self._command_menu_open:
                 self._update_command_menu(composer.value)
+            # An open Session Browser renders identifiers through the UI
+            # catalogs, so a language change makes every row stale at once --
+            # the one case where redrawing the whole list is the right answer.
+            #
+            # D. Session Detail is in the same position and was being missed:
+            # it has had `refresh_language` since the overview landed, and
+            # nothing called it, so switching language with the screen open
+            # left an entire English document above a Russian shell.
+            for screen in list(self.screen_stack):
+                if not isinstance(
+                    screen, (SessionBrowserScreen, SessionDetailScreen)
+                ):
+                    continue
+                # One call, so the title changes with the rows. Setting
+                # `.language` and replaying the dirty set left the heading in
+                # the old locale, because `compose` had already run.
+                try:
+                    screen.refresh_language(language)
+                except Exception:
+                    pass
 
         def _language_selected(self, language: Optional[str]) -> None:
             if language is not None:
@@ -3987,35 +7448,92 @@ if _HAS_TEXTUAL:
             self.query_one("#composer", Input).focus()
 
         def _refresh_status(self) -> None:
-            text = _TEXT[self.language]
-            self.query_one("#repo-status", Static).update(
-                text["repo"]
-                + ": "
-                + escape(self.repository.name or str(self.repository))
-            )
+            """Gather the facts and hand them to the one header renderer.
+
+            This method collects; :func:`_header_line` decides. Formatting the
+            header here as well would put the width rules in two places, and the
+            copy that drifts is always the one a screen actually reads.
+
+            Bridge state, the session id, the access profile and total spend are
+            deliberately absent: they are answers to questions a person asks
+            occasionally, and they were costing a permanent column each.
+            """
+
             selected = _selected_model()
             model = (
-                f"{text['model']}: {selected.provider_id}/{selected.model_id}"
+                f"{selected.provider_id}/{selected.model_id}"
                 if selected is not None
-                else f"{text['model']}: {text['not_configured']}"
+                else _TEXT[self.language]["not_configured"]
             )
-            self.query_one("#model-status", Static).update(escape(model))
-            self.query_one("#session-status", Static).update(
-                escape(
-                    text["session"] + ": " + (self.active_session or text["new_task"])
+            self.query_one("#header-status", Static).update(
+                _header_line(
+                    repository=self.repository.name or str(self.repository),
+                    model=model,
+                    activity=self._header_activity_text(),
+                    width=self._header_width(),
+                    effort=self.reasoning_effort or "auto",
+                    economy=self.run_cost_profile == "economy",
+                    context_note=self._context_warning(selected),
                 )
             )
-            self.query_one("#context-status", Static).update(
-                self._context_summary(selected)
-            )
-            bridge = (
-                f"{text['bridge']}: {text['public']}"
-                if self.public_endpoint
-                else f"{text['bridge']}: {self.bridge_launch.profile}/{self.bridge_launch.protocol}"
-                if self.bridge_launch is not None
-                else f"{text['bridge']}: {text['off']}"
-            )
-            self.query_one("#bridge-status", Static).update(escape(bridge))
+
+        def _header_width(self) -> int:
+            """How many columns the header actually has, right now.
+
+            Asked of the widget rather than assumed, because a terminal is
+            resized while the application runs and a breakpoint chosen at mount
+            would be wrong for the rest of the session.
+            """
+
+            try:
+                width = int(self.size.width)
+            except Exception:
+                width = 0
+            # A sane floor: during the first paint the size can still be zero,
+            # and rendering nothing at all reads as a broken interface.
+            return width if width > 0 else HEADER_WIDE_COLUMNS
+
+        def _header_activity_text(self) -> str:
+            """The one human state word for the header.
+
+            Reuses the session status projection the store already produces, so
+            the header cannot disagree with the Session Browser about what a run
+            is doing. When no session is active this is empty rather than a
+            placeholder: "no activity" is noise on a fresh screen.
+            """
+
+            row = self._active_session_view()
+            if row is None:
+                return ""
+            english = self.language != "ru"
+            words = _session_status_words(row.status, english)
+            # The one extra fact, chosen by the shared rule: a pending
+            # confirmation outranks a live step, which outranks a waiting
+            # reason. "выполняется" alone would hide the single state where the
+            # agent has stopped and is waiting on the person reading the screen.
+            detail = _session_detail_words(row, english)
+            return f"{words} · {detail}" if detail else words
+
+        def _context_warning(self, selected: Optional[ModelRecord]) -> str:
+            """Context occupancy, and only when it is close to mattering.
+
+            Below :data:`CONTEXT_WARNING_FRACTION` this returns nothing at all.
+            A permanent percentage is noise on every redraw; the same number at
+            eighty percent is the one fact that explains a truncated answer.
+            Nothing is invented: an unmeasured window produces no note.
+            """
+
+            if selected is None:
+                return ""
+            limit = _optional_positive_int(getattr(selected, "context_window", None))
+            used = self._last_prompt_tokens()
+            if not limit or used is None:
+                return ""
+            fraction = used / float(limit)
+            if fraction < CONTEXT_WARNING_FRACTION:
+                return ""
+            label = "context" if self.language != "ru" else "контекст"
+            return f"{label} {int(fraction * 100)}%"
 
         @staticmethod
         def _format_tokens(value: int) -> str:
@@ -4144,18 +7662,31 @@ if _HAS_TEXTUAL:
             ticker.styles.display = "block" if visible else "none"
 
         def on_resize(self, event: Any) -> None:  # noqa: ARG002
-            # The sponsor line is the first thing to go when the window is short,
-            # and it comes back when there is room again. The user's own /sponsors
-            # preference still wins: this can only hide it, never show it.
+            # The header chooses its fields by the width it has, so a resize is
+            # exactly when it has to be recomputed. Without this, a window
+            # narrowed after launch keeps drawing fields that no longer fit.
+            try:
+                self._refresh_status()
+            except Exception:
+                # A redraw fault must not propagate out of an event handler and
+                # take the interface down mid-resize.
+                pass
             self._apply_sponsor_visibility()
 
         def _set_sponsors_visible(self, visible: bool) -> None:
             self.sponsors_visible = bool(visible)
             _save_sponsors_visible(self.sponsors_visible)
             self._apply_sponsor_visibility()
+            # Honest wording: the preference is still stored, but the ticker is
+            # no longer part of the ordinary shell, so claiming it is "shown"
+            # would be a statement the screen does not back up.
             state = self._label(
-                "Лента спонсоров показана." if visible else "Лента спонсоров скрыта.",
-                "Sponsor line shown." if visible else "Sponsor line hidden.",
+                "Лента спонсоров больше не занимает строку интерфейса."
+                if visible
+                else "Лента спонсоров скрыта.",
+                "The sponsor line no longer occupies a row of the interface."
+                if visible
+                else "Sponsor line hidden.",
             )
             self._write(f"[#d4b676]{state}[/]")
 
@@ -4279,6 +7810,48 @@ if _HAS_TEXTUAL:
             command, _, argument = value.partition(" ")
             if command in {"/quit", "/exit"}:
                 self.exit(0)
+            elif command == "/home":
+                self.action_home()
+            elif command in {"/model", "/models"}:
+                self.action_model()
+            elif command == "/usage":
+                self.action_usage()
+            elif command == "/cost":
+                requested = argument.strip().casefold()
+                if not requested:
+                    self._write(
+                        self._label(
+                            f"Режим расходов: [#d4b676]{self.run_cost_profile}[/]. "
+                            "Используйте /cost economy или /cost balanced.",
+                            f"Run cost profile: [#d4b676]{self.run_cost_profile}[/]. "
+                            "Use /cost economy or /cost balanced.",
+                        )
+                    )
+                elif requested in {"balanced", "economy"}:
+                    self.run_cost_profile = requested
+                    _save_preferences(run_cost_profile=requested)
+                    self._refresh_status()
+                    self._write_notice(
+                        self._label(
+                            "Economy включён: модель, Effort и качественные лимиты не меняются; "
+                            "KaroX убирает точные повторы и использует prompt cache."
+                            if requested == "economy"
+                            else "Обычный режим включён. Модель и Effort не изменены.",
+                            "Economy enabled: model, Effort, and quality limits stay unchanged; "
+                            "KaroX removes exact duplication and uses prompt caching."
+                            if requested == "economy"
+                            else "Balanced mode enabled. Model and Effort are unchanged.",
+                        ),
+                        "success",
+                    )
+                else:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /cost economy или /cost balanced",
+                            "Usage: /cost economy or /cost balanced",
+                        ),
+                        "error",
+                    )
             elif command == "/help":
                 lines = [f"[bold #e0dccc]{_TEXT[self.language]['commands']}[/]"]
                 lines.extend(
@@ -4287,13 +7860,27 @@ if _HAS_TEXTUAL:
                 )
                 self._write("\n".join(lines))
             elif command in {"/connect", "/setup"}:
-                self.action_onboarding()
-            elif command == "/connections":
-                self.action_connect()
-            elif command == "/mcp-clients":
-                self._open_connections_screen("McpClientsScreen")
-            elif command == "/providers":
-                self._open_connections_screen("ModelProvidersScreen")
+                # The single connection entry point. Not the legacy api/web/both
+                # wizard: that asked the user to classify a connection before
+                # showing them what already exists.
+                self._open_connections(None)
+            elif command in DEPRECATED_COMMAND_ALIASES and command != "/bridge":
+                # Retired entry points, kept working and kept out of the menu.
+                # ``/bridge`` is excluded because ``/bridge stop`` is a real
+                # action and is routed by its own branch below.
+                self._open_connections(DEPRECATED_COMMAND_ALIASES.get(command))
+            elif command == "/browser":
+                self.action_session_browser()
+            elif command == "/sessions":
+                # Phase 2.3: /sessions opens the compact Session Browser by
+                # default. The verbose text renderer stays available via
+                # --verbose or /session-log for diagnostics.
+                if argument.strip() == "--verbose":
+                    self._run_inspection(_BACKEND_SLASH[command], command)
+                else:
+                    self.action_session_browser()
+            elif command == "/session-log":
+                self._run_inspection(["session", "list", "--json"], "/sessions")
             elif command == "/ask":
                 self._run_ask(argument.strip())
             elif command == "/language":
@@ -4303,39 +7890,9 @@ if _HAS_TEXTUAL:
             elif command == "/workspace":
                 raw_path = argument.strip().strip('"')
                 if not raw_path:
-                    self._write_notice(
-                        self._label(
-                            "Укажите папку проекта: /workspace D:\\путь\\к\\проекту",
-                            "Enter a project folder: /workspace D:\\path\\to\\project",
-                        ),
-                        "warning",
-                    )
+                    self.action_workspace()
                     return
-                candidate = Path(raw_path).expanduser()
-                if not candidate.is_dir():
-                    self._write_notice(
-                        self._label(
-                            "Такой папки не существует.",
-                            "That folder does not exist.",
-                        ),
-                        "error",
-                    )
-                    return
-                reason = _unsafe_workspace_reason(candidate, self.language)
-                if reason:
-                    self._write_notice(reason, "error")
-                    return
-                self.repository = candidate.resolve()
-                self.verification = _default_verification(self.repository)
-                self.active_session = None
-                self._refresh_status()
-                self._write_notice(
-                    self._label(
-                        f"Рабочая папка: {self.repository}",
-                        f"Workspace: {self.repository}",
-                    ),
-                    "success",
-                )
+                self._switch_workspace(raw_path)
             elif command == "/sponsors":
                 requested = argument.strip().casefold()
                 if requested in {"on", "show", "1", "true"}:
@@ -4353,9 +7910,10 @@ if _HAS_TEXTUAL:
                     self._set_sponsors_visible(not self.sponsors_visible)
             elif command == "/bridge":
                 if argument.strip() == "stop":
+                    # A real action, not a screen, so it keeps working verbatim.
                     self._stop_bridge()
                 else:
-                    self.action_bridge()
+                    self._open_connections(CONNECT_FOCUS_CLIENTS)
             elif command == "/clear":
                 self.action_clear_log()
             elif command == "/verify":
@@ -4385,24 +7943,475 @@ if _HAS_TEXTUAL:
                 message = _TEXT[self.language]["unknown"].format(
                     command=escape(command)
                 )
+                suggestion = _suggest_command(command, self.language)
+                if suggestion:
+                    message += " " + suggestion
                 self._write(f"[#e0a3a3]{message}[/]")
 
-        def action_onboarding(self) -> None:
-            # ``/connect`` and Ctrl+S keep the legacy ConnectionChoiceScreen
-            # wizard (api/web/both) for backward compatibility with existing
-            # flows and tests. The reworked universal Connections hub -- which
-            # lists and edits both MCP clients and API providers and launches
-            # this same wizard from its "new API provider" entry -- lives behind
-            # ``/connections`` (see ``action_connect``).
-            self.push_screen(
-                ConnectionChoiceScreen(self.language), self._connection_choice_done
+        def _workspace_saved_profiles(self) -> tuple[Any, ...]:
+            """Saved connections whose approved project set contains the current folder."""
+            from .project_registry import ProjectRegistry, ProjectRegistryError
+            from .web_bridge_profiles import WebBridgeProfileError, WebBridgeProfileStore
+
+            try:
+                current = self.repository.expanduser().resolve(strict=True)
+                profiles = WebBridgeProfileStore().list()
+            except (OSError, WebBridgeProfileError):
+                return ()
+            matched: list[Any] = []
+            for profile in profiles:
+                try:
+                    registry = ProjectRegistry.from_profile(
+                        repository=profile.repository,
+                        projects=profile.projects,
+                        default_project_id=profile.default_project_id,
+                    )
+                    if registry.entry_for_path(current) is not None:
+                        matched.append(profile)
+                except (OSError, ProjectRegistryError):
+                    continue
+            return tuple(matched)
+
+        def _workspace_registry(self) -> Any:
+            from .project_registry import ProjectRegistry, ProjectRegistryError
+
+            profiles = self._workspace_saved_profiles()
+            registry: Optional[ProjectRegistry] = None
+            for profile in profiles:
+                try:
+                    candidate = ProjectRegistry.from_profile(
+                        repository=profile.repository,
+                        projects=profile.projects,
+                        default_project_id=profile.default_project_id,
+                    )
+                except ProjectRegistryError:
+                    continue
+                if registry is None:
+                    registry = candidate
+                    continue
+                for entry in candidate.projects:
+                    if registry.entry_for_path(entry.path) is None:
+                        registry = registry.add(
+                            entry.path,
+                            project_id=entry.project_id,
+                            label=entry.label,
+                        )
+            if registry is not None:
+                return registry
+
+            preferences = _load_preferences()
+            raw_projects = preferences.get("workspace_projects", [])
+            raw_default = preferences.get("workspace_default_project_id")
+            if not isinstance(raw_projects, list):
+                raw_projects = []
+            default_project_id = raw_default if isinstance(raw_default, str) else None
+            try:
+                return ProjectRegistry.from_profile(
+                    repository=str(self.repository),
+                    projects=raw_projects,
+                    default_project_id=default_project_id,
+                )
+            except ProjectRegistryError:
+                return ProjectRegistry.single(self.repository)
+
+        def _workspace_project_in_use(self, project_id: str) -> bool:
+            """Conservatively refuse removal while a durable workstream is bound."""
+            from .task_state import TaskStateStore
+            from .web_bridge_launcher import saved_web_bridge_session_candidates
+
+            sessions = SessionStore(session_dir())
+            states = TaskStateStore(sessions)
+            for profile in self._workspace_saved_profiles():
+                for session_id in saved_web_bridge_session_candidates(profile.name):
+                    if not sessions.state_path(session_id).exists():
+                        continue
+                    workstreams: list[Optional[str]] = [None]
+                    with contextlib.suppress(Exception):
+                        workstreams.extend(states.list_workstreams(session_id))
+                    for workstream_id in workstreams:
+                        with contextlib.suppress(Exception):
+                            state = states.load_optional(
+                                session_id,
+                                workstream_id=workstream_id,
+                            )
+                            if state is None:
+                                continue
+                            project = state.facts.get("project_id")
+                            if project is not None and str(project.value) == project_id:
+                                return True
+            return False
+
+        def _persist_workspace_registry(self, registry: Any) -> None:
+            """Persist project routing without restarting or rebinding saved bridges."""
+            from dataclasses import replace as _replace
+            from .web_bridge_launcher import apply_saved_bridge_profile
+
+            profiles = self._workspace_saved_profiles()
+            for profile in profiles:
+                updated = _replace(
+                    profile,
+                    projects=tuple(registry.to_payload()),
+                    default_project_id=registry.default_project_id,
+                )
+                apply_saved_bridge_profile(
+                    profile.name,
+                    updated,
+                    allow_restart=False,
+                )
+            _save_preferences(
+                workspace_projects=registry.to_payload(),
+                workspace_default_project_id=registry.default_project_id,
             )
 
-        def action_connect(self) -> None:
-            """Open the reworked universal Connections hub."""
-            screens = self._connections_screens_cached()
+        def action_workspace(self) -> None:
+            """Ctrl+W: manage approved project folders for future tasks."""
+            from .tui_workspace import WorkspaceManagerScreen
+
             self.push_screen(
-                screens["ConnectionHubScreen"](self.language), self._connection_hub_done
+                WorkspaceManagerScreen(
+                    self._workspace_registry(),
+                    self.repository,
+                    self.language,
+                ),
+                self._workspace_manager_result,
+            )
+
+        def _workspace_manager_result(self, action: Any) -> None:
+            if action is None:
+                self.query_one("#composer", Input).focus()
+                return
+            from .project_registry import ProjectRegistryError
+
+            try:
+                registry = self._workspace_registry()
+                if action.action == "add":
+                    if action.path is None:
+                        raise ProjectRegistryError("project path is missing")
+                    registry = registry.add(action.path)
+                    self._persist_workspace_registry(registry)
+                    self._write_notice(
+                        self._label("Папка добавлена без перезапуска bridge.", "Workspace added without restarting the bridge."),
+                        "success",
+                    )
+                    self.action_workspace()
+                    return
+                if action.project_id is None:
+                    raise ProjectRegistryError("project selection is missing")
+                entry = registry.get(action.project_id)
+                if action.action == "use":
+                    self._switch_workspace(entry.path)
+                    return
+                if action.action == "default":
+                    registry = registry.with_default(entry.project_id)
+                    self._persist_workspace_registry(registry)
+                    self._write_notice(
+                        self._label(
+                            f"По умолчанию для новых задач: {entry.label}",
+                            f"Default for new tasks: {entry.label}",
+                        ),
+                        "success",
+                    )
+                    self.action_workspace()
+                    return
+                if action.action == "remove":
+                    for profile in self._workspace_saved_profiles():
+                        if profile.repository and os.path.normcase(str(Path(profile.repository).resolve())) == os.path.normcase(entry.path):
+                            raise ProjectRegistryError(
+                                "the durable session anchor cannot be removed; keep it approved or recreate the connection"
+                            )
+                    if self.agent_busy and os.path.normcase(str(self.repository)) == os.path.normcase(entry.path):
+                        raise ProjectRegistryError("the current running task still uses this project")
+                    if self._workspace_project_in_use(entry.project_id):
+                        raise ProjectRegistryError("a durable workstream is still bound to this project")
+                    registry = registry.remove(entry.project_id)
+                    self._persist_workspace_registry(registry)
+                    if os.path.normcase(str(self.repository)) == os.path.normcase(entry.path):
+                        target = registry.default
+                        if target is not None:
+                            self._switch_workspace(target.path)
+                    self._write_notice(
+                        self._label("Папка удалена из разрешённых.", "Workspace removed from the approved list."),
+                        "success",
+                    )
+                    self.action_workspace()
+                    return
+                raise ProjectRegistryError(f"unknown workspace action: {action.action}")
+            except (OSError, RuntimeError, ProjectRegistryError) as exc:
+                self._write_notice(str(exc), "error")
+                self.action_workspace()
+
+        def _workspace_selected(self, path: Optional[str]) -> None:
+            """Legacy picker callback retained for direct tests and old extensions."""
+            if path is None:
+                self.query_one("#composer", Input).focus()
+                return
+            self._switch_workspace(path)
+
+        def _switch_workspace(self, raw_path: str) -> bool:
+            """Switch future local tasks to one validated folder.
+
+            A running agent keeps ownership of the repository it started in, so
+            switching is refused while work is active. Durable saved bridges keep
+            their original session anchor and may route new workstreams to another
+            user-approved project without rebinding or restarting.
+            """
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Сначала дождитесь завершения или остановите текущую задачу.",
+                        "Wait for the current task to finish or stop it first.",
+                    ),
+                    "warning",
+                )
+                return False
+
+            candidate = Path(str(raw_path).strip().strip('"')).expanduser()
+            if not candidate.is_dir():
+                self._write_notice(
+                    self._label(
+                        "Такой папки не существует.",
+                        "That folder does not exist.",
+                    ),
+                    "error",
+                )
+                return False
+            reason = _unsafe_workspace_reason(candidate, self.language)
+            if reason:
+                self._write_notice(reason, "error")
+                return False
+
+            resolved = candidate.resolve()
+            previous = self.repository
+            with contextlib.suppress(Exception):
+                _remember_workspace(previous)
+            self.repository = resolved
+            self.verification = _default_verification(resolved)
+            self.active_session = None
+            self._history_seen = 0
+            self._history_fingerprint = None
+            self._content_seen = 0
+            with contextlib.suppress(Exception):
+                _remember_workspace(resolved)
+            self._refresh_status()
+            self._write_notice(
+                self._label(
+                    f"Рабочая папка: {resolved}",
+                    f"Workspace: {resolved}",
+                ),
+                "success",
+            )
+            if self._workspace_saved_profiles():
+                self._write_notice(
+                    self._label(
+                        "Сохранённые подключения сохраняют URL/сессию и маршрутизируют новые workstream в эту папку без перезапуска.",
+                        "Saved connections keep their URL/session and route new workstreams to this folder without a restart.",
+                    ),
+                    "success",
+                )
+            elif self.bridge_launch is not None or self.public_endpoint:
+                self._write_notice(
+                    self._label(
+                        "Это ad-hoc подключение остаётся привязано к исходной папке до явного перезапуска.",
+                        "This ad-hoc bridge stays bound to its original workspace until explicitly restarted.",
+                    ),
+                    "warning",
+                )
+            return True
+
+        def action_onboarding(self) -> None:
+            """Ctrl+S. The same hub the command opens, not a second root.
+
+            This used to push ``ConnectionChoiceScreen`` -- the api/web/both
+            wizard -- which left the product with two competing roots for one
+            scenario: `/connect` showed what exists, Ctrl+S demanded a
+            classification first. Whichever one a person happened to use
+            decided what they believed was connected. The key binding now goes
+            where the command goes, and the legacy screen is off every
+            production path.
+            """
+
+            self._open_connections(None)
+
+        def action_connect(self) -> None:
+            """Open the universal Connections hub. The one connection entry point."""
+
+            self._open_connections(None)
+
+        def action_home(self) -> None:
+            """The chat is the home screen; do not open a second dashboard root."""
+
+            self.query_one("#composer", Input).focus()
+
+        def get_system_commands(self, screen: Any) -> Iterable[Any]:
+            """The one curated command surface behind Ctrl+P.
+
+            Textual's palette normally collects bindings, but this app hides
+            its bindings from the footer, so the palette would otherwise offer
+            nothing but system entries. Every entry here is one existing action,
+            carries the key that also runs it, and appears in exactly one place.
+            The default system entries stay, minus the duplicate Quit.
+            """
+
+            english = self.language != "ru"
+            yield SystemCommand(
+                "Model and Effort" if english else "Модель и Effort",
+                "Ctrl+G — switch model and reasoning effort",
+                self.action_model,
+            )
+            yield SystemCommand(
+                "Usage & Cost",
+                "/usage — tokens, cache and spend",
+                self.action_usage,
+            )
+            yield SystemCommand(
+                "Connections" if english else "Подключения",
+                "Ctrl+S — one hub for models and services",
+                self.action_onboarding,
+            )
+            yield SystemCommand(
+                "Sessions" if english else "Сессии",
+                "Ctrl+O — task sessions",
+                self.action_session_browser,
+            )
+            yield SystemCommand(
+                "Project folder" if english else "Папка проекта",
+                "Ctrl+W — switch the working project",
+                self.action_workspace,
+            )
+            yield SystemCommand(
+                "Clear chat" if english else "Очистить чат",
+                "Ctrl+L — clear the conversation",
+                self.action_clear_log,
+            )
+            yield SystemCommand(
+                "Copy" if english else "Копировать",
+                "Ctrl+Shift+C — copy the selection",
+                self.action_copy_selection,
+            )
+            yield SystemCommand(
+                "Quit" if english else "Выйти",
+                "Ctrl+Q — exit KaroX",
+                self.action_quit,
+            )
+            for command in super().get_system_commands(screen):
+                if command.title == "Quit":
+                    continue
+                yield command
+
+        def action_model(self) -> None:
+            """Open the fast model picker used by Ctrl+G and /model."""
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Модель и Effort можно менять после завершения текущей задачи.",
+                        "Model and Effort can be changed after the current task finishes.",
+                    ),
+                    "warning",
+                )
+                return
+
+            from .tui_dashboard import ModelPickerScreen
+
+            self.push_screen(
+                ModelPickerScreen(self.language, effort=self.reasoning_effort),
+                self._model_picker_done,
+            )
+
+        def _model_picker_done(self, choice: Optional[str]) -> None:
+            from .tui_dashboard import MODEL_PICKER_CONNECT
+
+            if choice is None:
+                self.query_one("#composer", Input).focus()
+                return
+            if choice == MODEL_PICKER_CONNECT:
+                self._open_connections(CONNECT_FOCUS_MODELS)
+                return
+            if choice.startswith("effort:"):
+                value = choice.split(":", 1)[1] or "auto"
+                self.reasoning_effort = None if value == "auto" else value
+                _save_preferences(reasoning_effort=self.reasoning_effort)
+                self._refresh_status()
+                self._write_notice(f"Effort: {value}", "success")
+                self.query_one("#composer", Input).focus()
+                return
+            prefix, provider_id, model_id = (choice.split(":", 2) + ["", "", ""])[:3]
+            if prefix != "model" or not provider_id or not model_id:
+                self.query_one("#composer", Input).focus()
+                return
+            try:
+                _registry().select_model(provider_id, model_id)
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+            else:
+                self._refresh_status()
+                self._write_notice(f"Model: {provider_id}/{model_id}", "success")
+            self.query_one("#composer", Input).focus()
+
+        def action_usage(self) -> None:
+            """Open exact persisted Usage & Cost analytics."""
+
+            from .tui_dashboard import UsageCostScreen
+
+            selected = _selected_model()
+            model_text = (
+                f"{selected.provider_id}/{selected.model_id}"
+                if selected is not None
+                else self._label("модель не выбрана", "model not selected")
+            )
+            self.push_screen(
+                UsageCostScreen(
+                    self.language,
+                    session_id=self.active_session,
+                    model_text=model_text,
+                    effort=self.reasoning_effort,
+                )
+            )
+
+        def _open_connections(self, focus: Optional[str] = None) -> None:
+            """Open the single Connections screen, optionally on one section.
+
+            One entry point, one root flow. ``/connect`` and every retired alias
+            arrive here; ``focus`` only chooses which section is already open, so
+            a person who typed ``/providers`` lands on AI models without there
+            being a second hub that could disagree with this one about what is
+            connected.
+
+            The legacy ``ConnectionChoiceScreen`` api/web/both wizard is no longer
+            on any production path: it asked the user to classify the connection
+            before they had seen what exists, which is the question the hub
+            answers for them.
+            """
+
+            screens = self._connections_screens_cached()
+            if focus == CONNECT_FOCUS_MODELS:
+                self.push_screen(
+                    screens["ModelProvidersScreen"](self.language),
+                    self._connections_screen_closed,
+                )
+                return
+            if focus == CONNECT_FOCUS_CLIENTS:
+                self.push_screen(
+                    screens["McpClientsScreen"](self.language),
+                    self._connections_screen_closed,
+                )
+                return
+            # B5. Where the cursor lands. `select` is the record the user was
+            # just on; `after_delete` is the record that no longer exists, and
+            # the hub uses it to land on the neighbour rather than resetting to
+            # the top of the list.
+            select, self._hub_select = self._hub_select, None
+            after_delete, self._hub_select_after_delete = (
+                self._hub_select_after_delete,
+                None,
+            )
+            self.push_screen(
+                screens["ConnectionHubScreen"](
+                    self.language,
+                    select=select,
+                    after_delete=after_delete,
+                ),
+                self._connection_hub_done,
             )
 
         def _connections_screens_cached(self):
@@ -4415,25 +8424,449 @@ if _HAS_TEXTUAL:
             return cached
 
         def _connection_hub_done(self, choice: Optional[str]) -> None:
+            """Where a hub row or an add action goes next.
+
+            The hub speaks semantic ids, never list positions: an add action is
+            named for what it adds, and a saved row carries its own family and
+            the identity its store assigned. Reordering the screen therefore
+            cannot silently repoint an entry at a different flow.
+
+            Every destination comes back through ``_connection_hub_reopen``, so
+            the user lands in the hub they started from rather than being left
+            in the chat holding a half-finished thought.
+            """
+
+            from .tui_connections import (
+                HUB_ADD_MODEL,
+                HUB_ADD_OTHER,
+                HUB_ADD_SERVICE,
+                HUB_FAMILY_AI,
+                HUB_FAMILY_SERVICE,
+                HUB_MANAGE_CONNECTIONS,
+                HUB_MANAGE_MODELS,
+            )
+
+            if choice is None:
+                self.query_one("#composer", Input).focus()
+                return
             screens = self._connections_screens_cached()
-            if choice == "mcp_clients":
+            if choice == HUB_ADD_MODEL:
+                self._connect_return_to_hub = True
+                self.call_after_refresh(self.action_provider_preset)
+                return
+            if choice == HUB_ADD_SERVICE:
+                # B3. The three known services get the standard flow, not the
+                # generic MCP client form: a person choosing "ChatGPT" is not
+                # asking to configure a transport.
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["ServicePickerScreen"](self.language),
+                        self._service_chosen,
+                    )
+                )
+                return
+            if choice == HUB_ADD_OTHER:
                 self.call_after_refresh(
                     lambda: self.push_screen(
                         screens["McpClientsScreen"](self.language),
-                        self._connections_screen_closed,
+                        self._connection_hub_reopen,
                     )
                 )
-            elif choice == "model_providers":
+                return
+            if choice == HUB_MANAGE_MODELS:
                 self.call_after_refresh(
                     lambda: self.push_screen(
                         screens["ModelProvidersScreen"](self.language),
-                        self._connections_screen_closed,
+                        self._connection_hub_reopen,
                     )
                 )
-            elif choice == "new_provider":
+                return
+            if choice == HUB_MANAGE_CONNECTIONS:
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["McpClientsScreen"](self.language),
+                        self._connection_hub_reopen,
+                    )
+                )
+                return
+            # A saved row. The family prefix decides which surface owns it; the
+            # identity after the colon is that store's own and is not
+            # reinterpreted here.
+            family, _, identity = choice.partition(":")
+            if family == HUB_FAMILY_AI and identity:
+                # B5. Enter on a saved row opens *that record*, not the list it
+                # belongs to. Pushing `ModelProvidersScreen` here was the defect:
+                # the user pointed at one provider and got every provider, then
+                # had to find it again -- and there was nowhere for edit, disable
+                # or delete to live, because no screen was about one record.
+                self._open_connection_detail("provider", identity)
+                return
+            if family == HUB_FAMILY_SERVICE and identity:
+                # B5. Same rule for a saved service. B3's connect screen is the
+                # right thing when *adding* one; an existing record opens the
+                # management view, which can reach the connect flow through Edit.
+                self._open_connection_detail("service", identity)
+                return
+            self.call_after_refresh(
+                lambda: self.push_screen(
+                    screens["McpClientsScreen"](self.language),
+                    self._connection_hub_reopen,
+                )
+            )
+
+        def _saved_record_exists(self, kind: str, identity: str) -> bool:
+            """Whether the store that owns this identity still has it.
+
+            B5. The hub is a snapshot. A row can be rendered and then deleted --
+            by a CLI, by another window, by the previous keystroke -- before
+            Enter reaches it. Resolving through the owning store *before*
+            opening anything is what keeps a stale selection from producing a
+            detail screen full of blanks that offers to verify and delete a
+            record which is not there.
+
+            No guessing either way: an identity the store cannot resolve is
+            treated as absent rather than assumed into a preset.
+            """
+
+            if not identity:
+                return False
+            try:
+                if kind == "provider":
+                    from .registry import ProviderRegistry
+                    from .paths import config_dir
+
+                    ProviderRegistry(
+                        config_dir() / "vnext" / "providers.json"
+                    ).provider(identity)
+                    return True
+                from .connection_controller import connection_controller
+
+                connection_controller().get(identity)
+                return True
+            except Exception:
+                return False
+
+        def _open_connection_detail(self, kind: str, identity: str) -> None:
+            """Open the management view for one saved record.
+
+            The screen reads the registries directly, so this passes an identity
+            and nothing else: no snapshot of the row is handed over that could
+            already be stale by the time it renders.
+
+            A record that no longer exists falls back to the generic list rather
+            than opening an empty detail screen. The hub also re-reads its
+            sources when it next opens, so the vanished row disappears from it.
+            """
+
+            screens = self._connections_screens_cached()
+            if not self._saved_record_exists(kind, identity):
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["McpClientsScreen"](self.language),
+                        self._connection_hub_reopen,
+                    )
+                )
+                return
+            self._connection_detail_id = f"{kind}:{identity}"
+            self.call_after_refresh(
+                lambda: self.push_screen(
+                    screens["ConnectionDetailScreen"](
+                        self.language, kind=kind, identity=identity
+                    ),
+                    self._connection_detail_closed,
+                )
+            )
+
+        def _connection_detail_closed(self, result: Optional[str]) -> None:
+            """Back to the hub, on the right row.
+
+            Three outcomes, and the selection rule differs for each. A plain
+            close or a change lands back on the same record, because that is
+            where the user was. A delete cannot: the row is gone, so the hub
+            picks its neighbour rather than snapping to the top of the list.
+            An edit hands off to the form that owns the record.
+            """
+
+            self._refresh_status()
+            previous = getattr(self, "_connection_detail_id", None)
+            self._connection_detail_id = None
+            if result and result.startswith("edit:"):
+                _, _, rest = result.partition(":")
+                kind, _, identity = rest.partition(":")
+                self._edit_saved_connection(kind, identity)
+                return
+            if result and result.startswith("deleted:"):
+                # The hub worked out the neighbour while the row still existed;
+                # nothing can reconstruct it now that the record is gone.
+                self._hub_select_after_delete = getattr(self, "_hub_neighbour", None)
+                self._hub_neighbour = None
+                self.call_after_refresh(lambda: self._open_connections(None))
+                return
+            self._hub_select_after_delete = None
+            self._hub_select = previous
+            self.call_after_refresh(lambda: self._open_connections(None))
+
+        def _edit_saved_connection(self, kind: str, identity: str) -> None:
+            """Send an existing record to the form it was created with.
+
+            No second editor and no new record: the provider wizard is opened
+            on the saved provider's own id, so saving updates that provider
+            rather than creating a near-duplicate beside it.
+            """
+
+            if kind == "provider":
+                self.open_provider_editor(identity)
+                return
+            self._open_service_flow(connection_id=identity)
+
+        def open_provider_editor(self, provider_id: str) -> None:
+            """Open the setup form on a saved provider. One explicit path.
+
+            B5.1. What this replaces: setting a `_edit_provider_id` attribute
+            that nothing ever read, and then opening the *preset picker*. The
+            attribute was inert, so "Edit OpenRouter" asked the user to choose a
+            provider type from scratch and would have written a second record.
+            A flag nobody consumes is not a feature with a missing wire; it is
+            the absence of the feature.
+
+            The record is loaded here and handed to the screen, so there is no
+            hidden state between the two and no picker in front of them.
+            """
+
+            from .tui_connections import HUB_FAMILY_AI
+
+            existing = load_provider_edit(provider_id)
+            if existing is None:
+                # Vanished between the hub render and this keystroke. Back to
+                # the hub rather than an edit form for nothing.
+                self._hub_select = None
+                self.call_after_refresh(lambda: self._open_connections(None))
+                return
+            self._connect_return_to_hub = True
+            self._hub_select = f"{HUB_FAMILY_AI}:{provider_id}"
+            self.call_after_refresh(
+                lambda: self.push_screen(
+                    ProviderSetupScreen(self.language, existing=existing),
+                    self._provider_setup_done,
+                )
+            )
+
+        def _service_chosen(self, preset_id: Optional[str]) -> None:
+            """A service was picked, or the picker was dismissed.
+
+            Esc goes back one level -- to the hub -- rather than to the chat, so
+            changing your mind about which service costs one key rather than a
+            re-typed command.
+            """
+
+            if not preset_id:
+                self.call_after_refresh(lambda: self._open_connections(None))
+                return
+            if preset_id == "notion":
+                self._start_notion_workspace_connect()
+                return
+            self._open_service_flow(preset_id=preset_id)
+
+        def _start_notion_workspace_connect(self) -> None:
+            """Connect KaroX to Notion's official hosted MCP through OAuth."""
+
+            self._set_activity(
+                self._label("Подключаю Notion через OAuth…", "Connecting Notion with OAuth…")
+            )
+            self._write_notice(
+                self._label(
+                    "Notion подключается напрямую к KaroX. Tailscale и Bearer-ключ не нужны. "
+                    "Если OAuth ещё не подтверждён, откроется браузер Notion.",
+                    "Notion connects directly to KaroX. Tailscale and a Bearer key are not needed. "
+                    "If OAuth is not authorized yet, the Notion browser page will open.",
+                ),
+                "info",
+            )
+            _start_worker(
+                self._notion_workspace_connect_worker,
+                name="karox-notion-oauth-connect",
+            )
+
+        def _notion_workspace_connect_worker(self) -> None:
+            try:
+                from .mcp_client import McpClient, McpRegistry, mcp_selection
+                from .mcp_oauth import McpOAuthStorage, authorize_mcp_oauth
+                from .notion_mcp import ensure_notion_mcp_record
+                from .paths import config_dir, session_dir
+
+                registry = McpRegistry(config_dir() / "vnext" / "mcp-servers.json")
+                server = ensure_notion_mcp_record(registry)
+                storage = McpOAuthStorage(server.server_id)
+                if not storage.available():
+                    authorize_mcp_oauth(
+                        server.server_id,
+                        server.url or "",
+                        timeout_seconds=max(120.0, server.timeout_seconds),
+                    )
+                tools = McpClient(registry).discover_record(server, Path(self.repository))
+
+                allowed = 0
+                session_id = self.active_session
+                if session_id:
+                    store = SessionStore(session_dir())
+                    if store.state_path(session_id).exists():
+                        decisions = {
+                            tool.remote_name: ("allow" if tool.read_only else "ask")
+                            for tool in tools
+                        }
+                        with store.mutate(
+                            session_id,
+                            f"notion-oauth-select-{os.getpid()}",
+                            ttl_seconds=10.0,
+                        ) as session:
+                            store.validate_repository(session, Path(self.repository))
+                            previous = next(
+                                (
+                                    item
+                                    for item in session.mcp_servers
+                                    if isinstance(item, dict)
+                                    and item.get("server_id") == server.server_id
+                                ),
+                                None,
+                            )
+                            selection = mcp_selection(
+                                server,
+                                tools,
+                                decisions,
+                                previous=previous,
+                            )
+                            session.mcp_servers = [
+                                item
+                                for item in session.mcp_servers
+                                if not (
+                                    isinstance(item, dict)
+                                    and item.get("server_id") == server.server_id
+                                )
+                            ]
+                            session.mcp_servers.append(selection)
+                            session.mcp_servers.sort(
+                                key=lambda item: str(item.get("server_id", ""))
+                                if isinstance(item, dict)
+                                else ""
+                            )
+                        allowed = sum(1 for tool in tools if tool.read_only)
+                self.call_from_thread(
+                    self._notion_workspace_connected,
+                    len(tools),
+                    allowed,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._notion_workspace_connect_failed,
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def _notion_workspace_connected(self, tool_count: int, allowed: int) -> None:
+            self._set_activity("", "idle")
+            suffix = (
+                self._label(
+                    f" Для текущей сессии автоматически разрешены {allowed} безопасных read-only tools.",
+                    f" {allowed} safe read-only tools were enabled for the current session.",
+                )
+                if allowed
+                else ""
+            )
+            self._write_notice(
+                self._label(
+                    f"Notion подключён: найдено {tool_count} MCP-инструментов.",
+                    f"Notion connected: {tool_count} MCP tools discovered.",
+                )
+                + suffix,
+                "success",
+            )
+            self.call_after_refresh(lambda: self._open_connections(None))
+
+        def _notion_workspace_connect_failed(self, detail: str) -> None:
+            self._set_activity("", "idle")
+            self._write_notice(
+                self._label(
+                    "Не удалось подключить Notion: ",
+                    "Could not connect Notion: ",
+                )
+                + escape(detail),
+                "error",
+            )
+            self.call_after_refresh(lambda: self._open_connections(None))
+
+        def _open_service_flow(
+            self,
+            *,
+            preset_id: Optional[str] = None,
+            connection_id: Optional[str] = None,
+        ) -> None:
+            """Open the standard service screen for a preset or a saved row.
+
+            Nothing is started here. The screen reads the existing connection
+            state, so opening it cannot disturb a bridge that is already serving
+            the URL the user pasted into the service.
+            """
+
+            screens = self._connections_screens_cached()
+            resolved = preset_id
+            if resolved is None and connection_id:
+                resolved = self._service_preset_for(connection_id)
+            if resolved is None:
+                self.call_after_refresh(
+                    lambda: self.push_screen(
+                        screens["McpClientsScreen"](self.language),
+                        self._connection_hub_reopen,
+                    )
+                )
+                return
+            self.call_after_refresh(
+                lambda: self.push_screen(
+                    screens["ServiceConnectScreen"](
+                        self.language,
+                        preset_id=resolved,
+                        connection_id=connection_id,
+                    ),
+                    self._connection_hub_reopen,
+                )
+            )
+
+        def _service_preset_for(self, connection_id: str) -> Optional[str]:
+            """Which preset a saved connection belongs to, read from the registry.
+
+            Fail-soft: a connection the controller cannot describe falls back to
+            the generic list rather than opening a service screen for the wrong
+            service.
+            """
+
+            from .connection_controller import connection_controller
+
+            try:
+                target = connection_controller().get(connection_id).target
+            except Exception:
+                return None
+            preset_id = getattr(target, "preset_id", "") or ""
+            from .tui_connections import service_flow_presets
+
+            return preset_id if preset_id in service_flow_presets() else None
+
+        def _connection_hub_reopen(self, result: Optional[Any]) -> None:
+            """Return to the hub, not to the chat.
+
+            A child screen closing used to drop the user back at the composer,
+            so adding two connections meant typing ``/connect`` twice. Coming
+            back here also means the row just saved is visible immediately,
+            because the hub re-reads its two sources on mount.
+
+            The one exception is the provider wizard hand-off, which owns the
+            top of the modal stack while it runs and returns through its own
+            callback.
+            """
+
+            self._refresh_status()
+            if result == "add_provider":
+                self._connect_return_to_hub = True
                 self.call_after_refresh(self.action_provider_preset)
-            else:
-                self.query_one("#composer", Input).focus()
+                return
+            self.call_after_refresh(lambda: self._open_connections(None))
 
         def _connections_screen_closed(self, result: Optional[Any]) -> None:
             self._refresh_status()
@@ -4466,6 +8899,25 @@ if _HAS_TEXTUAL:
                 self._setup_both = True
                 self.call_after_refresh(self.action_provider_preset)
 
+        def _leave_provider_flow(self) -> None:
+            """Where the provider wizard puts the user down. One place, one rule.
+
+            B1. Entered from the Connection Hub, it returns to the hub -- and the
+            hub re-reads its sources on mount, so the provider just saved is
+            visible without anything having to tell it. Entered any other way it
+            focuses the composer, which is the pre-existing behaviour and the
+            right one: nobody who pressed a wizard key asked for a list.
+
+            The flag is cleared here rather than at each call site, so a flow
+            that ends early cannot leave it armed for the next unrelated wizard.
+            """
+
+            if self._connect_return_to_hub:
+                self._connect_return_to_hub = False
+                self.call_after_refresh(lambda: self._open_connections(None))
+                return
+            self.query_one("#composer", Input).focus()
+
         def action_provider_preset(self) -> None:
             self.push_screen(
                 ProviderPresetScreen(self.language), self._provider_preset_done
@@ -4474,7 +8926,7 @@ if _HAS_TEXTUAL:
         def _provider_preset_done(self, preset_id: Optional[str]) -> None:
             if preset_id is None:
                 self._setup_both = False
-                self.query_one("#composer", Input).focus()
+                self._leave_provider_flow()
                 return
             preset = provider_preset(preset_id)
             if not preset.installable:
@@ -4488,7 +8940,7 @@ if _HAS_TEXTUAL:
 
         def _puter_info_closed(self, _result: None) -> None:
             self._setup_both = False
-            self.query_one("#composer", Input).focus()
+            self._leave_provider_flow()
 
         def action_setup(self, preset: Optional[ProviderPreset] = None) -> None:
             self.push_screen(
@@ -4498,7 +8950,7 @@ if _HAS_TEXTUAL:
         def _provider_setup_done(self, setup: Optional[ProviderSetup]) -> None:
             if setup is None:
                 self._setup_both = False
-                self.query_one("#composer", Input).focus()
+                self._leave_provider_flow()
                 return
             selected = _selected_model()
             if selected is None:
@@ -4520,71 +8972,176 @@ if _HAS_TEXTUAL:
                 f"{escape(selected.model_id)}"
             )
             self._refresh_status()
-            self.query_one("#composer", Input).focus()
+            # B1. A saved provider goes back to the hub it was started from, and
+            # nowhere else. Two things used to follow a successful save and both
+            # were wrong for this journey: the composer took focus, so adding two
+            # connections meant typing `/connect` twice; and `_setup_both` could
+            # push `BridgeSetupScreen` on top, which asked a person who wanted a
+            # model to configure a tunnel. `_setup_both` is only ever armed by
+            # the retired api/web/both wizard, so no production path reaches that
+            # branch any more -- it is kept for the pending-task hand-off below
+            # and cleared here so it cannot leak into the next flow.
             if self._setup_both:
                 self._setup_both = False
+                self._connect_return_to_hub = False
+                self.query_one("#composer", Input).focus()
                 self.action_bridge()
-            elif self.pending_task:
+                return
+            if self.pending_task:
+                # A task was waiting on a model. Finishing the work the user
+                # actually asked for outranks showing them a list.
+                self._connect_return_to_hub = False
+                self.query_one("#composer", Input).focus()
                 task, self.pending_task = self.pending_task, None
                 self._submit_task(task)
+                return
+            self._leave_provider_flow()
+
+        def _open_bridge_setup(
+            self,
+            *,
+            default_profile: str = "promptql",
+            locked_profile: Optional[str] = None,
+            after: Optional[Callable[[], None]] = None,
+        ) -> None:
+            """Open the one production bridge wizard, optionally for a service.
+
+            The service flow uses this instead of inventing a second launcher.
+            Cancelling a nested service setup simply returns to that service;
+            the standalone /bridge action keeps its historical composer-focus
+            behavior through ``_bridge_setup_done(None)``.
+            """
+
+            def closed(setup: Optional[BridgeSetup]) -> None:
+                if setup is not None or after is None:
+                    self._bridge_setup_done(setup)
+                if after is not None:
+                    self.call_after_refresh(after)
+
+            self.push_screen(
+                BridgeSetupScreen(
+                    self.language,
+                    default_profile=default_profile,
+                    locked_profile=locked_profile,
+                ),
+                closed,
+            )
+
+        def open_service_bridge_setup(
+            self, preset_id: str, after: Optional[Callable[[], None]] = None
+        ) -> None:
+            """Create the selected service entirely through the TUI service layer."""
+
+            if preset_id == "clickup":
+                screens = self._connections_screens_cached()
+                screen = screens["_ClickupAutoScreen"](self.language)
+
+                def clickup_closed(_target: Optional[Any]) -> None:
+                    if after is not None:
+                        self.call_after_refresh(after)
+
+                self.push_screen(screen, clickup_closed)
+                return
+
+            profile = {
+                "chatgpt-web": "chatgpt-web",
+                "claude-web": "claude-web",
+                "hyperagent-web": "hyperagent-web",
+                "notion": "notion",
+                "adapt": "adapt",
+            }.get(preset_id)
+            if profile is None:
+                raise ValueError(f"unsupported service preset: {preset_id}")
+            self._open_bridge_setup(
+                default_profile=profile,
+                locked_profile=profile,
+                after=after,
+            )
 
         def action_bridge(self) -> None:
             # Always allow the picker to open. ClickUp is launched in its own
             # terminal and may run beside the bridge already owned by this TUI.
             # The single-process guard is applied later only to profiles that
             # would reuse ``self.bridge_process``.
-            self.push_screen(BridgeSetupScreen(self.language), self._bridge_setup_done)
+            self._open_bridge_setup()
 
-        def _launch_clickup_terminal(self, setup: BridgeSetup) -> None:
-            """Launch ClickUp in a separate console without touching this bridge."""
-            argv = [
-                sys.executable,
-                "-m",
-                "karox.cli",
-                "connect",
-                "clickup",
-                "--repository",
-                str(self.repository),
-                "--tunnel",
-                "cloudflare",
-                "--port",
-                str(setup.port),
-                "--name",
-                "ClickUp",
-            ]
-            src = Path(__file__).resolve().parent.parent
-            child_env = _child_environment(src)
-            child_env["KAROX_UI_LANGUAGE"] = self.language
-            if os.name == "nt":
-                flags = (
-                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        def _launch_saved_bridge_from_tui(self, setup: BridgeSetup) -> None:
+            """Persist and start one hosted bridge without shelling out to the CLI."""
+            try:
+                profile_name = _persist_tui_saved_bridge_profile(
+                    self.repository,
+                    setup,
+                    language=self.language,
                 )
-                subprocess.Popen(
-                    argv,
-                    cwd=self.repository,
-                    env=child_env,
-                    creationflags=flags,
-                    close_fds=False,
-                )
+            except Exception as exc:
                 self._write_notice(
                     self._label(
-                        "ClickUp запускается в новом терминале через Cloudflare "
-                        f"на порту {setup.port}. Текущий мост продолжает работу.",
-                        "ClickUp is starting in a new terminal through Cloudflare "
-                        f"on port {setup.port}. The current bridge keeps running.",
-                    ),
-                    "success",
+                        "Не удалось сохранить профиль подключения: ",
+                        "Could not save the connection profile: ",
+                    )
+                    + str(redact(str(exc)))[:200],
+                    "error",
                 )
                 return
 
-            command = shlex.join(argv)
             self._write_notice(
                 self._label(
-                    "Откройте новый терминал и выполните:\n" + command,
-                    "Open a new terminal and run:\n" + command,
+                    f"Запускаю {setup.profile} через сохранённый профиль KaroX…",
+                    f"Starting {setup.profile} through a saved KaroX profile…",
                 ),
-                "warning",
+                "info",
+            )
+
+            def execute() -> None:
+                try:
+                    from .web_bridge_launcher import start_saved_bridge
+
+                    result = dict(start_saved_bridge(profile_name))
+                    error = (
+                        str(result.get("error") or "bridge start failed")[:200]
+                        if result.get("action") == "error"
+                        else None
+                    )
+                except Exception as exc:
+                    result = {}
+                    error = str(redact(str(exc)))[:200]
+                with contextlib.suppress(Exception):
+                    self.call_from_thread(
+                        self._saved_bridge_from_tui_done,
+                        profile_name,
+                        result,
+                        error,
+                    )
+
+            self.run_worker(
+                execute,
+                thread=True,
+                exclusive=True,
+                group=f"saved-bridge-setup-{setup.profile}",
+            )
+
+        def _saved_bridge_from_tui_done(
+            self,
+            profile_name: str,
+            result: Mapping[str, Any],
+            error: Optional[str],
+        ) -> None:
+            if error:
+                self._write_notice(
+                    self._label(
+                        f"Профиль {profile_name} сохранён, но запуск не удался: {error}",
+                        f"Profile {profile_name} was saved, but start failed: {error}",
+                    ),
+                    "error",
+                )
+                return
+            action = str(result.get("action") or "started")
+            self._write_notice(
+                self._label(
+                    f"Подключение готово: {profile_name} ({action}). Управление доступно в /connect.",
+                    f"Connection ready: {profile_name} ({action}). Manage it in /connect.",
+                ),
+                "success",
             )
 
         def _bridge_setup_done(self, setup: Optional[BridgeSetup]) -> None:
@@ -4592,16 +9149,12 @@ if _HAS_TEXTUAL:
                 self.query_one("#composer", Input).focus()
                 return
             if setup.profile == "clickup":
-                try:
-                    self._launch_clickup_terminal(setup)
-                except Exception as exc:
-                    self._write_notice(
-                        self._label(
-                            "Не удалось запустить отдельный процесс ClickUp: ",
-                            "Could not launch the separate ClickUp process: ",
-                        ) + str(exc),
-                        "error",
-                    )
+                screens = self._connections_screens_cached()
+                self.push_screen(screens["_ClickupAutoScreen"](self.language))
+                self.query_one("#composer", Input).focus()
+                return
+            if setup.profile in WEB_BRIDGE_PROFILES:
+                self._launch_saved_bridge_from_tui(setup)
                 self.query_one("#composer", Input).focus()
                 return
 
@@ -4609,10 +9162,10 @@ if _HAS_TEXTUAL:
             if current is not None and current.poll() is None:
                 self._write_notice(
                     self._label(
-                        "Текущий мост уже работает. Для параллельного запуска выберите ClickUp; "
-                        "для замены сначала выполните /bridge stop.",
-                        "The current bridge is already running. Choose ClickUp for a parallel "
-                        "launch, or run /bridge stop before replacing it.",
+                        "Текущий мост уже работает. Notion, Hyperagent и ClickUp запускаются отдельно; "
+                        "для замены этого моста сначала выполните /bridge stop.",
+                        "The current bridge is already running. Notion, Hyperagent and ClickUp launch "
+                        "separately; run /bridge stop first to replace this bridge.",
                     ),
                     "warning",
                 )
@@ -4646,11 +9199,10 @@ if _HAS_TEXTUAL:
                     + "[/]"
                 )
             try:
-                launch = (
-                    _managed_web_bridge_launch(self.repository, setup)
-                    if setup.profile in WEB_BRIDGE_PROFILES
-                    else _bridge_launch(self.repository, setup)
-                )
+                # WEB_BRIDGE_PROFILES return above through the saved-profile
+                # service layer. Reaching this point means a generic/PromptQL
+                # bridge whose subprocess is the transport process itself.
+                launch = _bridge_launch(self.repository, setup)
                 flags = (
                     getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                     if launch.managed and os.name == "nt"
@@ -4742,10 +9294,12 @@ if _HAS_TEXTUAL:
                     self.call_from_thread(
                         self._write,
                         f"[#b7c2b0]Мост запущен (локально).[/] {escape(launch.endpoint)}\n"
-                        f"[bold #c6a56b]Ключ доступа (многоразовый):[/] {escape(launch.secret)}\n"
-                        "[dim]Ключ хранится в OS keyring. Публичный URL появится ниже — "
+                        f"[bold #c6a56b]Ключ доступа:[/] хранится в OS keyring "
+                        f"(fingerprint: {BridgeCredentialStore.fingerprint(launch.secret)[:16]}…)\n"
+                        f"[dim]Скопировать безопасно: karox bridge credential copy "
+                        f"{escape(launch.session_id)} --json. Публичный URL появится ниже — "
                         "вставляйте в Notion именно его (с суффиксом /mcp) "
-                        "вместе с этим ключом.[/]",
+                        "вместе со скопированным Bearer-значением.[/]",
                     )
                     provider = setup.tunnel_provider
                     if provider == "cloudflare":
@@ -4825,16 +9379,24 @@ if _HAS_TEXTUAL:
         def _tunnel_ready(self, endpoint: str) -> None:
             self.public_endpoint = endpoint
             self._refresh_status()
-            # Show the public URL and the access key together so the user has
-            # both in one place to paste into the external client.  The key is
-            # reusable (it lives in the OS keyring), so we don't say "one-time".
-            secret = self.bridge_launch.secret if self.bridge_launch else ""
+            # Keep the public URL visible, but never turn terminal scrollback
+            # into a credential store. The reusable secret remains in the OS
+            # keyring and is copied explicitly through the typed CLI action.
+            launch = self.bridge_launch
+            credential_note = ""
+            if launch is not None:
+                credential_note = (
+                    "\n[bold #c6a56b]Ключ доступа:[/] хранится в OS keyring "
+                    f"(fingerprint: {BridgeCredentialStore.fingerprint(launch.secret)[:16]}…)"
+                    "\n[dim]Скопировать безопасно: karox bridge credential copy "
+                    f"{escape(launch.session_id)} --json.[/]"
+                )
             self._write(
                 "[bold #d4b676]Публичный URL коннектора:[/] "
                 + escape(endpoint)
-                + ("\n[bold #c6a56b]Ключ доступа:[/] " + escape(secret) if secret else "")
-                + "\n[dim]Вставьте URL (с суффиксом /mcp) и этот ключ в Notion. "
-                "Ключ многоразовый — Notion хранит его и переиспользует.[/]"
+                + credential_note
+                + "\n[dim]Вставьте URL (с суффиксом /mcp) и скопированное Bearer-значение в Notion. "
+                "Credential многоразовый — Notion хранит его и переиспользует.[/]"
             )
 
         def _start_tailscale_funnel(self, port: int, launch: BridgeLaunch) -> None:
@@ -5372,10 +9934,16 @@ if _HAS_TEXTUAL:
                 self._write(f"[#c6a56b]{_TEXT[self.language]['connect_first']}[/]")
                 return
             session_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+            # A new generation for a genuinely new run. Bumped only after every
+            # guard above has passed, so a rejected submission (busy, unsafe
+            # workspace, no model) does not invalidate the run in flight.
+            self._run_generation += 1
+            run = RunIdentity(session_id, self._run_generation)
+            self._active_run = run
             self.active_session = session_id
             self._history_seen = 0
             self._history_fingerprint = None
-            self._steps.clear()
+            self._reset_activity()
             self.agent_busy = True
             self._stop_requested = False
             self.agent_process = None
@@ -5389,13 +9957,27 @@ if _HAS_TEXTUAL:
             # (#busy); the text activity line ("KaroX работает…", "Останавливаю…")
             # used to fight with the dots and was removed by user request.
             self._set_activity("", "idle")
-            argv = _agent_argv(task, self.repository, self.verification, session_id)
+            # The run is now really starting: the session id exists, the model is
+            # selected and the worker is about to be dispatched. Published from
+            # the production path rather than from a helper a test could call on
+            # its own, so the typed status row proves the real lifecycle.
+            self._publish_agent_started(run, task)
+            argv = _agent_argv(
+                task,
+                self.repository,
+                self.verification,
+                session_id,
+                run_cost_profile=self.run_cost_profile,
+            )
 
             def execute() -> None:
                 code, output = _run_agent_cli(
                     argv, on_process=lambda proc: setattr(self, "agent_process", proc)
                 )
-                self.call_from_thread(self._agent_finished, code, output)
+                # ``run`` is captured by the closure, so the callback names the
+                # run it belongs to rather than whatever session happens to be
+                # active by the time it is marshalled back.
+                self.call_from_thread(self._agent_finished, code, output, run)
 
             self.run_worker(execute, thread=True, exclusive=True, group="agent")
 
@@ -5511,58 +10093,240 @@ if _HAS_TEXTUAL:
             """
             self.copy_to_clipboard(text)
 
-        def _begin_step(self, call_id: str, label: str) -> None:
-            if call_id in self._steps:
+        def _begin_step(self, call_id: str, tool_name: str) -> None:
+            """A tool call started; the line becomes what that call *means*.
+
+            The tool name is consumed here and goes no further. It selects a
+            catalog entry and is then discarded, which is why no caller can
+            arrange for `repo.edit_file` to appear on screen.
+            """
+
+            kind = _activity_kind_for_tool(tool_name)
+            self._activity_calls[_identifier(call_id)] = kind
+            self._set_activity_kind(kind)
+
+        def _set_activity_kind(self, kind: str, *, restart: bool = True) -> None:
+            """Adopt a new action, replacing whatever the line said before.
+
+            The clock restarts with the action, not with the turn: an elapsed
+            number spanning two different actions describes neither of them.
+            """
+
+            if restart and kind != self._activity_kind:
+                self._activity_started = time.monotonic()
+            self._activity_kind = kind
+            self._show_activity()
+
+        def _activity_action(self) -> Optional[ActivityAction]:
+            """The current action, or nothing at all when there is none.
+
+            Idle draws no line. A framed "Working" over a finished conversation
+            is a claim that something is happening, and the person who believes
+            it waits for an agent that stopped minutes ago.
+            """
+
+            kind = self._activity_kind
+            if not kind:
+                return None
+            # A pending confirmation outranks whatever tool ran last: it is the
+            # only state waiting on the person reading the screen, and the one
+            # the animated dots cannot express. Read from the typed view store,
+            # which already owns this fact for the header and the browser.
+            row = self._active_session_view()
+            if row is not None and (
+                row.primary_action == ACTION_REVIEW_RISK
+                or _identifier(row.waiting_reason) == WAIT_CONFIRMATION
+            ):
+                kind = ACTIVITY_WAITING
+            elapsed: Optional[float] = None
+            started = self._activity_started
+            if isinstance(started, float) and kind in _ACTIVITY_IN_PROGRESS:
+                elapsed = time.monotonic() - started
+            return ActivityAction(
+                kind=kind,
+                files=len(self._activity_changed) or None,
+                tests_passed=self._activity_tests,
+                elapsed_seconds=elapsed,
+                reason=self._activity_reason,
+            )
+
+        def _show_activity(self) -> None:
+            action = self._activity_action()
+            if action is None:
+                self._activity_rendered = ""
+                self._set_activity("", "idle")
                 return
-            self._steps[call_id] = {
-                "label": label,
-                "started": time.monotonic(),
-                "line": None,
-            }
-            self._render_steps()
+            text = _activity_text(
+                action,
+                english=self.language != "ru",
+                width=self._activity_width(),
+            )
+            if text == self._activity_rendered:
+                return
+            self._activity_rendered = text
+            self._set_activity(text, _ACTIVITY_STYLES.get(action.kind, "working"))
+
+        def _activity_width(self) -> int:
+            """Columns the line actually has, which is not the window's width.
+
+            The pane is inset by its margin, padding and left rule. Measured
+            against the window, a line fits the terminal and still wraps inside
+            its own frame -- which is the one thing the contract forbids.
+            """
+
+            try:
+                width = int(self.size.width) - _ACTIVITY_CHROME_COLUMNS
+            except Exception:
+                width = 0
+            return width if width > 0 else 0
+
+        def _tick_activity(self) -> None:
+            """Advance the elapsed number without redrawing anything else.
+
+            One `Static.update` on one widget, and only when the rendered text
+            actually differs -- `_show_activity` compares before it writes. A
+            second in which nothing changed therefore costs a string comparison
+            rather than a frame, which is what makes a per-second timer
+            affordable beside a conversation that must stay scrollable.
+            """
+
+            if not self.agent_busy or not self._activity_kind:
+                return
+            self._show_activity()
+
+        def _reset_activity(self) -> None:
+            """Forget the previous turn completely before starting a new one."""
+
+            self._activity_calls.clear()
+            self._activity_changed.clear()
+            self._activity_tests = None
+            self._activity_kind = ""
+            self._activity_reason = ""
+            self._activity_started = None
+            self._activity_rendered = ""
+            self._set_activity("", "idle")
+
+        def _finish_activity(
+            self, kind: str, reason: str = "", *, files: Sequence[str] = ()
+        ) -> None:
+            """Turn the end of a run into the short summary the line becomes."""
+
+            for path in files:
+                self._activity_changed[_identifier(path)] = None
+            self._activity_reason = _identifier(reason)
+            self._activity_started = None
+            self._set_activity_kind(kind, restart=False)
 
         def _finish_step(
-            self, call_id: str, name: str, detail: str, *, failed: bool
+            self,
+            call_id: str,
+            tool_name: str,
+            *,
+            failed: bool,
+            changed: Sequence[str] = (),
+            tests_passed: Optional[int] = None,
         ) -> None:
-            step = self._steps.get(call_id)
-            if step is None:
-                # A resumed session replays results whose call the interface
-                # never watched start, so there is nothing to time.
-                self._steps[call_id] = step = {"label": name, "started": None}
-            mark = "✕" if failed else "✓"
-            elapsed = ""
-            started = step.get("started")
-            if isinstance(started, float):
-                seconds = time.monotonic() - started
-                # Below a second the number is mostly the polling interval, and
-                # printing it would present the interface's own latency as the
-                # tool's.
-                if seconds >= 1.0:
-                    elapsed = f" {seconds:.0f}s"
-            step["line"] = (
-                f"{mark} {escape(name)}{elapsed}"
-                + (f"  [dim]{escape(detail)}[/]" if detail else "")
-            )
-            self._render_steps()
+            """A tool call ended. An outcome moves the line; a call alone does not.
 
-        def _render_steps(self) -> None:
-            """Show the whole turn, not only whatever ran last.
+            A finished call is not worth an announcement of its own. Making one
+            had the line flicker "Reading code", "Done", "Reading code", "Done"
+            through a fast turn -- motion that reports nothing, because the next
+            call is already running by the time the eye arrives. The line keeps
+            describing the action until a *different* action starts, which is
+            what makes it legible at agent speed.
 
-            A three-tool turn used to overwrite one line twice, so the user saw
-            the third tool and no evidence that the first two had happened.
+            The parameters are the second half of the containment argument. This
+            method is handed a classification, a boolean, a list of paths to
+            count and an integer. There is no `detail` string any more, so the
+            branch that used to interpolate a tool result into rendered text no
+            longer exists to be exploited.
             """
-            while len(self._steps) > self.MAX_VISIBLE_STEPS:
-                self._steps.pop(next(iter(self._steps)))
-            lines = [
-                step["line"]
-                if step.get("line")
-                else f"⟳ {escape(str(step['label']))}…"
-                for step in self._steps.values()
-            ]
-            if lines:
-                self._set_activity("\n".join(lines))
 
-        def _poll_agent_history(self) -> None:
+            kind = self._activity_calls.pop(
+                _identifier(call_id), ""
+            ) or _activity_kind_for_tool(tool_name)
+            # Paths are counted, never rendered. The count is the fact a person
+            # wants from a glance; the names are in Session Detail, which has
+            # the room and the context for them.
+            for path in changed:
+                self._activity_changed[_identifier(path)] = None
+            if tests_passed is not None:
+                self._activity_tests = _optional_positive_int(tests_passed)
+            if failed:
+                # A failing tool is not yet a failing run -- the agent may well
+                # recover on the next step -- but it is the one in-flight event
+                # worth interrupting the line for.
+                self._set_activity_kind(ACTIVITY_FAILED, restart=False)
+                return
+            self._set_activity_kind(kind, restart=False)
+
+        def _poll_typed_transcript(self) -> None:
+            """Phase 3: typed transcript reader, replacing _poll_agent_history.
+
+            Reads new events from the SQLite WAL transcript store and projects
+            them into the chat bubbles and activity lines the UI shows. The
+            store is written by the agent subprocess via
+            :func:`~karox.transcript_shadow.make_transcript_observer`, so this
+            timer is a lightweight read of what has changed since the last tick
+            -- no session JSON load, no canonical re-serialise.
+            """
+            if not self.agent_busy or not self.active_session:
+                return
+            try:
+                from .transcript_shadow import get_transcript_store
+                store = get_transcript_store()
+            except Exception:
+                return
+            # Check for new events since last tick by sequence number.
+            try:
+                latest = store.latest_sequence(self.active_session)
+            except Exception:
+                self._poll_assistant_content()
+                return
+            if latest < self._history_seen:
+                # Session changed (new run); reset cursor.
+                self._history_seen = 0
+            if latest >= self._history_seen:
+                try:
+                    new_events = list(store.replay(
+                        self.active_session, from_sequence=self._history_seen
+                    ))
+                except Exception:
+                    new_events = []
+                self._history_seen = latest + 1
+                for event in new_events:
+                    kind = event.kind
+                    payload = event.payload
+                    if kind == "ToolCallStarted":
+                        tool = str(payload.get("tool") or "tool")
+                        call_id = str(payload.get("call_id") or event.parent_id or tool)
+                        self._begin_step(call_id, tool)
+                    elif kind == "ToolCallCompleted":
+                        tool = str(payload.get("tool") or "tool")
+                        call_id = str(payload.get("call_id") or event.parent_id or tool)
+                        ok = payload.get("ok")
+                        self._finish_step(
+                            call_id, tool,
+                            failed=(ok is False),
+                        )
+                    elif kind == "SessionStateChanged":
+                        pass
+                    elif kind == "AgentStepCompleted":
+                        pass
+            # Always read assistant content: the typed stream tracks tool
+            # calls and steps but NOT the model's text output.
+            self._poll_assistant_content()
+
+        def _poll_assistant_content(self) -> None:
+            """Read new entries from the session store for chat bubbles + activity.
+
+            The typed transcript tracks tool calls and steps but not the
+            model's text output (that arrives as streaming TEXT_DELTA fragments
+            which are intentionally not persisted as events). For the chat
+            bubble display AND the activity widget fallback (when the typed
+            stream has no events for this session), this reads the session
+            store's provider_history when it changes.
+            """
             if not self.agent_busy or not self.active_session:
                 return
             store = SessionStore(session_dir())
@@ -5571,11 +10335,6 @@ if _HAS_TEXTUAL:
                 stat = state_path.stat()
             except OSError:
                 return
-            # Loading a session reads the whole document, re-serialises it
-            # canonically and checksums it. That record holds every tool result
-            # the run has produced, so at three times a second on a long task it
-            # was several milliseconds of work per tick on the thread that draws
-            # the interface -- for a file that had usually not changed at all.
             fingerprint = (stat.st_mtime_ns, stat.st_size)
             if fingerprint == self._history_fingerprint:
                 return
@@ -5584,59 +10343,108 @@ if _HAS_TEXTUAL:
                 history = store.load(self.active_session).provider_history
             except Exception:
                 return
-            new_entries = history[self._history_seen :]
-            self._history_seen = len(history)
+            content_seen = getattr(self, "_content_seen", 0)
+            new_entries = history[content_seen:]
+            self._content_seen = len(history)
+            # The agent's internal "answer_prompt" nudge produces a ceremonial
+            # self-report reply ("the task was only a greeting...") that the
+            # user has already read as the real answer above it. Provider history
+            # is persisted in separate atomic updates, so the nudge and its reply
+            # can arrive in *different polling ticks*. Keep the suppression state
+            # on the app and bind it to this session; a function-local flag loses
+            # the race and renders the self-report as a second assistant card.
+            suppression_session = getattr(
+                self, "_answer_prompt_suppression_session", None
+            )
+            suppress_next_assistant_text = bool(
+                getattr(self, "_suppress_next_answer_prompt_assistant", False)
+                and suppression_session == self.active_session
+            )
             for entry in new_entries:
-                role = entry.get("role")
-                if role == "assistant":
+                if entry.get("role") == "user" and entry.get("kind") == "answer_prompt":
+                    suppress_next_assistant_text = True
+                    self._suppress_next_answer_prompt_assistant = True
+                    self._answer_prompt_suppression_session = self.active_session
+                    continue
+                if entry.get("role") == "assistant":
+                    suppress_now = suppress_next_assistant_text
+                    suppress_next_assistant_text = False
+                    if suppress_now:
+                        self._suppress_next_answer_prompt_assistant = False
+                        self._answer_prompt_suppression_session = None
                     content = entry.get("content")
                     text = str(content) if content else ""
-                    if text.strip():
-                        # Show the model's answer as a distinct chat bubble,
-                        # visually separated from the tool/command activity line.
+                    if text.strip() and not suppress_now:
                         self._last_assistant_content = text
                         self._write_assistant(text)
                     for call in entry.get("tool_calls") or ():
                         if isinstance(call, dict):
                             name = str(call.get("name") or "tool")
-                            ru, en = _TOOL_LABELS.get(
-                                _canonical_tool_name(name), (name, name)
-                            )
                             self._begin_step(
-                                str(call.get("call_id") or name),
-                                self._label(ru, en),
+                                str(call.get("call_id") or name), name
                             )
-                elif role == "tool":
+                elif entry.get("role") == "tool":
                     name = str(
                         entry.get("core_name") or entry.get("tool_name") or "tool"
                     )
                     result = entry.get("result")
-                    details: List[str] = []
-                    if isinstance(result, dict):
-                        data = result.get("data")
-                        if isinstance(data, dict):
-                            for key in ("path", "changed", "exit_code"):
-                                if key in data:
-                                    details.append(f"{key}={data[key]}")
-                        details.insert(0, "ok" if result.get("ok", True) else "failed")
                     self._finish_step(
                         str(entry.get("tool_call_id") or name),
-                        _canonical_tool_name(name),
-                        " • ".join(details),
-                        failed=isinstance(result, dict) and not result.get("ok", True),
+                        name,
+                        failed=isinstance(result, dict)
+                        and not result.get("ok", True),
                     )
-                # provider_audit intentionally has no visible activity line:
-                # showing "Модель: …" on every turn mixed the model identity
-                # into the work indicator and cluttered the chat.
 
-        def _agent_finished(self, code: int, output: str) -> None:
-            self._poll_agent_history()
+        def _agent_finished(
+            self, code: int, output: str, run: Optional[RunIdentity] = None
+        ) -> None:
+            """Finish one run, and only if that run is still the current one.
+
+            The identity check happens before every mutation below, which is the
+            entire point of it. A stale callback -- run A finishing after run B
+            of the same session has already started -- reached this method and
+            cleared ``agent_busy``, dropped B's process handle, re-enabled the
+            composer and published a terminal status for a run still working.
+            Recognising it here, before anything is touched, is what makes it
+            harmless.
+
+            ``run`` is optional so a caller that drives this method directly
+            still finishes the active run; the worker always names its own.
+            """
+
+            if run is None:
+                run = self._active_run or RunIdentity(
+                    self.active_session or "", self._run_generation
+                )
+            elif run != self._active_run:
+                # Late callback from a superseded run. Nothing is touched: not
+                # the busy flag, not the process handle, not the active session,
+                # not the composer, and no terminal event is published.
+                #
+                # Compared against the run the application currently owns, with
+                # no ``_active_run is not None`` escape hatch. That exemption
+                # left a real hole: a run clears ``_active_run`` when it ends, so
+                # a duplicate callback arriving while the application is idle
+                # found ``None``, skipped the check and went on to clear state it
+                # no longer owned. A generation is monotonic and never reused, so
+                # "not the current run" is the whole test -- including when the
+                # current run is no run at all.
+                return
+            # No local copy of the session id is needed any more: every terminal
+            # publisher below is handed ``run`` and reads ``run.session_id`` from
+            # the identity it was given, so no branch here can clear it first.
+            self._poll_typed_transcript()
             self.agent_busy = False
             self.agent_process = None
             self.query_one("#composer", Input).disabled = False
             self.query_one("#busy", LoadingIndicator).styles.display = "none"
             if self._stop_requested:
                 self._stop_requested = False
+                self._active_run = None
+                self._publish_agent_cancelled(run)
+                # Cancellation outranks every outcome below and returns before
+                # the resolver runs, so it names its own reason here.
+                self._finish_activity(ACTIVITY_STOPPED, "cancelled")
                 self._write_notice(
                     self._label(
                         "Вы остановили задачу. Сессия сохранена — повторите задачу "
@@ -5659,8 +10467,6 @@ if _HAS_TEXTUAL:
                     or report.get("reason")
                     or "Finished."
                 )
-                verified = bool(report.get("verified"))
-                state = "verified" if verified else str(report.get("status", "stopped"))
                 text_message = str(message)
                 # The polling reader above already showed this turn's answer, and
                 # the report carries the same text again, so every reply was drawn
@@ -5683,73 +10489,91 @@ if _HAS_TEXTUAL:
                     and text_message.strip() != self._last_assistant_content.strip()
                 ):
                     self._write_assistant(text_message)
-                changed = ", ".join(report.get("changed_files") or [])
-                if verified and report.get("reason") == "answer":
-                    # A question is answered, not verified. Saying "completed
-                    # and verified" over an empty file list described a change
-                    # that never happened, so the answer names what it read.
-                    basis = report.get("answer_basis") or []
-                    sources = ", ".join(
-                        sorted({str(item.get("tool")) for item in basis})
-                    )
-                    self._set_activity(
-                        self._label(
-                            f"[bold]Ответ получен[/]\nОснование: {escape(sources)}",
-                            f"[bold]Answered[/]\nBased on: {escape(sources)}",
-                        ),
-                        "success",
-                    )
-                elif verified:
-                    completion = self._label(
-                        "Задача завершена и проверена.",
-                        "Task completed and verified.",
-                    )
-                    if changed:
-                        completion += self._label(
-                            f" Изменены файлы: {changed}",
-                            f" Changed files: {changed}",
-                        )
-                    self._set_activity(
-                        f"[bold]{escape(completion)}[/]", "success"
-                    )
-                elif report.get("reason") == "no_changes":
-                    # Nothing changed and the reply rested on nothing KaroX
-                    # watched the model read, so this is neither a change nor an
-                    # answer. It is still not a crash, so it is stated plainly
-                    # rather than dressed up as an error.
-                    # One line, not three. The paragraph that used to sit here
-                    # repeated what the suppressed report above already said, in a
-                    # window where the answer itself had a few rows to live in.
-                    self._set_activity(
-                        self._label(
-                            "[bold]Без изменений[/] — файлы не менялись, "
-                            "репозиторий не читался.",
-                            "[bold]No change[/] — no file was changed and nothing "
-                            "was read from the repository.",
-                        ),
-                        "warning",
-                    )
-                else:
-                    reason = str(report.get("reason") or state)
-                    self._set_activity(
-                        self._label(
-                            f"[bold]Задача не завершена[/]\nПричина: {escape(reason)}",
-                            f"[bold]Task did not complete[/]\nReason: {escape(reason)}",
-                        ),
-                        "error",
-                    )
             else:
                 safe = output.strip() or f"Agent exited with code {code}."
                 self._write_notice(safe, "error")
-                self._set_activity(
-                    self._label(
-                        "[bold]Задача завершилась ошибкой[/]",
-                        "[bold]Task failed[/]",
-                    ),
-                    "error",
-                )
+            # One terminal lifecycle event for the run, decided from the
+            # structured result rather than from the words drawn above. A run
+            # that produced no parseable report failed, whatever it printed.
+            status, reason, error_code = self._run_outcome(report, code)
+            # A2. The summary and the published event are now decided by one
+            # resolver rather than by two ladders of `report.get` that could --
+            # and did -- disagree. A run could be drawn green as "completed and
+            # verified" while the event bus was told it failed on a contract
+            # mismatch, because the words read `verified` and the event read
+            # both `verified` and the exit code. One source, one verdict.
+            activity_kind = _ACTIVITY_OUTCOME_KINDS.get(status, ACTIVITY_FAILED)
+            if status == STATUS_STOPPED and reason in _BENIGN_STOP_REASONS:
+                # A bounded stop that changed nothing wrong is an outcome, not
+                # an abort: a plain question or a no-op task must not wear the
+                # same warning-coloured "Stopped" as a user cancellation or a
+                # blown step budget.
+                activity_kind = ACTIVITY_COMPLETED
+            self._finish_activity(
+                activity_kind,
+                reason,
+                files=(
+                    tuple(report.get("changed_files") or ())
+                    if isinstance(report, dict)
+                    else ()
+                ),
+            )
+            # The run is over as far as this process is concerned, so a further
+            # callback naming it is a duplicate and the terminal claim below
+            # rejects it.
+            self._active_run = None
+            if status == STATUS_COMPLETED:
+                self._publish_agent_completed(run, report)
+            elif status == STATUS_STOPPED:
+                self._publish_agent_stopped(run, reason)
+            else:
+                self._publish_agent_failed(run, reason, code=error_code)
             self._refresh_status()
             self.query_one("#composer", Input).focus()
+
+        @staticmethod
+        def _run_outcome(
+            report: Optional[Dict[str, Any]], code: int
+        ) -> Tuple[str, str, str]:
+            """Resolve one run into a lifecycle status and a reason identifier.
+
+            The exit code alone cannot answer this. ``karox agent`` returns
+            ``0 if report.verified else 1`` (see :mod:`karox.cli`), so a run that
+            simply changed nothing exits non-zero even though nothing went
+            wrong. Reading only the code would paint a plain question red;
+            reading only ``verified`` would call a crashed run finished. Both are
+            read, and the two disagreeing is itself reported rather than guessed.
+
+            Returns the status to publish, a machine-readable reason, and the
+            error code an ERROR event would carry (empty when none is published).
+            The caller owns cancellation, which outranks every outcome here.
+            """
+
+            if not isinstance(report, dict):
+                # No parseable structured result. Whatever the child printed, the
+                # contract was not honoured, so this is not allowed to look green.
+                return (
+                    STATUS_FAILED,
+                    f"malformed_report exit_code={int(code)}",
+                    ERROR_AGENT_MALFORMED,
+                )
+            status = _identifier(report.get("status"))
+            reason = _identifier(report.get("reason"))
+            verified = bool(report.get("verified"))
+            if verified:
+                # ``verified`` is the only outcome the CLI encodes as exit 0. A
+                # non-zero code beside it means the two halves disagree.
+                if int(code) != 0:
+                    return STATUS_FAILED, "contract_mismatch", ERROR_AGENT_CONTRACT
+                return STATUS_COMPLETED, reason or status, ""
+            if status == STATUS_FAILED:
+                return STATUS_FAILED, reason or status, ERROR_AGENT_FAILED
+            if int(code) == 0:
+                # Exit 0 without ``verified`` contradicts the CLI contract.
+                return STATUS_FAILED, "contract_mismatch", ERROR_AGENT_CONTRACT
+            # A bounded stop: no verified change and no evidence-backed answer,
+            # but the session is saved and resumable. Neutral, never an error.
+            return STATUS_STOPPED, reason or status or "stopped", ""
 
         def _run_ask(self, message: str) -> None:
             if not message:
@@ -5843,8 +10667,11 @@ if _HAS_TEXTUAL:
             }
             message = loading.get(label, ("Выполняю команду…", "Running command…"))
             self.query_one("#busy", LoadingIndicator).styles.display = "block"
-            self.query_one("#composer-hint", Static).update(
-                message[1] if self.language == "en" else message[0]
+            # The composer hint row is gone; the one-line activity surface is
+            # exactly what a transient "Loading models…" belongs on.
+            self._set_activity(
+                message[1] if self.language == "en" else message[0],
+                "working",
             )
 
             def execute() -> None:
@@ -5855,12 +10682,47 @@ if _HAS_TEXTUAL:
 
         def _inspection_finished(self, label: str, code: int, output: str) -> None:
             self.query_one("#busy", LoadingIndicator).styles.display = "none"
-            self.query_one("#composer-hint", Static).update(
-                _TEXT[self.language]["hint"]
-            )
+            self._reset_activity()
             color = "#b3a990" if code == 0 else "#e0a3a3"
             message = _inspection_text(label, code, output, self.language)
+            if label == "/sessions":
+                live = self._live_session_block()
+                if live:
+                    message = f"{message}\n\n{live}"
             self._write(f"[{color}]{escape(message)}[/]")
+
+        def _live_session_block(self) -> str:
+            """The typed rows `/sessions` cannot get from a child process.
+
+            The list above this block comes from ``karox session list --json``
+            run in a subprocess: it answers what exists and what each run
+            changed, and it is a snapshot of the files as they were when the
+            command was typed. The view store answers what a session is doing
+            *now* and what it is waiting on, from events that arrived after that
+            snapshot -- so the two are complementary rather than duplicates.
+
+            Only event-backed rows are listed. A session the store merely
+            backfilled from the same durable records would repeat the block
+            above without adding a fact.
+
+            Fail-soft by construction: a store fault costs this block, never the
+            command output the user asked for.
+            """
+
+            try:
+                rows = [
+                    row
+                    for row in self._view_store.summaries()
+                    if row.last_event_seq > 0
+                ]
+            except Exception:
+                return ""
+            if not rows:
+                return ""
+            english = self.language != "ru"
+            lines = ["Live:" if english else "Сейчас:"]
+            lines.extend(_session_row_text(row, english) for row in rows)
+            return "\n".join(lines)
 
         def action_clear_log(self) -> None:
             self._transcript().clear()
@@ -5904,6 +10766,319 @@ def _canonical_tool_name(name: str) -> str:
     return _ALIAS_TO_CORE_TOOL.get(name, name)
 
 
+# --------------------------------------------------------------- activity line
+#
+# One human-readable line, and the only ordinary-mode indicator of what the
+# agent is doing.
+#
+# What this replaces: a stack of up to six raw tool lines --
+# `X repo.read_file 2s  ok - path=src/karox/tui.py` -- one per call of the turn.
+# Three things were wrong with it and all three are structural. It named
+# internal functions the reader cannot call, so the screen taught vocabulary
+# instead of state. It interpolated `result["data"]` straight into rendered
+# text, so anything a tool returned -- a path, a prompt, an escape sequence, a
+# token that happened to sit in a diff -- was drawn verbatim. And it grew: four
+# rows describing plumbing, directly above a conversation that in a small
+# terminal had about eight.
+#
+# The rule that makes the leak impossible rather than merely unlikely: nothing
+# free-form reaches the screen. A line is assembled from the catalogs below plus
+# integers, and no branch in this layer interpolates a string taken from a tool
+# result. A hostile payload therefore has no path to rendered text -- not one
+# that is escaped or filtered, but none at all.
+#
+# The technical history is not lost, only moved: Session Detail still holds
+# every call, its arguments and its result.
+
+ACTIVITY_READING = "reading"
+ACTIVITY_SEARCHING = "searching"
+ACTIVITY_EDITING = "editing"
+ACTIVITY_TESTING = "testing"
+ACTIVITY_WAITING = "waiting"
+ACTIVITY_COMPLETED = "completed"
+ACTIVITY_STOPPED = "stopped"
+ACTIVITY_FAILED = "failed"
+# The fail-soft destination. An action nobody has taught this layer about still
+# has to say something true, and "working" is true of every one of them.
+ACTIVITY_WORKING = "working"
+
+# One ordinary line. The second is reserved for a critical failure, where the
+# reason is worth a row of the conversation and nothing else is.
+ACTIVITY_MAX_LINES = 2
+
+_ACTIVITY_WORDS: Dict[str, Tuple[str, str]] = {
+    ACTIVITY_READING: ("Читает код", "Reading code"),
+    ACTIVITY_SEARCHING: ("Ищет причину ошибки", "Finding the cause"),
+    ACTIVITY_EDITING: ("Изменяет код", "Updating code"),
+    ACTIVITY_TESTING: ("Проверяет тесты", "Running tests"),
+    ACTIVITY_WAITING: ("Ожидает подтверждения", "Waiting for confirmation"),
+    ACTIVITY_COMPLETED: ("Готово", "Done"),
+    ACTIVITY_STOPPED: ("Остановлено", "Stopped"),
+    ACTIVITY_FAILED: ("Ошибка проверки", "Check failed"),
+    ACTIVITY_WORKING: ("Работает", "Working"),
+}
+
+# Where the technical history went, said in the one place a person will look
+# for it. Only a failure earns this: on a good run it is an instruction to go
+# reading for nothing.
+_ACTIVITY_DETAILS_WORDS = ("открыть подробности", "open details")
+
+# The whole of the tool vocabulary the screen is allowed to know. A name absent
+# from this table is not an error and is not printed -- it resolves to
+# ACTIVITY_WORKING, so adding a tool to the core never leaks its identifier into
+# the interface while somebody gets around to classifying it.
+_TOOL_ACTIVITY_KINDS: Dict[str, str] = {
+    "repo.read_file": ACTIVITY_READING,
+    "repo.read_lines": ACTIVITY_READING,
+    "repo.list_files": ACTIVITY_READING,
+    "git.status": ACTIVITY_READING,
+    "git.diff": ACTIVITY_READING,
+    "git.log": ACTIVITY_READING,
+    "repo.search": ACTIVITY_SEARCHING,
+    "repo.write_file": ACTIVITY_EDITING,
+    "repo.edit_file": ACTIVITY_EDITING,
+    "git.commit": ACTIVITY_EDITING,
+    "checks.run": ACTIVITY_TESTING,
+}
+
+# Why a run ended, in words. Keyed by the identifiers the agent already
+# publishes, so a reason with no entry contributes nothing rather than printing
+# `budget_exceeded:output_tokens` at somebody.
+_ACTIVITY_REASON_WORDS: Dict[str, Tuple[str, str]] = {
+    "step_limit": ("достигнут лимит шагов", "step limit reached"),
+    "max_steps": ("достигнут лимит шагов", "step limit reached"),
+    "time_limit": ("достигнут лимит времени", "time limit reached"),
+    "budget_exceeded": ("исчерпан бюджет", "budget spent"),
+    "cancelled": ("остановлено вами", "cancelled by you"),
+    "no_changes": ("изменений не потребовалось", "no change was needed"),
+    "answer": ("вопрос без правки кода", "a question, not an edit"),
+    "malformed_report": ("агент не вернул результат", "the agent returned nothing"),
+    "contract_mismatch": ("противоречивый результат", "a contradictory result"),
+}
+
+
+# Kinds that are still running, and so have an elapsed number worth showing. An
+# outcome does not: "Done - 43s" times the run, which is a different fact from
+# the one this line reports and belongs to Session Detail.
+_ACTIVITY_IN_PROGRESS = frozenset(
+    {
+        ACTIVITY_READING,
+        ACTIVITY_SEARCHING,
+        ACTIVITY_EDITING,
+        ACTIVITY_TESTING,
+        ACTIVITY_WORKING,
+    }
+)
+
+# Colour is a second channel saying the same thing as the words, for the glance
+# that does not read them. Waiting borrows the warning colour because it is the
+# one state that will not resolve itself.
+_ACTIVITY_STYLES: Dict[str, str] = {
+    ACTIVITY_COMPLETED: "success",
+    ACTIVITY_FAILED: "error",
+    ACTIVITY_STOPPED: "warning",
+    ACTIVITY_WAITING: "warning",
+}
+
+# The published lifecycle status, and the word the line ends on. Keyed by the
+# same identifiers `_run_outcome` returns, so the summary a person reads and the
+# event the bus receives cannot describe two different runs.
+_ACTIVITY_OUTCOME_KINDS: Dict[str, str] = {
+    STATUS_COMPLETED: ACTIVITY_COMPLETED,
+    STATUS_STOPPED: ACTIVITY_STOPPED,
+    STATUS_FAILED: ACTIVITY_FAILED,
+}
+
+# Bounded stops that are outcomes rather than aborts: the task finished as an
+# answer or genuinely needed no change. These render as Done with their reason
+# instead of the warning-coloured Stopped a real abort earns.
+_BENIGN_STOP_REASONS = frozenset({"no_changes"})
+
+# Margin, padding and the left rule the `#activity` pane spends before a
+# character of text: 2 + 2 margin, 1 + 1 padding, 1 border. Measured against the
+# window instead, a line fits the terminal and still wraps inside its own frame.
+_ACTIVITY_CHROME_COLUMNS = 7
+
+
+def _activity_kind_for_tool(name: Any) -> str:
+    """What a tool call *means*, never what it is called."""
+
+    return _TOOL_ACTIVITY_KINDS.get(
+        _canonical_tool_name(_identifier(name)), ACTIVITY_WORKING
+    )
+
+
+def _activity_reason_words(reason: Any, english: bool) -> str:
+    """Localize an outcome reason, or say nothing at all.
+
+    Unlike :func:`_waiting_reason_text`, an unknown identifier here yields the
+    empty string rather than itself. That function feeds a diagnostic row where
+    a raw identifier beats a blank; this one feeds the single line an ordinary
+    user reads, where it would be exactly the internal vocabulary this layer
+    exists to keep off the screen.
+    """
+
+    identifier = _identifier(reason)
+    if not identifier:
+        return ""
+    words = _ACTIVITY_REASON_WORDS.get(identifier)
+    if words is None:
+        # `budget_exceeded:output_tokens` is a real published value.
+        words = _ACTIVITY_REASON_WORDS.get(identifier.split(":", 1)[0])
+    if words is None:
+        return ""
+    return words[1] if english else words[0]
+
+
+def _russian_plural(count: int, one: str, few: str, many: str) -> str:
+    """Russian needs three forms, and "2 файлов" reads as a bug in the tool."""
+
+    if 11 <= count % 100 <= 14:
+        return many
+    remainder = count % 10
+    if remainder == 1:
+        return one
+    if 2 <= remainder <= 4:
+        return few
+    return many
+
+
+def _activity_files_words(count: int, english: bool) -> str:
+    if english:
+        return f"{count} file" if count == 1 else f"{count} files"
+    return f"{count} {_russian_plural(count, 'файл', 'файла', 'файлов')}"
+
+
+def _activity_tests_words(count: int, english: bool) -> str:
+    if english:
+        return f"{count} test passed" if count == 1 else f"{count} tests passed"
+    noun = _russian_plural(count, "тест", "теста", "тестов")
+    verb = "прошёл" if noun == "тест" else "прошли"
+    return f"{count} {noun} {verb}"
+
+
+def _activity_elapsed_words(seconds: float, english: bool) -> str:
+    total = max(int(seconds), 0)
+    if total < 60:
+        return f"{total}s" if english else f"{total} с"
+    minutes, remaining = divmod(total, 60)
+    if english:
+        return f"{minutes}m {remaining}s"
+    return f"{minutes} мин {remaining} с"
+
+
+@dataclass(frozen=True)
+class ActivityAction:
+    """One thing the agent is doing, in the only vocabulary the screen speaks.
+
+    Every field is either a catalog key or a number. There is deliberately no
+    field for a path, a command, a tool name or a message: the type is the
+    boundary, so a caller cannot push free-form text through it by mistake.
+    """
+
+    kind: str = ACTIVITY_WORKING
+    files: Optional[int] = None
+    tests_passed: Optional[int] = None
+    elapsed_seconds: Optional[float] = None
+    reason: str = ""
+
+
+def _activity_lines(action: ActivityAction, english: bool) -> Tuple[str, ...]:
+    """Render one action into at most :data:`ACTIVITY_MAX_LINES` lines.
+
+    One line for everything that is going well: a reader of "Running tests - 28s"
+    already has the only fact they wanted, which is whether to keep waiting. Two
+    only for a failure, where the reason is the thing they now have to act on.
+    """
+
+    kind = action.kind if action.kind in _ACTIVITY_WORDS else ACTIVITY_WORKING
+    russian, plain_english = _ACTIVITY_WORDS[kind]
+    parts: List[str] = [plain_english if english else russian]
+
+    files = _optional_positive_int(action.files)
+    if files and kind in {ACTIVITY_EDITING, ACTIVITY_COMPLETED}:
+        parts.append(_activity_files_words(files, english))
+    passed = _optional_positive_int(action.tests_passed)
+    if passed:
+        parts.append(_activity_tests_words(passed, english))
+    elapsed = action.elapsed_seconds
+    # Below a second the number is mostly the polling interval, and printing it
+    # presents the interface's own latency as the agent's.
+    if isinstance(elapsed, (int, float)) and float(elapsed) >= 1.0:
+        parts.append(_activity_elapsed_words(float(elapsed), english))
+
+    if kind == ACTIVITY_FAILED:
+        parts.append(_ACTIVITY_DETAILS_WORDS[1 if english else 0])
+        reason = _activity_reason_words(action.reason, english)
+        first = " · ".join(parts)
+        return (first, reason) if reason else (first,)
+
+    if kind in {ACTIVITY_STOPPED, ACTIVITY_COMPLETED}:
+        reason = _activity_reason_words(action.reason, english)
+        if reason:
+            parts.append(reason)
+    return (" · ".join(parts),)
+
+
+def _result_changed_paths(result: Any) -> Tuple[str, ...]:
+    """Which files a tool result says it changed, for counting only.
+
+    A path is read from the result and never rendered: it is put in a set so
+    the same file edited three times counts once, and only the size of that set
+    reaches the screen. `changed` has to be true for the path to count, because
+    `repo.edit_file` reports the path it examined whether or not it rewrote it,
+    and "3 files" over three reads that changed nothing is a lie the user would
+    act on.
+    """
+
+    if not isinstance(result, dict):
+        return ()
+    data = result.get("data")
+    if not isinstance(data, dict) or not data.get("changed"):
+        return ()
+    path = data.get("path")
+    return (_identifier(path),) if path else ()
+
+
+def _result_tests_passed(result: Any) -> Optional[int]:
+    """How many tests passed, when the result actually counted them.
+
+    An integer or nothing. A check that reports no count contributes no number,
+    rather than a zero that would read as "everything failed".
+    """
+
+    if not isinstance(result, dict):
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    for key in ("passed", "tests_passed"):
+        count = _optional_positive_int(data.get(key))
+        if count:
+            return count
+    return None
+
+
+def _fit_activity_line(line: str, width: int) -> str:
+    """Keep one line one line, in a pane that is sometimes forty columns wide.
+
+    Wrapping is what would break the contract: a wrapped line is two rows taken
+    from the conversation, and the narrow terminals where those rows are
+    scarcest are exactly the ones where wrapping happens.
+    """
+
+    if width <= 1 or len(line) <= width:
+        return line
+    return line[: max(1, width - 1)].rstrip() + "…"
+
+
+def _activity_text(action: ActivityAction, *, english: bool, width: int = 0) -> str:
+    lines = _activity_lines(action, english)[:ACTIVITY_MAX_LINES]
+    if width > 0:
+        lines = tuple(_fit_activity_line(line, width) for line in lines)
+    return "\n".join(lines)
+
+
 def _line_writer(stream: Any) -> Callable[[str], None]:
     """Write to a possibly-redirected stream without dying on a glyph.
 
@@ -5929,7 +11104,7 @@ def _line_writer(stream: Any) -> Callable[[str], None]:
 
 def _line_help(out: Callable[[str], Any]) -> None:
     out("KaroX commands:\n")
-    for command, description in SLASH_COMMANDS.items():
+    for command, description in _commands("en").items():
         out(f"  {command:<18} {description}\n")
 
 
@@ -5977,13 +11152,24 @@ def _run_line_mode(
             out(_inspection_text(value, code, output, "en") + "\n")
             continue
         if value.startswith("/"):
-            out(f"Unknown command: {value.split()[0]}. Type /help.\n")
+            cmd_head = value.split(" ", 1)[0]
+            if cmd_head in _LINE_INTERACTIVE_ONLY:
+                out(
+                    "The command " + cmd_head + " needs the interactive KaroX terminal. "
+                    "Run `karox` without redirecting stdin.\n"
+                )
+                continue
+            suggestion = _suggest_command(cmd_head, "en")
+            if suggestion:
+                out(f"Unknown command: {cmd_head}. Type /help. {suggestion}\n")
+            else:
+                out(f"Unknown command: {cmd_head}. Type /help.\n")
             continue
         selected = _selected_model()
         if selected is None:
             out(
                 "No API model is configured. Run karox in an interactive terminal "
-                "and press Ctrl+S, or use `karox provider` / `karox model`.\n"
+                "and press Ctrl+S, or use `karox provider list` / `karox model list`.\n"
             )
             continue
         sid = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"

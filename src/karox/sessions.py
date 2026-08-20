@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import hmac
 import json
@@ -64,6 +65,38 @@ class MutationLease:
         return asdict(self)
 
 
+_INHERITED_MUTATION_LEASE: contextvars.ContextVar[Optional[MutationLease]] = (
+    contextvars.ContextVar("karox_inherited_mutation_lease", default=None)
+)
+
+
+@contextlib.contextmanager
+def mutation_lease_context(lease: MutationLease) -> Iterator[MutationLease]:
+    """Expose one already-owned lease to strictly nested calls in this context.
+
+    Context variables are intentionally used instead of PID/owner matching: a
+    parallel hosted request in another thread/task must still acquire its own
+    lease and therefore remains fenced by :class:`SessionBusy`.
+    """
+
+    if not isinstance(lease, MutationLease):
+        raise SessionBusy("a valid mutation lease is required")
+    token = _INHERITED_MUTATION_LEASE.set(lease)
+    try:
+        yield lease
+    finally:
+        _INHERITED_MUTATION_LEASE.reset(token)
+
+
+def current_mutation_lease(session_id: str) -> Optional[MutationLease]:
+    """Return a same-session inherited lease for the current execution context."""
+
+    lease = _INHERITED_MUTATION_LEASE.get()
+    if lease is None or lease.session_id != session_id:
+        return None
+    return lease
+
+
 @dataclass
 class SessionRecord:
     session_id: str
@@ -123,6 +156,31 @@ class SessionRecord:
         return cls(**value)
 
 
+_ATOMIC_REPLACE_RETRY_SECONDS = 1.5
+_ATOMIC_REPLACE_RETRY_DELAY = 0.05
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Atomically replace a session document, tolerating short Windows locks.
+
+    Antivirus/indexing and a concurrently exiting reader can transiently hold the
+    destination open on Windows and make ``os.replace`` raise ``PermissionError``
+    / WinError 5. Session mutations already hold KaroX's cross-process state lock,
+    so this retry is not masking a competing writer; it only bridges an external
+    short-lived filesystem lock. The deadline is bounded so a persistent ACL or
+    ownership problem is still surfaced promptly.
+    """
+    deadline = time.monotonic() + _ATOMIC_REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_ATOMIC_REPLACE_RETRY_DELAY)
+
+
 def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -132,7 +190,7 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
+        _replace_with_retry(temp, path)
     finally:
         try:
             temp.unlink()
@@ -244,6 +302,39 @@ class SessionStore:
             _atomic_json(target, payload)
             record.checksum = payload["checksum"]
             return record
+
+    def reactivate(
+        self,
+        session_id: str,
+        repository: Path,
+        access_profile: AccessProfile = AccessProfile.WORKSPACE_WRITE,
+    ) -> SessionRecord:
+        """Reactivate a revoked/existing session for a persistent saved bridge profile."""
+        sid = self._validate_id(session_id)
+        target = self.state_path(sid)
+        repo = repository.expanduser().resolve(strict=True)
+        if not repo.is_dir():
+            raise SessionError(f"repository is not a directory: {repo}")
+        with _exclusive_file_lock(self.lock_path(sid)):
+            if not target.exists():
+                return self.create(repo, "reactivated persistent session", access_profile, session_id=sid)
+            record = self.load(sid)
+            record.repository = str(repo)
+            record.repo_fingerprint = repository_fingerprint(repo)
+            record.access_profile = access_profile.value
+            record.revoked = False
+            record.status = "active"
+            payload = record.to_dict()
+            payload["repository"] = str(repo)
+            payload["repo_fingerprint"] = repository_fingerprint(repo)
+            payload["access_profile"] = access_profile.value
+            payload["revoked"] = False
+            payload["status"] = "active"
+            payload["revision"] = record.revision + 1
+            payload["updated_at"] = time.time()
+            payload["checksum"] = _checksum(payload)
+            _atomic_json(target, payload)
+            return SessionRecord.from_dict(payload)
 
     def load(self, session_id: str) -> SessionRecord:
         return SessionRecord.from_dict(_read_json(self.state_path(session_id)))

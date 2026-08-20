@@ -135,6 +135,33 @@ class ConnectionControllerTests(unittest.TestCase):
         self.assertEqual(already.status, "already_running")
         self.assertNotIn("launched", seen)
 
+    def test_repair_reuses_healthy_restarts_degraded_and_starts_stopped(self) -> None:
+        target = _target()
+
+        healthy, _, healthy_runtime, healthy_seen = self._controller(
+            target, state="running"
+        )
+        healthy_result = healthy.repair(target.connection_id)
+        self.assertEqual(healthy_result.status, "already_running")
+        self.assertEqual(healthy_runtime.stopped, [])
+        self.assertNotIn("launched", healthy_seen)
+
+        degraded, _, degraded_runtime, degraded_seen = self._controller(
+            target, state="degraded"
+        )
+        degraded_result = degraded.repair(target.connection_id)
+        self.assertEqual(degraded_result.status, "restarted")
+        self.assertEqual(degraded_runtime.stopped, [target.connection_id])
+        self.assertEqual(degraded_seen["launched"], target.connection_id)
+
+        stopped, _, stopped_runtime, stopped_seen = self._controller(
+            target, state="configured_not_running"
+        )
+        stopped_result = stopped.repair(target.connection_id)
+        self.assertEqual(stopped_result.status, "started")
+        self.assertEqual(stopped_runtime.stopped, [])
+        self.assertEqual(stopped_seen["launched"], target.connection_id)
+
     def test_test_uses_the_same_endpoint_and_secret_dispatch_for_every_surface(self) -> None:
         target = _target()
         controller, _, _, seen = self._controller(target)

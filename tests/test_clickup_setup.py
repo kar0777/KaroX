@@ -11,6 +11,12 @@ tests is real (initialize + tools/list over HTTP) against the echo MCP server in
 from __future__ import annotations
 
 import os
+
+# Explicit opt-in: the orchestrator saves the bridge secret through the real
+# OS keyring in production, and this suite exercised that path before the
+# isolation guard existed. Keep it visible, not silent.
+# TODO(post-v5): inject a fake keyring backend end-to-end instead.
+os.environ.setdefault("KAROX_TEST_ALLOW_REAL_KEYRING", "1")
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,7 +196,12 @@ class ClickupOrchestratorTests(unittest.TestCase):
         # list and failing ``test_provider_list_is_non_empty``.
         self._env = patch.dict(
             os.environ,
-            {"KAROX_CONFIG_DIR": self._tmp, "KAROX_RUNTIME_DIR": self._tmp},
+            {
+                "KAROX_CONFIG_DIR": self._tmp,
+                "KAROX_VNEXT_CONFIG_DIR": self._tmp,
+                "KAROX_RUNTIME_DIR": self._tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": self._tmp,
+            },
             clear=False,
         )
         self._env.start()
@@ -556,7 +567,12 @@ class ClickupPostSaveStopTests(unittest.TestCase):
         self._tmp = tempfile.mkdtemp()
         self._env = patch.dict(
             os.environ,
-            {"KAROX_CONFIG_DIR": self._tmp, "KAROX_RUNTIME_DIR": self._tmp},
+            {
+                "KAROX_CONFIG_DIR": self._tmp,
+                "KAROX_VNEXT_CONFIG_DIR": self._tmp,
+                "KAROX_RUNTIME_DIR": self._tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": self._tmp,
+            },
             clear=False,
         )
         self._env.start()
@@ -659,7 +675,12 @@ class ClickupSavedRestartTests(unittest.TestCase):
         self._tmp = tempfile.mkdtemp()
         self._env = patch.dict(
             os.environ,
-            {"KAROX_CONFIG_DIR": self._tmp, "KAROX_RUNTIME_DIR": self._tmp},
+            {
+                "KAROX_CONFIG_DIR": self._tmp,
+                "KAROX_VNEXT_CONFIG_DIR": self._tmp,
+                "KAROX_RUNTIME_DIR": self._tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": self._tmp,
+            },
             clear=False,
         )
         self._env.start()
@@ -895,7 +916,11 @@ class ClickupServerLauncherTests(unittest.TestCase):
             return _StubProcess()
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"KAROX_CONFIG_DIR": tmp}, clear=False):
+            with patch.dict(
+            os.environ,
+            {"KAROX_CONFIG_DIR": tmp, "KAROX_VNEXT_CONFIG_DIR": tmp},
+            clear=False,
+        ):
                 with patch("karox.web_bridge_launcher._wait_for_bridge", lambda *a, **k: None):
                     handle = default_server_launcher(
                         free_port,
