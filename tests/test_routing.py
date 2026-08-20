@@ -494,6 +494,50 @@ class RoutingTests(_RoutingFixture):
         )
         self.assertEqual(result.route_attempts[0]["retries"], 1)
 
+    def test_cheapest_strategy_reorders_only_comparable_priced_routes(self) -> None:
+        expensive = self.add_route(
+            "expensive",
+            pricing=ModelPricing("v1", "USD", 10.0, 20.0, "fixture"),
+            max_output_tokens=1_000,
+        )
+        cheap = self.add_route(
+            "cheap",
+            pricing=ModelPricing("v1", "USD", 1.0, 2.0, "fixture"),
+            max_output_tokens=1_000,
+        )
+        providers = {
+            "expensive": FakeProvider([response()]),
+            "cheap": FakeProvider([response()]),
+        }
+        routed, factory = self.routed(
+            (expensive, cheap), providers, route_strategy="cheapest"
+        )
+
+        result = routed.complete(request())
+
+        self.assertEqual(factory.created, ["cheap"])
+        self.assertEqual(result.selected_provider, "cheap")
+
+    def test_cheapest_strategy_keeps_user_order_when_pricing_is_incomplete(self) -> None:
+        first = self.add_route("first", max_output_tokens=1_000)
+        second = self.add_route(
+            "second",
+            pricing=ModelPricing("v1", "USD", 1.0, 1.0, "fixture"),
+            max_output_tokens=1_000,
+        )
+        providers = {
+            "first": FakeProvider([response()]),
+            "second": FakeProvider([response()]),
+        }
+        routed, factory = self.routed(
+            (first, second), providers, route_strategy="cheapest"
+        )
+
+        result = routed.complete(request())
+
+        self.assertEqual(factory.created, ["first"])
+        self.assertEqual(result.selected_provider, "first")
+
     def test_retry_policy_rejects_unusable_configuration(self) -> None:
         invalid = (
             {"max_attempts": 0},
@@ -863,6 +907,8 @@ class StreamingRouteTests(_RoutingFixture):
         self.assertEqual(final.response.content, "done")
         self.assertEqual(final.response.currency, "USD")
         self.assertAlmostEqual(final.response.cost or 0.0, 0.008)
+        self.assertAlmostEqual(final.response.uncached_cost or 0.0, 0.008)
+        self.assertEqual(final.response.cache_savings, 0.0)
         self.assertEqual(final.response.pricing_version, "v1")
 
     def test_a_route_that_dies_before_emitting_anything_still_falls_back(self) -> None:
