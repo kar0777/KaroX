@@ -103,7 +103,11 @@ class CredentialStoreTests(unittest.TestCase):
         )
 
     def test_a_missing_keyring_never_installs_software(self) -> None:
+        # Opt out of the isolation refusal deliberately: keyring import is
+        # patched to fail, so no real OS keyring is reachable, and the point
+        # is the production message a user without keyring support sees.
         with (
+            patch.dict(os.environ, {"KAROX_TEST_ALLOW_REAL_KEYRING": "1"}),
             patch.dict(sys.modules, {"keyring": None}),
             patch("subprocess.run") as run,
             self.assertRaises(CredentialError) as raised,

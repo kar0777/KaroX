@@ -1,0 +1,37 @@
+# Deterministic line endings, settled once for every future add/checkout.
+#
+# History note: mixed CRLF/LF working files repeatedly broke guarded edits.
+# These rules normalize text to LF in the object store as files are next
+# staged; there is deliberately no tree-wide renormalize commit, so unrelated
+# blame/diff churn is avoided and files converge as they are touched.
+* text=auto
+
+# Source, config, and docs: LF.
+*.py text eol=lf
+*.pyi text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.sh text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Windows-native scripts parse predictably only as CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary: never filtered.
+*.png binary
+*.ico binary
+*.gif binary
+*.whl binary
+*.zip binary
+*.db binary

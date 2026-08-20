@@ -28,6 +28,15 @@ cloudflared.log
 
 # OS
 .DS_Store
+
+# Scratch and recovery (never published)
+scratch/
+.claude/
+
+# Runtime transcript (process-local SQLite)
+*.db
+*.db-wal
+*.db-shm
 Thumbs.db
 
 # Agent tooling scratch
@@ -56,3 +65,14 @@ Thumbs.db
 !/requirements.txt
 # Written by scripts/run_browser_audit.py on demand.
 /browser_audit_report.json
+
+# Foreign projects and machine-local junk observed in this working copy.
+# Ignored, not deleted: nothing here may ever ship or be committed.
+NUL
+miraism/
+.commandcode/
+*.bak
+OPUS5_*.md
+OUTREACH_*.md
+TARGET_MODEL_*.md
+PROJECT_CONTEXT.md

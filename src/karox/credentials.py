@@ -104,6 +104,19 @@ class KeyringBackend:
 
     @classmethod
     def _module(cls):
+        if (
+            os.environ.get("KAROX_TEST_ISOLATION", "").strip() == "1"
+            and os.environ.get("KAROX_TEST_ALLOW_REAL_KEYRING", "").strip() != "1"
+        ):
+            # tests/_path_setup.py arms this flag for every test process. A
+            # test that reaches the real OS keyring can pollute or delete a
+            # developer's production credentials, so refuse by default; a
+            # live-conformance test may opt in explicitly.
+            raise CredentialError(
+                "test isolation is active: the real OS keyring is disabled in "
+                "tests. Inject a fake CredentialBackend, or set "
+                "KAROX_TEST_ALLOW_REAL_KEYRING=1 to opt in explicitly."
+            )
         try:
             import keyring  # type: ignore[import-not-found]
         except ImportError as exc:

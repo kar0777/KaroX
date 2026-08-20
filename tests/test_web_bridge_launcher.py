@@ -18,9 +18,12 @@ from unittest.mock import MagicMock, patch
 
 from _support import SRC
 
+from karox.bridge import BridgeCredentialMissing
 from karox.cli import _verification_command, main
 from karox.credentials import CredentialError
+from karox.mcp_client import McpServerRecord, McpToolDescriptor
 from karox.models import AccessProfile
+from karox.sessions import SessionStore
 from karox.web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
     WRITE_WEB_TOOLS,
@@ -28,8 +31,15 @@ from karox.web_bridge_launcher import (
     WebBridgeLaunchError,
     _bridge_argv,
     _child_options,
+    _consume_stop_request,
+    _listener_belongs_to_process_tree,
     _mirror_child_output,
+    _reclaim_orphaned_bridge_listener,
+    _release_saved_bridge_owner_lock,
+    _sync_external_mcp_selections,
+    _try_acquire_saved_bridge_owner_lock,
     _wait_for_bridge,
+    _write_stop_request,
     bundled_cloudflared,
     cloudflared_not_found_message,
     ephemeral_url_warning,
@@ -39,6 +49,8 @@ from karox.web_bridge_launcher import (
     start_cloudflare_quick_tunnel,
     web_bridge_connection_instructions,
     web_bridge_diagnostics,
+    web_bridge_mcp_endpoint,
+    web_bridge_mcp_path,
     windows_cloudflared_candidates,
 )
 
@@ -191,6 +203,63 @@ class WebBridgeConfigTests(unittest.TestCase):
         self.assertNotIn("karox.repo.command", config.tools)
         self.assertNotIn("karox.tests.run", config.tools)
 
+    def test_a_saved_profile_drops_tools_the_profile_cannot_grant(self) -> None:
+        """One impossible checkbox must not take the whole bridge down.
+
+        A saved browser_control profile with dev-server tools used to crash
+        the bridge at startup with "session profile does not allow
+        process.run". The config now drops those names and diagnostics say
+        exactly why they are not served.
+        """
+
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            saved_profile_name="aura-browser",
+            access_profile=AccessProfile.BROWSER_CONTROL,
+            tools=(
+                "karox.repo.read_file",
+                "karox.browser.snapshot",
+                "karox.dev_server.status",
+                "karox.dev_server.logs",
+            ),
+        )
+        self.assertIn("karox.repo.read_file", config.tools)
+        self.assertIn("karox.browser.snapshot", config.tools)
+        self.assertNotIn("karox.dev_server.status", config.tools)
+        self.assertNotIn("karox.dev_server.logs", config.tools)
+        self.assertIn("karox.dev_server.status", config.profile_denied_tools)
+        diagnostics = web_bridge_diagnostics(config)
+        disabled = {
+            item["name"]: item["reason"] for item in diagnostics["disabled_tools"]
+        }
+        self.assertIn(
+            "not allowed by the browser_control access profile",
+            disabled["karox.dev_server.status"],
+        )
+
+    def test_an_explicit_cli_tool_list_is_not_silently_dropped(self) -> None:
+        """Explicit `--tool` selection keeps the fail-closed startup error."""
+
+        config = WebBridgeConnectConfig(
+            profile="chatgpt-web",
+            repository=Path.cwd(),
+            access_profile=AccessProfile.READ_ONLY,
+            tools=("karox.repo.read_file", "karox.repo.edit_file"),
+        )
+        self.assertIn("karox.repo.edit_file", config.tools)
+        self.assertEqual(config.profile_denied_tools, {})
+
+    def test_a_saved_profile_with_no_usable_tools_fails_at_config_time(self) -> None:
+        with self.assertRaisesRegex(ValueError, "all incompatible"):
+            WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path.cwd(),
+                saved_profile_name="broken-profile",
+                access_profile=AccessProfile.READ_ONLY,
+                tools=("karox.repo.edit_file", "karox.dev_server.status"),
+            )
+
     def test_custom_tunnel_requires_https_origin(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires --public-url"):
             WebBridgeConnectConfig(
@@ -211,6 +280,7 @@ class WebBridgeConfigTests(unittest.TestCase):
             profile="claude-web",
             repository=Path("repo"),
             tools=("karox.repo.read_file", "karox.repo.edit_file"),
+            mcp_servers=("notion",),
             tunnel="custom",
             public_url="https://bridge.example.com",
             verification_commands=(("python", "-m", "pytest"),),
@@ -224,14 +294,84 @@ class WebBridgeConfigTests(unittest.TestCase):
         self.assertIn("web-test", argv)
         self.assertIn("https://bridge.example.com", argv)
         self.assertEqual(argv.count("--tool"), 2)
+        self.assertEqual(argv.count("--server"), 1)
+        self.assertEqual(argv[argv.index("--server") + 1], "notion")
         self.assertEqual(argv.count("--verification-command"), 1)
         index = argv.index("--verification-command")
         serialized = argv[index + 1]
         self.assertEqual(serialized, '["python","-m","pytest"]')
         self.assertEqual(_verification_command(serialized), ("python", "-m", "pytest"))
 
+    def test_external_mcp_startup_sync_allows_only_read_only_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = SessionStore(root / "sessions")
+            sessions.create(
+                repository,
+                "hosted bridge",
+                AccessProfile.WORKSPACE_WRITE,
+                session_id="web-mcp-sync",
+            )
+            server = McpServerRecord(
+                server_id="notion",
+                namespace="notion",
+                transport="streamable_http",
+                url="https://example.invalid/mcp",
+            )
+            tools = [
+                McpToolDescriptor(
+                    "notion", "notion", "search", "read", {"type": "object"}, "read-digest", True
+                ),
+                McpToolDescriptor(
+                    "notion", "notion", "update", "write", {"type": "object"}, "write-digest", False
+                ),
+            ]
+            registry = MagicMock()
+            registry.get.return_value = server
+            client = MagicMock()
+            client.discover_record.return_value = tools
+            config = WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=repository,
+                tools=("karox.repo.read_file",),
+                mcp_servers=("notion",),
+            )
+            with patch("karox.mcp_client.McpRegistry", return_value=registry), patch(
+                "karox.mcp_client.McpClient", return_value=client
+            ):
+                _sync_external_mcp_selections(
+                    config,
+                    sessions,
+                    "web-mcp-sync",
+                    repository,
+                )
+            selection = sessions.load("web-mcp-sync").mcp_servers[0]
+            self.assertEqual(selection["server_id"], "notion")
+            self.assertEqual(selection["tools"]["search"]["permission"], "allow")
+            self.assertEqual(selection["tools"]["update"]["permission"], "ask")
+
 
 class WebBridgeCliTests(unittest.TestCase):
+    def test_notion_bridge_argv_passes_oauth_public_url(self) -> None:
+        config = WebBridgeConnectConfig(
+            profile="notion",
+            repository=Path("repo"),
+            tools=("karox.repo.read_file",),
+            tunnel="tailscale",
+            port=8767,
+        )
+        argv = _bridge_argv(
+            config,
+            session_id="web-notion-test",
+            public_url="https://notion.example.ts.net:8443",
+        )
+        self.assertIn("--public-url", argv)
+        self.assertIn("https://notion.example.ts.net:8443", argv)
+        self.assertIn("notion", argv)
+        self.assertIn("8767", argv)
+
     def test_connect_builds_managed_cloudflare_config(self) -> None:
         expected_command = (
             "python",
@@ -255,6 +395,8 @@ class WebBridgeCliTests(unittest.TestCase):
                         "--repository",
                         str(root),
                         "--write",
+                        "--tunnel",
+                        "cloudflare",
                         "--verification-command",
                         powershell_native_value,
                     )
@@ -267,7 +409,11 @@ class WebBridgeCliTests(unittest.TestCase):
         self.assertEqual(config.tools[: len(DEFAULT_WEB_TOOLS)], DEFAULT_WEB_TOOLS)
         self.assertEqual(config.verification_commands, (expected_command,))
         for tool in WRITE_WEB_TOOLS:
-            self.assertIn(tool, config.tools)
+            if tool in {"karox.dev_server.start", "karox.dev_server.stop"}:
+                self.assertNotIn(tool, config.tools)
+            else:
+                self.assertIn(tool, config.tools)
+        self.assertEqual(config.server_profiles, ())
 
         child_argv = _bridge_argv(
             config,
@@ -372,6 +518,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                                 browser_external_https=True,
                                 browser_headed=True,
                                 browser_user_takeover=True,
+                                tunnel="cloudflare",
                             )
                         )
         session_id = sessions.create.call_args.kwargs["session_id"]
@@ -387,6 +534,468 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         self.assertEqual(spawned["env"]["PYTHONIOENCODING"], "utf-8")
         self.assertEqual(spawned["env"]["KAROX_BROWSER_BACKEND"], "extension")
 
+    def test_saved_bridge_keeps_local_service_when_initial_funnel_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+            tunnel.process.poll.return_value = None
+            bridge = MagicMock()
+            bridge.pid = 4301
+            bridge.poll.return_value = None
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_tailscale_background_funnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch("karox.web_bridge_launcher.subprocess.Popen", return_value=bridge),
+                patch("karox.web_bridge_launcher._wait_for_bridge"),
+                patch(
+                    "karox.web_bridge_launcher._wait_for_public_mcp_route",
+                    side_effect=WebBridgeLaunchError("Funnel is not ready"),
+                ),
+                patch("karox.web_bridge_launcher._consume_stop_request", return_value=True),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="chatgpt-web",
+                            repository=repository,
+                            saved_profile_name="chatgpt-durable",
+                            tunnel="tailscale",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        credentials.delete.assert_not_called()
+        sessions.revoke.assert_not_called()
+
+    def test_saved_bridge_recovers_local_child_without_rotating_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+
+            crashed = MagicMock()
+            crashed.pid = 4101
+            crashed.poll.return_value = 9
+            healthy = MagicMock()
+            healthy.pid = 4102
+            healthy.poll.return_value = None
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen",
+                    side_effect=[crashed, healthy],
+                ) as popen,
+                patch("karox.web_bridge_launcher._wait_for_bridge") as wait_ready,
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    side_effect=[False, True],
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ) as ensure_supervisor,
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ) as desired_state,
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="hyperagent-web",
+                            repository=repository,
+                            saved_profile_name="hyperagent-durable",
+                            tunnel="cloudflare",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(wait_ready.call_count, 2)
+        self.assertEqual(ensure_supervisor.call_count, 2)
+        ensure_supervisor.assert_any_call("hyperagent-durable", desired_running=True)
+        ensure_supervisor.assert_any_call("hyperagent-durable", desired_running=None)
+        desired_state.assert_called_once_with("hyperagent-durable", False)
+        self.assertIn("Local MCP child recovered (recovery #1)", output.getvalue())
+        credentials.delete.assert_not_called()
+        sessions.revoke.assert_not_called()
+        tunnel.stop.assert_called_once_with()
+
+    def test_saved_bridge_keeps_owner_alive_during_repeated_child_crashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+
+            crashed_children = []
+            for pid in range(4201, 4207):
+                child = MagicMock()
+                child.pid = pid
+                child.poll.return_value = 9
+                crashed_children.append(child)
+            healthy = MagicMock()
+            healthy.pid = 4207
+            healthy.poll.return_value = None
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen",
+                    side_effect=[*crashed_children, healthy],
+                ) as popen,
+                patch("karox.web_bridge_launcher._wait_for_bridge"),
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    side_effect=[False] * 6 + [True],
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="hyperagent-web",
+                            repository=repository,
+                            saved_profile_name="hyperagent-durable",
+                            tunnel="cloudflare",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_count, 7)
+        credentials.delete.assert_not_called()
+        sessions.revoke.assert_not_called()
+
+    def test_saved_bridge_survives_a_replacement_child_that_cannot_bind(self) -> None:
+        """A replacement that fails to bind must not end the durable session.
+
+        The dying child can still hold the port for a moment, so the replacement
+        loses the bind. That used to raise out of the owner's loop: the public
+        route, the OAuth identity and every MCP session went with it, and the
+        sibling supervisor had to rebuild the whole lifecycle.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+
+            crashed = MagicMock()
+            crashed.pid = 4301
+            crashed.poll.return_value = 9
+            unbindable = MagicMock()
+            unbindable.pid = 4302
+            unbindable.poll.return_value = 1
+            healthy = MagicMock()
+            healthy.pid = 4303
+            healthy.poll.return_value = None
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch(
+                    "karox.web_bridge_launcher._CHILD_RESPAWN_MIN_BACKOFF_SECONDS", 0.0
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen",
+                    side_effect=[crashed, unbindable, healthy],
+                ) as popen,
+                patch(
+                    "karox.web_bridge_launcher._wait_for_bridge",
+                    side_effect=[
+                        None,
+                        WebBridgeLaunchError("KaroX bridge did not open its local port"),
+                        None,
+                    ],
+                ),
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    side_effect=[False, False, True],
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="hyperagent-web",
+                            repository=repository,
+                            saved_profile_name="hyperagent-durable",
+                            tunnel="cloudflare",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_count, 3)
+        self.assertIn(
+            "Replacement MCP child did not become ready", output.getvalue()
+        )
+        self.assertIn("Local MCP child recovered", output.getvalue())
+        credentials.delete.assert_not_called()
+        sessions.revoke.assert_not_called()
+
+    def test_owner_heartbeat_keeps_running_while_a_repair_blocks(self) -> None:
+        """A blocking repair must not look like a hung owner.
+
+        The supervisor force-kills an owner whose watchdog heartbeat is older than
+        ``OWNER_HEARTBEAT_STALE_SECONDS``. While the heartbeat was written only at
+        the top of the main loop, waiting on a respawned child or on Funnel
+        propagation was indistinguishable from a hang.
+        """
+        observed: list[float] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+            child = MagicMock()
+            child.pid = 4401
+            child.poll.return_value = None
+
+            def blocking_wait(*_args: Any, **_kwargs: Any) -> None:
+                # Stand in for the real blocking repair work and sample the
+                # heartbeat the owner publishes while it is busy.
+                for _ in range(2):
+                    time.sleep(1.3)
+                    record = json.loads(
+                        list((root / "web-bridge").glob("*.json"))[0].read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    observed.append(float(record["owner_heartbeat_at"]))
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen", return_value=child
+                ),
+                patch(
+                    "karox.web_bridge_launcher._wait_for_bridge",
+                    side_effect=blocking_wait,
+                ),
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    return_value=True,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="hyperagent-web",
+                            repository=repository,
+                            saved_profile_name="hyperagent-durable",
+                            tunnel="cloudflare",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(observed), 2)
+        self.assertGreater(observed[1], observed[0])
+
+    def test_an_owner_that_dies_records_the_reason_it_died(self) -> None:
+        """A detached owner writes to DEVNULL, so the reason must reach disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = MagicMock()
+            tunnel.public_url = "https://stable.example.invalid"
+            child = MagicMock()
+            child.pid = 4501
+            child.poll.return_value = None
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_cloudflare_quick_tunnel",
+                    return_value=tunnel,
+                ),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen", return_value=child
+                ),
+                patch("karox.web_bridge_launcher._wait_for_bridge"),
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    side_effect=RuntimeError("watchdog store is unreadable"),
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.set_saved_bridge_desired_running",
+                ),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(RuntimeError):
+                        run_web_bridge(
+                            WebBridgeConnectConfig(
+                                profile="hyperagent-web",
+                                repository=repository,
+                                saved_profile_name="hyperagent-durable",
+                                tunnel="cloudflare",
+                            )
+                        )
+
+            records = list((root / "web-bridge").glob("*.last-exit.json"))
+            self.assertEqual(len(records), 1)
+            payload = json.loads(records[0].read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["reason"], "RuntimeError")
+        self.assertIn("watchdog store is unreadable", payload["detail"])
+        self.assertEqual(payload["saved_profile"], "hyperagent-durable")
+
     def test_watchdog_records_the_tunnel_before_the_bridge_is_spawned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -396,7 +1005,9 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel.public_url = "https://small-tree.trycloudflare.com"
             tunnel.process.pid = 4242
             credentials = MagicMock()
-            credentials.resolve.side_effect = CredentialError("missing")
+            # Absence, not an unreadable backend: the launcher may mint a first
+            # token here, whereas a plain CredentialError must fail closed.
+            credentials.resolve.side_effect = BridgeCredentialMissing("missing")
             credentials.set.return_value = {"secret": "approval-secret"}
             sessions = MagicMock()
             sessions.state_path.return_value.exists.return_value = False
@@ -444,6 +1055,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                                 profile="chatgpt-web",
                                 repository=repository,
                                 saved_profile_name="durable-dev",
+                                tunnel="cloudflare",
                             )
                         )
         self.assertEqual(len(seen["records"]), 1)
@@ -455,6 +1067,89 @@ class WebBridgeSupervisorTests(unittest.TestCase):
         session_id = sessions.create.call_args.kwargs["session_id"]
         credentials.delete.assert_called_once_with(session_id)
         sessions.revoke.assert_not_called()
+
+
+class OrphanedListenerReclaimTests(unittest.TestCase):
+    """Reclaiming a port is proof-gated and narrowly targeted.
+
+    The listener left behind by a dead owner is this profile's own bridge child.
+    It may be stopped -- but only after the live process re-proves its identity,
+    and only that one PID.
+    """
+
+    def _run(
+        self,
+        *,
+        proven: str | None = "web-saved-test",
+        pid: int = 4242,
+        port_free: bool = True,
+    ):
+        import itertools
+
+        # Alive when first asked (so it is stopped), gone afterwards.
+        liveness = itertools.chain([True], itertools.repeat(False))
+        with patch(
+            "karox.port_ownership.prove_bridge_process_identity",
+            return_value=proven,
+        ), patch(
+            "karox.web_bridge_launcher._process_is_alive",
+            side_effect=lambda _pid: next(liveness),
+        ), patch(
+            "karox.web_bridge_launcher._port_is_available", return_value=port_free
+        ), patch(
+            "karox.web_bridge_launcher.subprocess.run"
+        ) as run, patch(
+            "karox.web_bridge_launcher.os.kill"
+        ) as kill:
+            result = _reclaim_orphaned_bridge_listener(
+                pid, port=8765, session_id="web-saved-test"
+            )
+        return result, run, kill
+
+    def test_proven_orphan_is_stopped_and_the_port_is_reported_free(self) -> None:
+        result, run, kill = self._run()
+        self.assertTrue(result)
+        stopped = run.call_count + kill.call_count
+        self.assertEqual(stopped, 1, "exactly one targeted stop is expected")
+        if run.call_count:
+            argv = [str(token) for token in run.call_args.args[0]]
+            self.assertIn("4242", argv)
+            self.assertNotIn("/T", argv, "a descendant tree kill is never used")
+        else:
+            self.assertEqual(kill.call_args.args[0], 4242)
+
+    def test_a_holder_that_cannot_be_proven_is_never_stopped(self) -> None:
+        result, run, kill = self._run(proven=None)
+        self.assertFalse(result)
+        run.assert_not_called()
+        kill.assert_not_called()
+
+    def test_the_calling_process_is_never_stopped(self) -> None:
+        result, run, kill = self._run(pid=os.getpid())
+        self.assertFalse(result)
+        run.assert_not_called()
+        kill.assert_not_called()
+
+    def test_a_port_that_stays_busy_is_reported_as_not_reclaimed(self) -> None:
+        with patch(
+            "karox.port_ownership.prove_bridge_process_identity",
+            return_value="web-saved-test",
+        ), patch(
+            "karox.web_bridge_launcher._process_is_alive", return_value=True
+        ), patch(
+            "karox.web_bridge_launcher._port_is_available", return_value=False
+        ), patch(
+            "karox.web_bridge_launcher._ORPHAN_RECLAIM_TIMEOUT_SECONDS", 0.05
+        ), patch(
+            "karox.web_bridge_launcher.subprocess.run"
+        ), patch(
+            "karox.web_bridge_launcher.os.kill"
+        ):
+            self.assertFalse(
+                _reclaim_orphaned_bridge_listener(
+                    4242, port=8765, session_id="web-saved-test"
+                )
+            )
 
 
 class CloudflaredLookupTests(unittest.TestCase):
@@ -485,7 +1180,10 @@ class CloudflaredLookupTests(unittest.TestCase):
 
     def test_the_bundled_path_is_where_the_installer_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": tmp}):
+            with patch.dict(
+                os.environ,
+                {"KAROX_RUNTIME_DIR": tmp, "KAROX_VNEXT_RUNTIME_DIR": tmp},
+            ):
                 bundled = bundled_cloudflared()
                 self.assertEqual(bundled.parent.name, "bin")
                 self.assertEqual(bundled.parent.parent, Path(tmp).resolve())
@@ -525,6 +1223,66 @@ class CloudflaredLookupTests(unittest.TestCase):
 class BridgeDiagnosticsTests(unittest.TestCase):
     """A bridge that refuses to start has to say why, not just return a number."""
 
+    def test_existing_listener_is_not_accepted_as_the_new_child(self) -> None:
+        process = MagicMock()
+        process.pid = 4242
+        process.poll.side_effect = [None, 3]
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+        with (
+            patch("karox.web_bridge_launcher.socket.create_connection", return_value=connection),
+            patch(
+                "karox.web_bridge_launcher._listener_belongs_to_process_tree",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaisesRegex(WebBridgeLaunchError, "exited with code 3"):
+                _wait_for_bridge(process, 8768, timeout_seconds=1.0)
+
+    def test_stop_request_cannot_be_stolen_by_a_duplicate_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": tmp,
+            },
+        ):
+            request = _write_stop_request("session-duplicate-owner", 111)
+            self.assertFalse(_consume_stop_request("session-duplicate-owner", 222))
+            self.assertTrue(request.exists())
+            self.assertTrue(_consume_stop_request("session-duplicate-owner", 111))
+            self.assertFalse(request.exists())
+
+    def test_saved_bridge_owner_lock_is_exclusive_and_released_with_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": tmp,
+            },
+        ):
+            first = _try_acquire_saved_bridge_owner_lock("hyperagent-test")
+            self.assertIsNotNone(first)
+            try:
+                second = _try_acquire_saved_bridge_owner_lock("hyperagent-test")
+                self.assertIsNone(second)
+            finally:
+                _release_saved_bridge_owner_lock(first)
+            third = _try_acquire_saved_bridge_owner_lock("hyperagent-test")
+            self.assertIsNotNone(third)
+            _release_saved_bridge_owner_lock(third)
+
+    def test_listener_tree_probe_accepts_the_root_process_when_psutil_can_see_it(self) -> None:
+        # The live branch is intentionally tiny: this guards the ownership helper
+        # against accidentally rejecting the normal one-process uvicorn listener.
+        with patch("psutil.net_connections") as connections:
+            listener = MagicMock()
+            listener.laddr.port = 8768
+            listener.pid = os.getpid()
+            connections.return_value = [listener]
+            self.assertTrue(_listener_belongs_to_process_tree(8768, os.getpid()))
+
     def test_the_reason_a_bridge_child_exited_reaches_the_user(self) -> None:
         # A real child, because the defect is a real spawn: on Windows these are
         # started with CREATE_NO_WINDOW, and without redirected handles that gives
@@ -536,6 +1294,7 @@ class BridgeDiagnosticsTests(unittest.TestCase):
                 "import sys; sys.stderr.write('OSError: address already in use\\n');"
                 " sys.exit(2)",
             ],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -570,6 +1329,7 @@ class BridgeDiagnosticsTests(unittest.TestCase):
     def test_a_bridge_that_never_opens_its_port_is_not_waited_on_forever(self) -> None:
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -678,8 +1438,15 @@ class EphemeralUrlWarningTests(unittest.TestCase):
         self.assertIn("нужно будет обновить", note)
         self.assertIn("--public-url", note)
 
+    def test_notion_quick_tunnel_is_warned_about(self) -> None:
+        note = ephemeral_url_warning("notion", None)
+        self.assertIsNotNone(note)
+        assert note is not None
+        self.assertIn("temporary", note)
+        self.assertIn("--public-url", note)
+
     def test_a_profile_that_never_needed_a_stable_url_is_left_alone(self) -> None:
-        for profile in ("promptql", "notion", "generic-streamable-http"):
+        for profile in ("promptql", "generic-streamable-http"):
             with self.subTest(profile=profile):
                 self.assertIsNone(ephemeral_url_warning(profile, None))
 
@@ -716,6 +1483,23 @@ class WebBridgeInstructionTests(unittest.TestCase):
         self.assertIn("Settings → Connectors → Add custom connector", claude)
         self.assertIn("MCP URL", claude)
         self.assertIn("only on the KaroX page", claude)
+
+        notion = "\n".join(
+            web_bridge_connection_instructions("notion", language="en")
+        )
+        self.assertIn("Notion Custom Agent", notion)
+        self.assertIn("Tools & Access", notion)
+        self.assertIn("Dynamic Client Registration", notion)
+        self.assertIn("approval password only on the KaroX page", notion)
+        self.assertIn("stable Tailscale", notion)
+        self.assertNotIn("Claude", notion)
+
+        notion_ru = "\n".join(
+            web_bridge_connection_instructions("notion", language="ru")
+        )
+        self.assertIn("Notion Custom Agent", notion_ru)
+        self.assertIn("OAuth", notion_ru)
+        self.assertNotIn("Claude", notion_ru)
 
 
 if __name__ == "__main__":
