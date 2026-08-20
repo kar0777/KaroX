@@ -260,7 +260,7 @@ their compatibility path remains in place deliberately.
 
 ## Evidence status
 
-The canonical documented suite is now 2727 tests under:
+The canonical documented suite is now 2764 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -314,7 +314,7 @@ closed P0 defects as current blockers.
 
 ### Source and automated verification
 
-- run the complete 2727-test suite on the current release candidate;
+- run the complete 2764-test suite on the current release candidate;
 - run focused OAuth/web-bridge and Ellipsis local-agent tests;
 - local Windows acceptance did run the then-complete suite and coverage on 2026-08-07; see `docs/evidence/local-autonomy-acceptance-2026-08-07.md`;
 - run dependency, version, product, profile, workflow, Ruff, Mypy, and coverage
