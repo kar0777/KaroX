@@ -71,7 +71,19 @@ class ConnectionsTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.3)
             yield app, pilot
 
-    async def test_hub_opens_and_routes_to_mcp_clients(self) -> None:
+    async def test_hub_routes_the_other_mcp_entry_to_the_client_surface(self) -> None:
+        """B1: chosen by what the entry *means*, not by its position.
+
+        This pressed "1" against a three-button menu of protocol families --
+        "[1] MCP clients", "[2] Model providers". Those buttons are gone: the
+        root now lists what is connected and offers three things to add, and a
+        digit key would be a promise about ordering the screen no longer makes.
+        The routing property is unchanged and still worth pinning, so the test
+        asks for the entry by its semantic id.
+        """
+
+        from karox.tui_connections import HUB_ADD_OTHER
+
         async for app, pilot in self._app():
             screens = app._connections_screens
             app.push_screen(
@@ -81,14 +93,14 @@ class ConnectionsTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.3)
             hub = app.screen_stack[-1]
             self.assertEqual(hub.__class__.__name__, "ConnectionHubScreen")
-            # Choose MCP clients.
-            await pilot.press("1")
+
+            hub.dismiss(HUB_ADD_OTHER)
             await pilot.pause(0.4)
             mcp_cls = screens["McpClientsScreen"]
             self.assertTrue(any(isinstance(s, mcp_cls) for s in app.screen_stack))
             # Escape back out of the MCP clients list, then the hub.
             await pilot.press("escape")
-            await pilot.pause(0.2)
+            await pilot.pause(0.3)
             await pilot.press("escape")
             await pilot.pause(0.2)
 

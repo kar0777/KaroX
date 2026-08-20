@@ -137,6 +137,11 @@ class ProviderRegistryTests(unittest.TestCase):
         # rate reported a cost the run did not incur once caching existed.
         self.assertEqual(fresh, 0.525)
         self.assertEqual(cached, 0.0975)
+        self.assertEqual(pricing.estimate_uncached({
+            "prompt_tokens": 100_000,
+            "completion_tokens": 1_000,
+            "cache_read_tokens": 95_000,
+        }), 0.525)
 
     def test_a_cache_write_costs_more_than_plain_input(self) -> None:
         pricing = ModelPricing("2026-07", "USD", 5.0, 25.0, "test fixture")

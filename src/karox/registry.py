@@ -130,6 +130,22 @@ class ModelPricing:
             12,
         )
 
+    def estimate_uncached(self, usage: Mapping[str, Any]) -> float:
+        """Price the same response as if every prompt token billed at full rate.
+
+        This uses the exact same versioned input/output prices as ``estimate``;
+        only the cache assumption changes. The difference is therefore an
+        auditable cache effect rather than a guessed saving.
+        """
+
+        prompt_tokens = _usage_count(usage, "prompt_tokens", "input_tokens")
+        output_tokens = _usage_count(usage, "completion_tokens", "output_tokens")
+        return round(
+            prompt_tokens * float(self.input_per_million) / 1_000_000
+            + output_tokens * float(self.output_per_million) / 1_000_000,
+            12,
+        )
+
 
 def _usage_count(usage: Mapping[str, Any], *names: str) -> int:
     for name in names:
@@ -150,9 +166,33 @@ class ProviderRecord:
     privacy_class: str = "public"
     timeout_seconds: float = 60.0
     max_transport_retries: int = 2
+    # B5. Whether this provider may be chosen for new work.
+    #
+    # Recorded gap, closed here rather than simulated in the UI: before B5 the
+    # registry had no way to say "keep this configuration and this credential
+    # but do not use it". The only reversible state was ``selected_model``,
+    # which is a single global pointer, and the only way to take a provider out
+    # of service was to delete it -- taking its key with it. "Disable" drawn in
+    # the TUI over that model would have been a lie that survived until the
+    # next process start.
+    #
+    # This is deliberately a field on the record that already exists, written
+    # through the registry that already owns it. No second store, no parallel
+    # disabled-table to fall out of step with the providers it describes.
+    # Absent in a file written before B5, so an older registry reads as enabled.
+    enabled: bool = True
+    # Shared Bypass mode preference (see access_mode.py). The record only
+    # persists the preference; enforcement happens in the KaroX agent session
+    # created for this provider -- never in provider HTTP auth. Absent in a
+    # registry written before the mode existed, so an older file reads OFF.
+    bypass: bool = False
 
     def __post_init__(self) -> None:
         _safe_id(self.provider_id, "provider ID")
+        if not isinstance(self.enabled, bool):
+            raise ValueError("provider enabled flag must be true or false")
+        if not isinstance(self.bypass, bool):
+            raise ValueError("provider bypass flag must be true or false")
         if self.adapter_kind not in ADAPTER_KINDS:
             raise ValueError(f"unsupported provider adapter: {self.adapter_kind!r}")
         parts = urlsplit(self.base_url)
@@ -221,6 +261,18 @@ class ProviderRecord:
             privacy_class=value.get("privacy_class", "public"),
             timeout_seconds=value.get("timeout_seconds", 60.0),
             max_transport_retries=value.get("max_transport_retries", 2),
+            # Deliberately *not* ``bool(...)``. Coercing here defeats the
+            # validation boundary below: ``bool("false")`` and ``bool(0.1)``
+            # are both ``True``, so a corrupted or hand-edited registry would
+            # silently read as enabled -- the one direction a mistake must
+            # never fall, because it re-arms a provider the user switched off.
+            # The raw value is handed to ``__post_init__``, which accepts a
+            # JSON boolean and rejects everything else. A missing key is the
+            # only permitted default, for files written before B5.
+            enabled=value.get("enabled", True),
+            # Same discipline as ``enabled``: no coercion, and a missing key
+            # is the only permitted default so a legacy registry reads OFF.
+            bypass=value.get("bypass", False),
         )
 
 
@@ -538,9 +590,49 @@ class ProviderRegistry:
         self._save(providers.values(), models, selected)
         return removed
 
+    def set_provider_enabled(self, provider_id: str, enabled: bool) -> ProviderRecord:
+        """Take a provider out of service, or put it back, without deleting it.
+
+        B5. The whole point of the distinction: the record stays, the models
+        stay, and the credential reference stays, so re-enabling needs no key.
+        What changes is the one thing disabling is *for* -- the provider can no
+        longer be the selection new work reads.
+
+        Disabling therefore clears the global selection when it pointed here.
+        That is the persisted half of the promise; leaving the pointer in place
+        and filtering it out at read time would make every future reader
+        responsible for remembering, and one that forgot would quietly send the
+        next request through a provider the user switched off.
+
+        No replacement is chosen. Picking "some other model" on the user's
+        behalf is a product decision nobody made, so the selection simply
+        becomes empty and the surface above says so.
+        """
+
+        providers, models, selected = self._load()
+        try:
+            current = providers[provider_id]
+        except KeyError as exc:
+            raise RegistryError(f"provider does not exist: {provider_id}") from exc
+        # No ``bool(...)`` here either: ``replace`` re-runs ``__post_init__``,
+        # so a caller passing something that merely looks boolean is rejected
+        # rather than quietly rounded to True.
+        updated = replace(current, enabled=enabled)
+        providers[provider_id] = updated
+        if not updated.enabled and selected is not None and selected[0] == provider_id:
+            selected = None
+        self._save(providers.values(), models, selected)
+        return updated
+
     def select_model(self, provider_id: str, model_or_alias: str) -> ModelRecord:
         selected_model = self.model(provider_id, model_or_alias)
         providers, models, _ = self._load()
+        # A disabled provider is not a candidate. Refusing here rather than in
+        # the caller means every path -- TUI, CLI, selection repair -- inherits
+        # the guarantee instead of each having to re-check it.
+        owner = providers.get(provider_id)
+        if owner is not None and not owner.enabled:
+            raise RegistryError(f"provider is disabled: {provider_id}")
         selected = (selected_model.provider_id, selected_model.model_id)
         self._save(providers.values(), models, selected)
         return selected_model
