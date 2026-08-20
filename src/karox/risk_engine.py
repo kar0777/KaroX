@@ -143,6 +143,7 @@ MEDIUM_KINDS: frozenset[str] = frozenset(
         "repo.move",
         "checks.run",
         "tests.run",
+        "process.run_dev",
         "devserver.start",
         "browser.input",
         "git.commit",

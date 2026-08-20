@@ -44,6 +44,7 @@ COMMAND_RISK_KINDS: Mapping[str, str] = {
     "git.push": "git.push",
     "checks.run": "checks.run",
     "tests.run": "tests.run",
+    "dev.command": "process.run_dev",
     "process.run": "process.run_unknown",
     "runtime.status": "status.read",
     "bridge.diagnostics": "diagnostics.read",

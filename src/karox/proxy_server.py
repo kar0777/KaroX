@@ -8,7 +8,9 @@ import json
 import os
 import secrets
 import sys
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+import threading
+import time
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional, Sequence
 from urllib.parse import urlsplit
 
 import anyio
@@ -16,8 +18,9 @@ from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
+from .artifacts import ArtifactStore
 from .core import CoreError
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
@@ -25,10 +28,23 @@ from .hosted_bridge import (
     HostedToolRuntime,
 )
 from .process_launcher import is_executable_resolution_error
+from .result_envelope import artifact_backed_result
 from .sessions import SessionError
+from .tool_telemetry import (
+    ToolTraceContext,
+    ToolTraceSpan,
+    default_trace_store,
+)
 
 
 ALLOWED_HOSTS_ENVIRONMENT = "KAROX_MCP_ALLOWED_HOSTS"
+MODERN_MCP_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_MCP_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 # `karox bridge connect` declares the tunnel host for the bridge it starts; a
 # hand-run `karox bridge serve` behind someone else's tunnel has to be told, and
@@ -37,6 +53,37 @@ HOST_REJECTION_HINT = (
     "invalid Host header; declare the public host in "
     f"{ALLOWED_HOSTS_ENVIRONMENT}"
 )
+
+# Process-local, content-free HTTP activity used only to defer a supervised
+# MCP-child restart until the response that requested it has left the wire.
+# This child serves one hosted bridge, so process scope is the correct boundary.
+_TRANSPORT_ACTIVITY_LOCK = threading.Lock()
+_TRANSPORT_ACTIVE_REQUESTS = 0
+_TRANSPORT_RESPONSES_COMPLETED = 0
+
+
+def _transport_activity_started() -> None:
+    global _TRANSPORT_ACTIVE_REQUESTS
+    with _TRANSPORT_ACTIVITY_LOCK:
+        _TRANSPORT_ACTIVE_REQUESTS += 1
+
+
+def _transport_activity_finished(*, completed: bool) -> None:
+    global _TRANSPORT_ACTIVE_REQUESTS, _TRANSPORT_RESPONSES_COMPLETED
+    with _TRANSPORT_ACTIVITY_LOCK:
+        _TRANSPORT_ACTIVE_REQUESTS = max(0, _TRANSPORT_ACTIVE_REQUESTS - 1)
+        if completed:
+            _TRANSPORT_RESPONSES_COMPLETED += 1
+
+
+def transport_activity_snapshot() -> dict[str, int]:
+    """Return secret-free process-level transport liveness counters."""
+    with _TRANSPORT_ACTIVITY_LOCK:
+        return {
+            "active_requests": _TRANSPORT_ACTIVE_REQUESTS,
+            "responses_completed": _TRANSPORT_RESPONSES_COMPLETED,
+        }
+
 
 # The wire answers a third-party agent, so an error may only carry a code from
 # this table. Raw exception text on this path has already leaked absolute paths
@@ -58,6 +105,7 @@ BRIDGE_ERROR_MESSAGES: dict[str, str] = {
         "(install the missing tool or use a command in the allowlist)"
     ),
     "invalid_request": "the call was rejected as invalid",
+    "request_interrupted": "the call was interrupted before it finished",
     "internal": "the tool failed",
 }
 
@@ -276,7 +324,10 @@ def transport_security_settings(
 
 def bridge_error_result(code: str) -> CallToolResult:
     """Build the only tool-error shape this wire is allowed to send."""
-    message = BRIDGE_ERROR_MESSAGES[code]
+    # ``get`` with the internal fallback: an error handler that itself raises
+    # KeyError replaces the intended tool error with a 500, which is how a
+    # benign interrupt once escaped as a crash.
+    message = BRIDGE_ERROR_MESSAGES.get(code, BRIDGE_ERROR_MESSAGES["internal"])
     return CallToolResult(
         content=[TextContent(type="text", text=f"{code}: {message}")],
         structuredContent={"ok": False, "error_code": code, "error": message},
@@ -300,6 +351,47 @@ def bridge_error_code(exc: BaseException) -> str:
     if isinstance(exc, (CoreError, HostedBridgeError, TypeError, ValueError)):
         return "invalid_request"
     return "internal"
+
+
+def _maybe_record_client_evidence(tool_name: str, *, success: bool) -> None:
+    """Record client-verification evidence when an external client calls runtime.status.
+
+    This hook fires inside the bridge serve child's ``call_tool`` handler, so
+    it is triggered ONLY by a real MCP tool call from an external client
+    (e.g. ChatGPT). Local self-tests via :func:`_verify_bridge_endpoint` do
+    ``initialize`` + ``tools/list`` only and never call ``call_tool``, so this
+    hook is never triggered by them.
+
+    Evidence fields are safe only: timestamp, tool name, success/failure.
+    Never stores: OAuth token, Authorization header, tool arguments, file
+    contents, user messages.
+    """
+    # Only the canonical verification tool counts toward fully_verified.
+    if tool_name != "runtime.status":
+        return
+    raw_diagnostics = os.environ.get("KAROX_BRIDGE_DIAGNOSTICS_JSON", "").strip()
+    if not raw_diagnostics:
+        return
+    try:
+        diagnostics = json.loads(raw_diagnostics)
+    except (ValueError, TypeError):
+        return
+    saved_profile = diagnostics.get("saved_profile")
+    if not isinstance(saved_profile, str) or not saved_profile:
+        return
+    import time
+    try:
+        from .connection_status import write_client_evidence
+        write_client_evidence(saved_profile, {
+            "last_tool_call_at": time.time(),
+            "last_tool_call_name": "karox.runtime.status",
+            "success": success,
+            "client_kind": "mcp_external",
+        })
+    except Exception:
+        # Evidence recording is best-effort: a failure here must never break
+        # the tool call itself.
+        pass
 
 
 def _log_rebinding_421(
@@ -394,6 +486,7 @@ def build_proxy_asgi_app(
     unauthorized_headers: Optional[Mapping[str, str]] = None,
     allowed_hosts: Optional[Sequence[str]] = None,
     diagnostics: Optional[Mapping[str, Any]] = None,
+    inline_result_bytes: Optional[int] = None,
 ) -> Any:
     """Expose selected Core and/or proxied tools as authenticated MCP."""
     if (bearer_token is None) == (bearer_authorizer is None):
@@ -447,12 +540,182 @@ def build_proxy_asgi_app(
         if not isinstance(diagnostics_payload, dict):
             raise ValueError("bridge diagnostics must be a JSON object")
 
+    transport_runtime: dict[str, Any] = {
+        "requests_started": 0,
+        "responses_started": 0,
+        "responses_completed": 0,
+        "client_disconnects": 0,
+        "authorized_requests": 0,
+        "unauthorized_requests": 0,
+        "mcp_tool_calls_started": 0,
+        "mcp_tool_calls_completed": 0,
+        "last_mcp_tool_call_started_at": None,
+        "last_mcp_tool_call_completed_at": None,
+        "last_http_version": None,
+        "last_method": None,
+        "last_status": None,
+        "last_request_started_at": None,
+        "last_response_completed_at": None,
+        "last_request_duration_ms": None,
+        "max_request_duration_ms": 0.0,
+        "last_response_body_bytes": None,
+        "max_response_body_bytes": 0,
+    }
+
+    def current_diagnostics() -> Optional[dict[str, Any]]:
+        if diagnostics_payload is None:
+            return None
+        live = dict(diagnostics_payload)
+        live["transport_runtime"] = dict(transport_runtime)
+
+        # Saved bridges have an external credential-free supervisor. Diagnostics
+        # must read this state live instead of freezing it into the child process
+        # environment at startup, otherwise a hosted client cannot tell whether
+        # self-heal is actually active after an owner restart.
+        saved_profile = live.get("saved_profile")
+        if isinstance(saved_profile, str) and saved_profile:
+            try:
+                from .saved_bridge_supervisor import saved_bridge_supervisor_status
+
+                supervisor = saved_bridge_supervisor_status(saved_profile)
+                live["durable_supervisor"] = {
+                    "desired_running": bool(supervisor.get("desired_running")),
+                    "supervisor_alive": bool(supervisor.get("supervisor_alive")),
+                    "supervisor_process_alive": bool(
+                        supervisor.get("supervisor_process_alive")
+                    ),
+                    "supervisor_heartbeat_fresh": bool(
+                        supervisor.get("supervisor_heartbeat_fresh")
+                    ),
+                    "supervisor_heartbeat_age_seconds": supervisor.get(
+                        "supervisor_heartbeat_age_seconds"
+                    ),
+                    "supervisor_main_progress_fresh": bool(
+                        supervisor.get("supervisor_main_progress_fresh")
+                    ),
+                    "supervisor_main_progress_age_seconds": supervisor.get(
+                        "supervisor_main_progress_age_seconds"
+                    ),
+                    "supervisor_pid": supervisor.get("supervisor_pid"),
+                    "heartbeat_at": supervisor.get("heartbeat_at"),
+                    "last_owner_pid": supervisor.get("last_owner_pid"),
+                    "restart_count": int(supervisor.get("restart_count") or 0),
+                    "last_restart_at": supervisor.get("last_restart_at"),
+                    "last_error": supervisor.get("last_error"),
+                }
+            except Exception as exc:
+                live["durable_supervisor"] = {
+                    "desired_running": True,
+                    "supervisor_alive": False,
+                    "last_error": f"status_unavailable:{type(exc).__name__}",
+                }
+        return live
+
+    trace_context = ToolTraceContext.from_runtime(proxy, diagnostics_payload)
+    trace_store = default_trace_store(trace_context)
+    try:
+        result_artifact_store = (
+            ArtifactStore(trace_context.session_id) if trace_context is not None else None
+        )
+    except Exception:
+        result_artifact_store = None
+
+    def compact_result(
+        tool_name: str,
+        result: dict[str, Any] | CallToolResult,
+    ) -> dict[str, Any] | CallToolResult:
+        try:
+            return artifact_backed_result(
+                result,
+                tool_name=tool_name,
+                store=result_artifact_store,
+                threshold_bytes=inline_result_bytes,
+            )
+        except Exception:
+            return result
+
+    def repository_revision() -> Optional[int]:
+        try:
+            reader = getattr(proxy, "session_info", None)
+            info = dict(reader()) if callable(reader) else {}
+            value = info.get("revision")
+            return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+        except Exception:
+            return None
+
+    def start_trace(
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        read_only: bool,
+        idempotency_key: Optional[str],
+    ) -> Optional[ToolTraceSpan]:
+        if trace_store is None or trace_context is None:
+            return None
+        try:
+            return ToolTraceSpan(
+                store=trace_store,
+                context=trace_context,
+                tool_name=tool_name,
+                arguments=arguments,
+                read_only=read_only,
+                idempotency_key=idempotency_key,
+                repository_revision_before=repository_revision(),
+            )
+        except Exception:
+            return None
+
+    def finish_trace(
+        span: Optional[ToolTraceSpan],
+        result: Any,
+        *,
+        forced_error_code: Optional[str] = None,
+    ) -> None:
+        transport_runtime["mcp_tool_calls_completed"] += 1
+        transport_runtime["last_mcp_tool_call_completed_at"] = time.time()
+        if span is None:
+            return
+        try:
+            # A read-only KaroX call cannot advance the session repository
+            # revision itself, so a second session-store read adds latency without
+            # adding information. Mutating calls still sample the authoritative
+            # revision again after execution.
+            revision_after = (
+                span.repository_revision_before if span.read_only else repository_revision()
+            )
+            span.finish(
+                result,
+                repository_revision_after=revision_after,
+                forced_error_code=forced_error_code,
+            )
+        except Exception:
+            # Telemetry must never change the command result.
+            pass
+
     allowed = resolve_allowed_hosts(allowed_hosts)
     server = Server("karox-proxy")
+    # Tool names, schemas, and ownership are immutable for the lifetime of a
+    # bridge process. Keep a compact routing snapshot for tools/call so a hosted
+    # client does not force every runtime to rebuild descriptors merely to map
+    # the wire spelling back to the same internal name. tools/list still calls
+    # proxy.descriptors() live (and refreshes this snapshot), while each concrete
+    # runtime.execute() continues to enforce session revocation/policy on every
+    # invocation.
+    descriptor_routes: Optional[tuple[dict[str, Any], dict[str, Any]]] = None
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
+    def update_descriptor_routes(descriptors: Sequence[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        nonlocal descriptor_routes
+        by_internal: dict[str, Any] = {}
+        by_wire: dict[str, Any] = {}
+        for item in descriptors:
+            by_internal[item.name] = item
+            by_wire.setdefault(wire_tool_name(item.name), item)
+        descriptor_routes = (by_internal, by_wire)
+        return descriptor_routes
+
+    async def exposed_tools() -> list[Tool]:
         descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
+        update_descriptor_routes(descriptors)
         tools = [
             Tool(
                 name=wire_tool_name(item.name),
@@ -487,76 +750,369 @@ def build_proxy_asgi_app(
             )
         return tools
 
-    @server.call_tool()
-    async def call_tool(
-        name: str, arguments: dict[str, object]
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return await exposed_tools()
+
+    async def execute_tool(
+        name: str,
+        arguments: dict[str, object],
+        *,
+        meta_extra: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any] | CallToolResult:
+        transport_runtime["mcp_tool_calls_started"] += 1
+        transport_runtime["last_mcp_tool_call_started_at"] = time.time()
+        resolved_name = name
+        descriptor: Any = None
+        idempotency_key: Optional[str] = None
+        span: Optional[ToolTraceSpan] = None
+        result: dict[str, Any] | CallToolResult
         try:
             if (
                 diagnostics_payload is not None
                 and resolve_wire_tool_name(name, (_DIAGNOSTICS_TOOL_NAME,)) is not None
             ):
+                resolved_name = _DIAGNOSTICS_TOOL_NAME
+                span = start_trace(
+                    resolved_name,
+                    arguments,
+                    read_only=True,
+                    idempotency_key=None,
+                )
                 if arguments:
-                    return bridge_error_result("invalid_request")
-                return CallToolResult(
+                    result = bridge_error_result("invalid_request")
+                    finish_trace(span, result)
+                    return result
+                live_diagnostics = current_diagnostics() or {}
+                result = CallToolResult(
                     content=[
                         TextContent(
                             type="text",
                             text=json.dumps(
-                                diagnostics_payload,
+                                live_diagnostics,
                                 ensure_ascii=False,
                                 sort_keys=True,
                             ),
                         )
                     ],
-                    structuredContent=dict(diagnostics_payload),
+                    structuredContent=live_diagnostics,
                     isError=False,
                 )
-            descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
-            # The client calls whichever spelling it read from ``tools/list``,
-            # which is now the underscore one.  Resolving back to the internal
-            # name here keeps every layer below this line -- the descriptor
-            # lookup, the derived idempotency key, and ``proxy.execute`` -- on
-            # the single dotted identifier the rest of KaroX uses.
-            internal_name = resolve_wire_tool_name(
-                name, (item.name for item in descriptors)
-            )
-            descriptor = next(
-                (item for item in descriptors if item.name == internal_name), None
-            )
+                finish_trace(span, result)
+                return result
+            routes = descriptor_routes
+            if routes is None:
+                descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
+                routes = update_descriptor_routes(descriptors)
+            by_internal, by_wire = routes
+            # Exact internal names still win over a normalized wire alias, which
+            # preserves resolve_wire_tool_name() semantics if two unusual names
+            # would otherwise normalize to the same spelling.
+            descriptor = by_internal.get(name)
             if descriptor is None:
-                return bridge_error_result("tool_not_exposed")
-            name = descriptor.name
-            idempotency_key = None
+                descriptor = by_wire.get(name)
+            if descriptor is None:
+                span = start_trace(
+                    resolved_name,
+                    arguments,
+                    read_only=True,
+                    idempotency_key=None,
+                )
+                result = bridge_error_result("tool_not_exposed")
+                finish_trace(span, result)
+                return result
+            resolved_name = descriptor.name
             if not descriptor.read_only:
-                meta = server.request_context.meta
-                extra = getattr(meta, "model_extra", None) if meta is not None else None
                 supplied = (
-                    extra.get("karoxIdempotencyKey") if isinstance(extra, dict) else None
+                    meta_extra.get("karoxIdempotencyKey")
+                    if isinstance(meta_extra, Mapping)
+                    else None
                 )
                 if supplied is None:
                     # A client that knows its own retries is trusted to say so; one
                     # that cannot send _meta at all gets a key derived from the
                     # call, which is stable across exactly those retries.
-                    idempotency_key = derive_idempotency_key(name, arguments)
+                    idempotency_key = derive_idempotency_key(resolved_name, arguments)
                 elif (
                     not isinstance(supplied, str)
                     or not supplied
                     or len(supplied) > 256
                 ):
-                    return bridge_error_result("idempotency_key_invalid")
+                    span = start_trace(
+                        resolved_name,
+                        arguments,
+                        read_only=False,
+                        idempotency_key=None,
+                    )
+                    result = bridge_error_result("idempotency_key_invalid")
+                    finish_trace(span, result)
+                    return result
                 else:
                     idempotency_key = supplied
-            return await anyio.to_thread.run_sync(
+            span = start_trace(
+                resolved_name,
+                arguments,
+                read_only=bool(descriptor.read_only),
+                idempotency_key=idempotency_key,
+            )
+            result = await anyio.to_thread.run_sync(
                 lambda: proxy.execute(
-                    name,
+                    resolved_name,
                     dict(arguments),
                     idempotency_key=idempotency_key,
                     deadline_seconds=deadline_seconds,
                 )
             )
+            result = compact_result(resolved_name, result)
+            # Record client evidence when an external client (e.g. ChatGPT)
+            # calls karox.runtime.status. This is the only tool call that
+            # counts toward fully_verified: local self-tests do initialize +
+            # tools/list only, never call_tool, so this hook is never
+            # triggered by _verify_bridge_endpoint.
+            _maybe_record_client_evidence(resolved_name, success=True)
+            finish_trace(span, result)
+            return result
+        except KeyboardInterrupt:
+            # A command/request interrupt belongs to this tool invocation. It is
+            # never an operator instruction to stop uvicorn or the managed web
+            # bridge. Legacy synchronous commands contain their child tree in
+            # CoreRuntime; this is the final transport boundary.
+            _maybe_record_client_evidence(resolved_name, success=False)
+            result = bridge_error_result("request_interrupted")
+            if span is None:
+                span = start_trace(
+                    resolved_name,
+                    arguments,
+                    read_only=bool(getattr(descriptor, "read_only", True)),
+                    idempotency_key=idempotency_key,
+                )
+            finish_trace(span, result, forced_error_code="request_interrupted")
+            return result
         except Exception as exc:
-            return bridge_error_result(bridge_error_code(exc))
+            # Record evidence for failed runtime.status calls too.
+            _maybe_record_client_evidence(resolved_name, success=False)
+            code = bridge_error_code(exc)
+            result = bridge_error_result(code)
+            if span is None:
+                span = start_trace(
+                    resolved_name,
+                    arguments,
+                    read_only=bool(getattr(descriptor, "read_only", True)),
+                    idempotency_key=idempotency_key,
+                )
+            finish_trace(span, result, forced_error_code=code)
+            return result
+
+    @server.call_tool()
+    async def call_tool(
+        name: str, arguments: dict[str, object]
+    ) -> dict[str, Any] | CallToolResult:
+        meta = server.request_context.meta
+        extra = getattr(meta, "model_extra", None) if meta is not None else None
+        return await execute_tool(name, arguments, meta_extra=extra)
+
+    def modern_result_meta() -> dict[str, Any]:
+        try:
+            from . import __version__ as karox_version
+        except Exception:
+            karox_version = "unknown"
+        return {
+            "io.modelcontextprotocol/serverInfo": {
+                "name": "karox-proxy",
+                "version": str(karox_version),
+            }
+        }
+
+    def modern_tool_payload(tool: Tool) -> dict[str, Any]:
+        dumper = getattr(tool, "model_dump", None)
+        if callable(dumper):
+            payload = dumper(mode="json", by_alias=True, exclude_none=True)
+            if isinstance(payload, dict):
+                return payload
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": tool.inputSchema,
+        }
+
+    def modern_call_result_payload(
+        result: dict[str, Any] | CallToolResult,
+    ) -> dict[str, Any]:
+        if isinstance(result, CallToolResult):
+            payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        else:
+            payload = {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            result,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    }
+                ],
+                "structuredContent": result,
+                "isError": False,
+            }
+        payload["resultType"] = "complete"
+        payload.setdefault("_meta", modern_result_meta())
+        return payload
+
+    def modern_error(
+        request_id: Any,
+        code: int,
+        message: str,
+    ) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        }
+
+    async def modern_mcp_request(
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        """Serve the stateless MCP 2026-07-28 wire without disturbing v1 clients.
+
+        KaroX still uses the stable v1 Python SDK for its legacy ChatGPT/Claude
+        clients. The July 2026 protocol removed initialize/sessions and added
+        server/discover plus per-request metadata. Hyperagent moved to that wire
+        before KaroX could migrate its whole SDK surface to v2, so this narrow
+        adapter exposes the same tool runtime to both protocol eras.
+        """
+        if str(scope.get("method") or "").upper() != "POST":
+            await JSONResponse(
+                modern_error(None, -32600, "Modern MCP requests must use POST"),
+                status_code=405,
+            )(scope, receive, send)
+            return
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            message = await receive()
+            message_type = message.get("type")
+            if message_type == "http.disconnect":
+                return
+            if message_type != "http.request":
+                continue
+            body_chunk = message.get("body", b"")
+            if isinstance(body_chunk, (bytes, bytearray, memoryview)):
+                rendered = bytes(body_chunk)
+                total += len(rendered)
+                if total > 16 * 1024 * 1024:
+                    await JSONResponse(
+                        modern_error(None, -32600, "MCP request body is too large"),
+                        status_code=413,
+                    )(scope, receive, send)
+                    return
+                chunks.append(rendered)
+            if not bool(message.get("more_body", False)):
+                break
+
+        try:
+            request = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            await JSONResponse(
+                modern_error(None, -32700, "Parse error"),
+                status_code=400,
+            )(scope, receive, send)
+            return
+        if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
+            await JSONResponse(
+                modern_error(None, -32600, "Invalid Request"),
+                status_code=400,
+            )(scope, receive, send)
+            return
+
+        request_id = request.get("id")
+        method = request.get("method")
+        params = request.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            await JSONResponse(
+                modern_error(request_id, -32600, "Invalid Request"),
+                status_code=400,
+            )(scope, receive, send)
+            return
+
+        headers = scope_headers(scope)
+        header_method = headers.get("mcp-method")
+        if header_method and header_method != method:
+            await JSONResponse(
+                modern_error(request_id, -32600, "Mcp-Method header mismatch"),
+                status_code=400,
+            )(scope, receive, send)
+            return
+        meta = params.get("_meta")
+        meta_extra = meta if isinstance(meta, dict) else {}
+        body_version = meta_extra.get("io.modelcontextprotocol/protocolVersion")
+        if body_version not in {None, MODERN_MCP_PROTOCOL_VERSION}:
+            await JSONResponse(
+                modern_error(request_id, -32600, "MCP protocol version mismatch"),
+                status_code=400,
+            )(scope, receive, send)
+            return
+
+        if method == "server/discover":
+            discover_result: dict[str, Any] = {
+                "supportedVersions": [
+                    MODERN_MCP_PROTOCOL_VERSION,
+                    *LEGACY_MCP_PROTOCOL_VERSIONS,
+                ],
+                "capabilities": {"tools": {}},
+                "resultType": "complete",
+                "_meta": modern_result_meta(),
+            }
+            await JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "result": discover_result}
+            )(scope, receive, send)
+            return
+
+        if method == "tools/list":
+            tools = await exposed_tools()
+            list_result: dict[str, Any] = {
+                "tools": [modern_tool_payload(tool) for tool in tools],
+                "resultType": "complete",
+                "_meta": modern_result_meta(),
+            }
+            await JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "result": list_result}
+            )(scope, receive, send)
+            return
+
+        if method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments", {})
+            header_name = headers.get("mcp-name")
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(arguments, dict)
+                or (header_name is not None and header_name != name)
+            ):
+                await JSONResponse(
+                    modern_error(request_id, -32602, "Invalid tools/call params"),
+                    status_code=400,
+                )(scope, receive, send)
+                return
+            call_result = await execute_tool(name, arguments, meta_extra=meta_extra)
+            await JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": modern_call_result_payload(call_result),
+                }
+            )(scope, receive, send)
+            return
+
+        await JSONResponse(
+            modern_error(request_id, -32601, "Method not found"),
+            status_code=404,
+        )(scope, receive, send)
 
     # The proxy keeps durable state in SessionStore, not in transport sessions.
     # Stateless JSON responses avoid long-lived SSE streams and their upstream
@@ -627,14 +1183,25 @@ def build_proxy_asgi_app(
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         scope_type = scope.get("type")
         if scope_type == "lifespan":
-            async with manager.run():
-                while True:
-                    message = await receive()
-                    if message["type"] == "lifespan.startup":
-                        await send({"type": "lifespan.startup.complete"})
-                    elif message["type"] == "lifespan.shutdown":
-                        await send({"type": "lifespan.shutdown.complete"})
-                        return
+            try:
+                async with manager.run():
+                    while True:
+                        message = await receive()
+                        if message["type"] == "lifespan.startup":
+                            await send({"type": "lifespan.startup.complete"})
+                        elif message["type"] == "lifespan.shutdown":
+                            await send({"type": "lifespan.shutdown.complete"})
+                            return
+            finally:
+                closer = getattr(proxy, "close", None)
+                if callable(closer):
+                    try:
+                        await anyio.to_thread.run_sync(closer)
+                    except Exception:
+                        # Optional runtime cleanup must not break ASGI shutdown.
+                        pass
+                if trace_store is not None:
+                    trace_store.close()
             return
         if scope_type != "http":
             await Response("not found", status_code=404)(scope, receive, send)
@@ -654,13 +1221,81 @@ def build_proxy_asgi_app(
         elif request_path != path:
             await Response("not found", status_code=404)(scope, receive, send)
             return
-        if not await authorized(scope):
-            await Response(
-                "unauthorized",
-                status_code=401,
-                headers=dict(unauthorized_headers or {}),
-            )(scope, receive, send)
-            return
-        await manager.handle_request(scope, receive, send)
+
+        # Content-free transport telemetry starts at the raw ASGI boundary, before
+        # authentication and before the MCP SDK sees the request.  It deliberately
+        # records no headers, token, body, query string, tool name, or client IP.
+        # The counters let bridge.diagnostics distinguish an upstream connection
+        # failure (request never arrived) from a server-side response/disconnect.
+        transport_runtime["requests_started"] += 1
+        transport_runtime["last_http_version"] = str(scope.get("http_version") or "")[:16]
+        transport_runtime["last_method"] = str(scope.get("method") or "")[:16]
+        transport_runtime["last_request_started_at"] = time.time()
+        request_started_perf = time.perf_counter()
+        response_body_bytes = 0
+        activity_finished = False
+        _transport_activity_started()
+
+        async def tracked_receive() -> Any:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                transport_runtime["client_disconnects"] += 1
+            return message
+
+        async def tracked_send(message: MutableMapping[str, Any]) -> None:
+            nonlocal response_body_bytes, activity_finished
+            message_type = message.get("type")
+            final_body = False
+            if message_type == "http.response.start":
+                transport_runtime["responses_started"] += 1
+                status = message.get("status")
+                transport_runtime["last_status"] = (
+                    int(status) if isinstance(status, int) and not isinstance(status, bool) else None
+                )
+            elif message_type == "http.response.body":
+                body = message.get("body")
+                if isinstance(body, (bytes, bytearray, memoryview)):
+                    response_body_bytes += len(body)
+                final_body = not bool(message.get("more_body", False))
+                if final_body:
+                    duration_ms = round((time.perf_counter() - request_started_perf) * 1000, 3)
+                    transport_runtime["responses_completed"] += 1
+                    transport_runtime["last_response_completed_at"] = time.time()
+                    transport_runtime["last_request_duration_ms"] = duration_ms
+                    transport_runtime["max_request_duration_ms"] = max(
+                        float(transport_runtime["max_request_duration_ms"]),
+                        duration_ms,
+                    )
+                    transport_runtime["last_response_body_bytes"] = response_body_bytes
+                    transport_runtime["max_response_body_bytes"] = max(
+                        int(transport_runtime["max_response_body_bytes"]),
+                        response_body_bytes,
+                    )
+            await send(message)
+            # The self-restart coordinator may terminate the process as soon as
+            # this counter advances, so publish completion only after ASGI send
+            # itself returned for the final response body.
+            if final_body and not activity_finished:
+                activity_finished = True
+                _transport_activity_finished(completed=True)
+
+        try:
+            if not await authorized(scope):
+                transport_runtime["unauthorized_requests"] += 1
+                await Response(
+                    "unauthorized",
+                    status_code=401,
+                    headers=dict(unauthorized_headers or {}),
+                )(scope, tracked_receive, tracked_send)
+                return
+            transport_runtime["authorized_requests"] += 1
+            if scope_headers(scope).get("mcp-protocol-version") == MODERN_MCP_PROTOCOL_VERSION:
+                await modern_mcp_request(scope, tracked_receive, tracked_send)
+                return
+            await manager.handle_request(scope, tracked_receive, tracked_send)
+        finally:
+            if not activity_finished:
+                activity_finished = True
+                _transport_activity_finished(completed=False)
 
     return app

@@ -29,6 +29,7 @@ from .providers import (
     ProviderErrorKind,
     ReasoningBlock,
     ToolCallDelta,
+    _REASONING_FAMILY,
 )
 
 
@@ -52,6 +53,47 @@ def _gemini_thinking_level(effort: str) -> str:
     """
 
     return "high" if effort in {"xhigh", "max"} else effort
+
+
+def stream_error_kind(error_body: Any) -> ProviderErrorKind:
+    """Classify an error delivered inside an otherwise-200 SSE stream.
+
+    The HTTP status classifier never runs for these: the body arrives as an
+    ``error`` event (Anthropic/Gemini) or a ``response.failed`` payload
+    (Responses). Mapping every one of them to PROVIDER_INTERNAL made routing
+    retry and fallback-cycle auth and quota errors as if they were transient,
+    unlike the same error delivered with a status code. The body's ``code``
+    (int HTTP-like or vendor string) and ``type``/``status`` markers are read
+    through the same ladder the status path uses; anything unreadable stays
+    PROVIDER_INTERNAL so the conservative default is unchanged.
+    """
+
+    if not isinstance(error_body, dict):
+        return ProviderErrorKind.PROVIDER_INTERNAL
+    code = error_body.get("code")
+    marker = " ".join(
+        str(error_body.get(key) or "")
+        for key in ("type", "status", "error_type")
+    ).lower()
+    text = str(error_body.get("message") or "").lower()
+    if isinstance(code, bool):
+        code = None
+    status = code if isinstance(code, int) else None
+    vendor = str(code).lower() if code is not None else ""
+    combined = f"{marker} {vendor} {text}"
+    if status in {401, 403} or any(
+        token in combined for token in ("authentication", "permission", "unauthorized", "forbidden")
+    ):
+        return ProviderErrorKind.AUTHENTICATION
+    if status == 402 or "credit" in combined or "billing" in combined:
+        return ProviderErrorKind.PERMISSION
+    if status == 429 or "rate_limit" in combined or "rate limit" in combined or "quota" in combined:
+        return ProviderErrorKind.RATE_LIMIT
+    if status in {400, 405, 409, 415, 422} or "invalid_request" in combined:
+        return ProviderErrorKind.INVALID_REQUEST
+    if status in {404, 410} or "not_found" in combined or "model_not_found" in combined:
+        return ProviderErrorKind.MODEL_UNAVAILABLE
+    return ProviderErrorKind.PROVIDER_INTERNAL
 
 
 class _StreamingAdapter:
@@ -419,7 +461,13 @@ class OpenAIResponsesProvider(_StreamingAdapter):
             ]
             payload["tool_choice"] = "auto"
         if request.temperature is not None:
-            payload["temperature"] = request.temperature
+            # Reasoning models on the Responses wire reject temperature the
+            # same way their Chat-Completions siblings do; the shared family
+            # check keeps one preset from killing every gpt-5/o-series route.
+            if not _REASONING_FAMILY.match(
+                request.model.rsplit("/", 1)[-1].strip().lower()
+            ):
+                payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload["max_output_tokens"] = request.max_output_tokens
         if request.cache_key is not None:
@@ -584,7 +632,11 @@ class OpenAIResponsesProvider(_StreamingAdapter):
                 return
             if kind in {"response.failed", "error"}:
                 raise ProviderError(
-                    ProviderErrorKind.PROVIDER_INTERNAL,
+                    stream_error_kind(
+                        raw_response.get("error")
+                        if isinstance(raw_response, dict)
+                        else None
+                    ),
                     "OpenAI Responses reported a failed response",
                     status_code=response.status_code,
                 )
@@ -1051,7 +1103,10 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                 yield ModelEvent(ModelEventKind.COMPLETION, finish_reason=finish_reason, response_id=response_id, transport_attempts=attempts)
                 return
             if kind == "error":
-                raise ProviderError(ProviderErrorKind.PROVIDER_INTERNAL, "Anthropic reported a stream error")
+                raise ProviderError(
+                    stream_error_kind(value.get("error")),
+                    "Anthropic reported a stream error",
+                )
             if kind == "ping":
                 continue
             # Failing closed on content is right; failing closed on protocol
@@ -1173,7 +1228,10 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
         for _event_name, data in self._sse_records(response, deadline):
             value = self._json_event(data, response.status_code)
             if isinstance(value.get("error"), dict):
-                raise ProviderError(ProviderErrorKind.PROVIDER_INTERNAL, "Gemini reported a stream error")
+                raise ProviderError(
+                    stream_error_kind(value.get("error")),
+                    "Gemini reported a stream error",
+                )
             raw_id = value.get("responseId")
             if raw_id is not None:
                 if not isinstance(raw_id, str):

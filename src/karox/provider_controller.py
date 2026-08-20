@@ -155,6 +155,7 @@ class ProviderController:
         privacy_class: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
         max_transport_retries: Optional[int] = None,
+        bypass: Optional[bool] = None,
     ) -> ProviderMutation:
         current = self.registry.provider(provider_id)
         updated = replace(
@@ -177,6 +178,9 @@ class ProviderController:
                 if max_transport_retries is not None
                 else current.max_transport_retries
             ),
+            # Shared Bypass mode preference; None means "leave unchanged" so
+            # unrelated edits can never silently reset the mode.
+            bypass=bypass if bypass is not None else current.bypass,
         )
         return ProviderMutation(
             status="updated",
@@ -330,6 +334,13 @@ class ProviderController:
             base = provider
             if secret is None and previous_provider is not None and not base.credential_ref:
                 base = replace(base, credential_ref=previous_provider.credential_ref)
+            if previous_provider is not None:
+                # B5. Editing a parked provider must not quietly put it back in
+                # service. Callers build a fresh `ProviderRecord` from a form,
+                # and the form has no reason to carry a flag it never shows, so
+                # the default `True` would re-enable on every save. Disable is a
+                # deliberate state; only Enable leaves it.
+                base = replace(base, enabled=previous_provider.enabled)
             saved_provider = self.registry.put_provider(base)
             if secret is not None:
                 credential_result = self.set_credential(
@@ -343,9 +354,14 @@ class ProviderController:
                 if parsed_new.scheme == KEYRING_SCHEME:
                     new_keyring_name = parsed_new.name
             saved_model = self.registry.put_model(model)
+            # B5. A disabled provider cannot become the active selection, so an
+            # edit of one saves the model and leaves the selection alone rather
+            # than raising. The registry would refuse the write; turning that
+            # refusal into a failed save would make a parked provider
+            # uneditable, which is not what parking it meant.
             selected = (
                 self.registry.select_model(saved_model.provider_id, saved_model.model_id)
-                if activate
+                if activate and saved_provider.enabled
                 else self.registry.selected_model()
             )
             return ProviderMutation(
@@ -413,6 +429,27 @@ class ProviderController:
             selected_model=self.registry.selected_model(),
         )
 
+    def set_provider_enabled(
+        self,
+        provider_id: str,
+        enabled: bool,
+    ) -> ProviderMutation:
+        """Disable or re-enable a saved provider through the store that owns it.
+
+        B5. Nothing is deleted and nothing is re-verified. Enabling in
+        particular does *not* select a model: "enabled" and "working" are two
+        different claims, and a surface that conflated them would show a green
+        state for a provider whose key may have been revoked while it was off.
+        Proof comes from a check the user runs, not from a flag being flipped.
+        """
+
+        record = self.registry.set_provider_enabled(provider_id, enabled)
+        return ProviderMutation(
+            status="enabled" if record.enabled else "disabled",
+            provider=record,
+            selected_model=self.registry.selected_model(),
+        )
+
     def select_model(self, provider_id: str, model_or_alias: str) -> ProviderMutation:
         selected = self.registry.select_model(provider_id, model_or_alias)
         return ProviderMutation(status="selected", model=selected, selected_model=selected)
@@ -425,9 +462,24 @@ class ProviderController:
         selected = self.registry.selected_model()
         if selected is not None:
             return selected
-        models = self.registry.models(preferred_provider)
+        # B5. Repair may never resurrect a provider the user switched off. The
+        # registry refuses the write anyway, but choosing a disabled candidate
+        # here and then failing would turn "no model is selected" into an
+        # error report about a provider the user deliberately parked.
+        live = {
+            item.provider_id
+            for item in self.registry.providers()
+            if item.enabled
+        }
+        models = [
+            item
+            for item in self.registry.models(preferred_provider)
+            if item.provider_id in live
+        ]
         if not models and preferred_provider is not None:
-            models = self.registry.models()
+            models = [
+                item for item in self.registry.models() if item.provider_id in live
+            ]
         if not models:
             return None
         first = sorted(models, key=lambda item: (item.provider_id, item.model_id))[0]

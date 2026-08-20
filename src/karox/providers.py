@@ -243,6 +243,11 @@ class ModelResponse:
     selected_provider: Optional[str] = None
     selected_model: Optional[str] = None
     cost: Optional[float] = None
+    # The same response priced with every prompt token at the normal input rate.
+    # This lets the UI report the measured cache effect without inventing a
+    # second price table or guessing what the provider would have charged.
+    uncached_cost: Optional[float] = None
+    cache_savings: Optional[float] = None
     currency: Optional[str] = None
     pricing_version: Optional[str] = None
     cumulative_usage: Dict[str, int] = field(default_factory=dict)
@@ -564,7 +569,15 @@ class OpenAIChatCompletionsProvider:
             ]
             payload["tool_choice"] = "auto"
         if request.temperature is not None:
-            payload["temperature"] = request.temperature
+            # Reasoning families (o1/o3.../gpt-5...) reject ``temperature``
+            # with a 400, the same way they reject the old output-cap field.
+            # The family regex already picks their token field; the sampling
+            # dial has to respect it too, or one preset temperature kills the
+            # whole request on those models.
+            if not _REASONING_FAMILY.match(
+                request.model.rsplit("/", 1)[-1].strip().lower()
+            ):
+                payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload[output_token_field(request.model)] = request.max_output_tokens
         if request.cache_key is not None:
@@ -842,8 +855,11 @@ class OpenAIChatCompletionsProvider:
             if not isinstance(choices, list):
                 raise ValueError("choices must be an array")
             if not choices:
-                if raw_usage is None:
-                    raise ValueError("event must contain a choice or usage")
+                # An empty-choices chunk with no usage is a gateway keepalive
+                # frame, not a contract violation: some OpenAI-compatible
+                # gateways emit them during long generations. The other
+                # adapters tolerate unknown/empty events, so this one must not
+                # kill an otherwise healthy stream either.
                 return events, None, response_id
 
             choice = choices[0]

@@ -56,6 +56,7 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
             Capability.REPO_READ,
             Capability.REPO_WRITE,
             Capability.PROCESS_RUN,
+            Capability.DEV_COMMAND,
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
             Capability.GIT_COMMIT,

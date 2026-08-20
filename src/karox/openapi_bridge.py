@@ -41,6 +41,9 @@ _ERROR_STATUS: dict[str, int] = {
     "invalid_request": 400,
     "idempotency_key_required": 400,
     "idempotency_key_invalid": 400,
+    # The caller disconnected mid-call; the answer is best-effort because the
+    # recipient is usually already gone (nginx-style 499).
+    "request_interrupted": 499,
     "internal": 500,
 }
 
