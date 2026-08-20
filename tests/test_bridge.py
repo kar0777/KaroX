@@ -8,6 +8,7 @@ path is proven against the genuine transport -- not a mock.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -95,36 +96,29 @@ class BridgeProfileTests(unittest.TestCase):
             if p.name in {"hyperagent", "promptql"}:
                 self.assertEqual(p.status, BridgeStatus.EXPERIMENTAL)
 
-    def test_notion_evidence_runs_the_legacy_gateway_not_this_runtime(self) -> None:
-        """The label has to follow the evidence, not the other way round.
-
-        Two assertions used to live here: ``notion.status == TESTED`` and, inside
-        a loop, ``if p.status == TESTED: assertTrue(p.verified_versions)``. Both
-        read the registry and compared it with itself, so they passed whatever
-        the registry happened to say -- including a ``tested`` label whose only
-        evidence exercises a different HTTP server. This reads the evidence file
-        and derives what the label is allowed to be.
-        """
+    def test_notion_is_current_wire_compatible_without_claiming_a_live_product_run(self) -> None:
+        """Current wire coverage permits protocol-compatible, never `tested`."""
         evidence = (
             Path(__file__).resolve().parents[1]
             / "scripts"
             / "test_notion_mcp_transport.py"
         ).read_text(encoding="utf-8")
-        # It puts server/ on sys.path and drives notion_gateway; nothing in it
-        # reaches src/karox, so it cannot vouch for this runtime's bridge.
+        # Keep the old evidence honest: it still exercises only the legacy
+        # gateway and therefore cannot promote the current runtime to TESTED.
         self.assertIn("import notion_gateway", evidence)
         self.assertNotIn("import karox", evidence)
 
         notion = BridgeRegistry().get("notion")
-        self.assertEqual(notion.status, BridgeStatus.TESTED_LEGACY)
+        self.assertEqual(notion.status, BridgeStatus.PROTOCOL_COMPATIBLE)
         self.assertNotEqual(notion.status, BridgeStatus.TESTED)
-        # A reader of `bridge show notion` must be told where the evidence came
-        # from, not just given a status word.
+        self.assertEqual(notion.auth_scheme, "oauth")
+        self.assertTrue(notion.persistent_url)
+        self.assertTrue(notion.is_usable)
+        self.assertFalse(notion.verified_versions)
         self.assertTrue(
-            any("legacy" in item.lower() for item in notion.limitations),
+            any("no live notion" in item.lower() for item in notion.limitations),
             notion.limitations,
         )
-        self.assertTrue(any("legacy" in item for item in notion.verified_versions))
 
     def test_no_profile_claims_a_verified_run_against_this_runtime(self) -> None:
         """``tested`` is reserved for a recorded run against ``src/karox``.
@@ -187,7 +181,11 @@ class BridgeCredentialStoreTests(unittest.TestCase):
         self.assertTrue(info["fingerprint"].startswith("sha256:"))
         self.assertEqual(self.store.resolve(info["reference"]), token)
         rotated = self.store.rotate("bridge-1")
-        self.assertIn("secret", rotated)
+        # The library API must never return the secret. Doing so was the leak
+        # that put bridge tokens on screen and into screenshots; callers that
+        # need the value (the clipboard) drive generate()+set() directly.
+        self.assertNotIn("secret", rotated)
+        self.assertEqual(rotated["status"], "rotated")
         self.assertNotEqual(
             self.store.resolve(rotated["reference"]), token,
         )
@@ -360,7 +358,32 @@ class McpProxyTests(unittest.TestCase):
         server = uvicorn.Server(
             uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
         )
-        thread = threading.Thread(target=server.run, daemon=True)
+        def run_server() -> None:
+            # The default Windows Proactor loop can hang indefinitely while
+            # shutting down a deliberately reset loopback socket under full
+            # suite load. This fixture needs sockets only, so a private selector
+            # loop gives deterministic startup/teardown without changing any MCP
+            # wire assertion.
+            loop = (
+                asyncio.SelectorEventLoop()
+                if os.name == "nt"
+                else asyncio.new_event_loop()
+            )
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(server.serve())
+            finally:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+        thread = threading.Thread(target=run_server, daemon=True)
         thread.start()
         deadline = time.time() + 15
         while (not server.started or not server.servers) and time.time() < deadline:
@@ -448,6 +471,13 @@ class McpProxyTests(unittest.TestCase):
         finally:
             server.should_exit = True
             thread.join(timeout=10)
+            if thread.is_alive():
+                # Under a heavily loaded full suite, Windows Proactor may spend
+                # the whole graceful window closing a reset loopback socket.
+                # Force-exit is the bounded fixture fallback; the test still
+                # requires the server thread to terminate and leak no runtime.
+                server.force_exit = True
+                thread.join(timeout=10)
             self.assertFalse(thread.is_alive())
 
     def test_proxy_schema_change_is_detected(self) -> None:
@@ -467,6 +497,51 @@ class McpProxyTests(unittest.TestCase):
             record.revoked = True
         with self.assertRaisesRegex(ProxyAccessDenied, "revoked"):
             proxy.descriptors()
+
+
+class WatchdogWriteTests(unittest.TestCase):
+    """A contended heartbeat write must not take the bridge owner down."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.path = self.root / "web-bridge" / "record.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_replace_retries_until_the_reader_releases_the_record(self) -> None:
+        real_replace = os.replace
+        attempts: list[int] = []
+
+        def flaky(src: object, dst: object) -> None:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise PermissionError(5, "Access is denied")
+            real_replace(src, dst)
+
+        with patch("karox.web_bridge_launcher.os.replace", side_effect=flaky):
+            write_watchdog(self.path, {"session_id": "live", "owner_pid": 4242})
+
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(
+            json.loads(self.path.read_text(encoding="utf-8"))["owner_pid"], 4242
+        )
+
+    def test_replace_gives_up_after_the_retry_window(self) -> None:
+        with (
+            patch(
+                "karox.web_bridge_launcher.os.replace",
+                side_effect=PermissionError(5, "Access is denied"),
+            ),
+            patch("karox.web_bridge_launcher._WATCHDOG_REPLACE_TIMEOUT_SECONDS", 0.05),
+        ):
+            with self.assertRaises(PermissionError):
+                write_watchdog(self.path, {"session_id": "live", "owner_pid": 4242})
+
+        # A permanent failure still must not litter the runtime directory.
+        leftovers = list(self.path.parent.glob(f"{self.path.name}.*.tmp"))
+        self.assertEqual(leftovers, [])
 
 
 class WebBridgeOrphanTests(unittest.TestCase):
@@ -520,7 +595,13 @@ class WebBridgeOrphanTests(unittest.TestCase):
         sessions = MagicMock()
         orphan = self.root / "web-bridge" / "orphan.json"
         live = self.root / "web-bridge" / "live.json"
-        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+        with patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": str(self.root),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.root),
+            },
+        ):
             write_watchdog(
                 orphan,
                 {"session_id": "orphan", "owner_pid": self._dead_pid()},
@@ -557,7 +638,13 @@ class WebBridgeOrphanTests(unittest.TestCase):
         find.
         """
         record = self.root / "web-bridge" / "shared.json"
-        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+        with patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": str(self.root),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.root),
+            },
+        ):
             claim_watchdog(
                 record,
                 {"session_id": "shared", "owner_pid": os.getpid(), "port": 8765},
@@ -582,7 +669,13 @@ class WebBridgeOrphanTests(unittest.TestCase):
         says which command clears it.
         """
         record = self.root / "web-bridge" / "stale.json"
-        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+        with patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": str(self.root),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.root),
+            },
+        ):
             claim_watchdog(
                 record,
                 {"session_id": "stale", "owner_pid": self._dead_pid()},
@@ -602,7 +695,13 @@ class WebBridgeOrphanTests(unittest.TestCase):
         sessions = MagicMock()
         orphan = self.root / "web-bridge" / "orphan.json"
         printed = io.StringIO()
-        with patch.dict(os.environ, {"KAROX_RUNTIME_DIR": str(self.root)}):
+        with patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": str(self.root),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.root),
+            },
+        ):
             write_watchdog(
                 orphan,
                 {"session_id": "orphan", "owner_pid": self._dead_pid()},
@@ -652,7 +751,10 @@ class BridgeCliTests(unittest.TestCase):
             {
                 "PYTHONPATH": str(SRC),
                 "KAROX_CONFIG_DIR": str(self.root / "config"),
+                "KAROX_VNEXT_CONFIG_DIR": str(self.root / "config"),
                 "KAROX_RUNTIME_DIR": str(self.runtime_dir),
+                "KAROX_VNEXT_RUNTIME_DIR": str(self.runtime_dir),
+                "KAROX_LEGACY_CONFIG_DIR": str(self.root / "legacy-config"),
             }
         )
         proc = subprocess.run(
@@ -672,7 +774,9 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("chatgpt-web", names)
         self.assertIn("claude-web", names)
         notion = next(p for p in profiles if p["name"] == "notion")
-        self.assertEqual(notion["status"], "tested_legacy")
+        self.assertEqual(notion["status"], "protocol_compatible")
+        self.assertEqual(notion["auth_scheme"], "oauth")
+        self.assertTrue(notion["persistent_url"])
         promptql = next(p for p in profiles if p["name"] == "promptql")
         self.assertEqual(promptql["transport"], "openapi")
         hyperagent = next(p for p in profiles if p["name"] == "hyperagent")

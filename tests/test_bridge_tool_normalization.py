@@ -70,7 +70,7 @@ class DirectBridgeToolNormalizationTests(unittest.TestCase):
                 patch("karox.cli.CompositeHostedBridge", return_value=composite),
                 patch("karox.cli.BridgeCredentialStore", return_value=credential_store),
                 patch("karox.cli.build_proxy_asgi_app", return_value=object()),
-                patch("uvicorn.run"),
+                patch("uvicorn.run") as uvicorn_run,
             ):
                 code = main(
                     (
@@ -101,6 +101,7 @@ class DirectBridgeToolNormalizationTests(unittest.TestCase):
         self.assertIn("karox.repo.command", captured["core"])
         self.assertIn("karox.tests.run", captured["core"])
         self.assertIn("karox.browser.command", captured["extra"])
+        self.assertEqual(uvicorn_run.call_args.kwargs["timeout_keep_alive"], 300)
 
 
 if __name__ == "__main__":  # pragma: no cover
