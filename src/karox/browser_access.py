@@ -31,11 +31,18 @@ from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .artifacts import ArtifactStore
+from .browser_bootstrap import BrowserBootstrapError, ensure_playwright_chromium
+from .browser_credential_injection import (
+    BrowserCredentialInjectionError,
+    inject_browser_credential,
+)
+from .browser_credentials import BrowserCredentialReference, BrowserCredentialStore
 from .browser_session import BrowserError, BrowserSecurityError, BrowserSessionError
 from .security import redact
 from .system_chrome import (
     SystemChromeError,
     SystemChromeLaunch,
+    activate_chrome_window,
     launch_system_chrome,
     terminate_chrome_process,
 )
@@ -111,6 +118,9 @@ _FREE_EVIDENCE = re.compile(
 _SECRET_INPUT_HINT = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|credential|cookie|card|cvv|cvc|iban)"
 )
+_PAYMENT_CREDENTIAL_HINT = re.compile(
+    r"(?i)(card|cvv|cvc|iban|\bpan\b|billing|payment)"
+)
 _HIGH_ENTROPY = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
 _DATA_URI = re.compile(r"(?is)data:[^\s'\"<>]{64,}")
 _LONG_BLOB = re.compile(r"[A-Za-z0-9+/=_-]{200,}")
@@ -124,8 +134,8 @@ _MAX_JSON_BYTES = 1_000_000
 _CONNECT_ATTEMPT_TIMEOUT_SECONDS = 3.0
 _CONNECT_TOTAL_TIMEOUT_SECONDS = 10.0
 _PLAYWRIGHT_MISSING = (
-    "browser automation requires the optional Playwright package and browser; "
-    "install the 'browser' extra and run `python -m playwright install chromium`"
+    "browser automation is part of KaroX v5, but the Playwright runtime is unavailable; "
+    "repair or reinstall the KaroX package"
 )
 
 
@@ -155,11 +165,23 @@ class BrowserAccessPolicy:
     network_inspection: bool = False
     payment_confirmation: bool = False
     allowed_emails: tuple[str, ...] = ()
+    allowed_credential_refs: tuple[str, ...] = ()
     backend: str = "playwright"
+    startup_url: str = "about:blank"
+    # Secret-free durable identity of the saved bridge profile that owns this
+    # browser. "ad-hoc" is the explicit fallback for non-saved bridge runs.
+    # Extension hello verification binds this value together with session_id,
+    # browser/bridge instance IDs, launch nonce and the proven Chrome process.
+    saved_profile_id: str = "ad-hoc"
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
             raise ValueError("browser policy requires a session_id")
+        if (
+            not isinstance(self.saved_profile_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.saved_profile_id) is None
+        ):
+            raise ValueError("browser saved_profile_id must be a safe 1-128 character identifier")
         for field_name in (
             "localhost",
             "external_https",
@@ -184,9 +206,20 @@ class BrowserAccessPolicy:
             if not value or "@" not in value or len(value) > 320:
                 raise ValueError("browser allowed email is invalid")
             emails.append(value)
+        credential_refs: list[str] = []
+        for item in self.allowed_credential_refs:
+            try:
+                credential_refs.append(str(BrowserCredentialReference.parse(str(item))))
+            except ValueError as exc:
+                raise ValueError("browser allowed credential reference is invalid") from exc
         object.__setattr__(self, "allowed_domains", allowed)
         object.__setattr__(self, "denied_domains", denied)
         object.__setattr__(self, "allowed_emails", tuple(dict.fromkeys(emails)))
+        object.__setattr__(
+            self,
+            "allowed_credential_refs",
+            tuple(dict.fromkeys(credential_refs)),
+        )
         if self.user_takeover and not self.headed:
             raise ValueError("browser user takeover requires headed mode")
         if self.allowed_domains and not self.external_https:
@@ -207,7 +240,10 @@ class BrowserAccessPolicy:
             "allowed_domains": list(self.allowed_domains),
             "denied_domains": list(self.denied_domains),
             "allowed_email_count": len(self.allowed_emails),
+            "allowed_credential_refs": list(self.allowed_credential_refs),
+            "allowed_credential_count": len(self.allowed_credential_refs),
             "backend": self.backend,
+            "saved_profile_id": self.saved_profile_id,
             "dns_pinning_proxy": self.backend == "playwright",
             "proxy_authentication": "per_session",
             "proxy_port": "random_loopback",
@@ -794,11 +830,17 @@ class _BrowserHandle:
 class SecureBrowserSessionManager:
     """Own one Playwright browser/context for exactly one KaroX session."""
 
-    def __init__(self, artifacts: ArtifactStore, policy: BrowserAccessPolicy) -> None:
+    def __init__(
+        self,
+        artifacts: ArtifactStore,
+        policy: BrowserAccessPolicy,
+        credential_store: Optional[BrowserCredentialStore] = None,
+    ) -> None:
         if artifacts.session_id != policy.session_id:
             raise ValueError("browser policy and artifact store session IDs differ")
         self._artifacts = artifacts
         self.policy = policy
+        self._credential_store = credential_store or BrowserCredentialStore()
         self._handle: Optional[_BrowserHandle] = None
         self._explicit_navigation_target: Optional[str] = None
 
@@ -902,14 +944,6 @@ class SecureBrowserSessionManager:
         handle = self._ensure_open()
         page = self._active_page()
         current = str(getattr(page, "url", "") or "")
-        if handle.active_tab_id == handle.branding_tab_id:
-            return {
-                "recovered": False,
-                "recoverable": False,
-                "tab_id": handle.active_tab_id,
-                "context_id": handle.context_id,
-                "url": current,
-            }
         if current.startswith(("http://", "https://")):
             self._remember_safe_url(handle.active_tab_id, page)
             return {
@@ -1185,6 +1219,16 @@ class SecureBrowserSessionManager:
                 "engine": handle.engine,
                 "profile_persistent": handle.system_chrome is not None,
             }
+        # Headless/non-takeover work uses Playwright's managed Chromium. Provision
+        # its matching binary lazily on first use so a normal KaroX installation
+        # never requires a separate `playwright install chromium` command. A
+        # headed user-takeover session launches the installed system Chrome
+        # instead, so it deliberately skips the Chromium download.
+        if not (self.policy.headed and self.policy.user_takeover):
+            try:
+                ensure_playwright_chromium()
+            except BrowserBootstrapError as exc:
+                raise BrowserError(str(exc)) from None
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -1217,14 +1261,13 @@ class SecureBrowserSessionManager:
             self._handle = handle
             context.on("page", lambda page: self._register_page(page, make_active=True))
 
-            # System Chrome starts on the KaroX extension's branded new-tab page.
-            # Keep it as the first, protected tab and open the actual work in a
-            # second tab.  Bundled Chromium has no pre-existing pages here.
+            # System Chrome may start with an ordinary new-tab page. Register
+            # any pre-existing pages so they join the controlled tab set, then
+            # open the actual work in a fresh tab. There is no longer a
+            # protected branded tab: status is shown only through the in-page
+            # indicator, extension badge, and side panel.
             for existing_page in list(context.pages):
-                existing_url = str(getattr(existing_page, "url", "") or "")
-                existing_tab = self._register_page(existing_page, make_active=False)
-                if existing_url.startswith(("chrome-extension://", "chrome://newtab")):
-                    handle.branding_tab_id = existing_tab
+                self._register_page(existing_page, make_active=False)
             page = context.new_page()
             tab_id = self._register_page(page, make_active=True)
             self._navigate(page, url, deadline_seconds)
@@ -1259,7 +1302,6 @@ class SecureBrowserSessionManager:
             "context_preserved": True,
             "engine": handle.engine,
             "profile_persistent": handle.system_chrome is not None,
-            "branding_tab_id": handle.branding_tab_id,
         }
 
     def _navigate(self, page: Any, url: str, deadline_seconds: float) -> None:
@@ -1313,7 +1355,6 @@ class SecureBrowserSessionManager:
             "takeover_active": handle.takeover_active,
             "engine": handle.engine,
             "profile_persistent": handle.system_chrome is not None,
-            "branding_tab_id": handle.branding_tab_id,
         }
 
     def new_tab(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
@@ -1350,8 +1391,6 @@ class SecureBrowserSessionManager:
         tab_id = arguments.get("tab_id")
         if not isinstance(tab_id, str) or tab_id not in handle.tabs:
             raise BrowserSecurityError("browser tab does not belong to this KaroX session")
-        if tab_id == handle.branding_tab_id:
-            raise BrowserSecurityError("the protected KaroX branding tab cannot be closed")
         if len(handle.tabs) <= 1:
             raise BrowserSecurityError("cannot close the last tab; use browser.close")
         page = handle.tabs.pop(tab_id)
@@ -1373,9 +1412,18 @@ class SecureBrowserSessionManager:
         reason = arguments.get("reason") or "sensitive browser action"
         if not isinstance(reason, str) or len(reason) > 500:
             raise BrowserError("takeover reason must be a string up to 500 characters")
+        page = self._active_page()
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        window_activated = False
+        if handle.system_chrome is not None:
+            window_activated = activate_chrome_window(handle.system_chrome.process)
         return {
             "takeover": True,
             "agent_input_paused": True,
+            "window_activated": window_activated,
             "session_id": self.policy.session_id,
             "tab_id": handle.active_tab_id,
             "context_id": handle.context_id,
@@ -1413,12 +1461,15 @@ class SecureBrowserSessionManager:
             data = locator.evaluate(
                 """el => {
                     const scope = el.closest('form,section,article,[role=dialog]');
+                    const karoxSecret = el.getAttribute('data-karox-secret') === 'true' || el.dataset.karoxSecret === 'true';
                     return {
                         type: (el.getAttribute('type') || el.tagName || '').toLowerCase(),
                         name: el.getAttribute('name') || '',
                         id: el.id || '',
                         aria: el.getAttribute('aria-label') || '',
-                        text: (el.innerText || el.value || '').trim().slice(0, 500),
+                        placeholder: el.getAttribute('placeholder') || '',
+                        secret: karoxSecret ? 'true' : '',
+                        text: karoxSecret ? '' : (el.innerText || el.value || '').trim().slice(0, 500),
                         context: (scope && scope.innerText || '').trim().slice(0, 2000)
                     };
                 }"""
@@ -1468,10 +1519,17 @@ class SecureBrowserSessionManager:
             raise BrowserSecurityError(
                 "input field could not be inspected safely; use user takeover"
             )
-        descriptor = " ".join(metadata.values())
-        if metadata.get("type") == "password" or _SECRET_INPUT_HINT.search(descriptor):
+        descriptor = " ".join(
+            metadata.get(key, "")
+            for key in ("type", "name", "id", "aria", "placeholder")
+        )
+        if (
+            metadata.get("secret") == "true"
+            or metadata.get("type") == "password"
+            or _SECRET_INPUT_HINT.search(descriptor)
+        ):
             raise BrowserSecurityError(
-                "password, token, credential, or payment fields must be completed through user takeover"
+                "password, token, credential, or payment fields must be completed through user takeover or local credential injection"
             )
         if metadata.get("type") == "email":
             if not self.policy.allowed_emails:
@@ -1482,6 +1540,80 @@ class SecureBrowserSessionManager:
                 raise BrowserSecurityError("email is not allowed for this browser session")
         locator.fill(value, timeout=self._timeout_ms(deadline_seconds))
         return {"filled": True, "selector": selector, "value_length": len(value)}
+
+    def fill_credential(
+        self, arguments: Mapping[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        """Fill one login field from an opaque OS-keyring browser reference.
+
+        The hosted caller can choose only the target element, credential
+        reference, and field name. The resolved value never enters tool
+        arguments/results, logs, snapshots, or exception text.
+        """
+
+        self._assert_agent_input_allowed()
+        selector = self._selector(arguments.get("selector"))
+        reference = arguments.get("reference")
+        field = arguments.get("field")
+        if not isinstance(reference, str) or not reference.startswith("os-keyring:browser/"):
+            raise BrowserError(
+                "browser credential reference must use os-keyring:browser/<name>"
+            )
+        if field not in {"username", "password"}:
+            raise BrowserError("browser credential field must be username or password")
+        if (
+            self.policy.allowed_credential_refs
+            and reference not in self.policy.allowed_credential_refs
+        ):
+            raise BrowserSecurityError(
+                "browser credential reference is not approved for this browser session"
+            )
+
+        locator = self._active_page().locator(selector).first
+        metadata = self._locator_metadata(locator)
+        if not metadata or not metadata.get("type"):
+            raise BrowserSecurityError(
+                "credential input field could not be inspected safely; use user takeover"
+            )
+        descriptor = " ".join(
+            metadata.get(key, "")
+            for key in ("type", "name", "id", "aria", "placeholder")
+        )
+        field_type = metadata.get("type", "").lower()
+        if _PAYMENT_CREDENTIAL_HINT.search(descriptor):
+            raise BrowserSecurityError(
+                "browser credential injection never fills payment, card, CVV/CVC, IBAN, or billing fields; use user takeover"
+            )
+        if field == "password":
+            if field_type != "password" and not _SECRET_INPUT_HINT.search(descriptor):
+                raise BrowserSecurityError(
+                    "password credential may only be injected into a password/credential field"
+                )
+        else:
+            if field_type == "password" or _SECRET_INPUT_HINT.search(descriptor):
+                raise BrowserSecurityError(
+                    "username credential may not be injected into a password/secret field"
+                )
+            if field_type not in {"email", "text", "input", "tel"}:
+                raise BrowserSecurityError(
+                    "username credential target must be a text, email, or username-like input"
+                )
+            # A locally stored username/email is authorized by the profile's
+            # explicit credential-reference allowlist. ``allowed_emails`` is a
+            # separate guard for model-supplied plain-text browser.fill values;
+            # requiring both made detach leave a second, stale authority behind.
+
+        try:
+            result = inject_browser_credential(
+                locator=locator,
+                credential_store=self._credential_store,
+                reference=reference,
+                field=field,
+                timeout_ms=self._timeout_ms(deadline_seconds),
+            )
+        except BrowserCredentialInjectionError:
+            raise
+        return {"selector": selector, **result.to_dict()}
 
     def select(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
         self._assert_agent_input_allowed()
@@ -1626,7 +1758,7 @@ class SecureBrowserSessionManager:
             else if (tag === 'button' || el.getAttribute('role') === 'button') out.buttons.push({name: label, disabled: !!el.disabled});
             else if (['input','select','textarea'].includes(tag)) {
               const type = (el.getAttribute('type') || tag).toLowerCase();
-              const secret = type === 'password' || SECRET_HINT.test([el.name, el.id, label].join(' '));
+              const secret = el.getAttribute('data-karox-secret') === 'true' || el.dataset.karoxSecret === 'true' || type === 'password' || SECRET_HINT.test([el.name, el.id, label].join(' '));
               out.inputs.push({label, type, disabled: !!el.disabled, secret, value_length: secret ? null : (el.value || '').length});
             } else if (tag === 'a') out.links.push({text: label, href: (el.getAttribute('href') || '').slice(0, 300)});
             else if (el.getAttribute('role') === 'dialog') out.dialogs.push({name: label});

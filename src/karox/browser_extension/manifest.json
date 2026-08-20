@@ -3,9 +3,10 @@
   "name": "KaroX Browser",
   "version": "0.1.0",
   "description": "Local browser workspace controlled by the user's KaroX bridge.",
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "111",
   "permissions": [
     "tabs",
+    "tabGroups",
     "scripting",
     "sidePanel",
     "storage",
@@ -26,8 +27,18 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "chrome_url_overrides": {
-    "newtab": "newtab.html"
-  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["page_console_bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
   "incognito": "not_allowed"
 }
