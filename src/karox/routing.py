@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import time
@@ -92,6 +93,7 @@ class RetryPolicy:
 class RoutingPolicy:
     routes: tuple[RouteTarget, ...]
     privacy_limit: str = "public"
+    route_strategy: str = "ordered"
     max_total_tokens: int | None = None
     max_cost: float | None = None
     currency: str | None = None
@@ -106,6 +108,8 @@ class RoutingPolicy:
             raise ValueError("retry policy must be a RetryPolicy")
         if self.privacy_limit not in _PRIVACY_RANK:
             raise ValueError("privacy limit must be local, private, or public")
+        if self.route_strategy not in {"ordered", "cheapest"}:
+            raise ValueError("route strategy must be ordered or cheapest")
         if self.max_total_tokens is not None and (
             isinstance(self.max_total_tokens, bool)
             or not isinstance(self.max_total_tokens, int)
@@ -219,6 +223,58 @@ class RoutedProvider:
         if callable(self.factory):
             return self.factory(record)
         raise TypeError("provider factory must be callable or expose create()")
+
+    @staticmethod
+    def _request_input_estimate(request: ModelRequest) -> int:
+        """Conservative provider-independent token estimate used only for ordering."""
+
+        characters = 0
+        for message in request.messages:
+            if isinstance(message.content, str):
+                characters += len(message.content)
+            for call in message.tool_calls:
+                characters += len(call.name) + len(call.raw_arguments)
+        for tool in request.tools:
+            characters += len(tool.name) + len(tool.description)
+            characters += len(json.dumps(tool.input_schema, sort_keys=True))
+        return max(1, characters // 4 + 1)
+
+    def _route_sequence(self, request: ModelRequest) -> list[tuple[int, RouteTarget]]:
+        """Return execution order, reordering only when cost comparison is exact enough.
+
+        ``cheapest`` is explicit opt-in. KaroX reorders only if every configured
+        route has versioned pricing in one currency and an output ceiling. If
+        any fact is missing, user-declared order wins rather than guessing.
+        """
+
+        indexed = list(enumerate(self.policy.routes))
+        if self.policy.route_strategy != "cheapest" or len(indexed) < 2:
+            return indexed
+        prompt_tokens = self._request_input_estimate(request)
+        scored: list[tuple[float, int, RouteTarget]] = []
+        currency: str | None = None
+        for index, target in indexed:
+            try:
+                model = self.registry.model(target.provider_id, target.model)
+            except Exception:
+                return indexed
+            pricing = model.pricing
+            output_tokens = request.max_output_tokens or model.max_output_tokens
+            if pricing is None or output_tokens is None:
+                return indexed
+            if currency is None:
+                currency = pricing.currency
+            elif currency != pricing.currency:
+                return indexed
+            score = pricing.estimate_uncached(
+                {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": output_tokens,
+                }
+            )
+            scored.append((score, index, target))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [(index, target) for _score, index, target in scored]
 
     def _check_global_budgets(self) -> None:
         if (
@@ -356,11 +412,15 @@ class RoutedProvider:
 
         self._usage = _merge_usage(self._usage, response.usage)
         cost = None
+        uncached_cost = None
+        cache_savings = None
         currency = None
         pricing_version = None
         cumulative_cost = None
         if model_record.pricing is not None:
             cost = model_record.pricing.estimate(response.usage)
+            uncached_cost = model_record.pricing.estimate_uncached(response.usage)
+            cache_savings = round(uncached_cost - cost, 12)
             currency = model_record.pricing.currency
             pricing_version = model_record.pricing.version
             self._costs[currency] = round(self._costs.get(currency, 0.0) + cost, 12)
@@ -383,6 +443,8 @@ class RoutedProvider:
             selected_provider=provider_record.provider_id,
             selected_model=model_record.model_id,
             cost=cost,
+            uncached_cost=uncached_cost,
+            cache_savings=cache_savings,
             currency=currency,
             pricing_version=pricing_version,
             cumulative_usage=dict(self._usage),
@@ -407,7 +469,7 @@ class RoutedProvider:
         deadline = self._monotonic() + float(request.deadline_seconds)
         attempts: list[Dict[str, Any]] = []
         last_rejection: ProviderError | None = None
-        for index, target in enumerate(self.policy.routes):
+        for index, target in self._route_sequence(request):
             try:
                 provider_record, model_record = self._preflight(target, request)
             except ProviderError as exc:
@@ -539,7 +601,7 @@ class RoutedProvider:
         deadline = self._monotonic() + float(request.deadline_seconds)
         attempts: list[Dict[str, Any]] = []
         last_rejection: ProviderError | None = None
-        for index, target in enumerate(self.policy.routes):
+        for index, target in self._route_sequence(request):
             try:
                 provider_record, model_record = self._preflight(target, request)
             except ProviderError as exc:

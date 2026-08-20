@@ -154,7 +154,8 @@ def isolated_karox_directories() -> Iterator[Path]:
         # A fixed name: the status bar shows the repository directory's name, and a
         # random temporary name would land in every snapshot.
         repository = root / "demo-repo"
-        for path in (config, runtime, repository):
+        legacy = root / "legacy-config"
+        for path in (config, runtime, repository, legacy):
             path.mkdir(parents=True, exist_ok=True)
         environment = dict(os.environ)
         for names, value in (
@@ -166,6 +167,7 @@ def isolated_karox_directories() -> Iterator[Path]:
             environment[names[0]] = str(value)
         for name in _LEGACY_OVERRIDES:
             environment.pop(name, None)
+        environment[_LEGACY_OVERRIDES[0]] = str(legacy)
         with patch.dict(os.environ, environment, clear=True):
             yield repository
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -290,6 +292,43 @@ def _validated_targets(runtime: Any, raw: Any) -> list[str]:
     return targets
 
 
+def _node_test_command(repository: Path) -> tuple[list[str], str] | None:
+    """Return a one-shot package test command for a Node/Vite repository."""
+    manifest = repository / "package.json"
+    if not manifest.is_file():
+        return None
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    scripts = payload.get("scripts") if isinstance(payload, dict) else None
+    test_script = scripts.get("test") if isinstance(scripts, dict) else None
+    if not isinstance(test_script, str) or not test_script.strip():
+        return None
+
+    if (repository / "pnpm-lock.yaml").is_file():
+        argv = ["pnpm", "test"]
+        separator = ["--", "--run"]
+    elif (repository / "yarn.lock").is_file():
+        argv = ["yarn", "test"]
+        separator = ["--run"]
+    elif (repository / "bun.lockb").is_file() or (repository / "bun.lock").is_file():
+        argv = ["bun", "run", "test"]
+        separator = ["--", "--run"]
+    else:
+        argv = ["npm", "test"]
+        separator = ["--", "--run"]
+
+    # `vitest` without `run` may enter watch mode on an interactive machine.
+    # Force one-shot execution while leaving already-one-shot scripts untouched.
+    lowered = test_script.lower()
+    if re.search(r"(^|\s)vitest(?:\s|$)", lowered) and not re.search(
+        r"(^|\s)(?:run|--run)(?:\s|$)", lowered
+    ):
+        argv.extend(separator)
+    return argv, test_script.strip()
+
+
 def execute_tests(
     runtime: Any,
     arguments: dict[str, Any],
@@ -312,6 +351,56 @@ def execute_tests(
         float(deadline_seconds),
         runtime.MAX_PROCESS_TIMEOUT_SECONDS,
     )
+
+    test_root = runtime.repository / "tests"
+    has_python_tests = test_root.is_dir() and any(test_root.rglob("test_*.py"))
+    node_test = _node_test_command(runtime.repository)
+    if node_test is not None and not has_python_tests:
+        if suite == "split":
+            raise InvalidCommand("Node test suites do not support split/part through tests.run")
+        if arguments.get("targets") not in (None, []):
+            raise InvalidCommand(
+                "Node/Vitest tests.run does not accept Python pytest targets; use the project test script"
+            )
+        if arguments.get("split") is not None or arguments.get("part") is not None:
+            raise InvalidCommand("Node test suites do not accept split or part")
+        argv, test_script = node_test
+        result = runtime._run(argv, effective)
+        result.update(
+            {
+                "suite": suite,
+                "runner": "package-script",
+                "package_test_script": test_script,
+                "targets": [],
+                "target_count": 0,
+                "split": None,
+                "part": None,
+                "requested_timeout": timeout_value,
+                "effective_timeout": effective,
+                "timeout_clamped_by": (
+                    None
+                    if effective == timeout_value
+                    else "request_deadline_or_runtime_maximum"
+                ),
+                "verification_eligible": True,
+            }
+        )
+        result["_evidence"] = [
+            EvidenceRecord(
+                kind="test_run",
+                summary=("Passed" if result["exit_code"] == 0 else "Failed")
+                + " structured package test run",
+                command=result["argv"],
+                exit_code=result["exit_code"],
+                metadata={
+                    "suite": suite,
+                    "runner": "package-script",
+                    "timed_out": result["timed_out"],
+                },
+            )
+        ]
+        return result
+
     argv = [sys.executable, "-m", "pytest"]
     selected: list[str] = []
     part: Optional[int] = None
@@ -401,6 +490,31 @@ def execute_browser_command(
     if not isinstance(payload, dict):
         raise InvalidCommand("browser.command payload must be object")
     manager = runtime._browser
+    if action == "_temporary_fill_plain_text":
+        if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
+            raise InvalidCommand("temporary plain-text fill requires the extension browser backend")
+        from .browser_session import BrowserSecurityError
+        from .extension_browser import _SECRET_INPUT_HINT
+
+        manager._assert_agent_input_allowed()
+        selector = manager._selector(payload.get("selector"))
+        value = payload.get("value")
+        if not isinstance(value, str) or len(value) > 100_000:
+            raise InvalidCommand("temporary plain-text fill value must be text")
+        metadata = manager._inspect(selector, deadline_seconds)
+        field_type = str(metadata.get("type", "")).lower()
+        descriptor = " ".join(
+            str(metadata.get(key, ""))
+            for key in ("type", "name", "id", "aria", "placeholder")
+        )
+        if field_type == "password" or _SECRET_INPUT_HINT.search(descriptor):
+            raise BrowserSecurityError("temporary plain-text fill refuses sensitive fields")
+        result = manager._call("fill", {"selector": selector, "value": value}, deadline_seconds)
+        return {"action": action, "filled": True, "selector": selector, "value_length": len(value), **result}
+    if action in {"debug_overlay_state", "geometry"}:
+        if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
+            raise InvalidCommand(f"browser.command {action} requires the extension browser backend")
+        return {"action": action, **manager._call(action, payload, deadline_seconds)}
     handlers = {
         "open": manager.open,
         "tabs": manager.tabs,
@@ -410,6 +524,7 @@ def execute_browser_command(
         "snapshot": manager.snapshot,
         "click": manager.click,
         "fill": manager.fill,
+        "fill_credential": manager.fill_credential,
         "select": manager.select,
         "press": manager.press,
         "wait_for": manager.wait_for,

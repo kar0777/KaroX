@@ -99,6 +99,8 @@ def initialize_git_repository(path: Path) -> None:
         cwd=path,
         env=env,
         check=True,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
