@@ -173,6 +173,7 @@ def query_tailscale_status(
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {
@@ -264,6 +265,7 @@ def query_funnel_ownership(
                 encoding="utf-8",
                 errors="replace",
                 timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             last_detail = type(exc).__name__
@@ -302,16 +304,34 @@ def query_funnel_ownership(
     }
 
 
-def tailscale_funnel_argv(executable: str, port: int) -> tuple[str, ...]:
+def _normalize_funnel_mount_path(mount_path: str) -> str:
+    if not isinstance(mount_path, str) or not mount_path.startswith("/"):
+        raise ValueError("Tailscale Funnel mount path must start with /")
+    if "?" in mount_path or "#" in mount_path or "//" in mount_path:
+        raise ValueError("Tailscale Funnel mount path is invalid")
+    normalized = mount_path.rstrip("/") or "/"
+    if any(part in {".", ".."} for part in normalized.split("/")):
+        raise ValueError("Tailscale Funnel mount path is invalid")
+    return normalized
+
+
+def tailscale_funnel_argv(
+    executable: str,
+    port: int,
+    *,
+    https_port: int = 443,
+    mount_path: str = "/",
+) -> tuple[str, ...]:
     if not 1 <= port <= 65_535:
         raise ValueError("Tailscale Funnel target port must be between 1 and 65535")
-    return (
-        executable,
-        "funnel",
-        "--yes",
-        "--https=443",
-        f"http://127.0.0.1:{port}",
-    )
+    if https_port not in {443, 8443, 10000}:
+        raise ValueError("Tailscale Funnel HTTPS port must be 443, 8443, or 10000")
+    normalized_path = _normalize_funnel_mount_path(mount_path)
+    values = [executable, "funnel", "--yes", f"--https={https_port}"]
+    if normalized_path != "/":
+        values.append(f"--set-path={normalized_path}")
+    values.append(f"http://127.0.0.1:{port}")
+    return tuple(values)
 
 
 def classify_funnel_failure(detail: str) -> dict[str, Optional[str]]:
@@ -377,7 +397,7 @@ class TailscaleLaunchPlan:
 # ``machine_approval_required`` need a person (a browser login or an admin's
 # approval), so those are reported with their auth URL rather than blocked on.
 _TAILSCALE_AUTOFIX_CODES = frozenset(
-    {"daemon_not_ready", "hostname_unavailable", "status_unknown"}
+    {"daemon_not_ready", "hostname_unavailable", "status_unknown", "status_failed"}
 )
 
 
@@ -470,6 +490,7 @@ def _bring_tailscale_up(
             encoding="utf-8",
             errors="replace",
             timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -616,6 +637,7 @@ def _run_sc(
             encoding="utf-8",
             errors="replace",
             timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -665,6 +687,30 @@ def ensure_tailscale_ready(
         # ``login_required`` and ``machine_approval_required`` already carry the
         # auth URL in ``status``; the caller surfaces it instead of blocking.
         return status
+
+    gui_launched = False
+    # On Windows the user-session IPN app is part of making the backend useful.
+    # If it was exited, `tailscale status` may fail outright instead of returning
+    # NoState. Launch it *before* `tailscale up` so Start/Restart from the TUI
+    # repairs the common "Tailscale app is closed" state without a manual step.
+    if os.name == "nt" and not _tailscale_gui_launch_disabled():
+        gui_launched = bool(
+            launch_tailscale_gui(resolved, popen=popen, emit=emit)
+        )
+        if gui_launched:
+            time.sleep(max(0.25, poll_interval_seconds))
+            status = _poll_tailscale_ready(
+                resolved, run=run, attempts=poll_attempts,
+                interval=poll_interval_seconds,
+            )
+            if status.get("ready"):
+                if emit is not None:
+                    emit(f"Tailscale is ready: {status.get('public_url')}")
+                return status
+            code = status.get("code")
+            if code not in _TAILSCALE_AUTOFIX_CODES:
+                return status
+
     if emit is not None:
         emit("Tailscale is starting; bringing it online with `tailscale up`…")
     _bring_tailscale_up(resolved, run=run, timeout_seconds=up_timeout_seconds)
@@ -680,6 +726,7 @@ def ensure_tailscale_ready(
     # heavier service restart.
     if (
         os.name == "nt"
+        and not gui_launched
         and not _tailscale_gui_launch_disabled()
         and status.get("code") in _TAILSCALE_AUTOFIX_CODES
     ):
@@ -747,6 +794,8 @@ def _poll_tailscale_ready(
 def prepare_tailscale_funnel(
     port: int,
     *,
+    https_port: int = 443,
+    mount_path: str = "/",
     executable: Optional[str] = None,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     emit: Optional[Callable[[str], None]] = None,
@@ -764,6 +813,12 @@ def prepare_tailscale_funnel(
     reported with its auth URL instead of blocking on a browser the launch path
     never opens.
     """
+    if https_port not in {443, 8443, 10000}:
+        raise TailscaleError("invalid_https_port: Funnel supports 443, 8443, or 10000")
+    try:
+        normalized_path = _normalize_funnel_mount_path(mount_path)
+    except ValueError as exc:
+        raise TailscaleError(f"invalid_mount_path: {exc}") from exc
     status = ensure_tailscale_ready(
         executable, run=run, emit=emit,
         restart_service=restart_service, elevated_run=elevated_run,
@@ -783,13 +838,92 @@ def prepare_tailscale_funnel(
             "existing Tailscale Serve/Funnel routes"
         )
     if ownership.get("active"):
-        raise TailscaleError(
-            "route_in_use: an existing Tailscale Serve/Funnel route is active; "
-            "KaroX refuses to replace it"
-        )
+        # Phase 0.4: not every active route is foreign. A stale route left by a
+        # dead KaroX bridge (same port, no live process) is safe to clear, while
+        # a foreign route must never be touched. Enumerate the individual routes
+        # and decide.
+        from .tailscale_routes import inventory_tailscale_routes
+
+        routes = inventory_tailscale_routes(resolved, run=run)
+        if not routes:
+            # Something is active but we cannot parse it into individual
+            # routes. Fail-safe: refuse rather than risk clearing a foreign
+            # route we could not identify.
+            raise TailscaleError(
+                "route_in_use: an existing Tailscale Serve/Funnel route is "
+                "active but its details cannot be parsed; KaroX refuses to "
+                "replace it. Run `karox bridge doctor`."
+            )
+        # Tailscale can host multiple path mounts on one HTTPS listener. Only
+        # the route KaroX is about to own -- the root path -- can conflict with
+        # this launcher. Sibling paths (for example /karox-notion) must be
+        # preserved and must not prevent ChatGPT's root route from starting.
+        desired_routes = [
+            r
+            for r in routes
+            if r.public_port == https_port
+            and (r.path.rstrip("/") or "/") == normalized_path
+        ]
+        foreign = [r for r in desired_routes if r.local_port != port]
+        stale_owned = [r for r in desired_routes if r.local_port == port]
+        if foreign:
+            # There is at least one route that does not point at our bridge
+            # port. Refuse to touch it.
+            descriptions = ", ".join(
+                f"{r.host}:{r.public_port}{r.path}->{r.local_target}" for r in foreign
+            )
+            raise TailscaleError(
+                f"route_in_use: HTTPS {https_port} is already owned by another "
+                f"Tailscale route ({descriptions})"
+            )
+        if stale_owned:
+            if emit is not None:
+                emit(
+                    "Clearing the stale KaroX Funnel listener "
+                    f"HTTPS {https_port} -> localhost:{port}…"
+                )
+            try:
+                result = run(
+                    [
+                        resolved,
+                        "funnel",
+                        f"--https={https_port}",
+                        f"http://127.0.0.1:{port}",
+                        "off",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise TailscaleError(
+                    f"stale_route_clear_failed: could not clear stale owned "
+                    f"route: {type(exc).__name__}"
+                ) from exc
+            if result.returncode != 0:
+                raise TailscaleError(
+                    "stale_route_clear_failed: Tailscale refused the exact route cleanup"
+                )
+            remaining = inventory_tailscale_routes(resolved, run=run)
+            if any(
+                route.public_port == https_port and route.local_port == port
+                for route in remaining
+            ):
+                raise TailscaleError(
+                    "route_in_use: stale route could not be cleared; "
+                    "run `karox bridge doctor`"
+                )
+        # Routes on the other supported HTTPS ports are intentionally preserved.
+    published_url = public_url.rstrip("/")
+    if https_port != 443:
+        published_url = f"{published_url}:{https_port}"
     return TailscaleLaunchPlan(
         executable=resolved,
-        public_url=public_url,
-        argv=tailscale_funnel_argv(resolved, port),
+        public_url=published_url,
+        argv=tailscale_funnel_argv(resolved, port, https_port=https_port),
         ownership=ownership,
     )
