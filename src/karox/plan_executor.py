@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional, Protocol, Sequence
 from mcp.types import CallToolResult
 
 from .artifacts import ArtifactStore
+from .cost_intelligence import BatchPlanner
 from .repository_lease import (
     RepositoryLease,
     RepositoryLeaseConflict,
@@ -41,6 +42,13 @@ PLAN_ACTIONS = frozenset(
     }
 )
 _READ_ONLY_ACTIONS = frozenset({"inspect", "search", "read"})
+# Plan actions expressed as the core tool names BatchPlanner classifies. The
+# planner only groups read-only work; every other action stays sequential.
+_BATCH_TOOL_NAMES = {
+    "read": "repo.read_file",
+    "search": "repo.search",
+    "inspect": "repo.list_files",
+}
 _REPOSITORY_LEASE_ACTIONS = frozenset(
     {"patch", "command", "checks", "dev_server", "browser"}
 )
@@ -1366,12 +1374,27 @@ class PlanExecutor:
                 name="execute-plan.json",
                 mime="application/json",
             )
+            # One hosted plan call replaced a sequential tool round trip per
+            # operation; the batch planner additionally reports how many of
+            # those operations were independent reads. Counted, not estimated
+            # from tokens: these are the honest execute_plan economy numbers.
+            batch_plan = BatchPlanner().plan(
+                [
+                    {"name": _BATCH_TOOL_NAMES.get(operation.action, operation.action)}
+                    for operation in operations
+                ]
+            )
             final = {
                 "ok": True,
                 "schema_version": PLAN_SCHEMA_VERSION,
                 "plan_id": existing["plan_id"],
                 "status": "complete",
                 "operations_total": len(operations),
+                "economy": {
+                    "model_round_trips_avoided": max(0, len(operations) - 1),
+                    "parallel_read_candidates": len(batch_plan.parallel_reads),
+                    "read_round_trips_saved": batch_plan.estimated_round_trips_saved,
+                },
                 "operations_succeeded": sum(
                     item.get("status") == "success" for item in completed.values()
                 ),

@@ -257,6 +257,20 @@ class PlanExecutorTests(unittest.TestCase):
         self.assertEqual(len(self.delegate.calls), call_count)
         self.assertTrue(self.artifacts.exists(first["artifact_id"]))
 
+    def test_completed_plan_reports_honest_economy_counters(self) -> None:
+        final = self.executor.execute(self._read_plan(), "plan-economy")
+        economy = final["economy"]
+        # N operations in one hosted call replace N-1 further round trips;
+        # the batch planner marks the read-only ones as parallel candidates.
+        self.assertEqual(
+            economy["model_round_trips_avoided"], final["operations_total"] - 1
+        )
+        self.assertGreaterEqual(economy["parallel_read_candidates"], 0)
+        self.assertGreaterEqual(economy["read_round_trips_saved"], 0)
+        self.assertLessEqual(
+            economy["read_round_trips_saved"], final["operations_total"]
+        )
+
     def test_elevated_command_operation_routes_through_full_dev_runner(self) -> None:
         self.delegate.access_profile = "elevated"
         self.delegate.names.add("karox.command.run")
