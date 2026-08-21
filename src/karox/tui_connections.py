@@ -1724,6 +1724,87 @@ def validate_advanced(
     return ("", "")
 
 
+_CAPABILITY_GLYPHS = {"true": "✓", "false": "✗", "unknown": "?"}
+
+_MODEL_CAPABILITY_FIELDS = (
+    ("tools", "tools"),
+    ("vision", "vision"),
+    ("json", "structured_output"),
+    ("stream", "streaming"),
+)
+
+
+def model_capability_summary(model: Any) -> str:
+    """Honest one-line capability row for a saved model.
+
+    Renders the registry's true/false/unknown contract exactly as recorded:
+    ``✓`` for true, ``✗`` for false, and ``?`` for unknown. Unknown is
+    shown, never guessed into a promise the provider may not keep.
+    """
+
+    parts: list[str] = []
+    for label, attribute in _MODEL_CAPABILITY_FIELDS:
+        value = str(getattr(model, attribute, "unknown"))
+        parts.append(f"{label}{_CAPABILITY_GLYPHS.get(value, '?')}")
+    return " ".join(parts)
+
+
+def discover_models_for_provider(controller: Any, provider_id: str) -> Dict[str, Any]:
+    """Discover models for a saved provider and register only the new ones.
+
+    Uses the same discovery wire as the setup wizard and the CLI
+    (``_discover_models_result``), with the credential resolved through the
+    controller that owns it. New records carry ``provenance="discovered"``;
+    existing records are never overwritten, and when discovery lands on a
+    different effective base URL (the automatic ``/v1`` fallback) the provider
+    record follows it, mirroring ``karox model discover``. The returned
+    summary is secret-free.
+    """
+
+    from .registry import ModelRecord
+    from .tui import ProviderSetup, _discover_models_result
+
+    details = controller.details(provider_id)
+    provider = details.provider
+    api_key = ""
+    if provider.credential_ref:
+        try:
+            api_key = controller.credentials.resolve(provider.credential_ref)
+        except Exception:
+            api_key = ""
+    discovery = _discover_models_result(
+        ProviderSetup(
+            provider_id=provider.provider_id,
+            adapter=provider.adapter_kind,
+            base_url=provider.base_url,
+            model_id="",
+            api_key=api_key,
+        )
+    )
+    if discovery.base_url != provider.base_url:
+        controller.edit_provider(provider.provider_id, base_url=discovery.base_url)
+    existing = {model.model_id for model in details.models}
+    added: list[str] = []
+    for item in discovery.models:
+        if item.model_id in existing:
+            continue
+        controller.put_model(
+            ModelRecord(
+                provider_id=provider.provider_id,
+                model_id=item.model_id,
+                context_window=item.context_window,
+                max_output_tokens=item.max_output_tokens,
+                provenance="discovered",
+            )
+        )
+        added.append(item.model_id)
+    return {
+        "discovered": len(discovery.models),
+        "added": added,
+        "base_url": discovery.base_url,
+    }
+
+
 def secret_display(has_secret: bool, english: bool) -> str:
     """What is shown where a stored secret would be. Never the secret.
 
@@ -4175,6 +4256,7 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
         BINDINGS = [
             # Arrow keys belong to the focused OptionList. Once Tab moves to a
             # button, they must not keep moving a hidden list selection.
+            Binding("d", "discover", "Discover models", priority=True),
             Binding("escape", "close", _C["en"]["cancel"], priority=True),
         ]
         DEFAULT_CSS = """
@@ -4220,6 +4302,7 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 f"retries={provider.max_transport_retries}\n"
                 f"credential={self._label('проверяется…', 'checking…')}"
             )
+            self._summary_base = summary
             with Vertical(id="provider-details-dialog"):
                 yield Static(
                     self._label("Провайдер и модели", "Provider and models"),
@@ -4249,6 +4332,10 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                     yield Button(
                         self._label("Сделать модель активной", "Set model active"),
                         id="provider-details-active",
+                    )
+                    yield Button(
+                        self._label("Найти модели", "Discover models"),
+                        id="provider-details-discover",
                     )
                     yield Button(self._label("Закрыть", "Close"), id="provider-details-close")
 
@@ -4302,12 +4389,14 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 f"credential={credential_text}"
                 + (f" · {fingerprint}" if fingerprint else "")
             )
+            self._summary_base = summary
             self.query_one("#provider-details-summary", Static).update(summary)
             self._refresh_models(details=details)
 
         def _refresh_models(self, *, details: Any = None) -> None:
             if details is None:
                 details = self._controller.details(self.provider_id)
+            self._models = {model.model_id: model for model in details.models}
             options = self.query_one("#provider-details-models", OptionList)
             selected = details.selected_model
             options.clear_options()
@@ -4349,6 +4438,72 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             self.query_one("#provider-details-error", Static).update(
                 self._label("Модель активирована.", "Model activated.")
             )
+
+        @on(OptionList.OptionHighlighted, "#provider-details-models")
+        def _model_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            """Append the highlighted model's honest capability row to the summary.
+
+            The row renders exactly what the registry records — ``?`` stays
+            ``?``. It lives on the summary block, not the status line, so it
+            never overwrites an operation result such as "Model activated."
+            """
+
+            base = getattr(self, "_summary_base", None)
+            if base is None:
+                return
+            summary = self.query_one("#provider-details-summary", Static)
+            model_id = getattr(event.option, "id", None)
+            model = getattr(self, "_models", {}).get(model_id)
+            if model is None:
+                summary.update(base)
+                return
+            capability = (
+                f"{model.model_id}: {model_capability_summary(model)} · "
+                + self._label(
+                    f"источник={model.provenance}",
+                    f"source={model.provenance}",
+                )
+            )
+            summary.update(f"{base}\n{capability}")
+
+        def action_discover(self) -> None:
+            """Discover models from the provider endpoint and add the new ones."""
+
+            self.query_one("#provider-details-error", Static).update(
+                self._label("Поиск моделей…", "Discovering models…")
+            )
+
+            def execute() -> None:
+                try:
+                    result: Optional[Dict[str, Any]] = discover_models_for_provider(
+                        self._controller, self.provider_id
+                    )
+                    error: Optional[str] = None
+                except Exception as exc:
+                    result = None
+                    error = str(redact(exc))
+                with contextlib.suppress(Exception):
+                    self.app.call_from_thread(self._discover_done, result, error)
+
+            self.app.run_worker(
+                execute, thread=True, exclusive=True, group="provider-discover"
+            )
+
+        def _discover_done(
+            self, result: Optional[Dict[str, Any]], error: Optional[str]
+        ) -> None:
+            status = self.query_one("#provider-details-error", Static)
+            if error or result is None:
+                status.update(str(redact(error or "error")))
+                return
+            added = result.get("added") or []
+            status.update(
+                self._label(
+                    f"Найдено моделей: {result.get('discovered', 0)}, добавлено: {len(added)}.",
+                    f"Discovered {result.get('discovered', 0)} model(s), added {len(added)}.",
+                )
+            )
+            self._schedule_details_refresh()
 
         @on(Switch.Changed, "#provider-bypass")
         def _bypass_changed(self, event: Switch.Changed) -> None:
@@ -4402,6 +4557,8 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
         def _pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "provider-details-active":
                 self.action_set_active()
+            elif event.button.id == "provider-details-discover":
+                self.action_discover()
             elif event.button.id == "provider-details-close":
                 self.action_close()
 
