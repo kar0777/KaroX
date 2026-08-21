@@ -5058,6 +5058,19 @@ if _HAS_TEXTUAL:
                 except Exception as exc:
                     self.app.call_from_thread(self._probe_failed, exc, setup)
                     return
+                # A verified provider gets its catalog registered right away:
+                # the owner should not need to know a model id by heart. A
+                # discovery failure never fails the save -- the provider is
+                # verified and usable, and the catalog can be refreshed later
+                # with /model refresh or the details screen.
+                try:
+                    from .tui_connections import discover_models_for_provider
+
+                    discover_models_for_provider(
+                        _provider_controller(), setup.provider_id.strip()
+                    )
+                except Exception:
+                    pass
                 self.app.call_from_thread(self.dismiss, setup)
 
             self.run_worker(execute, thread=True, exclusive=True, group="provider-save")
@@ -8139,7 +8152,19 @@ if _HAS_TEXTUAL:
             elif command == "/home":
                 self.action_home()
             elif command in {"/model", "/models"}:
-                self.action_model()
+                requested = argument.strip().casefold()
+                if requested in {"refresh", "\u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c"}:
+                    self._refresh_models_command()
+                elif requested:
+                    self._write_notice(
+                        self._label(
+                            "\u0424\u043e\u0440\u043c\u0430\u0442: /model \u0438\u043b\u0438 /model refresh",
+                            "Usage: /model or /model refresh",
+                        ),
+                        "error",
+                    )
+                else:
+                    self.action_model()
             elif command == "/usage":
                 self.action_usage()
             elif command == "/cost":
@@ -9105,6 +9130,60 @@ if _HAS_TEXTUAL:
             self.push_screen(
                 ModelPickerScreen(self.language, effort=self.reasoning_effort),
                 self._model_picker_done,
+            )
+
+        def _refresh_models_command(self) -> None:
+            """/model refresh: rediscover the active provider's catalog.
+
+            Runs the same in-place discovery as the provider details screen,
+            so the command UX and the button cannot drift apart. Honest
+            counts, no invented capabilities, errors redacted.
+            """
+
+            selected = _selected_model()
+            if selected is None:
+                self._write_notice(
+                    self._label(
+                        "\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u043e\u0434\u0435\u043b\u044c: /model \u0438\u043b\u0438 /connect.",
+                        "Select a model first: /model or /connect.",
+                    ),
+                    "warning",
+                )
+                return
+            provider_id = selected.provider_id
+            self._write_notice(
+                self._label(
+                    f"\u041e\u0431\u043d\u043e\u0432\u043b\u044f\u044e \u043a\u0430\u0442\u0430\u043b\u043e\u0433 \u043c\u043e\u0434\u0435\u043b\u0435\u0439 {provider_id}\u2026",
+                    f"Refreshing the {provider_id} model catalog\u2026",
+                ),
+                "info",
+            )
+
+            def execute() -> None:
+                from .tui_connections import discover_models_for_provider
+
+                try:
+                    summary = discover_models_for_provider(
+                        _provider_controller(), provider_id
+                    )
+                except Exception as exc:
+                    self.call_from_thread(
+                        self._write_notice, str(redact(exc)), "error"
+                    )
+                    return
+                added = len(summary.get("added") or [])
+                discovered = summary.get("discovered", 0)
+                self.call_from_thread(
+                    self._write_notice,
+                    self._label(
+                        f"\u041d\u0430\u0439\u0434\u0435\u043d\u043e \u043c\u043e\u0434\u0435\u043b\u0435\u0439: {discovered}, \u043d\u043e\u0432\u044b\u0445 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e: {added}.",
+                        f"Discovered {discovered} models, {added} new added.",
+                    ),
+                    "success",
+                )
+
+            self.run_worker(
+                execute, thread=True, exclusive=True, group="model-refresh"
             )
 
         def _model_picker_done(self, choice: Optional[str]) -> None:
