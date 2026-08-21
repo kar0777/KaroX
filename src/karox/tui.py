@@ -137,6 +137,9 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/workspace PATH": "change the working project folder",
     "/sponsors": "show or hide the sponsor line",
     "/clear": "clear the conversation",
+    "/new": "start a new task (durable sessions are kept)",
+    "/resume": "return to a session: browser, or /resume SESSION_ID",
+    "/compact": "compact the conversation into a handoff + continuation context",
     "/help": "show command help",
     "/quit": "exit KaroX",
     "/connections": "manage connections (MCP clients and API providers)",
@@ -166,6 +169,9 @@ _COMMANDS_RU: Dict[str, str] = {
     "/workspace ПУТЬ": "изменить рабочую папку проекта",
     "/sponsors": "показать или скрыть строку спонсоров",
     "/clear": "очистить диалог",
+    "/new": "начать новую задачу (сессии сохраняются)",
+    "/resume": "вернуться к сессии: браузер или /resume ID",
+    "/compact": "сжать диалог в handoff и контекст продолжения",
     "/help": "показать справку по командам",
     "/quit": "выйти из KaroX",
     "/connections": "управление подключениями (MCP-клиенты и API-провайдеры)",
@@ -342,6 +348,9 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/usage",
     "/connect",
     "/sessions",
+    "/new",
+    "/resume",
+    "/compact",
     "/workspace",
     "/help",
     "/quit",
@@ -409,6 +418,69 @@ def _suggest_command(typed: str, language: str) -> str:
     if language == "ru":
         return _TEXT["ru"].get("suggestion", "Возможно, вы имели в виду {cmd}.").format(cmd=suggested)
     return _TEXT["en"].get("suggestion", "Did you mean {cmd}?").format(cmd=suggested)
+
+
+_CONTINUATION_CONTEXT_LIMIT = 4000
+
+
+def _continuation_from_handoff(document: Mapping[str, Any]) -> str:
+    """Render a bounded continuation preamble from a structured handoff.
+
+    ``build_handoff`` already redacted and length-capped every field; this
+    rendering only selects and truncates, it never adds payloads. Goal and
+    constraints come first because they are the contract, then what happened,
+    then what is still open.
+    """
+
+    parts: list[str] = []
+
+    def _add(label: str, value: Any) -> None:
+        text = str(value).strip() if value is not None else ""
+        if text:
+            parts.append(f"{label}: {text}")
+
+    _add("Goal", document.get("goal"))
+    constraints = document.get("constraints")
+    if isinstance(constraints, Mapping):
+        _add("Repository", constraints.get("repository"))
+        _add("Branch", constraints.get("branch"))
+        _add("Access profile", constraints.get("access_profile"))
+    _add("Summary", document.get("summary"))
+    changed = document.get("changed_files")
+    if isinstance(changed, list) and changed:
+        shown = [str(item) for item in changed[-20:]]
+        suffix = "" if len(changed) <= 20 else f" (+{len(changed) - 20} more)"
+        parts.append("Changed files: " + ", ".join(shown) + suffix)
+    checks = document.get("check_results")
+    if isinstance(checks, list) and checks:
+        rendered: list[str] = []
+        for item in checks[-5:]:
+            if not isinstance(item, Mapping):
+                continue
+            argv = item.get("argv")
+            command = (
+                " ".join(str(part) for part in argv)
+                if isinstance(argv, list)
+                else str(argv or "?")
+            )
+            rendered.append(f"{command} -> exit {item.get('exit_code')}")
+        if rendered:
+            parts.append("Recent checks: " + "; ".join(rendered))
+    remaining = document.get("remaining_steps")
+    if isinstance(remaining, list) and remaining:
+        parts.append(
+            "Remaining steps: " + "; ".join(str(step) for step in remaining[:10])
+        )
+    errors = document.get("errors")
+    if isinstance(errors, list) and errors:
+        parts.append("Open errors: " + "; ".join(str(item) for item in errors[-5:]))
+    unfinished = document.get("unfinished_actions")
+    if isinstance(unfinished, list) and unfinished:
+        parts.append(
+            "Unfinished actions: "
+            + "; ".join(str(item) for item in unfinished[-5:])
+        )
+    return "\n".join(parts)[:_CONTINUATION_CONTEXT_LIMIT]
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -6608,6 +6680,9 @@ if _HAS_TEXTUAL:
             # across the detail screen so returning does not send the cursor
             # back to the top of the list.
             self._browser_selection: Optional[str] = None
+            # What /compact produced and the next submission carries: a bounded,
+            # redacted continuation preamble. Consumed exactly once on dispatch.
+            self._continuation_context: Optional[str] = None
             self._view_detach: Optional[Callable[[], None]] = None
             self._view_bus: Optional[EventBus] = None
             # Run identity, not session identity. A monotonic counter bumped by
@@ -8069,6 +8144,12 @@ if _HAS_TEXTUAL:
                     self._open_connections(CONNECT_FOCUS_CLIENTS)
             elif command == "/clear":
                 self.action_clear_log()
+            elif command == "/new":
+                self._start_new_task()
+            elif command == "/resume":
+                self._resume_session(argument.strip())
+            elif command == "/compact":
+                self._compact_conversation()
             elif command == "/verify":
                 try:
                     decoded = json.loads(argument)
@@ -10115,8 +10196,20 @@ if _HAS_TEXTUAL:
             # the production path rather than from a helper a test could call on
             # its own, so the typed status row proves the real lifecycle.
             self._publish_agent_started(run, task)
+            task_for_agent = task
+            if self._continuation_context:
+                # /compact stored a bounded, redacted continuation preamble.
+                # The screen and the published run keep the task as typed; only
+                # the dispatched agent carries the extra context, exactly once.
+                task_for_agent = (
+                    "Continuation context from the previous session "
+                    "(structured handoff, bounded):\n"
+                    f"{self._continuation_context}\n\n"
+                    f"Task:\n{task}"
+                )
+                self._continuation_context = None
             argv = _agent_argv(
-                task,
+                task_for_agent,
                 self.repository,
                 self.verification,
                 session_id,
@@ -10811,6 +10904,163 @@ if _HAS_TEXTUAL:
                 "Ответ без текста.", "Answer without text."
             )
             self._write_assistant(body)
+
+        def _start_new_task(self) -> None:
+            """/new: a fresh conversation and a fresh session on submit.
+
+            Log-plus-screen state only: the transcript is cleared, the
+            on-screen session binding and any /compact continuation context are
+            dropped. Durable SessionRecords are never touched -- /resume
+            returns to them.
+            """
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "KaroX ещё работает. Текущее действие показано над строкой ввода.",
+                        "KaroX is still working. The current action is shown above the input.",
+                    ),
+                    "warning",
+                )
+                return
+            self.action_clear_log()
+            self.active_session = None
+            self._history_seen = 0
+            self._history_fingerprint = None
+            self._continuation_context = None
+            self._refresh_status()
+            self._write_notice(
+                self._label(
+                    "Новая задача: следующее сообщение начнёт свежую сессию. "
+                    "Прежние сессии сохранены — /resume вернёт к ним.",
+                    "New task: the next message starts a fresh session. "
+                    "Existing sessions are kept - /resume returns to one.",
+                ),
+                "success",
+            )
+
+        def _resume_session(self, target: str) -> None:
+            """/resume: the Session Browser act, typed.
+
+            Without an argument this opens the Session Browser -- one screen
+            owns the list. With an id it performs exactly what choosing
+            ``resume`` on a row performs: make that session the one on screen
+            and show its detail. Nothing here starts an agent; resuming the
+            work itself stays an explicit task the person types.
+            """
+
+            if not target:
+                self.action_session_browser()
+                return
+            try:
+                row = self._view_store.summary(target)
+            except Exception:
+                row = None
+            if row is None:
+                self._write_notice(
+                    self._label(
+                        f"Сессия {escape(target)} не найдена. /sessions покажет, что существует.",
+                        f"Session {escape(target)} was not found. /sessions shows what exists.",
+                    ),
+                    "error",
+                )
+                return
+            self.active_session = target
+            self._history_seen = 0
+            self._history_fingerprint = None
+            self._refresh_status()
+            self._open_session_detail(target)
+
+        def _compact_conversation(self) -> None:
+            """/compact: handoff document + continuation context.
+
+            Per SESSION-MODEL.md the durable record is never compacted; what is
+            compacted here is the conversation surface. The structured handoff
+            is built by the backend (bounded and redacted by ``build_handoff``),
+            the transcript is replaced by its summary, and the next submitted
+            task carries the bounded continuation preamble exactly once.
+            """
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "KaroX ещё работает. Текущее действие показано над строкой ввода.",
+                        "KaroX is still working. The current action is shown above the input.",
+                    ),
+                    "warning",
+                )
+                return
+            target = self.active_session
+            if not target:
+                self._write_notice(
+                    self._label(
+                        "Нет активной сессии для сжатия. /resume выберет её.",
+                        "No active session to compact. /resume picks one.",
+                    ),
+                    "warning",
+                )
+                return
+            self.query_one("#busy", LoadingIndicator).styles.display = "block"
+            self._set_activity(
+                self._label("Готовлю handoff…", "Building the handoff…"),
+                "working",
+            )
+            argv = [
+                "session",
+                "handoff",
+                target,
+                "--json",
+                "--repository",
+                str(self.repository),
+            ]
+
+            def execute() -> None:
+                code, output = _capture_cli(argv)
+                self.call_from_thread(self._compact_finished, target, code, output)
+
+            self.run_worker(execute, thread=True, exclusive=True, group="inspection")
+
+        def _compact_finished(self, session_id: str, code: int, output: str) -> None:
+            self.query_one("#busy", LoadingIndicator).styles.display = "none"
+            self._reset_activity()
+            if code != 0:
+                self._write_notice(
+                    self._label(
+                        f"Handoff для {escape(session_id)} не построен (код {code}).",
+                        f"The handoff for {escape(session_id)} could not be built (exit {code}).",
+                    ),
+                    "error",
+                )
+                detail = output.strip()
+                if detail:
+                    self._write(f"[#e0a3a3]{escape(detail[:2000])}[/]")
+                return
+            try:
+                document = json.loads(output)
+            except json.JSONDecodeError:
+                self._write_notice(
+                    self._label(
+                        "Вывод handoff не является корректным JSON.",
+                        "The handoff output was not valid JSON.",
+                    ),
+                    "error",
+                )
+                return
+            context = _continuation_from_handoff(document)
+            self._continuation_context = context or None
+            self._transcript().clear()
+            if context:
+                self._write(
+                    f"[bold #e0dccc]{self._label('Продолжение', 'Continuation')}[/]\n"
+                    + escape(context)
+                )
+            self._write_notice(
+                self._label(
+                    "Диалог сжат: следующее сообщение продолжит работу с этим контекстом.",
+                    "Conversation compacted: the next message continues with this context.",
+                ),
+                "success",
+            )
 
         def _run_inspection(self, argv: Sequence[str], label: str) -> None:
             loading = {
