@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from .agent import AgentLimits, ContextBudget
 from .providers import REASONING_EFFORTS
