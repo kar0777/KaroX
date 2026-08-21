@@ -1030,8 +1030,33 @@ def _signal_process_group(process: Optional[object], *, hard: bool) -> None:
         pass
 
 
+def _close_child_pipes(process: subprocess.Popen[str]) -> None:
+    """Release a stopped child's piped handles instead of leaving them to GC.
+
+    ``stdout``/``stderr`` normally belong to the drain thread, which closes them
+    at EOF; closing here as well is idempotent and covers children that were
+    never mirrored. ``stdin`` has no reader thread, so this is its only owner.
+    """
+    # ``getattr`` rather than attribute access: launch tests exercise these
+    # paths with minimal fake processes that only model the pieces they need.
+    for stream in (
+        getattr(process, "stdin", None),
+        getattr(process, "stdout", None),
+        getattr(process, "stderr", None),
+    ):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _stop_process(process: Optional[subprocess.Popen[str]]) -> None:
-    if process is None or process.poll() is not None:
+    if process is None:
+        return
+    if process.poll() is not None:
+        _close_child_pipes(process)
         return
     try:
         _signal_process_group(process, hard=False)
@@ -1044,6 +1069,8 @@ def _stop_process(process: Optional[subprocess.Popen[str]]) -> None:
             process.wait(timeout=5)
         except (OSError, subprocess.SubprocessError):
             pass
+    finally:
+        _close_child_pipes(process)
 
 
 def _tail_detail(output_tail: deque[str]) -> str:
@@ -1090,10 +1117,23 @@ def _mirror_child_output(
         stream = process.stdout
         if stream is None:
             return
-        for raw_line in stream:
-            line = raw_line.rstrip()
-            output_tail.append(line)
-            print(f"[{name}] {line}", flush=True)
+        # The reader owns the read end: it closes the wrapper at EOF so a
+        # stopped child never leaves an unclosed TextIOWrapper behind for the
+        # garbage collector to warn about. A concurrent _stop_process() may
+        # close the stream first; that reads as EOF/ValueError here and both
+        # are a normal shutdown, not an error.
+        try:
+            for raw_line in stream:
+                line = raw_line.rstrip()
+                output_tail.append(line)
+                print(f"[{name}] {line}", flush=True)
+        except ValueError:
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
     reader = threading.Thread(
         target=drain,
@@ -1147,14 +1187,24 @@ def start_cloudflare_quick_tunnel(
         if stream is None:
             ready.set()
             return
-        for raw_line in stream:
-            line = raw_line.rstrip()
-            output_tail.append(line)
-            match = _QUICK_TUNNEL_URL.search(line)
-            if match and state["public_url"] is None:
-                state["public_url"] = match.group(0)
-                ready.set()
-        ready.set()
+        # Reader owns the read end: close it at EOF so the stopped tunnel
+        # child never leaves an unclosed TextIOWrapper for the GC to report.
+        try:
+            for raw_line in stream:
+                line = raw_line.rstrip()
+                output_tail.append(line)
+                match = _QUICK_TUNNEL_URL.search(line)
+                if match and state["public_url"] is None:
+                    state["public_url"] = match.group(0)
+                    ready.set()
+        except ValueError:
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+            ready.set()
 
     reader = threading.Thread(
         target=drain,
@@ -1233,14 +1283,24 @@ def start_tailscale_foreground_funnel(
         if stream is None:
             ready.set()
             return
-        for raw_line in stream:
-            line = raw_line.rstrip()
-            output_tail.append(line)
-            print(f"[tailscale] {line}", flush=True)
-            if plan.public_url in line or ".ts.net" in line:
-                confirmed["public_url"] = True
-                ready.set()
-        ready.set()
+        # Reader owns the read end: close it at EOF so a stopped funnel child
+        # never leaves an unclosed TextIOWrapper for the GC to report.
+        try:
+            for raw_line in stream:
+                line = raw_line.rstrip()
+                output_tail.append(line)
+                print(f"[tailscale] {line}", flush=True)
+                if plan.public_url in line or ".ts.net" in line:
+                    confirmed["public_url"] = True
+                    ready.set()
+        except ValueError:
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+            ready.set()
 
     reader = threading.Thread(
         target=drain,

@@ -22,6 +22,7 @@ removal gate is parity evidence collected by the checker.
 from __future__ import annotations
 
 import dataclasses
+import threading
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
@@ -34,9 +35,60 @@ def _store_path() -> Path:
     return runtime_dir() / "vnext" / "transcript.db"
 
 
+_STORE_GUARD = threading.Lock()
+_SHARED_STORE: Optional[TranscriptStore] = None
+_SHARED_STORE_PATH: Optional[Path] = None
+
+
 def get_transcript_store() -> TranscriptStore:
-    """Return the shared transcript store for this KaroX runtime."""
-    return TranscriptStore(_store_path())
+    """Return the shared transcript store for this KaroX runtime.
+
+    One store -- one SQLite WAL connection -- per process, exactly as the class
+    docstring promises. This used to construct a brand-new ``TranscriptStore``
+    (and connection) per call; the TUI calls this from a polling timer, so every
+    tick leaked a connection that surfaced later as
+    ``ResourceWarning: unclosed database`` at garbage-collection time.
+
+    The instance is cached per resolved store path: tests that redirect
+    ``KAROX_RUNTIME_DIR`` to a fresh temporary tree get a fresh store, and the
+    store for the previous path is closed rather than abandoned.
+    """
+    global _SHARED_STORE, _SHARED_STORE_PATH
+    path = _store_path()
+    with _STORE_GUARD:
+        if _SHARED_STORE is not None and _SHARED_STORE_PATH == path:
+            return _SHARED_STORE
+        previous = _SHARED_STORE
+        _SHARED_STORE = None
+        _SHARED_STORE_PATH = None
+        if previous is not None:
+            try:
+                previous.close()
+            except Exception:
+                pass
+        store = TranscriptStore(path)
+        _SHARED_STORE = store
+        _SHARED_STORE_PATH = path
+        return store
+
+
+def close_transcript_store() -> None:
+    """Close the shared transcript store, if one is open.
+
+    Idempotent. The TUI calls this on unmount and tests call it in teardown so
+    the SQLite handle has an explicit owner instead of relying on interpreter
+    garbage collection.
+    """
+    global _SHARED_STORE, _SHARED_STORE_PATH
+    with _STORE_GUARD:
+        store = _SHARED_STORE
+        _SHARED_STORE = None
+        _SHARED_STORE_PATH = None
+    if store is not None:
+        try:
+            store.close()
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -360,6 +412,7 @@ __all__ = [
     "TranscriptReader",
     "TypedStep",
     "TypedToolCall",
+    "close_transcript_store",
     "get_transcript_store",
     "make_transcript_observer",
 ]

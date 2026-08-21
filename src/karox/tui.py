@@ -6697,6 +6697,16 @@ if _HAS_TEXTUAL:
             # widgets that no longer exist.
             self._stop_session_view()
             self._stop_bridge(quiet=True)
+            # The typed-transcript poller reads through the process-shared
+            # store; the app leaving is the moment that SQLite handle loses
+            # its last reader here, so close it explicitly instead of leaving
+            # it to garbage collection.
+            try:
+                from .transcript_shadow import close_transcript_store
+
+                close_transcript_store()
+            except Exception:
+                pass
 
         # ------------------------------------------------- typed event view layer
 
