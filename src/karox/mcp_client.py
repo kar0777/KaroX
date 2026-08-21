@@ -955,7 +955,21 @@ class McpClient:
                     raise McpAccessDenied(
                         "MCP tool schema changed; inspect and reselect the server"
                     )
-                result = await session.call_tool(descriptor.remote_name, arguments)
+                # Call with the server's advertised spelling. A KaroX bridge
+                # advertises ``karox_repo_read_file`` while our normalized
+                # identity stays ``karox.repo.read_file``; sending the dotted
+                # alias made the SDK's client session warn 'Tool ... not listed
+                # by server' and skip structured-content validation on every
+                # normal KaroX-to-KaroX call. The alias is still accepted by
+                # the server, so this changes only which spelling goes on the
+                # wire, never which tool runs.
+                listed_names = {tool.name for tool in listed.tools}
+                call_name = descriptor.remote_name
+                if call_name not in listed_names:
+                    wire_spelling = call_name.replace(".", "_")
+                    if wire_spelling in listed_names:
+                        call_name = wire_spelling
+                result = await session.call_tool(call_name, arguments)
         try:
             payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
             payload = redact(payload, secrets=(secret,) if secret else ())

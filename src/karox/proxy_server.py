@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -165,6 +167,43 @@ _DIAGNOSTICS_TOOL_NAME = "karox.bridge.diagnostics"
 def wire_tool_name(internal_name: str) -> str:
     """Return the ``tools/list`` spelling of an internal tool name."""
     return internal_name.replace(".", "_")
+
+
+# ``tools/list`` advertises wire spellings only, but ``tools/call`` accepts the
+# dotted internal spelling as a compatibility alias (see module comment above).
+# The MCP SDK does not know about the alias, so its lowlevel server logs
+# ``Tool 'karox.repo.read_file' not listed, no validation will be performed``
+# for every dotted call on a perfectly normal flow.  That warning is precise
+# noise: the call is routed, validated, and policy-checked by ``proxy.execute``.
+#
+# The filter below drops exactly that record and only for names this process
+# currently routes as aliases.  A genuinely unknown tool name still warns, and
+# nothing else about the ``mcp`` loggers is touched.
+_ROUTABLE_ALIAS_NAMES: set[str] = {_DIAGNOSTICS_TOOL_NAME}
+_NOT_LISTED_MESSAGE = re.compile(r"Tool '(?P<name>[^']+)' not listed")
+
+
+class _AliasCatalogLogFilter(logging.Filter):
+    """Suppress the SDK catalog warning for advertised-alias calls only."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        match = _NOT_LISTED_MESSAGE.search(message)
+        if match is None:
+            return True
+        return match.group("name") not in _ROUTABLE_ALIAS_NAMES
+
+
+def _install_alias_catalog_log_filter() -> None:
+    target = logging.getLogger("mcp.server.lowlevel.server")
+    if not any(isinstance(item, _AliasCatalogLogFilter) for item in target.filters):
+        target.addFilter(_AliasCatalogLogFilter())
+
+
+_install_alias_catalog_log_filter()
 
 
 def resolve_wire_tool_name(
@@ -756,6 +795,12 @@ def build_proxy_asgi_app(
         for item in descriptors:
             by_internal[item.name] = item
             by_wire.setdefault(wire_tool_name(item.name), item)
+        # The dotted internal spellings are callable aliases of the advertised
+        # wire names; record them so the SDK's 'not listed' warning is dropped
+        # for exactly these names and no others.
+        _ROUTABLE_ALIAS_NAMES.update(
+            name for name in by_internal if wire_tool_name(name) != name
+        )
         descriptor_routes = (by_internal, by_wire)
         return descriptor_routes
 
