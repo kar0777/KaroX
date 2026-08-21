@@ -1746,7 +1746,55 @@ def model_capability_summary(model: Any) -> str:
     for label, attribute in _MODEL_CAPABILITY_FIELDS:
         value = str(getattr(model, attribute, "unknown"))
         parts.append(f"{label}{_CAPABILITY_GLYPHS.get(value, '?')}")
+    pricing = getattr(model, "pricing", None)
+    if pricing is not None:
+        input_price = getattr(pricing, "input_per_million", None)
+        output_price = getattr(pricing, "output_per_million", None)
+        if input_price is not None and output_price is not None:
+            if float(input_price) == 0 and float(output_price) == 0:
+                parts.append("free")
+            else:
+                parts.append(
+                    f"${float(input_price):g}/M in ${float(output_price):g}/M out"
+                )
     return " ".join(parts)
+
+
+def discovered_model_record(provider_id: str, item: Any) -> Any:
+    """A registry record for one discovered model, metadata carried honestly.
+
+    Capabilities keep the discovery's true/false/unknown verdicts exactly;
+    pricing is attached only when the catalog published both token prices,
+    with source "provider-reported" so provenance stays next to the number.
+    Nothing is upgraded from unknown here.
+    """
+
+    from .registry import ModelPricing, ModelRecord
+
+    pricing = None
+    input_price = getattr(item, "input_per_million", None)
+    output_price = getattr(item, "output_per_million", None)
+    if input_price is not None and output_price is not None:
+        pricing = ModelPricing(
+            version="discovered",
+            currency="USD",
+            input_per_million=float(input_price),
+            output_per_million=float(output_price),
+            cache_read_per_million=getattr(item, "cache_read_per_million", None),
+            source="provider-reported",
+        )
+    return ModelRecord(
+        provider_id=provider_id,
+        model_id=item.model_id,
+        context_window=item.context_window,
+        max_output_tokens=item.max_output_tokens,
+        tools=str(getattr(item, "tools", "unknown")),
+        vision=str(getattr(item, "vision", "unknown")),
+        structured_output=str(getattr(item, "structured_output", "unknown")),
+        streaming=str(getattr(item, "streaming", "unknown")),
+        pricing=pricing,
+        provenance="discovered",
+    )
 
 
 def discover_models_for_provider(controller: Any, provider_id: str) -> Dict[str, Any]:
@@ -1754,14 +1802,14 @@ def discover_models_for_provider(controller: Any, provider_id: str) -> Dict[str,
 
     Uses the same discovery wire as the setup wizard and the CLI
     (``_discover_models_result``), with the credential resolved through the
-    controller that owns it. New records carry ``provenance="discovered"``;
+    controller that owns it. New records carry ``provenance="discovered"``
+    plus whatever capability and pricing metadata the catalog published;
     existing records are never overwritten, and when discovery lands on a
     different effective base URL (the automatic ``/v1`` fallback) the provider
     record follows it, mirroring ``karox model discover``. The returned
     summary is secret-free.
     """
 
-    from .registry import ModelRecord
     from .tui import ProviderSetup, _discover_models_result
 
     details = controller.details(provider_id)
@@ -1789,13 +1837,7 @@ def discover_models_for_provider(controller: Any, provider_id: str) -> Dict[str,
         if item.model_id in existing:
             continue
         controller.put_model(
-            ModelRecord(
-                provider_id=provider.provider_id,
-                model_id=item.model_id,
-                context_window=item.context_window,
-                max_output_tokens=item.max_output_tokens,
-                provenance="discovered",
-            )
+            discovered_model_record(provider.provider_id, item)
         )
         added.append(item.model_id)
     return {

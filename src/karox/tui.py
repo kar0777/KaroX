@@ -2101,6 +2101,21 @@ class DiscoveredModel:
     model_id: str
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    # Capability metadata keeps the registry's true/false/unknown contract.
+    # "unknown" means the catalog did not say; discovery never invents a
+    # capability from the adapter kind or the model name.
+    display_name: Optional[str] = None
+    tools: str = "unknown"
+    vision: str = "unknown"
+    structured_output: str = "unknown"
+    streaming: str = "unknown"
+    # USD per million tokens, straight from the provider catalog when it
+    # publishes prices. None means the provider did not publish one.
+    input_per_million: Optional[float] = None
+    output_per_million: Optional[float] = None
+    cache_read_per_million: Optional[float] = None
+    # True/False only when both token prices were published; None is honest.
+    free: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -2437,6 +2452,85 @@ def _response_error_detail(response: httpx.Response) -> str:
     return text[:500] if text and "<html" not in text.lower() else ""
 
 
+def _price_per_million(value: Any) -> Optional[float]:
+    """A catalog's per-token price (OpenRouter style) as USD per million.
+
+    Catalogs publish token prices as decimal strings ("0.000001") or numbers.
+    Anything unparseable, negative, or non-finite is treated as unpublished
+    rather than guessed.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if number != number or number in (float("inf"), float("-inf")) or number < 0:
+        return None
+    return number * 1_000_000
+
+
+def _capability_from_list(values: Any, *names: str) -> str:
+    """true/false when the catalog published a capability list, else unknown.
+
+    A published list is evidence in both directions: naming the capability is
+    "true", omitting it from an existing list is "false". No list at all --
+    an id-only catalog -- stays "unknown".
+    """
+
+    if not isinstance(values, (list, tuple)):
+        return "unknown"
+    published = {str(item).strip().lower() for item in values}
+    return "true" if any(name in published for name in names) else "false"
+
+
+def _discovered_metadata(raw: dict[str, Any], raw_id: str) -> dict[str, Any]:
+    """Capability and pricing metadata one catalog entry actually published.
+
+    ``raw_id`` is the identifier field the entry was keyed by: a catalog whose
+    "name" *is* the id (Gemini) does not thereby publish a display name.
+    """
+
+    extra: dict[str, Any] = {}
+    name = raw.get("displayName") or raw.get("display_name") or raw.get("name")
+    if (
+        isinstance(name, str)
+        and name.strip()
+        and name.strip() not in {raw_id, raw_id.removeprefix("models/")}
+    ):
+        extra["display_name"] = name.strip()[:200]
+    parameters = raw.get("supported_parameters")
+    extra["tools"] = _capability_from_list(parameters, "tools", "tool_choice")
+    extra["structured_output"] = _capability_from_list(
+        parameters, "structured_outputs", "response_format"
+    )
+    architecture = raw.get("architecture")
+    modalities = (
+        architecture.get("input_modalities")
+        if isinstance(architecture, dict)
+        else None
+    )
+    extra["vision"] = _capability_from_list(modalities, "image")
+    pricing = raw.get("pricing")
+    if isinstance(pricing, dict):
+        prompt = _price_per_million(pricing.get("prompt"))
+        completion = _price_per_million(pricing.get("completion"))
+        extra["input_per_million"] = prompt
+        extra["output_per_million"] = completion
+        extra["cache_read_per_million"] = _price_per_million(
+            pricing.get("input_cache_read")
+        )
+        if prompt is not None and completion is not None:
+            extra["free"] = prompt == 0 and completion == 0
+    return extra
+
+
 def _discover_models_result(setup: ProviderSetup) -> ModelDiscovery:
     """Discover models, trying the common OpenAI ``/v1`` base automatically."""
     base_url = setup.base_url.strip().rstrip("/")
@@ -2535,7 +2629,11 @@ def _discover_models_result(setup: ProviderSetup) -> ModelDiscovery:
             or raw.get("max_output_tokens")
             or raw.get("max_completion_tokens")
         )
-        discovered.append(DiscoveredModel(model_id, context, output))
+        discovered.append(
+            DiscoveredModel(
+                model_id, context, output, **_discovered_metadata(raw, raw_id)
+            )
+        )
     if not discovered:
         raise ModelDiscoveryError(
             "empty",
