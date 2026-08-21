@@ -163,6 +163,9 @@ class ExtensionOverlayContractTests(unittest.TestCase):
         self.content = (self.root / "content.js").read_text(encoding="utf-8")
         self.bridge = (self.root / "page_console_bridge.js").read_text(encoding="utf-8")
         self.worker = (self.root / "service_worker.js").read_text(encoding="utf-8")
+        # domAction moved to dom_helpers.js so the deterministic fixture suite
+        # exercises the exact engine production injects.
+        self.helpers = (self.root / "dom_helpers.js").read_text(encoding="utf-8")
 
     # --- cursor ---
 
@@ -314,8 +317,11 @@ class ExtensionOverlayContractTests(unittest.TestCase):
         self.assertIn('navigation transition', self.worker)
 
     def test_dom_action_rejects_overlay_elements(self) -> None:
-        # Even if a page selector matched the host, domAction refuses to act on it.
-        self.assertIn('part of the KaroX overlay', self.worker)
+        # Even if a page selector matched the host, domAction refuses to act
+        # on it. The engine lives in dom_helpers.js now, injected before every
+        # action and shared verbatim with the deterministic fixture suite.
+        self.assertIn('part of the KaroX overlay', self.helpers)
+        self.assertIn('closest(OVERLAY_HOST_SELECTOR)', self.helpers)
 
     def test_snapshot_excludes_overlay_in_text_too(self) -> None:
         # The filter runs before labels are collected for `out.text`.

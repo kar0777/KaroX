@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>KaroX fixture: dynamic</title>
+<style>
+  #tall { height: 3000px; }
+  #appear-later { display: none; }
+  #appear-later.ready { display: block; }
+</style>
+</head>
+<body>
+<h1>Fixture dynamic</h1>
+<nav>
+  <button id="route-home" type="button">Home</button>
+  <button id="route-about" type="button">About</button>
+</nav>
+<main id="route">home</main>
+<button id="start-loading" type="button">Start loading</button>
+<div id="appear-later" data-testid="late-content">Loaded content</div>
+<div id="tall">Tall spacer</div>
+<div id="bottom-marker">Bottom of the page</div>
+<script>
+  function render(route) {
+    document.getElementById("route").textContent = route;
+  }
+  document.getElementById("route-home").addEventListener("click", function () {
+    history.pushState({ route: "home" }, "", "#home");
+    render("home");
+  });
+  document.getElementById("route-about").addEventListener("click", function () {
+    history.pushState({ route: "about" }, "", "#about");
+    render("about");
+  });
+  window.addEventListener("popstate", function (event) {
+    render((event.state && event.state.route) || "home");
+  });
+  document.getElementById("start-loading").addEventListener("click", function () {
+    setTimeout(function () {
+      document.getElementById("appear-later").classList.add("ready");
+    }, 300);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>KaroX fixture: form</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  #hover-tip { display: none; }
+  #hover-zone:hover #hover-tip, #hover-tip.shown { display: block; }
+  #scroll-box { height: 100px; overflow-y: scroll; border: 1px solid #999; }
+  #scroll-inner { height: 600px; }
+  dialog[open] { border: 2px solid #333; }
+</style>
+</head>
+<body>
+<h1>Fixture form</h1>
+<form id="main-form">
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" placeholder="Your name" data-testid="username-input">
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" placeholder="Secret">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" placeholder="you@example.com">
+  <label for="notes">Notes</label>
+  <textarea id="notes" name="notes" placeholder="Write notes"></textarea>
+  <label for="country">Country</label>
+  <select id="country" name="country" multiple>
+    <option value="pl">Poland</option>
+    <option value="de">Germany</option>
+    <option value="fr">France</option>
+  </select>
+  <label><input id="agree" type="checkbox" name="agree"> I agree</label>
+  <label><input type="radio" name="plan" value="basic" id="plan-basic" checked> Basic plan</label>
+  <label><input type="radio" name="plan" value="pro" id="plan-pro"> Pro plan</label>
+  <input id="alt-testid" data-test-id="alternate-field" type="text">
+  <input id="file-upload" type="file" multiple data-testid="file-upload">
+  <button type="submit" id="save">Save</button>
+  <button type="button" id="save-draft">Save as draft</button>
+  <button type="button" class="delete-btn" data-row="1">Delete</button>
+  <button type="button" class="delete-btn" data-row="2">Delete</button>
+</form>
+<div id="submit-log"></div>
+<div id="click-log"></div>
+<button id="open-dialog" type="button">Open dialog</button>
+<div id="dialog" role="dialog" aria-label="Fixture dialog" hidden>
+  <p>Dialog content</p>
+  <button id="close-dialog" type="button">Close dialog</button>
+</div>
+<div id="hover-zone">Hover zone<span id="hover-tip">Tooltip revealed</span></div>
+<div id="dbl-target">Double-click me</div>
+<div id="scroll-box"><div id="scroll-inner">Tall content</div></div>
+<script>
+  document.getElementById("main-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    document.getElementById("submit-log").textContent = "submitted";
+  });
+  document.getElementById("open-dialog").addEventListener("click", function () {
+    document.getElementById("dialog").hidden = false;
+  });
+  document.getElementById("close-dialog").addEventListener("click", function () {
+    document.getElementById("dialog").hidden = true;
+  });
+  document.getElementById("dbl-target").addEventListener("dblclick", function () {
+    document.getElementById("click-log").textContent = "dblclicked";
+  });
+  document.getElementById("hover-zone").addEventListener("mouseover", function () {
+    document.getElementById("hover-tip").classList.add("shown");
+  });
+  var typedEvents = [];
+  document.getElementById("username").addEventListener("input", function (event) {
+    typedEvents.push(event.inputType || "input");
+    window.__karoxTypedEvents = typedEvents;
+  });
+  document.getElementById("file-upload").addEventListener("change", function (event) {
+    var files = event.target.files;
+    var names = [];
+    for (var i = 0; i < files.length; i++) names.push(files[i].name + ":" + files[i].size);
+    document.getElementById("click-log").setAttribute("data-files", names.join(","));
+  });
+</script>
+</body>
+</html>
