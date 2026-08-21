@@ -8607,6 +8607,9 @@ if _HAS_TEXTUAL:
                 else:
                     task_state = self._label("простаивает", "idle")
                 bridge_state = self.public_endpoint or _TEXT[self.language]["off"]
+                from .build_identity import build_identity
+
+                identity = build_identity()
                 rows = [
                     (self._label("Проект", "Project"), str(self.repository)),
                     (self._label("Модель", "Model"), model),
@@ -8622,6 +8625,11 @@ if _HAS_TEXTUAL:
                     ),
                     (self._label("Задача", "Task"), task_state),
                     (self._label("Мост", "Bridge"), bridge_state),
+                    (
+                        self._label("Сборка", "Build"),
+                        identity.summary(),
+                    ),
+                    (self._label("Код", "Code"), identity.package_path),
                 ]
                 if self.reasoning_effort:
                     # After Effort: the Mode row above shifted the list by one.
