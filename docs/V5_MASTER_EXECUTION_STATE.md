@@ -2038,3 +2038,52 @@ The remaining distance to Release Candidate is not new subsystems; it is:
 committing the working tree (needs explicit approval), live TUI multi-project
 and provider acceptance on the host, coverage/security gates, CI parity, and
 truthful release documentation.
+
+## Hard-close continuation — 2026-08-21 (Adapt session)
+
+### P1.4 Adaptive Output: production wiring closed
+
+`karox agent run` now narrates finished native-agent turns through
+`karox.output_policy` at the real call-site (`cli._print_agent_report`):
+`--output-mode` flag with adaptive default, `AgentReport` folded into a
+`TurnReport`, failures/warnings/compaction notices surviving every mode,
+legacy field dump one mode away (DETAILED) and one flag away (`--json`).
+Wiring acceptance `tests/test_output_policy_wiring.py` (5 tests) fails if
+anyone unwires the policy. Commit `288c40b`. Maturity: FOUNDATION → WIRED →
+MEASURED (>40% reduction recorded for the module) → LIVE on the CLI surface.
+
+### Cross-client memory: live evidence refreshed
+
+From this Adapt session, `karox.memory.recall` with the Cyrillic query
+«как меня зовут» returned `preferred_name = Егор` (entry
+`mem-89f383645f6e4d6cbc1f`, provenance `chatgpt-web`) through the running
+hosted bridge — the multilingual retrieval fix is live, no transcript
+dependency.
+
+### Live multi-project overlap re-proven
+
+While durable full-suite job `job-ee250f003302e0e57ff8` ran against
+`KaroX-v5` (workstream `release-live-pass3`), a workstream-routed safe
+`git status` for project `faceboooook` (workstream `faceboooook-live-smoke`,
+different root, different project_id) returned exit 0 in parallel
+(correlation `hosted-f0988c397a754f43bcc5e82828e944c2`). No global lock, no
+cwd switch, read-only access; no `.env` content read.
+
+### Counts and gates for this pass
+
+- Published counts republished from discovery: **2769 suite / 2774 root**
+  (README, README_RU, IMPLEMENTATION_STATUS, RELEASE_CHECKLIST, vNext index).
+- Count + v5 contract gates through pytest: 13 passed.
+- Ruff GREEN; Mypy GREEN (durable `job-eb8ea85f23b612a2f571`).
+- Final durable full pytest + wheel evidence recorded below when complete.
+
+### Honest remaining items (not machine-closable from the hosted surface)
+
+- Coverage execution: the hosted verification allowlist for profile
+  `chatgpt-dev` is exactly ruff/mypy/build/pytest; the coverage command must
+  be authorized owner-side (CI `quality.yml` runs it; last local evidence
+  72.4195% vs 70% threshold, recorded in RELEASE_CHECKLIST).
+- TUI visual smoke (Ctrl+W multi-project, screen-size acceptance) needs the
+  desktop; automated TUI suites remain green inside the full suite.
+- Push/tag/publish/GitHub Release: explicitly out of scope, owner approval.
+

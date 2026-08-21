@@ -5,6 +5,19 @@ All notable changes to KaroX 5 are documented here. The format follows
 
 ## [5.0.0-dev] — Unreleased
 
+### Hard-close: adaptive output wired at the production call-site (2026-08-21)
+- **P1.4 production wiring**: `karox agent run` now narrates every finished
+  native-agent turn through `karox.output_policy` — new `--output-mode`
+  flag (adaptive default), `AgentReport` folded into a `TurnReport`, the
+  complete legacy field dump preserved one mode away (DETAILED) and one
+  flag away (`--json`). Failures, warnings, compaction notices, and check
+  failures survive every mode by contract.
+- **Wiring acceptance**: `tests/test_output_policy_wiring.py` proves the
+  production path (`cli._print_agent_report`) renders through the policy
+  and that the parser exposes `--output-mode`; unwiring the policy fails
+  this suite, not a unit test of an unused class.
+- Published test counts republished from discovery: 2769 suite / 2774 root.
+
 ### Release pass 3 live continuation (2026-08-20, evening)
 - **Unicode/Cyrillic memory retrieval**: NFKC + casefold normalization with
   ё→е collapse, snake_case key parts as tokens, and a small deterministic
