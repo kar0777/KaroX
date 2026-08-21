@@ -6912,6 +6912,10 @@ if _HAS_TEXTUAL:
             # The text currently on screen, so a tick that changes nothing costs
             # a string compare instead of a repaint.
             self._activity_rendered = ""
+            # A2b. The grouped chronology behind the line. Closed groups are
+            # written to the conversation once each; the live group stays on
+            # the activity line. Built lazily per run, None between runs.
+            self._activity_group_stream: Any = None
             # Multi-line pastes held aside while the composer shows a short
             # marker for each. Pasting a stack trace or a diff is the most
             # common way a coding agent is handed context, and a one-line widget
@@ -11162,12 +11166,37 @@ if _HAS_TEXTUAL:
 
             self._activity_calls.clear()
             self._activity_changed.clear()
+            self._activity_group_stream = None
             self._activity_tests = None
             self._activity_kind = ""
             self._activity_reason = ""
             self._activity_started = None
             self._activity_rendered = ""
             self._set_activity("", "idle")
+
+        def _flush_activity_groups(self, *, finished: bool = False) -> None:
+            """Write each closed activity group to the conversation, once.
+
+            The grouped chronology is the product surface of the typed event
+            pipeline: what the run actually did, folded into catalog words
+            and integers. Raw calls stay in Session Detail, on demand. No
+            branch here interpolates text taken from a tool payload, and a
+            rendering failure must never take the interface down.
+            """
+
+            stream = getattr(self, "_activity_group_stream", None)
+            if stream is None:
+                return
+            try:
+                from .activity_stream import render_group_lines
+
+                if finished:
+                    stream.finish()
+                english = self.language != "ru"
+                for group in stream.pop_closed():
+                    self._write("\n".join(render_group_lines(group, english)))
+            except Exception:
+                pass
 
         def _finish_activity(
             self, kind: str, reason: str = "", *, files: Sequence[str] = ()
@@ -11249,6 +11278,7 @@ if _HAS_TEXTUAL:
             if latest < self._history_seen:
                 # Session changed (new run); reset cursor.
                 self._history_seen = 0
+                self._activity_group_stream = None
             if latest >= self._history_seen:
                 try:
                     new_events = list(store.replay(
@@ -11257,9 +11287,24 @@ if _HAS_TEXTUAL:
                 except Exception:
                     new_events = []
                 self._history_seen = latest + 1
+                stream = self._activity_group_stream
+                if stream is None and new_events:
+                    try:
+                        from .activity_stream import ActivityStream
+
+                        stream = ActivityStream()
+                    except Exception:
+                        stream = None
+                    self._activity_group_stream = stream
                 for event in new_events:
                     kind = event.kind
                     payload = event.payload
+                    if stream is not None:
+                        try:
+                            stream.feed(kind, payload)
+                        except Exception:
+                            # An observer must not take the interface down.
+                            pass
                     if kind == "ToolCallStarted":
                         tool = str(payload.get("tool") or "tool")
                         call_id = str(payload.get("call_id") or event.parent_id or tool)
@@ -11276,6 +11321,7 @@ if _HAS_TEXTUAL:
                         pass
                     elif kind == "AgentStepCompleted":
                         pass
+                self._flush_activity_groups()
             # Always read assistant content: the typed stream tracks tool
             # calls and steps but NOT the model's text output.
             self._poll_assistant_content()
@@ -11397,6 +11443,7 @@ if _HAS_TEXTUAL:
             # publisher below is handed ``run`` and reads ``run.session_id`` from
             # the identity it was given, so no branch here can clear it first.
             self._poll_typed_transcript()
+            self._flush_activity_groups(finished=True)
             self.agent_busy = False
             self.agent_process = None
             self.query_one("#composer", Input).disabled = False
