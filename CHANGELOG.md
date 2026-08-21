@@ -5,6 +5,24 @@ All notable changes to KaroX 5 are documented here. The format follows
 
 ## [5.0.0-dev] — Unreleased
 
+### Total product QA + UX hardening (2026-08-21)
+- **Shared bridge multi-project fix**: selecting another approved project no
+  longer degrades the bridge card to "not configured / Launch KaroX".
+  `ServiceConnectScreen` discovery now honours the saved profile's approved
+  project registry; unapproved projects still never match.
+- **Small-terminal usability**: `ServiceConnectScreen`, `ConnectionHubScreen`,
+  `ModelProvidersScreen` (also fixed a hard `width: 86`), and the Ctrl+W
+  workspace manager scroll instead of clipping controls; focus scrolls into
+  view. New gate `tests/test_tui_total_size_acceptance.py` exercises
+  40x12..160x45 plus 73x19, RU at every size.
+- **Coverage stall hardening**: the shared test git sandbox isolates
+  GIT_CONFIG_GLOBAL/SYSTEM, disables prompts, and bounds `git init` at 120s
+  with an actionable error, removing the fsmonitor/locked-gitconfig hang mode
+  observed during the owner's coverage run.
+- **Total UI acceptance record**: docs/V5_TOTAL_UI_ACCEPTANCE.md inventories
+  all 35 shipping screens with acceptance state and evidence.
+- Published test counts republished from discovery: 2775 suite / 2780 root.
+
 ### Hard-close: adaptive output wired at the production call-site (2026-08-21)
 - **P1.4 production wiring**: `karox agent run` now narrates every finished
   native-agent turn through `karox.output_policy` — new `--output-mode`
