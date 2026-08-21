@@ -16,7 +16,7 @@ from .project_registry import ProjectRegistry
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
@@ -216,7 +216,10 @@ class WorkspaceManagerScreen(ModalScreen[Optional[WorkspaceAction]]):
         return english if self.language != "ru" else russian
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="workspace-manager"):
+        # VerticalScroll: at small terminal sizes the list + input + buttons
+        # exceed max-height and a plain Vertical clipped the button row with
+        # no way to reach Use/Default/Remove/Back.
+        with VerticalScroll(id="workspace-manager"):
             yield Static(
                 self._label("Рабочие папки", "Workspaces"),
                 id="workspace-manager-title",

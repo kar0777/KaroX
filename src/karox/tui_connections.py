@@ -2276,7 +2276,10 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             return merge_hub_rows(providers, services)
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="connhub-dialog"):
+            # VerticalScroll: at 46x14-class terminals the title + list + hint
+            # exceed max-height and a plain Vertical clipped the hint and error
+            # rows with no way to reach them.
+            with VerticalScroll(id="connhub-dialog"):
                 yield Static(
                     _label(
                         self.language, _C["ru"]["hub_title"], _C["en"]["hub_title"]
@@ -4517,11 +4520,15 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
         ]
         DEFAULT_CSS = """
         ModelProvidersScreen { align: center middle; background: #0e0c08 92%; }
-        #mp-list-dialog { width: 86; height: 86%; background: #1a1712;
+        /* `width: 100%` with a ceiling: a fixed 86 was wider than 40-80
+           column terminals and clipped the whole right side. Height grows
+           with content and scrolls past max-height instead of clipping. */
+        #mp-list-dialog { width: 100%; max-width: 86; height: auto;
+          max-height: 90%; background: #1a1712;
           border: round #c6a56b; padding: 1 2; }
         #mp-list-dialog .title { text-style: bold; color: #e5e5e5; }
         #mp-list-dialog .hint { color: #8a7e6a; margin-bottom: 1; }
-        #mp-providers { height: 1fr; border: round #4a4338; }
+        #mp-providers { height: auto; max-height: 16; border: round #4a4338; }
         #mp-list-error { color: #e0a3a3; min-height: 1; max-height: 4;
           text-wrap: wrap; overflow-y: auto; }
         #mp-list-error.status-success { color: #8aab7e; }
@@ -4568,7 +4575,9 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             return rows
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="mp-list-dialog"):
+            # VerticalScroll for the same reason as the hub: fixed-height
+            # dialogs clipped the action buttons at small terminal sizes.
+            with VerticalScroll(id="mp-list-dialog"):
                 yield Static(self._label("API-провайдеры", "API providers"), classes="title")
                 yield Static(_t(self.language, "model_providers_hint"), classes="hint")
                 yield OptionList(id="mp-providers")
