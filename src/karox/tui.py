@@ -134,6 +134,7 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/doctor": "run KaroX diagnostics",
     "/verify JSON": "change the verification command",
     "/language": "change interface language",
+    "/project": "switch project: manager, or /project ID or PATH",
     "/workspace PATH": "change the working project folder",
     "/sponsors": "show or hide the sponsor line",
     "/clear": "clear the conversation",
@@ -166,6 +167,7 @@ _COMMANDS_RU: Dict[str, str] = {
     "/doctor": "запустить диагностику KaroX",
     "/verify JSON": "изменить команду проверки",
     "/language": "изменить язык интерфейса",
+    "/project": "проекты: менеджер или /project ID или ПУТЬ",
     "/workspace ПУТЬ": "изменить рабочую папку проекта",
     "/sponsors": "показать или скрыть строку спонсоров",
     "/clear": "очистить диалог",
@@ -351,6 +353,7 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/new",
     "/resume",
     "/compact",
+    "/project",
     "/workspace",
     "/help",
     "/quit",
@@ -481,6 +484,28 @@ def _continuation_from_handoff(document: Mapping[str, Any]) -> str:
             + "; ".join(str(item) for item in unfinished[-5:])
         )
     return "\n".join(parts)[:_CONTINUATION_CONTEXT_LIMIT]
+
+
+def _resolve_project_target(registry: Any, target: str) -> Optional[str]:
+    """Resolve a /project argument to an approved path: id first, then path.
+
+    Returns ``None`` when the registry does not know the target, so the caller
+    can fall through to the same path rules /workspace already enforces -- the
+    two spellings must not disagree about safety.
+    """
+
+    from .project_registry import ProjectRegistryError
+
+    cleaned = target.strip().strip('"')
+    try:
+        return str(registry.get(cleaned).path)
+    except (ProjectRegistryError, OSError):
+        pass
+    try:
+        entry = registry.entry_for_path(cleaned)
+    except (ProjectRegistryError, OSError):
+        return None
+    return str(entry.path) if entry is not None else None
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -8115,6 +8140,8 @@ if _HAS_TEXTUAL:
                 self.push_screen(
                     LanguageScreen(allow_cancel=True), self._language_selected
                 )
+            elif command == "/project":
+                self._project_command(argument.strip())
             elif command == "/workspace":
                 raw_path = argument.strip().strip('"')
                 if not raw_path:
@@ -8373,6 +8400,28 @@ if _HAS_TEXTUAL:
             except (OSError, RuntimeError, ProjectRegistryError) as exc:
                 self._write_notice(str(exc), "error")
                 self.action_workspace()
+
+        def _project_command(self, target: str) -> None:
+            """/project: the workspace act, typed.
+
+            Without an argument this opens the same manager Ctrl+W opens -- one
+            screen owns the approved list. With an argument it switches to an
+            approved project by id or approved path, and an unknown target falls
+            through to ``_switch_workspace`` so /project and /workspace cannot
+            disagree about which folders are safe.
+            """
+
+            if not target:
+                self.action_workspace()
+                return
+            resolved: Optional[str] = None
+            try:
+                resolved = _resolve_project_target(
+                    self._workspace_registry(), target
+                )
+            except Exception:
+                resolved = None
+            self._switch_workspace(resolved if resolved is not None else target)
 
         def _workspace_selected(self, path: Optional[str]) -> None:
             """Legacy picker callback retained for direct tests and old extensions."""
