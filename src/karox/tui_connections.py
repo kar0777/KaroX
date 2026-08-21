@@ -5098,6 +5098,25 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 str(self._current_repository())
             )
 
+        def _saved_profile_covers_current(self, saved: Any) -> bool:
+            """Whether this saved bridge serves the project selected in KaroX.
+
+            A physical bridge serves every project in its approved registry,
+            not only the anchor repository it was first created for. Selecting
+            another approved project must keep the same bridge card connected:
+            project selection chooses the target for new tasks, it never
+            changes bridge identity. Without this, choosing a second approved
+            project made the shared bridge card fall back to "not configured"
+            and offer to launch a duplicate bridge.
+            """
+            if self._repository_matches(str(getattr(saved, "repository", "") or "")):
+                return True
+            for entry in getattr(saved, "projects", ()) or ():
+                path = entry.get("path", "") if isinstance(entry, dict) else ""
+                if path and self._repository_matches(path):
+                    return True
+            return False
+
         def _state(self) -> Optional[Any]:
             """The saved connection for this service, if there is one.
 
@@ -5136,12 +5155,20 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 store = WebBridgeProfileStore()
                 for p in discover_saved_bridge_profiles_for_preset(self.preset_id):
                     repository = str(p.get("repository") or "")
-                    if not repository:
-                        name = str(p.get("saved_profile") or "")
-                        if name:
-                            with contextlib.suppress(Exception):
-                                repository = str(store.get(name).repository or "")
-                    if self._repository_matches(repository):
+                    saved_record: Optional[Any] = None
+                    name = str(p.get("saved_profile") or "")
+                    if name:
+                        with contextlib.suppress(Exception):
+                            saved_record = store.get(name)
+                    if not repository and saved_record is not None:
+                        repository = str(saved_record.repository or "")
+                    # The selected project matches when it is the anchor
+                    # repository OR any entry of the bridge's approved
+                    # project registry (multi-project saved profiles).
+                    if self._repository_matches(repository) or (
+                        saved_record is not None
+                        and self._saved_profile_covers_current(saved_record)
+                    ):
                         p = {**p, "repository": repository}
                         return _DiscoveredBridgeState(p, self.preset_id)
             except Exception:
@@ -5165,7 +5192,7 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 for saved in WebBridgeProfileStore().list():
                     if saved.target_profile != wanted:
                         continue
-                    if not self._repository_matches(str(saved.repository or "")):
+                    if not self._saved_profile_covers_current(saved):
                         continue
                     matching_saved.append(saved)
                 if matching_saved:
@@ -5410,7 +5437,12 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
         def compose(self) -> ComposeResult:
             english = self._english()
             name = service_display_name(self.preset_id)
-            with Vertical(id="svc-dialog"):
+            # VerticalScroll, not Vertical: at small terminal sizes the
+            # connected-state content (status + steps + address + actions)
+            # exceeds max-height and a plain Vertical clipped the lower
+            # controls with no way to reach them. Scrolling keeps every
+            # action reachable; focus auto-scrolls into view.
+            with VerticalScroll(id="svc-dialog"):
                 # The service name is the title. The old "Connect …" heading made
                 # an already-running bridge look as though setup had not started.
                 yield Static(name, classes="title")
