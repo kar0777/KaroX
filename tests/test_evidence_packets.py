@@ -18,7 +18,9 @@ from karox.evidence_packets import (
     Fidelity,
     PacketKind,
     build_packet,
+    checks_job_packet,
     git_packet,
+    packet_from_plan_result,
     search_packet,
     tests_packet as make_tests_packet,
 )
@@ -125,6 +127,128 @@ class BuilderTests(unittest.TestCase):
         packet = search_packet(query="q", match_count=3, files=("a", "b"))
         self.assertEqual(packet.metrics["match_count"], 3)
         self.assertEqual(packet.metrics["file_count"], 2)
+
+
+class ChecksJobPacketTests(unittest.TestCase):
+    def test_passed_job_parses_counts_from_summary(self) -> None:
+        packet = checks_job_packet(
+            status="passed",
+            exit_code=0,
+            summary="421 passed, 0 failed in 31.2s",
+            first_failure=None,
+            duration_seconds=31.2,
+            artifact=ArtifactRef("art-log", raw_bytes=100_000),
+        )
+        self.assertIs(packet.kind, PacketKind.TESTS)
+        self.assertEqual(packet.status, "passed")
+        self.assertEqual(packet.metrics["passed"], 421)
+        avoided = packet.bytes_avoided()
+        assert avoided is not None
+        self.assertGreater(avoided, 90_000)
+
+    def test_failed_job_never_renders_as_success(self) -> None:
+        packet = checks_job_packet(
+            status="failed",
+            exit_code=1,
+            summary="420 passed, 1 failed in 30.0s",
+            first_failure="FAILED tests/test_session.py::test_restore",
+            artifact=ArtifactRef("art-log"),
+        )
+        for fidelity in Fidelity:
+            rendered = packet.render(fidelity)
+            self.assertIn('"status": "failed"', rendered, fidelity)
+            self.assertIn("test_restore", rendered, fidelity)
+            self.assertIn("art-log", rendered, fidelity)
+
+    def test_passed_status_with_failing_counts_stays_failed(self) -> None:
+        packet = checks_job_packet(
+            status="passed",
+            exit_code=0,
+            summary="1 failed, 2 passed",
+            first_failure=None,
+        )
+        self.assertEqual(packet.status, "failed")
+
+    def test_worker_death_without_exit_code_is_failed(self) -> None:
+        packet = checks_job_packet(
+            status="failed",
+            exit_code=None,
+            summary=None,
+            first_failure=None,
+            error_code="worker_exited_without_final_state",
+        )
+        self.assertEqual(packet.status, "failed")
+        self.assertTrue(
+            any("worker_exited" in line for line in packet.critical)
+        )
+
+
+class PlanResultPacketTests(unittest.TestCase):
+    def test_checks_result_with_nonzero_exit_is_failed(self) -> None:
+        packet = packet_from_plan_result(
+            "checks",
+            {
+                "ok": True,
+                "exit_code": 1,
+                "summary": "1 failed, 2 passed",
+                "first_failure": "FAILED tests/test_a.py::test_b",
+            },
+            success=True,
+        )
+        assert packet is not None
+        self.assertEqual(packet.status, "failed")
+        self.assertIs(packet.kind, PacketKind.TESTS)
+        self.assertIn(
+            "primary_failure: FAILED tests/test_a.py::test_b", packet.critical
+        )
+
+    def test_checks_success_summary_counts_become_metrics(self) -> None:
+        packet = packet_from_plan_result(
+            "checks",
+            {"ok": True, "exit_code": 0, "data": {"summary": "3 passed"}},
+            success=True,
+        )
+        assert packet is not None
+        self.assertEqual(packet.status, "passed")
+        self.assertEqual(packet.metrics["passed"], 3)
+
+    def test_executor_failure_verdict_overrides_payload(self) -> None:
+        packet = packet_from_plan_result(
+            "search",
+            {"ok": True, "match_count": 3, "matches": []},
+            success=False,
+        )
+        assert packet is not None
+        self.assertTrue(packet.failed)
+        self.assertTrue(
+            any("operation failed" in line for line in packet.critical)
+        )
+
+    def test_search_files_are_bounded_and_deduplicated(self) -> None:
+        matches = [{"path": f"src/m{index}.py"} for index in range(30)]
+        packet = packet_from_plan_result(
+            "search",
+            {"ok": True, "query": "needle", "match_count": 30, "matches": matches},
+            success=True,
+        )
+        assert packet is not None
+        self.assertEqual(len(packet.related_files), 20)
+        self.assertTrue(any("truncated" in line for line in packet.critical))
+
+    def test_untyped_action_returns_none(self) -> None:
+        self.assertIsNone(
+            packet_from_plan_result("read", {"ok": True}, success=True)
+        )
+
+    def test_timed_out_checks_are_failed(self) -> None:
+        packet = packet_from_plan_result(
+            "checks",
+            {"ok": True, "exit_code": 0, "timed_out": True},
+            success=True,
+        )
+        assert packet is not None
+        self.assertEqual(packet.status, "failed")
+        self.assertIn("timed_out=true", packet.critical)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from .artifacts import ArtifactStore
 from .core import ProcessTree, VerificationRule
+from .evidence_packets import ArtifactRef, checks_job_packet
 from .paths import runtime_dir
 from .process_identity import (
     ProcessIdentity,
@@ -819,6 +820,28 @@ class CheckJobManager:
             diagnostic = "worker_exited_without_final_state"
         log = read_job_log(Path(state.log_path), limit=_DEFAULT_LOG_TAIL)
         summary = summarize_log(log["text"])
+        duration_seconds = round(
+            max(0.0, (state.finished_at or now) - (state.started_at or state.queued_at)), 3
+        )
+        evidence_packet: Optional[dict[str, Any]] = None
+        if effective_status in _FINAL_STATUSES:
+            packet = checks_job_packet(
+                status=effective_status,
+                exit_code=state.exit_code,
+                summary=summary["summary"],
+                first_failure=summary["first_failure"],
+                duration_seconds=duration_seconds,
+                artifact=(
+                    ArtifactRef(
+                        artifact_id=state.artifact_id,
+                        raw_bytes=int(log["bytes"]) or None,
+                    )
+                    if isinstance(state.artifact_id, str) and state.artifact_id
+                    else None
+                ),
+                error_code=diagnostic,
+            )
+            evidence_packet = json.loads(packet.render())
         return {
             "job_id": state.job_id,
             "status": effective_status,
@@ -827,15 +850,14 @@ class CheckJobManager:
             "bridge_pid": state.bridge_pid,
             "command_fingerprint": f"sha256:{state.command_sha256[:16]}",
             "started_at": state.started_at,
-            "duration_seconds": round(
-                max(0.0, (state.finished_at or now) - (state.started_at or state.queued_at)), 3
-            ),
+            "duration_seconds": duration_seconds,
             "timeout_budget": state.timeout_seconds,
             "exit_code": state.exit_code,
             "artifact_id": state.artifact_id,
             "summary": summary["summary"],
             "first_failure": summary["first_failure"],
             "progress": summary["progress"],
+            "evidence_packet": evidence_packet,
             "ownership": {
                 "session_id": state.session_id,
                 "worker": worker.to_dict(),

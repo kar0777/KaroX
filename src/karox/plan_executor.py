@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
@@ -14,6 +14,11 @@ from mcp.types import CallToolResult
 
 from .artifacts import ArtifactStore
 from .cost_intelligence import BatchPlanner
+from .evidence_packets import (
+    ArtifactRef as EvidenceArtifactRef,
+    Fidelity,
+    packet_from_plan_result,
+)
 from .repository_lease import (
     RepositoryLease,
     RepositoryLeaseConflict,
@@ -189,7 +194,7 @@ class PlanOperation:
             raise PlanExecutionError("invalid_plan", "preconditions and expected_outcome must be objects")
         if on_failure not in {"stop", "continue", "skip_dependents"}:
             raise PlanExecutionError("invalid_plan", f"operations[{index}].on_failure is invalid")
-        if output_policy not in {"summary", "inline", "artifact"}:
+        if output_policy not in {"summary", "inline", "artifact", "evidence"}:
             raise PlanExecutionError("invalid_plan", f"operations[{index}].output_policy is invalid")
         supplied_key = payload.get("idempotency_key")
         if supplied_key is not None and (
@@ -862,6 +867,61 @@ class PlanExecutor:
                 "persistence_policy": record.persistence_policy,
                 "available_sections": sorted(str(key) for key in result),
             }
+        if operation.output_policy == "evidence":
+            packet = packet_from_plan_result(
+                operation.action,
+                result,
+                success=self._success(result),
+            )
+            if packet is not None:
+                encoded = json.dumps(
+                    redact(result),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+                existing_id = result.get("artifact_id")
+                content_hash: Optional[str] = None
+                total_size: Optional[int] = None
+                if isinstance(existing_id, str) and existing_id:
+                    artifact_id = existing_id
+                    raw_hash = result.get("content_hash")
+                    if isinstance(raw_hash, str):
+                        content_hash = raw_hash
+                    raw_total = result.get("total_size")
+                    if isinstance(raw_total, int) and not isinstance(raw_total, bool):
+                        total_size = raw_total
+                else:
+                    record = self.artifacts.put(
+                        encoded,
+                        name=f"plan-{operation.operation_id}-result.json",
+                        mime="application/json",
+                    )
+                    artifact_id = record.artifact_id
+                    content_hash = record.sha256
+                    total_size = record.size
+                packet = replace(
+                    packet,
+                    artifact=EvidenceArtifactRef(
+                        artifact_id=artifact_id,
+                        sha256=content_hash,
+                        raw_bytes=len(encoded),
+                    ),
+                )
+                rendered = packet.render(Fidelity.AUTO)
+                rendered_size = len(rendered.encode("utf-8"))
+                return {
+                    "ok": self._success(result),
+                    "result_mode": "evidence",
+                    "packet": json.loads(rendered),
+                    "artifact_id": artifact_id,
+                    "content_hash": content_hash,
+                    "total_size": total_size,
+                    "raw_bytes": len(encoded),
+                    "packet_bytes": rendered_size,
+                    "bytes_avoided": max(0, len(encoded) - rendered_size),
+                    "output_policy": "evidence",
+                }
         compact: dict[str, Any] = {}
         for key in (
             "ok",
@@ -900,6 +960,10 @@ class PlanExecutor:
                     compact[key] = data[key]
         compact.setdefault("ok", self._success(result))
         compact["output_policy"] = "summary"
+        if operation.output_policy == "evidence":
+            # No typed packet form for this action yet: the downgrade to the
+            # lossless summary form is recorded rather than silent.
+            compact["requested_output_policy"] = "evidence"
         return compact
 
     def _checkpoint_progress(
@@ -1198,7 +1262,7 @@ class PlanExecutor:
                     stored_result = self._apply_output_policy(operation, result)
                     artifact_size = (
                         stored_result.get("total_size")
-                        if stored_result.get("result_mode") == "artifact"
+                        if stored_result.get("result_mode") in {"artifact", "evidence"}
                         else 0
                     )
                     if isinstance(artifact_size, int):
@@ -1374,6 +1438,15 @@ class PlanExecutor:
                 name="execute-plan.json",
                 mime="application/json",
             )
+            evidence_packets_stored = 0
+            evidence_bytes_avoided = 0
+            for item in completed.values():
+                stored = item.get("result") if isinstance(item, Mapping) else None
+                if isinstance(stored, Mapping) and stored.get("result_mode") == "evidence":
+                    evidence_packets_stored += 1
+                    avoided = stored.get("bytes_avoided")
+                    if isinstance(avoided, int) and not isinstance(avoided, bool):
+                        evidence_bytes_avoided += avoided
             # One hosted plan call replaced a sequential tool round trip per
             # operation; the batch planner additionally reports how many of
             # those operations were independent reads. Counted, not estimated
@@ -1394,6 +1467,8 @@ class PlanExecutor:
                     "model_round_trips_avoided": max(0, len(operations) - 1),
                     "parallel_read_candidates": len(batch_plan.parallel_reads),
                     "read_round_trips_saved": batch_plan.estimated_round_trips_saved,
+                    "evidence_packets": evidence_packets_stored,
+                    "evidence_bytes_avoided": evidence_bytes_avoided,
                 },
                 "operations_succeeded": sum(
                     item.get("status") == "success" for item in completed.values()

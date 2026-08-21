@@ -570,6 +570,111 @@ class PlanExecutorTests(unittest.TestCase):
             2,
         )
 
+    def test_evidence_output_policy_stores_packet_with_honest_bytes(self) -> None:
+        original_execute = self.delegate.execute
+
+        def execute_with_summary(*args: Any, **kwargs: Any) -> dict[str, Any] | CallToolResult:
+            result = original_execute(*args, **kwargs)
+            if args[0] == "karox.tests.run" and isinstance(result, dict):
+                return {**result, "summary": "3 passed", "stdout": "x" * 2000}
+            return result
+
+        self.delegate.execute = execute_with_summary  # type: ignore[method-assign]
+        plan = {
+            "operations": [
+                {
+                    "operation_id": "verify",
+                    "action": "checks",
+                    "inputs": {
+                        "tool": "tests",
+                        "suite": "focused",
+                        "targets": ["tests/test_value.py"],
+                    },
+                    "output_policy": "evidence",
+                }
+            ]
+        }
+        result = self.executor.execute(plan, "plan-evidence")
+        self.assertEqual(result["economy"]["evidence_packets"], 1)
+        selected = self.artifacts.read_selection(
+            result["artifact_id"],
+            {"kind": "json_path", "path": "operations.verify.result"},
+        )
+        stored = selected["content"]
+        self.assertEqual(stored["result_mode"], "evidence")
+        self.assertEqual(stored["packet"]["status"], "passed")
+        self.assertEqual(stored["packet"]["kind"], "tests")
+        self.assertTrue(self.artifacts.exists(stored["artifact_id"]))
+        self.assertEqual(
+            stored["raw_bytes"] - stored["packet_bytes"], stored["bytes_avoided"]
+        )
+        self.assertGreater(stored["bytes_avoided"], 0)
+        self.assertEqual(
+            result["economy"]["evidence_bytes_avoided"], stored["bytes_avoided"]
+        )
+
+    def test_evidence_packet_never_hides_a_failing_check(self) -> None:
+        original_execute = self.delegate.execute
+
+        def execute_failing(*args: Any, **kwargs: Any) -> dict[str, Any] | CallToolResult:
+            result = original_execute(*args, **kwargs)
+            if args[0] == "karox.tests.run" and isinstance(result, dict):
+                return {
+                    **result,
+                    "exit_code": 1,
+                    "summary": "2 passed, 1 failed",
+                    "first_failure": "FAILED tests/test_value.py::test_value",
+                }
+            return result
+
+        self.delegate.execute = execute_failing  # type: ignore[method-assign]
+        plan = {
+            "operations": [
+                {
+                    "operation_id": "verify",
+                    "action": "checks",
+                    "inputs": {
+                        "tool": "tests",
+                        "suite": "focused",
+                        "targets": ["tests/test_value.py"],
+                    },
+                    "output_policy": "evidence",
+                }
+            ]
+        }
+        result = self.executor.execute(plan, "plan-evidence-failure")
+        selected = self.artifacts.read_selection(
+            result["artifact_id"],
+            {"kind": "json_path", "path": "operations.verify.result"},
+        )
+        stored = selected["content"]
+        self.assertEqual(stored["packet"]["status"], "failed")
+        self.assertIn(
+            "primary_failure: FAILED tests/test_value.py::test_value",
+            stored["packet"]["critical"],
+        )
+
+    def test_evidence_policy_falls_back_losslessly_for_untyped_actions(self) -> None:
+        plan = {
+            "operations": [
+                {
+                    "operation_id": "read-value",
+                    "action": "read",
+                    "inputs": {"path": "src/value.txt"},
+                    "output_policy": "evidence",
+                }
+            ]
+        }
+        result = self.executor.execute(plan, "plan-evidence-fallback")
+        selected = self.artifacts.read_selection(
+            result["artifact_id"],
+            {"kind": "json_path", "path": "operations.read-value.result"},
+        )
+        stored = selected["content"]
+        self.assertEqual(stored["output_policy"], "summary")
+        self.assertEqual(stored["requested_output_policy"], "evidence")
+        self.assertEqual(result["economy"]["evidence_packets"], 0)
+
     def test_user_gate_operations_are_refused_inside_plan(self) -> None:
         plan = {
             "operations": [
