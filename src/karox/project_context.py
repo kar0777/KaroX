@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from .artifacts import ArtifactStore
+from .map_service import stored_map_digest
 from .repo_context import RepositoryContextEngine
 
 # Precedence order, least specific first. A later file is read after an earlier
@@ -410,6 +411,21 @@ def discover_project_context(
                 project_map = "\n\n".join(item for item in (project_map, recursive_map) if item)
         except Exception as exc:
             project_map_metadata = {"enabled": False, "error": type(exc).__name__}
+
+    # The durable /map document, when one exists, joins the prompt ahead of
+    # the per-run inspection: a bounded digest with explicit freshness, never
+    # the whole project. A broken map store must never break a run.
+    try:
+        stored_map = stored_map_digest(root)
+    except Exception:
+        stored_map = None
+    if stored_map is not None:
+        stored_text, stored_meta = stored_map
+        if stored_text:
+            project_map = "\n\n".join(
+                item for item in (stored_text, project_map) if item
+            )
+            project_map_metadata["map_store"] = stored_meta
 
     implementation_paths = project_map_metadata.get("implementation")
     if isinstance(implementation_paths, list):

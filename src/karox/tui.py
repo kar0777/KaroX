@@ -125,6 +125,7 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 SLASH_COMMANDS: Dict[str, str] = {
     "/model": "choose model",
     "/mode": "show or set agent mode (build, plan, ideate)",
+    "/map": "project map: status, preview, refresh, or a level (low..ultra)",
     "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
     "/status": "show project, model, effort, and run state",
     "/home": "return to chat",
@@ -159,6 +160,7 @@ SLASH_COMMANDS: Dict[str, str] = {
 _COMMANDS_RU: Dict[str, str] = {
     "/model": "выбрать модель",
     "/mode": "режим агента (build, plan, ideate)",
+    "/map": "карта проекта: status, preview, refresh или уровень (low..ultra)",
     "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
     "/status": "показать проект, модель, Effort и состояние запуска",
     "/home": "вернуться в чат",
@@ -375,6 +377,7 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/model",
     "/mode",
     "/effort",
+    "/map",
     "/status",
     "/usage",
     "/connect",
@@ -8072,6 +8075,135 @@ if _HAS_TEXTUAL:
                         ),
                         "error",
                     )
+            elif command == "/map":
+                requested = argument.strip().lower()
+                usage = self._label(
+                    "Формат: /map [status|preview [уровень]|refresh|"
+                    "low|medium|high|extra-high|ultra]",
+                    "Usage: /map [status|preview [level]|refresh|"
+                    "low|medium|high|extra-high|ultra]",
+                )
+                # Imported here, not at module top: the map service pulls the
+                # repository-context engine, and TUI startup must not pay for
+                # it before the command is actually used.
+                from .map_service import (
+                    MapService,
+                    default_map_level,
+                    normalize_map_level,
+                    render_preview,
+                    render_status,
+                )
+
+                parts = requested.split()
+                action = parts[0] if parts else "status"
+                if action == "status":
+                    try:
+                        status = MapService(self.repository).status()
+                    except Exception as exc:
+                        self._write_notice(
+                            f"Map status failed: {type(exc).__name__}", "error"
+                        )
+                    else:
+                        self._write(
+                            render_status(status, self.language) + f"\n{usage}"
+                        )
+                elif action == "preview":
+                    raw_level = (
+                        parts[1]
+                        if len(parts) > 1
+                        else default_map_level(self.effort_level)
+                    )
+                    try:
+                        level = normalize_map_level(raw_level)
+                    except ValueError:
+                        self._write_notice(usage, "error")
+                    else:
+                        try:
+                            preview = MapService(self.repository).preview(level)
+                        except Exception as exc:
+                            self._write_notice(
+                                f"Map preview failed: {type(exc).__name__}",
+                                "error",
+                            )
+                        else:
+                            self._write(render_preview(preview, self.language))
+                else:
+                    if action == "refresh":
+                        try:
+                            existing = MapService(self.repository).load()
+                        except Exception:
+                            existing = None
+                        raw_level = (
+                            str(existing.get("level"))
+                            if existing
+                            else default_map_level(self.effort_level)
+                        )
+                    else:
+                        raw_level = action
+                    try:
+                        level = normalize_map_level(raw_level)
+                    except ValueError:
+                        self._write_notice(usage, "error")
+                    else:
+                        try:
+                            map_service = MapService(self.repository)
+                        except OSError:
+                            self._write_notice(
+                                self._label(
+                                    "Проект недоступен для карты.",
+                                    "The project is not reachable for mapping.",
+                                ),
+                                "error",
+                            )
+                        else:
+                            self._write(
+                                self._label(
+                                    f"[#b7c2b0]Строю карту проекта "
+                                    f"(уровень {level})…[/]",
+                                    f"[#b7c2b0]Building the project map "
+                                    f"(level {level})…[/]",
+                                )
+                            )
+
+                            def build_map() -> None:
+                                try:
+                                    state = map_service.build(level)
+                                except Exception as exc:
+                                    self.call_from_thread(
+                                        self._write_notice,
+                                        "Map build failed: "
+                                        f"{type(exc).__name__}",
+                                        "error",
+                                    )
+                                else:
+                                    seconds = round(
+                                        float(state.get("duration_ms") or 0)
+                                        / 1000,
+                                        1,
+                                    )
+                                    kind = (
+                                        "warm" if state.get("warm") else "cold"
+                                    )
+                                    self.call_from_thread(
+                                        self._write_notice,
+                                        self._label(
+                                            f"Карта готова: уровень {level}, "
+                                            f"файлов "
+                                            f"{state.get('files_scanned')}, "
+                                            f"{seconds} с ({kind}).",
+                                            f"Map ready: level {level}, "
+                                            f"{state.get('files_scanned')} "
+                                            f"files, {seconds}s ({kind}).",
+                                        ),
+                                        "success",
+                                    )
+
+                            self.run_worker(
+                                build_map,
+                                thread=True,
+                                exclusive=True,
+                                group="map",
+                            )
             elif command == "/mode":
                 requested = argument.strip()
                 usage = self._label(
