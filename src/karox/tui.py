@@ -51,6 +51,11 @@ from .provider_presets import (
     provider_presets,
     sponsor_messages,
 )
+from .effort import (
+    AUTO_EFFORT,
+    effort_summary,
+    normalize_effort,
+)
 from .providers import (
     REASONING_EFFORTS,
     ModelMessage,
@@ -112,6 +117,7 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 
 SLASH_COMMANDS: Dict[str, str] = {
     "/model": "choose model",
+    "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
     "/home": "return to chat",
     "/usage": "show model usage, cache, and cost",
     "/cost": "show or switch the run economy profile",
@@ -139,6 +145,7 @@ SLASH_COMMANDS: Dict[str, str] = {
 
 _COMMANDS_RU: Dict[str, str] = {
     "/model": "выбрать модель",
+    "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
     "/home": "вернуться в чат",
     "/usage": "показать токены, кэш и расходы",
     "/cost": "режим расходов",
@@ -259,6 +266,24 @@ def _save_sponsors_visible(visible: bool) -> None:
     _save_preferences(sponsors_visible=bool(visible))
 
 
+def _load_effort_level() -> str:
+    """The persisted /effort choice; unknown spellings fall back to auto.
+
+    Fallback rather than raise: a hand-edited ui.json must never prevent the
+    TUI from starting, and auto is the only always-safe level.
+    """
+
+    raw = _load_preferences().get("effort_level", AUTO_EFFORT)
+    try:
+        return normalize_effort(raw)
+    except ValueError:
+        return AUTO_EFFORT
+
+
+def _save_effort_level(level: str) -> None:
+    _save_preferences(effort_level=normalize_effort(level))
+
+
 _RECENT_WORKSPACE_LIMIT = 8
 
 
@@ -310,6 +335,7 @@ def _remember_workspace(path: Path) -> None:
 # up as simplification.
 VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/model",
+    "/effort",
     "/usage",
     "/connect",
     "/sessions",
@@ -2711,6 +2737,7 @@ def _agent_argv(
     *,
     run_cost_profile: str = "balanced",
     reasoning_effort: Optional[str] = None,
+    effort_level: Optional[str] = None,
     token_ceiling: Optional[int] = None,
 ) -> List[str]:
     argv = [
@@ -2738,6 +2765,18 @@ def _agent_argv(
         if reasoning_effort not in REASONING_EFFORTS:
             raise ValueError("unknown reasoning effort")
         argv.extend(("--effort", reasoning_effort))
+    if effort_level is None:
+        stored_level = _load_preferences().get("effort_level")
+        if isinstance(stored_level, str) and stored_level.strip():
+            try:
+                effort_level = normalize_effort(stored_level)
+            except ValueError:
+                effort_level = None
+    # AUTO deliberately emits nothing yet: without task signals the ladder
+    # would resolve to medium and silently change legacy runs; the flag is
+    # sent only for an explicit human choice.
+    if effort_level is not None and effort_level != AUTO_EFFORT:
+        argv.extend(("--effort-level", normalize_effort(effort_level)))
     if run_cost_profile not in {"balanced", "economy"}:
         raise ValueError("run cost profile must be balanced or economy")
     if run_cost_profile == "economy":
@@ -6627,6 +6666,10 @@ if _HAS_TEXTUAL:
             self.reasoning_effort = (
                 str(raw_effort) if raw_effort in REASONING_EFFORTS else None
             )
+            # The ladder is separate from the raw provider hint above:
+            # reasoning_effort is the legacy per-provider knob, effort_level
+            # is the product budget ladder from /effort.
+            self.effort_level = _load_effort_level()
             self._last_assistant_content = ""
             self._task_started_at: Optional[float] = None
 
@@ -7867,6 +7910,45 @@ if _HAS_TEXTUAL:
                         ),
                         "error",
                     )
+            elif command == "/effort":
+                requested = argument.strip()
+                usage = self._label(
+                    "Формат: /effort auto|low|medium|high|extra-high|ultra",
+                    "Usage: /effort auto|low|medium|high|extra-high|ultra",
+                )
+                if not requested:
+                    if self.effort_level == AUTO_EFFORT:
+                        detail = self._label(
+                            "AUTO подбирает уровень под задачу; бюджеты "
+                            "остаются стандартными до явного выбора.",
+                            "AUTO picks a level per task; budgets stay at "
+                            "the defaults until a level is chosen.",
+                        )
+                    else:
+                        detail = effort_summary(self.effort_level, self.language)
+                    self._write(
+                        f"Effort: [#d4b676]{self.effort_level}[/]. "
+                        f"{detail} {usage}"
+                    )
+                else:
+                    try:
+                        level = normalize_effort(requested)
+                    except ValueError:
+                        self._write_notice(usage, "error")
+                    else:
+                        self.effort_level = level
+                        _save_effort_level(level)
+                        self._refresh_status()
+                        if level == AUTO_EFFORT:
+                            notice = self._label(
+                                "Effort AUTO включён: уровень подбирается "
+                                "под задачу.",
+                                "Effort AUTO enabled: the level is chosen "
+                                "per task.",
+                            )
+                        else:
+                            notice = effort_summary(level, self.language)
+                        self._write_notice(notice, "success")
             elif command == "/help":
                 lines = [f"[bold #e0dccc]{_TEXT[self.language]['commands']}[/]"]
                 lines.extend(
@@ -9983,6 +10065,7 @@ if _HAS_TEXTUAL:
                 self.verification,
                 session_id,
                 run_cost_profile=self.run_cost_profile,
+                effort_level=self.effort_level,
             )
 
             def execute() -> None:

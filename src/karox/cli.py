@@ -114,6 +114,7 @@ from .paths import (
 from .policy import CapabilityPolicy
 from .project_context import discover_project_context
 from .project_registry import ProjectRegistry, ProjectRegistryError
+from .effort import budget_for as effort_budget_for
 from .research_subagent import ResearchLimits, ResearchSubagent, build_research_context
 from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
@@ -1677,8 +1678,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-total-tokens", type=int)
     run.add_argument("--max-cost", type=float)
     run.add_argument("--currency")
-    run.add_argument("--max-steps", type=int, default=24)
-    run.add_argument("--max-seconds", type=float, default=900.0)
+    # None means "let --effort-level decide"; the legacy 24/900 defaults are
+    # applied in _effort_runtime so a run with neither flag nor ladder keeps
+    # exactly the old behavior.
+    run.add_argument("--max-steps", type=int, default=None)
+    run.add_argument("--max-seconds", type=float, default=None)
     run.add_argument(
         "--output-mode",
         choices=tuple(mode.value for mode in OutputMode),
@@ -1747,6 +1751,16 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "how hard the model should think before answering; sent to whichever "
             "provider serves the run, which may cap it at its own top level"
+        ),
+    )
+    run.add_argument(
+        "--effort-level",
+        choices=("auto", "low", "medium", "high", "extra-high", "ultra"),
+        default=None,
+        help=(
+            "one knob for how much engineering the run may spend: fills the "
+            "max-steps/max-seconds/context budgets that were not set "
+            "explicitly and picks a matching provider reasoning effort"
         ),
     )
     run.add_argument("--economy", action="store_true", help=argparse.SUPPRESS)
@@ -4561,11 +4575,52 @@ def _handle_pack(args: argparse.Namespace) -> int:
     return 0
 
 
+def _effort_runtime(
+    args: argparse.Namespace,
+) -> tuple[int, float, dict[str, Any], str | None]:
+    """Resolve --effort-level into the run's concrete budgets.
+
+    Explicit flags always win, the ladder fills only what the user left
+    unset, and a run with neither keeps the legacy defaults bit for bit.
+    The provider hint follows the same rule: --effort (raw provider
+    vocabulary) beats the ladder's mapping.
+    """
+
+    level = getattr(args, "effort_level", None)
+    budget = effort_budget_for(level) if level else None
+    max_steps = args.max_steps if args.max_steps is not None else (
+        budget.agent_limits.max_steps if budget else 24
+    )
+    max_seconds = args.max_seconds if args.max_seconds is not None else (
+        budget.agent_limits.max_seconds if budget else 900.0
+    )
+    context: dict[str, Any] = {}
+    if args.context_utilization is not None:
+        context["utilization"] = args.context_utilization
+    elif budget is not None:
+        context["utilization"] = budget.context.utilization
+    if args.max_tool_result_chars is not None:
+        context["max_tool_result_chars"] = args.max_tool_result_chars
+    elif budget is not None:
+        context["max_tool_result_chars"] = budget.context.max_tool_result_chars
+    if budget is not None:
+        context["keep_recent_groups"] = budget.context.keep_recent_groups
+    reasoning = getattr(args, "effort", None) or (
+        budget.reasoning_effort if budget else None
+    )
+    return max_steps, max_seconds, context, reasoning
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
-    limits = AgentLimits(max_steps=args.max_steps, max_seconds=args.max_seconds)
+    max_steps, max_seconds, effort_context, effort_reasoning = _effort_runtime(args)
+    # Written back so later math on args (the research budget share) sees the
+    # resolved numbers rather than None when the flags were left unset.
+    args.max_steps = max_steps
+    args.max_seconds = max_seconds
+    limits = AgentLimits(max_steps=max_steps, max_seconds=max_seconds)
     store = SessionStore(session_dir())
     record: SessionRecord | None = None
     if args.session_id and store.state_path(args.session_id).exists():
@@ -4759,11 +4814,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         record.session_id,
         next_observer=base_observer,
     )
-    context_options: dict[str, Any] = {}
-    if args.context_utilization is not None:
-        context_options["utilization"] = args.context_utilization
-    if args.max_tool_result_chars is not None:
-        context_options["max_tool_result_chars"] = args.max_tool_result_chars
+    # Explicit flags and the effort ladder were already reconciled once at
+    # the top of the run; consume that single source of truth here.
+    context_options: dict[str, Any] = dict(effort_context)
 
     return AgentKernel(
         provider=provider,
@@ -4777,7 +4830,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         max_output_tokens=max_output_tokens,
         project_context=project_context,
         require_change=args.expect == "change",
-        reasoning_effort=getattr(args, "effort", None),
+        reasoning_effort=effort_reasoning,
         economy_mode=bool(getattr(args, "economy", False)),
         on_event=transcript_observer,
     ).run(record.session_id)
