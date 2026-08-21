@@ -143,3 +143,44 @@ def mode_display_name(mode: object, language: str = "en") -> str:
 
     words = _MODE_WORDS[normalize_mode(mode)]
     return words.get(language, words["en"])
+
+
+_MODE_SUMMARIES = {
+    "build": {
+        "en": (
+            "Build: implement, test, and verify; mutations follow the "
+            "normal safety policy."
+        ),
+        "ru": (
+            "Сборка: реализация, тесты и проверка; изменения идут по "
+            "обычной политике безопасности."
+        ),
+    },
+    "plan": {
+        "en": (
+            "Plan: no production-code mutation by default; leaves a durable "
+            "Plan artifact. Build starts only on your explicit go-ahead."
+        ),
+        "ru": (
+            "План: по умолчанию без изменений кода; создаёт долговременный "
+            "артефакт плана. Сборка — только после вашего явного решения."
+        ),
+    },
+    "ideate": {
+        "en": (
+            "Ideate: no production-code mutation by default; hunts for "
+            "opportunities and records durable Concept artifacts."
+        ),
+        "ru": (
+            "Идеи: по умолчанию без изменений кода; ищет возможности и "
+            "сохраняет долговременные артефакты концепций."
+        ),
+    },
+}
+
+
+def mode_summary(mode: object, language: str = "en") -> str:
+    """One honest sentence about what the mode changes, for /mode and /status."""
+
+    texts = _MODE_SUMMARIES[normalize_mode(mode)]
+    return texts.get(language, texts["en"])

@@ -51,6 +51,13 @@ from .provider_presets import (
     provider_presets,
     sponsor_messages,
 )
+from .agent_modes import (
+    DEFAULT_MODE,
+    ModeError,
+    mode_display_name,
+    mode_summary,
+    normalize_mode,
+)
 from .effort import (
     AUTO_EFFORT,
     effort_summary,
@@ -117,6 +124,7 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 
 SLASH_COMMANDS: Dict[str, str] = {
     "/model": "choose model",
+    "/mode": "show or set agent mode (build, plan, ideate)",
     "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
     "/status": "show project, model, effort, and run state",
     "/home": "return to chat",
@@ -150,6 +158,7 @@ SLASH_COMMANDS: Dict[str, str] = {
 
 _COMMANDS_RU: Dict[str, str] = {
     "/model": "выбрать модель",
+    "/mode": "режим агента (build, plan, ideate)",
     "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
     "/status": "показать проект, модель, Effort и состояние запуска",
     "/home": "вернуться в чат",
@@ -294,6 +303,25 @@ def _save_effort_level(level: str) -> None:
     _save_preferences(effort_level=normalize_effort(level))
 
 
+def _load_agent_mode() -> str:
+    """The persisted /mode choice; unknown spellings fall back to Build.
+
+    Same contract as the effort ladder: a hand-edited ui.json must never
+    prevent the TUI from starting, and Build is the only stance whose
+    behavior matches the product before modes existed.
+    """
+
+    raw = _load_preferences().get("agent_mode", DEFAULT_MODE)
+    try:
+        return normalize_mode(raw)
+    except ModeError:
+        return DEFAULT_MODE
+
+
+def _save_agent_mode(mode: str) -> None:
+    _save_preferences(agent_mode=normalize_mode(mode))
+
+
 _RECENT_WORKSPACE_LIMIT = 8
 
 
@@ -345,6 +373,7 @@ def _remember_workspace(path: Path) -> None:
 # up as simplification.
 VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/model",
+    "/mode",
     "/effort",
     "/status",
     "/usage",
@@ -1821,6 +1850,7 @@ def _header_line(
     activity: str,
     width: int,
     effort: str = "auto",
+    mode: str = DEFAULT_MODE,
     economy: bool = False,
     context_note: str = "",
 ) -> str:
@@ -1837,15 +1867,24 @@ def _header_line(
     effort_text = f"effort {effort or 'auto'}"
     repo_text = f"@{repository}" if repository else ""
     economy_text = "Economy" if economy else ""
+    # Build renders nothing: like Economy, the header spends width on
+    # divergence from the default, not on restating it.
+    try:
+        normalized_mode = normalize_mode(mode) if mode else DEFAULT_MODE
+    except ModeError:
+        normalized_mode = DEFAULT_MODE
+    mode_text = (
+        mode_display_name(normalized_mode) if normalized_mode != DEFAULT_MODE else ""
+    )
     if width < HEADER_MEDIUM_COLUMNS:
         # Smallest tier: the agent state outranks the project name, and the
         # provider prefix gives way to the model id. Dropping a whole field is
         # what keeps "openai…" from reading as a different model.
-        candidates = [model_id, activity, effort_text, repo_text]
+        candidates = [model_id, activity, mode_text, effort_text, repo_text]
     elif width < HEADER_WIDE_COLUMNS:
-        candidates = [model, effort_text, repo_text, activity]
+        candidates = [model, mode_text, effort_text, repo_text, activity]
     else:
-        candidates = [model, effort_text, repo_text, activity, economy_text, context_note]
+        candidates = [model, mode_text, effort_text, repo_text, activity, economy_text, context_note]
     kept = [field for field in candidates if field]
     while len(kept) > 1 and len(" · ".join(kept)) > width:
         kept.pop()
@@ -2838,6 +2877,7 @@ def _agent_argv(
     run_cost_profile: str = "balanced",
     reasoning_effort: Optional[str] = None,
     effort_level: Optional[str] = None,
+    agent_mode: Optional[str] = None,
     token_ceiling: Optional[int] = None,
 ) -> List[str]:
     argv = [
@@ -2877,6 +2917,18 @@ def _agent_argv(
     # sent only for an explicit human choice.
     if effort_level is not None and effort_level != AUTO_EFFORT:
         argv.extend(("--effort-level", normalize_effort(effort_level)))
+    if agent_mode is None:
+        stored_mode = _load_preferences().get("agent_mode")
+        if isinstance(stored_mode, str) and stored_mode.strip():
+            try:
+                agent_mode = normalize_mode(stored_mode)
+            except ModeError:
+                agent_mode = None
+    # Build deliberately emits nothing: it is the stance every run had before
+    # modes existed, so a legacy argv stays bit for bit identical. The flag is
+    # sent only when the run diverges from that default.
+    if agent_mode is not None and normalize_mode(agent_mode) != DEFAULT_MODE:
+        argv.extend(("--mode", normalize_mode(agent_mode)))
     if run_cost_profile not in {"balanced", "economy"}:
         raise ValueError("run cost profile must be balanced or economy")
     if run_cost_profile == "economy":
@@ -6773,6 +6825,8 @@ if _HAS_TEXTUAL:
             # reasoning_effort is the legacy per-provider knob, effort_level
             # is the product budget ladder from /effort.
             self.effort_level = _load_effort_level()
+            # The agent stance from /mode, persisted exactly like the ladder.
+            self.agent_mode = _load_agent_mode()
             self._last_assistant_content = ""
             self._task_started_at: Optional[float] = None
 
@@ -7637,6 +7691,7 @@ if _HAS_TEXTUAL:
                         if self.effort_level != AUTO_EFFORT
                         else self.reasoning_effort or "auto"
                     ),
+                    mode=self.agent_mode,
                     economy=self.run_cost_profile == "economy",
                     context_note=self._context_warning(selected),
                 )
@@ -8017,6 +8072,38 @@ if _HAS_TEXTUAL:
                         ),
                         "error",
                     )
+            elif command == "/mode":
+                requested = argument.strip()
+                usage = self._label(
+                    "Формат: /mode build|plan|ideate",
+                    "Usage: /mode build|plan|ideate",
+                )
+                if not requested:
+                    self._write(
+                        f"Mode: [#d4b676]{self.agent_mode}[/]. "
+                        f"{mode_summary(self.agent_mode, self.language)} {usage}"
+                    )
+                else:
+                    try:
+                        mode = normalize_mode(requested)
+                    except ModeError:
+                        self._write_notice(usage, "error")
+                    else:
+                        # The explicit command is the user gate: a mode never
+                        # changes silently, and /mode build is the transition
+                        # that re-enables production mutation.
+                        previous = self.agent_mode
+                        self.agent_mode = mode
+                        _save_agent_mode(mode)
+                        self._refresh_status()
+                        notice = mode_summary(mode, self.language)
+                        if previous != mode and mode == DEFAULT_MODE:
+                            notice += self._label(
+                                " Изменения кода снова идут по обычной политике.",
+                                " Production-code changes follow the normal"
+                                " policy again.",
+                            )
+                        self._write_notice(notice, "success")
             elif command == "/effort":
                 requested = argument.strip()
                 usage = self._label(
@@ -8083,6 +8170,11 @@ if _HAS_TEXTUAL:
                 rows = [
                     (self._label("Проект", "Project"), str(self.repository)),
                     (self._label("Модель", "Model"), model),
+                    (
+                        self._label("Режим агента", "Mode"),
+                        f"{self.agent_mode} - "
+                        f"{mode_summary(self.agent_mode, self.language)}",
+                    ),
                     ("Effort", f"{self.effort_level} - {effort_note}"),
                     (
                         self._label("Режим расходов", "Cost profile"),
@@ -8092,8 +8184,9 @@ if _HAS_TEXTUAL:
                     (self._label("Мост", "Bridge"), bridge_state),
                 ]
                 if self.reasoning_effort:
+                    # After Effort: the Mode row above shifted the list by one.
                     rows.insert(
-                        3,
+                        4,
                         (
                             self._label("Провайдер-хинт", "Provider hint"),
                             self.reasoning_effort,
@@ -10264,6 +10357,7 @@ if _HAS_TEXTUAL:
                 session_id,
                 run_cost_profile=self.run_cost_profile,
                 effort_level=self.effort_level,
+                agent_mode=self.agent_mode,
             )
 
             def execute() -> None:

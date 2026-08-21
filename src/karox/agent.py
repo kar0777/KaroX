@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
+from .agent_modes import normalize_mode
 from .core import CoreRuntime, ToolDefinition
 from .cost_intelligence import (
     CostGovernor,
@@ -295,6 +296,10 @@ class AgentReport:
     # with the token counts either side. The same rule: if it shaped the run,
     # the run says so.
     compaction: Optional[Dict[str, Any]] = None
+    # The stance the run was started with (--mode / the TUI\'s /mode). None is
+    # the legacy default: a run created without the flag behaves as Build and
+    # claims nothing beyond that.
+    mode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(redact(asdict(self)))
@@ -482,6 +487,7 @@ class AgentKernel:
         max_output_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
         economy_mode: bool = False,
+        mode: Optional[str] = None,
         on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -519,6 +525,10 @@ class AgentKernel:
         # It may remove transport/context duplication, but it must not silently
         # choose a weaker model, lower effort, or shrink the quality ceilings.
         self.economy_mode = bool(economy_mode)
+        # The agent stance (Build/Plan/Ideate). Validated here so a bad value
+        # fails before a session is leased; the kernel only records it for the
+        # report -- the caller owns the prompt delta and the grant policy.
+        self.mode = None if mode is None else normalize_mode(mode)
         # The model's own output ceiling, sent on every request. Leaving it unset
         # here made it something only the routed layer could supply, so a model
         # registered without one -- or any direct endpoint -- was capped by an
@@ -1927,6 +1937,7 @@ class AgentKernel:
             answer_basis=self._answer_basis(record) if reason == "answer" else (),
             project_context=dict(self.project_context),
             compaction=dict(self._last_compaction) if self._last_compaction else None,
+            mode=self.mode,
         )
 
     def _completed(self, record: SessionRecord) -> bool:

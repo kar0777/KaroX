@@ -24,6 +24,7 @@ from .agent import (
     ContextBudget,
     SYSTEM_PROMPT,
 )
+from .agent_modes import MODES, ModePolicy, mode_policy
 from .browser_access import BrowserAccessPolicy
 from .browser_credentials import BrowserCredentialStore
 from . import clipboard
@@ -67,6 +68,7 @@ from .hosted_tools_runtime import (
 )
 from . import __version__
 from .migration import MigrationError, migrate_legacy_metadata
+from .mode_artifacts import save_mode_artifact
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
@@ -1761,6 +1763,16 @@ def _parser() -> argparse.ArgumentParser:
             "one knob for how much engineering the run may spend: fills the "
             "max-steps/max-seconds/context budgets that were not set "
             "explicitly and picks a matching provider reasoning effort"
+        ),
+    )
+    run.add_argument(
+        "--mode",
+        choices=MODES,
+        default=None,
+        help=(
+            "the agent's stance for this run: build implements; plan and "
+            "ideate refuse production-code mutation by default and leave a "
+            "durable Plan/Concept artifact next to the session"
         ),
     )
     run.add_argument("--economy", action="store_true", help=argparse.SUPPRESS)
@@ -4611,11 +4623,81 @@ def _effort_runtime(
     return max_steps, max_seconds, context, reasoning
 
 
+def _mode_rules(args: argparse.Namespace) -> ModePolicy | None:
+    """Resolve --mode into enforceable rules, or None for the legacy default.
+
+    None keeps a run without the flag bit for bit what it was before modes
+    existed -- the same contract as the effort ladder, where AUTO emits
+    nothing. An explicit mode is real even for build: its stance is injected
+    into the prompt and recorded in the report.
+    """
+
+    raw = getattr(args, "mode", None)
+    if raw is None:
+        return None
+    return mode_policy(raw)
+
+
+def _mode_grants(
+    grants: set[Capability], rules: ModePolicy | None
+) -> set[Capability]:
+    """Plan and Ideate lose the write capabilities; Build and legacy keep all.
+
+    The capability layer, not prompt text, is what makes "no production
+    mutation by default" true: reads, checks, and MCP stay available, while
+    writes and commits wait for an explicit user transition to Build.
+    """
+
+    if rules is None or rules.mutates_by_default:
+        return grants
+    return grants - {Capability.REPO_WRITE, Capability.GIT_COMMIT}
+
+
+def _attach_mode_artifact(
+    report: AgentReport,
+    rules: ModePolicy,
+    *,
+    session_id: str,
+    task: str,
+) -> None:
+    """Persist a Plan/Ideate run's final answer as a durable mode artifact.
+
+    Only a real final message is persisted: a failed or empty run must not
+    leave a plausible-looking empty Plan on disk. A write failure never fails
+    the run -- the answer itself is already in the report -- but it is
+    recorded honestly instead of being swallowed.
+    """
+
+    if not rules.default_artifact:
+        return
+    answer = report.provider_message
+    if not isinstance(answer, str) or not answer.strip():
+        return
+    try:
+        saved = save_mode_artifact(
+            session_id=session_id,
+            kind=rules.default_artifact,
+            task=task,
+            content=answer,
+        )
+    except (OSError, ValueError) as exc:
+        report.project_context["mode_artifact"] = {
+            "saved": False,
+            "kind": rules.default_artifact,
+            "error": type(exc).__name__,
+        }
+        return
+    report.project_context["mode_artifact"] = {"saved": True, **saved}
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
     max_steps, max_seconds, effort_context, effort_reasoning = _effort_runtime(args)
+    # Like the effort ladder: resolved once here, before a session is leased,
+    # so an unknown mode fails with nothing to clean up.
+    mode_rules = _mode_rules(args)
     # Written back so later math on args (the research budget share) sees the
     # resolved numbers rather than None when the flags were left unset.
     args.max_steps = max_steps
@@ -4694,6 +4776,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                 Capability.NETWORK,
             }
         )
+    grants = _mode_grants(grants, mode_rules)
     policy.set_grants(native_origin, grants)
     verification_commands = [
         _verification_command(value) for value in args.verification_command
@@ -4703,6 +4786,10 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     # prompt, so an edited AGENTS.md cannot retroactively change what a past run
     # was told and a handoff document carries no third-party text.
     system_prompt = SYSTEM_PROMPT
+    if mode_rules is not None:
+        # The stance joins the request-only part of the prompt, exactly like
+        # Skill content below: durable history keeps the base prompt.
+        system_prompt += "\n\n" + mode_rules.prompt_delta
     project_context: dict[str, Any] = {"enabled": False}
     if not args.no_project_context:
         project = discover_project_context(
@@ -4818,7 +4905,15 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     # the top of the run; consume that single source of truth here.
     context_options: dict[str, Any] = dict(effort_context)
 
-    return AgentKernel(
+    if mode_rules is not None:
+        # If the stance shaped the run, the run says so -- the same rule as
+        # project instructions and compaction.
+        project_context["mode"] = {
+            "mode": mode_rules.mode,
+            "mutates_by_default": mode_rules.mutates_by_default,
+            "default_artifact": mode_rules.default_artifact,
+        }
+    report = AgentKernel(
         provider=provider,
         model=model,
         core=core,
@@ -4832,8 +4927,17 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         require_change=args.expect == "change",
         reasoning_effort=effort_reasoning,
         economy_mode=bool(getattr(args, "economy", False)),
+        mode=mode_rules.mode if mode_rules is not None else None,
         on_event=transcript_observer,
     ).run(record.session_id)
+    if mode_rules is not None:
+        _attach_mode_artifact(
+            report,
+            mode_rules,
+            session_id=record.session_id,
+            task=args.task,
+        )
+    return report
 
 
 def _handle_credential(args: argparse.Namespace) -> int:
