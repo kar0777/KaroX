@@ -118,6 +118,7 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 SLASH_COMMANDS: Dict[str, str] = {
     "/model": "choose model",
     "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
+    "/status": "show project, model, effort, and run state",
     "/home": "return to chat",
     "/usage": "show model usage, cache, and cost",
     "/cost": "show or switch the run economy profile",
@@ -146,6 +147,7 @@ SLASH_COMMANDS: Dict[str, str] = {
 _COMMANDS_RU: Dict[str, str] = {
     "/model": "выбрать модель",
     "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
+    "/status": "показать проект, модель, Effort и состояние запуска",
     "/home": "вернуться в чат",
     "/usage": "показать токены, кэш и расходы",
     "/cost": "режим расходов",
@@ -336,6 +338,7 @@ def _remember_workspace(path: Path) -> None:
 VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/model",
     "/effort",
+    "/status",
     "/usage",
     "/connect",
     "/sessions",
@@ -7529,7 +7532,11 @@ if _HAS_TEXTUAL:
                     model=model,
                     activity=self._header_activity_text(),
                     width=self._header_width(),
-                    effort=self.reasoning_effort or "auto",
+                    effort=(
+                        self.effort_level
+                        if self.effort_level != AUTO_EFFORT
+                        else self.reasoning_effort or "auto"
+                    ),
                     economy=self.run_cost_profile == "economy",
                     context_note=self._context_warning(selected),
                 )
@@ -7949,6 +7956,55 @@ if _HAS_TEXTUAL:
                         else:
                             notice = effort_summary(level, self.language)
                         self._write_notice(notice, "success")
+            elif command == "/status":
+                # Honest subset only: rows appear here as their subsystems
+                # become real. No placeholder "Map: n/a" noise.
+                selected = _selected_model()
+                model = (
+                    f"{selected.provider_id}/{selected.model_id}"
+                    if selected is not None
+                    else _TEXT[self.language]["not_configured"]
+                )
+                if self.effort_level == AUTO_EFFORT:
+                    effort_note = self._label(
+                        "AUTO: уровень подбирается под задачу.",
+                        "AUTO: the level is chosen per task.",
+                    )
+                else:
+                    effort_note = effort_summary(self.effort_level, self.language)
+                if self.agent_busy and self.active_session:
+                    task_state = self._label(
+                        f"выполняется ({self.active_session})",
+                        f"running ({self.active_session})",
+                    )
+                else:
+                    task_state = self._label("простаивает", "idle")
+                bridge_state = self.public_endpoint or _TEXT[self.language]["off"]
+                rows = [
+                    (self._label("Проект", "Project"), str(self.repository)),
+                    (self._label("Модель", "Model"), model),
+                    ("Effort", f"{self.effort_level} - {effort_note}"),
+                    (
+                        self._label("Режим расходов", "Cost profile"),
+                        self.run_cost_profile,
+                    ),
+                    (self._label("Задача", "Task"), task_state),
+                    (self._label("Мост", "Bridge"), bridge_state),
+                ]
+                if self.reasoning_effort:
+                    rows.insert(
+                        3,
+                        (
+                            self._label("Провайдер-хинт", "Provider hint"),
+                            self.reasoning_effort,
+                        ),
+                    )
+                lines = [f"[bold #e0dccc]{self._label('Статус', 'Status')}[/]"]
+                lines.extend(
+                    f"  [#d4b676]{escape(str(name))}:[/] {escape(str(value))}"
+                    for name, value in rows
+                )
+                self._write("\n".join(lines))
             elif command == "/help":
                 lines = [f"[bold #e0dccc]{_TEXT[self.language]['commands']}[/]"]
                 lines.extend(
