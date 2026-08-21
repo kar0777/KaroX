@@ -87,6 +87,12 @@ from .mcp_status import (
     build_mcp_status,
 )
 from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
+from .output_policy import (
+    OutputMode,
+    TurnReport,
+    render_turn_report,
+    resolve_mode,
+)
 from .promptql_outbound import (
     PromptQLInvocationError,
     PromptQLNaturalLanguageClient,
@@ -1674,6 +1680,16 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=int, default=24)
     run.add_argument("--max-seconds", type=float, default=900.0)
     run.add_argument(
+        "--output-mode",
+        choices=tuple(mode.value for mode in OutputMode),
+        default=OutputMode.ADAPTIVE.value,
+        help=(
+            "how much of the finished turn is narrated: adaptive stays "
+            "concise while everything is green and escalates on any failure "
+            "or warning; failures and warnings are never hidden in any mode"
+        ),
+    )
+    run.add_argument(
         "--context-window",
         type=int,
         default=None,
@@ -1835,7 +1851,85 @@ def _stream_progress() -> Callable[[AgentEvent], None]:
     return observe
 
 
-def _print_agent_report(report: AgentReport) -> None:
+def _turn_report_from_agent(report: AgentReport) -> TurnReport:
+    """Fold one finished native-agent run into the narration contract.
+
+    MODEL WORK is not USER NARRATION: the complete AgentReport stays one flag
+    away (``--json``) and one mode away (DETAILED), while the default path
+    renders through the output policy so a green run reads short and any
+    failure or warning is said out loud, first.
+    """
+    failures: list[str] = []
+    warnings: list[str] = []
+    evidence: list[str] = []
+    if report.verified:
+        if report.reason == "answer":
+            result = "answered from recorded local evidence"
+        else:
+            result = "completed with required local evidence"
+        result += f" in {report.steps} step(s)"
+    else:
+        result = ""
+        failures.append(
+            f"native agent stopped: {report.reason} "
+            f"(status {report.status}, phase {report.phase})"
+        )
+    for check in report.checks:
+        if not check.get("ok", True):
+            failures.append(
+                "check failed: "
+                + str(check.get("command") or check.get("argv") or "check")
+            )
+    verification = None
+    if report.evidence:
+        verification = f"{len(report.evidence)} evidence record(s)"
+    if report.changed_files:
+        evidence.append("changed: " + ", ".join(report.changed_files))
+    for item in report.answer_basis:
+        line = str(item.get("tool"))
+        if item.get("path"):
+            line += f" {item['path']}"
+        evidence.append(line)
+    sources = report.project_context.get("sources") or []
+    if sources:
+        evidence.append(
+            "instructions: " + ", ".join(str(item.get("path")) for item in sources)
+        )
+    for skipped in report.project_context.get("skipped") or []:
+        warnings.append(f"project instructions skipped: {skipped}")
+    if report.compaction:
+        detail = report.compaction
+        warnings.append(
+            "context compacted {count}x, ~{before} -> ~{after} tokens{note}".format(
+                count=detail.get("count"),
+                before=detail.get("before_tokens"),
+                after=detail.get("after_tokens"),
+                note="" if detail.get("within_ceiling") else " (still over the ceiling)",
+            )
+        )
+    if report.provider_message:
+        evidence.append(f"provider: {report.provider_message}")
+    return TurnReport(
+        result=result,
+        verification=verification,
+        warnings=tuple(warnings),
+        failures=tuple(failures),
+        evidence=tuple(evidence),
+        details_ref=f"session {report.session_id} (--json for the full report)",
+    )
+
+
+def _print_agent_report(
+    report: AgentReport, mode: OutputMode = OutputMode.ADAPTIVE
+) -> None:
+    turn = _turn_report_from_agent(report)
+    rendered = render_turn_report(turn, mode)
+    if rendered:
+        print(rendered)
+    # Progressive disclosure: DETAILED keeps the complete legacy field dump.
+    # The detail is one mode away, never deleted.
+    if resolve_mode(turn, mode) is not OutputMode.DETAILED:
+        return
     print(f"session_id: {report.session_id}")
     print(f"status: {report.status}")
     print(f"verified: {str(report.verified).lower()}")
@@ -5252,7 +5346,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "agent":
             report = _run_agent(args)
-            _json(report.to_dict()) if args.json else _print_agent_report(report)
+            if args.json:
+                _json(report.to_dict())
+            else:
+                _print_agent_report(
+                    report,
+                    OutputMode(getattr(args, "output_mode", OutputMode.ADAPTIVE.value)),
+                )
             return 0 if report.verified else 1
 
         store = SessionStore(session_dir())
