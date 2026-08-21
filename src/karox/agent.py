@@ -405,6 +405,17 @@ class AgentEventKind(str, Enum):
     COMPACTED = "compacted"
     STEP_FINISHED = "step_finished"
     FINISHED = "finished"
+    # Normalized product events: providers and adapters never construct UI
+    # presentation; the kernel emits typed facts and every renderer derives
+    # its own view from them.
+    PHASE_CHANGED = "phase_changed"
+    WARNING = "warning"
+    ERROR = "error"
+    FILE_READ = "file_read"
+    FILE_EDITED = "file_edited"
+    TEST_STARTED = "test_started"
+    TEST_FINISHED = "test_finished"
+    ARTIFACT_CREATED = "artifact_created"
 
 
 @dataclass(frozen=True)
@@ -430,9 +441,58 @@ class AgentEvent:
     usage: Dict[str, int] = field(default_factory=dict)
     reason: Optional[str] = None
     status: Optional[str] = None
+    # Normalized event fields: the session phase, a repository-relative file
+    # path, and a short safe detail line. Free text is redacted at the emit
+    # site like every other field on this channel.
+    phase: Optional[str] = None
+    path: Optional[str] = None
+    detail: Optional[str] = None
 
 
 AgentObserver = Callable[[AgentEvent], None]
+
+
+_READ_TOOL_NAMES = frozenset({"repo.read_file", "repo.read_lines"})
+_EDIT_TOOL_NAMES = frozenset({"repo.edit_file", "repo.write_file"})
+_TEST_TOOL_NAMES = frozenset({"checks.run", "checks.run_affected", "tests.run"})
+
+
+def _derived_tool_events(
+    core_name: str, result: Any
+) -> list[tuple[AgentEventKind, Dict[str, Any]]]:
+    """Normalized file/test facts derived from one finished tool call.
+
+    Pure derivation from the CoreResult: a read that succeeded is FILE_READ,
+    an edit that actually changed a file is FILE_EDITED, and a check-family
+    call is TEST_FINISHED with its exit code. Nothing is invented -- a result
+    without the expected fields derives nothing.
+    """
+
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return []
+    ok = bool(getattr(result, "ok", False))
+    events: list[tuple[AgentEventKind, Dict[str, Any]]] = []
+    path = data.get("path")
+    if core_name in _READ_TOOL_NAMES and ok and isinstance(path, str) and path:
+        events.append((AgentEventKind.FILE_READ, {"path": path}))
+    elif (
+        core_name in _EDIT_TOOL_NAMES
+        and ok
+        and data.get("changed") is True
+        and isinstance(path, str)
+        and path
+    ):
+        events.append((AgentEventKind.FILE_EDITED, {"path": path}))
+    elif core_name in _TEST_TOOL_NAMES:
+        exit_code = data.get("exit_code")
+        detail = (
+            f"exit {exit_code}"
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+            else None
+        )
+        events.append((AgentEventKind.TEST_FINISHED, {"ok": ok, "detail": detail}))
+    return events
 
 
 @dataclass
@@ -1176,6 +1236,13 @@ class AgentKernel:
             )
             ledger.observe(call.name, signature)
             ledger.refusals += 1
+            self._emit(
+                AgentEventKind.WARNING,
+                tool=display,
+                call_id=call.call_id,
+                reason="repeated_action",
+                detail="identical call with unchanged results",
+            )
             finished(False, "identical call, results unchanged")
             return ledger.refusals >= self.limits.max_repeated_action_errors
         ledger.observe(call.name, signature)
@@ -1215,6 +1282,10 @@ class AgentKernel:
             idempotency_key=f"agent-{digest}" if definition.mutates else None,
             deadline_seconds=min(3600.0, max(0.1, remaining)),
         )
+        if core_name in _TEST_TOOL_NAMES:
+            self._emit(
+                AgentEventKind.TEST_STARTED, tool=display, call_id=call.call_id
+            )
         try:
             result = self.core.execute(command, lease=lease if definition.mutates else None)
         except Exception as exc:
@@ -1230,6 +1301,10 @@ class AgentKernel:
             return False
         self._persist_tool_result(session_id, lease, call, core_name, result)
         finished(bool(result.ok), self._result_summary(result))
+        for derived_kind, derived_fields in _derived_tool_events(core_name, result):
+            self._emit(
+                derived_kind, tool=display, call_id=call.call_id, **derived_fields
+            )
         if core_name in MUTATION_TOOLS and result.ok and result.data.get("changed") is True:
             ledger.clear_after_change()
         return False
@@ -1334,6 +1409,13 @@ class AgentKernel:
                 "core_name": core_name,
                 "error": payload["error"],
             },
+        )
+        self._emit(
+            AgentEventKind.ERROR,
+            tool=self._tool_aliases.get(call.name, call.name),
+            call_id=call.call_id,
+            reason=error_type,
+            detail=str(redact(message))[:400],
         )
 
     def _recover_pending(
@@ -1872,6 +1954,7 @@ class AgentKernel:
             record.status = "active"
 
         self._update_session(session_id, lease, update)
+        self._emit(AgentEventKind.PHASE_CHANGED, phase=phase)
 
     def _finish(
         self,

@@ -1886,6 +1886,23 @@ def _stream_progress() -> Callable[[AgentEvent], None]:
                 f"  <- {event.tool} {mark} in {event.duration_seconds:.2f}s"
                 f" ({event.summary})"
             )
+        elif event.kind is AgentEventKind.PHASE_CHANGED:
+            write(f"[phase: {event.phase}]")
+        elif event.kind is AgentEventKind.WARNING:
+            write(f"  !! {event.reason}: {event.detail}")
+        elif event.kind is AgentEventKind.ERROR:
+            write(f"  xx {event.reason}: {event.detail}")
+        elif event.kind is AgentEventKind.FILE_READ:
+            write(f"  file read {event.path}")
+        elif event.kind is AgentEventKind.FILE_EDITED:
+            write(f"  file edited {event.path}")
+        elif event.kind is AgentEventKind.TEST_STARTED:
+            write(f"  test {event.tool} started")
+        elif event.kind is AgentEventKind.TEST_FINISHED:
+            mark = "ok" if event.ok else "failed"
+            write(f"  test {event.tool} {mark} ({event.detail or 'no exit code'})")
+        elif event.kind is AgentEventKind.ARTIFACT_CREATED:
+            write(f"  artifact {event.detail or ''} {event.path or ''}".rstrip())
         elif event.kind is AgentEventKind.FINISHED:
             write(f"[{event.status}: {event.reason}]")
 
@@ -4696,6 +4713,7 @@ def _attach_mode_artifact(
     *,
     session_id: str,
     task: str,
+    observer: Any = None,
 ) -> None:
     """Persist a Plan/Ideate run's final answer as a durable mode artifact.
 
@@ -4725,6 +4743,20 @@ def _attach_mode_artifact(
         }
         return
     report.project_context["mode_artifact"] = {"saved": True, **saved}
+    if observer is not None:
+        # The kernel does not own artifacts, so the CLI publishes the
+        # synthetic typed fact itself: same channel, same renderer rules.
+        try:
+            observer(
+                AgentEvent(
+                    AgentEventKind.ARTIFACT_CREATED,
+                    report.steps,
+                    path=str(saved.get("path") or "") or None,
+                    detail=rules.default_artifact,
+                )
+            )
+        except Exception:
+            pass
 
 
 _ADAPTER_FAMILIES = {
@@ -5086,6 +5118,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             mode_rules,
             session_id=record.session_id,
             task=args.task,
+            observer=transcript_observer,
         )
     return report
 

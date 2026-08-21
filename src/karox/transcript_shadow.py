@@ -103,6 +103,14 @@ _AGENT_KIND_MAP: dict[AgentEventKind, str] = {
     AgentEventKind.TOOL_FINISHED: "ToolCallCompleted",
     AgentEventKind.FINISHED: "SessionStateChanged",
     AgentEventKind.COMPACTED: "SessionStateChanged",
+    AgentEventKind.PHASE_CHANGED: "AgentPhaseChanged",
+    AgentEventKind.WARNING: "AgentWarning",
+    AgentEventKind.ERROR: "AgentErrorEvent",
+    AgentEventKind.FILE_READ: "FileRead",
+    AgentEventKind.FILE_EDITED: "FileEdited",
+    AgentEventKind.TEST_STARTED: "TestRunStarted",
+    AgentEventKind.TEST_FINISHED: "TestRunCompleted",
+    AgentEventKind.ARTIFACT_CREATED: "ArtifactCreated",
 }
 
 
@@ -160,6 +168,12 @@ def make_transcript_observer(
             payload["reason"] = event.reason
         if event.status:
             payload["status"] = event.status
+        if event.phase:
+            payload["phase"] = event.phase
+        if event.path:
+            payload["path"] = event.path
+        if event.detail:
+            payload["detail"] = event.detail
 
         try:
             _store.append(
