@@ -8155,11 +8155,13 @@ if _HAS_TEXTUAL:
                 requested = argument.strip().casefold()
                 if requested in {"refresh", "\u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c"}:
                     self._refresh_models_command()
+                elif requested in {"auto", "авто"}:
+                    self._auto_model_command()
                 elif requested:
                     self._write_notice(
                         self._label(
-                            "\u0424\u043e\u0440\u043c\u0430\u0442: /model \u0438\u043b\u0438 /model refresh",
-                            "Usage: /model or /model refresh",
+                            "Формат: /model, /model auto или /model refresh",
+                            "Usage: /model, /model auto, or /model refresh",
                         ),
                         "error",
                     )
@@ -9185,6 +9187,77 @@ if _HAS_TEXTUAL:
             self.run_worker(
                 execute, thread=True, exclusive=True, group="model-refresh"
             )
+
+        def _auto_model_command(self) -> None:
+            """/model auto: capability-aware recommendation, explained honestly.
+
+            Required capabilities gate first (explicit "true" only; unknown is
+            rejected rather than invented), ranking happens only among the
+            compatible models, and the switch happens here because the user
+            asked for it: nothing overrides an explicit /model choice
+            automatically.
+            """
+
+            from .model_auto import recommend_model
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Модель и Effort можно менять после завершения текущей задачи.",
+                        "Model and Effort can be changed after the current task finishes.",
+                    ),
+                    "warning",
+                )
+                return
+            registry = _registry()
+            try:
+                providers = {
+                    item.provider_id: item for item in registry.providers()
+                }
+                models = [
+                    item
+                    for item in registry.models()
+                    if providers.get(item.provider_id) is None
+                    or bool(getattr(providers[item.provider_id], "enabled", True))
+                ]
+                selected = registry.selected_model()
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            result = recommend_model(models)
+            record = result.record
+            if record is None:
+                detail = "; ".join(result.reasons)
+                self._write_notice(
+                    self._label(
+                        f"AUTO: совместимой модели нет — {detail}",
+                        f"AUTO: no compatible model — {detail}",
+                    ),
+                    "warning",
+                )
+                return
+            why = "; ".join(result.reasons)
+            target = f"{record.provider_id}/{record.model_id}"
+            if (
+                selected is not None
+                and selected.provider_id == record.provider_id
+                and selected.model_id == record.model_id
+            ):
+                self._write_notice(
+                    self._label(
+                        f"AUTO подтверждает {target}: {why}",
+                        f"AUTO keeps {target}: {why}",
+                    ),
+                    "info",
+                )
+                return
+            try:
+                registry.select_model(record.provider_id, record.model_id)
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self._refresh_status()
+            self._write_notice(f"AUTO → {target}: {why}", "success")
 
         def _model_picker_done(self, choice: Optional[str]) -> None:
             from .tui_dashboard import MODEL_PICKER_CONNECT
