@@ -14,7 +14,8 @@ import pytest
 
 from karox import cli as karox_cli
 from karox import tui as karox_tui
-from karox.effort import budget_for
+from karox.effort import TaskSignals, budget_for
+from karox.effort_signals import DerivedSignals
 
 
 def _argv_namespace(**overrides):
@@ -79,6 +80,41 @@ class TestEffortRuntimeResolution:
         assert low[2]["max_tool_result_chars"] < high[2]["max_tool_result_chars"]
         assert low[3] != high[3]
 
+    def test_auto_resolves_from_derived_signals_and_explains(self, monkeypatch):
+        derived = DerivedSignals(
+            signals=TaskSignals(risk_area=True, dependency_breadth=12),
+            evidence=("12 co-change partners in git history",),
+        )
+        monkeypatch.setattr(
+            karox_cli, "derive_task_signals", lambda task, **kw: derived
+        )
+        args = _argv_namespace(effort_level="auto")
+        args.task = "fix token refresh in the auth subsystem"
+        args.repository = Path(".")
+        steps, seconds, context, reasoning = karox_cli._effort_runtime(args)
+        resolution = args.effort_auto
+        assert resolution["requested"] == "auto"
+        assert resolution["level"] in ("high", "extra-high", "ultra")
+        chosen = budget_for(resolution["level"])
+        assert steps == chosen.agent_limits.max_steps
+        assert seconds == chosen.agent_limits.max_seconds
+        assert reasoning == chosen.reasoning_effort
+        assert resolution["reasons"]
+        assert resolution["evidence"]
+
+    def test_auto_never_overrides_explicit_flags(self, monkeypatch):
+        derived = DerivedSignals(
+            signals=TaskSignals(risk_area=True, dependency_breadth=12),
+            evidence=(),
+        )
+        monkeypatch.setattr(
+            karox_cli, "derive_task_signals", lambda task, **kw: derived
+        )
+        args = _argv_namespace(effort_level="auto", max_steps=5)
+        args.task = "anything"
+        steps, _, _, _ = karox_cli._effort_runtime(args)
+        assert steps == 5
+
 
 class TestAgentArgvEffort:
     def test_explicit_level_is_emitted(self, monkeypatch):
@@ -97,12 +133,13 @@ class TestAgentArgvEffort:
         index = argv.index("--effort-level")
         assert argv[index + 1] == "extra-high"
 
-    def test_auto_emits_nothing(self, monkeypatch):
+    def test_auto_is_forwarded_for_signal_resolution(self, monkeypatch):
         monkeypatch.setattr(
             karox_tui, "_load_preferences", lambda: {"effort_level": "auto"}
         )
         argv = karox_tui._agent_argv("task", Path("."), (), "session")
-        assert "--effort-level" not in argv
+        index = argv.index("--effort-level")
+        assert argv[index + 1] == "auto"
 
     def test_garbage_preference_emits_nothing(self, monkeypatch):
         monkeypatch.setattr(

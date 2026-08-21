@@ -280,6 +280,12 @@ class TaskSignals:
     migration_involved: bool = False
     test_complexity: bool = False
     regression_history: bool = False
+    # Supplied by the deriver (karox.effort_signals), not typed by a person:
+    # the current mode and whether the stored project map is stale for the
+    # repository revision. Defaults mean "unknown" and keep old callers
+    # bit-for-bit stable.
+    mode: Optional[str] = None
+    map_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -339,6 +345,12 @@ def recommend_effort(signals: Optional[TaskSignals] = None) -> EffortRecommendat
     if signals.regression_history:
         score += 2
         reasons.append("area has a history of regressions")
+    if signals.map_stale:
+        score += 1
+        reasons.append("project map is stale; extra verification headroom")
+    if signals.mode == "plan" and signals.ambiguity:
+        score += 1
+        reasons.append("plan mode on an ambiguous scope: broader investigation")
 
     if score >= 9:
         level = "ultra"
@@ -351,6 +363,15 @@ def recommend_effort(signals: Optional[TaskSignals] = None) -> EffortRecommendat
     else:
         level = "low"
         reasons.append("no escalation signals; targeted change")
+    if (
+        signals.mode == "ideate"
+        and EFFORT_LEVELS.index(level) > EFFORT_LEVELS.index("high")
+    ):
+        # Ideation never mutates and never runs the live verification ladder,
+        # so recommending ultra would spend budget the mode cannot use. The
+        # user's explicit choice still always wins over this cap.
+        level = "high"
+        reasons.append("ideate mode never mutates; capped at high")
     return EffortRecommendation(level=level, reasons=tuple(reasons))
 
 

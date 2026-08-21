@@ -116,7 +116,13 @@ from .paths import (
 from .policy import CapabilityPolicy
 from .project_context import discover_project_context
 from .project_registry import ProjectRegistry, ProjectRegistryError
-from .effort import budget_for as effort_budget_for
+from .effort import (
+    AUTO_EFFORT,
+    budget_for as effort_budget_for,
+    normalize_effort as normalize_effort_level,
+    recommend_effort,
+)
+from .effort_signals import derive_task_signals
 from .research_subagent import ResearchLimits, ResearchSubagent, build_research_context
 from .openapi_bridge import build_openapi_bridge_app
 from .oauth_bridge import build_oauth_proxy_asgi_app
@@ -4599,7 +4605,29 @@ def _effort_runtime(
     """
 
     level = getattr(args, "effort_level", None)
-    budget = effort_budget_for(level) if level else None
+    budget = None
+    if level:
+        resolved = normalize_effort_level(level)
+        if resolved == AUTO_EFFORT:
+            # AUTO resolves here, once, from real signals: the task text,
+            # the stored project map (dependency breadth, churn, freshness),
+            # and the mode. The resolution is recorded on args so the run
+            # report can show the chosen level and its reasons.
+            derived = derive_task_signals(
+                str(getattr(args, "task", "") or ""),
+                repository=getattr(args, "repository", None),
+                mode=getattr(args, "mode", None),
+            )
+            recommendation = recommend_effort(derived.signals)
+            budget = effort_budget_for(recommendation.level)
+            args.effort_auto = {
+                "requested": AUTO_EFFORT,
+                "level": recommendation.level,
+                "reasons": list(recommendation.reasons),
+                "evidence": list(derived.evidence),
+            }
+        else:
+            budget = effort_budget_for(resolved)
     max_steps = args.max_steps if args.max_steps is not None else (
         budget.agent_limits.max_steps if budget else 24
     )
@@ -4913,6 +4941,12 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             "mutates_by_default": mode_rules.mutates_by_default,
             "default_artifact": mode_rules.default_artifact,
         }
+    effort_auto = getattr(args, "effort_auto", None)
+    if isinstance(effort_auto, dict):
+        # AUTO explains itself: the resolved level and its reasons ride in
+        # the report exactly like the mode stance, so the TUI and JSON
+        # consumers can show "Auto -> high" honestly.
+        project_context["effort_auto"] = effort_auto
     report = AgentKernel(
         provider=provider,
         model=model,

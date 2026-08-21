@@ -2918,10 +2918,12 @@ def _agent_argv(
                 effort_level = normalize_effort(stored_level)
             except ValueError:
                 effort_level = None
-    # AUTO deliberately emits nothing yet: without task signals the ladder
-    # would resolve to medium and silently change legacy runs; the flag is
-    # sent only for an explicit human choice.
-    if effort_level is not None and effort_level != AUTO_EFFORT:
+    # AUTO is forwarded since the task-signal wiring landed: the CLI
+    # resolves it at submission from the task text, the stored project map
+    # (dependency breadth, churn, freshness), and the mode, then records the
+    # chosen level plus reasons in the report. A run with no stored
+    # preference at all still emits nothing and stays legacy bit for bit.
+    if effort_level is not None:
         argv.extend(("--effort-level", normalize_effort(effort_level)))
     if agent_mode is None:
         stored_mode = _load_preferences().get("agent_mode")
@@ -8424,10 +8426,12 @@ if _HAS_TEXTUAL:
                 if not requested:
                     if self.effort_level == AUTO_EFFORT:
                         detail = self._label(
-                            "AUTO подбирает уровень под задачу; бюджеты "
-                            "остаются стандартными до явного выбора.",
-                            "AUTO picks a level per task; budgets stay at "
-                            "the defaults until a level is chosen.",
+                            "AUTO выбирает уровень по сигналам задачи: "
+                            "названные файлы, зависимости карты, churn, "
+                            "риск, режим. Уровень и причины - в отчёте.",
+                            "AUTO picks the level from task signals: named "
+                            "files, map dependency breadth, churn, risk, "
+                            "and mode. The run reports the level and why.",
                         )
                     else:
                         detail = effort_summary(self.effort_level, self.language)
@@ -8446,10 +8450,10 @@ if _HAS_TEXTUAL:
                         self._refresh_status()
                         if level == AUTO_EFFORT:
                             notice = self._label(
-                                "Effort AUTO включён: уровень подбирается "
-                                "под задачу.",
-                                "Effort AUTO enabled: the level is chosen "
-                                "per task.",
+                                "Effort AUTO включён: уровень выбирается "
+                                "по сигналам задачи при отправке.",
+                                "Effort AUTO enabled: the level is resolved "
+                                "from task signals at submission.",
                             )
                         else:
                             notice = effort_summary(level, self.language)
@@ -8465,8 +8469,8 @@ if _HAS_TEXTUAL:
                 )
                 if self.effort_level == AUTO_EFFORT:
                     effort_note = self._label(
-                        "AUTO: уровень подбирается под задачу.",
-                        "AUTO: the level is chosen per task.",
+                        "AUTO: уровень выбирается по сигналам задачи.",
+                        "AUTO: the level is resolved from task signals.",
                     )
                 else:
                     effort_note = effort_summary(self.effort_level, self.language)
