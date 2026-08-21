@@ -92,15 +92,35 @@ def initialize_git_repository(path: Path) -> None:
             "GIT_AUTHOR_EMAIL": "karox@example.invalid",
             "GIT_COMMITTER_NAME": "KaroX Test",
             "GIT_COMMITTER_EMAIL": "karox@example.invalid",
+            # The developer's global/system gitconfig must never reach a test
+            # repository. Two real stall modes motivated this: a briefly locked
+            # ~/.gitconfig blocks `git init` outright, and `core.fsmonitor=true`
+            # spawns a daemon whose inherited pipe handles keep
+            # capture_output/communicate blocked long after git exits — observed
+            # as the coverage-run stall around initialize_git_repository on
+            # Windows. Pointing both configs at the null device also makes the
+            # created repository deterministic across machines.
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
         }
     )
-    subprocess.run(
-        ["git", "init", "--quiet"],
-        cwd=path,
-        env=env,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    try:
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=path,
+            env=env,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - diagnostic path
+        raise RuntimeError(
+            "git init did not finish within 120s. A hung git here usually "
+            "means an external process holds the git config lock or a "
+            "filesystem watcher daemon kept the output pipes open; rerun "
+            "after closing other git tooling."
+        ) from exc
 
