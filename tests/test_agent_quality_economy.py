@@ -158,6 +158,73 @@ class QualityEconomyWiringTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertTrue(decision.shadow_mode)
 
+    def _duplicate_history(self, big: str) -> list[dict[str, object]]:
+        return [
+            {"role": "system", "content": "stale prompt"},
+            {"role": "user", "content": "task"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "call_id": "dup-1",
+                        "name": "repo_read_file",
+                        "raw_arguments": "{\"path\": \"a.txt\"}",
+                    },
+                    {
+                        "call_id": "dup-2",
+                        "name": "repo_read_file",
+                        "raw_arguments": "{\"path\": \"a.txt\"}",
+                    },
+                ],
+            },
+            {"role": "tool", "content": big, "tool_call_id": "dup-1"},
+            {"role": "tool", "content": big, "tool_call_id": "dup-2"},
+        ]
+
+    def _bare_kernel(self, economy: bool) -> AgentKernel:
+        return AgentKernel(
+            provider=_EconomyQueueProvider([]),
+            model="test-model",
+            core=self.core,
+            sessions=self.sessions,
+            origin=self.origin,
+            limits=AgentLimits(max_seconds=30),
+            system_prompt=SYSTEM_PROMPT,
+            economy_mode=economy,
+        )
+
+    def test_context_compiler_measures_without_rewriting(self) -> None:
+        kernel = self._bare_kernel(economy=False)
+        big = "y" * 1_500
+        messages = list(kernel._request_messages(self._duplicate_history(big)))
+        tool_contents = [m.content for m in messages if m.role == "tool"]
+        self.assertEqual(tool_contents, [big, big])
+        compiled = kernel._context_compilation
+        self.assertIsNotNone(compiled)
+        assert compiled is not None
+        self.assertEqual(compiled.stats.referenced, 1)
+        self.assertEqual(kernel._economy_reused_chars_pending, 0)
+
+    def test_context_compiler_rewrites_only_in_economy_mode(self) -> None:
+        kernel = self._bare_kernel(economy=True)
+        big = "y" * 1_500
+        messages = list(kernel._request_messages(self._duplicate_history(big)))
+        tool_messages = [m for m in messages if m.role == "tool"]
+        self.assertEqual(tool_messages[0].content, big)
+        replaced = tool_messages[1].content or ""
+        self.assertIn("identical_tool_result_reused", replaced)
+        self.assertIn("dup-1", replaced)
+        self.assertGreater(kernel._economy_reused_chars_pending, 0)
+
+    def test_usage_events_carry_context_compiler_counters(self) -> None:
+        self._run_repeated_read_session()
+        record = self.sessions.load("session")
+        usage = record.usage if isinstance(record.usage, dict) else {}
+        rendered = json.dumps(usage, ensure_ascii=False, sort_keys=True)
+        self.assertIn("economy_context_items", rendered)
+        self.assertIn("economy_context_applied", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

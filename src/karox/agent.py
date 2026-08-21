@@ -14,6 +14,12 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from .agent_modes import normalize_mode
 from .core import CoreRuntime, ToolDefinition
+from .context_compiler import (
+    CompiledContext,
+    ContextCompiler,
+    ContextItem,
+    Verdict,
+)
 from .cost_intelligence import (
     CostGovernor,
     CostLedger,
@@ -667,6 +673,12 @@ class AgentKernel:
         # Shadow mode: the governor observes and warns; it never blocks a run
         # and never downgrades the model. Enforcement stays a user decision.
         self._cost_governor = CostGovernor(shadow_mode=True)
+        # Typed context IR (Part 2): decisions are measured on every request;
+        # rewriting is applied only in economy mode and only through lossless
+        # reference / supersession markers. Quality precedes reduction.
+        self._context_compiler = ContextCompiler()
+        self._context_compilation: CompiledContext | None = None
+        self._economy_stale_chars_pending = 0
         schema_payload = [
             {
                 "name": tool.name,
@@ -1119,6 +1131,23 @@ class AgentKernel:
         usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
         usage_event["economy_read_cache_hits"] = self._read_cache.hits
         usage_event["economy_read_cache_misses"] = self._read_cache.misses
+        compiled = self._context_compilation
+        if compiled is not None:
+            usage_event["economy_context_items"] = compiled.stats.items_total
+            usage_event["economy_context_included"] = compiled.stats.included
+            usage_event["economy_context_referenced"] = compiled.stats.referenced
+            usage_event["economy_context_elided_stale"] = (
+                compiled.stats.elided_stale
+            )
+            usage_event["economy_context_chars_in"] = compiled.stats.chars_in
+            usage_event["economy_context_chars_out"] = compiled.stats.chars_out
+            usage_event["economy_context_applied"] = bool(self.economy_mode)
+        stale_chars = int(getattr(self, "_economy_stale_chars_pending", 0))
+        if stale_chars > 0:
+            usage_event["economy_stale_chars"] = stale_chars
+            usage_event["economy_stale_estimated_tokens"] = int(
+                stale_chars / float(self.context.chars_per_token)
+            )
         decision = self._cost_governor.evaluate(
             current_cost_usd=self._cost_ledger.total_cost(session_id)
         )
@@ -1594,42 +1623,80 @@ class AgentKernel:
         self, history: Iterable[Dict[str, Any]]
     ) -> Iterable[ModelMessage]:
         replaced = False
-        # Economy only removes exact duplication from the retained request. It
-        # does not alter the selected model, reasoning effort, or quality limits.
-        seen_tool_results: Dict[str, str] = {}
-        self._economy_reused_chars_pending = 0
+        messages: List[ModelMessage] = []
         for message in self._messages(self._compact(list(history))):
             if not replaced and message.role == "system":
                 replaced = True
-                yield ModelMessage("system", self.system_prompt)
+                messages.append(ModelMessage("system", self.system_prompt))
             elif message.role == "tool" and message.content is not None:
-                content = self._clip(
-                    message.content, self.context.max_tool_result_chars
-                )
-                if self.economy_mode and len(content) >= 1_000:
-                    previous_call = seen_tool_results.get(content)
-                    if previous_call:
-                        replacement = json.dumps(
-                            {
-                                "karox": "identical_tool_result_reused",
-                                "same_as_tool_call_id": previous_call,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        )
-                        self._economy_reused_chars_pending += max(
-                            0, len(content) - len(replacement)
-                        )
-                        content = replacement
-                    elif message.tool_call_id:
-                        seen_tool_results[content] = message.tool_call_id
-                yield ModelMessage(
-                    role="tool",
-                    content=content,
-                    tool_call_id=message.tool_call_id,
+                messages.append(
+                    ModelMessage(
+                        role="tool",
+                        content=self._clip(
+                            message.content, self.context.max_tool_result_chars
+                        ),
+                        tool_call_id=message.tool_call_id,
+                    )
                 )
             else:
-                yield message
+                messages.append(message)
+        # Typed context IR: every retained item receives an explicit
+        # INCLUDE / REFERENCE / ELIDE verdict with a recorded reason. The
+        # decisions are measured on every request; the rewrite below is
+        # applied only in economy mode. Economy never alters the selected
+        # model, reasoning effort, or quality limits, and every replaced
+        # item stays reachable through the marker that replaced it.
+        calls: Dict[str, tuple[str, str]] = {}
+        for message in messages:
+            for call in message.tool_calls:
+                calls[call.call_id] = (call.name, call.raw_arguments)
+        items: List[ContextItem] = []
+        for index, message in enumerate(messages):
+            tool_name: str | None = None
+            tool_arguments: str | None = None
+            if message.role == "tool" and message.tool_call_id:
+                known = calls.get(message.tool_call_id)
+                if known is not None:
+                    tool_name, tool_arguments = known
+            items.append(
+                ContextItem(
+                    index=index,
+                    role=message.role,
+                    content=message.content
+                    if isinstance(message.content, str)
+                    else None,
+                    tool_call_id=message.tool_call_id,
+                    tool_name=tool_name,
+                    tool_arguments=tool_arguments,
+                )
+            )
+        compiled = self._context_compiler.compile(items)
+        self._context_compilation = compiled
+        self._economy_reused_chars_pending = 0
+        self._economy_stale_chars_pending = 0
+        if not self.economy_mode:
+            return messages
+        rewritten: List[ModelMessage] = []
+        for message, decision in zip(messages, compiled.decisions):
+            if (
+                message.role == "tool"
+                and decision.replacement is not None
+                and decision.verdict is not Verdict.INCLUDE
+            ):
+                if decision.verdict is Verdict.ELIDE_STALE:
+                    self._economy_stale_chars_pending += decision.chars_saved
+                else:
+                    self._economy_reused_chars_pending += decision.chars_saved
+                rewritten.append(
+                    ModelMessage(
+                        role="tool",
+                        content=decision.replacement,
+                        tool_call_id=message.tool_call_id,
+                    )
+                )
+            else:
+                rewritten.append(message)
+        return rewritten
 
     # -- context compaction ------------------------------------------------
 
