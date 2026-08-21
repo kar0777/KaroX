@@ -1798,6 +1798,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--no-memory-context",
+        action="store_true",
+        help=(
+            "skip the bounded relevant-memory block in the composed request; "
+            "useful when reproducing a run that must not depend on it"
+        ),
+    )
+    run.add_argument(
         "--stream",
         action="store_true",
         help=(
@@ -5006,16 +5014,45 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             f"up to {max_steps} steps in {max_seconds:.0f}s. Escalate only "
             "when risk or uncertainty demands it."
         )
+    # Bounded relevant memory joins the request only when it exists: fresh
+    # entries, ranked against the task, capped by a byte budget -- never the
+    # whole database. Scope ids mirror the TUI /memory convention exactly so
+    # the CLI reads the same files the rest of the product writes.
+    memory_block: str | None = None
+    if not getattr(args, "no_memory_context", False):
+        try:
+            from .memory import KaroXMemory, MemoryScope
+            from .project_registry import _generated_project_id
+
+            memory_block = (
+                KaroXMemory(session_dir() / "memory").context(
+                    scopes=(
+                        (MemoryScope.USER, "default"),
+                        (MemoryScope.PROJECT, _generated_project_id(repository)),
+                        (MemoryScope.SESSION, record.session_id),
+                    ),
+                    budget_chars=1500,
+                    task=args.task,
+                    fresh_only=True,
+                )
+                or None
+            )
+        except Exception:
+            # Memory is context, not a dependency: a broken memory store
+            # must not stop a run that never asked for it.
+            memory_block = None
     # WIRED: the production request prompt is composed here -- constitution
     # core, provider delta, and runtime contract in the stable prefix; mode,
-    # effort, project, skill, and research after the boundary. The report
-    # records the sections and the prefix hash so composition is evidence.
+    # effort, project, memory, skill, and research after the boundary. The
+    # report records the sections and the prefix hash so composition is
+    # evidence.
     composed = compose_system_prompt(
         provider=_constitution_provider(args),
         runtime_contract=SYSTEM_PROMPT,
         mode_delta=mode_delta,
         effort_line=effort_line,
         project_suffix=project_suffix,
+        memory_context=memory_block,
         skill_suffix=skill_suffix,
         research_block=research_context,
     )

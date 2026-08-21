@@ -128,5 +128,91 @@ class ConstitutionWiringTests(unittest.TestCase):
         self.assertNotIn("effort", sections)
 
 
+class MemoryContextWiringTests(unittest.TestCase):
+    """Bounded relevant memory reaches the composed request; stale does not."""
+
+    def _run(self, seed, *extra_argv):
+        with isolated_karox_directories() as repository:
+            initialize_git_repository(repository)
+            seed(repository)
+            project = ProjectContext(
+                instructions="",
+                environment="<environment>fixture</environment>",
+                project_map="",
+                project_map_metadata={
+                    "enabled": True,
+                    "implementation": [],
+                    "tests": [],
+                    "docs": [],
+                },
+            )
+            provider = mock.Mock()
+            with (
+                mock.patch(
+                    "karox.cli._agent_provider",
+                    return_value=(provider, "model-x", 32000, 4096),
+                ),
+                mock.patch(
+                    "karox.cli.discover_project_context", return_value=project
+                ),
+                mock.patch(
+                    "karox.cli._selected_mcp_runtime", return_value=(None, None)
+                ),
+                mock.patch(
+                    "karox.transcript_shadow.make_transcript_observer",
+                    return_value=None,
+                ),
+                mock.patch("karox.cli.AgentKernel") as kernel,
+            ):
+                run_report = mock.Mock(provider_message="", project_context={})
+                kernel.return_value.run.return_value = run_report
+                cli._run_agent(_args(repository, *extra_argv))
+                return kernel.call_args.kwargs
+
+    @staticmethod
+    def _seed_memory(repository):
+        from karox.memory import KaroXMemory, MemoryKind, MemoryScope
+        from karox.paths import session_dir
+
+        memory = KaroXMemory(session_dir() / "memory")
+        memory.remember(
+            scope=MemoryScope.USER,
+            kind=MemoryKind.NOTE,
+            content="Feature changes must update the feature changelog first.",
+        )
+        memory.remember(
+            scope=MemoryScope.USER,
+            kind=MemoryKind.NOTE,
+            content="Outdated feature rule from a moved document.",
+            source_path="docs/moved.md",
+            source_sha256="0" * 64,
+        )
+        memory.mark_stale(source_path="docs/moved.md")
+
+    def test_fresh_relevant_memory_is_composed_stale_is_not(self):
+        kwargs = self._run(self._seed_memory)
+        prompt = kwargs["system_prompt"]
+        self.assertIn("feature changelog", prompt)
+        self.assertNotIn("Outdated feature rule", prompt)
+        sections = kwargs["project_context"]["constitution"]["sections"]
+        self.assertIn("memory", sections)
+        # Memory joins after the stable prefix boundary, never inside it.
+        self.assertGreater(
+            prompt.find("feature changelog"),
+            prompt.find("bounded KaroX Core Runtime"),
+        )
+
+    def test_no_memory_context_flag_omits_the_block(self):
+        kwargs = self._run(self._seed_memory, "--no-memory-context")
+        self.assertNotIn("feature changelog", kwargs["system_prompt"])
+        sections = kwargs["project_context"]["constitution"]["sections"]
+        self.assertNotIn("memory", sections)
+
+    def test_empty_memory_adds_no_section(self):
+        kwargs = self._run(lambda repository: None)
+        sections = kwargs["project_context"]["constitution"]["sections"]
+        self.assertNotIn("memory", sections)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -354,8 +354,15 @@ class KaroXMemory:
         limit: int = 5,
         budget_chars: int = 2000,
         include_personal: bool = True,
+        fresh_only: bool = False,
     ) -> tuple[MemoryEntry, ...]:
-        """Deterministic ranked recall: overlap, recency, confidence, budget."""
+        """Deterministic ranked recall: overlap, recency, confidence, budget.
+
+        ``fresh_only`` drops stale-marked entries entirely. The prompt
+        composer uses it: a fact whose source changed must be revalidated
+        before it may justify a decision, so it never rides into a model
+        request as if it were still true.
+        """
 
         query_tokens = _tokens(query)
         query_concepts = _concepts(query_tokens)
@@ -365,6 +372,8 @@ class KaroXMemory:
         for scope, scope_id in scopes:
             for entry in self._load(scope, scope_id):
                 if entry.sensitivity == "personal" and not include_personal:
+                    continue
+                if fresh_only and entry.validation == "stale":
                     continue
                 content_tokens = _tokens(entry.content)
                 key_tokens = _tokens(entry.key) if entry.key is not None else set()
@@ -411,6 +420,7 @@ class KaroXMemory:
         scopes: Iterable[tuple[MemoryScope, str]],
         budget_chars: int = 1500,
         task: str = "",
+        fresh_only: bool = False,
     ) -> str:
         """A compact, prompt-ready bundle; empty string when nothing relevant."""
 
@@ -419,6 +429,7 @@ class KaroXMemory:
             scopes=tuple(scopes),
             limit=12,
             budget_chars=budget_chars,
+            fresh_only=fresh_only,
         )
         if not entries:
             return ""
