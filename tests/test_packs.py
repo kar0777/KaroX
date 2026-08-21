@@ -440,6 +440,10 @@ class PackRegistryConcurrencyTests(unittest.TestCase):
             ],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        # ``with holder:`` closes stdin/stdout/stderr and reaps the child on
+        # exit -- without it the three pipe wrappers surfaced later as
+        # ``ResourceWarning: unclosed file`` (encoded in the console code page,
+        # e.g. cp1251) during unrelated tests.
         try:
             assert holder.stdout is not None and holder.stdin is not None
             # Read stderr only once the child is gone: it is a pipe, and reading
@@ -463,7 +467,13 @@ class PackRegistryConcurrencyTests(unittest.TestCase):
         finally:
             if holder.poll() is None:
                 holder.kill()
-                holder.wait(timeout=30)
+            for stream in (holder.stdin, holder.stdout, holder.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            holder.wait(timeout=30)
 
     def test_threads_sharing_one_registry_are_still_serialised(self) -> None:
         """One instance, two threads: the lock must not conclude it is its own.

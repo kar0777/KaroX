@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -108,7 +111,46 @@ async def _call_mcp_tool_async(
             read_timeout_seconds=timedelta(seconds=15),
         ) as session:
             await session.initialize()
-            return await session.call_tool(name, arguments, meta=meta)
+            with _expected_alias_client_warning(name):
+                return await session.call_tool(name, arguments, meta=meta)
+
+
+class _ExpectedAliasWarningFilter(logging.Filter):
+    """Drop the SDK client's 'not listed by server' line for one dotted alias.
+
+    Tests here deliberately call tools by the internal dotted spelling to prove
+    the compatibility alias keeps working. The SDK cannot validate a name that
+    never appeared in ``tools/list`` and warns about it -- an expected negative
+    path, so it is contained at the call site instead of flooding the release
+    console. Only the exact message for the exact alias is dropped.
+    """
+
+    def __init__(self, alias: str) -> None:
+        super().__init__()
+        self._alias = alias
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return not ("not listed by server" in message and self._alias in message)
+
+
+@contextlib.contextmanager
+def _expected_alias_client_warning(name: str):
+    if "." not in name:
+        yield
+        return
+    scoped = _ExpectedAliasWarningFilter(name)
+    targets = [logging.getLogger("client"), logging.getLogger("mcp.client.session")]
+    for target in targets:
+        target.addFilter(scoped)
+    try:
+        yield
+    finally:
+        for target in targets:
+            target.removeFilter(scoped)
 
 
 def _call_mcp_tool(
@@ -860,26 +902,32 @@ class BridgeWireSecurityTests(unittest.TestCase):
 
     def test_foreign_origin_is_rejected_before_the_tool_runs(self) -> None:
         app = build_proxy_asgi_app(self.runtime, self.token)
-        rejected, accepted = _wire_requests(
-            app,
-            [
-                _tools_call(
-                    self.token,
-                    "karox.repo.read_file",
-                    {"path": "sample.txt"},
-                    origin="https://attacker.example",
-                ),
-                _tools_call(
-                    self.token,
-                    "karox.repo.read_file",
-                    {"path": "sample.txt"},
-                    origin="http://127.0.0.1:8765",
-                    meta={"karoxIdempotencyKey": "read-1"},
-                ),
-            ],
-        )
+        # The 421 below is this test's point; capture the guard's console
+        # diagnostic so intentional attack traffic does not pollute the
+        # release log, and assert it instead of discarding it.
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stderr(diagnostics):
+            rejected, accepted = _wire_requests(
+                app,
+                [
+                    _tools_call(
+                        self.token,
+                        "karox.repo.read_file",
+                        {"path": "sample.txt"},
+                        origin="https://attacker.example",
+                    ),
+                    _tools_call(
+                        self.token,
+                        "karox.repo.read_file",
+                        {"path": "sample.txt"},
+                        origin="http://127.0.0.1:8765",
+                        meta={"karoxIdempotencyKey": "read-1"},
+                    ),
+                ],
+            )
         self.assertEqual(rejected.status, 421)
         self.assertEqual(accepted.status, 200)
+        self.assertIn("[karox-rebind] 421", diagnostics.getvalue())
 
     def test_foreign_host_is_rejected_on_both_wires(self) -> None:
         import anyio
@@ -914,17 +962,20 @@ class BridgeWireSecurityTests(unittest.TestCase):
 
             await mcp_app(scope, tracked_receive, send)
 
+        diagnostics = io.StringIO()
         with patch(f"{__name__}._memory_stream_pair", side_effect=captured_pair):
-            (mcp_response,) = _wire_requests(
-                tracked_mcp_app,
-                [{"method": "GET", "path": "/mcp", "headers": headers}],
-            )
-            (openapi_response,) = _wire_requests(
-                openapi_app,
-                [{"method": "GET", "path": "/health", "headers": headers}],
-            )
+            with contextlib.redirect_stderr(diagnostics):
+                (mcp_response,) = _wire_requests(
+                    tracked_mcp_app,
+                    [{"method": "GET", "path": "/mcp", "headers": headers}],
+                )
+                (openapi_response,) = _wire_requests(
+                    openapi_app,
+                    [{"method": "GET", "path": "/health", "headers": headers}],
+                )
         self.assertEqual(mcp_response.status, 421)
         self.assertEqual(openapi_response.status, 421)
+        self.assertIn("[karox-rebind] 421", diagnostics.getvalue())
         self.assertEqual(
             lifespan_events,
             ["lifespan.startup", "lifespan.shutdown"],

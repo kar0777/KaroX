@@ -255,10 +255,15 @@ class HyperagentOAuthWireTests(unittest.TestCase):
         self.assertEqual(protected.status_code, 200, protected.text)
 
     def test_unknown_host_is_421(self) -> None:
+        # Intentional attack traffic: capture the guard's console line so the
+        # release log stays clean, and assert it rather than discard it.
+        captured = io.StringIO()
         with httpx.Client(base_url=self.base, timeout=15.0,
                           headers={"Host": "rebound.attacker.example"}) as client:
-            response = client.get("/.well-known/oauth-authorization-server")
+            with redirect_stderr(captured):
+                response = client.get("/.well-known/oauth-authorization-server")
         self.assertEqual(response.status_code, 421, response.text)
+        self.assertIn("[karox-rebind] 421", captured.getvalue())
 
     def test_public_url_with_port_is_allowed(self) -> None:
         app = build_oauth_proxy_asgi_app(
@@ -285,14 +290,17 @@ class HyperagentOAuthWireTests(unittest.TestCase):
             public_url=f"https://{self.host}",
             allowed_redirect_hosts=frozenset({"hyperagent.com"}),
         )
-        status, _body = _asgi_get(
-            app,
-            "/.well-known/oauth-authorization-server",
-            headers=[("host", "rebound.attacker.example"),
-                     ("x-forwarded-host", self.host)],
-            client=("5.6.7.8", 44000),
-        )
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            status, _body = _asgi_get(
+                app,
+                "/.well-known/oauth-authorization-server",
+                headers=[("host", "rebound.attacker.example"),
+                         ("x-forwarded-host", self.host)],
+                client=("5.6.7.8", 44000),
+            )
         self.assertEqual(status, 421)
+        self.assertIn("[karox-rebind] 421", captured.getvalue())
 
     def test_forwarded_host_from_trusted_loopback_peer_is_accepted(self) -> None:
         # The tunnel child connects from loopback and may preserve the public

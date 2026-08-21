@@ -237,7 +237,12 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
             finally:
                 if parent.poll() is None:
                     parent.kill()
-                    parent.wait(timeout=5)
+                if parent.stdout is not None:
+                    try:
+                        parent.stdout.close()
+                    except OSError:
+                        pass
+                parent.wait(timeout=5)
 
 
 class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):

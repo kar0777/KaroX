@@ -8,6 +8,7 @@ source, and missing Chrome-extension package data.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import tempfile
 import unittest
@@ -126,31 +127,41 @@ class WheelContentsGateTests(unittest.TestCase):
             check_wheel_contents.newest_wheel(self.root / "dist"), newer
         )
 
+    @staticmethod
+    def _run_gate(argv: list[str]) -> tuple[int, str]:
+        """Run the gate with its human report captured, not printed.
+
+        These are intentional failure fixtures; letting the report through made
+        the release console claim wheels were broken when only a fixture was.
+        """
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = check_wheel_contents.main(argv)
+        return int(code), output.getvalue()
+
     def test_an_empty_dist_directory_reports_clearly(self) -> None:
         self.assertIsNone(check_wheel_contents.newest_wheel(self.root / "dist"))
-        self.assertEqual(
-            check_wheel_contents.main(["--root", str(self.root)]), 1
-        )
+        code, report = self._run_gate(["--root", str(self.root)])
+        self.assertEqual(code, 1, report)
+        self.assertIn("no wheel found in dist/", report)
 
     def test_the_gate_exits_non_zero_on_a_bad_wheel(self) -> None:
         wheel = self.build_wheel(
             (*self.complete_names(), "karox/markdown_render.py")
         )
-        self.assertEqual(
-            check_wheel_contents.main(
-                ["--root", str(self.root), "--wheel", str(wheel)]
-            ),
-            1,
+        code, report = self._run_gate(
+            ["--root", str(self.root), "--wheel", str(wheel)]
         )
+        self.assertEqual(code, 1, report)
+        self.assertIn("ships karox/markdown_render.py", report)
 
     def test_the_gate_exits_zero_on_a_good_wheel(self) -> None:
         wheel = self.build_wheel(self.complete_names())
-        self.assertEqual(
-            check_wheel_contents.main(
-                ["--root", str(self.root), "--wheel", str(wheel)]
-            ),
-            0,
+        code, report = self._run_gate(
+            ["--root", str(self.root), "--wheel", str(wheel)]
         )
+        self.assertEqual(code, 0, report)
+        self.assertIn("wheel matches source", report)
 
 
 if __name__ == "__main__":

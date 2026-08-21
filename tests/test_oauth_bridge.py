@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from typing import Any
@@ -451,19 +451,25 @@ class OAuthBridgeWireTests(unittest.TestCase):
         self.assertEqual(response.json()["error"], "invalid_request")
 
     def test_foreign_host_is_rejected_on_the_oauth_endpoints(self) -> None:
+        # Intentional attack traffic: capture the guard's console diagnostics
+        # so the release log stays clean, and assert them instead.
+        captured = io.StringIO()
         with httpx.Client(base_url=self.base, timeout=15.0) as client:
-            registration = client.post(
-                "/oauth/register",
-                json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
-                headers={"Host": "rebound.attacker.example"},
-            )
-            token = client.post(
-                "/oauth/token",
-                data={"grant_type": "authorization_code"},
-                headers={"Host": "rebound.attacker.example"},
-            )
+            with redirect_stderr(captured):
+                registration = client.post(
+                    "/oauth/register",
+                    json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
+                    headers={"Host": "rebound.attacker.example"},
+                )
+                token = client.post(
+                    "/oauth/token",
+                    data={"grant_type": "authorization_code"},
+                    headers={"Host": "rebound.attacker.example"},
+                )
         self.assertEqual(registration.status_code, 421, registration.text)
         self.assertEqual(token.status_code, 421, token.text)
+        diagnostics = captured.getvalue()
+        self.assertEqual(diagnostics.count("[karox-rebind] 421"), 2, diagnostics)
 
     def test_the_declared_public_host_reaches_the_mcp_wire(self) -> None:
         with httpx.Client(base_url=self.base, timeout=15.0) as client:

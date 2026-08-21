@@ -24,18 +24,20 @@ from unittest.mock import patch
 from _support import ROOT  # noqa: F401 - inserts src on sys.path
 
 
-def _run_quietly(gate: ModuleType, argv: list[str]) -> int:
+def _run_quietly(gate: ModuleType, argv: list[str]) -> tuple[int, str]:
     """Run a checker without its report landing in the suite's own output.
 
     These scripts are built to talk to a human on stdout, which is right for CI
-    and noise inside a test run.
+    and noise inside a test run. Several tests below drive a gate into an
+    intentional failure; re-printing those reports made the release console
+    read as if the real repository were failing its version and count checks.
+    The report is returned instead, so an assertion that goes wrong can still
+    show exactly what the gate said.
     """
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         result = gate.main(argv)
-    if result:
-        print(output.getvalue(), end="")
-    return int(result)
+    return int(result), output.getvalue()
 
 
 def _load_gate(name: str) -> ModuleType:
@@ -106,7 +108,9 @@ class CheckVersionsTests(unittest.TestCase):
 
     def _run(self) -> int:
         with patch.object(self.gate, "ROOT", self.root):
-            return _run_quietly(self.gate, [])
+            code, report = _run_quietly(self.gate, [])
+        self.last_report = report
+        return code
 
     def test_a_marker_that_lags_the_bump_is_accepted(self) -> None:
         """This is the state of every version bump, and it used to fail.
@@ -149,10 +153,12 @@ class CheckTestCountTests(unittest.TestCase):
     def test_the_counts_this_repository_publishes_are_current(self) -> None:
         """The real check, against the real tree -- all three copies read 536
         against a suite of 576 before this gate existed."""
-        self.assertEqual(_run_quietly(self.gate, []), 0)
+        code, report = _run_quietly(self.gate, [])
+        self.assertEqual(code, 0, report)
 
     def test_a_stale_published_count_fails(self) -> None:
-        self.assertEqual(_run_quietly(self.gate, ["--print", "suite"]), 0)
+        code, report = _run_quietly(self.gate, ["--print", "suite"])
+        self.assertEqual(code, 0, report)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # A document that states a number one short of the truth.
@@ -170,7 +176,8 @@ class CheckTestCountTests(unittest.TestCase):
                 patch.object(self.gate, "LEGACY_CHECKS", root / "absent.py"),
                 patch.object(self.gate, "_discover", lambda *a, **k: [object()] * 7),
             ):
-                self.assertEqual(_run_quietly(self.gate, []), 1)
+                code, report = _run_quietly(self.gate, [])
+                self.assertEqual(code, 1, report)
 
     def test_write_updates_a_stale_count_and_leaves_the_prose_alone(self) -> None:
         """The suite grows in most commits that add one, so nine documented copies
@@ -202,9 +209,11 @@ class CheckTestCountTests(unittest.TestCase):
                 patch.object(self.gate, "EXPECTED_LEGACY_SCRIPT_TESTS", 0),
                 patch.object(self.gate, "_discover", lambda *a, **k: [object()] * 7),
             ):
-                self.assertEqual(_run_quietly(self.gate, ["--write"]), 0)
+                code, report = _run_quietly(self.gate, ["--write"])
+                self.assertEqual(code, 0, report)
                 # Idempotent: a second pass has nothing to change and still passes.
-                self.assertEqual(_run_quietly(self.gate, ["--write"]), 0)
+                code, report = _run_quietly(self.gate, ["--write"])
+                self.assertEqual(code, 0, report)
 
             self.assertEqual(
                 document.read_bytes(),
@@ -230,7 +239,8 @@ class CheckTestCountTests(unittest.TestCase):
                 patch.object(self.gate, "EXPECTED_LEGACY_SCRIPT_TESTS", 0),
                 patch.object(self.gate, "_discover", lambda *a, **k: [object()] * 7),
             ):
-                self.assertEqual(_run_quietly(self.gate, ["--write"]), 1)
+                code, report = _run_quietly(self.gate, ["--write"])
+                self.assertEqual(code, 1, report)
             self.assertEqual(
                 (root / "README.md").read_text(encoding="utf-8"), "No claim here.\n"
             )
