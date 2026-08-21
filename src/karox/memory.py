@@ -21,6 +21,7 @@ Design contract:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -486,6 +487,162 @@ class KaroXMemory:
         if result is not None:
             self._save(scope, scope_id, updated)
         return result
+
+    def find(self, entry_id: str) -> Optional[MemoryEntry]:
+        """Locate one entry by id across every scope file."""
+
+        for scope, scope_id in self._stored_scopes():
+            for entry in self._load(scope, scope_id):
+                if entry.entry_id == entry_id:
+                    return entry
+        return None
+
+    def entries(
+        self, *, scope: Optional[MemoryScope] = None
+    ) -> tuple[MemoryEntry, ...]:
+        """Every stored entry, newest first, optionally one scope only.
+
+        This is the inspection surface /memory renders: unlike recall it is
+        exhaustive on purpose, so the user can see exactly what the runtime
+        knows -- including entries recall would never select.
+        """
+
+        found: list[MemoryEntry] = []
+        for stored_scope, scope_id in self._stored_scopes():
+            if scope is not None and stored_scope is not scope:
+                continue
+            found.extend(self._load(stored_scope, scope_id))
+        found.sort(key=lambda item: (-item.updated_at, item.entry_id))
+        return tuple(found)
+
+    def edit(self, *, entry_id: str, content: str) -> MemoryEntry:
+        """Rewrite one entry's content in place, keeping its identity.
+
+        The edited text is the user's own assertion, so provenance becomes
+        ``user-edit`` and validation returns to ``valid``. The source binding
+        is dropped: the entry no longer restates a file, it states the user.
+        """
+
+        text = content.strip()
+        if not text:
+            raise MemoryError("memory content must be a non-empty string")
+        if len(text) > 4000:
+            raise MemoryError("memory content is capped at 4000 characters")
+        reject_secret_like(text)
+        located = self.find(entry_id)
+        if located is None:
+            raise MemoryError(f"unknown memory entry: {entry_id}")
+        entries = self._load(located.scope, located.scope_id)
+        result: Optional[MemoryEntry] = None
+        updated: list[MemoryEntry] = []
+        for entry in entries:
+            if entry.entry_id == entry_id:
+                result = dataclasses.replace(
+                    entry,
+                    content=text,
+                    provenance="user-edit",
+                    validation="valid",
+                    updated_at=_now(),
+                    source_path=None,
+                    source_sha256=None,
+                )
+                updated.append(result)
+            else:
+                updated.append(entry)
+        if result is None:
+            raise MemoryError(f"unknown memory entry: {entry_id}")
+        self._save(located.scope, located.scope_id, updated)
+        return result
+
+    def forget_entry(self, entry_id: str) -> int:
+        """Forget by id alone; 0 when no such entry exists anywhere."""
+
+        located = self.find(entry_id)
+        if located is None:
+            return 0
+        return self.forget(
+            scope=located.scope,
+            scope_id=located.scope_id,
+            entry_id=entry_id,
+        )
+
+    def revalidate_sources(self, *, repository: Path) -> dict[str, Any]:
+        """Sweep every source-backed entry: VALID <-> STALE from real hashes.
+
+        Map refresh calls this, so stale architecture memory cannot silently
+        remain authoritative after the repository moved underneath it. The
+        flip is bidirectional: a source restored to its recorded hash turns
+        the entry valid again instead of leaving a permanent scar.
+        """
+
+        checked = 0
+        became_stale: list[str] = []
+        became_valid: list[str] = []
+        for scope, scope_id in self._stored_scopes():
+            entries = self._load(scope, scope_id)
+            changed = False
+            updated: list[MemoryEntry] = []
+            for entry in entries:
+                if not entry.source_path or not entry.source_sha256:
+                    updated.append(entry)
+                    continue
+                source = Path(entry.source_path)
+                if not source.is_absolute():
+                    source = Path(repository) / source
+                current: Optional[str] = None
+                try:
+                    if source.is_file():
+                        digest = hashlib.sha256()
+                        with source.open("rb") as handle:
+                            for chunk in iter(
+                                lambda: handle.read(65536), b""
+                            ):
+                                digest.update(chunk)
+                        current = digest.hexdigest()
+                except OSError:
+                    current = None
+                checked += 1
+                validation = (
+                    "valid" if current == entry.source_sha256 else "stale"
+                )
+                if validation != entry.validation:
+                    (
+                        became_stale
+                        if validation == "stale"
+                        else became_valid
+                    ).append(entry.entry_id)
+                    updated.append(
+                        dataclasses.replace(
+                            entry, validation=validation, updated_at=_now()
+                        )
+                    )
+                    changed = True
+                else:
+                    updated.append(entry)
+            if changed:
+                self._save(scope, scope_id, updated)
+        return {
+            "checked": checked,
+            "became_stale": became_stale,
+            "became_valid": became_valid,
+        }
+
+    # Annotated with tuple, not list: inside this class body the name
+    # ``list`` is the method above, and a return annotation is evaluated in
+    # class scope -- builtins.list is unreachable from here.
+    def _stored_scopes(self) -> tuple[tuple[MemoryScope, str], ...]:
+        found = []
+        for file in sorted(self.root.glob("*.json")):
+            try:
+                payload = json.loads(file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            try:
+                scope = MemoryScope(str(payload.get("scope", "session")))
+            except ValueError:
+                continue
+            found.append((scope, str(payload.get("scope_id", "default"))))
+        return tuple(found)
 
     def _touch(self, entries: Iterable[MemoryEntry], now: float) -> None:
         by_file: dict[tuple[MemoryScope, str], list[str]] = {}

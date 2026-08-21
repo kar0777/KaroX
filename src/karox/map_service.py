@@ -187,6 +187,7 @@ class MapService:
         *,
         root: Optional[Path] = None,
         session_id: str = MAP_SESSION_ID,
+        memory_root: Optional[Path] = None,
     ) -> None:
         self.repository = Path(repository).expanduser().resolve(strict=True)
         base = (
@@ -204,6 +205,7 @@ class MapService:
             self.repository, self.directory / "facts.json"
         )
         self.session_id = session_id
+        self.memory_root = memory_root
 
     # -- storage -----------------------------------------------------------
 
@@ -517,6 +519,26 @@ class MapService:
             # real time; re-checking keeps the recorded state honest at save.
             validation = self._validate_sources(facts)
 
+        # Map refresh participates in memory invalidation: source-backed
+        # memory entries are re-hashed against the repository the map just
+        # walked, so stale architecture memory cannot stay authoritative.
+        memory_invalidation: Optional[dict[str, Any]] = None
+        try:
+            from .memory import KaroXMemory
+            from .paths import session_dir
+
+            memory_home = (
+                self.memory_root
+                if self.memory_root is not None
+                else session_dir() / "memory"
+            )
+            if memory_home.exists():
+                memory_invalidation = KaroXMemory(
+                    memory_home
+                ).revalidate_sources(repository=self.repository)
+        except Exception as exc:
+            memory_invalidation = {"error": type(exc).__name__}
+
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         measurements: dict[str, Any] = (
             dict(previous.get("measurements", {})) if previous else {}
@@ -552,6 +574,7 @@ class MapService:
             "second_pass": second_pass,
             "git_evidence": git_evidence,
             "validation": validation,
+            "memory_invalidation": memory_invalidation,
             "changed_files_seen": changed if changed is not None else None,
             "measurements": measurements,
         }

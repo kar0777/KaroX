@@ -126,6 +126,7 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/model": "choose model",
     "/mode": "show or set agent mode (build, plan, ideate)",
     "/map": "project map: status, preview, refresh, or a level (low..ultra)",
+    "/memory": "inspect, remember, edit, or forget KaroX memory",
     "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
     "/status": "show project, model, effort, and run state",
     "/home": "return to chat",
@@ -161,6 +162,7 @@ _COMMANDS_RU: Dict[str, str] = {
     "/model": "выбрать модель",
     "/mode": "режим агента (build, plan, ideate)",
     "/map": "карта проекта: status, preview, refresh или уровень (low..ultra)",
+    "/memory": "память KaroX: просмотр, запись, правка, удаление",
     "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
     "/status": "показать проект, модель, Effort и состояние запуска",
     "/home": "вернуться в чат",
@@ -378,6 +380,7 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/mode",
     "/effort",
     "/map",
+    "/memory",
     "/status",
     "/usage",
     "/connect",
@@ -8075,6 +8078,182 @@ if _HAS_TEXTUAL:
                         ),
                         "error",
                     )
+            elif command == "/memory":
+                requested = argument.strip()
+                usage = self._label(
+                    "Формат: /memory [user|project|workstream|session] | "
+                    "show ID | remember [scope] ТЕКСТ | edit ID ТЕКСТ | "
+                    "forget ID",
+                    "Usage: /memory [user|project|workstream|session] | "
+                    "show ID | remember [scope] TEXT | edit ID TEXT | "
+                    "forget ID",
+                )
+                # Local import for the same reason as /map: pay for the
+                # subsystem when it is used, not at TUI startup.
+                from .memory import (
+                    KaroXMemory,
+                    MemoryError,
+                    MemoryKind,
+                    MemoryScope,
+                )
+                from .paths import session_dir
+
+                memory = KaroXMemory(session_dir() / "memory")
+                scope_names = ("user", "project", "workstream", "session")
+
+                def memory_scope_pair(name: str) -> tuple[Any, str]:
+                    # Mirrors the hosted runtime's convention exactly, so the
+                    # TUI reads and writes the same files the bridge does.
+                    if name == "user":
+                        return MemoryScope.USER, "default"
+                    if name == "project":
+                        from .project_registry import _generated_project_id
+
+                        return (
+                            MemoryScope.PROJECT,
+                            _generated_project_id(self.repository),
+                        )
+                    if name == "workstream":
+                        return MemoryScope.WORKSTREAM, "default"
+                    return (
+                        MemoryScope.SESSION,
+                        self.active_session or "default",
+                    )
+
+                def render_entry_line(entry: Any) -> str:
+                    text = entry.content.replace("\n", " ")
+                    if len(text) > 70:
+                        text = text[:69] + "…"
+                    marker = (
+                        ""
+                        if entry.validation == "valid"
+                        else f" [#d47a6a]{entry.validation.upper()}[/]"
+                    )
+                    return (
+                        f"[#d4b676]{entry.entry_id}[/] "
+                        f"{entry.scope.value}/{entry.kind.value}"
+                        f"{marker} — {text}"
+                    )
+
+                parts = requested.split(maxsplit=1)
+                action = parts[0].lower() if parts else ""
+                remainder = parts[1].strip() if len(parts) > 1 else ""
+                try:
+                    if not requested or action in scope_names:
+                        wanted = (
+                            None
+                            if not requested
+                            else MemoryScope(action)
+                        )
+                        entries = memory.entries(scope=wanted)
+                        if not entries:
+                            self._write(
+                                self._label(
+                                    "Память пуста для этого раздела.",
+                                    "Memory is empty for this view.",
+                                )
+                                + f" {usage}"
+                            )
+                        else:
+                            shown = entries[:20]
+                            lines = [
+                                render_entry_line(entry) for entry in shown
+                            ]
+                            if len(entries) > len(shown):
+                                lines.append(
+                                    self._label(
+                                        f"…и ещё {len(entries) - len(shown)}.",
+                                        f"…and {len(entries) - len(shown)} more.",
+                                    )
+                                )
+                            lines.append(usage)
+                            self._write("\n".join(lines))
+                    elif action == "show" and remainder:
+                        entry = memory.find(remainder.split()[0])
+                        if entry is None:
+                            self._write_notice(
+                                self._label(
+                                    "Нет записи с таким id.",
+                                    "No memory entry with that id.",
+                                ),
+                                "error",
+                            )
+                        else:
+                            details = [
+                                render_entry_line(entry),
+                                f"content: {entry.content}",
+                                (
+                                    f"provenance: {entry.provenance} · "
+                                    f"confidence: {entry.confidence} · "
+                                    f"validation: {entry.validation}"
+                                ),
+                            ]
+                            if entry.source_path:
+                                details.append(
+                                    f"source: {entry.source_path} "
+                                    f"({(entry.source_sha256 or '')[:16]})"
+                                )
+                            self._write("\n".join(details))
+                    elif action == "remember" and remainder:
+                        scope_word = remainder.split(maxsplit=1)
+                        if (
+                            scope_word
+                            and scope_word[0].lower() in scope_names
+                            and len(scope_word) > 1
+                        ):
+                            scope, scope_id = memory_scope_pair(
+                                scope_word[0].lower()
+                            )
+                            text = scope_word[1]
+                        else:
+                            scope, scope_id = memory_scope_pair("user")
+                            text = remainder
+                        entry = memory.remember(
+                            scope=scope,
+                            scope_id=scope_id,
+                            kind=MemoryKind.NOTE,
+                            content=text,
+                            provenance="user-tui",
+                            confidence=1.0,
+                        )
+                        self._write_notice(
+                            self._label(
+                                f"Записано: {entry.entry_id}",
+                                f"Remembered: {entry.entry_id}",
+                            ),
+                            "success",
+                        )
+                    elif action == "edit" and len(remainder.split()) > 1:
+                        entry_id, new_text = remainder.split(maxsplit=1)
+                        entry = memory.edit(
+                            entry_id=entry_id, content=new_text
+                        )
+                        self._write_notice(
+                            self._label(
+                                f"Обновлено: {entry.entry_id}",
+                                f"Updated: {entry.entry_id}",
+                            ),
+                            "success",
+                        )
+                    elif action == "forget" and remainder:
+                        removed = memory.forget_entry(remainder.split()[0])
+                        if removed:
+                            self._write_notice(
+                                self._label("Забыто.", "Forgotten."),
+                                "success",
+                            )
+                        else:
+                            self._write_notice(
+                                self._label(
+                                    "Нет записи с таким id.",
+                                    "No memory entry with that id.",
+                                ),
+                                "error",
+                            )
+                    else:
+                        self._write_notice(usage, "error")
+                except MemoryError as exc:
+                    self._write_notice(str(exc), "error")
             elif command == "/map":
                 requested = argument.strip().lower()
                 usage = self._label(
