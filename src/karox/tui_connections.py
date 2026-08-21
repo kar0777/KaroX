@@ -1794,6 +1794,7 @@ def discovered_model_record(provider_id: str, item: Any) -> Any:
         streaming=str(getattr(item, "streaming", "unknown")),
         pricing=pricing,
         provenance="discovered",
+        display_name=getattr(item, "display_name", None),
     )
 
 

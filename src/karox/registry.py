@@ -289,6 +289,9 @@ class ModelRecord:
     streaming: str = "unknown"
     pricing: Optional[ModelPricing] = None
     provenance: str = "manual"
+    # The provider's published display name. None when the catalog did not
+    # publish one; never synthesized from the model id.
+    display_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         _safe_id(self.provider_id, "provider ID")
@@ -314,6 +317,14 @@ class ModelRecord:
                 raise ValueError(f"{label} capability must be true, false, or unknown")
         if not isinstance(self.provenance, str) or not self.provenance.strip():
             raise ValueError("model provenance is required")
+        if self.display_name is not None:
+            if (
+                not isinstance(self.display_name, str)
+                or not self.display_name.strip()
+                or len(self.display_name) > 500
+                or any(char in self.display_name for char in "\r\n\x00")
+            ):
+                raise ValueError("model display name must be short plain text")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModelRecord":
@@ -331,6 +342,7 @@ class ModelRecord:
             streaming=value.get("streaming", "unknown"),
             pricing=pricing,
             provenance=value.get("provenance", "manual"),
+            display_name=value.get("display_name"),
         )
 
 
