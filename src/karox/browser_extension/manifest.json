@@ -5,15 +5,18 @@
   "description": "Local browser workspace controlled by the user's KaroX bridge.",
   "minimum_chrome_version": "111",
   "permissions": [
-    "tabs",
-    "tabGroups",
+    "downloads",
     "scripting",
     "sidePanel",
     "storage",
+    "tabGroups",
+    "tabs",
     "webNavigation",
     "webRequest"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "service_worker.js",
     "type": "module"
@@ -29,13 +32,23 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["page_console_bridge.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "page_console_bridge.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     }

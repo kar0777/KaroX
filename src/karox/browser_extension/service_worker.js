@@ -441,90 +441,12 @@ function visible(el) {
   return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && rect.width >= 0 && rect.height >= 0;
 }
 
-function domAction(payload) {
-  const el = resolveSelector(String(payload.selector || ""));
-  if (!el) throw new Error("element not found");
-  if (el.closest && el.closest(OVERLAY_HOST_SELECTOR)) {
-    throw new Error("element is part of the KaroX overlay and cannot be acted on");
-  }
-  const scope = el.closest("form,section,article,[role=dialog]");
-  const fieldType = String(el.getAttribute("type") || el.tagName || "").toLowerCase();
-  const secretHint = /password|secret|token|api[_-]?key|credential|cookie|card|cvv|cvc|iban/i;
-  const secretMarked = el.getAttribute("data-karox-secret") === "true" || el.dataset.karoxSecret === "true";
-  const sensitive = secretMarked || fieldType === "password" || secretHint.test([
-    el.getAttribute("name") || "",
-    el.id || "",
-    el.getAttribute("aria-label") || "",
-    el.getAttribute("placeholder") || "",
-  ].join(" "));
-  const metadata = {
-    type: fieldType,
-    name: String(el.getAttribute("name") || ""),
-    id: String(el.id || ""),
-    aria: String(el.getAttribute("aria-label") || ""),
-    placeholder: String(el.getAttribute("placeholder") || ""),
-    secret: sensitive,
-    text: sensitive ? "" : String(el.innerText || el.value || "").trim().slice(0, 500),
-    context: String(scope?.innerText || "").trim().slice(0, 2200),
-    disabled: Boolean(el.disabled),
-    visible: visible(el),
-  };
-  if (payload.action === "inspect") return metadata;
-  if (payload.action === "click") {
-    el.scrollIntoView({ block: "center", inline: "center" });
-    el.focus({ preventScroll: true });
-    el.click();
-    return { clicked: true, metadata };
-  }
-  if (payload.action === "fill" || payload.action === "fill_secret") {
-    const secretFill = payload.action === "fill_secret";
-    if (secretFill) {
-      el.dataset.karoxSecret = "true";
-      el.setAttribute("data-karox-secret", "true");
-      el.setAttribute("autocomplete", "off");
-      el.style.setProperty("-webkit-text-security", "disc", "important");
-      el.style.setProperty("text-security", "disc", "important");
-    }
-    el.focus({ preventScroll: true });
-    const value = String(payload.value ?? "");
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (setter) setter.call(el, value); else el.value = value;
-    if (secretFill) {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    } else {
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-    }
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    return secretFill
-      ? { filled: true, secret: true }
-      : { filled: true, value_length: value.length, metadata };
-  }
-  if (payload.action === "select") {
-    const values = Array.isArray(payload.value) ? payload.value.map(String) : [String(payload.value)];
-    for (const option of el.options || []) option.selected = values.includes(option.value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { selected: true, count: values.length, metadata };
-  }
-  if (payload.action === "press") {
-    const key = String(payload.key || "");
-    el.focus({ preventScroll: true });
-    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
-    if (key.toLowerCase() === "enter") {
-      const form = el.closest("form");
-      if (form?.requestSubmit) form.requestSubmit();
-    } else if (key === " " || key.toLowerCase() === "space") {
-      el.click();
-    }
-    return { pressed: true, key, metadata };
-  }
-  if (payload.action === "text") {
-    if (sensitive) return { text: "", secret: true };
-    return { text: String(el.innerText || el.textContent || el.value || "").slice(0, 30000), metadata };
-  }
-  throw new Error("unsupported DOM action");
+// domAction moved to dom_helpers.js so the deterministic fixture suite tests
+// the exact engine production injects. executeScript cannot serialize a
+// closure over the worker's globals, so this proxy resolves the global that
+// the files-inject of dom_helpers.js provides in the ISOLATED world.
+function domActionProxy(payload) {
+  return domAction(payload);
 }
 
 async function executeScript(tabId, func, args = []) {
@@ -555,7 +477,7 @@ async function executeScript(tabId, func, args = []) {
 }
 
 async function dom(tabId, action, params = {}) {
-  return executeScript(tabId, domAction, [{ action, ...params }]);
+  return executeScript(tabId, domActionProxy, [{ action, ...params }]);
 }
 
 // Resolve the centre of the target element so the cursor can travel to it
@@ -810,14 +732,19 @@ async function dispatchCommand(method, params) {
     }));
     return { ...result, tab_id: tabRef(tab.id), tab_url: safeUrl(tab.url || "") };
   }
-  if (["click", "fill", "fill_secret", "select", "press", "get_text"].includes(method)) {
+  if ([
+    "click", "dblclick", "hover", "focus", "clear", "fill", "fill_secret",
+    "type", "select", "press", "set_checked", "scroll", "upload", "get_text",
+  ].includes(method)) {
     // Double-checked takeover: before move, and again before the DOM action,
     // so a takeover that arrives between move and click is honoured and never
     // lets a queued action fire on the user's tab.
     assertAgentInputAllowed(method);
     const tab = await currentAgentTab();
     const action = method === "get_text" ? "text" : method;
-    if (method !== "get_text") {
+    const readOnly = method === "get_text";
+    const pageScoped = method === "scroll" && !params.selector;
+    if (!readOnly && !pageScoped) {
       await moveCursorTo(tab.id, params.selector, action);
       assertAgentInputAllowed(method); // re-check after cursor move
     }
@@ -846,10 +773,51 @@ async function dispatchCommand(method, params) {
   }
   if (method === "screenshot") {
     const tab = await currentAgentTab();
+    // Element screenshots crop the viewport capture to the target's box.
+    // The element is scrolled into view first -- unless the user has taken
+    // over, in which case the agent must not move their viewport.
+    let clip = null;
+    if (params.selector) {
+      if (!state.takeover) {
+        await dom(tab.id, "scroll", { selector: String(params.selector), mode: "into_view" });
+      }
+      const meta = await dom(tab.id, "inspect", { selector: String(params.selector) });
+      if (meta && meta.error_kind) return meta;
+      const dpr = await executeScript(tab.id, () => window.devicePixelRatio || 1);
+      if (!meta || !meta.rect || meta.rect.width <= 0 || meta.rect.height <= 0) {
+        throw new Error("element_not_found: the element has no visible box to screenshot");
+      }
+      const scale = Number(dpr) || 1;
+      clip = {
+        x: Math.max(0, Math.round(meta.rect.x * scale)),
+        y: Math.max(0, Math.round(meta.rect.y * scale)),
+        width: Math.max(1, Math.round(meta.rect.width * scale)),
+        height: Math.max(1, Math.round(meta.rect.height * scale)),
+      };
+    }
     const previous = (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0];
     await chrome.tabs.update(tab.id, { active: true });
-    const data_url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    let data_url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     if (previous?.id && previous.id !== tab.id) await chrome.tabs.update(previous.id, { active: true });
+    if (clip) {
+      const blob = await (await fetch(data_url)).blob();
+      const bitmap = await createImageBitmap(blob);
+      const x = Math.min(clip.x, Math.max(0, bitmap.width - 1));
+      const y = Math.min(clip.y, Math.max(0, bitmap.height - 1));
+      const width = Math.max(1, Math.min(clip.width, bitmap.width - x));
+      const height = Math.max(1, Math.min(clip.height, bitmap.height - y));
+      const canvas = new OffscreenCanvas(width, height);
+      canvas.getContext("2d").drawImage(bitmap, x, y, width, height, 0, 0, width, height);
+      const cropped = await canvas.convertToBlob({ type: "image/png" });
+      const buffer = new Uint8Array(await cropped.arrayBuffer());
+      let binary = "";
+      const chunk = 0x8000;
+      for (let offset = 0; offset < buffer.length; offset += chunk) {
+        binary += String.fromCharCode.apply(null, buffer.subarray(offset, offset + chunk));
+      }
+      data_url = "data:image/png;base64," + btoa(binary);
+      return { data_url, tab_id: tabRef(tab.id), full_page: false, viewport_only: false, element: true };
+    }
     return { data_url, tab_id: tabRef(tab.id), full_page: false, viewport_only: true };
   }
   if (method === "network") {
@@ -910,6 +878,74 @@ async function dispatchCommand(method, params) {
       geo = { ok: false, error: String((err && err.message) || err).slice(0, 300) };
     }
     return { tab_id: tabRef(tab.id), geometry: geo };
+  }
+  if (method === "back" || method === "forward") {
+    // History navigation on the agent tab. Same takeover contract as open:
+    // the agent never navigates a tab the user has taken over.
+    assertAgentInputAllowed(method);
+    const tab = await currentAgentTab();
+    if (method === "back") await chrome.tabs.goBack(tab.id);
+    else await chrome.tabs.goForward(tab.id);
+    // Navigation commits asynchronously; poll briefly for the settled URL so
+    // the evidence names where the tab actually ended up.
+    let settled = tab;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      settled = await getTab(tab.id);
+      if (settled && settled.status === "complete") break;
+    }
+    return {
+      action: method,
+      result: "success",
+      navigated: true,
+      tab_id: tabRef(tab.id),
+      tab_url: safeUrl((settled && settled.url) || ""),
+      title: String((settled && settled.title) || "").slice(0, 300),
+    };
+  }
+  if (method === "page_info") {
+    // Cheap read of where the agent tab is, without a full snapshot.
+    const tab = await currentAgentTab();
+    return {
+      tab_id: tabRef(tab.id),
+      tab_url: safeUrl(tab.url || ""),
+      title: String(tab.title || "").slice(0, 300),
+      status: String(tab.status || ""),
+    };
+  }
+  if (method === "download") {
+    // Explicit download through the browser's own download manager. Requires
+    // the optional "downloads" permission; refusal is a typed permission
+    // error, never a silent generic failure.
+    assertAgentInputAllowed("download");
+    if (!chrome.downloads || !chrome.downloads.download) {
+      throw new Error("permission_denied: the downloads permission is not granted to the KaroX extension");
+    }
+    const url = String(params.url || "");
+    if (!/^https?:\/\//i.test(url)) throw new Error("download url must be http(s)");
+    const downloadId = await chrome.downloads.download({ url, saveAs: false });
+    const deadline = Date.now() + Math.max(1000, Math.min(Number(params.timeout_ms || 60000), 300000));
+    let last = null;
+    while (Date.now() < deadline) {
+      const found = await chrome.downloads.search({ id: downloadId });
+      last = found && found[0];
+      if (last && last.state === "complete") {
+        return {
+          action: "download",
+          result: "success",
+          download_id: downloadId,
+          filename: String(last.filename || "").split(/[\\/]/).pop(),
+          bytes: Number(last.totalBytes || last.bytesReceived || 0),
+          state: "complete",
+        };
+      }
+      if (last && last.state === "interrupted") {
+        throw new Error("download_failure: " + String(last.error || "interrupted"));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    try { await chrome.downloads.cancel(downloadId); } catch (e) {}
+    throw new Error("download_failure: timed out waiting for completion");
   }
   if (method === "reload_page") {
     // Reload the current agent tab to re-inject the content script.

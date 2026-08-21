@@ -515,27 +515,49 @@ def execute_browser_command(
         if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
             raise InvalidCommand(f"browser.command {action} requires the extension browser backend")
         return {"action": action, **manager._call(action, payload, deadline_seconds)}
-    handlers = {
-        "open": manager.open,
-        "tabs": manager.tabs,
-        "new_tab": manager.new_tab,
-        "switch_tab": manager.switch_tab,
-        "close_tab": manager.close_tab,
-        "snapshot": manager.snapshot,
-        "click": manager.click,
-        "fill": manager.fill,
-        "fill_credential": manager.fill_credential,
-        "select": manager.select,
-        "press": manager.press,
-        "wait_for": manager.wait_for,
-        "get_text": manager.get_text,
-        "screenshot": manager.screenshot,
-        "console": manager.console,
-        "network_failures": manager.network_failures,
-        "network_requests": manager.network_requests,
-        "request_user_takeover": manager.request_user_takeover,
-        "resume_after_user_takeover": manager.resume_after_user_takeover,
-    }
+    # Bound lazily so a partial engine is an engine-honest refusal at
+    # dispatch time, never an AttributeError while the table is built.
+    known_actions = (
+        "open",
+        "tabs",
+        "new_tab",
+        "switch_tab",
+        "close_tab",
+        "snapshot",
+        "click",
+        "fill",
+        "fill_credential",
+        "select",
+        "press",
+        "wait_for",
+        "get_text",
+        "screenshot",
+        "console",
+        "network_failures",
+        "network_requests",
+        "request_user_takeover",
+        "resume_after_user_takeover",
+        # Guarded actions added inside the stable browser.command schema:
+        # navigation history, reads, pointer/keyboard verbs, deterministic
+        # state setters, scrolling, and file transfer.
+        ("back", "back"),
+        ("forward", "forward"),
+        ("reload", "reload"),
+        ("page_info", "page_info"),
+        ("hover", "hover"),
+        ("focus", "focus_element"),
+        ("clear", "clear"),
+        ("dblclick", "dblclick"),
+        ("type", "type_text"),
+        ("set_checked", "set_checked"),
+        ("scroll", "scroll"),
+        ("upload", "upload"),
+        ("download", "download"),
+    )
+    handlers = {}
+    for entry in known_actions:
+        action_name, method_name = entry if isinstance(entry, tuple) else (entry, entry)
+        handlers[action_name] = getattr(manager, method_name, None)
     if action == "close":
         if payload.get("user_confirmed") is not True:
             from .browser_session import BrowserSecurityError
@@ -557,9 +579,15 @@ def execute_browser_command(
                 "browser cannot be closed while user takeover is active"
             )
         return {"action": action, **manager.close()}
-    handler = handlers.get(action)
-    if handler is None:
-        raise InvalidCommand(
-            "unsupported browser.command action: " + action
-        )
-    return {"action": action, **handler(payload, deadline_seconds)}
+    if action in handlers:
+        handler = handlers[action]
+        if handler is None:
+            # A real action this engine has not implemented is a typed
+            # refusal, not a generic unsupported-action error.
+            raise InvalidCommand(
+                f"browser.command {action} is not supported by this browser engine"
+            )
+        return {"action": action, **handler(payload, deadline_seconds)}
+    raise InvalidCommand(
+        "unsupported browser.command action: " + action
+    )

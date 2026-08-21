@@ -48,6 +48,7 @@ from .browser_access import (
 )
 from .browser_credential_injection import BrowserCredentialInjectionError
 from .browser_credentials import BrowserCredentialStore
+from .browser_errors import prefix_browser_error
 from .browser_session import BrowserError, BrowserSecurityError
 from .managed_browser import (
     BrowserInstanceRegistry,
@@ -856,7 +857,15 @@ class ChromeExtensionBrowserSessionManager:
     def _call(self, method: str, params: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
         self._ensure_started()
         assert self._bridge is not None
-        return self._bridge.call(method, params, self._timeout(deadline_seconds))
+        try:
+            return self._bridge.call(method, params, self._timeout(deadline_seconds))
+        except (BrowserError, BrowserSecurityError):
+            raise
+        except Exception as exc:
+            # One typed vocabulary for every engine failure: the message the
+            # extension produced, classified, never collapsed into a generic
+            # "browser failure" (mandate: distinguishable browser errors).
+            raise BrowserError(prefix_browser_error(str(exc)[:500])) from exc
 
     def _assert_agent_input_allowed(self) -> None:
         if self.takeover_active:
@@ -1156,6 +1165,178 @@ class ChromeExtensionBrowserSessionManager:
                 self._assert_action_safe(self._inspect(selector, deadline_seconds))
             return self._call("press", {"selector": selector, "key": key}, deadline_seconds)
 
+    def back(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            return self._call("back", {}, deadline_seconds)
+
+    def forward(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            return self._call("forward", {}, deadline_seconds)
+
+    def reload(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            return self._call("reload_page", {}, deadline_seconds)
+
+    def page_info(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Where the agent tab is right now: URL, title, load status. Read-only."""
+
+        with self._lock:
+            return redact(self._call("page_info", {}, deadline_seconds))
+
+    def hover(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            return self._call("hover", {"selector": selector}, deadline_seconds)
+
+    def focus_element(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            return self._call("focus", {"selector": selector}, deadline_seconds)
+
+    def clear(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            return self._call("clear", {"selector": selector}, deadline_seconds)
+
+    def dblclick(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            self._assert_action_safe(self._inspect(selector, deadline_seconds))
+            return self._call("dblclick", {"selector": selector}, deadline_seconds)
+
+    def type_text(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Per-keystroke typing. Same secret-field refusal contract as fill."""
+
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            value = arguments.get("value")
+            if not isinstance(value, str) or len(value) > 20_000:
+                raise BrowserError("value must be a string up to 20000 characters")
+            metadata = self._inspect(selector, deadline_seconds)
+            descriptor = " ".join(
+                str(metadata.get(key, ""))
+                for key in ("type", "name", "id", "aria", "placeholder")
+            )
+            field_type = str(metadata.get("type", "")).lower()
+            if (
+                bool(metadata.get("secret"))
+                or field_type == "password"
+                or _SECRET_INPUT_HINT.search(descriptor)
+            ):
+                raise BrowserSecurityError(
+                    "password, token, credential, or payment fields must be completed through user takeover or local credential injection"
+                )
+            if field_type == "email" and self.policy.allowed_emails:
+                if value.strip().lower() not in self.policy.allowed_emails:
+                    raise BrowserSecurityError("email is not allowed for this browser session")
+            return self._call("type", {"selector": selector, "value": value}, deadline_seconds)
+
+    def set_checked(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Deterministic checkbox/radio state, not a blind toggle."""
+
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            checked = arguments.get("checked")
+            if not isinstance(checked, bool):
+                raise BrowserError("set_checked requires a boolean checked value")
+            self._assert_action_safe(self._inspect(selector, deadline_seconds))
+            return self._call(
+                "set_checked", {"selector": selector, "checked": checked}, deadline_seconds
+            )
+
+    def scroll(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Page scroll, container scroll, or scroll-into-view, by explicit mode."""
+
+        with self._lock:
+            self._assert_agent_input_allowed()
+            params: dict[str, Any] = {}
+            mode = arguments.get("mode")
+            if mode is not None:
+                if mode not in {"page", "container", "into_view"}:
+                    raise BrowserError("scroll mode must be page, container, or into_view")
+                params["mode"] = mode
+            if arguments.get("selector") is not None:
+                params["selector"] = self._selector(arguments.get("selector"))
+            elif mode in {"container", "into_view"}:
+                raise BrowserError("container and into_view scrolling require a selector")
+            to = arguments.get("to")
+            if to is not None:
+                if to not in {"top", "bottom"}:
+                    raise BrowserError("scroll to must be top or bottom")
+                params["to"] = to
+            for axis in ("dx", "dy"):
+                value = arguments.get(axis)
+                if value is not None:
+                    if not isinstance(value, (int, float)) or not -20_000 <= value <= 20_000:
+                        raise BrowserError(f"scroll {axis} must be a number within +-20000")
+                    params[axis] = float(value)
+            return self._call("scroll", params, deadline_seconds)
+
+    def upload(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Attach agent-supplied file content to an input[type=file].
+
+        Content arrives as explicit base64 payloads, never as host filesystem
+        paths, so the browser can only receive what the caller could already
+        read. Bounded: 10 files, 5 MB decoded total.
+        """
+
+        with self._lock:
+            self._assert_agent_input_allowed()
+            selector = self._selector(arguments.get("selector"))
+            files = arguments.get("files")
+            if not isinstance(files, list) or not files or len(files) > 10:
+                raise BrowserError("upload requires 1-10 files")
+            total = 0
+            cleaned: list[dict[str, str]] = []
+            for entry in files:
+                if not isinstance(entry, Mapping):
+                    raise BrowserError("each upload file must be an object")
+                name = entry.get("name")
+                mime = entry.get("mime", "application/octet-stream")
+                content = entry.get("content_base64")
+                if not isinstance(name, str) or not name or len(name) > 128 or "/" in name or "\\" in name:
+                    raise BrowserError("upload file name must be a plain 1-128 character name")
+                if not isinstance(mime, str) or len(mime) > 100:
+                    raise BrowserError("upload file mime is invalid")
+                if not isinstance(content, str):
+                    raise BrowserError("upload file content_base64 must be a string")
+                try:
+                    decoded = base64.b64decode(content, validate=True)
+                except Exception as exc:
+                    raise BrowserError("upload file content_base64 is malformed") from exc
+                total += len(decoded)
+                if total > 5 * 1024 * 1024:
+                    raise BrowserError("upload refuses more than 5 MB of file content")
+                cleaned.append(
+                    {"name": name, "mime": mime, "content_base64": content}
+                )
+            metadata = self._inspect(selector, deadline_seconds)
+            if str(metadata.get("type", "")).lower() != "file":
+                raise BrowserError("element_not_found: upload target must be an input[type=file]")
+            return self._call(
+                "upload", {"selector": selector, "files": cleaned}, deadline_seconds
+            )
+
+    def download(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        """Download through the browser's own manager, to its own directory."""
+
+        with self._lock:
+            self._assert_agent_input_allowed()
+            url = validate_browser_url(arguments.get("url"), self.policy)
+            timeout_ms = int(self._timeout(deadline_seconds, cap=300.0) * 1000)
+            return self._call(
+                "download", {"url": url, "timeout_ms": timeout_ms}, deadline_seconds
+            )
+
     def wait_for(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:
         with self._lock:
             params = dict(arguments)
@@ -1174,7 +1355,14 @@ class ChromeExtensionBrowserSessionManager:
             name = arguments.get("name") or "screenshot"
             if not isinstance(name, str) or not name or len(name) > 128:
                 raise BrowserError("screenshot name is invalid")
-            result = self._call("screenshot", {}, deadline_seconds)
+            params: dict[str, Any] = {}
+            if arguments.get("selector") is not None:
+                params["selector"] = self._selector(arguments.get("selector"))
+            result = self._call("screenshot", params, deadline_seconds)
+            if result.get("error_kind"):
+                # Typed resolution failure (not found / ambiguous with
+                # candidates) surfaces as data, never as a PNG that lies.
+                return redact(dict(result))
             data_url = result.get("data_url")
             prefix = "data:image/png;base64,"
             if not isinstance(data_url, str) or not data_url.startswith(prefix):
@@ -1191,7 +1379,8 @@ class ChromeExtensionBrowserSessionManager:
                 "size": record.size,
                 "sha256": record.sha256,
                 "full_page": False,
-                "viewport_only": True,
+                "viewport_only": bool(result.get("viewport_only", True)),
+                "element": bool(result.get("element", False)),
                 "tab_id": result.get("tab_id"),
             }
 
