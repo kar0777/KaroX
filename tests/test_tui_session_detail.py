@@ -390,6 +390,15 @@ class HeaderTests(_DetailCase):
         app = self.harness.app()
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
+            # Freeze the view store's clock first. The diagnostics section
+            # renders its row when the screen opens, while the expected string
+            # below renders at assert time; a stopped-but-resumable run still
+            # measures elapsed against "now", so on a slow (coverage-
+            # instrumented) run the two renders can land on different seconds
+            # and disagree by one "1s". That is a fact about the wall clock,
+            # not about the shared source this test pins.
+            frozen = float(app._view_store._now())
+            app._view_store._now = lambda: frozen
             screen = await self._open(app, pilot, "s-shared", ACTION_OPEN)
             row = app._view_store.summary("s-shared")
             assert row is not None

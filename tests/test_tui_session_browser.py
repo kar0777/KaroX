@@ -213,6 +213,15 @@ class SessionListTests(_BrowserCase):
         app = self.harness.app()
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
+            # Freeze the view store's clock before the screen renders. The row
+            # in the browser renders when the screen opens; the expected string
+            # below renders at assert time. A stopped-but-resumable run still
+            # measures elapsed against "now", so on a slow (coverage-
+            # instrumented) run the two renders can land on different seconds
+            # and disagree by "0s" vs "1s" -- a wall-clock fact, not the shared
+            # source this test pins.
+            frozen = float(app._view_store._now())
+            app._view_store._now = lambda: frozen
             screen = await self._open(app, pilot)
             row = app._view_store.summary("s-shared")
             assert row is not None
@@ -267,6 +276,13 @@ class IncrementalRedrawTests(_BrowserCase):
         app = self.harness.app()
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
+            # Freeze the store's clock: the row equality at the end of this
+            # test compares a screen render against a fresh render, and a
+            # running session measures elapsed against "now" -- on a slow
+            # (coverage-instrumented) run the two renders can disagree by one
+            # second, which is not what this test pins.
+            frozen = float(app._view_store._now())
+            app._view_store._now = lambda: frozen
             screen = await self._open(app, pilot)
             redrawn: list[str] = []
             with patch.object(
