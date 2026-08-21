@@ -40,6 +40,7 @@ from .bridge import (
 from .connections import ConnectionError as SavedConnectionError
 from .connection_controller import connection_controller
 from .connection_runtime import ConnectionRuntimeError
+from .constitution import compose_system_prompt, provider_family
 from .core import CoreError, CoreRuntime
 from .core_tools import ExtendedCoreRuntime
 from .credentials import CredentialError, CredentialStore
@@ -4718,6 +4719,46 @@ def _attach_mode_artifact(
     report.project_context["mode_artifact"] = {"saved": True, **saved}
 
 
+_ADAPTER_FAMILIES = {
+    "openai_compatible_chat": "openai",
+    "openai_responses": "openai",
+    "anthropic_messages": "anthropic",
+    "gemini_generate_content": "gemini",
+}
+
+
+def _constitution_provider(args: argparse.Namespace) -> str | None:
+    """Resolve which provider delta the Constitution should carry.
+
+    A routed run reads the primary route's registry record: a provider id
+    that names a known family wins (a provider the user called "claude"
+    gets the Anthropic delta wherever it is hosted), otherwise the adapter
+    kind decides. A direct --base-url endpoint publishes neither, so it
+    honestly gets the generic delta instead of a guessed one.
+    """
+
+    if args.model is not None or args.base_url is not None or args.api_key_env:
+        return None
+    try:
+        registry = _registry()
+        routes = tuple(_route(value) for value in args.route)
+        if routes:
+            provider_id = routes[0].provider_id
+        else:
+            selected = registry.selected_model()
+            if selected is None:
+                return None
+            provider_id = selected.provider_id
+        family = provider_family(provider_id)
+        if family is not None:
+            return family
+        return _ADAPTER_FAMILIES.get(registry.provider(provider_id).adapter_kind)
+    except Exception:
+        # Failing loudly on a broken registry belongs to _agent_provider;
+        # the prompt delta only ever degrades to the generic one.
+        return None
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -4812,12 +4853,13 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     # Project instructions and environment facts join the request-only part of
     # the prompt, exactly like Skill content: the durable history keeps the base
     # prompt, so an edited AGENTS.md cannot retroactively change what a past run
-    # was told and a handoff document carries no third-party text.
-    system_prompt = SYSTEM_PROMPT
-    if mode_rules is not None:
-        # The stance joins the request-only part of the prompt, exactly like
-        # Skill content below: durable history keeps the base prompt.
-        system_prompt += "\n\n" + mode_rules.prompt_delta
+    # was told and a handoff document carries no third-party text. Sections are
+    # collected here and composed once through the Constitution composer, which
+    # owns the ordering and the stable-prefix boundary.
+    mode_delta = mode_rules.prompt_delta if mode_rules is not None else None
+    project_suffix: str | None = None
+    skill_suffix: str | None = None
+    research_context: str | None = None
     project_context: dict[str, Any] = {"enabled": False}
     if not args.no_project_context:
         project = discover_project_context(
@@ -4828,7 +4870,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             session_id=record.session_id,
             recursive_context=getattr(args, "recursive_context", "off"),
         )
-        system_prompt += project.prompt_suffix
+        project_suffix = project.prompt_suffix
         project_context = {"enabled": True, **project.to_dict()}
     if content is not None and selection is not None:
         origin = configure_skill_policy(
@@ -4837,7 +4879,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             selection,
             parent=native_origin.key,
         )
-        system_prompt += skill_system_prompt(content)
+        skill_suffix = skill_system_prompt(content)
         with store.mutate(
             record.session_id,
             f"agent-skill-{os.getpid()}",
@@ -4916,7 +4958,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                 "max_output_tokens_per_branch": research_limits.max_output_tokens,
             }
             if research_block:
-                system_prompt += "\n\n" + research_block
+                research_context = research_block
         project_context["research"] = research_metadata
     # Phase 3 shadow mode: publish typed events to the transcript store
     # alongside the existing stream observer. The typed stream runs in
@@ -4947,6 +4989,43 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         # the report exactly like the mode stance, so the TUI and JSON
         # consumers can show "Auto -> high" honestly.
         project_context["effort_auto"] = effort_auto
+    # The effort delta only exists when a ladder level actually shaped the
+    # run; a legacy run without the flag stays delta-free, the same
+    # bit-for-bit rule the ladder itself follows for budgets.
+    effort_line: str | None = None
+    effort_level_flag = getattr(args, "effort_level", None)
+    if isinstance(effort_auto, dict):
+        effort_line = (
+            f"## Effort\nEffort {effort_auto['level']} (auto): up to "
+            f"{max_steps} steps in {max_seconds:.0f}s. Escalate only when "
+            "risk or uncertainty demands it."
+        )
+    elif effort_level_flag:
+        effort_line = (
+            f"## Effort\nEffort {normalize_effort_level(effort_level_flag)}: "
+            f"up to {max_steps} steps in {max_seconds:.0f}s. Escalate only "
+            "when risk or uncertainty demands it."
+        )
+    # WIRED: the production request prompt is composed here -- constitution
+    # core, provider delta, and runtime contract in the stable prefix; mode,
+    # effort, project, skill, and research after the boundary. The report
+    # records the sections and the prefix hash so composition is evidence.
+    composed = compose_system_prompt(
+        provider=_constitution_provider(args),
+        runtime_contract=SYSTEM_PROMPT,
+        mode_delta=mode_delta,
+        effort_line=effort_line,
+        project_suffix=project_suffix,
+        skill_suffix=skill_suffix,
+        research_block=research_context,
+    )
+    system_prompt = composed.text
+    project_context["constitution"] = {
+        "sections": list(composed.sections),
+        "prefix_sha256": composed.prefix_sha256,
+        "prefix_chars": len(composed.stable_prefix),
+        "dynamic_chars": len(composed.dynamic_suffix),
+    }
     report = AgentKernel(
         provider=provider,
         model=model,

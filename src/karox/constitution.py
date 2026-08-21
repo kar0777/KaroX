@@ -24,10 +24,11 @@ Why this shape:
   evidence -- never as authorization to skip verification. Product-specific
   baggage from those prompts is deliberately absent.
 
-Maturity: FOUNDATION (module + tests). WIRED happens when the CLI builds
-its system prompt through :func:`compose_system_prompt`; MEASURED when the
-prompt A/B benchmark compares this Constitution against raw-harness and
-leak-inspired policies on the same model, tasks, and effort.
+Maturity: WIRED (the CLI composes its production request prompt through
+:func:`compose_system_prompt`; ``tests/test_constitution_wiring.py`` proves
+the kernel receives it). MEASURED when the prompt A/B benchmark compares
+this Constitution against raw-harness and leak-inspired policies on the
+same model, tasks, and effort -- live, not just offline mechanics.
 """
 
 from __future__ import annotations
@@ -175,6 +176,18 @@ def provider_delta(provider: Optional[str]) -> str:
     return PROVIDER_DELTAS[_DELTA_ALIASES.get(key, "generic")]
 
 
+def provider_family(identifier: Optional[str]) -> Optional[str]:
+    """The canonical delta family for an id or alias, or ``None`` if unknown.
+
+    :func:`provider_delta` silently falls back to the generic delta; wiring
+    code that wants to *know* whether an identifier named a real family (a
+    registry provider the user called "claude") asks here instead.
+    """
+
+    key = (identifier or "").strip().casefold()
+    return _DELTA_ALIASES.get(key)
+
+
 @dataclass(frozen=True)
 class ComposedPrompt:
     """A composed system prompt with a measurable stable prefix.
@@ -202,6 +215,7 @@ def compose_system_prompt(
     *,
     provider: Optional[str] = None,
     core: str = CONSTITUTION_CORE,
+    runtime_contract: Optional[str] = None,
     mode_delta: Optional[str] = None,
     effort_line: Optional[str] = None,
     project_suffix: Optional[str] = None,
@@ -211,15 +225,22 @@ def compose_system_prompt(
 ) -> ComposedPrompt:
     """Compose the full system prompt from the core and explicit deltas.
 
-    Ordering is deterministic and fixed: core, provider delta (both
-    stable), then mode, effort, project, memory, skill, research (dynamic,
-    each only when non-empty). Callers must not concatenate around this
-    function; new sections get a named parameter here so the order stays
-    a single decision.
+    Ordering is deterministic and fixed: core, provider delta, runtime
+    contract (all stable), then mode, effort, project, memory, skill,
+    research (dynamic, each only when non-empty). Callers must not
+    concatenate around this function; new sections get a named parameter
+    here so the order stays a single decision.
     """
 
-    stable = core.rstrip() + "\n\n" + provider_delta(provider).rstrip() + "\n"
+    stable_parts = [core.rstrip(), provider_delta(provider).rstrip()]
     sections: list[str] = ["core", "provider"]
+    if runtime_contract is not None and runtime_contract.strip():
+        # The runtime operating contract (tool table, evidence rules) is as
+        # byte-stable as the core: it belongs before the prefix boundary so
+        # provider-side prefix caching covers it too.
+        stable_parts.append(runtime_contract.strip("\n"))
+        sections.append("runtime")
+    stable = "\n\n".join(stable_parts) + "\n"
     dynamic_parts: list[str] = []
     for name, value in (
         ("mode", mode_delta),
