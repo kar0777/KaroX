@@ -45,6 +45,12 @@ from .providers import (
 )
 from .security import redact, redact_content
 from .sessions import MutationLease, SessionRecord, SessionStore
+from .tool_universe import (
+    UniverseSelection,
+    discovery_note,
+    family_of,
+    select_families,
+)
 from .usage_analytics import merge_response_usage, usage_event_from_response
 
 
@@ -656,10 +662,14 @@ class AgentKernel:
         # attempt is recorded as a policy denial in the audit log instead of
         # disappearing behind a generic "unknown tool" reply.
         self._tool_aliases = aliases
-        self._provider_tools = tuple(
-            self._provider_tool(alias, definitions[core_name])
+        self._permitted_tool_pairs = tuple(
+            (alias, core_name)
             for alias, core_name in aliases.items()
             if self._may_call(definitions[core_name])
+        )
+        self._provider_tools = tuple(
+            self._provider_tool(alias, definitions[core_name])
+            for alias, core_name in self._permitted_tool_pairs
         )
         # -- quality economy (P0.4) ---------------------------------------
         # Same model, same reasoning, same verification: these primitives
@@ -679,28 +689,19 @@ class AgentKernel:
         self._context_compiler = ContextCompiler()
         self._context_compilation: CompiledContext | None = None
         self._economy_stale_chars_pending = 0
-        schema_payload = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            }
-            for tool in self._provider_tools
-        ]
-        rendered_schemas = json.dumps(
-            schema_payload, ensure_ascii=False, sort_keys=True
-        )
-        self._tool_schema_bytes_advertised = len(rendered_schemas.encode("utf-8"))
-        self._tool_schema_bytes_unique = len(
-            json.dumps(
-                self._schema_dedup.deduplicate(schema_payload),
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-        )
-        self._tool_schema_digest = hashlib.sha256(
-            rendered_schemas.encode("utf-8")
-        ).hexdigest()
+        # -- deferred tool universe (Part 2) --------------------------------
+        # Family selection is measured on every run and applied only in
+        # economy mode. Resolution always covers the full permitted set, so
+        # an omitted tool called by exact name still executes, and its family
+        # is advertised from the next step: deferral can never strand a run.
+        self._universe_selection: Optional[UniverseSelection] = None
+        self._expanded_families: set[str] = set()
+        self._tool_schemas_included = 0
+        self._tool_schemas_omitted = 0
+        self._tool_schema_bytes_included = 0
+        self._tool_schema_bytes_avoided = 0
+        self._universe_note = ""
+        self._refresh_tool_advertisement()
         self._prefix_stable_steps = 0
         self._prefix_total_steps = 0
 
@@ -778,6 +779,143 @@ class AgentKernel:
             for capability in required
         )
 
+    # -- deferred tool universe ---------------------------------------------
+
+    def _select_tool_universe(self, task_text: object) -> None:
+        """Decide once per run which tool families this task gets to see.
+
+        Selection is a pure function of the task text, so re-running the same
+        task keeps the same advertisement and the same prompt-cache prefix.
+        Expansion state resets here: a family another task demanded must not
+        leak into this one.
+        """
+
+        self._universe_selection = select_families(
+            task_text if isinstance(task_text, str) else ""
+        )
+        self._expanded_families = set()
+        self._refresh_tool_advertisement()
+
+    def _active_families(self) -> Optional[frozenset[str]]:
+        selection = self._universe_selection
+        if selection is None:
+            return None
+        return frozenset(selection.families) | frozenset(self._expanded_families)
+
+    def _note_tool_demand(self, core_name: str) -> None:
+        """Widen the advertised universe when the model proves it needs more.
+
+        The omitted call itself already executed through full resolution; the
+        only thing that changes is that from the next step the family's
+        schemas are attached, so later calls are well-formed instead of
+        guessed from the discovery note.
+        """
+
+        if not self.economy_mode:
+            return
+        families = self._active_families()
+        if families is None:
+            return
+        family = family_of(core_name)
+        if family in families:
+            return
+        self._expanded_families.add(family)
+        self._refresh_tool_advertisement()
+
+    def _refresh_tool_advertisement(self) -> None:
+        """Recompute the advertised tool tuple and its measured economy.
+
+        Deterministic by construction: permitted pairs keep their sorted
+        order, so an equal selection always renders a byte-identical schema
+        payload and the prefix cache key stays stable across the run. The
+        omitted bytes are measured on every refresh even when deferral is not
+        applied, which is what makes an OFF vs ON comparison honest.
+        """
+
+        pairs = self._permitted_tool_pairs
+        tools = self._provider_tools
+        families = self._active_families()
+        if families is None:
+            included = list(range(len(pairs)))
+        else:
+            included = [
+                index
+                for index, (_alias, core_name) in enumerate(pairs)
+                if family_of(core_name) in families
+            ]
+        included_set = set(included)
+        omitted = [index for index in range(len(pairs)) if index not in included_set]
+
+        def payload(indexes: List[int]) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "name": tools[index].name,
+                    "description": tools[index].description,
+                    "parameters": tools[index].input_schema,
+                }
+                for index in indexes
+            ]
+
+        included_payload = payload(included)
+        self._tool_schemas_included = len(included)
+        self._tool_schemas_omitted = len(omitted)
+        self._tool_schema_bytes_included = len(
+            json.dumps(
+                included_payload, ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+        )
+        self._tool_schema_bytes_avoided = (
+            len(
+                json.dumps(
+                    payload(omitted), ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            )
+            if omitted
+            else 0
+        )
+        applied = self.economy_mode and families is not None
+        if applied and omitted:
+            omitted_names: Dict[str, List[str]] = {}
+            for index in omitted:
+                alias, core_name = pairs[index]
+                omitted_names.setdefault(family_of(core_name), []).append(alias)
+            self._universe_note = discovery_note(omitted_names)
+        else:
+            self._universe_note = ""
+        active_payload = included_payload if applied else payload(
+            list(range(len(pairs)))
+        )
+        self._advertised_provider_tools = (
+            tuple(tools[index] for index in included) if applied else tools
+        )
+        rendered = json.dumps(active_payload, ensure_ascii=False, sort_keys=True)
+        self._tool_schema_bytes_advertised = len(rendered.encode("utf-8"))
+        # A fresh deduplicator per refresh: the previous advertisement's seen
+        # set must not make the new unique-bytes measurement collapse to zero.
+        self._schema_dedup = ToolSchemaDeduplicator()
+        self._tool_schema_bytes_unique = len(
+            json.dumps(
+                self._schema_dedup.deduplicate(active_payload),
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        self._tool_schema_digest = hashlib.sha256(
+            rendered.encode("utf-8")
+        ).hexdigest()
+
+    def _request_system_prompt(self) -> str:
+        """The system prompt one request actually carries.
+
+        The discovery note rides on the request, never on the stored history:
+        durable history keeps the plain SYSTEM_PROMPT contract, and a run
+        whose universe never changes keeps a byte-identical prefix.
+        """
+
+        if self._universe_note:
+            return self.system_prompt + "\n" + self._universe_note
+        return self.system_prompt
+
     @staticmethod
     def _provider_tool(alias: str, definition: ToolDefinition) -> ProviderTool:
         return ProviderTool(alias, definition.description, definition.input_schema)
@@ -805,6 +943,7 @@ class AgentKernel:
                     provider_message=self._last_provider_message(record),
                 )
             self._initialize_history(record, lease)
+            self._select_tool_universe(record.task)
             ledger = self._completed_action_counts(
                 self.sessions.load(session_id).provider_history
             )
@@ -852,7 +991,7 @@ class AgentKernel:
                 self._emit(AgentEventKind.STEP_STARTED)
                 previous_prefix_key = self._prefix_cache.last_key
                 prefix_key = self._prefix_cache.compute_key(
-                    system_prompt=self.system_prompt,
+                    system_prompt=self._request_system_prompt(),
                     tool_schemas=self._tool_schema_digest,
                     session_id=session_id,
                 )
@@ -865,7 +1004,7 @@ class AgentKernel:
                 request = ModelRequest(
                     model=self.model,
                     messages=tuple(self._request_messages(record.provider_history)),
-                    tools=self._provider_tools,
+                    tools=self._advertised_provider_tools,
                     deadline_seconds=min(remaining, 3600.0),
                     # Every step resends the whole transcript, so the stable
                     # prefix (system prompt + tool schemas) plus the session id
@@ -1129,6 +1268,30 @@ class AgentKernel:
         )
         usage_event["economy_prefix_stable_steps"] = self._prefix_stable_steps
         usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
+        selection = self._universe_selection
+        if selection is not None:
+            # Measured on every run; "applied" separates shadow measurement
+            # from the economy-mode advertisement that actually omits bytes.
+            usage_event["economy_tool_universe_applied"] = bool(self.economy_mode)
+            usage_event["economy_tool_groups_selected"] = ",".join(
+                selection.families
+            )
+            usage_event["economy_tool_schemas_included"] = (
+                self._tool_schemas_included
+            )
+            usage_event["economy_tool_schemas_omitted"] = (
+                self._tool_schemas_omitted
+            )
+            usage_event["economy_tool_schema_bytes_included"] = (
+                self._tool_schema_bytes_included
+            )
+            usage_event["economy_tool_schema_bytes_avoided"] = (
+                self._tool_schema_bytes_avoided
+            )
+            if self._expanded_families:
+                usage_event["economy_tool_groups_expanded"] = ",".join(
+                    sorted(self._expanded_families)
+                )
         usage_event["economy_read_cache_hits"] = self._read_cache.hits
         usage_event["economy_read_cache_misses"] = self._read_cache.misses
         compiled = self._context_compilation
@@ -1282,6 +1445,9 @@ class AgentKernel:
             )
             finished(False, "tool is not available")
             return False
+        # Deferred universe discovery: an omitted family the model reached for
+        # by exact name gets its schemas attached from the next step.
+        self._note_tool_demand(core_name)
         try:
             arguments = _strict_json_loads(call.raw_arguments)
             if not isinstance(arguments, dict):
@@ -1627,7 +1793,7 @@ class AgentKernel:
         for message in self._messages(self._compact(list(history))):
             if not replaced and message.role == "system":
                 replaced = True
-                messages.append(ModelMessage("system", self.system_prompt))
+                messages.append(ModelMessage("system", self._request_system_prompt()))
             elif message.role == "tool" and message.content is not None:
                 messages.append(
                     ModelMessage(
