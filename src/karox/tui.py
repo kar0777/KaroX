@@ -43,6 +43,7 @@ from .credentials import CredentialStore
 from .event_bus import EventBus, EventKind, EventLevel, event_bus
 from .models import AccessProfile
 from .paths import config_dir, session_dir
+from .port_allocation import karox_owned_process as _karox_owned_process
 from .provider_controller import ProviderController
 from .provider_factory import ProviderFactory
 from .provider_presets import (
@@ -2257,6 +2258,12 @@ def _free_port_on_address(address: str, port: int, *, skip_pids: Optional[set] =
     stopped = 0
     for pid in _pids_listening_on(address, port):
         if pid in skip:
+            continue
+        # Mandate: a foreign port owner is NEVER killed. Only a process
+        # whose identity positively names KaroX may be stopped; "cannot
+        # tell" is treated exactly like foreign, because the OS reuses
+        # PIDs and this port may belong to someone else's server.
+        if _karox_owned_process(pid) is not True:
             continue
         try:
             if os.name == "nt":

@@ -2614,19 +2614,19 @@ class TunnelHelperTests(unittest.TestCase):
         with patch.object(tui.subprocess, "run", side_effect=OSError("no netstat")):
             self.assertEqual(tui._pids_listening_on("127.0.0.1", 8765), [])
 
-    def test_free_port_on_address_stops_orphans_not_self(self) -> None:
-        # _free_port_on_address stops every listener on the port EXCEPT the
-        # caller's own PID and any explicit skip set, so it never kills the
-        # current KaroX process or the live bridge.
+    def test_free_port_on_address_stops_proven_karox_orphans_only(self) -> None:
+        # Mandate: a foreign port owner is NEVER killed. Of four listeners --
+        # us, an explicitly skipped bridge, a proven KaroX orphan, and a
+        # process whose identity cannot be proven -- only the proven KaroX
+        # orphan is stopped. Unknown identity is treated exactly like foreign.
         our_pid = tui.os.getpid()
-        # Pretend netstat reports three listeners on 8765: us, the current
-        # bridge process, and a stale orphan from a previous session.
         fake_netstat = Mock(
             returncode=0,
             stdout=(
                 f"  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       {our_pid}\n"
                 "  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       50000\n"
                 "  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       99999\n"
+                "  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       88888\n"
             ),
         )
         killed: list = []
@@ -2642,13 +2642,46 @@ class TunnelHelperTests(unittest.TestCase):
                 return Mock(returncode=0)
             return Mock()
 
-        with patch.object(tui.subprocess, "run", side_effect=dispatch):
+        def identity(pid):
+            # 99999 is a proven KaroX orphan; 88888 cannot be proven (None),
+            # which the mandate treats exactly like a foreign owner.
+            return True if pid == 99999 else None
+
+        with patch.object(tui.subprocess, "run", side_effect=dispatch), patch.object(
+            tui, "_karox_owned_process", side_effect=identity
+        ):
             freed = tui._free_port_on_address("127.0.0.1", 8765, skip_pids={50000})
-        # Only the orphan (99999) is stopped — our_pid is auto-skipped, 50000
-        # is in the explicit skip set.
         self.assertEqual(freed, 1)
         killed_pids = [a[a.index("/PID") + 1] for a in killed if "/PID" in a]
         self.assertEqual(killed_pids, ["99999"])
+
+    def test_free_port_on_address_never_kills_unproven_listeners(self) -> None:
+        # Without positive KaroX evidence nothing is stopped at all, even
+        # when the port is visibly busy: freeing a port is never worth
+        # killing what might be someone else's server.
+        fake_netstat = Mock(
+            returncode=0,
+            stdout=(
+                "  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       77777\n"
+            ),
+        )
+        killed: list = []
+
+        def dispatch(args, **kwargs):
+            first = args[0] if args else ""
+            if first == "netstat":
+                return fake_netstat
+            if first == "taskkill":
+                killed.append(args)
+                return Mock(returncode=0)
+            return Mock()
+
+        with patch.object(tui.subprocess, "run", side_effect=dispatch), patch.object(
+            tui, "_karox_owned_process", return_value=None
+        ):
+            freed = tui._free_port_on_address("127.0.0.1", 8765)
+        self.assertEqual(freed, 0)
+        self.assertEqual(killed, [])
 
 
 class McpStatusAggregationTests(unittest.TestCase):
