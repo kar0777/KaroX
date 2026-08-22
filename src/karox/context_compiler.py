@@ -36,7 +36,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REFERENCE_THRESHOLD_CHARS = 1_000
 """Below this size a marker saves nothing worth the indirection."""
@@ -131,6 +131,79 @@ class CompiledContext:
                 f"reason={decision.reason} saved={decision.chars_saved}"
             )
         return tuple(lines)
+
+
+# -- reasoning continuity ledger ---------------------------------------------
+
+CONTINUITY_MAX_STATEMENTS = 8
+"""Most recent statements carried through one compaction; older ones age out."""
+
+CONTINUITY_STATEMENT_CHARS = 160
+"""One carried statement stays one bounded line; details live in history."""
+
+
+@dataclass(frozen=True)
+class ContinuityStats:
+    """Deterministic accounting for one compaction's carried narration."""
+
+    statements_carried: int
+    statement_chars: int
+    reasoning_blocks_dropped: int
+    replayable_blocks_dropped: int
+
+
+def continuity_lines(
+    groups: Sequence[Sequence[Mapping[str, Any]]],
+) -> Tuple[Tuple[str, ...], ContinuityStats]:
+    """Carry the model's own dropped conclusions through a compaction.
+
+    Compaction preserves tool facts but used to discard every conclusion the
+    model had already stated, so after a long session the model re-derived
+    decisions it had written down turns earlier. This ledger quotes the
+    first line of each dropped assistant turn verbatim -- extraction, never
+    paraphrase, so the mechanism stays deterministic and cannot invent a
+    conclusion the model did not state. Callers must label the result as the
+    model's own narration; it is not tool evidence and never merges with it.
+    """
+
+    statements: List[str] = []
+    blocks = 0
+    replayable = 0
+    turn = 0
+    for group in groups:
+        for entry in group:
+            if entry.get("role") != "assistant":
+                continue
+            turn += 1
+            stored_blocks = entry.get("reasoning_blocks")
+            if isinstance(stored_blocks, list):
+                blocks += len(stored_blocks)
+                replayable += sum(
+                    1
+                    for block in stored_blocks
+                    if isinstance(block, Mapping)
+                    and block.get("replayable") is True
+                )
+            content = entry.get("content")
+            if not isinstance(content, str):
+                continue
+            first_line = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                "",
+            )
+            if not first_line:
+                continue
+            if len(first_line) > CONTINUITY_STATEMENT_CHARS:
+                first_line = first_line[: CONTINUITY_STATEMENT_CHARS - 3] + "..."
+            statements.append(f"turn {turn}: {first_line}")
+    kept = statements[-CONTINUITY_MAX_STATEMENTS:]
+    stats = ContinuityStats(
+        statements_carried=len(kept),
+        statement_chars=sum(len(statement) for statement in kept),
+        reasoning_blocks_dropped=blocks,
+        replayable_blocks_dropped=replayable,
+    )
+    return tuple(kept), stats
 
 
 def _reuse_marker(first_call_id: str) -> str:

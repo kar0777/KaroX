@@ -19,6 +19,7 @@ from .context_compiler import (
     ContextCompiler,
     ContextItem,
     Verdict,
+    continuity_lines,
 )
 from .cost_intelligence import (
     CostGovernor,
@@ -708,6 +709,10 @@ class AgentKernel:
         # tool calls executes them in one model turn where classic
         # one-call-per-turn execution would have paid N turns.
         self._batched_turns_avoided = 0
+        # Reasoning continuity: statements the compaction summary carried
+        # verbatim so the model does not re-derive its own conclusions.
+        self._continuity_statements_carried = 0
+        self._continuity_chars_carried = 0
 
     def _emit(self, kind: AgentEventKind, **fields: Any) -> None:
         """Tell the watcher, and never let the watcher end the session.
@@ -1275,6 +1280,13 @@ class AgentKernel:
         usage_event["economy_prefix_stable_steps"] = self._prefix_stable_steps
         usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
         usage_event["economy_batched_turns_avoided"] = self._batched_turns_avoided
+        if self._continuity_statements_carried:
+            usage_event["economy_continuity_statements"] = (
+                self._continuity_statements_carried
+            )
+            usage_event["economy_continuity_chars"] = (
+                self._continuity_chars_carried
+            )
         selection = self._universe_selection
         if selection is not None:
             # Measured on every run; "applied" separates shadow measurement
@@ -2054,6 +2066,23 @@ class AgentKernel:
             lines.append("Evidence already recorded: " + _joined(evidence) + ".")
         if failures:
             lines.append("Failures: " + _joined(failures, separator="; ") + ".")
+        carried, continuity = continuity_lines(groups)
+        if carried:
+            # The model's own words, clearly fenced off from tool evidence:
+            # continuity must never let narration masquerade as proof.
+            lines.append(
+                "Your own earlier conclusions, quoted verbatim from the "
+                "summarized turns (model narration, not verified evidence):"
+            )
+            lines.extend("- " + statement for statement in carried)
+        if continuity.reasoning_blocks_dropped:
+            lines.append(
+                f"{continuity.reasoning_blocks_dropped} provider reasoning "
+                "blocks were dropped with the summarized turns; the quoted "
+                "conclusions above are the only narration that survives."
+            )
+        self._continuity_statements_carried += continuity.statements_carried
+        self._continuity_chars_carried += continuity.statement_chars
         if not self.context.window_known:
             lines.append(
                 "The active model does not advertise an input window, so a "
