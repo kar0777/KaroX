@@ -1,0 +1,61 @@
+{
+  "cache_scheduler_decide_avg_us": {
+    "iterations": 2000,
+    "label": "MEASURED",
+    "value": 2.27
+  },
+  "cold_import_karox_cli_seconds": {
+    "label": "MEASURED",
+    "median": 1.0522,
+    "note": "child interpreter, includes interpreter boot",
+    "runs": [
+      1.0905,
+      1.0398,
+      1.0522
+    ]
+  },
+  "context_compiler_compile_400_items_ms": {
+    "chars_in": 201292,
+    "label": "MEASURED",
+    "median": 0.37,
+    "runs": [
+      0.4,
+      0.379,
+      0.37,
+      0.368,
+      0.367
+    ]
+  },
+  "evidence_packet_render_avg_us": {
+    "iterations": 1000,
+    "label": "MEASURED",
+    "value": 10.37
+  },
+  "interpreter_boot_seconds": {
+    "label": "MEASURED",
+    "median": 0.0634,
+    "runs": [
+      0.0643,
+      0.0634,
+      0.0607
+    ]
+  },
+  "measured_at": "2026-08-22T11:35:23+0200",
+  "platform": "win32",
+  "python": "3.13.11",
+  "schema": "part2-perf-pass-v1",
+  "tool_universe_select_avg_us": {
+    "iterations": 1000,
+    "label": "MEASURED",
+    "value": 16.85
+  },
+  "unavailable": {
+    "browser_flow": "needs the managed headed browser",
+    "memory_recall": "needs the session-scoped memory store",
+    "model_discovery": "needs a provider key in the host OS keyring",
+    "project_map_cold_warm": "needs real project session state",
+    "service_start_restart": "needs an approved server profile",
+    "tui_rendering": "needs an interactive terminal",
+    "usage_aggregation": "needs live persisted usage events"
+  }
+}
