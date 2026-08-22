@@ -259,7 +259,7 @@ class RoutingTests(_RoutingFixture):
             ProviderErrorKind.TRANSPORT,
             ProviderErrorKind.PROVIDER_INTERNAL,
         ):
-            with self.subTest(kind=kind):
+            with self.subTest(kind=kind.value):
                 providers = {
                     "first": FakeProvider([ProviderError(kind, "temporary")]),
                     "second": FakeProvider([response()]),
@@ -290,7 +290,7 @@ class RoutingTests(_RoutingFixture):
             }
         )
         for kind in sorted(non_fallback, key=lambda item: item.value):
-            with self.subTest(kind=kind):
+            with self.subTest(kind=kind.value):
                 providers = {
                     "first": FakeProvider([ProviderError(kind, "terminal")]),
                     "second": FakeProvider([response()]),
@@ -417,7 +417,7 @@ class RoutingTests(_RoutingFixture):
             }
         )
         for kind in sorted(hopeless, key=lambda item: item.value):
-            with self.subTest(kind=kind):
+            with self.subTest(kind=kind.value):
                 provider = FakeProvider(
                     # Even an explicit Retry-After must not buy an attempt that
                     # cannot change the answer.

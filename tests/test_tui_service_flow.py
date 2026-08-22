@@ -717,6 +717,12 @@ class ServiceScreenTests(unittest.IsolatedAsyncioTestCase):
                 str(chatgpt.query_one("#svc-full-access-label", hub.Label).render()),
             )
 
+    def test_adapt_guide_copies_complete_authorization_value_once(self) -> None:
+        steps = "\n".join(english for _russian, english in hub._SERVICE_STEPS["adapt"])
+        self.assertIn("complete KaroX Authorization value", steps)
+        self.assertIn("already starts with Bearer", steps)
+        self.assertIn("do not add a second Bearer", steps)
+
     async def test_adapt_reuses_saved_chatgpt_bridge_without_opening_duplicate_setup(self) -> None:
         profile = SavedWebBridgeProfile(
             name="chatgpt-dev-adapt-reuse",

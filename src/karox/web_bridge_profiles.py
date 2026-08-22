@@ -214,9 +214,12 @@ class SavedWebBridgeProfile:
             )
         profiles = tuple(_server_profile(value) for value in self.server_profiles)
         object.__setattr__(self, "server_profiles", profiles)
-        if "karox.dev_server.start" in self.tools and not profiles:
+        if (
+            {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(self.tools)
+            and not profiles
+        ):
             raise WebBridgeProfileError(
-                "a profile exposing karox.dev_server.start needs at least one "
+                "a profile exposing karox.dev_server.start/restart needs at least one "
                 "approved server profile"
             )
         seen: set[str] = set()

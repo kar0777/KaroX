@@ -111,6 +111,17 @@ def _fake_pid_alive():
     return is_alive, kill_tree, register
 
 
+def _fake_process_identity(pid: int):
+    """Return stable OS identity facts for a synthetic test-only PID."""
+
+    return _htr_mod.ProcessIdentity(
+        pid=pid,
+        created_at=float(pid),
+        executable="node.exe",
+        cmdline_digest=f"fake-{pid}",
+    )
+
+
 class _LocalHttpServer:
     """A throwaway localhost http.server for browser tests."""
 
@@ -220,7 +231,14 @@ class TestChecksAndServerProfiles(_Base):
             server_profiles=default_server_profiles(),
             popen_factory=self._fake_popen(pid=44001),
         )
-        with mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree):
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(
+                _htr_mod.ProcessIdentity,
+                "capture",
+                side_effect=_fake_process_identity,
+            ),
+        ):
             result = runtime.execute(
                 DEV_SERVER_START,
                 {"argv": ["npm", "run", "start:safe"], "ready_url": None},
@@ -243,7 +261,14 @@ class TestChecksAndServerProfiles(_Base):
             server_profiles=default_server_profiles(),
             popen_factory=self._fake_popen(pid=44002),
         )
-        with mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree):
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(
+                _htr_mod.ProcessIdentity,
+                "capture",
+                side_effect=_fake_process_identity,
+            ),
+        ):
             result = runtime.execute(
                 DEV_SERVER_START,
                 {
@@ -254,7 +279,8 @@ class TestChecksAndServerProfiles(_Base):
             )
         payload = result if isinstance(result, dict) else result.structuredContent
 
-        self.assertTrue(payload.get("ok"))
+        self.assertFalse(payload.get("ok"))
+        self.assertEqual(payload.get("error_code"), "readiness_failed")
         self.assertFalse(payload["ready"])
         self.assertTrue(payload["ready_error"], "readiness failure carried no reason")
 
@@ -268,7 +294,14 @@ class TestChecksAndServerProfiles(_Base):
             server_profiles=default_server_profiles(),
             popen_factory=self._fake_popen(pid=44003),
         )
-        with mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree):
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(
+                _htr_mod.ProcessIdentity,
+                "capture",
+                side_effect=_fake_process_identity,
+            ),
+        ):
             result = runtime.execute(
                 DEV_SERVER_START,
                 {"argv": ["npm", "run", "start:safe"], "ready_url": None},
@@ -319,7 +352,14 @@ class TestDevServerLifecycle(_Base):
             server_profiles=default_server_profiles(),
             popen_factory=self._fake_popen(pid=44010),
         )
-        with mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree):
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(
+                _htr_mod.ProcessIdentity,
+                "capture",
+                side_effect=_fake_process_identity,
+            ),
+        ):
             first = runtime.execute(
                 DEV_SERVER_START,
                 {"argv": ["npm", "run", "start:safe"], "process_id": "srv-idem"},
@@ -514,7 +554,14 @@ class TestSessionCleanup(_Base):
             server_profiles=default_server_profiles(),
             popen_factory=self._fake_popen(pid=44040),
         )
-        with mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree):
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(
+                _htr_mod.ProcessIdentity,
+                "capture",
+                side_effect=_fake_process_identity,
+            ),
+        ):
             runtime.execute(
                 DEV_SERVER_START,
                 {"argv": ["npm", "run", "start:safe"], "process_id": "srv-cleanup"},

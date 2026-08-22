@@ -392,8 +392,8 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/new",
     "/resume",
     "/compact",
+    "/clear",
     "/project",
-    "/workspace",
     "/help",
     "/quit",
 )
@@ -3475,7 +3475,11 @@ def _persist_tui_saved_bridge_profile(
     server_profiles = (
         tuple(item.to_public_dict() for item in server_profiles_for_repository(repository))
         if any(
-            tool in {"karox.dev_server.start", "karox.dev_server.stop"}
+            tool in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }
             for tool in effective_tools
         )
         else ()
@@ -5299,8 +5303,8 @@ if _HAS_TEXTUAL:
                 )
                 yield Checkbox(
                     self._label(
-                        "Dev-сервер: запуск и остановка (start:safe)",
-                        "Dev server: start and stop (start:safe)",
+                        "Сервисы проекта: запуск, restart и безопасная остановка",
+                        "Project services: start, restart, and safe stop",
                     ),
                     value=True,
                     id="tool-server-input",
@@ -5531,6 +5535,7 @@ if _HAS_TEXTUAL:
                 "tool-server-input": (
                     "karox.dev_server.start",
                     "karox.dev_server.stop",
+                    "karox.dev_server.restart",
                 ),
             }
             tools = tuple(

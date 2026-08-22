@@ -85,6 +85,18 @@ class RiskClassificationTests(unittest.TestCase):
         self.assertEqual(assessment.level, RiskLevel.HIGH)
         self.assertIn("bulk_mutation", assessment.reasons)
 
+    def test_many_test_targets_are_not_bulk_mutations(self) -> None:
+        action = _read(
+            kind="tests.run",
+            paths=tuple(f"tests/test_{index}.py" for index in range(25)),
+            repository_file_count=40,
+        )
+        assessment = self.engine.assess(action)
+        self.assertEqual(assessment.level, RiskLevel.MEDIUM)
+        self.assertFalse(assessment.requires_confirmation)
+        self.assertNotIn("bulk_mutation", assessment.reasons)
+        self.assertNotIn("large_repository_share", assessment.reasons)
+
     def test_a_recursive_delete_stops(self) -> None:
         action = _read(
             kind="repo.delete",
@@ -299,7 +311,7 @@ class AlwaysBlockedTests(unittest.TestCase):
 
     def test_an_engine_cannot_be_configured_to_auto_approve_danger(self) -> None:
         for level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            with self.subTest(level=level):
+            with self.subTest(level=level.value):
                 with self.assertRaises(ValueError):
                     RiskEngine(auto_approve_up_to=level)
 

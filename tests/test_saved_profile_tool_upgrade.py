@@ -96,7 +96,7 @@ class ProfileIncompatibleAutonomyToolsTests(unittest.TestCase):
             profile_incompatible_tools(tools, AccessProfile.WORKSPACE_WRITE), {}
         )
 
-    def test_elevated_saved_bridge_auto_publishes_local_git_commit_tool(self) -> None:
+    def test_elevated_saved_bridge_auto_publishes_local_developer_tools(self) -> None:
         from karox.web_bridge_launcher import WebBridgeConnectConfig
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -105,8 +105,9 @@ class ProfileIncompatibleAutonomyToolsTests(unittest.TestCase):
                 repository=Path(tmpdir),
                 tools=("karox.repo.read_file", "karox.repo.write_file"),
                 access_profile=AccessProfile.ELEVATED,
-                saved_profile_name="chatgpt-elevated-commit",
+                saved_profile_name="chatgpt-elevated-developer",
             )
+        self.assertIn("karox.command.run", config.tools)
         self.assertIn("karox.git.commit", config.tools)
 
     def test_hyperagent_saved_config_keeps_full_only_names_advertised(self) -> None:

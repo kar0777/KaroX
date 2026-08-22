@@ -743,8 +743,8 @@ _SERVICE_STEPS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             "Create a Personal integration named KaroX and put the stable KaroX /mcp address in its description",
         ),
         (
-            "Добавьте credential KAROX_AUTHORIZATION и вставьте защищённое значение Authorization из KaroX",
-            "Add credential KAROX_AUTHORIZATION and paste the protected KaroX Authorization value",
+            "Добавьте credential KAROX_AUTHORIZATION и вставьте полное значение Authorization из KaroX. Оно уже начинается с Bearer — второй Bearer не добавляйте",
+            "Add credential KAROX_AUTHORIZATION and paste the complete KaroX Authorization value. It already starts with Bearer — do not add a second Bearer",
         ),
         (
             "Сохраните integration, попросите Adapt использовать KaroX и вернитесь сюда для проверки",
@@ -6076,7 +6076,9 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 # hidden P key — the exact "user must know internal commands"
                 # failure this screen exists to prevent.
                 auth.label = (
-                    _label(self.language, "Скопировать ключ", "Copy key")
+                    _label(self.language, "Скопировать Authorization", "Copy Authorization")
+                    if uses_bearer and self.preset_id == "adapt"
+                    else _label(self.language, "Скопировать ключ", "Copy key")
                     if uses_bearer
                     else _label(
                         self.language,

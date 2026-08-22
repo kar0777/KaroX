@@ -64,7 +64,13 @@ from .remote_tools import (
     _read_log,
 )
 from .security import child_process_environment, redact
-from .service_supervisor import ProcessIdentity, verify_identity
+from .service_supervisor import (
+    PROTECTED_EXECUTABLES,
+    ProcessIdentity,
+    ServiceLease,
+    ServiceLeaseError,
+    verify_identity,
+)
 from .sessions import SessionStore
 
 
@@ -247,6 +253,7 @@ DEV_SERVER_START = "karox.dev_server.start"
 DEV_SERVER_STATUS = "karox.dev_server.status"
 DEV_SERVER_LOGS = "karox.dev_server.logs"
 DEV_SERVER_STOP = "karox.dev_server.stop"
+DEV_SERVER_RESTART = "karox.dev_server.restart"
 CHECKS_START = "karox.checks.start"
 CHECKS_STATUS = "karox.checks.status"
 CHECKS_LOGS = "karox.checks.logs"
@@ -544,6 +551,7 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
             "properties": {
                 "argv": {"type": "array", "items": {"type": "string"}},
                 "process_id": {"type": "string"},
+                "workstream_id": {"type": "string"},
                 "env": {"type": "object"},
                 "ready_url": {"type": "string"},
                 "timeout_seconds": {"type": "number"},
@@ -558,7 +566,10 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         description="Return the running state and tail of safe logs for a managed dev server.",
         input_schema={
             "type": "object",
-            "properties": {"process_id": {"type": "string"}},
+            "properties": {
+                "process_id": {"type": "string"},
+                "workstream_id": {"type": "string"},
+            },
             "required": ["process_id"],
             "additionalProperties": False,
         },
@@ -569,7 +580,11 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         description="Return redacted stdout/stderr logs for a managed dev server.",
         input_schema={
             "type": "object",
-            "properties": {"process_id": {"type": "string"}, "limit": {"type": "integer"}},
+            "properties": {
+                "process_id": {"type": "string"},
+                "workstream_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
             "required": ["process_id"],
             "additionalProperties": False,
         },
@@ -577,10 +592,38 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         capability=Capability.PROCESS_RUN,
     ),
     DEV_SERVER_STOP: _ToolMeta(
-        description="Stop a managed dev server started by this KaroX session only.",
+        description=(
+            "Stop a managed project service started by this KaroX session only. "
+            "The live PID must still match its recorded creation time, executable, "
+            "and command identity; unverifiable or protected processes are refused."
+        ),
         input_schema={
             "type": "object",
-            "properties": {"process_id": {"type": "string"}},
+            "properties": {
+                "process_id": {"type": "string"},
+                "workstream_id": {"type": "string"},
+            },
+            "required": ["process_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.PROCESS_RUN,
+    ),
+    DEV_SERVER_RESTART: _ToolMeta(
+        description=(
+            "Atomically restart one managed project service: verify identity, acquire "
+            "its mutation lease, stop and confirm exit, relaunch the same approved "
+            "argv, then run the optional localhost readiness probe."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string"},
+                "workstream_id": {"type": "string"},
+                "env": {"type": "object"},
+                "ready_url": {"type": "string"},
+                "timeout_seconds": {"type": "number"},
+            },
             "required": ["process_id"],
             "additionalProperties": False,
         },
@@ -882,6 +925,10 @@ class HostedToolsRuntime:
         sessions.validate_repository(record, self.repository)
         if record.revoked:
             raise HostedBridgeAccessDenied("session access has been revoked")
+        # Stable repository identity used by managed-process scope records. The
+        # canonical path alone is not enough after a repo is moved/recreated;
+        # SessionStore already maintains a fingerprint for this exact purpose.
+        self._repo_fingerprint = record.repo_fingerprint
 
         self._access_profile = access_profile
         self.policy = CapabilityPolicy(access_profile)
@@ -1040,15 +1087,35 @@ class HostedToolsRuntime:
             raise HostedBridgeAccessDenied("session access has been revoked")
 
     def cleanup_session(self) -> dict[str, Any]:
-        """Tear down browser + stop every dev server when the bridge itself exits."""
+        """Tear down browser and only still-proven owned dev servers.
+
+        Cleanup is not a privileged bypass. A stale process record may point at
+        a PID the OS already reused, so bridge teardown goes through the same
+        fail-closed identity path as an explicit ``dev_server.stop``. Anything
+        that cannot still be proven ours is left untouched and reported.
+        """
         browser = _release_browser_manager(self.session_id, self._browser)
         stopped: list[str] = []
+        refused: list[str] = []
         for record in self._process_store.list():
-            if _pid_alive(record.pid):
-                _kill_pid_tree(record.pid)
-            if not _pid_alive(record.pid):
+            scope = self._load_process_scope(record) or {}
+            stop_arguments: dict[str, Any] = {"process_id": record.process_id}
+            stored_workstream = scope.get("workstream_id")
+            if isinstance(stored_workstream, str):
+                stop_arguments["workstream_id"] = stored_workstream
+            result = self._dev_server_stop(
+                stop_arguments,
+                DEFAULT_HOSTED_DEADLINE_SECONDS,
+            )
+            if bool(result.get("ok")) and not bool(result.get("running")):
                 stopped.append(record.process_id)
-        return {"browser_closed": browser, "stopped_servers": stopped}
+            elif not bool(result.get("ok")):
+                refused.append(record.process_id)
+        return {
+            "browser_closed": browser,
+            "stopped_servers": stopped,
+            "refused_servers": refused,
+        }
 
     # -- browser handlers ---------------------------------------------------
 
@@ -1168,44 +1235,40 @@ class HostedToolsRuntime:
             "dev server argv is not in the user-approved server-profile allowlist"
         )
 
-    def _dev_server_start(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
-        argv = self._required(arguments, "argv", list)
-        try:
-            profile = self._resolve_profile(argv)
-        except HostedBridgeAccessDenied as exc:
-            return {"ok": False, "error_code": "denied", "error": str(exc)}
-        process_id = arguments.get("process_id") or f"srv-{int(time.time()*1000)}"
-        if not isinstance(process_id, str) or len(process_id) > 80:
-            return {"ok": False, "error_code": "invalid_request", "error": "process_id must be a 1-80 character string"}
-        if not all(ch.isalnum() or ch in "._-" for ch in process_id):
-            return {"ok": False, "error_code": "invalid_request", "error": "process_id must use [A-Za-z0-9._-] only"}
+    def _spawn_dev_server_locked(
+        self,
+        *,
+        profile: ManagedServerProfile,
+        argv: Sequence[str],
+        process_id: str,
+        caller_env: Any,
+        ready_url: Optional[str],
+        deadline_seconds: float,
+        workstream_id: str,
+    ) -> dict[str, Any]:
+        """Spawn one approved profile while the caller owns its service lease."""
 
-        # Idempotency: a live process_id is returned as-is, never respawned.
-        try:
-            existing = self._process_store.get(process_id)
-        except Exception:
-            existing = None
-        if existing is not None and _pid_alive(existing.pid):
-            return {
-                "ok": True,
-                "process_id": existing.process_id,
-                "pid": existing.pid,
-                "running": True,
-                "started_at": existing.started_at,
-                "reused": True,
-            }
-
-        caller_env = arguments.get("env") or {}
         if not isinstance(caller_env, dict):
-            return {"ok": False, "error_code": "invalid_request", "error": "env must be an object"}
+            return {
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "env must be an object",
+            }
         env = child_process_environment()
-        # Profile env is forced; caller may only add allowlisted names on top.
         env.update(profile.env)
         for key, value in caller_env.items():
-            if key.upper() not in profile.env_allowlist:
-                return {"ok": False, "error_code": "denied", "error": f"env override is not in the profile allowlist: {key}"}
+            if not isinstance(key, str) or key.upper() not in profile.env_allowlist:
+                return {
+                    "ok": False,
+                    "error_code": "denied",
+                    "error": f"env override is not in the profile allowlist: {key}",
+                }
             if not isinstance(value, str) or len(value) > 1000:
-                return {"ok": False, "error_code": "invalid_request", "error": f"env value for {key} is invalid"}
+                return {
+                    "ok": False,
+                    "error_code": "invalid_request",
+                    "error": f"env value for {key} is invalid",
+                }
             env[key] = value
 
         stdout_path = self._process_store.root / f"{process_id}.stdout.log"
@@ -1213,9 +1276,6 @@ class HostedToolsRuntime:
         stdout_handle = stdout_path.open("ab", buffering=0)
         stderr_handle = stderr_path.open("ab", buffering=0)
         try:
-            # Resolve ``npm`` to ``npm.cmd`` (etc.) AFTER the profile allowlist
-            # already matched on the logical argv.  Keeps shell=False, the
-            # repo-scoped cwd, env, and the no-shell-string/no-injection rules.
             launch_argv = _resolve_process_argv(argv)
             if self._popen_factory is not None:
                 process = self._popen_factory(
@@ -1237,12 +1297,32 @@ class HostedToolsRuntime:
                     stderr=stderr_handle,
                     shell=False,
                 )
-        except Exception:
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error_code": "launch_failed",
+                "error": str(redact(f"managed service launch failed: {exc}")),
+            }
+        finally:
             stdout_handle.close()
             stderr_handle.close()
-            raise
-        stdout_handle.close()
-        stderr_handle.close()
+
+        identity = ProcessIdentity.capture(process.pid)
+        if (
+            identity.created_at is None
+            and identity.executable is None
+            and identity.cmdline_digest is None
+        ):
+            # We still own the freshly-created child here, so this one cleanup is
+            # safe. Do not persist an unmanageable process that future calls
+            # would have to guess about.
+            _kill_pid_tree(process.pid)
+            return {
+                "ok": False,
+                "error_code": "identity_capture_failed",
+                "error": "managed service started but its process identity could not be captured",
+            }
+
         record = ManagedProcessRecord(
             process_id=process_id,
             pid=process.pid,
@@ -1253,34 +1333,151 @@ class HostedToolsRuntime:
             stderr_path=str(stderr_path),
         )
         self._process_store.put(record)
-        # Identity sidecar (mandate: PID alone is never enough). Captured the
-        # instant the child is provably ours, so a later stop can refuse a
-        # PID the OS has since handed to someone else's program.
-        self._write_process_identity(process_id, ProcessIdentity.capture(process.pid))
+        identity_saved = self._write_process_identity(process_id, identity)
+        scope_saved = self._write_process_scope(record, workstream_id=workstream_id)
+        if not identity_saved or not scope_saved:
+            # The child was created by this exact call, so cleanup is safe here.
+            # Never leave behind a process whose future ownership cannot be
+            # proven after the bridge or OS restarts.
+            _kill_pid_tree(process.pid)
+            return {
+                "ok": False,
+                "error_code": "ownership_record_failed",
+                "error": "managed service ownership metadata could not be persisted",
+                "process_id": process_id,
+                "pid": process.pid,
+                "running": _pid_alive(process.pid),
+            }
 
-        ready_url = arguments.get("ready_url") or profile.ready_url
+        # Give immediate-exit failures a short chance to become observable
+        # before reporting a successful long-lived service.
+        time.sleep(0.03)
+        running = _pid_alive(process.pid)
+        if not running:
+            return {
+                "ok": False,
+                "error_code": "startup_exit",
+                "error": "managed service exited immediately after launch",
+                "process_id": process_id,
+                "pid": process.pid,
+                "running": False,
+                "started_at": record.started_at,
+                "stdout": _read_log(stdout_path),
+                "stderr": _read_log(stderr_path),
+            }
+
+        effective_ready_url = ready_url or profile.ready_url
         url: Optional[str] = None
         ready = False
         ready_error: Optional[str] = None
-        if ready_url is not None:
-            ready_url = _validate_local_url(ready_url)
-            url = ready_url
-            ready, ready_error = self._poll_ready(ready_url, deadline_seconds)
+        if effective_ready_url is not None:
+            effective_ready_url = _validate_local_url(effective_ready_url)
+            url = effective_ready_url
+            ready, ready_error = self._poll_ready(effective_ready_url, deadline_seconds)
+        ok = running and (ready if url is not None else True)
         return {
-            "ok": True,
+            "ok": ok,
+            "error_code": None if ok else "readiness_failed",
+            "error": str(redact(ready_error)) if ready_error else None,
             "process_id": process_id,
             "pid": process.pid,
-            "running": _pid_alive(process.pid),
+            "running": running,
             "started_at": record.started_at,
             "url": url,
             "ready": ready,
-            # Present only when readiness was checked and failed, so a caller can
-            # distinguish "never polled" from "polled and here is what happened".
             "ready_error": str(redact(ready_error)) if ready_error else None,
             "host_hint": profile.host_hint,
-            # Env values are deliberately never returned; only the names that were set.
-            "env_keys": sorted(profile.env.keys()),
+            # Values are never returned; names are safe diagnostics.
+            "env_keys": sorted({*profile.env.keys(), *caller_env.keys()}),
         }
+
+    def _dev_server_start(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        try:
+            workstream_id = self._requested_workstream(arguments)
+        except HostedBridgeAccessDenied as exc:
+            return {"ok": False, "error_code": "denied", "error": str(exc)}
+        argv = self._required(arguments, "argv", list)
+        try:
+            profile = self._resolve_profile(argv)
+        except HostedBridgeAccessDenied as exc:
+            return {"ok": False, "error_code": "denied", "error": str(exc)}
+        process_id = arguments.get("process_id") or f"srv-{int(time.time() * 1000)}"
+        if not isinstance(process_id, str) or not 1 <= len(process_id) <= 80:
+            return {
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "process_id must be a 1-80 character string",
+            }
+        if not all(ch.isalnum() or ch in "._-" for ch in process_id):
+            return {
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "process_id must use [A-Za-z0-9._-] only",
+            }
+
+        lease = ServiceLease(
+            self._process_store.root,
+            process_id,
+            owner=f"{self.session_id}:{os.getpid()}",
+        )
+        try:
+            with lease:
+                try:
+                    existing = self._process_store.get(process_id)
+                except Exception:
+                    existing = None
+                if existing is not None and _pid_alive(existing.pid):
+                    scope_ok, scope_reason = self._verify_process_scope(
+                        existing, workstream_id=workstream_id
+                    )
+                    if not scope_ok:
+                        return {
+                            "ok": False,
+                            "error_code": "ownership_scope_mismatch",
+                            "error": f"refusing to reuse pid {existing.pid}: {scope_reason}",
+                            "process_id": existing.process_id,
+                            "pid": existing.pid,
+                            "running": False,
+                            "pid_alive": True,
+                        }
+                    proven, state, reason, _live = self._prove_live_record(existing)
+                    if not proven:
+                        return {
+                            "ok": False,
+                            "error_code": state,
+                            "error": f"refusing to reuse pid {existing.pid}: {reason}",
+                            "process_id": existing.process_id,
+                            "pid": existing.pid,
+                            "running": False,
+                            "pid_alive": True,
+                        }
+                    return {
+                        "ok": True,
+                        "process_id": existing.process_id,
+                        "pid": existing.pid,
+                        "running": True,
+                        "started_at": existing.started_at,
+                        "identity": state,
+                        "reused": True,
+                    }
+                return self._spawn_dev_server_locked(
+                    profile=profile,
+                    argv=argv,
+                    process_id=process_id,
+                    caller_env=arguments.get("env") or {},
+                    ready_url=arguments.get("ready_url"),
+                    deadline_seconds=deadline_seconds,
+                    workstream_id=workstream_id,
+                )
+        except ServiceLeaseError as exc:
+            return {
+                "ok": False,
+                "error_code": "service_busy",
+                "error": str(redact(str(exc))),
+                "process_id": process_id,
+            }
 
     def _poll_ready(self, url: str, deadline_seconds: float) -> tuple[bool, Optional[str]]:
         """Poll a local readiness URL, returning why it never answered.
@@ -1313,16 +1510,50 @@ class HostedToolsRuntime:
         return False, last_error
 
     def _dev_server_status(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        del deadline_seconds
         process_id = self._required(arguments, "process_id", str)
         try:
+            workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
+        scope_ok, scope_reason = self._verify_process_scope(
+            record, workstream_id=workstream_id
+        )
+        if not scope_ok:
+            return {
+                "ok": False,
+                "error_code": "ownership_scope_mismatch",
+                "error": f"refusing to inspect pid {record.pid}: {scope_reason}",
+                "process_id": record.process_id,
+                "pid": record.pid,
+                "running": False,
+                "pid_alive": _pid_alive(record.pid),
+            }
+        alive = _pid_alive(record.pid)
+        identity = "not_running"
+        if alive:
+            proven, identity, reason, _live = self._prove_live_record(record)
+            if not proven:
+                return {
+                    "ok": False,
+                    "error_code": identity,
+                    "error": f"managed service identity is not trusted: {reason}",
+                    "process_id": record.process_id,
+                    "pid": record.pid,
+                    "running": False,
+                    "pid_alive": True,
+                    "started_at": record.started_at,
+                    "argv": list(redact(record.argv)),
+                    "stdout": _read_log(Path(record.stdout_path)),
+                    "stderr": _read_log(Path(record.stderr_path)),
+                }
         return {
             "ok": True,
             "process_id": record.process_id,
             "pid": record.pid,
-            "running": _pid_alive(record.pid),
+            "running": alive,
+            "identity": identity,
             "started_at": record.started_at,
             "argv": list(redact(record.argv)),
             "stdout": _read_log(Path(record.stdout_path)),
@@ -1330,14 +1561,27 @@ class HostedToolsRuntime:
         }
 
     def _dev_server_logs(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        del deadline_seconds
         process_id = self._required(arguments, "process_id", str)
         limit = arguments.get("limit", 100_000)
         if not isinstance(limit, int) or limit <= 0 or limit > 1_000_000:
             limit = 100_000
         try:
+            workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
+        scope_ok, scope_reason = self._verify_process_scope(
+            record, workstream_id=workstream_id
+        )
+        if not scope_ok:
+            return {
+                "ok": False,
+                "error_code": "ownership_scope_mismatch",
+                "error": f"refusing to read logs for pid {record.pid}: {scope_reason}",
+                "process_id": record.process_id,
+                "pid": record.pid,
+            }
         return {
             "ok": True,
             "process_id": record.process_id,
@@ -1348,7 +1592,30 @@ class HostedToolsRuntime:
     def _identity_path(self, process_id: str) -> Any:
         return self._process_store.root / f"{process_id}.identity.json"
 
-    def _write_process_identity(self, process_id: str, identity: ProcessIdentity) -> None:
+    def _scope_path(self, process_id: str) -> Any:
+        return self._process_store.root / f"{process_id}.scope.json"
+
+    @staticmethod
+    def _requested_workstream(arguments: Mapping[str, Any]) -> str:
+        raw = arguments.get("workstream_id")
+        if raw is None:
+            return "default"
+        if not isinstance(raw, str):
+            raise HostedBridgeAccessDenied("workstream_id must be a string")
+        value = raw.strip()
+        if not 1 <= len(value) <= 64 or not all(
+            ch.isalnum() or ch in "._-" for ch in value
+        ):
+            raise HostedBridgeAccessDenied(
+                "workstream_id must be 1-64 characters from [A-Za-z0-9._-]"
+            )
+        return value
+
+    def _write_process_identity(
+        self, process_id: str, identity: ProcessIdentity
+    ) -> bool:
+        """Persist identity facts; mutation must fail closed if this fails."""
+
         import dataclasses as _dc
 
         try:
@@ -1356,10 +1623,84 @@ class HostedToolsRuntime:
                 json.dumps(_dc.asdict(identity), sort_keys=True),
                 encoding="utf-8",
             )
+            return True
         except OSError:
-            # The sidecar is defense-in-depth; a write failure must not fail
-            # the start, it only downgrades a later stop to the fallback check.
-            pass
+            return False
+
+    def _write_process_scope(
+        self, record: ManagedProcessRecord, *, workstream_id: str
+    ) -> bool:
+        """Persist non-model-visible ownership proof for a managed service."""
+
+        import secrets
+        import tempfile
+
+        path = self._scope_path(record.process_id)
+        payload = {
+            "schema_version": 1,
+            "session_id": self.session_id,
+            "repository": str(self.repository),
+            "repo_fingerprint": self._repo_fingerprint,
+            "workstream_id": workstream_id,
+            "pid": record.pid,
+            # Local ownership proof only. Never returned in status/logs/MCP.
+            "ownership_token": secrets.token_hex(24),
+        }
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent
+        )
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            return True
+        except OSError:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            return False
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def _load_process_scope(self, record: ManagedProcessRecord) -> Optional[dict[str, Any]]:
+        try:
+            payload = json.loads(
+                self._scope_path(record.process_id).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _verify_process_scope(
+        self, record: ManagedProcessRecord, *, workstream_id: str
+    ) -> tuple[bool, str]:
+        scope = self._load_process_scope(record)
+        if scope is None:
+            return False, "managed service has no ownership scope proof"
+        token = scope.get("ownership_token")
+        expected = {
+            "schema_version": 1,
+            "session_id": self.session_id,
+            "repository": str(self.repository),
+            "repo_fingerprint": self._repo_fingerprint,
+            "workstream_id": workstream_id,
+            "pid": record.pid,
+        }
+        for key, value in expected.items():
+            if scope.get(key) != value:
+                return False, f"managed service ownership scope mismatch: {key}"
+        if not isinstance(token, str) or len(token) < 32:
+            return False, "managed service ownership token is missing or malformed"
+        return True, "scope verified"
 
     def _load_process_identity(
         self, record: ManagedProcessRecord
@@ -1394,78 +1735,220 @@ class HostedToolsRuntime:
                 cmdline_digest=None,
             )
 
-    def _dev_server_stop(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+    @staticmethod
+    def _protected_process_reason(
+        record: ManagedProcessRecord, live: ProcessIdentity
+    ) -> Optional[str]:
+        """Why this recorded process must never be signalled, if any."""
+
+        if record.pid == os.getpid():
+            return "refusing to stop the KaroX control plane itself"
+        # A managed record must never be allowed to target an ancestor of the
+        # bridge either: killing its tree would also kill KaroX even when the
+        # record's PID differs from os.getpid().
+        try:
+            import psutil  # type: ignore[import-untyped]
+
+            if any(parent.pid == record.pid for parent in psutil.Process(os.getpid()).parents()):
+                return "refusing to stop an ancestor of the KaroX control plane"
+        except Exception:
+            pass
+        logical = [str(item).replace("\\", "/").lower() for item in record.argv]
+        if logical:
+            first = logical[0].rsplit("/", 1)[-1]
+            if first in {"karox", "karox.exe", "karox-vnext", "karox-vnext.exe"}:
+                return "refusing to stop a KaroX launcher"
+            if len(logical) >= 3 and logical[1] == "-m" and logical[2].startswith("karox"):
+                return "refusing to stop a KaroX Python module"
+        executable = (live.executable or "").replace("\\", "/")
+        basename = executable.rsplit("/", 1)[-1].lower()
+        for suffix in (".exe", ".cmd", ".bat", ".com"):
+            if basename.endswith(suffix):
+                basename = basename[: -len(suffix)]
+                break
+        if basename in PROTECTED_EXECUTABLES:
+            return f"refusing to stop protected executable {basename!r}"
+        return None
+
+    def _prove_live_record(
+        self, record: ManagedProcessRecord
+    ) -> tuple[bool, str, str, ProcessIdentity]:
+        """Prove that a live PID is still the process this record started."""
+
+        if not _pid_alive(record.pid):
+            return False, "not_running", "process is not running", ProcessIdentity.capture(record.pid)
+        live = ProcessIdentity.capture(record.pid)
+        protected = self._protected_process_reason(record, live)
+        if protected is not None:
+            return False, "protected_process", protected, live
+        stored = self._load_process_identity(record)
+        has_stored_facts = (
+            stored.created_at is not None
+            or stored.executable is not None
+            or stored.cmdline_digest is not None
+        )
+        has_live_facts = (
+            live.created_at is not None
+            or live.executable is not None
+            or live.cmdline_digest is not None
+        )
+        if not has_stored_facts or not has_live_facts:
+            return (
+                False,
+                "identity_unverifiable",
+                (
+                    f"process identity for pid {record.pid} cannot be proven from "
+                    "both the stored record and the live OS"
+                ),
+                live,
+            )
+        verdict = verify_identity(stored, live, alive=True)
+        if not verdict.ok:
+            return False, "identity_mismatch", verdict.reason, live
+        return True, "verified", "identity verified", live
+
+    def _verified_stop_locked(
+        self, record: ManagedProcessRecord, *, workstream_id: str
+    ) -> dict[str, Any]:
+        """Stop one managed process after the caller owns its mutation lease."""
+
+        scope_ok, scope_reason = self._verify_process_scope(
+            record, workstream_id=workstream_id
+        )
+        if not scope_ok:
+            return {
+                "ok": False,
+                "error_code": "ownership_scope_mismatch",
+                "error": f"refusing to manage pid {record.pid}: {scope_reason}",
+                "process_id": record.process_id,
+                "pid": record.pid,
+                "running": False,
+                "pid_alive": _pid_alive(record.pid),
+                "exit_confirmed": False,
+            }
+
+        was_running = _pid_alive(record.pid)
+        if not was_running:
+            return {
+                "ok": True,
+                "process_id": record.process_id,
+                "pid": record.pid,
+                "was_running": False,
+                "running": False,
+                "identity": "not_running",
+                "exit_confirmed": True,
+            }
+
+        proven, state, reason, _live = self._prove_live_record(record)
+        if not proven:
+            return {
+                "ok": False,
+                "error_code": state,
+                "error": f"refusing to stop pid {record.pid}: {reason}",
+                "process_id": record.process_id,
+                "pid": record.pid,
+                "was_running": True,
+                "running": True,
+                "exit_confirmed": False,
+            }
+
+        _kill_pid_tree(record.pid)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and _pid_alive(record.pid):
+            time.sleep(0.05)
+        running = _pid_alive(record.pid)
+        return {
+            "ok": not running,
+            "error_code": None if not running else "stop_timeout",
+            "error": None if not running else "managed process did not exit within 10 seconds",
+            "process_id": record.process_id,
+            "pid": record.pid,
+            "was_running": True,
+            "running": running,
+            "identity": state,
+            "exit_confirmed": not running,
+        }
+
+    def _dev_server_stop(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
         process_id = self._required(arguments, "process_id", str)
         try:
+            workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
-        was_running = _pid_alive(record.pid)
-        identity_state = "not_running"
-        if was_running:
-            # Mandate: PID alone is never enough. Every provable live fact is
-            # checked before the kill; a provable mismatch refuses without
-            # touching the process, because the OS may have reused this PID
-            # for a program that is not ours.
-            live = ProcessIdentity.capture(record.pid)
-            provable = (
-                live.created_at is not None
-                or live.executable is not None
-                or live.cmdline_digest is not None
-            )
-            if provable:
-                stored = self._load_process_identity(record)
-                has_stored_facts = (
-                    stored.created_at is not None
-                    or stored.executable is not None
-                    or stored.cmdline_digest is not None
+        lease = ServiceLease(
+            self._process_store.root,
+            process_id,
+            owner=f"{self.session_id}:{os.getpid()}",
+        )
+        try:
+            with lease:
+                return self._verified_stop_locked(
+                    record, workstream_id=workstream_id
                 )
-                if has_stored_facts:
-                    verdict = verify_identity(stored, live, alive=True)
-                    if not verdict.ok:
-                        return {
-                            "ok": False,
-                            "error_code": "identity_mismatch",
-                            "error": f"refusing to stop pid {record.pid}: {verdict.reason}",
-                            "process_id": record.process_id,
-                            "pid": record.pid,
-                            "was_running": True,
-                            "running": True,
-                        }
-                    identity_state = "verified"
-                elif (
-                    live.created_at is not None
-                    and live.created_at > record.started_at + 60.0
-                ):
-                    # No sidecar, but the live process was created well AFTER
-                    # this record started: the PID was reused by someone else.
-                    return {
-                        "ok": False,
-                        "error_code": "identity_mismatch",
-                        "error": (
-                            f"refusing to stop pid {record.pid}: it was created "
-                            "after this managed process record"
-                        ),
-                        "process_id": record.process_id,
-                        "pid": record.pid,
-                        "was_running": True,
-                        "running": True,
-                    }
-                else:
-                    identity_state = "verified_by_start_time"
-            else:
-                # Nothing provable on this platform: the pre-existing contract
-                # (session-owned record) is all the evidence that exists.
-                identity_state = "unverifiable"
-            _kill_pid_tree(record.pid)
-        return {
-            "ok": True,
-            "process_id": record.process_id,
-            "pid": record.pid,
-            "was_running": was_running,
-            "running": _pid_alive(record.pid),
-            "identity": identity_state,
-        }
+        except ServiceLeaseError as exc:
+            return {
+                "ok": False,
+                "error_code": "service_busy",
+                "error": str(redact(str(exc))),
+                "process_id": process_id,
+                "pid": record.pid,
+                "running": _pid_alive(record.pid),
+            }
+
+    def _dev_server_restart(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        """Identity-checked stop -> confirmed exit -> launch -> readiness."""
+
+        process_id = self._required(arguments, "process_id", str)
+        try:
+            workstream_id = self._requested_workstream(arguments)
+            record = self._require_own(process_id)
+            profile = self._resolve_profile(list(record.argv))
+        except HostedBridgeAccessDenied as exc:
+            return {"ok": False, "error_code": "denied", "error": str(exc)}
+        lease = ServiceLease(
+            self._process_store.root,
+            process_id,
+            owner=f"{self.session_id}:{os.getpid()}",
+        )
+        try:
+            with lease:
+                stopped = self._verified_stop_locked(
+                    record, workstream_id=workstream_id
+                )
+                if not bool(stopped.get("ok")):
+                    return {"action": "restart", **stopped}
+                launched = self._spawn_dev_server_locked(
+                    profile=profile,
+                    argv=record.argv,
+                    process_id=process_id,
+                    caller_env=arguments.get("env") or {},
+                    ready_url=arguments.get("ready_url"),
+                    deadline_seconds=deadline_seconds,
+                    workstream_id=workstream_id,
+                )
+                return {
+                    "action": "restart",
+                    "old_pid": record.pid,
+                    "exit_confirmed": True,
+                    "restarted": bool(launched.get("ok")),
+                    **launched,
+                }
+        except ServiceLeaseError as exc:
+            return {
+                "ok": False,
+                "action": "restart",
+                "error_code": "service_busy",
+                "error": str(redact(str(exc))),
+                "process_id": process_id,
+                "pid": record.pid,
+                "running": _pid_alive(record.pid),
+            }
 
     def _checks_start(
         self, arguments: dict[str, Any], deadline_seconds: float
@@ -1657,6 +2140,7 @@ HostedToolsRuntime._dispatch = {
     DEV_SERVER_STATUS: HostedToolsRuntime._dev_server_status,
     DEV_SERVER_LOGS: HostedToolsRuntime._dev_server_logs,
     DEV_SERVER_STOP: HostedToolsRuntime._dev_server_stop,
+    DEV_SERVER_RESTART: HostedToolsRuntime._dev_server_restart,
     CHECKS_START: HostedToolsRuntime._checks_start,
     CHECKS_STATUS: HostedToolsRuntime._checks_status,
     CHECKS_LOGS: HostedToolsRuntime._checks_logs,

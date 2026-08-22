@@ -3021,14 +3021,19 @@ def _saved_profile_connect_config(
             item.name == "vacancy-control-safe" for item in profiles
         )
         if legacy_vacancy_only or (
-            not profiles and "karox.dev_server.start" in tools
+            not profiles
+            and {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools)
         ):
             profiles = discovered_profiles
-    if "karox.dev_server.start" in tools and not profiles:
+    if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
         tools = tuple(
             name
             for name in tools
-            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+            if name not in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }
         )
     effective_external_browser = profile.browser_external_https or browser_external_https
     effective_access = (
@@ -3119,13 +3124,17 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
     )
     # Auto-discovery is repository-aware: never advertise Vacancy Control's
     # start:safe recipe to an unrelated Vite/React project.
-    if "karox.dev_server.start" in tools and not profiles:
+    if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
         profiles = server_profiles_for_repository(repository)
-    if "karox.dev_server.start" in tools and not profiles:
+    if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
         tools = tuple(
             name
             for name in tools
-            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+            if name not in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }
         )
     browser_kwargs = _browser_config_kwargs(args)
     access = _web_bridge_access_profile(
@@ -3610,7 +3619,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
         profiles = tuple(
             _server_profile(value) for value in (args.server_profile or [])
         )
-        if "karox.dev_server.start" in tools and not profiles:
+        if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
             profiles = default_server_profiles()
         browser_kwargs = _browser_config_kwargs(args)
         access = _web_bridge_access_profile(
@@ -3708,7 +3717,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
                 _server_profile(value).to_public_dict()
                 for value in args.server_profile
             )
-        if "karox.dev_server.start" in tools and not profiles:
+        if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
             profiles = tuple(p.to_public_dict() for p in default_server_profiles())
         mcp_servers = current.mcp_servers
         if args.clear_mcp_servers:
@@ -4023,14 +4032,18 @@ def _handle_connect(args: argparse.Namespace) -> int:
     )
     profiles = (
         server_profiles_for_repository(repository)
-        if "karox.dev_server.start" in tools
+        if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools)
         else ()
     )
-    if "karox.dev_server.start" in tools and not profiles:
+    if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
         tools = tuple(
             name
             for name in tools
-            if name not in {"karox.dev_server.start", "karox.dev_server.stop"}
+            if name not in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }
         )
     browser_kwargs = _browser_config_kwargs(args)
     access = _web_bridge_access_profile(
@@ -4252,7 +4265,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             server_profiles = tuple(
                 _server_profile(value) for value in (args.server_profile or [])
             )
-            if "karox.dev_server.start" in extra_tools and not server_profiles:
+            if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(extra_tools) and not server_profiles:
                 server_profiles = default_server_profiles()
             browser_policy = BrowserAccessPolicy(
                 session_id=record.session_id,

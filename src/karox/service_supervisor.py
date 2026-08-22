@@ -43,7 +43,7 @@ from .remote_tools import _kill_pid_tree, _pid_alive, _read_log
 #: even when a recorded service somehow points at them. The control plane
 #: protects itself and the transport it depends on.
 PROTECTED_EXECUTABLES: frozenset[str] = frozenset(
-    {"tailscale", "tailscaled", "cloudflared"}
+    {"karox", "tailscale", "tailscale-ipn", "tailscaled", "cloudflared"}
 )
 
 

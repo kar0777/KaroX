@@ -277,15 +277,15 @@ def test_hosted_credential_tool_schema_can_only_name_an_opaque_reference() -> No
 
 
 def test_extension_worker_secret_fill_contract_is_non_observing() -> None:
-    worker = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "karox"
-        / "browser_extension"
-        / "service_worker.js"
-    ).read_text(encoding="utf-8-sig")
-    assert 'payload.action === "fill" || payload.action === "fill_secret"' in worker
-    assert 'el.setAttribute("data-karox-secret", "true")' in worker
-    assert '? { filled: true, secret: true }' in worker
-    assert 'if (sensitive) return { text: "", secret: true };' in worker
-    assert 'el.dataset.karoxSecret === "true"' in worker
+    extension = Path(__file__).resolve().parents[1] / "src" / "karox" / "browser_extension"
+    worker = (extension / "service_worker.js").read_text(encoding="utf-8-sig")
+    helpers = (extension / "dom_helpers.js").read_text(encoding="utf-8-sig")
+
+    # The worker advertises/dispatches the opaque secret-fill action, while the
+    # exact DOM engine it injects owns the non-observing value handling.
+    assert '"fill", "fill_secret"' in worker
+    assert 'action === "fill" || action === "fill_secret"' in helpers
+    assert 'el.setAttribute("data-karox-secret", "true")' in helpers
+    assert 'filled: true, secret: true' in helpers
+    assert 'if (sensitive) return { action: "text", result: "success", text: "", secret: true };' in helpers
+    assert 'el.dataset.karoxSecret === "true"' in helpers

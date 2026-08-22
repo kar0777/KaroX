@@ -152,7 +152,11 @@ def _build_hyperagent_bypass(profile: Any, enabled: bool) -> Any:
         tools = [
             item
             for item in tools
-            if item not in {"karox.dev_server.start", "karox.dev_server.stop"}
+            if item not in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }
         ]
     # Hyperagent may cache the MCP tool catalogue for the lifetime of a thread.
     # Keep the advertised tool names stable across Project access <-> Bypass

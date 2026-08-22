@@ -46,6 +46,8 @@ dependencies = [
   "markdown-it-py>=3.0,<5.0",
   "anyio>=4.4,<5.0",
   "starlette>=0.37,<2.0",
+  # Process ownership, PID-reuse protection, and managed-service identity checks.
+  "psutil>=5.9,<8.0",
   # tomllib is standard from 3.11; the declared 3.10 floor needs the backport.
   "tomli>=2.0,<3.0; python_version < '3.11'",
 ]
@@ -109,6 +111,10 @@ dev = [
 # to contributors who installed pytest-xdist (`pytest -n 6`), but the canonical
 # verification command must not fail at argument parsing on a clean runtime.
 addopts = "-q -p no:cacheprovider"
+# Always test the current checkout. Without this, the first test importing karox
+# directly can load an older installed wheel and poison sys.modules for the rest
+# of a full run, while focused tests that import tests/_support still pass.
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 
 [tool.setuptools]

@@ -168,6 +168,24 @@ LOW_KINDS: frozenset[str] = frozenset(
 
 # A write that touches this many files at once stops being a bounded edit.
 BULK_FILE_THRESHOLD = 10
+# Only operations that actually mutate repository files participate in bulk-file
+# escalation. Read/check/test payloads may legitimately name many paths; treating
+# those targets as modified files turns a harmless verification run into a
+# spurious Smart Stop at exactly BULK_FILE_THRESHOLD targets.
+FILE_MUTATION_KINDS: frozenset[str] = frozenset(
+    {
+        "repo.write",
+        "repo.create",
+        "repo.move",
+        "repo.delete",
+        "repo.bulk_write",
+        "repo.wide_replace",
+        # A commit does not edit file contents, but its path set is still the exact
+        # repository mutation scope a human is approving. Large commits therefore
+        # keep Smart Stop, while checks/tests with many targets stay non-mutating.
+        "git.commit",
+    }
+)
 # Touching this share of the repository is a structural change, not an edit.
 REPO_FRACTION_THRESHOLD = 0.25
 # Deleting this many files at once always stops, regardless of share.
@@ -536,12 +554,12 @@ class RiskEngine:
             raise_to(RiskLevel.HIGH, "recursive_delete")
         if action.delete_count >= self._bulk_deletes:
             raise_to(RiskLevel.HIGH, "bulk_delete")
-        if level.rank >= RiskLevel.MEDIUM.rank or action.effective_file_count:
+        if action.kind in FILE_MUTATION_KINDS:
             if action.effective_file_count >= self._bulk_files:
                 raise_to(RiskLevel.HIGH, "bulk_mutation")
-        fraction = action.repository_fraction
-        if fraction is not None and fraction >= self._repo_fraction:
-            raise_to(RiskLevel.HIGH, "large_repository_share")
+            fraction = action.repository_fraction
+            if fraction is not None and fraction >= self._repo_fraction:
+                raise_to(RiskLevel.HIGH, "large_repository_share")
         if action.beyond_user_request:
             # Doing noticeably more than was asked is its own hazard, even when
             # each individual step looks harmless.

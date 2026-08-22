@@ -146,7 +146,9 @@ class _WorkstreamScopedDelegate:
         deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     ) -> dict[str, Any]:
         routed = dict(arguments)
-        if self._workstream_id is not None and tool_name in CORE_TOOL_NAMES:
+        if self._workstream_id is not None and (
+            tool_name in CORE_TOOL_NAMES or tool_name.startswith("karox.dev_server.")
+        ):
             routed["workstream_id"] = self._workstream_id
         return self._delegate.execute(
             tool_name,

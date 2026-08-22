@@ -25,6 +25,7 @@ from typing import Any, Iterable, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 TESTS = ROOT / "tests"
 
 # The five legacy KaroX 4 checks are plain pytest functions in one module, not
@@ -111,8 +112,10 @@ def _discover(start_dir: Path, pattern: str) -> list[Any]:
     number this gate publishes and the number CI reports the same number.
     """
     previous = list(sys.path)
-    if str(start_dir) not in sys.path:
-        sys.path.insert(0, str(start_dir))
+    # Discovery must import the checkout under test, not an older installed wheel.
+    # Some test modules import `karox` directly before `_support` gets a chance to
+    # prepend src/, which otherwise poisons sys.modules for the rest of discovery.
+    sys.path[:0] = [str(start_dir), str(SRC)]
     try:
         suite = unittest.defaultTestLoader.discover(str(start_dir), pattern=pattern)
     finally:

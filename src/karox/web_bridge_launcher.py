@@ -161,6 +161,7 @@ WRITE_WEB_TOOLS = (
     "karox.browser.close",
     "karox.dev_server.start",
     "karox.dev_server.stop",
+    "karox.dev_server.restart",
     "karox.checks.start",
     "karox.checks.cancel",
 )
@@ -258,12 +259,12 @@ def _include_stable_worker_commands(
     if access_profile in _WORKSPACE_WRITE_PROFILES:
         if selected.intersection(_REPOSITORY_WRITE_TOOL_NAMES):
             include("karox.repo.command")
-        # Local Git commits are an explicit ELEVATED capability. Publish the
-        # corresponding tool automatically for an elevated saved bridge so the
-        # client does not end up in the contradictory state where policy grants
-        # GIT_COMMIT but the tool catalogue makes it impossible to use. Remote
-        # Git, publish, and auth remain separately blocked by policy.
+        # ELEVATED is the explicit trusted developer grant. Publish both the
+        # unrestricted repository-scoped command runner and local Git commit
+        # automatically so the client catalogue matches the capabilities the
+        # user already enabled instead of silently exposing a crippled subset.
         if access_profile == AccessProfile.ELEVATED:
+            include("karox.command.run")
             include("karox.git.commit")
         # Supplying a verification allowlist is the explicit approval needed by
         # checks.run. Hiding the tool after accepting that allowlist produced a
@@ -622,14 +623,17 @@ class WebBridgeConnectConfig:
             raise ValueError(
                 "karox.checks.run requires at least one approved verification command"
             )
-        # ``karox.dev_server.start`` can only ever reject without an approved
-        # profile, so it is not allowed in the bundle: catch that early with a
+        # ``karox.dev_server.start``/``restart`` can only ever reject without an
+        # approved profile, so they are not allowed in the bundle: catch that early with a
         # message that names the fix instead of a runtime denial.  status/logs
         # are read-only and harmless without profiles (they report "not found"),
         # so they are left alone here.
-        if "karox.dev_server.start" in self.tools and not self.server_profiles:
+        if (
+            {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(self.tools)
+            and not self.server_profiles
+        ):
             raise ValueError(
-                "karox.dev_server.start requires at least one approved server profile"
+                "karox.dev_server.start/restart requires at least one approved server profile"
             )
         seen_profiles: set[str] = set()
         for profile in self.server_profiles:
@@ -3304,6 +3308,7 @@ def web_bridge_diagnostics(
         if tool in {
             "karox.dev_server.start",
             "karox.dev_server.stop",
+            "karox.dev_server.restart",
         } and config.access_profile == AccessProfile.READ_ONLY:
             reason = "write actions require the workspace_write or elevated profile"
         disabled.append({"name": tool, "reason": reason})
@@ -3336,6 +3341,7 @@ def web_bridge_diagnostics(
         "karox.dev_server.status",
         "karox.dev_server.logs",
         "karox.dev_server.stop",
+        "karox.dev_server.restart",
     ))
     screenshot = "karox.browser.screenshot" in config.tools
     extension_backend = config.browser_headed and config.browser_user_takeover

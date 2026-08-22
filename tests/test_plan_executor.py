@@ -40,6 +40,7 @@ class FakeDelegate:
             "karox.checks.run",
             "karox.browser.snapshot",
             "karox.dev_server.status",
+            "karox.dev_server.restart",
         }
 
     def descriptors(self) -> list[Any]:
@@ -98,6 +99,8 @@ class FakeDelegate:
             return {"ok": True, "title": "fixture"}
         if tool_name == "karox.dev_server.status":
             return {"ok": True, "running": True}
+        if tool_name == "karox.dev_server.restart":
+            return {"ok": True, "running": True, "restarted": True}
         raise AssertionError(f"unexpected fake tool: {tool_name}")
 
 
@@ -674,6 +677,22 @@ class PlanExecutorTests(unittest.TestCase):
         self.assertEqual(stored["output_policy"], "summary")
         self.assertEqual(stored["requested_output_policy"], "evidence")
         self.assertEqual(result["economy"]["evidence_packets"], 0)
+
+    def test_dev_server_restart_is_routed_inside_plan(self) -> None:
+        plan = {
+            "operations": [
+                {
+                    "operation_id": "restart-server",
+                    "action": "dev_server",
+                    "inputs": {"verb": "restart", "process_id": "owned"},
+                }
+            ]
+        }
+        result = self.executor.execute(plan, "plan-restart")
+        self.assertTrue(result["ok"])
+        self.assertTrue(
+            any(call[0] == "karox.dev_server.restart" for call in self.delegate.calls)
+        )
 
     def test_user_gate_operations_are_refused_inside_plan(self) -> None:
         plan = {

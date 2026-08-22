@@ -166,7 +166,7 @@ class RuntimeEnforcementTests(unittest.TestCase):
             Capability.GIT_COMMIT,
             Capability.NETWORK,
         ):
-            with self.subTest(capability=capability):
+            with self.subTest(capability=capability.value):
                 self.assertFalse(
                     self._decide(AccessProfile.WORKSPACE_WRITE, capability)
                 )
@@ -178,7 +178,7 @@ class RuntimeEnforcementTests(unittest.TestCase):
             Capability.PACKAGE_PUBLISH,
             Capability.AUTH_COMMAND,
         ):
-            with self.subTest(capability=capability):
+            with self.subTest(capability=capability.value):
                 self.assertFalse(self._decide(AccessProfile.ELEVATED, capability))
 
 

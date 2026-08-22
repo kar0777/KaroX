@@ -409,7 +409,11 @@ class WebBridgeCliTests(unittest.TestCase):
         self.assertEqual(config.tools[: len(DEFAULT_WEB_TOOLS)], DEFAULT_WEB_TOOLS)
         self.assertEqual(config.verification_commands, (expected_command,))
         for tool in WRITE_WEB_TOOLS:
-            if tool in {"karox.dev_server.start", "karox.dev_server.stop"}:
+            if tool in {
+                "karox.dev_server.start",
+                "karox.dev_server.stop",
+                "karox.dev_server.restart",
+            }:
                 self.assertNotIn(tool, config.tools)
             else:
                 self.assertIn(tool, config.tools)

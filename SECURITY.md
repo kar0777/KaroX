@@ -41,11 +41,31 @@ confirmation.
 | Provider API key | Exposure in transit | Keyring-backed; never passed as CLI argument in production paths |
 | Workspace files | Accidental deletion | Transaction model with checkpoints; no `git reset` in undo path |
 
+## Access Profiles
+
+KaroX exposes three stable access profiles. The friendly names used in the UI map
+to durable policy identifiers:
+
+- **Observe** -> `read_only`: repository and Git inspection plus `browser.read`
+  for non-mutating observation of the localhost UI. It does not grant
+  `browser.input` or repository mutation.
+- **Build** -> `workspace_write`: repository mutation, approved process/check
+  execution, Git status/diff, selected MCP calls, `browser.read`, and
+  `browser.input` for driving the localhost UI. Build does **not** grant
+  `git.commit`.
+- **Advanced** -> `elevated`: Build capabilities plus guarded local commit,
+  `desktop.input`, and `network` for explicitly elevated work.
+
+Even Advanced does not grant `git push`, package publishing, or authentication
+commands. Git push and package publishing remain outside every stable access
+profile and require a separate explicit boundary.
+
 ## What KaroX Does Not Do
 
 - KaroX does not bypass CAPTCHA, 2FA, or login flows. User takeover is
   requested when these are encountered.
 - KaroX does not auto-install system software without explicit consent.
 - KaroX does not disable TLS verification.
-- KaroX does not perform `git push`, `git commit`, or `git reset` autonomously.
+- KaroX does not perform `git push` or `git reset` autonomously. A guarded local
+  commit is available only in the Advanced/`elevated` profile.
 - KaroX does not read passwords or paste secrets into external forms.

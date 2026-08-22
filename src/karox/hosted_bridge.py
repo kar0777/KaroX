@@ -92,6 +92,7 @@ HOSTED_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
         "karox.dev_server.status",
         "karox.dev_server.logs",
         "karox.dev_server.stop",
+        "karox.dev_server.restart",
         "karox.checks.start",
         "karox.checks.status",
         "karox.checks.logs",

@@ -51,6 +51,7 @@ _WRITE_TOOLS = frozenset(
         "karox.tests.run",
         "karox.dev_server.start",
         "karox.dev_server.stop",
+        "karox.dev_server.restart",
     }
 )
 # Browser tools that drive the browser (mutate its session state). Tab

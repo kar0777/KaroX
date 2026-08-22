@@ -634,6 +634,7 @@ class PlanExecutor:
             verb = inputs.pop("verb", "status")
             mapping = {
                 "start": "karox.dev_server.start",
+                "restart": "karox.dev_server.restart",
                 "status": "karox.dev_server.status",
                 "logs": "karox.dev_server.logs",
             }

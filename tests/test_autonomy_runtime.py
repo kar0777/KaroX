@@ -18,6 +18,7 @@ from karox.autonomy_runtime import (
     TASK_STATUS,
     TASK_WORKSTREAMS,
     AutonomyRuntime,
+    _WorkstreamScopedDelegate,
 )
 from karox.hosted_bridge import HostedBridgeAccessDenied
 from karox.models import AccessProfile, Origin, OriginKind
@@ -58,6 +59,23 @@ class AutonomyRuntimeTests(unittest.TestCase):
         with mock.patch.object(self.runtime.plan_executor, "close") as closer:
             self.runtime.close()
         closer.assert_called_once_with()
+
+    def test_workstream_delegate_scopes_dev_server_calls(self) -> None:
+        delegate = mock.Mock()
+        delegate.execute.return_value = {"ok": True}
+        scoped = _WorkstreamScopedDelegate(delegate, "frontend")
+        result = scoped.execute(
+            "karox.dev_server.restart",
+            {"process_id": "srv-ui"},
+            deadline_seconds=15,
+        )
+        self.assertTrue(result["ok"])
+        delegate.execute.assert_called_once_with(
+            "karox.dev_server.restart",
+            {"process_id": "srv-ui", "workstream_id": "frontend"},
+            idempotency_key=None,
+            deadline_seconds=15,
+        )
 
     def test_descriptors_are_small_versioned_high_level_surface(self) -> None:
         descriptors = {item.name: item for item in self.runtime.descriptors()}
