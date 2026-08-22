@@ -10,6 +10,30 @@ from pathlib import Path
 APP_NAME = "KaroX"
 LEGACY_NAME = "RepoPilotBridge"
 
+#: Release channels with isolated state namespaces. A Dogfood install must
+#: never read or write the Stable install's sessions, credentials, or map
+#: state -- otherwise the dogfood is not evidence about the packaged build.
+CHANNELS = ("stable", "dogfood", "dev")
+
+
+def channel() -> str:
+    """The active release channel; unrecognized spellings mean stable.
+
+    Unknown never guesses: an unexpected value falls back to the stable
+    namespace rather than inventing a new directory tree that no launcher
+    or uninstaller knows about.
+    """
+
+    value = os.environ.get("KAROX_CHANNEL", "").strip().lower()
+    return value if value in CHANNELS else "stable"
+
+
+def _channel_app_name() -> str:
+    """Directory name for the active channel: KaroX, KaroX-dogfood, KaroX-dev."""
+
+    active = channel()
+    return APP_NAME if active == "stable" else f"{APP_NAME}-{active}"
+
 
 def _override(*names: str) -> Path | None:
     for name in names:
@@ -91,7 +115,7 @@ def config_dir() -> Path:
         base = home / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    return _guard_real_dir((base / APP_NAME).resolve(), "config directory")
+    return _guard_real_dir((base / _channel_app_name()).resolve(), "config directory")
 
 
 def runtime_dir() -> Path:
@@ -105,7 +129,7 @@ def runtime_dir() -> Path:
         base = home / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    return _guard_real_dir((base / APP_NAME).resolve(), "runtime directory")
+    return _guard_real_dir((base / _channel_app_name()).resolve(), "runtime directory")
 
 
 def legacy_config_dir() -> Path:
