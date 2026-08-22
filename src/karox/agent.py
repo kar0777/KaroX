@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from .agent_modes import normalize_mode
+from .cache_scheduler import CacheAwareScheduler, CacheDecision
 from .core import CoreRuntime, ToolDefinition
 from .context_compiler import (
     CompiledContext,
@@ -29,6 +30,7 @@ from .cost_intelligence import (
     ToolSchemaDeduplicator,
 )
 from .models import CoreCommand, CoreResult, Origin, OriginKind
+from .provider_pricing import PricingRegistry
 from .providers import (
     ModelEvent,
     ModelEventKind,
@@ -561,6 +563,7 @@ class AgentKernel:
         reasoning_effort: Optional[str] = None,
         economy_mode: bool = False,
         mode: Optional[str] = None,
+        pricing_registry: Optional[PricingRegistry] = None,
         on_event: Optional[AgentObserver] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -679,6 +682,20 @@ class AgentKernel:
         # economy claim stays provable from this process instead of assumed.
         self._cost_ledger = CostLedger()
         self._prefix_cache = StablePrefixCache()
+        # Cache-aware scheduling (Part 2): capability starts UNKNOWN and is
+        # confirmed only by provider-reported cached tokens; money appears
+        # only when the pricing registry knows every rate involved. The
+        # scheduler is advisory: it never blocks a step or drops the key.
+        self._pricing_registry = pricing_registry
+        self._cache_scheduler = CacheAwareScheduler(
+            pricing=(
+                None
+                if pricing_registry is None
+                else pricing_registry.lookup(provider.provider_name, model)
+            )
+        )
+        self._cache_decision: Optional[CacheDecision] = None
+        self._cache_pricing_model = model
         self._schema_dedup = ToolSchemaDeduplicator()
         self._read_cache = ReadCache()
         # Shadow mode: the governor observes and warns; it never blocks a run
@@ -1010,9 +1027,22 @@ class AgentKernel:
                     and previous_prefix_key.key == prefix_key.key
                 ):
                     self._prefix_stable_steps += 1
+                messages = tuple(self._request_messages(record.provider_history))
+                # The dynamic tail is everything except the cacheable prefix;
+                # measuring it per step keeps prefix churn distinguishable
+                # from a genuinely growing transcript on the usage surface.
+                self._cache_decision = self._cache_scheduler.decide(
+                    prefix_key=prefix_key,
+                    previous_key=previous_prefix_key,
+                    dynamic_chars=sum(
+                        len(message.content or "")
+                        for message in messages
+                        if message.role != "system"
+                    ),
+                )
                 request = ModelRequest(
                     model=self.model,
-                    messages=tuple(self._request_messages(record.provider_history)),
+                    messages=messages,
                     tools=self._advertised_provider_tools,
                     deadline_seconds=min(remaining, 3600.0),
                     # Every step resends the whole transcript, so the stable
@@ -1279,6 +1309,46 @@ class AgentKernel:
         )
         usage_event["economy_prefix_stable_steps"] = self._prefix_stable_steps
         usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
+        # Cache-aware scheduler: feed provider-reported cached counts back as
+        # the only accepted capability evidence, then surface measured
+        # counters. The estimated saving appears only when the registry
+        # knows both the input and cached-input rates; otherwise the field
+        # is absent, which the usage surface renders as UNAVAILABLE.
+        routed_model = str(response.selected_model or self.model)
+        if routed_model != self._cache_pricing_model:
+            self._cache_pricing_model = routed_model
+            registry = self._pricing_registry
+            self._cache_scheduler.set_pricing(
+                None
+                if registry is None
+                else registry.lookup(
+                    str(response.selected_provider or self.provider.provider_name),
+                    routed_model,
+                )
+            )
+        self._cache_scheduler.observe_usage(
+            cache_read_tokens=int(usage_event.get("cache_read_tokens", 0)),
+            cache_write_tokens=int(usage_event.get("cache_write_tokens", 0)),
+        )
+        cache_decision = self._cache_decision
+        if cache_decision is not None:
+            usage_event["economy_cache_verdict"] = cache_decision.verdict
+            usage_event["economy_cache_prefix_sha"] = cache_decision.prefix_sha
+            usage_event["economy_cache_invalidations"] = (
+                self._cache_scheduler.invalidations
+            )
+            usage_event["economy_cache_capability"] = (
+                self._cache_scheduler.capability.label()
+            )
+            usage_event["economy_cache_read_tokens_total"] = (
+                self._cache_scheduler.cache_read_tokens_total
+            )
+            usage_event["economy_cache_write_tokens_total"] = (
+                self._cache_scheduler.cache_write_tokens_total
+            )
+            cache_saving = self._cache_scheduler.estimated_reuse_saving_usd()
+            if cache_saving is not None:
+                usage_event["economy_cache_saving_estimated_usd"] = cache_saving
         usage_event["economy_batched_turns_avoided"] = self._batched_turns_avoided
         if self._continuity_statements_carried:
             usage_event["economy_continuity_statements"] = (

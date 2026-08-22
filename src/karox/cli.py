@@ -131,6 +131,7 @@ from .proxy import McpProxy
 from .proxy_server import build_proxy_asgi_app, normalize_host
 from .provider_controller import ProviderController
 from .provider_factory import ProviderFactory
+from .provider_pricing import PricingRegistry
 from .provider_presets import provider_preset, provider_presets
 from .providers import (
     ModelMessage,
@@ -5110,6 +5111,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         reasoning_effort=effort_reasoning,
         economy_mode=bool(getattr(args, "economy", False)),
         mode=mode_rules.mode if mode_rules is not None else None,
+        pricing_registry=_load_pricing_registry(),
         on_event=transcript_observer,
     ).run(record.session_id)
     if mode_rules is not None:
@@ -5121,6 +5123,25 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             observer=transcript_observer,
         )
     return report
+
+
+def _load_pricing_registry() -> Optional[PricingRegistry]:
+    """Load the per-deployment pricing document when one exists.
+
+    Prices live in a versioned JSON document at ``session_dir()/pricing.json``
+    -- an explicit, auditable update path -- never in source. No document
+    means every money estimate is UNAVAILABLE, which is the honest default.
+    A malformed document is reported once on stderr and then treated as
+    absent: pricing is advisory context and must never stop a run.
+    """
+
+    path = session_dir() / "pricing.json"
+    try:
+        registry = PricingRegistry.from_path(path)
+    except ValueError as exc:
+        print(f"warning: ignoring invalid pricing document {path}: {exc}", file=sys.stderr)
+        return None
+    return registry if len(registry) > 0 else None
 
 
 def _handle_credential(args: argparse.Namespace) -> int:
