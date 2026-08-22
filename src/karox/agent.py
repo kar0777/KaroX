@@ -704,6 +704,10 @@ class AgentKernel:
         self._refresh_tool_advertisement()
         self._prefix_stable_steps = 0
         self._prefix_total_steps = 0
+        # ToolVM lane of the same measurement: one response that carries N
+        # tool calls executes them in one model turn where classic
+        # one-call-per-turn execution would have paid N turns.
+        self._batched_turns_avoided = 0
 
     def _emit(self, kind: AgentEventKind, **fields: Any) -> None:
         """Tell the watcher, and never let the watcher end the session.
@@ -1066,6 +1070,8 @@ class AgentKernel:
                         provider_message,
                     )
                 repeated = False
+                if len(response.tool_calls) > 1:
+                    self._batched_turns_avoided += len(response.tool_calls) - 1
                 for call in response.tool_calls:
                     if self.monotonic() >= deadline:
                         return self._finish(
@@ -1268,6 +1274,7 @@ class AgentKernel:
         )
         usage_event["economy_prefix_stable_steps"] = self._prefix_stable_steps
         usage_event["economy_prefix_total_steps"] = self._prefix_total_steps
+        usage_event["economy_batched_turns_avoided"] = self._batched_turns_avoided
         selection = self._universe_selection
         if selection is not None:
             # Measured on every run; "applied" separates shadow measurement

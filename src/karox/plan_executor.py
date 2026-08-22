@@ -217,6 +217,28 @@ class PlanOperation:
         )
 
 
+def _executed_operation_count(completed: Mapping[str, Any]) -> int:
+    """Count operations whose action actually ran.
+
+    ToolVM measurement honesty: a ``failed_precondition`` entry records a
+    dependency gate refusing to run the action, so nothing executed and no
+    model round trip was avoided. Success and every other recorded failure
+    mean the delegate really performed work the model would otherwise have
+    spent one inference turn dispatching and observing.
+    """
+
+    executed = 0
+    for item in completed.values():
+        if not isinstance(item, Mapping):
+            continue
+        status = item.get("status")
+        if status == "success":
+            executed += 1
+        elif status == "failed" and item.get("error_code") != "failed_precondition":
+            executed += 1
+    return executed
+
+
 class PlanJournalStore:
     def __init__(self, session_directory: Path) -> None:
         self.root = session_directory / "plans"
@@ -1457,6 +1479,7 @@ class PlanExecutor:
                     for operation in operations
                 ]
             )
+            executed_operations = _executed_operation_count(completed)
             final = {
                 "ok": True,
                 "schema_version": PLAN_SCHEMA_VERSION,
@@ -1464,7 +1487,11 @@ class PlanExecutor:
                 "status": "complete",
                 "operations_total": len(operations),
                 "economy": {
-                    "model_round_trips_avoided": max(0, len(operations) - 1),
+                    # ToolVM: one plan call replaced one model round trip per
+                    # operation that actually ran. Dependents a gate refused
+                    # to run are not counted; nothing executed for them.
+                    "model_round_trips_avoided": max(0, executed_operations - 1),
+                    "operations_executed": executed_operations,
                     "parallel_read_candidates": len(batch_plan.parallel_reads),
                     "read_round_trips_saved": batch_plan.estimated_round_trips_saved,
                     "evidence_packets": evidence_packets_stored,
@@ -1510,6 +1537,15 @@ class PlanExecutor:
             error_code = exc.code
             error_message = str(exc)
             error_details = exc.details
+            executed_operations = _executed_operation_count(completed)
+            blocked_economy = {
+                # A blocked plan still avoided one model round trip for every
+                # operation that really ran before the halt. Dropping that
+                # number would make OFF vs ON comparisons overstate the cost
+                # of failures, so it lands in the durable journal.
+                "model_round_trips_avoided": max(0, executed_operations - 1),
+                "operations_executed": executed_operations,
+            }
             self.journals.mutate(
                 plan_key,
                 lambda state: {
@@ -1520,6 +1556,7 @@ class PlanExecutor:
                     "error": error_message,
                     "error_details": error_details,
                     "operations": completed,
+                    "economy": blocked_economy,
                 },
             )
             raise
