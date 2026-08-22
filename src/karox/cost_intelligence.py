@@ -40,6 +40,8 @@ import re
 import time
 from typing import Any, Optional
 
+from .provider_pricing import ModelPricing
+
 
 @dataclasses.dataclass(frozen=True)
 class UsageRecord:
@@ -501,13 +503,139 @@ class CostGovernor:
     def warnings_issued(self) -> int:
         return self._warnings_issued
 
+    # -- long-context guard (Part 2) ------------------------------------
+    #: Fraction of the tier threshold at which the guard starts advising
+    #: reductions, so the cheaper mitigations run before the boundary.
+    APPROACH_RATIO = 0.8
+
+    def evaluate_context(
+        self,
+        *,
+        estimated_input_tokens: int,
+        pricing: Optional[ModelPricing] = None,
+    ) -> "ContextTierDecision":
+        """Classify the next request against the model's long-context tier.
+
+        No model name is hard-coded here: the threshold and both rates come
+        from the per-deployment pricing document, so an unpriced model
+        honestly stays UNKNOWN instead of borrowing another model's
+        boundary. The decision is advisory by contract -- it always allows
+        the request, because evidence the task actually needs outranks the
+        long-context premium. Quality precedes price.
+        """
+
+        tokens = max(0, int(estimated_input_tokens))
+        threshold = (
+            None if pricing is None else pricing.long_context_threshold_tokens
+        )
+        standard_rate = None if pricing is None else pricing.input_per_mtok
+        long_rate = (
+            None if pricing is None else pricing.long_context_input_per_mtok
+        )
+        if threshold is None:
+            return ContextTierDecision(
+                tier=ContextTierDecision.TIER_UNKNOWN,
+                reason="no long-context tier is known for this model",
+                allowed=True,
+                estimated_input_tokens=tokens,
+                threshold_tokens=None,
+                standard_input_per_mtok=standard_rate,
+                long_context_input_per_mtok=long_rate,
+                suggested_reductions=(),
+            )
+        if tokens >= threshold:
+            return ContextTierDecision(
+                tier=ContextTierDecision.TIER_LONG,
+                reason=(
+                    f"estimated input {tokens} tokens is at or beyond the "
+                    f"long-context threshold {threshold}; the request is "
+                    "allowed because required evidence outranks price"
+                ),
+                allowed=True,
+                estimated_input_tokens=tokens,
+                threshold_tokens=threshold,
+                standard_input_per_mtok=standard_rate,
+                long_context_input_per_mtok=long_rate,
+                suggested_reductions=CONTEXT_REDUCTIONS,
+            )
+        if tokens >= int(threshold * self.APPROACH_RATIO):
+            return ContextTierDecision(
+                tier=ContextTierDecision.TIER_APPROACHING,
+                reason=(
+                    f"estimated input {tokens} tokens is within "
+                    f"{int(self.APPROACH_RATIO * 100)}% of the long-context "
+                    f"threshold {threshold}; cheaper reductions are worth "
+                    "attempting before the boundary"
+                ),
+                allowed=True,
+                estimated_input_tokens=tokens,
+                threshold_tokens=threshold,
+                standard_input_per_mtok=standard_rate,
+                long_context_input_per_mtok=long_rate,
+                suggested_reductions=CONTEXT_REDUCTIONS,
+            )
+        return ContextTierDecision(
+            tier=ContextTierDecision.TIER_STANDARD,
+            reason="estimated input is well below the long-context threshold",
+            allowed=True,
+            estimated_input_tokens=tokens,
+            threshold_tokens=threshold,
+            standard_input_per_mtok=standard_rate,
+            long_context_input_per_mtok=long_rate,
+            suggested_reductions=(),
+        )
+
+
+#: Reductions the kernel can actually attempt, in the order they are wired
+#: today. Names only: the guard advises, the owning subsystems act.
+CONTEXT_REDUCTIONS: tuple[str, ...] = (
+    "context_compiler",
+    "map_references",
+    "memory_relevance",
+    "evidence_packet_references",
+    "artifact_elision",
+    "native_compaction",
+    "continuity_reuse",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ContextTierDecision:
+    """Advisory long-context evaluation; quality always precedes price.
+
+    ``allowed`` is ``True`` by contract on every path. The guard exists to
+    say *this request is about to cost more than usual and why*, and to
+    name the reductions worth attempting -- never to withhold evidence a
+    task needs. Numbers are echoed from the pricing record; when the
+    record does not know a rate the field stays ``None`` (UNAVAILABLE).
+    """
+
+    tier: str
+    reason: str
+    allowed: bool
+    estimated_input_tokens: int
+    threshold_tokens: Optional[int]
+    standard_input_per_mtok: Optional[float]
+    long_context_input_per_mtok: Optional[float]
+    suggested_reductions: tuple[str, ...]
+
+    TIER_UNKNOWN = "UNKNOWN"
+    TIER_STANDARD = "STANDARD"
+    TIER_APPROACHING = "APPROACHING_LONG_CONTEXT"
+    TIER_LONG = "LONG_CONTEXT"
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
 
 __all__ = [
     "BatchPlan",
     "BatchPlanner",
     "BudgetDecision",
+    "CONTEXT_REDUCTIONS",
     "CacheKey",
     "CompactSummary",
+    "ContextTierDecision",
     "ContextWindow",
     "CostGovernor",
     "CostLedger",

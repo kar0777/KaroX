@@ -23,6 +23,7 @@ from .context_compiler import (
     continuity_lines,
 )
 from .cost_intelligence import (
+    ContextTierDecision,
     CostGovernor,
     CostLedger,
     ReadCache,
@@ -696,6 +697,11 @@ class AgentKernel:
         )
         self._cache_decision: Optional[CacheDecision] = None
         self._cache_pricing_model = model
+        # Long-context guard (Part 2): advisory tier classification from the
+        # same pricing record the scheduler follows. It never blocks and
+        # never trims evidence itself; it makes the premium visible and
+        # names the reductions worth attempting. Quality precedes price.
+        self._context_tier: Optional[ContextTierDecision] = None
         self._schema_dedup = ToolSchemaDeduplicator()
         self._read_cache = ReadCache()
         # Shadow mode: the governor observes and warns; it never blocks a run
@@ -1040,6 +1046,13 @@ class AgentKernel:
                         if message.role != "system"
                     ),
                 )
+                self._context_tier = self._cost_governor.evaluate_context(
+                    estimated_input_tokens=int(
+                        sum(len(message.content or "") for message in messages)
+                        / float(self.context.chars_per_token)
+                    ),
+                    pricing=self._cache_scheduler.pricing,
+                )
                 request = ModelRequest(
                     model=self.model,
                     messages=messages,
@@ -1349,6 +1362,21 @@ class AgentKernel:
             cache_saving = self._cache_scheduler.estimated_reuse_saving_usd()
             if cache_saving is not None:
                 usage_event["economy_cache_saving_estimated_usd"] = cache_saving
+        context_tier = self._context_tier
+        if context_tier is not None:
+            usage_event["economy_context_tier"] = context_tier.tier
+            if context_tier.threshold_tokens is not None:
+                usage_event["economy_context_tier_threshold"] = (
+                    context_tier.threshold_tokens
+                )
+                usage_event["economy_context_tier_estimated_input"] = (
+                    context_tier.estimated_input_tokens
+                )
+            if context_tier.tier in (
+                ContextTierDecision.TIER_APPROACHING,
+                ContextTierDecision.TIER_LONG,
+            ):
+                usage_event["economy_context_tier_reason"] = context_tier.reason
         usage_event["economy_batched_turns_avoided"] = self._batched_turns_avoided
         if self._continuity_statements_carried:
             usage_event["economy_continuity_statements"] = (
