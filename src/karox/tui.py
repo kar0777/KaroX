@@ -131,6 +131,7 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/status": "show project, model, effort, and run state",
     "/home": "return to chat",
     "/usage": "show model usage, cache, and cost",
+    "/economy": "show economy subsystems and measured savings",
     "/cost": "show or switch the run economy profile",
     "/connect": "connect an API model, website, or both",
     "/models": "show configured API models",
@@ -167,6 +168,7 @@ _COMMANDS_RU: Dict[str, str] = {
     "/status": "показать проект, модель, Effort и состояние запуска",
     "/home": "вернуться в чат",
     "/usage": "показать токены, кэш и расходы",
+    "/economy": "подсистемы экономии и измеренные сбережения",
     "/cost": "режим расходов",
     "/connect": "подключить API-модель, сайт или оба варианта",
     "/models": "показать настроенные API-модели",
@@ -383,6 +385,7 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/memory",
     "/status",
     "/usage",
+    "/economy",
     "/connect",
     "/sessions",
     "/new",
@@ -8173,6 +8176,8 @@ if _HAS_TEXTUAL:
                     self.action_model()
             elif command == "/usage":
                 self.action_usage()
+            elif command == "/economy":
+                self._economy_status_command()
             elif command == "/cost":
                 requested = argument.strip().casefold()
                 if not requested:
@@ -9320,6 +9325,33 @@ if _HAS_TEXTUAL:
                     effort=self.reasoning_effort,
                 )
             )
+
+        def _economy_status_command(self) -> None:
+            """Mandate section-10: subsystem status with honest labels.
+
+            Economy is infrastructure optimization; Effort owns quality.
+            The rows come from the newest persisted economy usage event of
+            the active session, so every number shown here was measured by
+            the kernel that ran the work -- absent counters render
+            UNAVAILABLE instead of pretending to be zero.
+            """
+
+            from .usage_report import economy_status_lines, last_economy_event
+
+            usage: Dict[str, Any] = {}
+            if self.active_session:
+                try:
+                    record = SessionStore(session_dir()).load(self.active_session)
+                    if isinstance(record.usage, dict):
+                        usage = record.usage
+                except Exception:
+                    usage = {}
+            lines = economy_status_lines(
+                self.language,
+                economy=last_economy_event(usage),
+                economy_mode=self.run_cost_profile == "economy",
+            )
+            self._write("\n".join(lines))
 
         def _open_connections(self, focus: Optional[str] = None) -> None:
             """Open the single Connections screen, optionally on one section.

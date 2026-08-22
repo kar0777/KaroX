@@ -58,26 +58,36 @@ def _today_start_timestamp() -> float:
     return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
-def _usage_snapshot(session_id: Optional[str]) -> tuple[UsageSummary, UsageSummary]:
-    """Load persisted sessions once for both Usage cards.
+def _usage_snapshot(
+    session_id: Optional[str],
+) -> tuple[UsageSummary, UsageSummary, dict[str, Any]]:
+    """Load persisted sessions once for every Usage card.
 
     The old screen called ``SessionStore.list`` twice on every open and refresh:
     once for Today and again for Current session. On a long-lived KaroX install
     that made a tiny modal feel like a database screen. One immutable snapshot is
-    enough because both summaries represent the same refresh instant.
+    enough because all cards represent the same refresh instant. The third
+    element is the current session's raw usage dict, which carries the
+    newest economy event for the labeled report card.
     """
 
     try:
         records = SessionStore(session_dir()).list()
     except Exception:
-        return UsageSummary(), UsageSummary()
+        return UsageSummary(), UsageSummary(), {}
     today = summarize_records(records, since=_today_start_timestamp())
     current = (
         summarize_records(records, session_id=session_id)
         if session_id
         else UsageSummary()
     )
-    return today, current
+    current_usage: dict[str, Any] = {}
+    if session_id:
+        for record in records:
+            if record.session_id == session_id and isinstance(record.usage, dict):
+                current_usage = record.usage
+                break
+    return today, current, current_usage
 
 
 def _summary_lines(summary: UsageSummary, language: str) -> list[str]:
@@ -831,6 +841,7 @@ class UsageCostScreen(ModalScreen[None]):
             )
             yield Static("", id="usage-today", classes="usage-card")
             yield Static("", id="usage-session", classes="usage-card")
+            yield Static("", id="usage-report", classes="usage-card")
             yield Static("", id="usage-breakdown", classes="usage-card")
             yield Static(
                 _label(self.language, "R — обновить · Esc — назад", "R — refresh · Esc — back"),
@@ -853,13 +864,20 @@ class UsageCostScreen(ModalScreen[None]):
         )
 
     def _load_snapshot(self) -> None:
-        today, current = _usage_snapshot(self.session_id)
+        today, current, current_usage = _usage_snapshot(self.session_id)
         try:
-            self.app.call_from_thread(self._render_snapshot, today, current)
+            self.app.call_from_thread(
+                self._render_snapshot, today, current, current_usage
+            )
         except Exception:
             return
 
-    def _render_snapshot(self, today: UsageSummary, current: UsageSummary) -> None:
+    def _render_snapshot(
+        self,
+        today: UsageSummary,
+        current: UsageSummary,
+        current_usage: Optional[dict[str, Any]] = None,
+    ) -> None:
         self.query_one("#usage-today", Static).update(
             _label(self.language, "Сегодня", "Today") + "\n  " + "\n  ".join(_summary_lines(today, self.language))
         )
@@ -867,6 +885,18 @@ class UsageCostScreen(ModalScreen[None]):
         self.query_one("#usage-session", Static).update(
             session_title + "\n  " + "\n  ".join(_summary_lines(current, self.language))
         )
+        # Mandate-shaped labeled report for the current session: every value
+        # carries exactly one of MEASURED / ESTIMATED / UNAVAILABLE, and a
+        # counter nobody reported renders as an em dash, never a zero.
+        from .usage_report import build_usage_report, last_economy_event
+
+        report = build_usage_report(
+            self.language,
+            runtime_line=f"{self.model_text}  ·  Effort {self.effort}",
+            summary=current,
+            economy=last_economy_event(current_usage or {}),
+        )
+        self.query_one("#usage-report", Static).update("\n".join(report))
         rows: list[str] = []
         for key, item in sorted(
             today.by_provider_model.items(),
