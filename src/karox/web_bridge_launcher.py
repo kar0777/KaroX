@@ -1415,6 +1415,7 @@ def _apply_tailscale_background_funnel(
     https_port: int = 443,
     timeout_seconds: float,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    expected_stale_ports: frozenset[int] = frozenset(),
 ) -> None:
     kwargs: dict[str, Any] = {
         "check": False,
@@ -1448,19 +1449,28 @@ def _apply_tailscale_background_funnel(
     # alone: verify that the daemon reports the exact host/port route KaroX owns.
     deadline = time.monotonic() + min(max(float(timeout_seconds), 1.0), 15.0)
     while time.monotonic() < deadline:
-        owned, foreign = _matching_background_funnel_routes(
+        owned, others = _matching_background_funnel_routes(
             executable,
             public_url=public_url,
             port=port,
             https_port=https_port,
             run=run,
         )
+        # During an owned retarget the daemon may briefly still report the
+        # route at the previous KaroX-owned port. That route is stale, not
+        # foreign: wait for the daemon to converge instead of refusing.
+        stale = [
+            route for route in others if route.local_port in expected_stale_ports
+        ]
+        foreign = [
+            route for route in others if route.local_port not in expected_stale_ports
+        ]
         if foreign:
             raise WebBridgeLaunchError(
                 "background Funnel configuration introduced or encountered a foreign "
                 "Tailscale route; refusing to claim ownership"
             )
-        if owned:
+        if owned and not stale:
             return
         time.sleep(0.2)
     raise WebBridgeLaunchError(
@@ -1537,6 +1547,59 @@ def refresh_tailscale_background_funnel(
         run=run,
     )
     return tunnel
+
+
+def retarget_tailscale_background_funnel(
+    tunnel: TailscaleBackgroundFunnel,
+    new_port: int,
+    *,
+    timeout_seconds: float = 30.0,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> TailscaleBackgroundFunnel:
+    """Repoint the owned daemon Funnel route at a new local backend port.
+
+    The stable public hostname is the bridge's identity: it never changes
+    here, and no bridge credential is read, written, or rotated. Only the
+    local target of the route already proven to belong to this bridge moves
+    from ``tunnel.port`` to ``new_port``. A same-listener route that matches
+    neither the current nor the requested port belongs to another program,
+    so the retarget is refused before any mutation.
+    """
+    requested_port = int(new_port)
+    if requested_port == tunnel.port:
+        return refresh_tailscale_background_funnel(
+            tunnel, timeout_seconds=timeout_seconds, run=run
+        )
+    _owned, others = _matching_background_funnel_routes(
+        tunnel.executable,
+        public_url=tunnel.public_url,
+        port=tunnel.port,
+        https_port=tunnel.https_port,
+        run=run,
+    )
+    # A route already pointing at the requested port is an interrupted
+    # earlier retarget finishing idempotently, not a foreign route.
+    foreign = [route for route in others if route.local_port != requested_port]
+    if foreign:
+        raise WebBridgeLaunchError(
+            "Tailscale retarget found a route owned by neither the current nor "
+            "the requested bridge port; refusing to mutate a foreign route"
+        )
+    _apply_tailscale_background_funnel(
+        tunnel.executable,
+        public_url=tunnel.public_url,
+        port=requested_port,
+        https_port=tunnel.https_port,
+        timeout_seconds=timeout_seconds,
+        run=run,
+        expected_stale_ports=frozenset({tunnel.port}),
+    )
+    return TailscaleBackgroundFunnel(
+        tunnel.executable,
+        tunnel.public_url,
+        requested_port,
+        https_port=tunnel.https_port,
+    )
 
 
 def stop_tailscale_background_funnel(
