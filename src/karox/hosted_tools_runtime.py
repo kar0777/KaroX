@@ -64,6 +64,7 @@ from .remote_tools import (
     _read_log,
 )
 from .security import child_process_environment, redact
+from .service_supervisor import ProcessIdentity, verify_identity
 from .sessions import SessionStore
 
 
@@ -1252,6 +1253,10 @@ class HostedToolsRuntime:
             stderr_path=str(stderr_path),
         )
         self._process_store.put(record)
+        # Identity sidecar (mandate: PID alone is never enough). Captured the
+        # instant the child is provably ours, so a later stop can refuse a
+        # PID the OS has since handed to someone else's program.
+        self._write_process_identity(process_id, ProcessIdentity.capture(process.pid))
 
         ready_url = arguments.get("ready_url") or profile.ready_url
         url: Optional[str] = None
@@ -1340,6 +1345,55 @@ class HostedToolsRuntime:
             "stderr": _read_log(Path(record.stderr_path), limit=limit),
         }
 
+    def _identity_path(self, process_id: str) -> Any:
+        return self._process_store.root / f"{process_id}.identity.json"
+
+    def _write_process_identity(self, process_id: str, identity: ProcessIdentity) -> None:
+        import dataclasses as _dc
+
+        try:
+            self._identity_path(process_id).write_text(
+                json.dumps(_dc.asdict(identity), sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            # The sidecar is defense-in-depth; a write failure must not fail
+            # the start, it only downgrades a later stop to the fallback check.
+            pass
+
+    def _load_process_identity(
+        self, record: ManagedProcessRecord
+    ) -> ProcessIdentity:
+        try:
+            payload = json.loads(
+                self._identity_path(record.process_id).read_text(encoding="utf-8")
+            )
+            return ProcessIdentity(
+                pid=int(payload.get("pid") or record.pid),
+                created_at=(
+                    float(payload["created_at"])
+                    if payload.get("created_at") is not None
+                    else None
+                ),
+                executable=(
+                    str(payload["executable"]) if payload.get("executable") else None
+                ),
+                cmdline_digest=(
+                    str(payload["cmdline_digest"])
+                    if payload.get("cmdline_digest")
+                    else None
+                ),
+            )
+        except (OSError, ValueError, TypeError, KeyError):
+            # Legacy record without a sidecar: the only stored time fact is
+            # started_at, recorded moments after the spawn.
+            return ProcessIdentity(
+                pid=record.pid,
+                created_at=None,
+                executable=None,
+                cmdline_digest=None,
+            )
+
     def _dev_server_stop(self, arguments: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
         process_id = self._required(arguments, "process_id", str)
         try:
@@ -1347,7 +1401,62 @@ class HostedToolsRuntime:
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         was_running = _pid_alive(record.pid)
+        identity_state = "not_running"
         if was_running:
+            # Mandate: PID alone is never enough. Every provable live fact is
+            # checked before the kill; a provable mismatch refuses without
+            # touching the process, because the OS may have reused this PID
+            # for a program that is not ours.
+            live = ProcessIdentity.capture(record.pid)
+            provable = (
+                live.created_at is not None
+                or live.executable is not None
+                or live.cmdline_digest is not None
+            )
+            if provable:
+                stored = self._load_process_identity(record)
+                has_stored_facts = (
+                    stored.created_at is not None
+                    or stored.executable is not None
+                    or stored.cmdline_digest is not None
+                )
+                if has_stored_facts:
+                    verdict = verify_identity(stored, live, alive=True)
+                    if not verdict.ok:
+                        return {
+                            "ok": False,
+                            "error_code": "identity_mismatch",
+                            "error": f"refusing to stop pid {record.pid}: {verdict.reason}",
+                            "process_id": record.process_id,
+                            "pid": record.pid,
+                            "was_running": True,
+                            "running": True,
+                        }
+                    identity_state = "verified"
+                elif (
+                    live.created_at is not None
+                    and live.created_at > record.started_at + 60.0
+                ):
+                    # No sidecar, but the live process was created well AFTER
+                    # this record started: the PID was reused by someone else.
+                    return {
+                        "ok": False,
+                        "error_code": "identity_mismatch",
+                        "error": (
+                            f"refusing to stop pid {record.pid}: it was created "
+                            "after this managed process record"
+                        ),
+                        "process_id": record.process_id,
+                        "pid": record.pid,
+                        "was_running": True,
+                        "running": True,
+                    }
+                else:
+                    identity_state = "verified_by_start_time"
+            else:
+                # Nothing provable on this platform: the pre-existing contract
+                # (session-owned record) is all the evidence that exists.
+                identity_state = "unverifiable"
             _kill_pid_tree(record.pid)
         return {
             "ok": True,
@@ -1355,6 +1464,7 @@ class HostedToolsRuntime:
             "pid": record.pid,
             "was_running": was_running,
             "running": _pid_alive(record.pid),
+            "identity": identity_state,
         }
 
     def _checks_start(
