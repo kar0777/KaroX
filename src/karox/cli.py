@@ -2911,6 +2911,21 @@ def _upgrade_saved_profile_tools(profile: SavedWebBridgeProfile) -> tuple[str, .
                 tools.append(name)
                 names.add(name)
 
+    # A profile that may read a managed server's status and logs already
+    # approved managed servers as a capability; without start/stop/restart the
+    # agent can only watch a server somebody else launched by hand. The caller
+    # drops these again when no project approves a launch recipe, so this
+    # widens the surface only where a recipe actually exists.
+    if names.intersection({"karox.dev_server.status", "karox.dev_server.logs"}):
+        for name in (
+            "karox.dev_server.start",
+            "karox.dev_server.stop",
+            "karox.dev_server.restart",
+        ):
+            if name not in names:
+                tools.append(name)
+                names.add(name)
+
     can_patch = "karox.repo.command" in names
     can_verify = bool({"karox.checks.run", "karox.tests.run"}.intersection(names))
     if can_patch and can_verify and "karox.task.execute_plan" not in names:
@@ -2950,6 +2965,57 @@ def _web_bridge_repository(value: Optional[Path], saved: Optional[str] = None) -
     if not resolved.is_dir():
         raise ValueError("web bridge repository must be a directory")
     return resolved
+
+
+def _discovered_server_profiles_for_profile(
+    profile: SavedWebBridgeProfile, anchor: Path
+) -> tuple[ManagedServerProfile, ...]:
+    """Server recipes discovered in *every* project the saved profile approves.
+
+    Discovery used to look at the anchor repository alone. On a multi-project
+    connection anchored to a Python repo that yields nothing, so the whole
+    ``karox.dev_server.*`` family was disabled and the agent could not start the
+    Node project sitting right next to it. Names are namespaced per project so
+    two projects shipping the same script stay distinguishable in diagnostics;
+    argv stays untouched because the runtime matches on argv.
+    """
+
+    try:
+        registry = ProjectRegistry.from_profile(
+            repository=profile.repository,
+            projects=profile.projects,
+            default_project_id=profile.default_project_id,
+        )
+        entries = list(registry.projects)
+    except (ProjectRegistryError, ValueError):
+        entries = []
+    if not entries:
+        return server_profiles_for_repository(anchor)
+
+    discovered: list[ManagedServerProfile] = []
+    used_names: set[str] = set()
+    for entry in entries:
+        try:
+            found = server_profiles_for_repository(Path(entry.path))
+        except (OSError, ValueError):
+            continue
+        for item in found:
+            name = item.name if item.name not in used_names else f"{entry.project_id}-{item.name}"
+            name = name[:80]
+            if name in used_names:
+                continue
+            used_names.add(name)
+            discovered.append(
+                ManagedServerProfile(
+                    name=name,
+                    argv=item.argv,
+                    env=dict(item.env),
+                    env_allowlist=item.env_allowlist,
+                    host_hint=item.host_hint,
+                    ready_url=item.ready_url,
+                )
+            )
+    return tuple(discovered)
 
 
 def _saved_profile_connect_config(
@@ -3016,14 +3082,13 @@ def _saved_profile_connect_config(
             )
             for item in profile.server_profiles
         )
-        discovered_profiles = server_profiles_for_repository(resolved_repository)
+        discovered_profiles = _discovered_server_profiles_for_profile(
+            profile, resolved_repository
+        )
         legacy_vacancy_only = bool(profiles) and all(
             item.name == "vacancy-control-safe" for item in profiles
         )
-        if legacy_vacancy_only or (
-            not profiles
-            and {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools)
-        ):
+        if legacy_vacancy_only or not profiles:
             profiles = discovered_profiles
     if {"karox.dev_server.start", "karox.dev_server.restart"}.intersection(tools) and not profiles:
         tools = tuple(
@@ -4298,6 +4363,8 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                     verification_commands=parsed_verification_commands,
                     audit_path=audit_path,
                     saved_profile_name=args.saved_profile_name,
+                    project_registry=project_registry,
+                    project_registry_loader=project_registry_loader,
                 )
             )
         if autonomy_tools:

@@ -30,6 +30,7 @@ from .sessions import (
     current_mutation_lease,
 )
 from .task_state import TaskStateStore
+from .verification import discover_verification_commands
 
 
 class HostedBridgeError(RuntimeError):
@@ -239,7 +240,7 @@ class CoreToolBridge:
             self.policy,
             self.sessions,
             self.audit_path,
-            verification_commands=self._verification_commands,
+            verification_commands=self._verification_commands_for(self.repository),
             risk=self._risk,
             events=self._events,
             session_repository_validator=self._validate_project_session,
@@ -295,6 +296,27 @@ class CoreToolBridge:
         if approved is None:
             raise SessionError("repository is not approved by this saved profile")
 
+    def _verification_commands_for(
+        self, path: Path
+    ) -> Optional[tuple[tuple[str, ...], ...]]:
+        """Approved verification argv for one project, not for the whole bridge.
+
+        The saved profile's allowlist is written for the anchor repository, so a
+        Python bridge anchored on KaroX handed ``pytest`` to a Node project and
+        refused ``npm test`` there -- checks were unusable in every project but
+        one.  Each project additionally approves what its own manifest actually
+        declares, discovered by the same conservative rules the TUI uses when
+        the user adds the project.
+        """
+
+        if self._verification_commands is None:
+            return None
+        try:
+            discovered = discover_verification_commands(path)
+        except (OSError, ValueError):
+            discovered = ()
+        return tuple(dict.fromkeys((*self._verification_commands, *discovered)))
+
     def _runtime_for(self, project_id: str) -> ExtendedCoreRuntime:
         try:
             entry = self._current_project_registry().get(project_id)
@@ -309,7 +331,7 @@ class CoreToolBridge:
                 self.policy,
                 self.sessions,
                 self.audit_path,
-                verification_commands=self._verification_commands,
+                verification_commands=self._verification_commands_for(Path(entry.path)),
                 risk=self._risk,
                 events=self._events,
                 session_repository_validator=self._validate_project_session,

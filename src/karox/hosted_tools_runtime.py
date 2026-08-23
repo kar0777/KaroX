@@ -55,6 +55,7 @@ from .hosted_bridge import (
 from .models import AccessProfile, Capability, Origin
 from .policy import CapabilityPolicy, PolicyDenied
 from .process_launcher import resolve_process_argv as _resolve_process_argv
+from .project_registry import ProjectRegistry, ProjectRegistryError
 from .proxy import ProxyToolDescriptor
 from .remote_tools import (
     ManagedProcessRecord,
@@ -72,6 +73,7 @@ from .service_supervisor import (
     verify_identity,
 )
 from .sessions import SessionStore
+from .task_state import TaskStateStore
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +159,122 @@ def default_server_profiles() -> tuple[ManagedServerProfile, ...]:
     )
 
 
+SERVER_MANIFEST_RELATIVE_PATH = Path(".karox") / "servers.json"
+
+_MANIFEST_FORCED_ENV: dict[str, str] = {"HOST": "127.0.0.1"}
+_MANIFEST_MAX_PROFILES = 20
+_COMPOSITE_SCRIPT_MARKERS: tuple[str, ...] = (
+    "&&",
+    "||",
+    ";",
+    "|",
+    "concurrently",
+    "npm-run-all",
+    "run-p ",
+    "run-s ",
+)
+# Runners KaroX can start as a plain long-lived listener.  Anything else
+# (docker, ssh, deploy wrappers, arbitrary shell) stays out of auto-discovery
+# and must be declared in the in-repository manifest instead.
+_SAFE_SCRIPT_RUNNERS: tuple[str, ...] = (
+    "node ",
+    "node--",
+    "nodemon",
+    "vite",
+    "next dev",
+    "nuxt dev",
+    "astro dev",
+    "http-server",
+    "serve ",
+    "python -m http.server",
+    "uvicorn",
+    "fastapi dev",
+    "flask run",
+)
+
+
+def _is_composite_script(command: str) -> bool:
+    normalized = f" {command.strip().lower()} "
+    return any(marker in normalized for marker in _COMPOSITE_SCRIPT_MARKERS)
+
+
+def _is_safe_script_runner(command: str) -> bool:
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _SAFE_SCRIPT_RUNNERS)
+
+
+def server_profiles_from_manifest(repository: Path) -> tuple[ManagedServerProfile, ...]:
+    """Read the in-repository dev-server manifest, if the project ships one.
+
+    Auto-discovery can only guess from ``package.json`` script names, so a
+    project whose real launch recipe is anything else (a bare ``npm start`` that
+    the project itself declares safe, a Python entry point, an extra argument)
+    had no way to be startable by KaroX at all.  ``.karox/servers.json`` is that
+    missing piece: the recipe lives in the repository, next to the code, under
+    review, and the user approves it by committing it.
+
+    The manifest never widens the security envelope beyond a loopback listener:
+    ``HOST`` is force-set to ``127.0.0.1`` after the manifest's own ``env``, the
+    ``host_hint`` must stay loopback (``ManagedServerProfile`` enforces that),
+    and a malformed manifest yields no profiles rather than a partial allowlist.
+    """
+
+    manifest_path = repository / SERVER_MANIFEST_RELATIVE_PATH
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    entries = payload.get("servers") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return ()
+    profiles: list[ManagedServerProfile] = []
+    for entry in entries[:_MANIFEST_MAX_PROFILES]:
+        if not isinstance(entry, dict):
+            continue
+        argv = entry.get("argv")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(item, str) and item for item in argv)
+        ):
+            continue
+        raw_env = entry.get("env")
+        env: dict[str, str] = {}
+        if isinstance(raw_env, dict):
+            for key, value in raw_env.items():
+                if isinstance(key, str) and isinstance(value, str) and len(value) <= 1000:
+                    env[key] = value
+        env.update(_MANIFEST_FORCED_ENV)
+        raw_allowlist = entry.get("env_allowlist")
+        allowlist = frozenset(
+            item.upper()
+            for item in (raw_allowlist if isinstance(raw_allowlist, list) else [])
+            if isinstance(item, str) and item
+        )
+        # A caller must never be able to override an env var the manifest
+        # forces; that is the whole point of declaring it forced.
+        allowlist = frozenset(allowlist.difference({key.upper() for key in env}))
+        ready_url = entry.get("ready_url")
+        if ready_url is not None and not isinstance(ready_url, str):
+            ready_url = None
+        try:
+            profiles.append(
+                ManagedServerProfile(
+                    name=str(entry.get("name") or "manifest-server"),
+                    argv=tuple(argv),
+                    env=env,
+                    env_allowlist=allowlist,
+                    host_hint=str(entry.get("host_hint", "127.0.0.1")),
+                    ready_url=ready_url,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return tuple(profiles)
+
+
 def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfile, ...]:
     """Return loopback-only dev-server profiles that actually belong to *repository*.
 
@@ -164,25 +282,26 @@ def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfi
     intentionally kept for the Vacancy Control compatibility path.  Reusing it
     for every repository exposed a bogus ``npm run start:safe`` recipe to
     unrelated projects.  Hosted connectors now discover only scripts present in
-    the selected repository and only auto-approve a direct Vite dev script where
-    KaroX can force the listener onto loopback.
+    the selected repository, plus whatever the project declares for itself in
+    ``.karox/servers.json``.
     """
 
+    manifest_profiles = server_profiles_from_manifest(repository)
     package_json = repository / "package.json"
     try:
         payload = json.loads(package_json.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ()
+        return _deduplicate_server_profiles(manifest_profiles)
     scripts_raw = payload.get("scripts") if isinstance(payload, dict) else None
     if not isinstance(scripts_raw, dict):
-        return ()
+        return _deduplicate_server_profiles(manifest_profiles)
     scripts = {
         str(name): str(command)
         for name, command in scripts_raw.items()
         if isinstance(name, str) and isinstance(command, str)
     }
 
-    profiles: list[ManagedServerProfile] = []
+    profiles: list[ManagedServerProfile] = list(manifest_profiles)
     if "start:safe" in scripts:
         profiles.extend(default_server_profiles())
 
@@ -193,11 +312,7 @@ def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfi
     for script_name in ("client:dev", "dev"):
         command = scripts.get(script_name, "").strip()
         normalized = command.lower()
-        composite = any(
-            marker in normalized
-            for marker in ("&&", "||", ";", "concurrently", "npm-run-all", "run-p ", "run-s ")
-        )
-        if "vite" not in normalized or composite:
+        if "vite" not in normalized or _is_composite_script(command):
             continue
         profiles.append(
             ManagedServerProfile(
@@ -209,7 +324,56 @@ def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfi
             )
         )
         break
-    return tuple(profiles)
+
+    # A project that ships an explicit ``start:safe`` script has already told us
+    # which recipe is the safe one, so its plain ``start``/``dev`` scripts stay
+    # out of auto-discovery: on Vacancy Control the bare script is exactly the
+    # one that turns live Facebook publication on.  Projects without that
+    # distinction would otherwise have no startable server at all, which is why
+    # a plain single-runner script is approved for them.
+    if "start:safe" not in scripts:
+        for script_name in ("start", "dev", "serve"):
+            command = scripts.get(script_name, "").strip()
+            if not command or _is_composite_script(command):
+                continue
+            if not _is_safe_script_runner(command):
+                continue
+            argv = ("npm", "start") if script_name == "start" else ("npm", "run", script_name)
+            profiles.append(
+                ManagedServerProfile(
+                    name=f"npm-{script_name}-loopback",
+                    env={"HOST": "127.0.0.1"},
+                    argv=argv,
+                    env_allowlist=frozenset({"PORT", "NODE_ENV", "CI", "DB_FILE"}),
+                    host_hint="127.0.0.1",
+                )
+            )
+            break
+    return _deduplicate_server_profiles(tuple(profiles))
+
+
+def _deduplicate_server_profiles(
+    profiles: Sequence[ManagedServerProfile],
+) -> tuple[ManagedServerProfile, ...]:
+    """Keep the first recipe for each argv and each name.
+
+    ``ManagedServerProfile`` holds a mapping, so it is not hashable and cannot
+    go through ``dict.fromkeys``.  Duplicate argv would also make
+    ``_resolve_profile`` order-dependent: the manifest is listed first so an
+    in-repository declaration wins over the discovered default for the same
+    command line.
+    """
+
+    seen_argv: set[tuple[str, ...]] = set()
+    seen_names: set[str] = set()
+    unique: list[ManagedServerProfile] = []
+    for profile in profiles:
+        if profile.argv in seen_argv or profile.name in seen_names:
+            continue
+        seen_argv.add(profile.argv)
+        seen_names.add(profile.name)
+        unique.append(profile)
+    return tuple(unique)
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +1056,8 @@ class HostedToolsRuntime:
         popen_factory: Optional[Callable[..., Any]] = None,
         verification_commands: Sequence[Sequence[str]] = (),
         saved_profile_name: Optional[str] = None,
+        project_registry: Optional[ProjectRegistry] = None,
+        project_registry_loader: Optional[Callable[[], ProjectRegistry]] = None,
     ) -> None:
         if not allowed_tool_names:
             raise HostedBridgeAccessDenied("hosted tools allowlist must not be empty")
@@ -967,6 +1133,24 @@ class HostedToolsRuntime:
             session_id,
             verification_commands,
         )
+        # Managed servers are per project, not per bridge.  The anchor
+        # repository is only the session's identity; a hosted client that works
+        # across several approved projects must be able to start each project's
+        # own server in that project's own directory.
+        try:
+            self._project_registry = project_registry or ProjectRegistry.single(self.repository)
+            anchor_entry = self._project_registry.entry_for_path(self.repository)
+        except ProjectRegistryError as exc:
+            raise HostedBridgeAccessDenied(f"invalid project registry: {exc}") from exc
+        if anchor_entry is None:
+            raise HostedBridgeAccessDenied(
+                "managed-server session anchor must be an approved project"
+            )
+        self._anchor_project_id = anchor_entry.project_id
+        self._project_registry_loader = project_registry_loader
+        self._task_states = TaskStateStore(sessions)
+        self._project_profile_cache: dict[str, tuple[ManagedServerProfile, ...]] = {}
+        self._project_profile_lock = threading.RLock()
 
     # -- HostedToolRuntime protocol ----------------------------------------
 
@@ -1223,16 +1407,87 @@ class HostedToolsRuntime:
 
     # -- dev server handlers ------------------------------------------------
 
-    def _resolve_profile(self, argv: Sequence[str]) -> ManagedServerProfile:
+    def _current_project_registry(self) -> ProjectRegistry:
+        loader = self._project_registry_loader
+        if loader is None:
+            return self._project_registry
+        try:
+            registry = loader()
+            anchor = registry.entry_for_path(self.repository)
+        except (ProjectRegistryError, OSError, RuntimeError, ValueError) as exc:
+            raise HostedBridgeAccessDenied(
+                f"cannot refresh saved project registry: {exc}"
+            ) from exc
+        if anchor is None:
+            raise HostedBridgeAccessDenied(
+                "saved project registry no longer contains the durable session anchor"
+            )
+        self._project_registry = registry
+        self._anchor_project_id = anchor.project_id
+        return registry
+
+    def _project_for_workstream(self, workstream_id: str) -> tuple[str, Path]:
+        """Resolve which approved project a managed-server call belongs to.
+
+        The binding comes from the workstream's own durable task state, the same
+        record every repository tool routes through, so a server always starts
+        in the directory whose code the agent is editing.  A workstream that was
+        never bootstrapped (or predates project routing) keeps the historical
+        behaviour and resolves to the session anchor.
+        """
+
+        registry = self._current_project_registry()
+        project_id = self._anchor_project_id
+        state = self._task_states.load_optional(
+            self.session_id,
+            workstream_id=workstream_id if workstream_id != "default" else None,
+        )
+        if state is not None:
+            stored = state.facts.get("project_id")
+            if stored is not None:
+                project_id = str(stored.value)
+        try:
+            entry = registry.get(project_id)
+            return entry.project_id, Path(registry.resolve(entry.project_id))
+        except ProjectRegistryError as exc:
+            raise HostedBridgeAccessDenied(
+                f"managed server project is not approved: {exc}"
+            ) from exc
+
+    def _profiles_for_project(self, project_id: str, path: Path) -> tuple[ManagedServerProfile, ...]:
+        """Server recipes this one project approves, discovered from its own tree.
+
+        Sharing one flat allowlist across projects would let a recipe discovered
+        in project A launch inside project B, where nobody approved it.  The
+        explicitly configured profiles stay bound to the session anchor, which
+        is the project they were configured for.
+        """
+
+        with self._project_profile_lock:
+            cached = self._project_profile_cache.get(project_id)
+            if cached is not None:
+                return cached
+            discovered = list(server_profiles_for_repository(path))
+            if project_id == self._anchor_project_id:
+                discovered = [*self._server_profiles, *discovered]
+            profiles = _deduplicate_server_profiles(discovered)
+            self._project_profile_cache[project_id] = profiles
+            return profiles
+
+    def _resolve_profile(
+        self, argv: Sequence[str], profiles: Sequence[ManagedServerProfile]
+    ) -> ManagedServerProfile:
         if not isinstance(argv, list) or not argv or len(argv) > 100:
             raise HostedBridgeAccessDenied("dev_server argv must be a 1-100 string array")
         if not all(isinstance(item, str) and item for item in argv):
             raise HostedBridgeAccessDenied("dev_server argv must contain non-empty strings")
-        for profile in self._server_profiles:
+        for profile in profiles:
             if profile.matches(argv):
                 return profile
+        approved = ", ".join(" ".join(item.argv) for item in profiles) or "none"
         raise HostedBridgeAccessDenied(
-            "dev server argv is not in the user-approved server-profile allowlist"
+            "dev server argv is not in the user-approved server-profile allowlist "
+            f"for this project (approved: {approved})"
         )
 
     def _spawn_dev_server_locked(
@@ -1245,8 +1500,13 @@ class HostedToolsRuntime:
         ready_url: Optional[str],
         deadline_seconds: float,
         workstream_id: str,
+        project_id: Optional[str] = None,
+        cwd: Optional[Path] = None,
     ) -> dict[str, Any]:
         """Spawn one approved profile while the caller owns its service lease."""
+
+        project_id = project_id or self._anchor_project_id
+        working_directory = str(cwd or self.repository)
 
         if not isinstance(caller_env, dict):
             return {
@@ -1280,7 +1540,7 @@ class HostedToolsRuntime:
             if self._popen_factory is not None:
                 process = self._popen_factory(
                     launch_argv,
-                    cwd=str(self.repository),
+                    cwd=working_directory,
                     env=env,
                     stdout=stdout_handle,
                     stderr=stderr_handle,
@@ -1291,7 +1551,7 @@ class HostedToolsRuntime:
 
                 process = subprocess.Popen(
                     launch_argv,
-                    cwd=str(self.repository),
+                    cwd=working_directory,
                     env=env,
                     stdout=stdout_handle,
                     stderr=stderr_handle,
@@ -1334,7 +1594,9 @@ class HostedToolsRuntime:
         )
         self._process_store.put(record)
         identity_saved = self._write_process_identity(process_id, identity)
-        scope_saved = self._write_process_scope(record, workstream_id=workstream_id)
+        scope_saved = self._write_process_scope(
+            record, workstream_id=workstream_id, project_id=project_id
+        )
         if not identity_saved or not scope_saved:
             # The child was created by this exact call, so cleanup is safe here.
             # Never leave behind a process whose future ownership cannot be
@@ -1400,7 +1662,10 @@ class HostedToolsRuntime:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         argv = self._required(arguments, "argv", list)
         try:
-            profile = self._resolve_profile(argv)
+            project_id, project_path = self._project_for_workstream(workstream_id)
+            profile = self._resolve_profile(
+                argv, self._profiles_for_project(project_id, project_path)
+            )
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         process_id = arguments.get("process_id") or f"srv-{int(time.time() * 1000)}"
@@ -1430,7 +1695,7 @@ class HostedToolsRuntime:
                     existing = None
                 if existing is not None and _pid_alive(existing.pid):
                     scope_ok, scope_reason = self._verify_process_scope(
-                        existing, workstream_id=workstream_id
+                        existing, workstream_id=workstream_id, project_id=project_id
                     )
                     if not scope_ok:
                         return {
@@ -1470,6 +1735,8 @@ class HostedToolsRuntime:
                     ready_url=arguments.get("ready_url"),
                     deadline_seconds=deadline_seconds,
                     workstream_id=workstream_id,
+                    project_id=project_id,
+                    cwd=project_path,
                 )
         except ServiceLeaseError as exc:
             return {
@@ -1515,10 +1782,11 @@ class HostedToolsRuntime:
         try:
             workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
+            project_id, _project_path = self._project_for_workstream(workstream_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         scope_ok, scope_reason = self._verify_process_scope(
-            record, workstream_id=workstream_id
+            record, workstream_id=workstream_id, project_id=project_id
         )
         if not scope_ok:
             return {
@@ -1569,10 +1837,11 @@ class HostedToolsRuntime:
         try:
             workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
+            project_id, _project_path = self._project_for_workstream(workstream_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         scope_ok, scope_reason = self._verify_process_scope(
-            record, workstream_id=workstream_id
+            record, workstream_id=workstream_id, project_id=project_id
         )
         if not scope_ok:
             return {
@@ -1628,7 +1897,11 @@ class HostedToolsRuntime:
             return False
 
     def _write_process_scope(
-        self, record: ManagedProcessRecord, *, workstream_id: str
+        self,
+        record: ManagedProcessRecord,
+        *,
+        workstream_id: str,
+        project_id: Optional[str] = None,
     ) -> bool:
         """Persist non-model-visible ownership proof for a managed service."""
 
@@ -1642,6 +1915,7 @@ class HostedToolsRuntime:
             "repository": str(self.repository),
             "repo_fingerprint": self._repo_fingerprint,
             "workstream_id": workstream_id,
+            "project_id": project_id or self._anchor_project_id,
             "pid": record.pid,
             # Local ownership proof only. Never returned in status/logs/MCP.
             "ownership_token": secrets.token_hex(24),
@@ -1681,7 +1955,11 @@ class HostedToolsRuntime:
         return payload if isinstance(payload, dict) else None
 
     def _verify_process_scope(
-        self, record: ManagedProcessRecord, *, workstream_id: str
+        self,
+        record: ManagedProcessRecord,
+        *,
+        workstream_id: str,
+        project_id: Optional[str] = None,
     ) -> tuple[bool, str]:
         scope = self._load_process_scope(record)
         if scope is None:
@@ -1695,6 +1973,11 @@ class HostedToolsRuntime:
             "workstream_id": workstream_id,
             "pid": record.pid,
         }
+        # Records written before managed servers were project-aware carry no
+        # project at all; they belong to the anchor by construction, so they
+        # keep verifying instead of stranding a running service.
+        if project_id is not None and "project_id" in scope:
+            expected["project_id"] = project_id
         for key, value in expected.items():
             if scope.get(key) != value:
                 return False, f"managed service ownership scope mismatch: {key}"
@@ -1808,12 +2091,16 @@ class HostedToolsRuntime:
         return True, "verified", "identity verified", live
 
     def _verified_stop_locked(
-        self, record: ManagedProcessRecord, *, workstream_id: str
+        self,
+        record: ManagedProcessRecord,
+        *,
+        workstream_id: str,
+        project_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Stop one managed process after the caller owns its mutation lease."""
 
         scope_ok, scope_reason = self._verify_process_scope(
-            record, workstream_id=workstream_id
+            record, workstream_id=workstream_id, project_id=project_id
         )
         if not scope_ok:
             return {
@@ -1877,6 +2164,7 @@ class HostedToolsRuntime:
         try:
             workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
+            project_id, _project_path = self._project_for_workstream(workstream_id)
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         lease = ServiceLease(
@@ -1887,7 +2175,7 @@ class HostedToolsRuntime:
         try:
             with lease:
                 return self._verified_stop_locked(
-                    record, workstream_id=workstream_id
+                    record, workstream_id=workstream_id, project_id=project_id
                 )
         except ServiceLeaseError as exc:
             return {
@@ -1908,7 +2196,10 @@ class HostedToolsRuntime:
         try:
             workstream_id = self._requested_workstream(arguments)
             record = self._require_own(process_id)
-            profile = self._resolve_profile(list(record.argv))
+            project_id, project_path = self._project_for_workstream(workstream_id)
+            profile = self._resolve_profile(
+                list(record.argv), self._profiles_for_project(project_id, project_path)
+            )
         except HostedBridgeAccessDenied as exc:
             return {"ok": False, "error_code": "denied", "error": str(exc)}
         lease = ServiceLease(
@@ -1919,7 +2210,7 @@ class HostedToolsRuntime:
         try:
             with lease:
                 stopped = self._verified_stop_locked(
-                    record, workstream_id=workstream_id
+                    record, workstream_id=workstream_id, project_id=project_id
                 )
                 if not bool(stopped.get("ok")):
                     return {"action": "restart", **stopped}
@@ -1931,6 +2222,8 @@ class HostedToolsRuntime:
                     ready_url=arguments.get("ready_url"),
                     deadline_seconds=deadline_seconds,
                     workstream_id=workstream_id,
+                    project_id=project_id,
+                    cwd=project_path,
                 )
                 return {
                     "action": "restart",
