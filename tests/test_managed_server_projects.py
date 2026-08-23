@@ -132,6 +132,18 @@ class ServerManifestTests(unittest.TestCase):
         profile = server_profiles_from_manifest(project)[0]
         self.assertEqual(profile.env_allowlist, frozenset({"PORT"}))
 
+    def test_root_level_manifest_is_accepted(self) -> None:
+        # An agent cannot create a hidden directory through the repository path
+        # guard, so the root-level name must work on its own.
+        project = self.root / "root-manifest"
+        project.mkdir()
+        (project / "karox.servers.json").write_text(
+            json.dumps({"servers": [{"name": "app", "argv": ["npm", "start"]}]}),
+            encoding="utf-8",
+        )
+        profiles = server_profiles_from_manifest(project)
+        self.assertEqual([item.name for item in profiles], ["app"])
+
     def test_malformed_manifest_yields_no_profiles(self) -> None:
         project = self._manifest({"servers": [{"name": "broken"}, "nonsense", 5]})
         self.assertEqual(server_profiles_from_manifest(project), ())

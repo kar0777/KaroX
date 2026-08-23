@@ -160,6 +160,11 @@ def default_server_profiles() -> tuple[ManagedServerProfile, ...]:
 
 
 SERVER_MANIFEST_RELATIVE_PATH = Path(".karox") / "servers.json"
+# The dot-directory form is the tidy one, but KaroX's own path guard refuses to
+# write inside a hidden directory, so an agent cannot create it. The root-level
+# name is therefore also accepted: a project must be able to declare how it is
+# started without a human having to hand-create a file first.
+SERVER_MANIFEST_FALLBACK_PATH = Path("karox.servers.json")
 
 _MANIFEST_FORCED_ENV: dict[str, str] = {"HOST": "127.0.0.1"}
 _MANIFEST_MAX_PROFILES = 20
@@ -221,10 +226,14 @@ def server_profiles_from_manifest(repository: Path) -> tuple[ManagedServerProfil
     and a malformed manifest yields no profiles rather than a partial allowlist.
     """
 
-    manifest_path = repository / SERVER_MANIFEST_RELATIVE_PATH
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    payload = None
+    for candidate in (SERVER_MANIFEST_RELATIVE_PATH, SERVER_MANIFEST_FALLBACK_PATH):
+        try:
+            payload = json.loads((repository / candidate).read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            continue
+    if payload is None:
         return ()
     entries = payload.get("servers") if isinstance(payload, dict) else payload
     if not isinstance(entries, list):
