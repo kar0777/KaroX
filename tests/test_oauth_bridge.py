@@ -547,6 +547,31 @@ class OAuthStatePersistenceTests(unittest.TestCase):
         )
         return client_id, tokens
 
+    def test_oauth_access_token_survives_keyring_failure_after_discovery(self) -> None:
+        calls = 0
+
+        def approval_secret() -> str:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                return "approval-password"
+            raise RuntimeError("credential backend temporarily unavailable")
+
+        service = OAuthBridgeService(
+            "https://karox.example",
+            approval_secret,
+            state_dir=self.state,
+        )
+        _client_id, tokens = self._connect(service)
+
+        # Model two consecutive authenticated MCP requests: discovery succeeds,
+        # then the first real tool invocation arrives while Windows Credential
+        # Manager is transiently unavailable. A valid OAuth access token is
+        # self-contained in the persisted digest grant and must not depend on the
+        # approval password/keyring after the authorization flow completed.
+        self.assertTrue(service.authorize_access_token(tokens["access_token"]))
+        self.assertTrue(service.authorize_access_token(tokens["access_token"]))
+
     def test_a_registered_client_and_its_refresh_token_outlive_the_process(
         self,
     ) -> None:

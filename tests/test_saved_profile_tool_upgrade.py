@@ -54,6 +54,28 @@ class SavedProfileToolUpgradeTests(unittest.TestCase):
         upgraded = _upgrade_saved_profile_tools(profile)
         self.assertEqual(upgraded.count("karox.task.execute_plan"), 1)
 
+    def test_legacy_chatgpt_profile_gains_durable_autonomy_surface(self) -> None:
+        upgraded = _upgrade_saved_profile_tools(
+            self._profile(("karox.repo.read_file",))
+        )
+
+        for name in (
+            "karox.task.workstreams",
+            "karox.chatgpt_project.bind",
+            "karox.chatgpt_project.resume",
+            "karox.intelligence.list",
+            "karox.orchestrate.recipes",
+            "karox.orchestrate.plan",
+            "karox.orchestrate.status",
+            "karox.orchestrate.start",
+            "karox.orchestrate.control",
+            "karox.memory.remember",
+            "karox.memory.recall",
+        ):
+            self.assertIn(name, upgraded)
+        self.assertNotIn("karox.browser.open", upgraded)
+        self.assertNotIn("karox.repo.write_file", upgraded)
+
 
 class ProfileIncompatibleAutonomyToolsTests(unittest.TestCase):
     """Autonomy tools are capability-gated like Core and hosted-extra tools."""
@@ -109,6 +131,48 @@ class ProfileIncompatibleAutonomyToolsTests(unittest.TestCase):
             )
         self.assertIn("karox.command.run", config.tools)
         self.assertIn("karox.git.commit", config.tools)
+        self.assertIn("karox.chatgpt_project.bind", config.tools)
+        self.assertIn("karox.orchestrate.start", config.tools)
+        self.assertIn("karox.orchestrate.control", config.tools)
+
+    def test_read_only_saved_chatgpt_bridge_gets_continuity_without_process_control(self) -> None:
+        from karox.web_bridge_launcher import WebBridgeConnectConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path(tmpdir),
+                tools=("karox.repo.read_file",),
+                access_profile=AccessProfile.READ_ONLY,
+                saved_profile_name="chatgpt-readonly-legacy",
+            )
+        self.assertIn("karox.chatgpt_project.bind", config.tools)
+        self.assertIn("karox.chatgpt_project.resume", config.tools)
+        self.assertIn("karox.orchestrate.status", config.tools)
+        self.assertIn("karox.memory.remember", config.tools)
+        self.assertNotIn("karox.orchestrate.start", config.tools)
+        self.assertNotIn("karox.orchestrate.control", config.tools)
+
+    def test_ad_hoc_and_non_chatgpt_profiles_keep_exact_autonomy_scope(self) -> None:
+        from karox.web_bridge_launcher import WebBridgeConnectConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ad_hoc = WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path(tmpdir),
+                tools=("karox.repo.read_file",),
+                access_profile=AccessProfile.WORKSPACE_WRITE,
+            )
+            claude = WebBridgeConnectConfig(
+                profile="claude-web",
+                repository=Path(tmpdir),
+                tools=("karox.repo.read_file",),
+                access_profile=AccessProfile.WORKSPACE_WRITE,
+                saved_profile_name="claude-legacy-minimal",
+            )
+        for config in (ad_hoc, claude):
+            self.assertNotIn("karox.chatgpt_project.bind", config.tools)
+            self.assertNotIn("karox.orchestrate.start", config.tools)
 
     def test_hyperagent_saved_config_keeps_full_only_names_advertised(self) -> None:
         from karox.web_bridge_launcher import WebBridgeConnectConfig

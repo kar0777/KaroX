@@ -22,8 +22,9 @@ from karox.autonomy_runtime import (
 )
 from karox.hosted_bridge import HostedBridgeAccessDenied
 from karox.models import AccessProfile, Origin, OriginKind
+from karox.project_registry import ProjectEntry, ProjectRegistry
 from karox.sessions import SessionStore
-from karox.task_state import FactOrigin
+from karox.task_state import FactOrigin, fact
 
 
 class AutonomyRuntimeTests(unittest.TestCase):
@@ -121,6 +122,114 @@ class AutonomyRuntimeTests(unittest.TestCase):
                 "affected-workstream-key",
                 workstream_id="frontend",
             )
+        finally:
+            runtime.close()
+
+    def test_run_affected_auto_bootstrap_keeps_named_lane_ledger_isolated(self) -> None:
+        lease = self.sessions.acquire("session-a", "seed-affected-foreign-ledger", ttl_seconds=5)
+        try:
+            record = self.sessions.load("session-a")
+            record.changed_files = ["foreign-affected.txt"]
+            record.checks = [{"ok": True, "command": ["foreign-check"]}]
+            self.sessions.save(record, record.revision, lease)
+        finally:
+            self.sessions.release(lease)
+
+        runtime = AutonomyRuntime(
+            self.repo,
+            self.sessions,
+            "session-a",
+            (CHECKS_RUN_AFFECTED,),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            hosted_origin=Origin(OriginKind.HOSTED_CLIENT, "test-affected-isolation"),
+            connection_profile="clickup-opus",
+        )
+        engine = mock.Mock()
+        engine.run.return_value = {"ok": True}
+        try:
+            with mock.patch.object(runtime, "_affected_engine_for", return_value=engine):
+                result = runtime._run_affected(
+                    {"workstream_id": "fresh-affected-lane", "changed_files": []},
+                    "affected-isolation-key",
+                )
+            self.assertTrue(result["ok"])
+            facts = runtime.task_states.load(
+                "session-a", workstream_id="fresh-affected-lane"
+            ).compact()["facts"]
+            self.assertEqual(facts["files_changed"]["value"], [])
+            self.assertEqual(facts["checks_executed"]["value"], [])
+        finally:
+            runtime.close()
+
+    def test_execute_plan_auto_bootstrap_keeps_named_lane_ledger_isolated(self) -> None:
+        lease = self.sessions.acquire("session-a", "seed-plan-foreign-ledger", ttl_seconds=5)
+        try:
+            record = self.sessions.load("session-a")
+            record.changed_files = ["foreign-plan.txt"]
+            record.failures = [{"message": "foreign blocker", "resolved": False}]
+            self.sessions.save(record, record.revision, lease)
+        finally:
+            self.sessions.release(lease)
+
+        runtime = AutonomyRuntime(
+            self.repo,
+            self.sessions,
+            "session-a",
+            (TASK_EXECUTE_PLAN,),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            hosted_origin=Origin(OriginKind.HOSTED_CLIENT, "test-plan-isolation"),
+            connection_profile="clickup-opus",
+        )
+        executor = mock.Mock()
+        executor.execute.return_value = {"ok": True}
+        arguments = {
+            "workstream_id": "fresh-plan-lane",
+            "operations": [
+                {"operation_id": "read", "action": "read", "inputs": {"path": "README.md"}}
+            ],
+        }
+        try:
+            with mock.patch.object(runtime, "_plan_executor_for", return_value=executor):
+                result = runtime._execute_plan(arguments, None)
+            self.assertTrue(result["ok"])
+            facts = runtime.task_states.load(
+                "session-a", workstream_id="fresh-plan-lane"
+            ).compact()["facts"]
+            self.assertEqual(facts["files_changed"]["value"], [])
+            self.assertEqual(facts["current_blockers"]["value"], [])
+        finally:
+            runtime.close()
+
+    def test_execute_plan_canonicalizes_echoed_default_alias_for_idempotency(self) -> None:
+        runtime = AutonomyRuntime(
+            self.repo,
+            self.sessions,
+            "session-a",
+            (TASK_EXECUTE_PLAN,),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            hosted_origin=Origin(OriginKind.HOSTED_CLIENT, "test-plan-default-alias"),
+            connection_profile="clickup-opus",
+        )
+        executor = mock.Mock()
+        executor.execute.return_value = {"ok": True}
+        base = {
+            "operations": [
+                {"operation_id": "read", "action": "read", "inputs": {"path": "README.md"}}
+            ]
+        }
+        try:
+            with mock.patch.object(runtime, "_plan_executor_for", return_value=executor):
+                self.assertTrue(runtime._execute_plan(dict(base), None)["ok"])
+                self.assertTrue(
+                    runtime._execute_plan({**base, "workstream_id": "default"}, None)["ok"]
+                )
+            first = executor.execute.call_args_list[0]
+            second = executor.execute.call_args_list[1]
+            self.assertEqual(first.args[0], second.args[0])
+            self.assertEqual(first.args[1], second.args[1])
+            self.assertNotIn("workstream_id", first.args[0])
+            self.assertEqual(first.kwargs["workstream_id"], None)
+            self.assertEqual(second.kwargs["workstream_id"], None)
         finally:
             runtime.close()
 
@@ -225,6 +334,91 @@ class AutonomyRuntimeTests(unittest.TestCase):
         self.assertTrue(second["idempotent_replay"])
         self.assertEqual(second["task"]["revision"], state_revision)
 
+    def test_bootstrap_refresh_without_objective_preserves_existing_workstream_intent(self) -> None:
+        first = self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {"workstream_id": "frontend", "objective": "Keep this scoped objective"},
+            idempotency_key="bootstrap-objective-first",
+        )
+        second = self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {"workstream_id": "frontend"},
+            idempotency_key="bootstrap-objective-refresh",
+        )
+
+        self.assertFalse(second["idempotent_replay"])
+        self.assertEqual(second["objective"], "Keep this scoped objective")
+        self.assertEqual(
+            second["task"]["facts"]["objective"]["value"],
+            "Keep this scoped objective",
+        )
+        self.assertEqual(
+            second["task"]["task_id"],
+            first["task"]["task_id"],
+        )
+
+    def test_bootstrap_refresh_preserves_existing_project_binding_after_reconnect_hint(self) -> None:
+        other_repo = Path(self.temp.name) / "other-repo"
+        initialize_git_repository(other_repo)
+        registry = ProjectRegistry(
+            (
+                ProjectEntry("anchor", str(self.repo), "Anchor"),
+                ProjectEntry("other", str(other_repo), "Other"),
+            ),
+            "anchor",
+        )
+        runtime = AutonomyRuntime(
+            self.repo,
+            self.sessions,
+            "session-a",
+            (TASK_BOOTSTRAP, TASK_STATUS),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            hosted_origin=Origin(OriginKind.HOSTED_CLIENT, "test-bootstrap-reconnect"),
+            connection_profile="chatgpt-web",
+            project_registry=registry,
+        )
+        try:
+            first = runtime.execute(
+                TASK_BOOTSTRAP,
+                {
+                    "workstream_id": "frontend-reconnect",
+                    "project_id": "anchor",
+                    "objective": "Keep the original project binding",
+                },
+                idempotency_key="bootstrap-reconnect-first",
+            )
+            recovered = runtime.execute(
+                TASK_BOOTSTRAP,
+                {
+                    "workstream_id": "frontend-reconnect",
+                    "project_id": "other",
+                },
+                idempotency_key="bootstrap-reconnect-refresh",
+            )
+
+            self.assertEqual(first["project_id"], "anchor")
+            self.assertEqual(recovered["project_id"], "anchor")
+            self.assertTrue(recovered["project_binding_recovered"])
+            self.assertEqual(
+                recovered["binding_recovery"],
+                {
+                    "reason": "existing_workstream_binding_preserved",
+                    "requested_project_id": "other",
+                    "bound_project_id": "anchor",
+                    "recovery_action": "continued_with_saved_binding",
+                },
+            )
+            self.assertEqual(
+                recovered["task"]["facts"]["project_id"]["value"],
+                "anchor",
+            )
+            self.assertEqual(
+                recovered["objective"],
+                "Keep the original project binding",
+            )
+        finally:
+            runtime.close()
+
     def test_checkpoint_auto_bootstraps_when_cached_client_lacks_bootstrap_tool(self) -> None:
         result = self.runtime.execute(
             TASK_CHECKPOINT,
@@ -243,6 +437,41 @@ class AutonomyRuntimeTests(unittest.TestCase):
         facts = result["task"]["facts"]
         self.assertEqual(facts["repository"]["origin"], FactOrigin.VERIFIED.value)
         self.assertEqual(facts["current_phase"]["value"], "smoke")
+
+    def test_named_checkpoint_auto_bootstrap_does_not_inherit_session_global_ledger(self) -> None:
+        lease = self.sessions.acquire("session-a", "seed-foreign-ledger", ttl_seconds=5)
+        try:
+            record = self.sessions.load("session-a")
+            record.changed_files = ["foreign-agent.txt"]
+            record.checks = [{"ok": True, "command": ["foreign-check"]}]
+            record.failures = [{"message": "foreign blocker", "resolved": False}]
+            record.unfinished_actions = [{"action": "foreign gate", "requires_user": True}]
+            self.sessions.save(record, record.revision, lease)
+        finally:
+            self.sessions.release(lease)
+
+        result = self.runtime.execute(
+            TASK_CHECKPOINT,
+            {
+                "workstream_id": "fresh-parallel-lane",
+                "updates": {
+                    "current_phase": {
+                        "value": "isolated",
+                        "origin": "reported_by_agent",
+                    }
+                },
+            },
+            idempotency_key="checkpoint-named-isolation",
+        )
+
+        self.assertTrue(result["auto_bootstrapped"])
+        facts = result["task"]["facts"]
+        self.assertEqual(facts["files_changed"]["value"], [])
+        self.assertEqual(facts["checks_executed"]["value"], [])
+        self.assertEqual(facts["current_blockers"]["value"], [])
+        self.assertEqual(facts["pending_user_gates"]["value"], [])
+        self.assertEqual(facts["files_changed"]["evidence"], ["workstream.initial"])
+        self.assertEqual(facts["current_phase"]["value"], "isolated")
 
     def test_custom_checkpoint_auto_bootstraps_without_hidden_fact_whitelist(self) -> None:
         result = self.runtime.execute(
@@ -359,12 +588,58 @@ class AutonomyRuntimeTests(unittest.TestCase):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         resumed = self.runtime.execute(TASK_RESUME, {})
-        self.assertFalse(resumed["freshness"]["current"])
-        self.assertEqual(
-            resumed["freshness"]["mismatches"][0]["fact"],
+        self.assertTrue(resumed["freshness"]["current"])
+        self.assertTrue(resumed["freshness"]["recovered"])
+        self.assertEqual(resumed["freshness"]["mismatches"], [])
+        self.assertIn(
             "repository_revision",
+            {item["fact"] for item in resumed["freshness"]["previous_mismatches"]},
         )
-        self.assertIn("refresh task.bootstrap", resumed["next_safe_action"])
+
+    def test_resume_detects_dirty_worktree_drift_without_head_change(self) -> None:
+        boot = self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {"workstream_id": "dirty-lane", "objective": "Continue safely"},
+            idempotency_key="dirty-lane-bootstrap",
+        )
+        self.runtime.execute(
+            TASK_CHECKPOINT,
+            {
+                "workstream_id": "dirty-lane",
+                "expected_revision": boot["task"]["revision"],
+                "updates": {
+                    "next_safe_action": {
+                        "value": "continue the previous mutation immediately",
+                        "origin": "pending",
+                    }
+                },
+            },
+            idempotency_key="dirty-lane-checkpoint",
+        )
+        stored_revision = boot["task"]["facts"]["repository_revision"]["value"]
+        (self.repo / "untracked-drift.txt").write_text("changed\n", encoding="utf-8")
+
+        resumed = self.runtime.execute(
+            TASK_RESUME,
+            {"workstream_id": "dirty-lane"},
+        )
+
+        self.assertTrue(resumed["freshness"]["current"])
+        self.assertTrue(resumed["freshness"]["recovered"])
+        self.assertEqual(resumed["freshness"]["mismatches"], [])
+        previous = {
+            item["fact"] for item in resumed["freshness"]["previous_mismatches"]
+        }
+        self.assertIn("working_tree_fingerprint", previous)
+        self.assertNotIn("repository_revision", previous)
+        self.assertEqual(
+            resumed["task"]["facts"]["repository_revision"]["value"],
+            stored_revision,
+        )
+        self.assertEqual(
+            resumed["next_safe_action"],
+            "inspect current diff and architecture before the next mutation",
+        )
 
     def test_execute_plan_identity_survives_transport_key_change(self) -> None:
         runtime = AutonomyRuntime(
@@ -430,6 +705,24 @@ class AutonomyRuntimeTests(unittest.TestCase):
         )
         status = self.runtime.execute(TASK_STATUS, {})
         self.assertEqual(status["task"]["revision"], boot["task"]["revision"])
+
+    def test_status_self_heals_dirty_worktree_drift(self) -> None:
+        boot = self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {},
+            idempotency_key="boot-before-status-drift",
+        )
+        (self.repo / "status-drift.txt").write_text("changed\n", encoding="utf-8")
+
+        status = self.runtime.execute(TASK_STATUS, {})
+
+        self.assertTrue(status["freshness"]["current"])
+        self.assertTrue(status["freshness"]["recovered"])
+        self.assertGreater(status["task"]["revision"], boot["task"]["revision"])
+        self.assertIn(
+            "working_tree_fingerprint",
+            {item["fact"] for item in status["freshness"]["previous_mismatches"]},
+        )
 
     def test_named_workstreams_keep_parallel_chats_independent(self) -> None:
         frontend = self.runtime.execute(
@@ -503,6 +796,35 @@ class AutonomyRuntimeTests(unittest.TestCase):
             "First chat",
         )
 
+    def test_resume_surfaces_active_durable_jobs_before_duplicate_work(self) -> None:
+        self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {"objective": "Continue durable work"},
+            idempotency_key="boot-active-job",
+        )
+        active = {
+            "count": 1,
+            "total_count": 1,
+            "unreadable_count": 0,
+            "jobs": [
+                {
+                    "job_id": "job-aaaaaaaaaaaaaaaaaaaa",
+                    "kind": "command",
+                    "status": "running",
+                    "updated_at": 1.0,
+                    "command": "python",
+                    "error_code": None,
+                    "artifact_id": None,
+                }
+            ],
+            "truncated": False,
+        }
+        with mock.patch.object(self.runtime, "_active_durable_jobs", return_value=active):
+            resumed = self.runtime.execute(TASK_RESUME, {})
+
+        self.assertEqual(resumed["active_jobs"], active)
+        self.assertIn("active durable job", resumed["next_safe_action"])
+
     def test_legacy_default_task_remains_backward_compatible_with_named_workstreams(self) -> None:
         default = self.runtime.execute(
             TASK_BOOTSTRAP,
@@ -518,6 +840,22 @@ class AutonomyRuntimeTests(unittest.TestCase):
         self.assertEqual(status["workstream_id"], "default")
         self.assertEqual(status["task"]["task_id"], default["task"]["task_id"])
         self.assertEqual(status["available_workstreams"], ["parallel"])
+
+    def test_echoed_default_workstream_id_does_not_create_a_second_default_lane(self) -> None:
+        default = self.runtime.execute(
+            TASK_BOOTSTRAP,
+            {"objective": "Legacy chat"},
+            idempotency_key="boot-echo-default",
+        )
+        echoed = self.runtime.execute(
+            TASK_STATUS,
+            {"workstream_id": "default"},
+        )
+
+        self.assertEqual(echoed["workstream_id"], "default")
+        self.assertEqual(echoed["task"]["task_id"], default["task"]["task_id"])
+        self.assertNotIn("default", echoed["available_workstreams"])
+        self.assertEqual(self.runtime.task_states.list_workstreams("session-a"), ())
 
     def test_workstream_id_refuses_path_escape(self) -> None:
         with self.assertRaisesRegex(HostedBridgeAccessDenied, "workstream_id"):
@@ -545,7 +883,20 @@ class AutonomyRuntimeTests(unittest.TestCase):
                 "expected_revision": frontend["task"]["revision"],
                 "updates": {
                     "current_phase": {"value": "implementation", "origin": "reported_by_agent"},
-                    "current_blockers": {"value": ["waiting for API shape"], "origin": "reported_by_agent"},
+                    "current_blockers": {
+                        "value": [
+                            "waiting for API shape",
+                            "blocker-2",
+                            "blocker-3",
+                            "blocker-4",
+                            "blocker-5",
+                        ],
+                        "origin": "reported_by_agent",
+                    },
+                    "files_changed": {
+                        "value": [f"src/file-{index}.py" for index in range(12)],
+                        "origin": "reported_by_agent",
+                    },
                     "next_safe_action": {"value": "wire form", "origin": "pending"},
                 },
             },
@@ -560,6 +911,10 @@ class AutonomyRuntimeTests(unittest.TestCase):
         view = self.runtime.execute(TASK_WORKSTREAMS, {})
         self.assertTrue(view["ok"])
         self.assertEqual(view["count"], 3)
+        self.assertEqual(view["total_count"], 3)
+        self.assertEqual(view["limit"], 24)
+        self.assertFalse(view["truncated"])
+        self.assertEqual(view["omitted_count"], 0)
         self.assertEqual(
             [item["workstream_id"] for item in view["workstreams"]],
             ["default", "backend", "frontend"],
@@ -569,7 +924,18 @@ class AutonomyRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(frontend_summary["objective"], "Build settings UI")
         self.assertEqual(frontend_summary["current_phase"], "implementation")
-        self.assertEqual(frontend_summary["current_blockers"], ["waiting for API shape"])
+        self.assertEqual(
+            frontend_summary["current_blockers"],
+            ["waiting for API shape", "blocker-2", "blocker-3", "blocker-4"],
+        )
+        self.assertEqual(frontend_summary["current_blockers_count"], 5)
+        self.assertTrue(frontend_summary["current_blockers_truncated"])
+        self.assertEqual(
+            frontend_summary["files_changed"],
+            [f"src/file-{index}.py" for index in range(8)],
+        )
+        self.assertEqual(frontend_summary["files_changed_count"], 12)
+        self.assertTrue(frontend_summary["files_changed_truncated"])
         self.assertEqual(frontend_summary["next_safe_action"], "wire form")
         self.assertNotIn("facts", frontend_summary)
 
@@ -583,6 +949,80 @@ class AutonomyRuntimeTests(unittest.TestCase):
             ["backend", "frontend"],
         )
 
+    def test_workstreams_hide_legacy_session_snapshot_from_lane_attribution(self) -> None:
+        self.runtime.task_states.bootstrap(
+            "session-a",
+            {
+                "objective": fact("Legacy parallel lane", FactOrigin.VERIFIED, "test.fixture"),
+                "files_changed": fact(
+                    ["foreign-a.py", "foreign-b.py"],
+                    FactOrigin.HISTORICAL,
+                    "session.changed_files",
+                ),
+                "current_blockers": fact(
+                    ["foreign blocker"],
+                    FactOrigin.HISTORICAL,
+                    "session.failures",
+                ),
+            },
+            workstream_id="legacy-lane",
+        )
+
+        view = self.runtime.execute(
+            TASK_WORKSTREAMS,
+            {"include_default": False, "limit": 100},
+        )
+        summary = next(
+            item for item in view["workstreams"] if item["workstream_id"] == "legacy-lane"
+        )
+        self.assertEqual(summary["files_changed"], [])
+        self.assertEqual(summary["files_changed_count"], 0)
+        self.assertEqual(summary["legacy_session_files_changed_count"], 2)
+        self.assertEqual(summary["current_blockers"], [])
+        self.assertEqual(summary["current_blockers_count"], 0)
+        self.assertEqual(summary["legacy_session_blockers_count"], 1)
+        self.assertEqual(
+            summary["legacy_session_snapshot_fields"],
+            ["current_blockers", "files_changed"],
+        )
+
+        # The raw durable task state is retained for audit/recovery; only the
+        # coordination summary stops falsely attributing session-global history.
+        raw = self.runtime.task_states.load("session-a", workstream_id="legacy-lane")
+        self.assertEqual(raw.facts["files_changed"].value, ["foreign-a.py", "foreign-b.py"])
+        self.assertEqual(raw.facts["current_blockers"].value, ["foreign blocker"])
+
+    def test_workstreams_bounds_large_sessions_to_recent_lanes(self) -> None:
+        for index in range(25):
+            self.runtime.task_states.bootstrap(
+                "session-a",
+                {
+                    "objective": fact(
+                        f"Lane {index:02d}", FactOrigin.VERIFIED, "test.fixture"
+                    )
+                },
+                workstream_id=f"lane-{index:02d}",
+            )
+
+        view = self.runtime.execute(
+            TASK_WORKSTREAMS,
+            {"include_default": False},
+        )
+        self.assertEqual(view["count"], 24)
+        self.assertEqual(view["total_count"], 25)
+        self.assertTrue(view["truncated"])
+        self.assertEqual(view["omitted_count"], 1)
+        self.assertEqual(
+            [item["workstream_id"] for item in view["workstreams"]],
+            [f"lane-{index:02d}" for index in range(1, 25)],
+        )
+
+        limited = self.runtime.execute(
+            TASK_WORKSTREAMS,
+            {"include_default": False, "limit": 3},
+        )
+        self.assertEqual(limited["count"], 3)
+        self.assertEqual(limited["omitted_count"], 22)
 
 class AutonomyBridgeContractTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -613,17 +1053,41 @@ class AutonomyBridgeContractTests(unittest.TestCase):
         self.runtime.close()
         self.temp.cleanup()
 
-    def test_status_before_bootstrap_reports_not_initialized_instead_of_policy_denial(self) -> None:
+    def test_status_before_bootstrap_self_heals_verified_base_state(self) -> None:
         status = self.runtime.execute(TASK_STATUS, {})
-        self.assertFalse(status["ok"])
-        self.assertEqual(status["error_code"], "task_not_initialized")
-        self.assertIn("task.bootstrap", status["next_safe_action"])
+        self.assertTrue(status["ok"])
+        self.assertTrue(status["auto_bootstrapped"])
+        self.assertEqual(status["task"]["facts"]["repository"]["origin"], "verified")
 
-    def test_resume_before_bootstrap_reports_not_initialized_instead_of_policy_denial(self) -> None:
+    def test_resume_before_bootstrap_self_heals_verified_base_state(self) -> None:
         resumed = self.runtime.execute(TASK_RESUME, {})
-        self.assertFalse(resumed["ok"])
-        self.assertEqual(resumed["error_code"], "task_not_initialized")
-        self.assertIn("task.bootstrap", resumed["next_safe_action"])
+        self.assertTrue(resumed["ok"])
+        self.assertTrue(resumed["auto_bootstrapped"])
+        self.assertTrue(resumed["freshness"]["current"])
+        self.assertTrue(resumed["freshness"]["recovered"])
+
+    def test_non_git_bootstrap_reports_not_applicable_without_invoking_git(self) -> None:
+        (self.repo / "plain.txt").write_text("plain directory\n", encoding="utf-8")
+        with mock.patch.object(
+            self.runtime,
+            "_git",
+            side_effect=AssertionError("Git must not run for a non-Git root"),
+        ):
+            result = self.runtime.execute(
+                TASK_BOOTSTRAP,
+                {"objective": "Inspect an allowed plain directory"},
+                idempotency_key="non-git-bootstrap",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["repository_kind"], "directory")
+        self.assertFalse(result["git_applicable"])
+        self.assertIsNone(result["branch"])
+        self.assertIsNone(result["repository_revision"])
+        self.assertIsNone(result["dirty_summary"]["dirty"])
+        facts = result["task"]["facts"]
+        self.assertEqual(facts["repository_kind"]["value"], "directory")
+        self.assertIn("not_applicable.non_git.branch", facts["branch"]["evidence"])
 
     def test_web_bridge_capability_snapshot_uses_advertised_output_limit(self) -> None:
         diagnostics = '{"client_capabilities":{"practical_output_size_limit":4194304}}'
@@ -672,8 +1136,11 @@ class AutonomyBridgeContractTests(unittest.TestCase):
                 runtime,
                 "_git_snapshot",
                 return_value={
+                    "repository_kind": "git",
+                    "git_applicable": True,
                     "branch": "main",
                     "revision": "deadbeef",
+                    "working_tree_fingerprint": "fixture-clean-tree",
                     "dirty": False,
                     "dirty_count": 0,
                     "dirty_summary": [],

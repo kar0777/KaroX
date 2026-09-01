@@ -625,6 +625,44 @@ function assertAgentInputAllowed(method) {
   }
 }
 
+async function captureVisibleTabResilient(tab, previous) {
+  const windowState = await chrome.windows.get(tab.windowId);
+  const wasMinimized = windowState?.state === "minimized";
+  let restored = false;
+  let attempts = 0;
+  try {
+    // Chromium 151 can fail compositor readback for a minimized window.
+    // KaroX starts its Windows browser minimized, so temporarily restore only
+    // this owned window, capture, then return it to its prior state.
+    if (wasMinimized) {
+      await chrome.windows.update(tab.windowId, { state: "normal" });
+      restored = true;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      attempts += 1;
+      try {
+        const data_url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        return { data_url, attempts, recovered: restored || attempts > 1 };
+      } catch (error) {
+        const recoverable = /image readback failed|view is invisible/i.test(String(error || ""));
+        if (!recoverable || attempt >= 1) throw error;
+        // captureVisibleTab is limited to two calls per second.
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+    }
+  } finally {
+    if (previous?.id && previous.id !== tab.id) {
+      try { await chrome.tabs.update(previous.id, { active: true }); } catch {}
+    }
+    if (wasMinimized && restored) {
+      try { await chrome.windows.update(tab.windowId, { state: "minimized" }); } catch {}
+    }
+  }
+  throw new Error("screenshot_capture_failed: captureVisibleTab returned no image");
+}
+
 async function dispatchCommand(method, params) {
   if (method === "status") {
     return { connected: state.connected, takeover: state.takeover, session_id: state.sessionId };
@@ -796,9 +834,8 @@ async function dispatchCommand(method, params) {
       };
     }
     const previous = (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0];
-    await chrome.tabs.update(tab.id, { active: true });
-    let data_url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    if (previous?.id && previous.id !== tab.id) await chrome.tabs.update(previous.id, { active: true });
+    const capture = await captureVisibleTabResilient(tab, previous);
+    let data_url = capture.data_url;
     if (clip) {
       const blob = await (await fetch(data_url)).blob();
       const bitmap = await createImageBitmap(blob);
@@ -816,9 +853,24 @@ async function dispatchCommand(method, params) {
         binary += String.fromCharCode.apply(null, buffer.subarray(offset, offset + chunk));
       }
       data_url = "data:image/png;base64," + btoa(binary);
-      return { data_url, tab_id: tabRef(tab.id), full_page: false, viewport_only: false, element: true };
+      return {
+        data_url,
+        tab_id: tabRef(tab.id),
+        full_page: false,
+        viewport_only: false,
+        element: true,
+        capture_recovered: capture.recovered,
+        capture_attempts: capture.attempts,
+      };
     }
-    return { data_url, tab_id: tabRef(tab.id), full_page: false, viewport_only: true };
+    return {
+      data_url,
+      tab_id: tabRef(tab.id),
+      full_page: false,
+      viewport_only: true,
+      capture_recovered: capture.recovered,
+      capture_attempts: capture.attempts,
+    };
   }
   if (method === "network") {
     return { requests: state.network.slice(), count: state.network.length };

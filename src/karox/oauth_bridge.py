@@ -675,16 +675,18 @@ class OAuthBridgeService:
                 },
             }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        # The pid alone is not unique: two threads of one bridge that register
-        # concurrently would otherwise share a temp path and interleave bytes
-        # into it, and the survivor of the race would publish a truncated file.
-        temporary = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        # Windows time_ns() can repeat across threads at the filesystem clock's
+        # coarser resolution. Use cryptographic randomness and O_EXCL so two
+        # concurrent registrations can never share a temporary state file.
+        temporary = path.with_name(
+            f"{path.name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # 0600 before a byte is written: the digests here recognise a live
             # bearer token, so another local account must never read them.
             descriptor = os.open(
-                str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+                str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
             )
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(encoded)
@@ -1145,21 +1147,32 @@ class OAuthBridgeService:
     def authorize_access_token(self, token: str) -> bool:
         if not isinstance(token, str) or not token or len(token) > 512:
             return False
+        # OAuth access tokens are recognized by their persisted digest grant and
+        # do not depend on the approval password after the authorization flow.
+        # The old order resolved the approval secret from the OS keyring before
+        # consulting this table on *every* MCP request. A transient keyring error
+        # could therefore let tools/list pass and turn the immediately following
+        # tools/call into a 401; concurrent clients also serialized on the slow
+        # credential backend. Keep the direct approval-secret bearer as a legacy
+        # fallback, but only for tokens that are not valid OAuth grants.
+        key = _digest(token)
+        with self._lock:
+            self._prune()
+            grant = self._access.get(key)
+            if not grant and self.state_path is not None and self.state_path.exists():
+                self._load()
+                self._prune()
+                grant = self._access.get(key)
+            if grant and grant.resource == self.resource:
+                return True
         try:
             if hmac.compare_digest(
                 token.encode("utf-8"), self._secret().encode("utf-8")
             ):
                 return True
-        except (OAuthBridgeError, UnicodeError):
+        except (OAuthBridgeError, UnicodeError, OSError, RuntimeError):
             return False
-        with self._lock:
-            self._prune()
-            grant = self._access.get(_digest(token))
-            if not grant and self.state_path is not None and self.state_path.exists():
-                self._load()
-                self._prune()
-                grant = self._access.get(_digest(token))
-            return bool(grant and grant.resource == self.resource)
+        return False
 
 
 def _oauth_error(message: str, *, status_code: int = 400) -> JSONResponse:

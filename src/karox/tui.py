@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import (
     Any,
@@ -40,6 +40,14 @@ import httpx
 
 from .bridge import BridgeCredentialStore
 from .credentials import CredentialStore
+from .disk_maintenance import (
+    CleanupError,
+    apply_cleanup_plan,
+    cleanup_impact_preview,
+    is_drive_root,
+    load_cleanup_plan,
+    workspace_system_reason,
+)
 from .event_bus import EventBus, EventKind, EventLevel, event_bus
 from .models import AccessProfile
 from .paths import config_dir, session_dir
@@ -62,6 +70,7 @@ from .agent_modes import (
 from .effort import (
     AUTO_EFFORT,
     effort_summary,
+    effort_user_summary,
     normalize_effort,
 )
 from .providers import (
@@ -73,6 +82,8 @@ from .providers import (
 )
 from .registry import ModelRecord, ProviderRecord, ProviderRegistry
 from .session_view import (
+    ACTION_OPEN,
+    ACTION_RESUME,
     ACTION_REVIEW_RISK,
     ACTION_STOP,
     WAIT_CONFIRMATION,
@@ -124,18 +135,37 @@ except Exception:  # pragma: no cover - only minimal/broken installations
 
 
 SLASH_COMMANDS: Dict[str, str] = {
-    "/model": "choose model",
-    "/mode": "show or set agent mode (build, plan, ideate)",
-    "/map": "project map: status, preview, refresh, or a level (low..ultra)",
+    "/model": "choose model (legacy alias for /models)",
+    "/models": "choose a model",
+    "/effort": "choose work depth (Auto to Ultra)",
+    "/mode": "choose how KaroX works (Build, Plan, Ideate)",
+    "/review": "review changes without modifying them",
+    "/permissions": "inspect or manage the effective KaroX capability profile",
+    "/worktrees": "inspect isolated worker worktrees or clean finished ones",
+    "/skills": "discover, select, and permission KaroX/Claude-compatible Skills",
+    "/packs": "manage verified KaroX extension packs",
+    "/commands": "manage data-only user prompt commands",
+    "/fork": "fork the active or named durable session into a new branch",
+    "/checkpoint": "create a local rollback checkpoint for the active session",
+    "/undo": "preview or explicitly restore a KaroX checkpoint",
+    "/diff": "show a bounded read-only Git change summary or diff",
+    "/init": "create a non-overwriting KAROX.md project-instructions template",
+    "/context": "inspect the real prompt/context inputs KaroX will use",
+    "/diagnostics": "read language-server diagnostics for one repository file",
+    "/attach": "attach repository PNG/JPEG/WebP images to the next model turn",
+    "/map": "project map — build it once, then KaroX uses it automatically",
     "/memory": "inspect, remember, edit, or forget KaroX memory",
-    "/effort": "show or set agent effort (auto, low, medium, high, extra-high, ultra)",
     "/status": "show project, model, effort, and run state",
+    "/jobs": "show recent durable jobs and their state",
     "/home": "return to chat",
     "/usage": "show model usage, cache, and cost",
     "/economy": "show economy subsystems and measured savings",
     "/cost": "show or switch the run economy profile",
-    "/connect": "connect an API model, website, or both",
-    "/models": "show configured API models",
+    "/orchestrate": "plan a role-based multi-agent task with one orchestrator",
+    "/agents": "show the unified API/subscription intelligence pool",
+    "/mission": "show Mission Control status for a run",
+    "/connect": "connect a model or external AI client",
+    "/paste": "paste clipboard directly; F8 bypasses Windows Terminal >5 KiB warning",
     "/sessions": "show task sessions (compact browser)",
     "/sessions --verbose": "show task sessions as text",
     "/session-log": "alias for /sessions --verbose",
@@ -146,14 +176,14 @@ SLASH_COMMANDS: Dict[str, str] = {
     "/doctor": "run KaroX diagnostics",
     "/verify JSON": "change the verification command",
     "/language": "change interface language",
-    "/project": "switch project: manager, or /project ID or PATH",
+    "/project": "switch project or folder",
     "/workspace PATH": "change the working project folder",
     "/sponsors": "show or hide the sponsor line",
     "/clear": "clear the conversation",
-    "/new": "start a new task (durable sessions are kept)",
-    "/resume": "return to a session: browser, or /resume SESSION_ID",
+    "/new": "start a new task",
+    "/resume": "continue a previous task",
     "/compact": "compact the conversation into a handoff + continuation context",
-    "/help": "show command help",
+    "/help": "show more commands",
     "/quit": "exit KaroX",
     "/connections": "manage connections (MCP clients and API providers)",
     "/providers": "manage API providers",
@@ -161,18 +191,37 @@ SLASH_COMMANDS: Dict[str, str] = {
 }
 
 _COMMANDS_RU: Dict[str, str] = {
-    "/model": "выбрать модель",
-    "/mode": "режим агента (build, plan, ideate)",
-    "/map": "карта проекта: status, preview, refresh или уровень (low..ultra)",
+    "/model": "выбрать модель (старый псевдоним /models)",
+    "/models": "выбрать модель",
+    "/effort": "выбрать глубину работы (Auto → Ultra)",
+    "/mode": "как работать: Build, Plan или Ideate",
+    "/review": "проверить изменения без их правки",
+    "/permissions": "показать или настроить эффективные права KaroX",
+    "/worktrees": "показать изолированные worktree агентов или убрать завершённые",
+    "/skills": "найти, выбрать и настроить права KaroX/Claude-совместимых Skills",
+    "/packs": "управлять проверяемыми пакетами расширений KaroX",
+    "/commands": "управлять безопасными пользовательскими prompt-командами",
+    "/fork": "создать новую ветку из активной или указанной сессии",
+    "/checkpoint": "создать локальную точку отката активной сессии",
+    "/undo": "показать или явно восстановить checkpoint KaroX",
+    "/diff": "показать ограниченный read-only Git diff или сводку изменений",
+    "/init": "создать KAROX.md без перезаписи существующих инструкций",
+    "/context": "показать реальные источники prompt/context KaroX",
+    "/diagnostics": "показать диагностику language server для файла проекта",
+    "/attach": "прикрепить PNG/JPEG/WebP из проекта к следующему запросу",
+    "/map": "карта проекта — после построения используется автоматически",
     "/memory": "память KaroX: просмотр, запись, правка, удаление",
-    "/effort": "уровень усилий агента (auto, low, medium, high, extra-high, ultra)",
     "/status": "показать проект, модель, Effort и состояние запуска",
+    "/jobs": "показать последние долговечные задачи и их состояние",
     "/home": "вернуться в чат",
     "/usage": "показать токены, кэш и расходы",
     "/economy": "подсистемы экономии и измеренные сбережения",
     "/cost": "режим расходов",
-    "/connect": "подключить API-модель, сайт или оба варианта",
-    "/models": "показать настроенные API-модели",
+    "/orchestrate": "спланировать multi-agent задачу с одним оркестратором",
+    "/agents": "единый пул API-моделей и подписочных агентов",
+    "/mission": "статус Mission Control для запуска",
+    "/connect": "подключить модель или внешний AI-клиент",
+    "/paste": "вставить буфер напрямую; F8 обходит предупреждение Windows Terminal >5 KiB",
     "/sessions": "показать сессии задач (компактный браузер)",
     "/sessions --verbose": "показать сессии задач как текст",
     "/session-log": "псевдоним для /sessions --verbose",
@@ -183,14 +232,14 @@ _COMMANDS_RU: Dict[str, str] = {
     "/doctor": "запустить диагностику KaroX",
     "/verify JSON": "изменить команду проверки",
     "/language": "изменить язык интерфейса",
-    "/project": "проекты: менеджер или /project ID или ПУТЬ",
+    "/project": "сменить проект или папку",
     "/workspace ПУТЬ": "изменить рабочую папку проекта",
     "/sponsors": "показать или скрыть строку спонсоров",
     "/clear": "очистить диалог",
-    "/new": "начать новую задачу (сессии сохраняются)",
-    "/resume": "вернуться к сессии: браузер или /resume ID",
+    "/new": "начать новую задачу",
+    "/resume": "продолжить прошлую задачу",
     "/compact": "сжать диалог в handoff и контекст продолжения",
-    "/help": "показать справку по командам",
+    "/help": "показать остальные команды",
     "/quit": "выйти из KaroX",
     "/connections": "управление подключениями (MCP-клиенты и API-провайдеры)",
     "/providers": "управление API-провайдерами",
@@ -201,9 +250,9 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "ru": {
         "brand": "KaroX\n[dim]API-модели • локальные инструменты • сайты и MCP[/dim]",
         "placeholder": "Опишите задачу для KaroX…",
-        "hint": "Enter — отправить • Ctrl+G — модель и Effort • / — команды • Ctrl+C — остановить/выйти",
-        "welcome_ready": "[bold #e0dccc]KaroX готов.[/]\nНапишите задачу обычным текстом.\n[#d4b676]Ctrl+G[/] — модель и Effort; [#d4b676]/[/] — остальные действия.",
-        "welcome_unconfigured": "[bold #e0dccc]KaroX запущен, но модель не подключена.[/]\nПодключите API-провайдера командой [#d4b676]/connect[/].\nВведите [#d4b676]/[/], чтобы увидеть все команды.",
+        "hint": "Enter — отправить • /models — модель • /effort — глубина • / — команды • Ctrl+C — остановить/выйти",
+        "welcome_ready": "[bold #e0dccc]KaroX готов.[/]  [#d4b676]/models[/] · [#d4b676]/effort[/] · [#d4b676]/[/]",
+        "welcome_unconfigured": "[bold #e0dccc]KaroX: модель не подключена[/]  ·  [#d4b676]/connect[/]",
         "repo": "репозиторий",
         "model": "модель",
         "not_configured": "не настроена",
@@ -224,9 +273,9 @@ _TEXT: Dict[str, Dict[str, str]] = {
     "en": {
         "brand": "KaroX\n[dim]API models • local tools • websites and MCP[/dim]",
         "placeholder": "Describe a task for KaroX…",
-        "hint": "Enter — send • Ctrl+G — model and Effort • / — commands • Ctrl+C — stop/exit",
-        "welcome_ready": "[bold #e0dccc]KaroX is ready.[/]\nDescribe a task in plain language.\n[#d4b676]Ctrl+G[/] — model and Effort; [#d4b676]/[/] — every other action.",
-        "welcome_unconfigured": "[bold #e0dccc]KaroX is running, but no model is connected.[/]\nConnect an API provider with [#d4b676]/connect[/].\nEnter [#d4b676]/[/] to see every command.",
+        "hint": "Enter — send • /models — model • /effort — depth • / — commands • Ctrl+C — stop/exit",
+        "welcome_ready": "[bold #e0dccc]KaroX ready.[/]  [#d4b676]/models[/] · [#d4b676]/effort[/] · [#d4b676]/[/]",
+        "welcome_unconfigured": "[bold #e0dccc]KaroX: no model connected[/]  ·  [#d4b676]/connect[/]",
         "repo": "repository",
         "model": "model",
         "not_configured": "not configured",
@@ -379,21 +428,71 @@ def _remember_workspace(path: Path) -> None:
 # real users, and deleting them to shorten a menu would be a regression dressed
 # up as simplification.
 VISIBLE_COMMANDS: Tuple[str, ...] = (
-    "/model",
-    "/mode",
+    # Bare `/` is the calm starting surface. Keep only controls a person is
+    # likely to need during normal chat. Observability/economy/orchestration
+    # remain fully discoverable by prefix and in `/help all`, but no longer make
+    # the first menu look like an operations cockpit.
+    "/models",
     "/effort",
+    "/mode",
+    "/status",
+    "/review",
+    "/map",
+    "/resume",
+    "/new",
+    "/project",
+    "/connect",
+    "/help",
+)
+
+# Commands that normal users may discover by typing a prefix. Deprecated aliases
+# and internal/legacy entry points stay routable but are not advertised. This is
+# intentionally larger than VISIBLE_COMMANDS: `/` stays small, while `/m` can
+# reveal Map, Memory, MCP, Mission Control, Mode and Models instead of pretending
+# those KaroX capabilities do not exist.
+DISCOVERABLE_COMMANDS: Tuple[str, ...] = (
+    "/models",
+    "/effort",
+    "/mode",
+    "/review",
+    "/permissions",
+    "/worktrees",
+    "/skills",
+    "/packs",
+    "/commands",
+    "/fork",
+    "/checkpoint",
+    "/undo",
+    "/diff",
+    "/init",
+    "/context",
+    "/diagnostics",
+    "/attach",
     "/map",
     "/memory",
+    "/resume",
+    "/new",
+    "/compact",
+    "/project",
+    "/workspace",
     "/status",
+    "/jobs",
     "/usage",
     "/economy",
+    "/cost",
     "/connect",
+    "/paste",
+    "/mcp",
+    "/doctor",
+    "/orchestrate",
+    "/agents",
+    "/mission",
     "/sessions",
-    "/new",
-    "/resume",
-    "/compact",
+    "/verify",
+    "/language",
     "/clear",
-    "/project",
+    "/ask",
+    "/sponsors",
     "/help",
     "/quit",
 )
@@ -434,11 +533,31 @@ def _commands(language: str) -> Dict[str, str]:
 
     catalog = _COMMANDS_RU if language == "ru" else SLASH_COMMANDS
     visible: Dict[str, str] = {}
-    for name, description in catalog.items():
-        head = name.split(" ", 1)[0]
-        if head in VISIBLE_COMMANDS:
-            visible[name] = description
+    for wanted in VISIBLE_COMMANDS:
+        for name, description in catalog.items():
+            if name.split(" ", 1)[0] == wanted:
+                visible[name] = description
+                break
     return visible
+
+
+def _discoverable_commands(language: str) -> Dict[str, str]:
+    """Searchable user command catalog, larger than the bare `/` menu.
+
+    The first slash stays compact. Once the user types a prefix we search this
+    complete human-facing surface, which keeps KaroX-specific tools discoverable
+    without rendering a permanent cockpit. Deprecated aliases remain executable
+    but never appear here.
+    """
+
+    catalog = _COMMANDS_RU if language == "ru" else SLASH_COMMANDS
+    discoverable: Dict[str, str] = {}
+    for wanted in DISCOVERABLE_COMMANDS:
+        for name, description in catalog.items():
+            if name.split(" ", 1)[0] == wanted:
+                discoverable[name] = description
+                break
+    return discoverable
 
 
 def _suggest_command(typed: str, language: str) -> str:
@@ -556,31 +675,27 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 
 def _unsafe_workspace_reason(path: Path, language: str = "ru") -> Optional[str]:
-    """Reject operating-system locations that must never be agent workspaces."""
-    resolved = path.expanduser().resolve()
-    protected: list[Path] = []
-    for name in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)"):
-        value = os.environ.get(name)
-        if value:
-            protected.append(Path(value))
-    drive_root = Path(resolved.anchor) if resolved.anchor else None
-    unsafe = (drive_root is not None and resolved == drive_root) or any(
-        _is_within(resolved, item) for item in protected
-    )
-    if not unsafe:
+    """Reject system subdirectories while allowing a whole drive for cleanup."""
+
+    try:
+        reason = workspace_system_reason(path)
+    except (OSError, RuntimeError, ValueError):
+        reason = "windows_system_folder"
+    if reason is None:
         return None
     return (
-        "Системная папка Windows не может быть рабочим проектом. "
-        "Перейдите в папку проекта или введите /workspace ПУТЬ."
+        "Системная папка Windows защищена. Для очистки выберите диск целиком "
+        "или обычную несистемную папку."
         if language == "ru"
-        else "A Windows system folder cannot be used as a project workspace. "
-        "Open the project folder or enter /workspace PATH."
+        else "This Windows system folder is protected. For cleanup, select the "
+        "whole drive or a normal non-system folder."
     )
 
 
 _BACKEND_SLASH: Dict[str, List[str]] = {
     "/models": ["model", "list", "--json"],
     "/sessions": ["session", "list", "--json"],
+    "/jobs": ["jobs", "--json"],
     "/mcp": ["mcp", "status", "--json"],
     "/doctor": ["doctor", "--json"],
 }
@@ -591,7 +706,38 @@ _BACKEND_SLASH: Dict[str, List[str]] = {
 _LINE_INTERACTIVE_ONLY: frozenset[str] = (
     frozenset(VISIBLE_COMMANDS)
     | frozenset(DEPRECATED_COMMAND_ALIASES.keys())
-    | {"/setup", "/browser", "/clear", "/verify", "/ask"}
+    | {
+        "/setup",
+        "/browser",
+        "/clear",
+        "/verify",
+        "/ask",
+        # Hidden advanced commands still deserve an actionable line-mode answer
+        # instead of looking as if they were deleted from KaroX.
+        "/model",
+        "/mode",
+        "/effort",
+        "/permissions",
+        "/worktrees",
+        "/skills",
+        "/packs",
+        "/commands",
+        "/map",
+        "/memory",
+        "/resume",
+        "/fork",
+        "/checkpoint",
+        "/undo",
+        "/diff",
+        "/init",
+        "/context",
+        "/diagnostics",
+        "/attach",
+        "/compact",
+        "/orchestrate",
+        "/agents",
+        "/mission",
+    }
 ) - frozenset(_BACKEND_SLASH) - {"/quit", "/help"}
 
 _MCP_LIVENESS_TEXT: Dict[str, Tuple[str, str]] = {
@@ -1853,6 +1999,38 @@ HEADER_MEDIUM_COLUMNS = 52
 CONTEXT_WARNING_FRACTION = 0.75
 
 
+def _compact_token_count(value: int) -> str:
+    """Human-sized token count without hiding the measured integer scale."""
+
+    number = max(0, int(value))
+    if number < 1_000:
+        return str(number)
+    if number < 1_000_000:
+        text = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}k"
+    text = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+    return f"{text}M"
+
+
+def _token_counter_text(
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    cache_read_tokens: Optional[int] = None,
+    *,
+    cache_reported: bool = False,
+) -> str:
+    """Compact task-level API usage; em dash means not measured yet."""
+
+    incoming = "—" if prompt_tokens is None else _compact_token_count(prompt_tokens)
+    outgoing = "—" if completion_tokens is None else _compact_token_count(completion_tokens)
+    cache = (
+        _compact_token_count(cache_read_tokens or 0)
+        if cache_reported
+        else "—"
+    )
+    return f"in{incoming} out{outgoing} cache{cache}"
+
+
 def _header_line(
     *,
     repository: str,
@@ -1863,6 +2041,8 @@ def _header_line(
     mode: str = DEFAULT_MODE,
     economy: bool = False,
     context_note: str = "",
+    usage: str = "",
+    language: str = "en",
 ) -> str:
     """Render the run state with the model as the primary fact.
 
@@ -1874,7 +2054,8 @@ def _header_line(
     """
 
     model_id = model.split("/", 1)[-1] if "/" in model else model
-    effort_text = f"effort {effort or 'auto'}"
+    effort_label = "глубина" if language == "ru" else "effort"
+    effort_text = f"{effort_label} {effort or 'auto'}"
     repo_text = f"@{repository}" if repository else ""
     economy_text = "Economy" if economy else ""
     # Build renders nothing: like Economy, the header spends width on
@@ -1887,14 +2068,23 @@ def _header_line(
         mode_display_name(normalized_mode) if normalized_mode != DEFAULT_MODE else ""
     )
     if width < HEADER_MEDIUM_COLUMNS:
-        # Smallest tier: the agent state outranks the project name, and the
-        # provider prefix gives way to the model id. Dropping a whole field is
-        # what keeps "openai…" from reading as a different model.
-        candidates = [model_id, activity, mode_text, effort_text, repo_text]
+        # Smallest tier keeps model + project first. The task usage counter is
+        # next: it stays visible whenever the three honest fields fit together,
+        # but is dropped whole instead of turning a narrow terminal into noise.
+        candidates = [model_id, usage, activity, repo_text, effort_text, mode_text]
     elif width < HEADER_WIDE_COLUMNS:
-        candidates = [model, mode_text, effort_text, repo_text, activity]
+        candidates = [model, usage, repo_text, effort_text, activity, mode_text]
     else:
-        candidates = [model, mode_text, effort_text, repo_text, activity, economy_text, context_note]
+        candidates = [
+            model,
+            usage,
+            mode_text,
+            effort_text,
+            repo_text,
+            activity,
+            economy_text,
+            context_note,
+        ]
     kept = [field for field in candidates if field]
     while len(kept) > 1 and len(" · ".join(kept)) > width:
         kept.pop()
@@ -2876,6 +3066,49 @@ def _friendly_probe_error(
     return f"{heading}\n{checked} {base}\n{str(redact(str(error))).strip()}"
 
 
+def _save_provider_connection(setup: ProviderSetup, discovery: ModelDiscovery) -> int:
+    """Persist a verified provider/key immediately after model discovery.
+
+    Model choice is deliberately *not* part of this transaction. Once the
+    provider catalog has accepted the endpoint/key pair, pressing Esc from the
+    following model picker must not throw the connection away. Secrets are
+    written only through ProviderController/CredentialStore; the registry keeps
+    only the opaque reference.
+    """
+
+    provider_id = setup.provider_id.strip()
+    base_url = discovery.base_url.strip().rstrip("/")
+    if not provider_id or not base_url:
+        raise ValueError("provider and base URL are required")
+    controller = _provider_controller()
+    credential_ref: Optional[str] = None
+    try:
+        credential_ref = controller.details(provider_id).provider.credential_ref
+    except Exception:
+        pass
+    is_local = base_url.startswith(("http://127.0.0.1", "http://localhost"))
+    if not setup.api_key and credential_ref is None and not is_local:
+        raise ValueError("an API key is required for a remote provider")
+
+    controller.configure_provider(
+        ProviderRecord(
+            provider_id=provider_id,
+            adapter_kind=setup.adapter,
+            base_url=base_url,
+            credential_ref=credential_ref,
+            privacy_class="local" if is_local else "public",
+        ),
+        secret=setup.api_key or None,
+    )
+    from .tui_connections import discovered_model_record
+
+    saved = 0
+    for item in discovery.models:
+        controller.put_model(discovered_model_record(provider_id, item))
+        saved += 1
+    return saved
+
+
 def _save_provider(setup: ProviderSetup, *, activate: bool = True) -> ModelRecord:
     provider_id = setup.provider_id.strip()
     model_id = setup.model_id.strip()
@@ -2993,6 +3226,13 @@ def _agent_argv(
     effort_level: Optional[str] = None,
     agent_mode: Optional[str] = None,
     token_ceiling: Optional[int] = None,
+    continue_task: bool = False,
+    auto_checkpoint: bool = False,
+    maintenance_mode: bool = False,
+    skill: Optional[str] = None,
+    skill_permissions: Sequence[str] = (),
+    images: Sequence[str] = (),
+    protected_paths: Sequence[str] = (),
 ) -> List[str]:
     argv = [
         "agent",
@@ -3004,6 +3244,21 @@ def _agent_argv(
         "--task",
         task,
     ]
+    if continue_task:
+        argv.append("--continue-task")
+    if auto_checkpoint:
+        argv.append("--auto-checkpoint")
+    if maintenance_mode:
+        argv.append("--maintenance-mode")
+    if skill:
+        argv.extend(("--skill", skill))
+        for permission in skill_permissions:
+            argv.extend(("--skill-permission", permission))
+    for image in images:
+        argv.extend(("--image", str(image)))
+    for protected in protected_paths:
+        if isinstance(protected, str) and protected.strip():
+            argv.extend(("--protected-path", protected))
     # ``agent run`` accepts a repeatable ``--verification-command``; emit one
     # per approved command so a repository with several safe checks (npm test,
     # npm run ci, npm run test:smoke) gets the full allowlist.
@@ -3182,9 +3437,9 @@ def _slash_to_argv(
     argv = list(_BACKEND_SLASH.get(parts[0], ()))
     if not argv:
         return None
-    if parts[0] == "/mcp" and session_id:
-        # Tool permissions live in the session, so the screen can only report
-        # authorization when a session is open; otherwise it shows setup only.
+    if parts[0] in {"/mcp", "/jobs"} and session_id:
+        # MCP permissions and durable jobs are both session-scoped. Keep the TUI
+        # view on the active task instead of dumping unrelated historical state.
         argv.extend(["--session-id", session_id])
     return argv
 
@@ -3329,6 +3584,39 @@ def _inspection_text(label: str, code: int, output: str, language: str) -> str:
                 )
             if facts:
                 lines.append("   " + " · ".join(facts))
+        return "\n".join(lines)
+
+    if label == "/jobs" and isinstance(payload, dict):
+        recent = payload.get("recent")
+        if not isinstance(recent, list) or not recent:
+            return "Нет активных или недавних долговечных задач." if not english else "No recent durable jobs."
+        heading = (
+            f"Долговечные задачи: {payload.get('count', len(recent))}"
+            if not english
+            else f"Durable jobs: {payload.get('count', len(recent))}"
+        )
+        lines = [heading]
+        for item in recent[:20]:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "unknown")
+            marker = "●" if status in {"queued", "running"} else "✓" if status == "passed" else "!"
+            duration = item.get("duration_seconds")
+            duration_text = (
+                f" · {float(duration):.1f}s"
+                if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                else ""
+            )
+            lines.append(
+                f"{marker} {item.get('job_id', '?')} · {status} · "
+                f"{item.get('kind', '?')} · {item.get('command') or '-'}{duration_text}"
+            )
+        if bool(payload.get("truncated")):
+            lines.append(
+                "Показаны последние записи; полный список: karox jobs --limit 100"
+                if not english
+                else "Showing recent entries; use karox jobs --limit 100 for more."
+            )
         return "\n".join(lines)
 
     if label == "/mcp":
@@ -3641,29 +3929,94 @@ if _HAS_TEXTUAL:
             Binding("down", "next_command", show=False, priority=True),
             Binding("tab", "complete_command", show=False, priority=True),
             Binding("escape", "dismiss_commands", show=False, priority=True),
+            # Windows Terminal often sends Ctrl+V as a key instead of Textual's
+            # Paste event. Read the local clipboard only after this explicit user
+            # gesture and feed it through the exact same compact-paste path.
+            Binding("ctrl+v", "paste_system_clipboard", show=False, priority=True),
+            Binding("ctrl+shift+v", "paste_system_clipboard", show=False, priority=True),
+            Binding("shift+insert", "paste_system_clipboard", show=False, priority=True),
+            # Windows Terminal normally owns Ctrl+V before Textual gets a key
+            # event. These application-level fallbacks are explicit user
+            # gestures and route through the same compact-paste implementation.
+            Binding("alt+v", "paste_system_clipboard", show=False, priority=True),
+            Binding("f8", "paste_system_clipboard", show=False, priority=True),
         ]
 
-        def _on_paste(self, event: Any) -> None:
-            """Keep a multi-line paste instead of throwing away all but line one.
+        # Windows Terminal may fail to emit bracketed-paste markers for a large
+        # clipboard payload. Then the paste arrives as a fast stream of ordinary
+        # Key events. Three matching characters inside a short window are enough
+        # to identify the stream without polling the clipboard during normal typing.
+        _RAW_PASTE_MIN_CHARS = 2_048
+        _RAW_PASTE_PROBE_CHARS = 3
+        _RAW_PASTE_PROBE_WINDOW = 0.12
+        _RAW_PASTE_IDLE_TIMEOUT = 0.75
 
-            Textual's single-line Input keeps ``splitlines()[0]`` and discards
-            the rest without saying so, which for a coding agent silently ate
-            the most common input there is: a pasted stack trace or diff. The
-            text is held whole and the composer shows a short marker for it,
-            which is also more readable than one enormous scrolling line.
+        @staticmethod
+        def _raw_paste_key_text(event: Any) -> str:
+            character = getattr(event, "character", None)
+            if isinstance(character, str) and character:
+                return character
+            key = str(getattr(event, "key", ""))
+            if key in {"enter", "ctrl+j"}:
+                return "\n"
+            if key == "tab":
+                return "\t"
+            return ""
+
+        def _consume_raw_paste_tail(self, text: str) -> bool:
+            """Consume one key that belongs to an already detected raw paste."""
+            tail = str(getattr(self, "_raw_paste_tail", ""))
+            if not tail or not text:
+                return False
+            now = time.monotonic()
+            last = float(getattr(self, "_raw_paste_last", 0.0) or 0.0)
+            if last and now - last > self._RAW_PASTE_IDLE_TIMEOUT:
+                self._raw_paste_tail = ""
+                return False
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            if not tail.startswith(normalized):
+                self._raw_paste_tail = ""
+                return False
+            self._raw_paste_tail = tail[len(normalized) :]
+            self._raw_paste_last = now
+            return True
+
+        def action_paste_system_clipboard(self) -> None:
+            """Paste from the local OS clipboard when the terminal sends only a key."""
+            handler = getattr(self.app, "_paste_system_clipboard_into_composer", None)
+            if handler is not None:
+                handler(self)
+
+        def delete(self, start: int, end: int) -> None:
+            """Delete text while treating pending-paste placeholders atomically.
+
+            Textual's normal Backspace/Delete actions all funnel through this
+            method. KaroX expands a deletion that touches one of its registered
+            paste placeholders to cover the whole placeholder, so a multi-KB
+            paste behaves like one editor element instead of thirty editable
+            label characters. Ordinary text still uses Input.delete unchanged.
             """
+            handler = getattr(self.app, "_expand_paste_element_delete_range", None)
+            if handler is not None:
+                try:
+                    start, end = handler(self, start, end)
+                except Exception:
+                    pass
+            super().delete(start, end)
+
+        def _on_paste(self, event: Any) -> None:
+            """Route terminal paste through the app's version-tolerant composer path.
+
+            Textual has delivered ``Paste`` at different points in the event path
+            across releases. Handling it only here made synthetic tests pass while
+            a real Windows Terminal paste could be delivered to the App instead.
+            """
+            handler = getattr(self.app, "_accept_composer_paste", None)
             text = getattr(event, "text", "")
-            if not isinstance(text, str) or not text:
+            if handler is None or not handler(self, text):
                 return
-            normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
-            if "\n" not in normalized:
-                return
-            register = getattr(self.app, "_register_pasted_block", None)
-            if register is None:
-                return
-            self.insert_text_at_cursor(register(normalized))
-            # Textual runs the handler from every class in the MRO, so without
-            # this the base Input would append line one after the marker.
+            # Once KaroX inserted the literal/marker, the base Input must not add
+            # it again when Textual continues through the handler MRO.
             event.prevent_default()
             event.stop()
 
@@ -4019,6 +4372,8 @@ if _HAS_TEXTUAL:
         #model-options { height: 1fr; border: round #4a4338;
           background: #1a1712; }
         #model-details { height: 3; color: #d4b676; margin-top: 1; }
+        #model-picker-buttons { height: 3; align-horizontal: right; }
+        #model-picker-buttons Button { margin-left: 1; }
         """
 
         def __init__(
@@ -4050,6 +4405,13 @@ if _HAS_TEXTUAL:
                 )
                 yield OptionList(id="model-options", markup=False)
                 yield Static("", id="model-details", markup=False)
+                with Horizontal(id="model-picker-buttons"):
+                    yield Button(self._label("Отмена", "Cancel"), id="model-picker-cancel")
+                    yield Button(
+                        self._label("Использовать модель", "Use model"),
+                        id="model-picker-apply",
+                        variant="primary",
+                    )
 
         def on_mount(self) -> None:
             self._render_models()
@@ -4078,6 +4440,10 @@ if _HAS_TEXTUAL:
                 model for model in self._models if query in model.model_id.casefold()
             ]
             self._render_models()
+
+        @on(Input.Submitted, "#model-search")
+        def model_search_submitted(self, _event: Input.Submitted) -> None:
+            self.action_choose()
 
         @on(OptionList.OptionHighlighted, "#model-options")
         def model_highlighted(self) -> None:
@@ -4133,6 +4499,13 @@ if _HAS_TEXTUAL:
 
         def action_cancel(self) -> None:
             self.dismiss(None)
+
+        @on(Button.Pressed)
+        def model_picker_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "model-picker-apply":
+                self.action_choose()
+            elif event.button.id == "model-picker-cancel":
+                self.action_cancel()
 
     class ProviderLimitsScreen(ModalScreen[Optional[tuple[str, str]]]):
         """Optional model limits live on their own small screen."""
@@ -4336,7 +4709,7 @@ if _HAS_TEXTUAL:
             # was renamed.
             Binding("f2", "advanced", "Дополнительные настройки", priority=True),
             Binding("f3", "limits", "Лимиты", priority=True),
-            Binding("f10", "save", "Проверить и сохранить", priority=True),
+            Binding("f10", "save", "Использовать и сохранить", priority=True),
             Binding("escape", "cancel", "Отмена", priority=True),
         ]
         DEFAULT_CSS = """
@@ -4379,6 +4752,7 @@ if _HAS_TEXTUAL:
         #provider-error.status-error { color: #e0a3a3; }
         #provider-buttons { height: 3; align-horizontal: right; }
         #provider-buttons Button { margin-left: 1; }
+        #provider-save.standard-auto-save { display: none; }
         """
 
         # B2. Which fields the standard path keeps out of sight, and the ids the
@@ -4486,8 +4860,8 @@ if _HAS_TEXTUAL:
                 )
                 yield Static(
                     self._label(
-                        "Ключ → модели → проверка   •   Tab — перейти   •   Enter — выбрать   •   Esc — назад",
-                        "Key → models → verify   •   Tab — move   •   Enter — choose   •   Esc — back",
+                        "Вставьте API-ключ и нажмите Enter. KaroX сохранит его безопасно и сразу покажет модели. Esc в списке моделей не отменит подключение.",
+                        "Paste the API key and press Enter. KaroX saves it securely and opens the model list. Esc in the model list does not undo the connection.",
                     ),
                     classes="hint",
                 )
@@ -4595,7 +4969,14 @@ if _HAS_TEXTUAL:
                     )
                     with Horizontal(id="provider-actions"):
                         yield Button(
-                            self._label("Найти модели", "Find models"),
+                            self._label(
+                                "Подключить"
+                                if self.preset is not None and self.existing is None
+                                else "Найти модели",
+                                "Connect"
+                                if self.preset is not None and self.existing is None
+                                else "Find models",
+                            ),
                             id="provider-discover",
                             variant="primary",
                         )
@@ -4675,10 +5056,15 @@ if _HAS_TEXTUAL:
                     )
                     yield Button(
                         self._label(
-                            "Проверить подключение",
-                            "Verify connection",
+                            "Использовать и сохранить",
+                            "Use and save",
                         ),
                         id="provider-save",
+                        classes=(
+                            "standard-auto-save"
+                            if self.preset is not None and self.existing is None
+                            else None
+                        ),
                         variant="success",
                         disabled=True,
                     )
@@ -4710,6 +5096,12 @@ if _HAS_TEXTUAL:
             target = "#provider-key" if self.preset is not None else "#provider-adapter"
             self.query_one(target).focus()
 
+        @on(Input.Submitted, "#provider-key")
+        def provider_key_submitted(self, _event: Input.Submitted) -> None:
+            """The obvious action after pasting a key is Connect, not a hidden F5."""
+
+            self.action_discover()
+
         def _show_manual_fields(self) -> None:
             self.app.push_screen(
                 ManualModelScreen(
@@ -4733,8 +5125,8 @@ if _HAS_TEXTUAL:
                 self._update_summary()
                 self._set_status(
                     self._label(
-                        "Модель введена вручную. Теперь проверьте подключение.",
-                        "Model entered manually. Now verify the connection.",
+                        "Модель введена вручную. Нажмите «Использовать и сохранить».",
+                        "Model entered manually. Choose 'Use and save'.",
                     ),
                     "info",
                 )
@@ -4925,14 +5317,12 @@ if _HAS_TEXTUAL:
             self._discovered_index = models.index(model)
             self._apply_discovered(model)
             self._render_discovered()
-            self._set_status(
-                self._label(
-                    "Модель выбрана. Теперь проверьте подключение.",
-                    "Model selected. Now verify the connection.",
-                ),
-                "success",
-            )
-            self.query_one("#provider-save", Button).focus()
+            # Choosing a discovered model is the user's explicit apply action.
+            # Do not make them discover a second hidden confirmation step: verify
+            # the key, persist it to the OS keyring, save the model, and activate
+            # it immediately. A failed probe leaves this screen open with the
+            # normal retry/error state.
+            self.action_save()
 
         def _setup_from_form(self, *, require_model: bool) -> ProviderSetup:
             def positive(field: str) -> Optional[int]:
@@ -5003,6 +5393,7 @@ if _HAS_TEXTUAL:
             def execute() -> None:
                 try:
                     result = _discover_models_result(setup)
+                    _save_provider_connection(setup, result)
                 except Exception as exc:
                     self.app.call_from_thread(self._discovery_failed, exc, setup)
                     return
@@ -5017,6 +5408,15 @@ if _HAS_TEXTUAL:
             self._discovered_models = models
             self._discovered_index = -1
             self.query_one("#provider-url", Input).value = result.base_url
+            key_input = self.query_one("#provider-key", Input)
+            key_input.value = ""
+            key_input.placeholder = self._label(
+                "Ключ сохранён в системном хранилище",
+                "Key saved in the system keyring",
+            )
+            self.query_one("#provider-discover", Button).label = self._label(
+                "Обновить модели", "Refresh models"
+            )
             self.query_one("#provider-model", Input).value = ""
             self.query_one("#provider-context", Input).value = ""
             self.query_one("#provider-output", Input).value = ""
@@ -5030,8 +5430,8 @@ if _HAS_TEXTUAL:
                 )
             self._set_status(
                 self._label(
-                    f"Найдено моделей: {len(models)}.{endpoint_note}",
-                    f"Found models: {len(models)}.{endpoint_note}",
+                    f"Подключено. Ключ сохранён безопасно. Найдено моделей: {len(models)}.{endpoint_note}",
+                    f"Connected. Key saved securely. Found models: {len(models)}.{endpoint_note}",
                 ),
                 "success" if models else "warning",
             )
@@ -5699,6 +6099,96 @@ if _HAS_TEXTUAL:
                 parts.append(extracted[0])
         return "\n".join(parts)
 
+    def _compact_number(value: int) -> str:
+        value = max(0, int(value))
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.1f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.1f}k"
+        return str(value)
+
+    def _compact_user_message(message: str, language: str) -> str:
+        """Keep the full prompt for the agent but show a CLI-style preview in chat."""
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n").strip()
+        lines = normalized.splitlines() or [normalized]
+        # The composer already turns a paste above 240 characters into an opaque
+        # marker. Keep the transcript on the same mental model even when text
+        # arrived through another path (resume, programmatic submit, terminal
+        # paste implementation): a long prompt is data for the agent, not a wall
+        # the user needs to read back at themselves.
+        if len(normalized) <= 240 and len(lines) <= 3:
+            return normalized
+        first = next((line.strip() for line in lines if line.strip()), "")
+        first = re.sub(r"\s+", " ", first)
+        if len(first) > 120:
+            first = first[:119].rstrip() + "…"
+        if language == "ru":
+            meta = f"промпт: {len(lines)} стр. · {_compact_number(len(normalized))} симв."
+        else:
+            meta = f"prompt: {len(lines)} lines · {_compact_number(len(normalized))} chars"
+        return f"{first}\n[ {meta} ]" if first else f"[ {meta} ]"
+
+    def _local_status_query_kind(task: str) -> str:
+        """Recognise tiny deterministic status questions that need no model call."""
+
+        normalized = re.sub(r"\s+", " ", str(task).strip()).casefold()
+        normalized = normalized.rstrip(" ?!.,:;…")
+        if not normalized or len(normalized) > 120:
+            return ""
+        folder_patterns = (
+            r"в какой папке ты работаешь",
+            r"где ты работаешь",
+            r"какая (?:у тебя )?рабочая папка",
+            r"какой (?:у тебя )?(?:проект|репозиторий)",
+            r"в каком (?:проекте|репозитории) ты работаешь",
+            r"(?:what|which) (?:working )?(?:folder|directory|project|repository)(?: are you (?:in|using|working in))?",
+            r"where are you working",
+        )
+        if any(re.fullmatch(pattern, normalized) for pattern in folder_patterns):
+            return "folder"
+        model_patterns = (
+            r"какая модель",
+            r"какую модель ты используешь",
+            r"на какой модели ты работаешь",
+            r"(?:what|which) model(?: are you using| are you on)?",
+        )
+        if any(re.fullmatch(pattern, normalized) for pattern in model_patterns):
+            return "model"
+        effort_patterns = (
+            r"какая глубина",
+            r"какой effort",
+            r"какой уровень усилий",
+            r"(?:what|which) (?:reasoning )?(?:effort|depth)",
+        )
+        if any(re.fullmatch(pattern, normalized) for pattern in effort_patterns):
+            return "effort"
+        return ""
+
+    def _compact_progress_text(message: str) -> str:
+        """A short visible preamble, never raw provider/internal reasoning."""
+        text = re.sub(r"\s+", " ", str(message).strip())
+        # A tool-using turn may return a paragraph of setup prose. In the chat it
+        # is a progress hint, not an answer. Prefer its first complete sentence
+        # and keep it glance-sized; the durable session record retains the full
+        # provider-authored text for technical inspection.
+        sentences = re.split(r"(?<=[.!?…])\s+", text, maxsplit=1)
+        if len(sentences) > 1 and len(sentences[0]) >= 24:
+            text = sentences[0]
+        if len(text) > 220:
+            text = text[:219].rstrip() + "…"
+        return text
+
+    def _assistant_message_width(markdown: str) -> int:
+        """Readable answer width in columns; the terminal may still clamp it smaller."""
+
+        lines = str(markdown).replace("\r", "").splitlines() or [str(markdown)]
+        longest = max((len(line.expandtabs(4)) for line in lines), default=0)
+        # Textual Markdown defaults to 1fr even under a width:auto class. An
+        # inline width wins that default; max-width:100% still reflows when the
+        # terminal is narrower. Roughly 90 visible columns is also a much easier
+        # reading measure than a 150-column answer card.
+        return max(16, min(96, longest + 8))
+
     class MessageBlock(Static):
         """One user message, notice or status line in the transcript.
 
@@ -5746,6 +6236,7 @@ if _HAS_TEXTUAL:
         def __init__(self, markdown: str, *, title: str = "", classes: str = "") -> None:
             super().__init__(markdown, classes=classes)
             self._border_title_text = title
+            self.styles.width = _assistant_message_width(markdown)
 
         def on_mount(self) -> None:
             if self._border_title_text:
@@ -5813,6 +6304,12 @@ if _HAS_TEXTUAL:
                 AssistantMessage(
                     markdown, title=title, classes="message message-assistant"
                 )
+            )
+
+        def add_progress(self, text: str) -> Any:
+            """A visible model preamble or verified run summary, not a final answer."""
+            return self._append(
+                MessageBlock(text, classes="message message-progress")
             )
 
         def add_notice(self, text: str, kind: str = "info") -> Any:
@@ -6030,7 +6527,29 @@ if _HAS_TEXTUAL:
             """
 
             try:
-                rows = sorted(self._store.summaries(), key=lambda row: row.session_id)
+                realtime = {row.session_id: row for row in self._store.summaries()}
+                repository = Path(self.app.repository).expanduser().resolve()
+                for record in SessionStore(session_dir()).list(include_archived=False):
+                    try:
+                        if Path(record.repository).expanduser().resolve() != repository:
+                            continue
+                    except OSError:
+                        continue
+                    title = record.name or record.task
+                    current = realtime.get(record.session_id)
+                    if current is not None:
+                        if title and current.title != title:
+                            realtime[record.session_id] = replace(current, title=title)
+                        continue
+                    realtime[record.session_id] = SessionSummary(
+                        session_id=record.session_id,
+                        title=title,
+                        access_profile=record.access_profile,
+                        status=record.status,
+                        changed_files=len(record.changed_files),
+                        primary_action=ACTION_RESUME,
+                    )
+                rows = sorted(realtime.values(), key=lambda row: row.session_id)
             except Exception:
                 return tuple(self._rows.values())
             self._overflow = max(len(rows) - self.MAX_ROWS, 0)
@@ -6730,11 +7249,6 @@ if _HAS_TEXTUAL:
         ENABLE_COMMAND_PALETTE = True
         BINDINGS = [
             Binding("ctrl+p", "command_palette", "Команды", show=False),
-            # Ctrl+M is not bindable in a real terminal: every terminal sends
-            # carriage return for it, so Textual can only see Enter. The model
-            # picker therefore lives on Ctrl+G, a key that arrives intact
-            # everywhere. Advertised in the welcome and the command palette.
-            Binding("ctrl+g", "model", "Модель", show=False),
             # No Ctrl+U binding: the composer Input owns ctrl+u for "delete to
             # the start of the line", and an app-level shortcut that only works
             # while the user is *not* typing is a trap. Usage & Cost stays on
@@ -6791,13 +7305,18 @@ if _HAS_TEXTUAL:
            anything whose render is not Content or Text, and a Panel is neither.
            `width: 1fr` also gives a message the whole conversation width, where a
            measured renderable took 37 columns of an available 116. */
-        .message { width: 1fr; border: round #4a4338; border-title-align: left;
+        .message { width: auto; max-width: 100%; border: round #4a4338; border-title-align: left;
           padding: 0 1; margin-bottom: 1; }
         /* An unframed line. A frame is a claim that something needs attention, so
            the welcome and ordinary status lines do not get one. */
         .message-line { border: none; padding: 0; margin-bottom: 0; }
         .message-user { border: round #8a7a55; }
         .message-assistant { border: round #8aab7e; }
+        /* Model preambles and run summaries are the CLI-style thinking/progress
+           surface. They are deliberately not answer cards: no box, no title and
+           no empty width around a short sentence. */
+        .message-progress { border: none; padding: 0 1; margin: 0 0 0 1;
+          color: #a99f8d; background: transparent; }
         .message-notice { border: round #c6a56b; }
         .notice-success { border: round #8aab7e; }
         .notice-warning { border: round #d4b676; }
@@ -6814,11 +7333,11 @@ if _HAS_TEXTUAL:
            is the contract stated where the layout engine can enforce it: even
            if a line escaped `_fit_activity_line`, it cannot eat the chat. */
         #activity { display: none; height: auto; min-height: 1; max-height: 2;
-          margin: 0 2; padding: 0 1; background: #1a1712;
-          border-left: thick #c6a56b; color: #d4b676; }
-        #activity.activity-success { border-left: thick #8aab7e; color: #b7c2b0; }
-        #activity.activity-error { border-left: thick #cf7c7c; color: #e0a3a3; }
-        #activity.activity-warning { border-left: thick #c3a86b; color: #d6c49a; }
+          margin: 0 2; padding: 0; background: transparent;
+          border: none; color: #d4b676; }
+        #activity.activity-success { color: #b7c2b0; }
+        #activity.activity-error { color: #e0a3a3; }
+        #activity.activity-warning { color: #d6c49a; }
         #command-menu { display: none; height: auto; max-height: 14; margin: 0 2;
           padding: 0 1; background: #191612; border: round #4a4338;
           color: #c6bca8; }
@@ -6894,6 +7413,10 @@ if _HAS_TEXTUAL:
             # What /compact produced and the next submission carries: a bounded,
             # redacted continuation preamble. Consumed exactly once on dispatch.
             self._continuation_context: Optional[str] = None
+            # Explicit resume/fork arms exactly one next submission to reuse the
+            # selected durable session. Ordinary prompts still create fresh task
+            # sessions, preserving the previous isolation default.
+            self._resume_next_task = bool(session_id)
             self._view_detach: Optional[Callable[[], None]] = None
             self._view_bus: Optional[EventBus] = None
             # Run identity, not session identity. A monotonic counter bumped by
@@ -6931,6 +7454,16 @@ if _HAS_TEXTUAL:
             # written to the conversation once each; the live group stays on
             # the activity line. Built lazily per run, None between runs.
             self._activity_group_stream: Any = None
+            # Once typed ToolCall events arrive for a session, provider_history
+            # remains the source of visible model text only. Replaying its tool
+            # calls as activity as well would draw every operation twice.
+            self._typed_activity_sessions: set[str] = set()
+            # Provider history is persisted per session, so its display cursor
+            # must be per session too. A single global integer can skip the first
+            # entries of a new short session after a long one, or replay old text
+            # when returning to an earlier session.
+            self._provider_history_seen: Dict[str, int] = {}
+            self._provider_history_fingerprints: Dict[str, Tuple[int, int]] = {}
             # Multi-line pastes held aside while the composer shows a short
             # marker for each. Pasting a stack trace or a diff is the most
             # common way a coding agent is handed context, and a one-line widget
@@ -6938,6 +7471,9 @@ if _HAS_TEXTUAL:
             # when the message is sent.
             self._pasted_blocks: "OrderedDict[str, str]" = OrderedDict()
             self._paste_counter = 0
+            # Frozen cleanup plans are offered to the human at most once. The
+            # model can create a plan but has no API that can mark it approved.
+            self._cleanup_plans_reviewed: set[str] = set()
             self.bridge_process: Optional[subprocess.Popen[str]] = None
             self.tunnel_process: Optional[subprocess.Popen[str]] = None
             self._tailscale_active = False
@@ -6965,8 +7501,35 @@ if _HAS_TEXTUAL:
             self.effort_level = _load_effort_level()
             # The agent stance from /mode, persisted exactly like the ladder.
             self.agent_mode = _load_agent_mode()
+            # Skills are repository-scoped and therefore stay in this TUI
+            # lifetime rather than global ui.json. A workspace switch clears
+            # them so a same-named Skill in another project is never inherited.
+            self.active_skill: Optional[str] = None
+            self._skill_permissions: Dict[str, Dict[str, str]] = {}
+            # One-shot image attachments for the next turn. Only repository-
+            # relative paths live in UI state; bytes are loaded inside the CLI
+            # run after the selected model's vision capability is verified.
+            self._pending_images: List[str] = []
+            # Disk deletion is two-phase. The model can freeze one exact plan;
+            # only this human-facing process can approve and apply it.
+            self._pending_cleanup_plan_data: Optional[Dict[str, Any]] = None
+            self._seen_cleanup_plans: set[str] = set()
+            self._cleanup_apply_busy = False
             self._last_assistant_content = ""
+            self._last_progress_block: Optional[MessageBlock] = None
+            self._progress_blocks_this_run = 0
+            # Provider-labeled reasoning summaries are public progress, not raw
+            # chain-of-thought. Fragments from one model step update one block.
+            self._reasoning_summary_step: Optional[int] = None
+            self._reasoning_summary_text = ""
+            self._reasoning_summary_block: Optional[MessageBlock] = None
+            self._phase_progress_seen: set[str] = set()
             self._task_started_at: Optional[float] = None
+            # Benchmark-facing usage is a delta over the current user task, not
+            # an all-time session total. The baseline is an event index so cache
+            # provenance can remain per-request (`cache 0` vs `cache —`).
+            self._usage_session_id: Optional[str] = None
+            self._usage_baseline: Dict[str, Any] = {}
 
         def compose(self) -> ComposeResult:
             # One permanent line of chrome. The brand block, the five status
@@ -7585,15 +8148,21 @@ if _HAS_TEXTUAL:
                 self._write_notice(self._risk_review_text(choice.session_id), "warning")
                 self._open_session_detail(choice.session_id, focus_risk=True)
                 return
-            # ``resume`` and ``open`` are the same act from the user's side: make
-            # this the session on screen and show what it is doing. Resuming the
-            # work itself stays an explicit task the person types, so nothing here
-            # starts an agent.
-            self.active_session = choice.session_id
-            self._history_seen = 0
-            self._history_fingerprint = None
-            self._refresh_status()
-            self._open_session_detail(choice.session_id)
+            if choice.action == ACTION_RESUME:
+                # Explicit Resume arms the composer: the next user message is
+                # appended to this durable session under its existing fencing and
+                # idempotency state.
+                self._resume_session(choice.session_id)
+                return
+            # Open is inspection-only. Looking at a completed session must not
+            # silently make the composer write into it.
+            if choice.action == ACTION_OPEN:
+                self.active_session = choice.session_id
+                self._resume_next_task = False
+                self._history_seen = 0
+                self._history_fingerprint = None
+                self._refresh_status()
+                self._open_session_detail(choice.session_id)
 
         def _risk_review_text(self, session_id: str) -> str:
             """Describe a pending confirmation without carrying its token.
@@ -7713,11 +8282,96 @@ if _HAS_TEXTUAL:
             # A new turn drops a selection left over from the previous one, so it
             # does not linger as a highlight over text the user has moved past.
             transcript.clear_selection()
-            transcript.add_user(message, title=self._label("Вы", "You"))
+            transcript.add_user(
+                _compact_user_message(message, self.language),
+                title=self._label("Вы", "You"),
+            )
 
         def _write_assistant(self, message: str) -> None:
             self._last_assistant_content = message
             self._transcript().add_assistant(message)
+
+        def _write_progress(self, message: str) -> None:
+            """Show bounded public progress without turning it into chat spam.
+
+            This is never hidden chain-of-thought. Inputs are either assistant
+            work notes the model intentionally made public, provider-labeled
+            reasoning summaries, or coarse observed phases such as editing,
+            checks, and browser validation. Keep the first two distinct anchors;
+            after that, update the third line in place so a long run stays alive
+            without pushing the actual answer behind a progress wall.
+            """
+
+            preview = _compact_progress_text(message)
+            if not preview or preview == getattr(self, "_last_progress_text", ""):
+                return
+            self._last_progress_text = preview
+            rendered = f"› {preview}"
+            if self._progress_blocks_this_run < 3:
+                block = self._transcript().add_progress(rendered)
+                self._last_progress_block = block
+                self._progress_blocks_this_run += 1
+                return
+            block = self._last_progress_block
+            if block is None:
+                block = self._transcript().add_progress(rendered)
+                self._last_progress_block = block
+                return
+            try:
+                block.update(Content(rendered))
+            except Exception:
+                self._last_progress_block = self._transcript().add_progress(rendered)
+
+        def _write_reasoning_summary_delta(self, step: int, delta: str) -> None:
+            """Stream one provider-labeled public reasoning summary in place.
+
+            ``reasoning.summary`` is an explicit high-level provider channel;
+            raw reasoning text never reaches this method. Fragments belonging to
+            one model step update a single progress row, while a new step may
+            start a new row under the same three-row progress budget.
+            """
+            if not isinstance(delta, str) or not delta:
+                return
+            if self._reasoning_summary_step != step:
+                self._reasoning_summary_step = step
+                self._reasoning_summary_text = ""
+                self._reasoning_summary_block = None
+            self._reasoning_summary_text += delta
+            preview = _compact_progress_text(self._reasoning_summary_text)
+            if not preview:
+                return
+            rendered = f"› {preview}"
+            block = self._reasoning_summary_block
+            if block is None:
+                if self._progress_blocks_this_run < 3:
+                    block = self._transcript().add_progress(rendered)
+                    self._progress_blocks_this_run += 1
+                else:
+                    block = self._last_progress_block
+                    if block is None:
+                        block = self._transcript().add_progress(rendered)
+                self._reasoning_summary_block = block
+                self._last_progress_block = block
+            try:
+                block.update(Content(rendered))
+            except Exception:
+                block = self._transcript().add_progress(rendered)
+                self._reasoning_summary_block = block
+                self._last_progress_block = block
+            self._last_progress_text = preview
+
+        def _write_phase_progress(self, kind: str) -> None:
+            """Persist one safe coding-CLI milestone for each major run phase."""
+
+            phase_kind = ACTIVITY_READING if kind == ACTIVITY_SEARCHING else kind
+            words = _ACTIVITY_MILESTONE_WORDS.get(phase_kind)
+            if words is None or phase_kind in self._phase_progress_seen:
+                return
+            self._phase_progress_seen.add(phase_kind)
+            text = words[1] if self.language == "en" else words[0]
+            # Observed milestones and model/provider summaries share one small
+            # rolling budget instead of building two independent progress walls.
+            self._write_progress(text)
 
         def _write_notice(self, message: str, kind: str = "info") -> None:
             self._transcript().add_notice(message, kind)
@@ -7734,6 +8388,9 @@ if _HAS_TEXTUAL:
                 # stale cache here would suppress the next real line.
                 self._activity_rendered = ""
                 return
+            # Dots are only a placeholder until the typed event stream can name
+            # a truthful action. Once it can, one progress indicator is enough.
+            self.query_one("#busy", LoadingIndicator).styles.display = "none"
             activity.styles.display = "block"
             activity.set_class(kind == "success", "activity-success")
             activity.set_class(kind == "error", "activity-error")
@@ -7741,7 +8398,7 @@ if _HAS_TEXTUAL:
             # changed nothing and answered from nothing -- gets its own colour
             # rather than borrowing one that would misreport it.
             activity.set_class(kind == "warning", "activity-warning")
-            activity.update(message)
+            activity.update("\n".join(f"› {line}" for line in message.splitlines()))
 
         def _label(self, russian: str, english: str) -> str:
             return english if self.language == "en" else russian
@@ -7824,14 +8481,12 @@ if _HAS_TEXTUAL:
                     model=model,
                     activity=self._header_activity_text(),
                     width=self._header_width(),
-                    effort=(
-                        self.effort_level
-                        if self.effort_level != AUTO_EFFORT
-                        else self.reasoning_effort or "auto"
-                    ),
+                    effort=self.effort_level,
                     mode=self.agent_mode,
                     economy=self.run_cost_profile == "economy",
                     context_note=self._context_warning(selected),
+                    usage=self._task_usage_text(),
+                    language=self.language,
                 )
             )
 
@@ -7909,6 +8564,64 @@ if _HAS_TEXTUAL:
             except Exception:
                 return {}
             return record.usage if isinstance(record.usage, dict) else {}
+
+        def _task_usage_text(self) -> str:
+            """Measured input/output/cache delta for the current user task."""
+
+            if not self._usage_session_id or self.active_session != self._usage_session_id:
+                return ""
+            current = self._session_usage()
+            baseline = self._usage_baseline
+
+            def number(source: Mapping[str, Any], *names: str) -> int:
+                for name in names:
+                    value = source.get(name)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        return value
+                return 0
+
+            requests = max(0, number(current, "requests") - number(baseline, "requests"))
+            if requests <= 0:
+                return ""
+            prompt = max(
+                0,
+                number(current, "prompt_tokens", "input_tokens")
+                - number(baseline, "prompt_tokens", "input_tokens"),
+            )
+            completion = max(
+                0,
+                number(current, "completion_tokens", "output_tokens")
+                - number(baseline, "completion_tokens", "output_tokens"),
+            )
+            cache_read = max(
+                0,
+                number(current, "cache_read_tokens")
+                - number(baseline, "cache_read_tokens"),
+            )
+            current_events = current.get("events")
+            baseline_events = baseline.get("events")
+            cache_reported = False
+            if isinstance(current_events, list) and isinstance(baseline_events, list):
+                recent_events = current_events[len(baseline_events) :]
+                cache_reported = any(
+                    isinstance(item, Mapping)
+                    and (
+                        item.get("cache_metrics_reported") is True
+                        or number(item, "cache_read_tokens") > 0
+                    )
+                    for item in recent_events
+                )
+            elif cache_read > 0:
+                # Legacy/session data without an event history can prove a cache
+                # hit only when the task delta itself is positive. A zero cannot
+                # distinguish "measured zero" from "provider did not report".
+                cache_reported = True
+            return _token_counter_text(
+                prompt,
+                completion,
+                cache_read,
+                cache_reported=cache_reported,
+            )
 
         def _last_prompt_tokens(self) -> Optional[int]:
             # Prompt size of the most recent request, recorded by the agent
@@ -8066,18 +8779,206 @@ if _HAS_TEXTUAL:
             ticker.update(doubled[start : start + width])
             self._sponsor_offset = (self._sponsor_offset + 1) % len(stream)
 
+        def _raw_paste_preview(self, text: str) -> str:
+            lines = max(1, len(text.splitlines()))
+            size = _compact_number(len(text))
+            return (
+                f"[вставка: {lines} стр. · {size} симв.…]"
+                if self.language == "ru"
+                else f"[pasting: {lines} lines · {size} chars…]"
+            )
+
+        def _start_raw_composer_capture(
+            self, composer: Input, *, origin: str, buffer: str
+        ) -> None:
+            """Start collecting a terminal paste that arrived as typed characters."""
+            self._composer_raw_capture_active = True
+            self._composer_raw_capture_origin = origin
+            self._composer_raw_capture_buffer = buffer
+            self._composer_raw_capture_last_at = time.monotonic()
+            target = origin + self._raw_paste_preview(buffer)
+            self._composer_raw_capture_target = target
+            composer.value = target
+            composer.cursor_position = len(target)
+            self._composer_last_value = target
+            self._composer_last_changed_at = time.monotonic()
+
+        def _finish_raw_composer_capture(self, composer: Input) -> str:
+            """Turn a provisional paste preview into a durable numbered marker."""
+            if not bool(getattr(self, "_composer_raw_capture_active", False)):
+                return composer.value
+            origin = str(getattr(self, "_composer_raw_capture_origin", ""))
+            buffer = str(getattr(self, "_composer_raw_capture_buffer", ""))
+            marker = self._register_pasted_block(buffer)
+            target = origin + marker
+            self._composer_raw_capture_active = False
+            self._composer_raw_capture_target = ""
+            self._composer_raw_capture_buffer = ""
+            composer.value = target
+            composer.cursor_position = len(target)
+            self._composer_last_value = target
+            self._composer_last_changed_at = time.monotonic()
+            return target
+
         @on(Input.Changed, "#composer")
         def composer_changed(self, event: Input.Changed) -> None:
-            self._update_command_menu(event.value)
+            composer = event.input
+            value = event.value
+            now = time.monotonic()
+
+            # Some Windows Terminal configurations deliver Ctrl+V as the raw
+            # control character 22 instead of a Textual Paste event. Treat that
+            # byte itself as the user's explicit paste gesture: remove the
+            # visible square and route through the same clipboard action used by
+            # F8/Alt+V. No clipboard polling happens outside this gesture.
+            control_v = chr(22)
+            if control_v in value:
+                cursor = max(0, int(getattr(composer, "cursor_position", len(value))))
+                before = value[:cursor]
+                removed_before = before.count(control_v)
+                cleaned = value.replace(control_v, "")
+                composer.value = cleaned
+                composer.cursor_position = max(0, cursor - removed_before)
+                self._composer_last_value = cleaned
+                self._composer_last_changed_at = now
+                composer.action_paste_system_clipboard()
+                return
+
+            expected_explicit = str(
+                getattr(self, "_composer_expected_explicit_paste_value", "")
+            )
+            if expected_explicit and value == expected_explicit:
+                self._composer_expected_explicit_paste_value = ""
+                self._composer_last_value = value
+                self._composer_last_changed_at = now
+                self._composer_burst_origin = value
+                self._composer_burst_started_at = 0.0
+                self._update_command_menu(value)
+                return
+
+            # Once a broken bracketed paste is recognised, keep the composer as
+            # one compact preview. Raw characters continue to arrive from the
+            # terminal; collect them into the hidden buffer and immediately put
+            # the preview back instead of letting thousands of characters flash.
+            if bool(getattr(self, "_composer_raw_capture_active", False)):
+                target = str(getattr(self, "_composer_raw_capture_target", ""))
+                if value == target:
+                    self._update_command_menu(value)
+                    return
+                if target and value.startswith(target):
+                    appended = value[len(target) :]
+                    if appended:
+                        buffer = str(getattr(self, "_composer_raw_capture_buffer", ""))
+                        buffer += appended
+                        self._composer_raw_capture_buffer = buffer
+                        self._composer_raw_capture_last_at = now
+                        origin = str(getattr(self, "_composer_raw_capture_origin", ""))
+                        target = origin + self._raw_paste_preview(buffer)
+                        self._composer_raw_capture_target = target
+                        composer.value = target
+                        composer.cursor_position = len(target)
+                        self._composer_last_value = target
+                        self._composer_last_changed_at = now
+                        self._update_command_menu(target)
+                        return
+                # A real edit that does not extend the preview means the paste
+                # stream is over and the user took control again. Finalise the
+                # captured text before allowing normal composer behaviour.
+                self._finish_raw_composer_capture(composer)
+                value = composer.value
+
+            # A real Textual Paste event has already been converted into its
+            # durable numbered marker by `_accept_composer_paste`. Do not mistake
+            # that one programmatic value change for a raw terminal burst.
+            if "[вставка #" in value or "[paste #" in value:
+                self._composer_last_value = value
+                self._composer_last_changed_at = now
+                self._composer_burst_origin = value
+                self._composer_burst_started_at = 0.0
+                self._update_command_menu(value)
+                return
+
+            previous = str(getattr(self, "_composer_last_value", ""))
+            previous_at = float(getattr(self, "_composer_last_changed_at", 0.0) or 0.0)
+            burst_origin = str(getattr(self, "_composer_burst_origin", previous))
+            burst_started = float(getattr(self, "_composer_burst_started_at", 0.0) or 0.0)
+
+            appended = ""
+            if value.startswith(previous) and len(value) > len(previous):
+                appended = value[len(previous) :]
+
+            fast_step = bool(previous_at and now - previous_at <= 0.08)
+            burst_events = int(getattr(self, "_composer_burst_events", 0) or 0)
+            if appended:
+                if not fast_step or not burst_started:
+                    burst_origin = previous
+                    burst_started = now
+                    burst_events = 1
+                    self._composer_burst_origin = burst_origin
+                    self._composer_burst_started_at = burst_started
+                else:
+                    burst_events += 1
+                self._composer_burst_events = burst_events
+                burst_text = value[len(burst_origin) :] if value.startswith(burst_origin) else appended
+                # Require at least two distinct Changed events. Programmatic UI
+                # assignments often replace the whole field in one event; the
+                # broken Windows paste path is a genuine stream of rapid events.
+                if (
+                    burst_events >= 2
+                    and len(burst_text) >= 12
+                    and now - burst_started <= 0.30
+                ):
+                    self._start_raw_composer_capture(
+                        composer, origin=burst_origin, buffer=burst_text
+                    )
+                    self._update_command_menu(composer.value)
+                    return
+            else:
+                self._composer_burst_origin = value
+                self._composer_burst_started_at = 0.0
+                self._composer_burst_events = 0
+
+            self._composer_last_value = value
+            self._composer_last_changed_at = now
+            self._update_command_menu(value)
 
         def _update_command_menu(self, value: str) -> None:
-            commands = _commands(self.language)
             query = value.strip().lower()
+            # A bare slash is the calm 12-command home surface. As soon as the
+            # user types a prefix, search the full human-facing catalog so KaroX
+            # features such as /map, /memory and /mission never feel deleted.
+            commands = (
+                _commands(self.language)
+                if query in {"", "/"}
+                else _discoverable_commands(self.language)
+            )
+            if query not in {"", "/"}:
+                commands = dict(commands)
+                with contextlib.suppress(Exception):
+                    from .user_commands import UserCommandStore
+
+                    for row in UserCommandStore().list(repository=self.repository):
+                        preview = " ".join(row.template.split())
+                        if len(preview) > 70:
+                            preview = preview[:69] + "…"
+                        commands[f"/{row.name}"] = self._label(
+                            f"пользовательская команда · {preview}",
+                            f"user command · {preview}",
+                        )
             matches = (
                 [name for name in commands if name.lower().startswith(query)]
                 if query.startswith("/")
                 else []
             )
+            # Progressive disclosure: when a short prefix points to exactly one
+            # everyday command, do not let advanced commands with the same prefix
+            # steal Enter. Typing further still reveals the advanced command
+            # (for example /con -> /connect, while /cont -> /context).
+            primary_matches = [
+                name for name in matches if name in VISIBLE_COMMANDS
+            ]
+            if len(primary_matches) == 1:
+                matches = primary_matches
             self._filtered_commands = matches
             self._command_index = min(self._command_index, max(0, len(matches) - 1))
             self._command_menu_open = bool(matches)
@@ -8130,9 +9031,172 @@ if _HAS_TEXTUAL:
             composer.clear()
             self._update_command_menu("")
 
+        def _restore_composer_focus_after_paste(self, composer: Input) -> None:
+            """Restore focus and collapse any stale selection after a paste.
+
+            Windows Terminal's large-paste confirmation can return focus with the
+            input's old selection still active. If KaroX only restores focus, the
+            first typed character replaces the whole paste placeholder. Collapse
+            selection to the current cursor every time focus is restored so typing
+            continues *after* the paste element, like a normal coding CLI.
+            """
+
+            def _focus() -> None:
+                try:
+                    if not composer.disabled:
+                        composer.focus()
+                    position = max(
+                        0,
+                        min(
+                            len(str(composer.value)),
+                            int(getattr(composer, "cursor_position", len(str(composer.value)))),
+                        ),
+                    )
+                    composer.selection = Selection(position, position)
+                except Exception:
+                    pass
+
+            _focus()
+            try:
+                self.call_after_refresh(_focus)
+            except Exception:
+                pass
+            try:
+                self.set_timer(0.05, _focus)
+            except Exception:
+                pass
+
+        def _paste_system_clipboard_into_composer(self, composer: Input) -> bool:
+            """Read the OS clipboard on an explicit gesture and place it in the composer.
+
+            Keep this app-level so /paste and keyboard bindings exercise the exact
+            same production path. Fail visibly instead of silently doing nothing.
+            """
+            try:
+                from . import clipboard as _clipboard
+
+                text = _clipboard.read_text()
+            except Exception:
+                text = None
+            if not text:
+                self._write_notice(
+                    self._label(
+                        "Буфер обмена пуст или недоступен.",
+                        "Clipboard is empty or unavailable.",
+                    ),
+                    "error",
+                )
+                self._restore_composer_focus_after_paste(composer)
+                return False
+            accepted = self._accept_composer_paste(composer, text)
+            self._restore_composer_focus_after_paste(composer)
+            return accepted
+
+        def _accept_composer_paste(self, composer: Input, text: Any) -> bool:
+            """Insert one paste without relying on Textual's cursor insertion path.
+
+            Real Windows Terminal sessions proved that ``insert_text_at_cursor`` can
+            succeed in the test harness while leaving the live composer visually
+            unchanged.  Build the new value ourselves instead: one deterministic
+            assignment is easy to reason about, works for terminal paste, F8/Alt+V
+            and ``/paste``, and still preserves text on either side of the cursor.
+            """
+            if not isinstance(text, str) or not text:
+                return False
+            literal = text
+            if text.endswith("\r\n") and "\n" not in text[:-2] and "\r" not in text[:-2]:
+                literal = text[:-2]
+            elif text.endswith(("\n", "\r")) and "\n" not in text[:-1] and "\r" not in text[:-1]:
+                literal = text[:-1]
+            inserted = (
+                self._register_pasted_block(text)
+                if "\n" in literal or "\r" in literal or len(literal) > 240
+                else literal
+            )
+            current = str(composer.value)
+            cursor = max(0, min(len(current), int(getattr(composer, "cursor_position", len(current)))))
+            target = current[:cursor] + inserted + current[cursor:]
+            composer.value = target
+            paste_end = cursor + len(inserted)
+            composer.cursor_position = paste_end
+            composer.selection = Selection(paste_end, paste_end)
+            self._composer_expected_explicit_paste_value = target
+            self._composer_last_value = target
+            self._composer_last_changed_at = time.monotonic()
+            return True
+
+        def on_paste(self, event: events.Paste) -> None:
+            """App-targeted half of the cross-version terminal paste boundary.
+
+            Windows Terminal's large-paste confirmation temporarily moves focus
+            away from the composer *before* it forwards the bracketed Paste
+            event. Requiring ``composer.has_focus`` here therefore drops the
+            confirmed payload. Accept it whenever the composer belongs to the
+            currently active screen; a real KaroX modal still owns a different
+            screen and remains isolated from the chat composer.
+            """
+            try:
+                composer = self.query_one("#composer", Input)
+            except Exception:
+                return
+            try:
+                if composer.screen is not self.screen:
+                    return
+            except Exception:
+                if not composer.has_focus:
+                    return
+            if not self._accept_composer_paste(composer, getattr(event, "text", "")):
+                return
+            self._restore_composer_focus_after_paste(composer)
+            event.prevent_default()
+            event.stop()
+
+        def _expand_paste_element_delete_range(
+            self, composer: Input, start: int, end: int
+        ) -> Tuple[int, int]:
+            """Expand an editor deletion to whole pending-paste placeholders.
+
+            Large pastes are stored out of band in ``_pasted_blocks``. The text
+            visible in the one-line composer is therefore only an element label,
+            not user content. If Backspace, Delete, Ctrl+W, or a selection clips
+            any part of such a label, remove the complete label and its backing
+            payload in the same edit transaction.
+            """
+            value = str(composer.value)
+            left, right = sorted((max(0, int(start)), min(len(value), int(end))))
+            if left == right or not self._pasted_blocks:
+                return left, right
+
+            removed: set[str] = set()
+            changed = True
+            while changed:
+                changed = False
+                for marker in list(self._pasted_blocks):
+                    marker_start = value.find(marker)
+                    if marker_start < 0:
+                        continue
+                    marker_end = marker_start + len(marker)
+                    if left < marker_end and right > marker_start:
+                        new_left = min(left, marker_start)
+                        new_right = max(right, marker_end)
+                        if (new_left, new_right) != (left, right):
+                            left, right = new_left, new_right
+                            changed = True
+                        removed.add(marker)
+
+            for marker in removed:
+                self._pasted_blocks.pop(marker, None)
+            return left, right
+
         def _register_pasted_block(self, text: str) -> str:
             self._paste_counter += 1
-            marker = f"[paste #{self._paste_counter}: {len(text.splitlines())} lines]"
+            lines = max(1, len(text.splitlines()))
+            size = _compact_number(len(text))
+            marker = (
+                f"[вставка #{self._paste_counter}: {lines} стр. · {size} симв.]"
+                if self.language == "ru"
+                else f"[paste #{self._paste_counter}: {lines} lines · {size} chars]"
+            )
             self._pasted_blocks[marker] = text
             # A composer that is cleared without sending would otherwise hold
             # every paste of the session in memory.
@@ -8141,13 +9205,78 @@ if _HAS_TEXTUAL:
             return marker
 
         def _expand_pasted_blocks(self, value: str) -> str:
-            for marker, text in self._pasted_blocks.items():
+            for marker, text in list(self._pasted_blocks.items()):
+                if marker not in value:
+                    continue
                 value = value.replace(marker, text)
+                self._pasted_blocks.pop(marker, None)
             return value
 
         @on(Input.Submitted, "#composer")
         def input_submitted(self, event: Input.Submitted) -> None:
-            value = self._expand_pasted_blocks(event.value).strip()
+            composer = event.input
+            now = time.monotonic()
+
+            if bool(getattr(self, "_composer_raw_capture_active", False)):
+                last_at = float(
+                    getattr(self, "_composer_raw_capture_last_at", 0.0) or 0.0
+                )
+                # Enter arriving essentially in the same terminal burst is pasted
+                # content, not the user's submit gesture. Human Enter after a
+                # paste is orders of magnitude slower and falls through below.
+                if last_at and now - last_at <= 0.15:
+                    buffer = str(getattr(self, "_composer_raw_capture_buffer", ""))
+                    buffer += "\n"
+                    self._composer_raw_capture_buffer = buffer
+                    self._composer_raw_capture_last_at = now
+                    origin = str(getattr(self, "_composer_raw_capture_origin", ""))
+                    target = origin + self._raw_paste_preview(buffer)
+                    self._composer_raw_capture_target = target
+                    composer.value = target
+                    composer.cursor_position = len(target)
+                    self._composer_last_value = target
+                    self._composer_last_changed_at = now
+                    self._update_command_menu(target)
+                    return
+                value = self._finish_raw_composer_capture(composer)
+            else:
+                value = event.value
+                # A raw multiline paste may have a very short first line and hit
+                # Enter before the 12-character burst threshold. A near-immediate
+                # submit after a machine-speed burst is therefore treated as the
+                # first pasted newline instead of dispatching a partial task.
+                last_changed = float(
+                    getattr(self, "_composer_last_changed_at", 0.0) or 0.0
+                )
+                burst_started = float(
+                    getattr(self, "_composer_burst_started_at", 0.0) or 0.0
+                )
+                origin = str(getattr(self, "_composer_burst_origin", ""))
+                if (
+                    value
+                    and last_changed
+                    and burst_started
+                    and now - last_changed <= 0.15
+                    and now - burst_started <= 0.30
+                    and int(getattr(self, "_composer_burst_events", 0) or 0) >= 2
+                    and value.startswith(origin)
+                    and len(value) > len(origin)
+                ):
+                    buffer = value[len(origin) :] + "\n"
+                    self._start_raw_composer_capture(
+                        composer, origin=origin, buffer=buffer
+                    )
+                    self._update_command_menu(composer.value)
+                    return
+
+            # Typed chat keeps the familiar trim behaviour, but an out-of-band
+            # paste is user-supplied source/context and must round-trip exactly.
+            # Detect the marker before expansion because `_expand_pasted_blocks`
+            # consumes it from the temporary store.
+            had_paste = any(marker in value for marker in self._pasted_blocks)
+            value = self._expand_pasted_blocks(value)
+            if not had_paste:
+                value = value.strip()
             if self._command_menu_open and self._filtered_commands:
                 selected = self._filtered_commands[self._command_index]
                 insertion = self._command_insertion(selected)
@@ -8179,8 +9308,8 @@ if _HAS_TEXTUAL:
                 elif requested:
                     self._write_notice(
                         self._label(
-                            "Формат: /model, /model auto или /model refresh",
-                            "Usage: /model, /model auto, or /model refresh",
+                            "Формат: /models, /models auto или /models refresh",
+                            "Usage: /models, /models auto, or /models refresh",
                         ),
                         "error",
                     )
@@ -8189,7 +9318,19 @@ if _HAS_TEXTUAL:
             elif command == "/usage":
                 self.action_usage()
             elif command == "/economy":
-                self._economy_status_command()
+                requested = argument.strip().casefold()
+                if requested in {"", "summary"}:
+                    self._economy_status_command(verbose=False)
+                elif requested in {"verbose", "details", "full"}:
+                    self._economy_status_command(verbose=True)
+                else:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /economy или /economy verbose",
+                            "Usage: /economy or /economy verbose",
+                        ),
+                        "error",
+                    )
             elif command == "/cost":
                 requested = argument.strip().casefold()
                 if not requested:
@@ -8405,10 +9546,10 @@ if _HAS_TEXTUAL:
             elif command == "/map":
                 requested = argument.strip().lower()
                 usage = self._label(
-                    "Формат: /map [status|preview [уровень]|refresh|"
-                    "low|medium|high|extra-high|ultra]",
-                    "Usage: /map [status|preview [level]|refresh|"
-                    "low|medium|high|extra-high|ultra]",
+                    "KaroX использует карту автоматически. /map refresh — обновить · "
+                    "/map preview — оценить · /map details — технические детали",
+                    "KaroX uses the map automatically. /map refresh — update · "
+                    "/map preview — estimate · /map details — technical details",
                 )
                 # Imported here, not at module top: the map service pulls the
                 # repository-context engine, and TUI startup must not pay for
@@ -8423,7 +9564,7 @@ if _HAS_TEXTUAL:
 
                 parts = requested.split()
                 action = parts[0] if parts else "status"
-                if action == "status":
+                if action in {"status", "details"}:
                     try:
                         status = MapService(self.repository).status()
                     except Exception as exc:
@@ -8431,13 +9572,26 @@ if _HAS_TEXTUAL:
                             f"Map status failed: {type(exc).__name__}", "error"
                         )
                     else:
+                        rendered = render_status(
+                            status,
+                            self.language,
+                            details=action == "details",
+                        )
                         self._write(
-                            render_status(status, self.language) + f"\n{usage}"
+                            rendered
+                            if action == "details"
+                            else rendered + f"\n{usage}"
                         )
                 elif action == "preview":
+                    preview_args = parts[1:]
+                    preview_details = "details" in preview_args
+                    level_args = [item for item in preview_args if item != "details"]
+                    if len(level_args) > 1:
+                        self._write_notice(usage, "error")
+                        return
                     raw_level = (
-                        parts[1]
-                        if len(parts) > 1
+                        level_args[0]
+                        if level_args
                         else default_map_level(self.effort_level)
                     )
                     try:
@@ -8453,7 +9607,13 @@ if _HAS_TEXTUAL:
                                 "error",
                             )
                         else:
-                            self._write(render_preview(preview, self.language))
+                            self._write(
+                                render_preview(
+                                    preview,
+                                    self.language,
+                                    details=preview_details,
+                                )
+                            )
                 else:
                     if action == "refresh":
                         try:
@@ -8508,19 +9668,17 @@ if _HAS_TEXTUAL:
                                         / 1000,
                                         1,
                                     )
-                                    kind = (
-                                        "warm" if state.get("warm") else "cold"
-                                    )
                                     self.call_from_thread(
                                         self._write_notice,
                                         self._label(
-                                            f"Карта готова: уровень {level}, "
-                                            f"файлов "
-                                            f"{state.get('files_scanned')}, "
-                                            f"{seconds} с ({kind}).",
-                                            f"Map ready: level {level}, "
-                                            f"{state.get('files_scanned')} "
-                                            f"files, {seconds}s ({kind}).",
+                                            f"Карта готова: {level} · "
+                                            f"{state.get('files_scanned')} файлов · "
+                                            f"{seconds} с. Теперь просто опишите задачу — "
+                                            "KaroX будет использовать карту автоматически.",
+                                            f"Map ready: {level} · "
+                                            f"{state.get('files_scanned')} files · "
+                                            f"{seconds}s. Just describe the task — KaroX "
+                                            "will use the map automatically.",
                                         ),
                                         "success",
                                     )
@@ -8531,17 +9689,16 @@ if _HAS_TEXTUAL:
                                 exclusive=True,
                                 group="map",
                             )
+            elif command == "/review":
+                self._submit_review(argument.strip())
             elif command == "/mode":
                 requested = argument.strip()
                 usage = self._label(
-                    "Формат: /mode build|plan|ideate",
-                    "Usage: /mode build|plan|ideate",
+                    "Откройте /mode для выбора · быстро: /mode build|plan|ideate",
+                    "Open /mode to choose · quick form: /mode build|plan|ideate",
                 )
                 if not requested:
-                    self._write(
-                        f"Mode: [#d4b676]{self.agent_mode}[/]. "
-                        f"{mode_summary(self.agent_mode, self.language)} {usage}"
-                    )
+                    self.action_mode()
                 else:
                     try:
                         mode = normalize_mode(requested)
@@ -8551,40 +9708,35 @@ if _HAS_TEXTUAL:
                         # The explicit command is the user gate: a mode never
                         # changes silently, and /mode build is the transition
                         # that re-enables production mutation.
-                        previous = self.agent_mode
-                        self.agent_mode = mode
-                        _save_agent_mode(mode)
-                        self._refresh_status()
-                        notice = mode_summary(mode, self.language)
-                        if previous != mode and mode == DEFAULT_MODE:
-                            notice += self._label(
-                                " Изменения кода снова идут по обычной политике.",
-                                " Production-code changes follow the normal"
-                                " policy again.",
-                            )
-                        self._write_notice(notice, "success")
+                        self._apply_agent_mode(mode)
             elif command == "/effort":
                 requested = argument.strip()
                 usage = self._label(
-                    "Формат: /effort auto|low|medium|high|extra-high|ultra",
-                    "Usage: /effort auto|low|medium|high|extra-high|ultra",
+                    "Откройте /effort для выбора · /effort details [уровень] — точные бюджеты",
+                    "Open /effort to choose · /effort details [level] — exact budgets",
                 )
+                parts = requested.split()
                 if not requested:
-                    if self.effort_level == AUTO_EFFORT:
-                        detail = self._label(
-                            "AUTO выбирает уровень по сигналам задачи: "
-                            "названные файлы, зависимости карты, churn, "
-                            "риск, режим. Уровень и причины - в отчёте.",
-                            "AUTO picks the level from task signals: named "
-                            "files, map dependency breadth, churn, risk, "
-                            "and mode. The run reports the level and why.",
-                        )
+                    self.action_effort()
+                elif parts and parts[0].casefold() == "details":
+                    if len(parts) > 2:
+                        self._write_notice(usage, "error")
                     else:
-                        detail = effort_summary(self.effort_level, self.language)
-                    self._write(
-                        f"Effort: [#d4b676]{self.effort_level}[/]. "
-                        f"{detail} {usage}"
-                    )
+                        raw_level = parts[1] if len(parts) == 2 else self.effort_level
+                        try:
+                            level = normalize_effort(raw_level)
+                        except ValueError:
+                            self._write_notice(usage, "error")
+                        else:
+                            if level == AUTO_EFFORT:
+                                self._write(
+                                    self._label(
+                                        "AUTO не имеет одного фиксированного бюджета: он выбирает уровень для каждой задачи. Укажите уровень, например /effort details ultra.",
+                                        "AUTO has no single fixed budget: it resolves a level for each task. Name a level, for example /effort details ultra.",
+                                    )
+                                )
+                            else:
+                                self._write(effort_summary(level, self.language))
                 else:
                     try:
                         level = normalize_effort(requested)
@@ -8594,32 +9746,34 @@ if _HAS_TEXTUAL:
                         self.effort_level = level
                         _save_effort_level(level)
                         self._refresh_status()
-                        if level == AUTO_EFFORT:
-                            notice = self._label(
-                                "Effort AUTO включён: уровень выбирается "
-                                "по сигналам задачи при отправке.",
-                                "Effort AUTO enabled: the level is resolved "
-                                "from task signals at submission.",
-                            )
-                        else:
-                            notice = effort_summary(level, self.language)
-                        self._write_notice(notice, "success")
+                        self._write_notice(
+                            effort_user_summary(level, self.language), "success"
+                        )
+            elif command == "/permissions":
+                self._permissions_command(argument.strip())
+            elif command == "/worktrees":
+                self._worktrees_command(argument.strip())
+            elif command == "/skills":
+                self._skills_command(argument.strip())
+            elif command == "/packs":
+                self._packs_command(argument.strip())
+            elif command == "/commands":
+                self._commands_command(argument.strip())
             elif command == "/status":
                 # Honest subset only: rows appear here as their subsystems
                 # become real. No placeholder "Map: n/a" noise.
+                show_details = argument.strip().casefold() in {
+                    "details", "detail", "full", "all", "подробно", "все"
+                }
                 selected = _selected_model()
                 model = (
                     f"{selected.provider_id}/{selected.model_id}"
                     if selected is not None
                     else _TEXT[self.language]["not_configured"]
                 )
-                if self.effort_level == AUTO_EFFORT:
-                    effort_note = self._label(
-                        "AUTO: уровень выбирается по сигналам задачи.",
-                        "AUTO: the level is resolved from task signals.",
-                    )
-                else:
-                    effort_note = effort_summary(self.effort_level, self.language)
+                effort_note = effort_user_summary(
+                    self.effort_level, self.language
+                )
                 if self.agent_busy and self.active_session:
                     task_state = self._label(
                         f"выполняется ({self.active_session})",
@@ -8627,10 +9781,6 @@ if _HAS_TEXTUAL:
                     )
                 else:
                     task_state = self._label("простаивает", "idle")
-                bridge_state = self.public_endpoint or _TEXT[self.language]["off"]
-                from .build_identity import build_identity
-
-                identity = build_identity()
                 rows = [
                     (self._label("Проект", "Project"), str(self.repository)),
                     (self._label("Модель", "Model"), model),
@@ -8645,20 +9795,35 @@ if _HAS_TEXTUAL:
                         self.run_cost_profile,
                     ),
                     (self._label("Задача", "Task"), task_state),
-                    (self._label("Мост", "Bridge"), bridge_state),
-                    (
-                        self._label("Сборка", "Build"),
-                        identity.summary(),
-                    ),
-                    (self._label("Код", "Code"), identity.package_path),
                 ]
-                if self.reasoning_effort:
-                    # After Effort: the Mode row above shifted the list by one.
+                if show_details:
+                    from .build_identity import build_identity
+
+                    identity = build_identity()
+                    rows.extend(
+                        [
+                            (
+                                self._label("Мост", "Bridge"),
+                                self.public_endpoint or _TEXT[self.language]["off"],
+                            ),
+                            (self._label("Сборка", "Build"), identity.summary()),
+                            (self._label("Код", "Code"), identity.package_path),
+                        ]
+                    )
+                if self.active_skill:
                     rows.insert(
                         4,
                         (
-                            self._label("Провайдер-хинт", "Provider hint"),
-                            self.reasoning_effort,
+                            self._label("Skill", "Skill"),
+                            self.active_skill,
+                        ),
+                    )
+                if self._pending_images:
+                    rows.insert(
+                        5,
+                        (
+                            self._label("Вложения", "Attachments"),
+                            f"{len(self._pending_images)} → next turn",
                         ),
                     )
                 lines = [f"[bold #e0dccc]{self._label('Статус', 'Status')}[/]"]
@@ -8667,12 +9832,42 @@ if _HAS_TEXTUAL:
                     for name, value in rows
                 )
                 self._write("\n".join(lines))
+            elif command == "/orchestrate":
+                self._orchestrate_command(argument.strip())
+            elif command == "/agents":
+                self._agents_command(argument.strip())
+            elif command == "/mission":
+                self._mission_command(argument.strip())
+            elif command == "/paste":
+                composer = self.query_one("#composer", CommandInput)
+                # Defer the clipboard edit until the Submitted event that invoked
+                # /paste has completely unwound. Otherwise Textual can finish the
+                # same Enter event after this handler and overwrite the marker or
+                # move focus again.
+                self.call_after_refresh(
+                    lambda: self._paste_system_clipboard_into_composer(composer)
+                )
             elif command == "/help":
+                show_all = argument.strip().casefold() in {"all", "все"}
+                commands = (
+                    _discoverable_commands(self.language)
+                    if show_all
+                    else _commands(self.language)
+                )
                 lines = [f"[bold #e0dccc]{_TEXT[self.language]['commands']}[/]"]
                 lines.extend(
                     f"  [#d4b676]{escape(name)}[/]  [dim]{escape(description)}[/]"
-                    for name, description in _commands(self.language).items()
+                    for name, description in commands.items()
                 )
+                if not show_all:
+                    lines.append(
+                        "  [dim]"
+                        + self._label(
+                            "/help all — все пользовательские команды; вводите префикс вроде /m для поиска.",
+                            "/help all — every user command; type a prefix such as /m to search.",
+                        )
+                        + "[/]"
+                    )
                 self._write("\n".join(lines))
             elif command in {"/connect", "/setup"}:
                 # The single connection entry point. Not the legacy api/web/both
@@ -8687,13 +9882,7 @@ if _HAS_TEXTUAL:
             elif command == "/browser":
                 self.action_session_browser()
             elif command == "/sessions":
-                # Phase 2.3: /sessions opens the compact Session Browser by
-                # default. The verbose text renderer stays available via
-                # --verbose or /session-log for diagnostics.
-                if argument.strip() == "--verbose":
-                    self._run_inspection(_BACKEND_SLASH[command], command)
-                else:
-                    self.action_session_browser()
+                self._sessions_command(argument.strip())
             elif command == "/session-log":
                 self._run_inspection(["session", "list", "--json"], "/sessions")
             elif command == "/ask":
@@ -8725,6 +9914,8 @@ if _HAS_TEXTUAL:
                     )
                 else:
                     self._set_sponsors_visible(not self.sponsors_visible)
+            elif command == "/mcp":
+                self._open_connections(CONNECT_FOCUS_CLIENTS)
             elif command == "/bridge":
                 if argument.strip() == "stop":
                     # A real action, not a screen, so it keeps working verbatim.
@@ -8737,6 +9928,22 @@ if _HAS_TEXTUAL:
                 self._start_new_task()
             elif command == "/resume":
                 self._resume_session(argument.strip())
+            elif command == "/fork":
+                self._fork_session(argument.strip())
+            elif command == "/checkpoint":
+                self._checkpoint_command(argument.strip())
+            elif command == "/undo":
+                self._undo_command(argument.strip())
+            elif command == "/diff":
+                self._diff_command(argument.strip())
+            elif command == "/init":
+                self._init_command(argument.strip())
+            elif command == "/context":
+                self._context_command(argument.strip())
+            elif command == "/diagnostics":
+                self._diagnostics_command(argument.strip())
+            elif command == "/attach":
+                self._attach_command(argument.strip())
             elif command == "/compact":
                 self._compact_conversation()
             elif command == "/verify":
@@ -8762,6 +9969,8 @@ if _HAS_TEXTUAL:
                     )
             elif command in _BACKEND_SLASH:
                 self._run_inspection(_BACKEND_SLASH[command], command)
+            elif self._run_user_command(command, argument):
+                return
             else:
                 message = _TEXT[self.language]["unknown"].format(
                     command=escape(command)
@@ -8770,6 +9979,1370 @@ if _HAS_TEXTUAL:
                 if suggestion:
                     message += " " + suggestion
                 self._write(f"[#e0a3a3]{message}[/]")
+
+        def _skills_command(self, argument: str = "") -> None:
+            """Discover and select repository-scoped, capability-declared Skills."""
+
+            from .skills import SkillCatalog, SkillError, SkillPermission
+
+            try:
+                catalog = SkillCatalog(self.repository)
+                discovered = {item.name: item for item in catalog.discover()}
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+
+            raw = argument.strip()
+            try:
+                parts = shlex.split(raw) if raw else []
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            if not parts or parts[0].casefold() in {"list", "ls"}:
+                lines = [
+                    f"[bold #e0dccc]{self._label('Skills', 'Skills')}[/]"
+                ]
+                if not discovered:
+                    lines.append(
+                        "  "
+                        + self._label(
+                            "Не найдено Skills в .karox/.agents/.claude или глобальном каталоге.",
+                            "No Skills found in .karox/.agents/.claude or the global catalog.",
+                        )
+                    )
+                for item in discovered.values():
+                    marker = "✓" if item.name == self.active_skill else " "
+                    capabilities = ", ".join(
+                        capability.value for capability in item.requested_capabilities
+                    ) or self._label("без дополнительных прав", "no extra permissions")
+                    description = " ".join(item.description.split())
+                    if len(description) > 90:
+                        description = description[:89] + "…"
+                    lines.append(
+                        f"  {marker} [#d4b676]{escape(item.name)}[/] @{escape(item.version)} · "
+                        f"{escape(capabilities)}"
+                        + (f" · [dim]{escape(description)}[/]" if description else "")
+                    )
+                rejected = [row for row in catalog.diagnostics if row.status == "rejected"]
+                if rejected:
+                    lines.append(
+                        "  [dim]"
+                        + self._label(
+                            f"Отклонено небезопасных/битых Skill: {len(rejected)}. Подробности: /skills diagnostics",
+                            f"Rejected unsafe/broken Skills: {len(rejected)}. Details: /skills diagnostics",
+                        )
+                        + "[/]"
+                    )
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "/skills use NAME · off · permissions NAME · allow|ask|deny NAME CAPABILITY",
+                        "/skills use NAME · off · permissions NAME · allow|ask|deny NAME CAPABILITY",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+
+            action = parts[0].casefold()
+            if action in {"off", "none", "disable"}:
+                self.active_skill = None
+                self._write_notice(
+                    self._label("Skill выключен.", "Skill disabled."), "success"
+                )
+                return
+            if action == "diagnostics":
+                rows = catalog.diagnostics
+                if not rows:
+                    self._write_notice(
+                        self._label("Диагностика Skills чистая.", "Skill diagnostics are clean."),
+                        "success",
+                    )
+                    return
+                lines = [f"[bold #e0dccc]{self._label('Диагностика Skills', 'Skill diagnostics')}[/]"]
+                for row in rows[:40]:
+                    lines.append(
+                        f"  {escape(row.status)} · {escape(row.source_kind)} · "
+                        f"{escape(row.name or Path(row.path).name)} · {escape(row.reason[:220])}"
+                    )
+                self._write("\n".join(lines))
+                return
+            if action == "use":
+                if len(parts) != 2:
+                    self._write_notice(
+                        self._label("Формат: /skills use NAME", "Usage: /skills use NAME"),
+                        "warning",
+                    )
+                    return
+                name = parts[1]
+                try:
+                    metadata = catalog.get(name)
+                    # Loading now proves referenced files are still confined and
+                    # unchanged since discovery; the run will load again before use.
+                    catalog.load(name)
+                except SkillError as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self.active_skill = metadata.name
+                self._skill_permissions.setdefault(metadata.name, {})
+                requested = ", ".join(
+                    capability.value for capability in metadata.requested_capabilities
+                ) or self._label("нет", "none")
+                self._write_notice(
+                    self._label(
+                        f"Skill {metadata.name} выбран. Запрошенные права: {requested}. Неуказанные решения = ask.",
+                        f"Skill {metadata.name} selected. Requested permissions: {requested}. Unset decisions default to ask.",
+                    ),
+                    "success",
+                )
+                return
+            if action == "permissions":
+                name = parts[1] if len(parts) == 2 else self.active_skill
+                if not name or len(parts) > 2:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /skills permissions NAME",
+                            "Usage: /skills permissions NAME",
+                        ),
+                        "warning",
+                    )
+                    return
+                try:
+                    metadata = catalog.get(name)
+                except SkillError as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                overrides = self._skill_permissions.get(metadata.name, {})
+                lines = [
+                    f"[bold #e0dccc]{escape(metadata.name)} · {self._label('права', 'permissions')}[/]"
+                ]
+                if not metadata.requested_capabilities:
+                    lines.append("  " + self._label("Дополнительные права не запрошены.", "No extra permissions requested."))
+                for capability in metadata.requested_capabilities:
+                    decision = overrides.get(capability.value, SkillPermission.ASK.value)
+                    lines.append(f"  {escape(capability.value)} → [#d4b676]{escape(decision)}[/]")
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "/skills allow|ask|deny NAME CAPABILITY",
+                        "/skills allow|ask|deny NAME CAPABILITY",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+            if action in {item.value for item in SkillPermission}:
+                if len(parts) != 3:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /skills allow|ask|deny NAME CAPABILITY",
+                            "Usage: /skills allow|ask|deny NAME CAPABILITY",
+                        ),
+                        "warning",
+                    )
+                    return
+                name, capability_name = parts[1], parts[2]
+                try:
+                    metadata = catalog.get(name)
+                except SkillError as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                declared = {capability.value for capability in metadata.requested_capabilities}
+                if capability_name not in declared:
+                    self._write_notice(
+                        self._label(
+                            f"Skill {name} не объявлял capability {capability_name}; решение отклонено.",
+                            f"Skill {name} did not declare capability {capability_name}; decision refused.",
+                        ),
+                        "error",
+                    )
+                    return
+                self._skill_permissions.setdefault(name, {})[capability_name] = action
+                self._write_notice(
+                    f"{name}: {capability_name} → {action}", "success"
+                )
+                return
+            self._write_notice(
+                self._label(
+                    "Формат: /skills [list|use NAME|off|permissions NAME|allow|ask|deny NAME CAPABILITY|diagnostics]",
+                    "Usage: /skills [list|use NAME|off|permissions NAME|allow|ask|deny NAME CAPABILITY|diagnostics]",
+                ),
+                "warning",
+            )
+
+        def _packs_command(self, argument: str = "") -> None:
+            """Manage immutable, verified KaroX extension Packs."""
+
+            from .packs import (
+                PackAccessDenied,
+                PackConfigurationError,
+                PackManifestError,
+                PackRegistry,
+                create_pack_template,
+            )
+            from .paths import runtime_dir
+
+            registry = PackRegistry(runtime_dir() / "vnext" / "packs")
+            raw = argument.strip()
+            try:
+                parts = shlex.split(raw) if raw else []
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+
+            def usage() -> str:
+                return self._label(
+                    "Формат: /packs [list|doctor ID|enable ID|disable ID|install PATH [--approve PERMISSION]...|remove ID|template PATH NAME [DESCRIPTION]]",
+                    "Usage: /packs [list|doctor ID|enable ID|disable ID|install PATH [--approve PERMISSION]...|remove ID|template PATH NAME [DESCRIPTION]]",
+                )
+
+            action = parts[0].casefold() if parts else "list"
+            try:
+                if action in {"list", "ls"}:
+                    packs = registry.list()
+                    lines = [f"[bold #e0dccc]{self._label('KaroX Packs', 'KaroX Packs')}[/]"]
+                    if not packs:
+                        lines.append("  " + self._label("Packs не установлены.", "No Packs installed."))
+                    for pack in packs:
+                        state = self._label("включён", "enabled") if pack.enabled else self._label("выключен", "disabled")
+                        lines.append(
+                            f"  [#d4b676]{escape(pack.identity)}[/] · {state} · {escape(pack.install_path)}"
+                        )
+                    lines.append(
+                        "  [dim]"
+                        + self._label(
+                            "Install принимает только локальную папку; права подтверждаются через --approve.",
+                            "Install accepts a local folder only; permissions require explicit --approve.",
+                        )
+                        + "[/]"
+                    )
+                    self._write("\n".join(lines))
+                    return
+                if action == "doctor":
+                    if len(parts) != 2:
+                        raise ValueError(usage())
+                    report = registry.doctor(parts[1])
+                    lines = [f"[bold #e0dccc]{escape(parts[1])} · doctor[/]"]
+                    for key in (
+                        "status",
+                        "installed",
+                        "manifest_present",
+                        "manifest_matches",
+                    ):
+                        if key in report:
+                            lines.append(f"  {escape(key)}: {escape(str(report[key]))}")
+                    for key in ("missing_files", "modified_files"):
+                        rows = report.get(key)
+                        if rows:
+                            lines.append(f"  {escape(key)}: {escape(', '.join(str(item) for item in rows))}")
+                    if report.get("error"):
+                        lines.append(f"  error: {escape(str(report['error']))}")
+                    self._write("\n".join(lines))
+                    return
+                if action in {"enable", "disable", "remove"}:
+                    if len(parts) != 2:
+                        raise ValueError(usage())
+                    identity = parts[1]
+                    if action == "enable":
+                        pack = registry.enable(identity)
+                        message = self._label(
+                            f"Pack {pack.identity} проверен и включён.",
+                            f"Pack {pack.identity} verified and enabled.",
+                        )
+                    elif action == "disable":
+                        pack = registry.disable(identity)
+                        message = self._label(
+                            f"Pack {pack.identity} выключен.",
+                            f"Pack {pack.identity} disabled.",
+                        )
+                    else:
+                        pack = registry.remove(identity)
+                        message = self._label(
+                            f"Pack {pack.identity} удалён.",
+                            f"Pack {pack.identity} removed.",
+                        )
+                    self._write_notice(message, "success")
+                    return
+                if action == "install":
+                    if len(parts) < 2:
+                        raise ValueError(usage())
+                    source = Path(parts[1]).expanduser()
+                    approvals: list[str] = []
+                    index = 2
+                    while index < len(parts):
+                        if parts[index] != "--approve" or index + 1 >= len(parts):
+                            raise ValueError(usage())
+                        approvals.append(parts[index + 1])
+                        index += 2
+                    pack = registry.install(source, approved_permissions=approvals)
+                    self._write_notice(
+                        self._label(
+                            f"Pack {pack.identity} установлен выключенным. Проверьте: /packs doctor {pack.identity}; затем enable.",
+                            f"Pack {pack.identity} installed disabled. Verify with /packs doctor {pack.identity}; then enable it.",
+                        ),
+                        "success",
+                    )
+                    return
+                if action == "template":
+                    if len(parts) < 3:
+                        raise ValueError(usage())
+                    target = Path(parts[1]).expanduser()
+                    name = parts[2]
+                    description = " ".join(parts[3:]).strip() or f"{name} KaroX Pack"
+                    created = create_pack_template(target, name=name, description=description)
+                    self._write_notice(
+                        self._label(
+                            f"Шаблон Pack создан: {created}",
+                            f"Pack template created: {created}",
+                        ),
+                        "success",
+                    )
+                    return
+                raise ValueError(usage())
+            except (PackAccessDenied, PackConfigurationError, PackManifestError, ValueError, OSError) as exc:
+                self._write_notice(str(redact(exc)), "error")
+
+        def _commands_command(self, argument: str = "") -> None:
+            """Manage data-only prompt macros; never shell commands or hooks."""
+
+            from .user_commands import UserCommandError, UserCommandStore
+
+            store = UserCommandStore()
+            raw = argument.strip()
+            try:
+                parts = shlex.split(raw) if raw else []
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            if not parts or parts[0].casefold() in {"list", "ls"}:
+                try:
+                    rows = store.list(repository=self.repository)
+                except Exception as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                lines = [f"[bold #e0dccc]{self._label('Пользовательские команды', 'User commands')}[/]"]
+                if not rows:
+                    lines.append("  " + self._label("Команд пока нет.", "No custom commands yet."))
+                for row in rows:
+                    preview = " ".join(row.template.split())
+                    if len(preview) > 100:
+                        preview = preview[:99] + "…"
+                    scope = (
+                        self._label("локальный override проекта", "local project override")
+                        if row.scope == "project"
+                        else self._label("из репозитория", "repository")
+                        if row.scope == "repository"
+                        else self._label("везде", "user")
+                    )
+                    lines.append(f"  [#d4b676]/{escape(row.name)}[/] · {scope} · [dim]{escape(preview)}[/]")
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "/commands add NAME TEMPLATE · add-project NAME TEMPLATE · remove NAME [--project] · show NAME",
+                        "/commands add NAME TEMPLATE · add-project NAME TEMPLATE · remove NAME [--project] · show NAME",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+
+            action = parts[0].casefold()
+            reserved = {
+                name.split(" ", 1)[0].lstrip("/")
+                for name in (*SLASH_COMMANDS.keys(), *DEPRECATED_COMMAND_ALIASES.keys())
+            }
+            if action in {"add", "add-project"}:
+                if len(parts) < 3:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /commands add NAME TEMPLATE",
+                            "Usage: /commands add NAME TEMPLATE",
+                        ),
+                        "warning",
+                    )
+                    return
+                name = parts[1].lstrip("/").casefold()
+                if name in reserved:
+                    self._write_notice(
+                        self._label(
+                            f"/{name} — встроенная команда KaroX и не может быть перекрыта.",
+                            f"/{name} is a built-in KaroX command and cannot be overridden.",
+                        ),
+                        "error",
+                    )
+                    return
+                template = " ".join(parts[2:]).strip()
+                scope = "project" if action == "add-project" else "user"
+                try:
+                    row = store.put(name, template, scope=scope, repository=self.repository if scope == "project" else None)
+                except (UserCommandError, ValueError, OSError) as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self._write_notice(
+                    self._label(
+                        f"Команда /{row.name} сохранена ({'проект' if row.scope == 'project' else 'везде'}).",
+                        f"Command /{row.name} saved ({row.scope}).",
+                    ),
+                    "success",
+                )
+                return
+            if action == "remove":
+                if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "--project"):
+                    self._write_notice(
+                        self._label(
+                            "Формат: /commands remove NAME [--project]",
+                            "Usage: /commands remove NAME [--project]",
+                        ),
+                        "warning",
+                    )
+                    return
+                name = parts[1].lstrip("/").casefold()
+                scope = "project" if len(parts) == 3 else "user"
+                try:
+                    row = store.remove(name, scope=scope, repository=self.repository if scope == "project" else None)
+                except (UserCommandError, ValueError, OSError) as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self._write_notice(f"/{row.name} removed", "success")
+                return
+            if action == "show":
+                if len(parts) != 2:
+                    self._write_notice(
+                        self._label("Формат: /commands show NAME", "Usage: /commands show NAME"),
+                        "warning",
+                    )
+                    return
+                try:
+                    row = store.get(parts[1].lstrip("/").casefold(), repository=self.repository)
+                except (UserCommandError, ValueError, OSError) as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self._write(
+                    f"[bold #e0dccc]/{escape(row.name)}[/] · {escape(row.scope)}\n"
+                    f"{escape(row.template)}"
+                )
+                return
+            self._write_notice(
+                self._label(
+                    "Формат: /commands [list|add|add-project|remove|show]",
+                    "Usage: /commands [list|add|add-project|remove|show]",
+                ),
+                "warning",
+            )
+
+        def _run_user_command(self, command: str, argument: str) -> bool:
+            """Expand one local prompt macro through the normal agent path."""
+
+            from .user_commands import UserCommandError, UserCommandStore
+
+            name = command.lstrip("/").casefold()
+            try:
+                row = UserCommandStore().get(name, repository=self.repository)
+            except (UserCommandError, ValueError, OSError):
+                return False
+            expanded = row.expand(argument)
+            self._write_notice(
+                self._label(
+                    f"/{row.name} → обычная задача KaroX ({row.scope}).",
+                    f"/{row.name} → normal KaroX task ({row.scope}).",
+                ),
+                "info",
+            )
+            self._submit_task(expanded)
+            return True
+
+        def _worktrees_command(self, argument: str = "") -> None:
+            """Inspect KaroX-owned isolated worktrees and clean terminal runs."""
+
+            from .background_orchestration import (
+                BackgroundOrchestrationError,
+                BackgroundOrchestrationRegistry,
+            )
+            from .mission_control import MissionControlStore
+            from .worktree_pool import WorktreePool, WorktreePoolError
+
+            try:
+                pool = WorktreePool(self.repository)
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            raw = argument.strip()
+            parts = raw.split()
+            if parts and parts[0].casefold() == "cleanup":
+                if len(parts) != 2:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /worktrees cleanup RUN_ID",
+                            "Usage: /worktrees cleanup RUN_ID",
+                        ),
+                        "warning",
+                    )
+                    return
+                run_id = parts[1]
+                terminal = {"passed", "failed", "stopped", "blocked", "skipped"}
+                snapshot = None
+                try:
+                    view = BackgroundOrchestrationRegistry().view(run_id)
+                    snapshot = view.snapshot
+                    if view.alive and view.status not in terminal:
+                        raise WorktreePoolError(
+                            "refusing to clean worktrees while the background run is alive"
+                        )
+                except BackgroundOrchestrationError:
+                    with contextlib.suppress(Exception):
+                        snapshot = MissionControlStore(run_id).snapshot()
+                if snapshot is None or snapshot.status not in terminal:
+                    self._write_notice(
+                        self._label(
+                            "Нельзя доказать, что run завершён; cleanup отменён.",
+                            "KaroX cannot prove the run is terminal; cleanup was refused.",
+                        ),
+                        "warning",
+                    )
+                    return
+                statuses = pool.list_statuses(run_id=run_id)
+                removed = 0
+                retained: list[str] = []
+                for status in statuses:
+                    if not status.clean:
+                        retained.append(status.worktree.worker_id)
+                        continue
+                    try:
+                        pool.remove(status.worktree)
+                    except WorktreePoolError:
+                        retained.append(status.worktree.worker_id)
+                    else:
+                        removed += 1
+                with contextlib.suppress(WorktreePoolError):
+                    pool.prune_stale_metadata()
+                self._write_notice(
+                    self._label(
+                        f"Удалено clean worktree: {removed}. С изменениями оставлено: {len(retained)}.",
+                        f"Removed {removed} clean worktree(s). Kept {len(retained)} with changes.",
+                    ),
+                    "success",
+                )
+                return
+            if parts:
+                self._write_notice(
+                    self._label(
+                        "Формат: /worktrees или /worktrees cleanup RUN_ID",
+                        "Usage: /worktrees or /worktrees cleanup RUN_ID",
+                    ),
+                    "warning",
+                )
+                return
+            try:
+                statuses = pool.list_statuses()
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            if not statuses:
+                self._write_notice(
+                    self._label(
+                        "Изолированных worktree KaroX для этого проекта нет.",
+                        "No isolated KaroX worktrees exist for this project.",
+                    ),
+                    "info",
+                )
+                return
+            lines = [
+                f"[bold #e0dccc]{self._label('KaroX worktrees', 'KaroX worktrees')}[/]"
+            ]
+            for status in statuses:
+                files = ", ".join(status.changed_files[:3])
+                if len(status.changed_files) > 3:
+                    files += f" +{len(status.changed_files) - 3}"
+                state = self._label("clean", "clean") if status.clean else self._label("изменён", "changed")
+                lines.append(
+                    f"  [#d4b676]{escape(status.worktree.run_id)}[/] / "
+                    f"{escape(status.worktree.worker_id)} · {state} · "
+                    f"{escape(str(status.worktree.path))}"
+                    + (f" · [dim]{escape(files)}[/]" if files else "")
+                )
+            lines.append(
+                "  [dim]"
+                + self._label(
+                    "Cleanup только после завершения run: /worktrees cleanup RUN_ID",
+                    "Cleanup only after a terminal run: /worktrees cleanup RUN_ID",
+                )
+                + "[/]"
+            )
+            self._write("\n".join(lines))
+
+        def _permissions_command(self, argument: str = "") -> None:
+            """Show the real CapabilityPolicy for the selected provider."""
+
+            selected = _selected_model()
+            if selected is None:
+                self._write_notice(
+                    self._label(
+                        "Сначала подключите или выберите модель через /connect или /models.",
+                        "Connect or select a model with /connect or /models first.",
+                    ),
+                    "warning",
+                )
+                return
+            controller = _provider_controller()
+            try:
+                details = controller.details(selected.provider_id)
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            requested = argument.strip().casefold()
+            show_details = requested in {"details", "detail"}
+            if requested in {"manage", "edit", "elevated", "full"}:
+                self._write_notice(
+                    self._label(
+                        "Расширенные права включаются только явным переключателем Elevated access в настройках провайдера.",
+                        "Elevated access is enabled only with the explicit Elevated access switch in provider settings.",
+                    ),
+                    "warning",
+                )
+                self._open_connection_detail("provider", selected.provider_id)
+                return
+            if requested in {"normal", "safe", "off"}:
+                try:
+                    controller.edit_provider(selected.provider_id, bypass=False)
+                except Exception as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                details = controller.details(selected.provider_id)
+                self._write_notice(
+                    self._label(
+                        "Обычные права включены для следующих новых сессий.",
+                        "Normal access enabled for future sessions.",
+                    ),
+                    "success",
+                )
+            elif requested and not show_details:
+                self._write_notice(
+                    self._label(
+                        "Используйте /permissions · /permissions details · /permissions normal · /permissions manage",
+                        "Use /permissions · /permissions details · /permissions normal · /permissions manage",
+                    ),
+                    "warning",
+                )
+                return
+
+            from .models import Capability, Origin, OriginKind
+            from .policy import CapabilityPolicy
+
+            profile = (
+                AccessProfile.ELEVATED
+                if bool(details.provider.bypass)
+                else AccessProfile.WORKSPACE_WRITE
+            )
+            policy = CapabilityPolicy(profile)
+            origin = Origin(OriginKind.USER, "permissions-preview")
+            allowed = [
+                capability.value
+                for capability in Capability
+                if policy.decide(origin, capability).allowed
+            ]
+            allowed_set = set(allowed)
+            profile_name = (
+                self._label(
+                    "Расширенный — больше локальных инструментов, те же защитные границы",
+                    "Elevated — more local tools, same safety boundaries",
+                )
+                if profile is AccessProfile.ELEVATED
+                else self._label(
+                    "Обычный — работа внутри проекта и проверка изменений",
+                    "Normal — work inside the project and verify changes",
+                )
+            )
+            capabilities: list[str] = []
+            if "repo.read" in allowed_set or "repo.write" in allowed_set:
+                if "repo.write" in allowed_set:
+                    capabilities.append(self._label("файлы проекта: читать и редактировать", "project files: read and edit"))
+                else:
+                    capabilities.append(self._label("файлы проекта: только читать", "project files: read only"))
+            if "process.run" in allowed_set or "checks.run" in allowed_set:
+                capabilities.append(self._label("разрешённые команды и проверки", "approved commands and checks"))
+            if "git.read" in allowed_set:
+                capabilities.append(
+                    self._label(
+                        "локальный Git: смотреть" + (" и коммитить" if "git.commit" in allowed_set else ""),
+                        "local Git: inspect" + (" and commit" if "git.commit" in allowed_set else ""),
+                    )
+                )
+            if "browser.read" in allowed_set:
+                capabilities.append(
+                    self._label(
+                        "браузер: смотреть" + (" и взаимодействовать" if "browser.input" in allowed_set else ""),
+                        "browser: inspect" + (" and interact" if "browser.input" in allowed_set else ""),
+                    )
+                )
+            if "desktop.input" in allowed_set:
+                capabilities.append(self._label("подключённые приложения: background control", "attached apps: background control"))
+            if "mcp.call" in allowed_set:
+                capabilities.append(self._label("подключённые MCP-инструменты", "connected MCP tools"))
+            if "diagnostics.read" in allowed_set:
+                capabilities.append(self._label("диагностика", "diagnostics"))
+            if "dev.command" in allowed_set:
+                capabilities.append(self._label("guarded developer commands", "guarded developer commands"))
+            if "network" in allowed_set:
+                capabilities.append(self._label("разрешённая сеть", "allowed network access"))
+
+            lines = [
+                f"[bold #e0dccc]{self._label('Доступ KaroX', 'KaroX access')}[/]",
+                f"  {self._label('Режим', 'Mode')}: [#d4b676]{escape(profile_name)}[/]",
+                f"  {self._label('Можно', 'Can')}: {escape(' · '.join(capabilities) or '—')}",
+                "  "
+                + self._label(
+                    "Push, publish и вход в аккаунты не выполняются автоматически — для опасного действия нужен отдельный явный шаг.",
+                    "Push, publish, and account sign-in are never automatic; sensitive actions need a separate explicit step.",
+                ),
+            ]
+            if show_details:
+                lines.extend(
+                    [
+                        f"  {self._label('Провайдер', 'Provider')}: {escape(selected.provider_id)}",
+                        f"  {self._label('Профиль', 'Profile')}: [dim]{escape(profile.value)}[/]",
+                        f"  {self._label('Capability IDs', 'Capability IDs')}: [dim]{escape(', '.join(allowed))}[/]",
+                    ]
+                )
+            else:
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "Технические capability IDs: /permissions details",
+                        "Technical capability IDs: /permissions details",
+                    )
+                    + "[/]"
+                )
+            lines.append(
+                "  [dim]"
+                + self._label(
+                    "/permissions normal — обычный режим · /permissions manage — настройки",
+                    "/permissions normal — normal mode · /permissions manage — settings",
+                )
+                + "[/]"
+            )
+            self._write("\n".join(lines))
+
+        def _agents_command(self, argument: str = "") -> None:
+            """Show or opt-in the unified API/subscription intelligence pool."""
+            from .intelligence_pool import IntelligencePool
+            from .orchestration_presenter import role_label
+            from .subscription_cli import (
+                discover_subscription_clis,
+                register_discovered_subscription_endpoints,
+            )
+
+            requested = argument.strip().casefold()
+            details = requested in {"details", "detail"}
+            pool = IntelligencePool()
+            if requested in {"apply", "enable", "install"}:
+                applied = register_discovered_subscription_endpoints(pool)
+                self._write_notice(
+                    self._label(
+                        f"Добавлено безопасных подписочных агентов: {len(applied)}.",
+                        f"Added guarded subscription agents: {len(applied)}.",
+                    ),
+                    "success",
+                )
+            elif requested and not details:
+                self._write_notice(
+                    self._label(
+                        "Используйте /agents · /agents apply · /agents details",
+                        "Use /agents · /agents apply · /agents details",
+                    ),
+                    "warning",
+                )
+                return
+
+            endpoints = pool.list()
+            installed = [item for item in discover_subscription_clis() if item.installed]
+            lines = [
+                f"[bold #e0dccc]{self._label('Пул интеллекта', 'Intelligence pool')}[/]",
+            ]
+            if endpoints:
+                for endpoint in endpoints:
+                    paid = (
+                        self._label("уже оплачено", "already paid")
+                        if endpoint.already_paid
+                        else self._label("оплата по использованию", "pay per use")
+                    )
+                    if endpoint.roles:
+                        roles = ", ".join(
+                            role_label(role, self.language) for role in endpoint.roles
+                        )
+                    else:
+                        roles = self._label("KaroX выберет роль", "KaroX chooses the role")
+                    if details:
+                        lines.append(
+                            f"  [#d4b676]{escape(endpoint.display_name)}[/] · "
+                            f"{escape(endpoint.source_kind)} · {escape(paid)} · "
+                            f"{escape(roles)} · [dim]{escape(endpoint.endpoint_id)}[/]"
+                        )
+                    else:
+                        lines.append(
+                            f"  [#d4b676]{escape(endpoint.display_name)}[/] · "
+                            f"{escape(paid)} · {escape(roles)}"
+                        )
+            else:
+                lines.append(f"  [dim]{self._label('Пул пока пуст.', 'The pool is empty.')}[/]")
+            not_added = [
+                item for item in installed
+                if not any(endpoint.target_id == item.profile.target_id for endpoint in endpoints)
+            ]
+            if not_added:
+                lines.append("")
+                lines.append(
+                    f"[bold #e0dccc]{self._label('Найдены на компьютере', 'Installed on this computer')}[/]"
+                )
+                for item in not_added:
+                    mode = (
+                        self._label("можно подключить", "guarded adapter available")
+                        if item.profile.auto_executable
+                        else self._label("нужен отдельный guarded adapter", "requires a separate guarded adapter")
+                    )
+                    lines.append(
+                        f"  {escape(item.profile.display_name)} · [dim]{escape(mode)}[/]"
+                    )
+                if any(item.profile.auto_executable for item in not_added):
+                    lines.append(
+                        f"  [dim]{self._label('Введите /agents apply, чтобы добавить безопасные встроенные adapters.', 'Type /agents apply to add the guarded built-in adapters.')}[/]"
+                    )
+            if not details:
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "Технические ID и тип подключения: /agents details",
+                        "Technical IDs and connection types: /agents details",
+                    )
+                    + "[/]"
+                )
+            self._write("\n".join(lines))
+
+        def _orchestrate_command(self, argument: str) -> None:
+            """Plan or run one role-based task through the canonical CLI service."""
+            from .intelligence_pool import IntelligencePool
+            from .recipe_registry import RecipeRegistry
+
+            raw = argument.strip()
+            if not raw:
+                self._write(
+                    f"[bold #e0dccc]{self._label('Оркестрация', 'Orchestration')}[/]\n"
+                    f"  {self._label('/orchestrate ЗАДАЧА — собрать команду и выполнить', '/orchestrate TASK — build a team and run')}\n"
+                    f"  {self._label('/orchestrate run ЗАДАЧА — выполнить в этом окне', '/orchestrate run TASK — execute in this window')}\n"
+                    f"  {self._label('/orchestrate start ЗАДАЧА — запустить в фоне', '/orchestrate start TASK — run in background')}\n"
+                    f"  {self._label('/orchestrate @ENDPOINT ЗАДАЧА — выбрать оркестратора; он распределит workers', '/orchestrate @ENDPOINT TASK — choose the orchestrator; it assigns the workers')}\n"
+                    f"  [dim]{self._label('KaroX проверяет назначения по capability/risk/independent-review правилам. Доступные модели и подписки: /agents.', 'KaroX validates assignments against capability, risk, and independent-review rules. Available models and subscriptions: /agents.')}[/]"
+                )
+                return
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "KaroX уже выполняет задачу. Дождитесь завершения или остановите текущую.",
+                        "KaroX is already running a task. Wait for it to finish or stop it first.",
+                    ),
+                    "warning",
+                )
+                return
+
+            action = "run"
+            rest = raw
+            first, separator, tail = raw.partition(" ")
+            requested_action = first.casefold()
+            if requested_action in {"plan", "run", "start", "bg", "background"}:
+                action = "start" if requested_action in {"bg", "background"} else requested_action
+                rest = tail.strip() if separator else ""
+            if not rest:
+                self._write_notice(
+                    self._label(
+                        "После plan/run/start нужна задача.",
+                        "A task is required after plan/run/start.",
+                    ),
+                    "warning",
+                )
+                return
+
+            orchestrator_override: Optional[str] = None
+            first_token, separator, tail = rest.partition(" ")
+            if first_token.startswith("@"):
+                orchestrator_override = first_token[1:].strip()
+                if not orchestrator_override:
+                    self._write_notice(
+                        self._label("После @ нужен endpoint id.", "An endpoint id is required after @."),
+                        "warning",
+                    )
+                    return
+                try:
+                    endpoint = IntelligencePool().get(orchestrator_override)
+                except Exception:
+                    self._write_notice(
+                        self._label(
+                            f"Endpoint {orchestrator_override} не найден. /agents покажет доступные.",
+                            f"Endpoint {orchestrator_override} was not found. /agents shows available endpoints.",
+                        ),
+                        "warning",
+                    )
+                    return
+                if "orchestrator" not in endpoint.roles and endpoint.roles:
+                    self._write_notice(
+                        self._label(
+                            f"{endpoint.display_name} не разрешён как orchestrator.",
+                            f"{endpoint.display_name} is not allowed as an orchestrator.",
+                        ),
+                        "warning",
+                    )
+                    return
+                rest = tail.strip() if separator else ""
+                if not rest:
+                    self._write_notice(
+                        self._label("После endpoint нужна задача.", "A task is required after the endpoint."),
+                        "warning",
+                    )
+                    return
+
+            recipe_name = "feature"
+            objective = rest
+            if "::" in rest:
+                recipe_candidate, objective_candidate = rest.split("::", 1)
+                recipe_candidate = recipe_candidate.strip()
+                objective_candidate = objective_candidate.strip()
+                if recipe_candidate:
+                    recipe_name = recipe_candidate
+                objective = objective_candidate
+            else:
+                names = {item.name for item in RecipeRegistry().list()}
+                head, sep, tail = rest.partition(" ")
+                if sep and head in names:
+                    recipe_name = head
+                    objective = tail.strip()
+            if not objective:
+                self._write_notice(
+                    self._label("Задача пустая.", "The task is empty."),
+                    "warning",
+                )
+                return
+
+            argv = [
+                "orchestrate",
+                action,
+                "--repository",
+                str(self.repository),
+                "--objective",
+                objective,
+                "--recipe",
+                recipe_name,
+                "--preset",
+                "maximum_economy" if self.run_cost_profile == "economy" else "balanced",
+                "--delegate-workers",
+                "--json",
+            ]
+            selected = _selected_model()
+            if orchestrator_override is not None:
+                argv.extend(["--orchestrator", orchestrator_override])
+            elif selected is not None:
+                argv.extend(
+                    [
+                        "--orchestrator",
+                        f"api:{selected.provider_id}:{selected.model_id}",
+                    ]
+                )
+            # The current /effort setting controls the chosen orchestrator. The
+            # remaining workers keep preset-specific efforts unless explicitly
+            # overridden through the power-user CLI.
+            if self.effort_level != AUTO_EFFORT:
+                argv.extend(
+                    ["--worker-effort", f"orchestrator={self.effort_level}"]
+                )
+            if action in {"run", "start"}:
+                for command in self.verification:
+                    argv.extend(
+                        ["--verification-command", json.dumps(list(command), ensure_ascii=False)]
+                    )
+                argv.append("--isolate-implementers")
+
+            if action == "start":
+                self._write_notice(
+                    self._label(
+                        "Запускаю background orchestration… Можно продолжать работать в этом окне.",
+                        "Starting background orchestration… You can keep working in this window.",
+                    ),
+                    "info",
+                )
+
+                def start_background() -> None:
+                    code, output = _capture_cli(argv)
+                    self.call_from_thread(
+                        self._orchestration_start_finished, code, output
+                    )
+
+                self.run_worker(
+                    start_background,
+                    thread=True,
+                    exclusive=False,
+                    group="orchestration-start",
+                )
+                return
+
+            self.agent_busy = True
+            self.query_one("#busy", LoadingIndicator).styles.display = "block"
+            self._set_activity(
+                self._label(
+                    "Оркестратор строит и выполняет команду…" if action == "run" else "Оркестратор строит план…",
+                    "Orchestrator is running the team…" if action == "run" else "Orchestrator is building the plan…",
+                ),
+                "working",
+            )
+
+            def execute() -> None:
+                code, output = _capture_cli(argv)
+                self.call_from_thread(self._orchestration_finished, action, code, output)
+
+            self.run_worker(execute, thread=True, exclusive=True, group="orchestration")
+
+        def _orchestration_start_finished(self, code: int, output: str) -> None:
+            if code != 0:
+                self._write_notice(
+                    self._label(
+                        f"Background orchestration не запущена (код {code}).",
+                        f"Background orchestration did not start (exit {code}).",
+                    ),
+                    "error",
+                )
+                if output.strip():
+                    self._write(f"[#e0a3a3]{escape(output.strip()[:3000])}[/]")
+                return
+            try:
+                payload = json.loads(output)
+            except json.JSONDecodeError:
+                self._write_notice(
+                    self._label(
+                        "Фоновый launcher вернул некорректный JSON.",
+                        "The background launcher returned invalid JSON.",
+                    ),
+                    "error",
+                )
+                return
+            if not isinstance(payload, dict) or not payload.get("run_id"):
+                self._write_notice(
+                    self._label(
+                        "Фоновый launcher не вернул run id.",
+                        "The background launcher returned no run id.",
+                    ),
+                    "error",
+                )
+                return
+            run_id = str(payload["run_id"])
+            self._last_orchestration_run_id = run_id
+            self._write_notice(
+                self._label(
+                    f"Background run запущен: {escape(run_id)}. /mission покажет все задачи; /mission {escape(run_id)} — детали.",
+                    f"Background run started: {escape(run_id)}. /mission lists all tasks; /mission {escape(run_id)} shows details.",
+                ),
+                "success",
+            )
+            self.query_one("#composer", Input).focus()
+
+        def _orchestration_finished(self, action: str, code: int, output: str) -> None:
+            self.agent_busy = False
+            self.query_one("#busy", LoadingIndicator).styles.display = "none"
+            self._reset_activity()
+            if code != 0:
+                self._write_notice(
+                    self._label(
+                        f"Оркестрация остановилась (код {code}).",
+                        f"Orchestration stopped (exit {code}).",
+                    ),
+                    "error",
+                )
+                if output.strip():
+                    self._write(f"[#e0a3a3]{escape(output.strip()[:4000])}[/]")
+                return
+            try:
+                payload = json.loads(output)
+            except json.JSONDecodeError:
+                self._write_notice(
+                    self._label(
+                        "Orchestration вернула некорректный JSON.",
+                        "Orchestration returned invalid JSON.",
+                    ),
+                    "error",
+                )
+                return
+            if not isinstance(payload, dict):
+                self._write_notice(
+                    self._label("Некорректный результат orchestration.", "Invalid orchestration result."),
+                    "error",
+                )
+                return
+
+            plan = payload.get("plan") if action == "run" else payload
+            plan = plan if isinstance(plan, dict) else {}
+            run_id = str(plan.get("run_id") or "")
+            if run_id:
+                self._last_orchestration_run_id = run_id
+
+            from .orchestration_presenter import render_plan, render_run
+
+            if action == "plan":
+                rendered = render_plan(plan, self.language)
+                if isinstance(payload.get("delegation"), dict):
+                    rendered += "\n" + self._label(
+                        "Workers предложены выбранным оркестратором и проверены правилами KaroX.",
+                        "Workers were proposed by the selected orchestrator and validated by KaroX.",
+                    )
+                rendered += "\n" + self._label(
+                    "Запуск: повторите задачу через /orchestrate run … · технические детали доступны в CLI --json.",
+                    "Run it: repeat the task with /orchestrate run … · technical details remain available through CLI --json.",
+                )
+            else:
+                rendered = render_run(payload, self.language)
+                if run_id:
+                    rendered += "\n" + self._label(
+                        "Подробнее и управление: /mission " + run_id,
+                        "Details and controls: /mission " + run_id,
+                    )
+            self._write(escape(rendered))
+
+        def _mission_command(self, argument: str) -> None:
+            from .background_orchestration import BackgroundOrchestrationRegistry
+            from .intelligence_pool import IntelligencePool
+            from .mission_control import MissionControlStore
+            from .orchestration_presenter import role_label, status_label
+
+            raw = argument.strip()
+            registry = BackgroundOrchestrationRegistry()
+            intelligence = IntelligencePool()
+
+            def endpoint_name(endpoint_id: str) -> str:
+                try:
+                    return intelligence.get(endpoint_id).display_name
+                except Exception:
+                    fallback = endpoint_id.rsplit(":", 1)[-1].replace("-", " ").strip()
+                    return fallback or self._label("неизвестная модель", "unknown model")
+            if not raw:
+                views = registry.list_views(limit=30)
+                if not views:
+                    fallback = getattr(self, "_last_orchestration_run_id", "")
+                    if fallback:
+                        self._mission_command(fallback)
+                        return
+                    self._write_notice(
+                        self._label(
+                            "Background runs пока нет. Запуск: /orchestrate start ЗАДАЧА",
+                            "No background runs yet. Start one with /orchestrate start TASK",
+                        ),
+                        "info",
+                    )
+                    return
+                lines = [
+                    f"[bold #e0dccc]{self._label('Mission Control · задачи', 'Mission Control · runs')}[/]"
+                ]
+                for view in views:
+                    snapshot = view.snapshot
+                    progress = (
+                        f"{snapshot.progress_percent:.0f}%"
+                        if snapshot is not None
+                        else "—"
+                    )
+                    repo = Path(view.record.repository).name or view.record.repository
+                    proof = "✓" if view.identity_proven else "?"
+                    label = view.record.label or (
+                        snapshot.objective if snapshot is not None else ""
+                    )
+                    if len(label) > 60:
+                        label = label[:59] + "…"
+                    title = label or repo
+                    lines.append(
+                        f"  {proof} [#d4b676]{escape(title)}[/] · "
+                        f"{escape(status_label(view.status, self.language))} · {progress} · @{escape(repo)}"
+                    )
+                    lines.append(f"    [dim]Run {escape(view.record.run_id)}[/]")
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "/mission RUN — открыть · /mission details RUN — технические детали",
+                        "/mission RUN — open · /mission details RUN — technical details",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+
+            try:
+                parts = shlex.split(raw)
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            action = parts[0].casefold() if parts else ""
+            if action in {"mobile", "mobile-stop"}:
+                from .mobile_mission import MobileMissionRegistry
+
+                run_id = (
+                    parts[1]
+                    if len(parts) == 2
+                    else getattr(self, "_last_orchestration_run_id", "")
+                    if len(parts) == 1
+                    else ""
+                )
+                if not run_id:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /mission mobile RUN или /mission mobile-stop RUN",
+                            "Usage: /mission mobile RUN or /mission mobile-stop RUN",
+                        ),
+                        "warning",
+                    )
+                    return
+                mobile = MobileMissionRegistry()
+                if action == "mobile-stop":
+                    try:
+                        view = mobile.stop(run_id)
+                    except Exception as exc:
+                        self._write_notice(str(redact(exc)), "error")
+                        return
+                    self._write_notice(
+                        self._label(
+                            f"Mobile Mission Control для {run_id}: {'ещё останавливается' if view.alive else 'остановлен'}.",
+                            f"Mobile Mission Control for {run_id}: {'still stopping' if view.alive else 'stopped'}.",
+                        ),
+                        "warning" if view.alive else "success",
+                    )
+                    return
+                try:
+                    import ipaddress
+
+                    from .tailscale import query_tailscale_status
+
+                    status = query_tailscale_status()
+                    candidates = status.get("tailscale_ips") if isinstance(status, dict) else None
+                    host = ""
+                    if isinstance(candidates, list):
+                        network = ipaddress.ip_network("100.64.0.0/10")
+                        for raw_ip in candidates:
+                            try:
+                                address = ipaddress.ip_address(str(raw_ip))
+                            except ValueError:
+                                continue
+                            if address.version == 4 and address in network:
+                                host = str(address)
+                                break
+                    if not bool(status.get("ready")) or not host:
+                        raise RuntimeError(
+                            self._label(
+                                "Tailscale не готов или у устройства нет Tailscale IPv4.",
+                                "Tailscale is not ready or this device has no Tailscale IPv4.",
+                            )
+                        )
+                    launch = mobile.start(run_id=run_id, host=host)
+                except Exception as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self._write(
+                    f"[bold #e0dccc]{self._label('Mobile Mission Control', 'Mobile Mission Control')}[/]\n"
+                    f"  URL: [#d4b676]{escape(launch.record.url)}[/]\n"
+                    f"  {self._label('Код подключения', 'Pairing code')}: [bold]{escape(launch.pairing_code)}[/]\n"
+                    f"  [dim]{self._label('Код короткоживущий; после входа телефон получает HttpOnly session cookie. Доступен только через Tailscale.', 'The code is short-lived; after pairing the phone gets an HttpOnly session cookie. The service is bound only to Tailscale.')}[/]\n"
+                    f"  [dim]/mission mobile-stop {escape(run_id)}[/]"
+                )
+                return
+            if action in {"pause", "resume", "stop", "steer"}:
+                if len(parts) < 2 or (action != "steer" and len(parts) != 2):
+                    self._write_notice(
+                        self._label(
+                            "Формат: /mission pause|resume|stop RUN или /mission steer RUN ТЕКСТ",
+                            "Usage: /mission pause|resume|stop RUN or /mission steer RUN TEXT",
+                        ),
+                        "warning",
+                    )
+                    return
+                run_id = parts[1]
+                text = " ".join(parts[2:]) if action == "steer" else ""
+                if action == "steer" and not text:
+                    self._write_notice(
+                        self._label("Для steer нужен текст.", "Steer requires text."),
+                        "warning",
+                    )
+                    return
+                try:
+                    registry.request(run_id, action, text=text)
+                except Exception as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                self._write_notice(
+                    self._label(
+                        f"Mission {run_id}: {action} поставлен в очередь безопасной границы.",
+                        f"Mission {run_id}: {action} queued for the next safe boundary.",
+                    ),
+                    "success",
+                )
+                return
+
+            details = action in {"details", "detail"}
+            if details:
+                if len(parts) != 2:
+                    self._write_notice(
+                        self._label("Формат: /mission details RUN", "Usage: /mission details RUN"),
+                        "warning",
+                    )
+                    return
+                run_id = parts[1]
+            else:
+                if len(parts) != 1:
+                    self._write_notice(
+                        self._label(
+                            "Используйте /mission RUN или /mission details RUN.",
+                            "Use /mission RUN or /mission details RUN.",
+                        ),
+                        "warning",
+                    )
+                    return
+                run_id = parts[0]
+            try:
+                snapshot = MissionControlStore(run_id).snapshot()
+            except Exception as exc:
+                self._write_notice(
+                    self._label(
+                        f"Mission Control недоступен: {type(exc).__name__}",
+                        f"Mission Control unavailable: {type(exc).__name__}",
+                    ),
+                    "error",
+                )
+                return
+            if snapshot is None:
+                self._write_notice(
+                    self._label(f"Run {run_id} не найден.", f"Run {run_id} was not found."),
+                    "warning",
+                )
+                return
+            title = snapshot.objective.strip() or self._label("Задача", "Task")
+            if len(title) > 80:
+                title = title[:79] + "…"
+            lines = [
+                f"[bold #e0dccc]Mission Control[/] · {escape(title)}",
+                f"  {self._label('Статус', 'Status')}: {escape(status_label(snapshot.status, self.language))} · {snapshot.progress_percent:.1f}%",
+                f"  {self._label('Оркестратор', 'Orchestrator')}: {escape(endpoint_name(snapshot.orchestrator_endpoint_id))}",
+                f"  {self._label('Дополнительная стоимость', 'Incremental cost')}: ${snapshot.actual_cost_usd:.4f}",
+            ]
+            for agent in snapshot.agents:
+                lines.append(
+                    f"  {escape(role_label(agent.role, self.language))} · "
+                    f"{escape(endpoint_name(agent.endpoint_id))} · "
+                    f"{escape(status_label(agent.status, self.language))}"
+                    + (f" · [dim]{escape(agent.activity[:160])}[/]" if agent.activity else "")
+                )
+            if details:
+                lines.extend([f"  Run ID: [dim]{escape(snapshot.run_id)}[/]", f"  Tokens: {snapshot.total_tokens}", f"  Orchestrator endpoint: [dim]{escape(snapshot.orchestrator_endpoint_id)}[/]"])
+                for agent in snapshot.agents:
+                    lines.append(f"  [dim]{escape(agent.step_id)} · {escape(agent.endpoint_id)}[/]")
+            else:
+                lines.append("  [dim]" + self._label(f"Технические детали: /mission details {snapshot.run_id}", f"Technical details: /mission details {snapshot.run_id}") + "[/]")
+            lines.append(
+                "  [dim]"
+                + self._label(
+                    f"Управление: /mission pause|resume|stop {snapshot.run_id} · /mission steer {snapshot.run_id} ТЕКСТ",
+                    f"Controls: /mission pause|resume|stop {snapshot.run_id} · /mission steer {snapshot.run_id} TEXT",
+                )
+                + "[/]"
+            )
+            self._write("\n".join(lines))
 
         def _workspace_saved_profiles(self) -> tuple[Any, ...]:
             """Saved connections whose approved project set contains the current folder."""
@@ -8836,6 +11409,166 @@ if _HAS_TEXTUAL:
                 )
             except ProjectRegistryError:
                 return ProjectRegistry.single(self.repository)
+
+        def _maintenance_protected_paths(self) -> tuple[str, ...]:
+            """Every workspace root the user added stays protected during drive cleanup."""
+            try:
+                registry = self._workspace_registry()
+                values = [str(Path(entry.path).expanduser().resolve(strict=False)) for entry in registry.projects]
+            except Exception:
+                values = [str(self.repository)]
+            return tuple(dict.fromkeys(value for value in values if value))
+
+        def _latest_cleanup_plan(self, session_id: str) -> Optional[Dict[str, Any]]:
+            """Newest valid frozen cleanup plan created by one finished agent run."""
+
+            try:
+                history = SessionStore(session_dir()).load(session_id).provider_history
+            except Exception:
+                return None
+            for entry in reversed(history):
+                if not isinstance(entry, dict) or entry.get("role") != "tool":
+                    continue
+                core_name = str(entry.get("core_name") or entry.get("tool_name") or "")
+                if core_name != "disk.plan_cleanup":
+                    continue
+                result = entry.get("result")
+                if not isinstance(result, dict) or result.get("ok") is not True:
+                    continue
+                data = result.get("data")
+                if not isinstance(data, dict):
+                    continue
+                plan_id = str(data.get("plan_id") or "")
+                if not re.fullmatch(r"[0-9a-f]{32}", plan_id):
+                    continue
+                if plan_id in self._cleanup_plans_reviewed:
+                    return None
+                try:
+                    plan = load_cleanup_plan(plan_id, public=True)
+                except CleanupError:
+                    return None
+                root = str(plan.get("root") or "")
+                if os.path.normcase(os.path.abspath(root)) != os.path.normcase(
+                    os.path.abspath(str(self.repository))
+                ):
+                    return None
+                return dict(plan)
+            return None
+
+        def _offer_cleanup_plan(self, session_id: str) -> bool:
+            plan = self._latest_cleanup_plan(session_id)
+            if plan is None:
+                return False
+            plan_id = str(plan.get("plan_id") or "")
+            self._cleanup_plans_reviewed.add(plan_id)
+            self._pending_cleanup_plan_data = plan
+            body = cleanup_impact_preview(plan, language=self.language)
+            self.push_screen(
+                ConfirmScreen(
+                    self._label("Подтвердить удаление", "Confirm deletion"),
+                    body,
+                    yes=self._label("Удалить", "Delete"),
+                    no=self._label("Отмена", "Cancel"),
+                    language=self.language,
+                ),
+                self._cleanup_confirmation_result,
+            )
+            return True
+
+        def _cleanup_confirmation_result(self, approved: Optional[bool]) -> None:
+            plan = self._pending_cleanup_plan_data
+            self._pending_cleanup_plan_data = None
+            if plan is None:
+                self.query_one("#composer", Input).focus()
+                return
+            if approved is not True:
+                self._write_notice(
+                    self._label("Удаление отменено.", "Deletion cancelled."),
+                    "info",
+                )
+                self.query_one("#composer", Input).focus()
+                return
+            plan_id = str(plan.get("plan_id") or "")
+            root = Path(str(plan.get("root") or "")).expanduser().resolve(strict=False)
+            protected = self._maintenance_protected_paths()
+            self._cleanup_apply_busy = True
+            composer = self.query_one("#composer", Input)
+            composer.disabled = True
+            self.query_one("#busy", LoadingIndicator).styles.display = "block"
+            self._set_activity(
+                self._label(
+                    "Удаляю подтверждённые данные…",
+                    "Deleting confirmed data…",
+                )
+            )
+
+            def execute() -> None:
+                try:
+                    result = apply_cleanup_plan(
+                        plan_id,
+                        root=root,
+                        confirmed_by_user=True,
+                        protected_roots=protected,
+                    )
+                except Exception as exc:
+                    self.call_from_thread(
+                        self._cleanup_apply_finished,
+                        False,
+                        {"error": str(redact(exc))[:1000]},
+                    )
+                    return
+                self.call_from_thread(self._cleanup_apply_finished, True, result)
+
+            self.run_worker(execute, thread=True, exclusive=True, group="cleanup-apply")
+
+        def _cleanup_apply_finished(self, ok: bool, result: Mapping[str, Any]) -> None:
+            self._cleanup_apply_busy = False
+            composer = self.query_one("#composer", Input)
+            composer.disabled = False
+            self.query_one("#busy", LoadingIndicator).styles.display = "none"
+            self._set_activity("", "idle")
+            if not ok:
+                self._write_notice(
+                    self._label(
+                        f"Удаление не выполнено: {result.get('error') or 'ошибка проверки плана'}",
+                        f"Deletion was not applied: {result.get('error') or 'plan validation failed'}",
+                    ),
+                    "error",
+                )
+                composer.focus()
+                return
+            try:
+                removed = max(0, int(result.get("removed_target_count") or 0))
+                delta = max(0, int(result.get("free_space_delta_bytes") or 0))
+                planned = max(0, int(result.get("planned_bytes") or 0))
+            except (TypeError, ValueError, OverflowError):
+                removed = delta = planned = 0
+            bytes_value = delta or planned
+            amount = float(bytes_value)
+            unit = "B"
+            for label in ("B", "KB", "MB", "GB", "TB"):
+                unit = label
+                if amount < 1024.0 or label == "TB":
+                    break
+                amount /= 1024.0
+            size = f"{int(amount)} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+            if str(result.get("status")) == "completed":
+                self._write_notice(
+                    self._label(
+                        f"Удалено: {removed} объектов · ~{size}",
+                        f"Deleted: {removed} targets · ~{size}",
+                    ),
+                    "success",
+                )
+            else:
+                self._write_notice(
+                    self._label(
+                        f"Удаление частичное: {removed} объектов · проверьте /sessions и просканируйте снова.",
+                        f"Partial deletion: {removed} targets · check /sessions and scan again.",
+                    ),
+                    "warning",
+                )
+            composer.focus()
 
         def _workspace_project_in_use(self, project_id: str) -> bool:
             """Conservatively refuse removal while a durable workstream is bound."""
@@ -9030,28 +11763,52 @@ if _HAS_TEXTUAL:
             with contextlib.suppress(Exception):
                 _remember_workspace(previous)
             self.repository = resolved
-            self.verification = _default_verification(resolved)
+            maintenance_mode = is_drive_root(resolved)
+            self.verification = () if maintenance_mode else _default_verification(resolved)
             self.active_session = None
+            self._resume_next_task = False
+            self.active_skill = None
+            self._skill_permissions.clear()
+            self._pending_images.clear()
+            self._pending_cleanup_plan_data = None
             self._history_seen = 0
             self._history_fingerprint = None
-            self._content_seen = 0
+            self._provider_history_seen.clear()
+            self._provider_history_fingerprints.clear()
+            self._typed_activity_sessions.clear()
             with contextlib.suppress(Exception):
                 _remember_workspace(resolved)
             self._refresh_status()
-            self._write_notice(
+            self._write(
                 self._label(
-                    f"Рабочая папка: {resolved}",
-                    f"Workspace: {resolved}",
-                ),
-                "success",
+                    (
+                        f"Диск → {resolved} · безопасная очистка"
+                        if maintenance_mode
+                        else f"Папка → {resolved}"
+                    ),
+                    (
+                        f"Drive → {resolved} · safe cleanup mode"
+                        if maintenance_mode
+                        else f"Workspace → {resolved}"
+                    ),
+                )
             )
             if self._workspace_saved_profiles():
-                self._write_notice(
+                self._write(
                     self._label(
-                        "Сохранённые подключения сохраняют URL/сессию и маршрутизируют новые workstream в эту папку без перезапуска.",
-                        "Saved connections keep their URL/session and route new workstreams to this folder without a restart.",
-                    ),
-                    "success",
+                        (
+                            "Подключения сохранены · на корне диска доступны только "
+                            "метаданные и план очистки"
+                            if maintenance_mode
+                            else "Подключения сохранены · новые workstream → эта папка"
+                        ),
+                        (
+                            "Connections kept · drive root is restricted to metadata "
+                            "and cleanup planning"
+                            if maintenance_mode
+                            else "Connections kept · new workstreams → this folder"
+                        ),
+                    )
                 )
             elif self.bridge_launch is not None or self.public_endpoint:
                 self._write_notice(
@@ -9099,43 +11856,66 @@ if _HAS_TEXTUAL:
 
             english = self.language != "ru"
             yield SystemCommand(
-                "Model and Effort" if english else "Модель и Effort",
-                "Ctrl+G — switch model and reasoning effort",
+                "Models" if english else "Модели",
+                "/models — choose the active model"
+                if english
+                else "/models — выбрать активную модель",
                 self.action_model,
             )
             yield SystemCommand(
-                "Usage & Cost",
-                "/usage — tokens, cache and spend",
+                "Work depth" if english else "Глубина работы",
+                "/effort — Auto to Ultra"
+                if english
+                else "/effort — от Auto до Ultra",
+                self.action_effort,
+            )
+            yield SystemCommand(
+                "Usage & Cost" if english else "Использование и расходы",
+                "/usage — tokens, cache and cost"
+                if english
+                else "/usage — токены, кэш и расходы",
                 self.action_usage,
             )
             yield SystemCommand(
                 "Connections" if english else "Подключения",
-                "Ctrl+S — one hub for models and services",
+                "Ctrl+S — models and external AI clients"
+                if english
+                else "Ctrl+S — модели и внешние AI-клиенты",
                 self.action_onboarding,
             )
             yield SystemCommand(
                 "Sessions" if english else "Сессии",
-                "Ctrl+O — task sessions",
+                "Ctrl+O — previous tasks"
+                if english
+                else "Ctrl+O — прошлые задачи",
                 self.action_session_browser,
             )
             yield SystemCommand(
                 "Project folder" if english else "Папка проекта",
-                "Ctrl+W — switch the working project",
+                "Ctrl+W — switch project or folder"
+                if english
+                else "Ctrl+W — сменить проект или папку",
                 self.action_workspace,
             )
             yield SystemCommand(
                 "Clear chat" if english else "Очистить чат",
-                "Ctrl+L — clear the conversation",
+                "Ctrl+L — clear the conversation"
+                if english
+                else "Ctrl+L — очистить диалог",
                 self.action_clear_log,
             )
             yield SystemCommand(
                 "Copy" if english else "Копировать",
-                "Ctrl+Shift+C — copy the selection",
+                "Ctrl+Shift+C — copy selection"
+                if english
+                else "Ctrl+Shift+C — копировать выделение",
                 self.action_copy_selection,
             )
             yield SystemCommand(
                 "Quit" if english else "Выйти",
-                "Ctrl+Q — exit KaroX",
+                "Ctrl+Q — exit KaroX"
+                if english
+                else "Ctrl+Q — выйти из KaroX",
                 self.action_quit,
             )
             for command in super().get_system_commands(screen):
@@ -9144,13 +11924,13 @@ if _HAS_TEXTUAL:
                 yield command
 
         def action_model(self) -> None:
-            """Open the fast model picker used by Ctrl+G and /model."""
+            """Open the dedicated model picker used by /models."""
 
             if self.agent_busy:
                 self._write_notice(
                     self._label(
-                        "Модель и Effort можно менять после завершения текущей задачи.",
-                        "Model and Effort can be changed after the current task finishes.",
+                        "Модель можно менять после завершения текущей задачи.",
+                        "The model can be changed after the current task finishes.",
                     ),
                     "warning",
                 )
@@ -9158,10 +11938,91 @@ if _HAS_TEXTUAL:
 
             from .tui_dashboard import ModelPickerScreen
 
+            self.push_screen(ModelPickerScreen(self.language), self._model_picker_done)
+
+        def action_mode(self) -> None:
+            """Open the human-first Build/Plan/Ideate picker used by /mode."""
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Режим можно менять после завершения текущей задачи.",
+                        "The mode can be changed after the current task finishes.",
+                    ),
+                    "warning",
+                )
+                return
+            from .tui_dashboard import ModePickerScreen
+
             self.push_screen(
-                ModelPickerScreen(self.language, effort=self.reasoning_effort),
-                self._model_picker_done,
+                ModePickerScreen(self.language, mode=self.agent_mode),
+                self._mode_picker_done,
             )
+
+        def _mode_picker_done(self, choice: Optional[str]) -> None:
+            if choice is None:
+                self.query_one("#composer", Input).focus()
+                return
+            try:
+                mode = normalize_mode(choice)
+            except ModeError:
+                self._write_notice(
+                    self._label("Неизвестный режим.", "Unknown mode."), "error"
+                )
+            else:
+                self._apply_agent_mode(mode)
+            self.query_one("#composer", Input).focus()
+
+        def _apply_agent_mode(self, mode: str) -> None:
+            previous = self.agent_mode
+            self.agent_mode = mode
+            _save_agent_mode(mode)
+            self._refresh_status()
+            notice = mode_summary(mode, self.language)
+            if previous != mode and mode == DEFAULT_MODE:
+                notice += self._label(
+                    " Изменения кода снова разрешены в обычных безопасных границах.",
+                    " Code changes are enabled again inside the normal safety boundaries.",
+                )
+            self._write_notice(notice, "success")
+
+        def action_effort(self) -> None:
+            """Open the dedicated first-class Effort picker used by /effort."""
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Effort можно менять после завершения текущей задачи.",
+                        "Effort can be changed after the current task finishes.",
+                    ),
+                    "warning",
+                )
+                return
+            from .tui_dashboard import EffortPickerScreen
+
+            self.push_screen(
+                EffortPickerScreen(self.language, effort=self.effort_level),
+                self._effort_picker_done,
+            )
+
+        def _effort_picker_done(self, choice: Optional[str]) -> None:
+            if choice is None:
+                self.query_one("#composer", Input).focus()
+                return
+            try:
+                level = normalize_effort(choice)
+            except ValueError:
+                self._write_notice(
+                    self._label("Неизвестный Effort.", "Unknown Effort."), "error"
+                )
+                self.query_one("#composer", Input).focus()
+                return
+            self.effort_level = level
+            _save_effort_level(level)
+            self._refresh_status()
+            notice = effort_user_summary(level, self.language)
+            self._write_notice(notice, "success")
+            self.query_one("#composer", Input).focus()
 
         def _refresh_models_command(self) -> None:
             """/model refresh: rediscover the active provider's catalog.
@@ -9232,8 +12093,8 @@ if _HAS_TEXTUAL:
             if self.agent_busy:
                 self._write_notice(
                     self._label(
-                        "Модель и Effort можно менять после завершения текущей задачи.",
-                        "Model and Effort can be changed after the current task finishes.",
+                        "Модель можно менять после завершения текущей задачи.",
+                        "The model can be changed after the current task finishes.",
                     ),
                     "warning",
                 )
@@ -9297,20 +12158,19 @@ if _HAS_TEXTUAL:
             if choice == MODEL_PICKER_CONNECT:
                 self._open_connections(CONNECT_FOCUS_MODELS)
                 return
-            if choice.startswith("effort:"):
-                value = choice.split(":", 1)[1] or "auto"
-                self.reasoning_effort = None if value == "auto" else value
-                _save_preferences(reasoning_effort=self.reasoning_effort)
-                self._refresh_status()
-                self._write_notice(f"Effort: {value}", "success")
-                self.query_one("#composer", Input).focus()
-                return
             prefix, provider_id, model_id = (choice.split(":", 2) + ["", "", ""])[:3]
             if prefix != "model" or not provider_id or not model_id:
                 self.query_one("#composer", Input).focus()
                 return
+            registry = _registry()
             try:
-                _registry().select_model(provider_id, model_id)
+                candidate = registry.model(provider_id, model_id)
+                auth_problem = self._model_auth_problem(candidate)
+                if auth_problem is not None:
+                    self._write_notice(auth_problem, "warning")
+                    self._open_connections(CONNECT_FOCUS_MODELS)
+                    return
+                registry.select_model(provider_id, model_id)
             except Exception as exc:
                 self._write_notice(str(redact(exc)), "error")
             else:
@@ -9334,12 +12194,12 @@ if _HAS_TEXTUAL:
                     self.language,
                     session_id=self.active_session,
                     model_text=model_text,
-                    effort=self.reasoning_effort,
+                    effort=self.effort_level,
                 )
             )
 
-        def _economy_status_command(self) -> None:
-            """Mandate section-10: subsystem status with honest labels.
+        def _economy_status_command(self, *, verbose: bool = False) -> None:
+            """Show a human summary by default; verbose keeps subsystem diagnostics.
 
             Economy is infrastructure optimization; Effort owns quality.
             The rows come from the newest persisted economy usage event of
@@ -9363,7 +12223,26 @@ if _HAS_TEXTUAL:
                 economy=last_economy_event(usage),
                 economy_mode=self.run_cost_profile == "economy",
             )
-            self._write("\n".join(lines))
+            if verbose:
+                self._write("\n".join(lines))
+                return
+            compact = [lines[0]] if lines else []
+            measured = [
+                line
+                for line in lines[1:-1]
+                if "UNAVAILABLE" not in line
+            ]
+            compact.extend(measured)
+            if not measured:
+                compact.append(
+                    self._label(
+                        "Измерения появятся после завершённой задачи. /economy verbose — диагностика подсистем.",
+                        "Measurements appear after a completed task. /economy verbose — subsystem diagnostics.",
+                    )
+                )
+            if len(lines) > 1:
+                compact.append(lines[-1])
+            self._write("\n".join(compact))
 
         def _open_connections(self, focus: Optional[str] = None) -> None:
             """Open the single Connections screen, optionally on one section.
@@ -9963,7 +12842,7 @@ if _HAS_TEXTUAL:
             self._write(
                 "[#b7c2b0]"
                 + self._label(
-                    "API подключён и проверен:", "API connected and verified:"
+                    "API подключён · ключ сохранён:", "API connected · key saved:"
                 )
                 + f"[/] {escape(selected.provider_id)}/"
                 f"{escape(selected.model_id)}"
@@ -10913,7 +13792,121 @@ if _HAS_TEXTUAL:
                 self._write("[dim]Мост остановлен.[/]")
                 self._refresh_status()
 
-        def _submit_task(self, task: str) -> None:
+        def _model_auth_problem(self, model: ModelRecord) -> Optional[str]:
+            """Return a user-facing credential problem before a paid/network call."""
+
+            try:
+                details = _provider_controller().details(model.provider_id)
+            except Exception:
+                return None
+            provider = details.provider
+            base_url = str(provider.base_url or "").casefold()
+            if base_url.startswith(("http://127.0.0.1", "http://localhost")):
+                return None
+            credential = details.credential if isinstance(details.credential, dict) else {}
+            if credential.get("configured") and credential.get("available"):
+                return None
+            provider_name = provider.provider_id
+            if credential.get("configured"):
+                return self._label(
+                    f"У {provider_name} сохранена ссылка на API-ключ, но ключ недоступен. "
+                    "Откройте /connect, выберите провайдера и сохраните ключ заново.",
+                    f"{provider_name} has a saved API-key reference, but the key is unavailable. "
+                    "Open /connect, choose the provider, and save the key again.",
+                )
+            return self._label(
+                f"Для {provider_name} не сохранён API-ключ. Выбор модели сам по себе ключ не сохраняет. "
+                "Откройте /connect → API-модель → провайдер, вставьте ключ и нажмите «Использовать и сохранить».",
+                f"No API key is saved for {provider_name}. Selecting a model does not save a key. "
+                "Open /connect → API model → provider, enter the key, then choose 'Use and save'.",
+            )
+
+        def _friendly_provider_message(self, message: str) -> str:
+            """Translate provider machine failures into one actionable user sentence."""
+
+            text = str(message or "")
+            lowered = text.casefold()
+            if "provider_error:" not in lowered:
+                return text
+            selected = _selected_model()
+            provider = (
+                selected.provider_id
+                if selected is not None
+                else self._label("Провайдер", "The provider")
+            )
+            if "provider_error:authentication" in lowered:
+                return self._label(
+                    f"{provider} отклонил API-ключ. Откройте /connect и сохраните новый ключ.",
+                    f"{provider} rejected the API key. Open /connect and save a new key.",
+                )
+            if "provider_error:malformed_response" in lowered:
+                return self._label(
+                    "Ответ модели пришёл потоком, который KaroX не смог обработать. Сессия сохранена — повторите задачу; подробности доступны в /sessions.",
+                    "The model response used a stream KaroX could not process. The session is saved — retry the task; details are available in /sessions.",
+                )
+            if "provider_error:rate_limit" in lowered:
+                return self._label(
+                    f"{provider} временно ограничил запросы. Повторите задачу позже.",
+                    f"{provider} is temporarily rate-limiting requests. Retry later.",
+                )
+            if "provider_error:model_unavailable" in lowered:
+                return self._label(
+                    "Выбранная модель сейчас недоступна. Выберите другую через /models или повторите позже.",
+                    "The selected model is currently unavailable. Choose another with /models or retry later.",
+                )
+            return self._label(
+                f"{provider} не завершил запрос. Сессия сохранена; технические подробности доступны в /sessions.",
+                f"{provider} did not complete the request. The session is saved; technical details are available in /sessions.",
+            )
+
+        def _submit_review(self, focus: str = "") -> None:
+            """Run a Codex/Claude-style review without enabling source mutation."""
+
+            review_task = (
+                "Review the current repository changes and branch diff. Do not modify files. "
+                "Look for correctness bugs, regressions, security issues, missing tests, and "
+                "violations of the task/project contract. Report findings first, ordered by "
+                "severity, with concrete file/line evidence. If you find no meaningful issues, "
+                "say that explicitly and name the verification evidence you checked."
+            )
+            if focus:
+                review_task += f"\n\nReview focus from the user: {focus}"
+            self._submit_task(review_task, agent_mode_override="plan")
+
+        def _local_status_answer(self, task: str) -> Optional[str]:
+            """Answer local UI facts without spending provider tokens."""
+
+            kind = _local_status_query_kind(task)
+            if not kind:
+                return None
+            if kind == "folder":
+                return self._label(
+                    f"Рабочая папка: {self.repository}.",
+                    f"Working folder: {self.repository}.",
+                )
+            if kind == "model":
+                selected = _selected_model()
+                model = (
+                    f"{selected.provider_id}/{selected.model_id}"
+                    if selected is not None
+                    else self._label("не подключена", "not connected")
+                )
+                return self._label(f"Модель: {model}.", f"Model: {model}.")
+            return self._label(
+                f"Глубина: {self.effort_level}.",
+                f"Effort: {self.effort_level}.",
+            )
+
+        def _submit_task(
+            self, task: str, *, agent_mode_override: Optional[str] = None
+        ) -> None:
+            if agent_mode_override is None:
+                local_answer = self._local_status_answer(task)
+                if local_answer is not None:
+                    self._write_user(task)
+                    self._write_assistant(local_answer)
+                    self._refresh_status()
+                    return
             if self.agent_busy:
                 self._write_notice(
                     self._label(
@@ -10927,10 +13920,33 @@ if _HAS_TEXTUAL:
             if unsafe_reason:
                 self._write_notice(unsafe_reason, "error")
                 return
-            if _selected_model() is None:
+            selected_model = _selected_model()
+            if selected_model is None:
                 self._write(f"[#c6a56b]{_TEXT[self.language]['connect_first']}[/]")
                 return
-            session_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+            auth_problem = self._model_auth_problem(selected_model)
+            if auth_problem is not None:
+                self._write_notice(auth_problem, "error")
+                return
+            if self._pending_images and selected_model.vision != "true":
+                self._write_notice(
+                    self._label(
+                        f"Вложения не отправлены: {selected_model.provider_id}/{selected_model.model_id} не объявляет vision=true. Выберите vision-модель или /attach clear.",
+                        f"Attachments were not sent: {selected_model.provider_id}/{selected_model.model_id} does not declare vision=true. Choose a vision model or use /attach clear.",
+                    ),
+                    "error",
+                )
+                return
+            continue_task = bool(self._resume_next_task and self.active_session)
+            session_id = (
+                str(self.active_session)
+                if continue_task
+                else f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+            )
+            # The one-shot resume arm is consumed only after every submission
+            # guard above passed. A rejected prompt (busy/unsafe/no model/key)
+            # therefore leaves Resume armed instead of silently losing it.
+            self._resume_next_task = False
             # A new generation for a genuinely new run. Bumped only after every
             # guard above has passed, so a rejected submission (busy, unsafe
             # workspace, no model) does not invalidate the run in flight.
@@ -10938,6 +13954,8 @@ if _HAS_TEXTUAL:
             run = RunIdentity(session_id, self._run_generation)
             self._active_run = run
             self.active_session = session_id
+            self._usage_session_id = session_id
+            self._usage_baseline = dict(self._session_usage())
             self._history_seen = 0
             self._history_fingerprint = None
             self._reset_activity()
@@ -10950,17 +13968,18 @@ if _HAS_TEXTUAL:
             self.query_one("#busy", LoadingIndicator).styles.display = "block"
             self._refresh_status()
             self._write_user(task)
-            # While the agent works we show only the animated dots indicator
-            # (#busy); the text activity line ("KaroX работает…", "Останавливаю…")
-            # used to fight with the dots and was removed by user request.
-            self._set_activity("", "idle")
+            # A reasoning-heavy model can spend tens of seconds before its first
+            # tool call. A spinner alone looks frozen, so start with one truthful
+            # public progress line; tool/verification events replace it in place.
+            # This is observed phase state, never raw chain-of-thought.
+            self._set_activity_kind(ACTIVITY_REASONING)
             # The run is now really starting: the session id exists, the model is
             # selected and the worker is about to be dispatched. Published from
             # the production path rather than from a helper a test could call on
             # its own, so the typed status row proves the real lifecycle.
             self._publish_agent_started(run, task)
             task_for_agent = task
-            if self._continuation_context:
+            if self._continuation_context and not continue_task:
                 # /compact stored a bounded, redacted continuation preamble.
                 # The screen and the published run keep the task as typed; only
                 # the dispatched agent carries the extra context, exactly once.
@@ -10971,6 +13990,17 @@ if _HAS_TEXTUAL:
                     f"Task:\n{task}"
                 )
                 self._continuation_context = None
+            skill_permissions = (
+                tuple(
+                    f"{capability}={decision}"
+                    for capability, decision in sorted(
+                        self._skill_permissions.get(self.active_skill or "", {}).items()
+                    )
+                )
+                if self.active_skill
+                else ()
+            )
+            images_for_run = tuple(self._pending_images)
             argv = _agent_argv(
                 task_for_agent,
                 self.repository,
@@ -10978,8 +14008,15 @@ if _HAS_TEXTUAL:
                 session_id,
                 run_cost_profile=self.run_cost_profile,
                 effort_level=self.effort_level,
-                agent_mode=self.agent_mode,
+                agent_mode=agent_mode_override or self.agent_mode,
+                continue_task=continue_task,
+                auto_checkpoint=True,
+                skill=self.active_skill,
+                skill_permissions=skill_permissions,
+                images=images_for_run,
+                protected_paths=self._maintenance_protected_paths(),
             )
+            self._pending_images.clear()
 
             def execute() -> None:
                 code, output = _run_agent_cli(
@@ -11123,9 +14160,12 @@ if _HAS_TEXTUAL:
             number spanning two different actions describes neither of them.
             """
 
-            if restart and kind != self._activity_kind:
+            changed = kind != self._activity_kind
+            if restart and changed:
                 self._activity_started = time.monotonic()
             self._activity_kind = kind
+            if changed:
+                self._write_phase_progress(kind)
             self._show_activity()
 
         def _activity_action(self) -> Optional[ActivityAction]:
@@ -11153,9 +14193,34 @@ if _HAS_TEXTUAL:
             started = self._activity_started
             if isinstance(started, float) and kind in _ACTIVITY_IN_PROGRESS:
                 elapsed = time.monotonic() - started
+
+            # The grouped typed stream can add measured context to an otherwise
+            # generic live phase without leaking paths, tool arguments or model
+            # chain-of-thought. Only integer counts from the event stream cross
+            # this boundary; technical detail remains in Session Detail.
+            files_read: Optional[int] = None
+            searches: Optional[int] = None
+            stream = getattr(self, "_activity_group_stream", None)
+            if stream is not None and kind in {ACTIVITY_READING, ACTIVITY_SEARCHING}:
+                try:
+                    groups = stream.groups()
+                    current_group = groups[-1] if groups else None
+                except Exception:
+                    current_group = None
+                if current_group is not None:
+                    if kind == ACTIVITY_READING:
+                        files_read = _optional_positive_int(
+                            getattr(current_group, "files_read", None)
+                        )
+                    else:
+                        searches = _optional_positive_int(
+                            getattr(current_group, "searches", None)
+                        )
             return ActivityAction(
                 kind=kind,
                 files=len(self._activity_changed) or None,
+                files_read=files_read,
+                searches=searches,
                 tests_passed=self._activity_tests,
                 elapsed_seconds=elapsed,
                 reason=self._activity_reason,
@@ -11216,29 +14281,31 @@ if _HAS_TEXTUAL:
             self._activity_reason = ""
             self._activity_started = None
             self._activity_rendered = ""
+            self._last_progress_text = ""
+            self._last_progress_block = None
+            self._progress_blocks_this_run = 0
+            self._reasoning_summary_step = None
+            self._reasoning_summary_text = ""
+            self._reasoning_summary_block = None
+            self._phase_progress_seen.clear()
             self._set_activity("", "idle")
 
         def _flush_activity_groups(self, *, finished: bool = False) -> None:
-            """Write each closed activity group to the conversation, once.
+            """Keep technical chronology in Session Detail, not the main chat.
 
-            The grouped chronology is the product surface of the typed event
-            pipeline: what the run actually did, folded into catalog words
-            and integers. Raw calls stay in Session Detail, on demand. No
-            branch here interpolates text taken from a tool payload, and a
-            rendering failure must never take the interface down.
+            The live ``#activity`` row answers what is happening now and the final
+            assistant message answers what happened. Closed low-level groups are
+            drained so alternating read/check/read never becomes permanent chat
+            spam; the exact chronology remains available in Session Detail.
             """
 
             stream = getattr(self, "_activity_group_stream", None)
             if stream is None:
                 return
             try:
-                from .activity_stream import render_group_lines
-
                 if finished:
                     stream.finish()
-                english = self.language != "ru"
-                for group in stream.pop_closed():
-                    self._write("\n".join(render_group_lines(group, english)))
+                stream.pop_closed()
             except Exception:
                 pass
 
@@ -11251,6 +14318,20 @@ if _HAS_TEXTUAL:
                 self._activity_changed[_identifier(path)] = None
             self._activity_reason = _identifier(reason)
             self._activity_started = None
+            # A plain answer/no-op already ended with an assistant message and the
+            # header says the run is complete. A second `Done · question, not an
+            # edit` row adds chrome but no information. Successful coding runs
+            # still keep their measured files/tests summary; waiting, stopped and
+            # failed states always remain visible.
+            if (
+                kind == ACTIVITY_COMPLETED
+                and self._activity_reason in {"answer", "no_changes"}
+                and not self._activity_changed
+                and not self._activity_tests
+            ):
+                self._activity_kind = ""
+                self._set_activity("", "idle")
+                return
             self._set_activity_kind(kind, restart=False)
 
         def _finish_step(
@@ -11319,7 +14400,12 @@ if _HAS_TEXTUAL:
             except Exception:
                 self._poll_assistant_content()
                 return
-            if latest < self._history_seen:
+            # `_history_seen` is the next sequence to request, while `latest` is
+            # the last sequence currently stored. On a quiet tick latest is
+            # therefore exactly seen-1; that is not a rewind. The old comparison
+            # reset to zero in that normal state and replayed the whole run every
+            # 350 ms, which is why the chat filled with repeated activity rows.
+            if latest + 1 < self._history_seen:
                 # Session changed (new run); reset cursor.
                 self._history_seen = 0
                 self._activity_group_stream = None
@@ -11349,11 +14435,26 @@ if _HAS_TEXTUAL:
                         except Exception:
                             # An observer must not take the interface down.
                             pass
-                    if kind == "ToolCallStarted":
+                    if kind == "AgentPhaseChanged":
+                        phase = str(payload.get("phase") or "")
+                        if phase == "verification":
+                            self._set_activity_kind(ACTIVITY_TESTING)
+                        elif phase == "execution" and not self._activity_calls:
+                            self._set_activity_kind(ACTIVITY_REASONING)
+                    elif kind == "ReasoningSummaryDelta":
+                        summary = str(payload.get("summary") or "")
+                        try:
+                            step = int(payload.get("step") or 0)
+                        except (TypeError, ValueError):
+                            step = 0
+                        self._write_reasoning_summary_delta(step, summary)
+                    elif kind == "ToolCallStarted":
+                        self._typed_activity_sessions.add(self.active_session)
                         tool = str(payload.get("tool") or "tool")
                         call_id = str(payload.get("call_id") or event.parent_id or tool)
                         self._begin_step(call_id, tool)
                     elif kind == "ToolCallCompleted":
+                        self._typed_activity_sessions.add(self.active_session)
                         tool = str(payload.get("tool") or "tool")
                         call_id = str(payload.get("call_id") or event.parent_id or tool)
                         ok = payload.get("ok")
@@ -11389,16 +14490,27 @@ if _HAS_TEXTUAL:
             except OSError:
                 return
             fingerprint = (stat.st_mtime_ns, stat.st_size)
-            if fingerprint == self._history_fingerprint:
+            if self._provider_history_fingerprints.get(self.active_session) == fingerprint:
                 return
-            self._history_fingerprint = fingerprint
+            self._provider_history_fingerprints[self.active_session] = fingerprint
             try:
                 history = store.load(self.active_session).provider_history
             except Exception:
                 return
-            content_seen = getattr(self, "_content_seen", 0)
+            content_seen = self._provider_history_seen.get(self.active_session, 0)
+            # A compacted/recreated session can legitimately have a shorter
+            # history under the same id. Clamp instead of silently skipping all
+            # of its new entries.
+            if content_seen > len(history):
+                content_seen = 0
             new_entries = history[content_seen:]
-            self._content_seen = len(history)
+            self._provider_history_seen[self.active_session] = len(history)
+            # Keep this observer cache bounded across a very long TUI lifetime.
+            if len(self._provider_history_seen) > 64:
+                for session_id in tuple(self._provider_history_seen):
+                    if session_id != self.active_session:
+                        self._provider_history_seen.pop(session_id, None)
+                        break
             # The agent's internal "answer_prompt" nudge produces a ceremonial
             # self-report reply ("the task was only a greeting...") that the
             # user has already read as the real answer above it. Provider history
@@ -11413,6 +14525,7 @@ if _HAS_TEXTUAL:
                 getattr(self, "_suppress_next_answer_prompt_assistant", False)
                 and suppression_session == self.active_session
             )
+            typed_tool_activity = self.active_session in self._typed_activity_sessions
             for entry in new_entries:
                 if entry.get("role") == "user" and entry.get("kind") == "answer_prompt":
                     suppress_next_assistant_text = True
@@ -11425,18 +14538,43 @@ if _HAS_TEXTUAL:
                     if suppress_now:
                         self._suppress_next_answer_prompt_assistant = False
                         self._answer_prompt_suppression_session = None
+                    # Non-stream providers and recovery after a TUI restart still
+                    # get the provider-labeled public reasoning summary from the
+                    # durable assistant entry. The live stream path deduplicates
+                    # this because its last accumulated preview is identical.
+                    reasoning_summary = entry.get("reasoning_summary")
+                    if (
+                        isinstance(reasoning_summary, str)
+                        and reasoning_summary.strip()
+                        and not suppress_now
+                    ):
+                        self._write_progress(reasoning_summary)
                     content = entry.get("content")
                     text = str(content) if content else ""
+                    tool_calls = tuple(
+                        call
+                        for call in (entry.get("tool_calls") or ())
+                        if isinstance(call, dict)
+                    )
                     if text.strip() and not suppress_now:
                         self._last_assistant_content = text
-                        self._write_assistant(text)
-                    for call in entry.get("tool_calls") or ():
-                        if isinstance(call, dict):
+                        # Text accompanying tool calls is a visible preamble/plan,
+                        # not the final answer. Show it like Codex/Claude progress:
+                        # compact and borderless, without pretending it is hidden
+                        # chain-of-thought.
+                        if tool_calls:
+                            self._write_progress(text)
+                        else:
+                            self._write_assistant(text)
+                    if not typed_tool_activity:
+                        for call in tool_calls:
                             name = str(call.get("name") or "tool")
                             self._begin_step(
                                 str(call.get("call_id") or name), name
                             )
                 elif entry.get("role") == "tool":
+                    if typed_tool_activity:
+                        continue
                     name = str(
                         entry.get("core_name") or entry.get("tool_name") or "tool"
                     )
@@ -11447,6 +14585,126 @@ if _HAS_TEXTUAL:
                         failed=isinstance(result, dict)
                         and not result.get("ok", True),
                     )
+
+        def _pending_cleanup_plan(self, session_id: str) -> Optional[Dict[str, Any]]:
+            """Return the newest authoritative frozen cleanup plan for this workspace."""
+            if not session_id:
+                return None
+            try:
+                history = SessionStore(session_dir()).load(session_id).provider_history
+            except Exception:
+                return None
+            for entry in reversed(history):
+                if not isinstance(entry, dict) or entry.get("role") != "tool":
+                    continue
+                core_name = str(entry.get("core_name") or entry.get("tool_name") or "")
+                if core_name not in {"disk.plan_cleanup", "disk_plan_cleanup"}:
+                    continue
+                result = entry.get("result")
+                data = result.get("data") if isinstance(result, dict) else None
+                if not isinstance(data, dict):
+                    return None
+                plan_id = str(data.get("plan_id") or "")
+                if not plan_id or plan_id in self._cleanup_plans_reviewed:
+                    return None
+                try:
+                    plan = load_cleanup_plan(plan_id, public=True)
+                    root = Path(str(plan.get("root") or "")).expanduser().resolve(strict=True)
+                except (CleanupError, OSError, RuntimeError, ValueError):
+                    return None
+                if os.path.normcase(os.path.abspath(str(root))) != os.path.normcase(
+                    os.path.abspath(str(self.repository))
+                ):
+                    return None
+                return plan
+            return None
+
+        def _offer_cleanup_plan(self, session_id: str) -> bool:
+            """Ask the human about one exact local plan; no model turn is involved."""
+            plan = self._pending_cleanup_plan(session_id)
+            if plan is None:
+                return False
+            plan_id = str(plan.get("plan_id") or "")
+            root = str(plan.get("root") or self.repository)
+            self._cleanup_plans_reviewed.add(plan_id)
+            screen = ConfirmScreen(
+                self._label("Подтвердить очистку?", "Confirm cleanup?"),
+                cleanup_impact_preview(plan, language=self.language),
+                yes=self._label("Enter  Удалить", "Enter  Delete"),
+                no=self._label("Esc  Отмена", "Esc  Cancel"),
+                language=self.language,
+            )
+            self.push_screen(
+                screen,
+                lambda approved: self._on_cleanup_plan_answer(
+                    approved, plan_id, root
+                ),
+            )
+            return True
+
+        def _on_cleanup_plan_answer(
+            self, approved: Optional[bool], plan_id: str, root: str
+        ) -> None:
+            if not approved:
+                self._write_notice(
+                    self._label(
+                        "Очистка отменена · ничего не удалено.",
+                        "Cleanup cancelled · nothing was deleted.",
+                    ),
+                    "info",
+                )
+                self.query_one("#composer", Input).focus()
+                return
+            composer = self.query_one("#composer", Input)
+            composer.disabled = True
+            self._write_notice(
+                self._label(
+                    "Удаляю только подтверждённый список…",
+                    "Deleting only the confirmed list…",
+                ),
+                "info",
+            )
+
+            def apply_in_background() -> None:
+                try:
+                    result = apply_cleanup_plan(
+                        plan_id,
+                        root=root,
+                        confirmed_by_user=True,
+                        protected_roots=self._maintenance_protected_paths(),
+                    )
+                except CleanupError as exc:
+                    self.call_from_thread(self._cleanup_apply_failed, str(exc))
+                    return
+                self.call_from_thread(self._cleanup_apply_finished, result)
+
+            self.run_worker(
+                apply_in_background,
+                thread=True,
+                exclusive=True,
+                group="cleanup",
+            )
+
+        def _cleanup_apply_failed(self, reason: str) -> None:
+            composer = self.query_one("#composer", Input)
+            composer.disabled = False
+            self._write_notice(
+                self._label("Очистка остановлена: ", "Cleanup stopped: ") + reason[:240],
+                "error",
+            )
+            composer.focus()
+
+        def _cleanup_apply_finished(self, result: Mapping[str, Any]) -> None:
+            composer = self.query_one("#composer", Input)
+            composer.disabled = False
+            removed = int(result.get("removed_target_count") or 0)
+            status = str(result.get("status") or "completed")
+            message = self._label(
+                f"Очистка завершена · удалено целей: {removed}",
+                f"Cleanup finished · targets removed: {removed}",
+            )
+            self._write_notice(message, "success" if status == "completed" else "warning")
+            composer.focus()
 
         def _agent_finished(
             self, code: int, output: str, run: Optional[RunIdentity] = None
@@ -11521,7 +14779,7 @@ if _HAS_TEXTUAL:
                     or report.get("reason")
                     or "Finished."
                 )
-                text_message = str(message)
+                text_message = self._friendly_provider_message(str(message))
                 # The polling reader above already showed this turn's answer, and
                 # the report carries the same text again, so every reply was drawn
                 # twice. `_last_assistant_content` was recorded for exactly this
@@ -11533,8 +14791,10 @@ if _HAS_TEXTUAL:
                 # only a greeting, no repository change was required" -- and the
                 # user has already read the actual reply above it. The one-line
                 # notice below says the same thing without a paragraph of it.
+                reason_id = _identifier(report.get("reason"))
+                provider_failure = reason_id.startswith("provider_error:")
                 ceremony = (
-                    report.get("reason") == "no_changes"
+                    reason_id == "no_changes"
                     and bool(self._last_assistant_content.strip())
                 )
                 if (
@@ -11542,7 +14802,10 @@ if _HAS_TEXTUAL:
                     and not ceremony
                     and text_message.strip() != self._last_assistant_content.strip()
                 ):
-                    self._write_assistant(text_message)
+                    if provider_failure:
+                        self._write_notice(text_message, "error")
+                    else:
+                        self._write_assistant(text_message)
             else:
                 safe = output.strip() or f"Agent exited with code {code}."
                 self._write_notice(safe, "error")
@@ -11583,7 +14846,10 @@ if _HAS_TEXTUAL:
             else:
                 self._publish_agent_failed(run, reason, code=error_code)
             self._refresh_status()
-            self.query_one("#composer", Input).focus()
+            # A maintenance run stops after freezing a plan. The human-facing
+            # process owns the only transition from preview to deletion.
+            if not self._offer_cleanup_plan(run.session_id):
+                self.query_one("#composer", Input).focus()
 
         @staticmethod
         def _run_outcome(
@@ -11712,6 +14978,626 @@ if _HAS_TEXTUAL:
             )
             self._write_assistant(body)
 
+        def _diff_command(self, argument: str = "") -> None:
+            """Show bounded read-only Git status/diff without invoking a shell."""
+
+            requested = argument.strip().casefold()
+            if requested not in {"", "stat", "full"}:
+                self._write_notice(
+                    self._label("Формат: /diff [stat|full]", "Usage: /diff [stat|full]"),
+                    "warning",
+                )
+                return
+
+            def git(*args: str) -> str:
+                try:
+                    completed = subprocess.run(
+                        ["git", *args],
+                        cwd=self.repository,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=20.0,
+                        check=False,
+                        creationflags=(
+                            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                            if os.name == "nt"
+                            else 0
+                        ),
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise RuntimeError(f"git read failed: {exc}") from exc
+                if completed.returncode != 0:
+                    raise RuntimeError((completed.stderr or completed.stdout or "git failed").strip()[:1000])
+                return completed.stdout
+
+            try:
+                git("rev-parse", "--is-inside-work-tree")
+                status = git("status", "--short")
+                unstaged = git("diff", "--no-ext-diff", "--stat")
+                staged = git("diff", "--cached", "--no-ext-diff", "--stat")
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            lines = [f"[bold #e0dccc]{self._label('Git changes', 'Git changes')}[/]"]
+            if not status.strip():
+                lines.append("  " + self._label("Рабочее дерево чистое.", "Working tree is clean."))
+            else:
+                status_lines = status.rstrip().splitlines()
+                lines.append(f"  {self._label('Изменённых путей', 'Changed paths')}: {len(status_lines)}")
+                for row in status_lines[:30]:
+                    lines.append("  " + escape(str(redact(row))))
+                if len(status_lines) > 30:
+                    lines.append(f"  … +{len(status_lines) - 30}")
+            if staged.strip():
+                lines.append("  [#d4b676]staged[/]")
+                lines.extend("    " + escape(row) for row in staged.rstrip().splitlines()[:20])
+            if unstaged.strip():
+                lines.append("  [#d4b676]unstaged[/]")
+                lines.extend("    " + escape(row) for row in unstaged.rstrip().splitlines()[:20])
+            if requested == "full":
+                try:
+                    raw = (
+                        git("diff", "--no-ext-diff", "--no-color")
+                        + "\n"
+                        + git("diff", "--cached", "--no-ext-diff", "--no-color")
+                    )
+                except Exception as exc:
+                    self._write_notice(str(redact(exc)), "error")
+                    return
+                safe = str(redact(raw))
+                limit = 24_000
+                clipped = len(safe) > limit
+                safe = safe[:limit]
+                lines.append("\n[bold #e0dccc]diff[/]")
+                lines.append(escape(safe.rstrip() or self._label("Нет diff.", "No diff.")))
+                if clipped:
+                    lines.append("[dim]… diff truncated at 24000 characters; use Git or a focused read for the rest.[/]")
+            self._write("\n".join(lines))
+
+        def _init_command(self, argument: str = "") -> None:
+            """Create a project-owned KAROX.md template without overwriting anything."""
+
+            if argument.strip():
+                self._write_notice(
+                    self._label("Формат: /init", "Usage: /init"), "warning"
+                )
+                return
+            target = self.repository / "KAROX.md"
+            if target.exists():
+                self._write_notice(
+                    self._label(
+                        "KAROX.md уже существует; KaroX никогда не перезаписывает project instructions через /init.",
+                        "KAROX.md already exists; /init never overwrites project instructions.",
+                    ),
+                    "warning",
+                )
+                return
+            inherited = [
+                name
+                for name in ("CLAUDE.md", "AGENTS.md")
+                if (self.repository / name).is_file()
+            ]
+            checks = [" ".join(command) for command in self.verification]
+            lines = [
+                "# KaroX project instructions",
+                "",
+                "This file is project-owned guidance. KaroX treats it as untrusted local convention;",
+                "it cannot grant capabilities or override KaroX safety policy.",
+                "",
+                "## Project goal",
+                "",
+                "- TODO: describe the product and the outcome that matters.",
+                "",
+                "## Verification",
+                "",
+            ]
+            if checks:
+                lines.extend(f"- `{command}`" for command in checks)
+            else:
+                lines.append("- TODO: add the canonical test/lint/build commands.")
+            lines.extend(
+                [
+                    "",
+                    "## Local conventions",
+                    "",
+                    "- TODO: architecture, style, generated files, and paths agents should know.",
+                    "",
+                    "## Operational boundaries",
+                    "",
+                    "- Never put credentials or tokens in repository files or prompts.",
+                    "- Do not push, publish, deploy, authenticate, or mutate external production systems unless an explicit KaroX approval path authorizes that exact action.",
+                    "- Prefer evidence from tests, Git diff, and real UI/runtime checks over narrative claims.",
+                ]
+            )
+            if inherited:
+                lines.extend(
+                    [
+                        "",
+                        "## Existing compatible instructions",
+                        "",
+                        "KaroX also reads these existing files before KAROX.md; keep only KaroX-specific overrides here:",
+                        *(f"- `{name}`" for name in inherited),
+                    ]
+                )
+            text = "\n".join(lines).rstrip() + "\n"
+            try:
+                with target.open("x", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except FileExistsError:
+                self._write_notice(
+                    self._label("KAROX.md уже появился; запись отменена.", "KAROX.md already appeared; write cancelled."),
+                    "warning",
+                )
+                return
+            except OSError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self._write_notice(
+                self._label(
+                    f"Создан {target}. Заполните TODO; KaroX начнёт читать файл со следующей задачи.",
+                    f"Created {target}. Fill the TODOs; KaroX reads it from the next task.",
+                ),
+                "success",
+            )
+
+        def _context_command(self, argument: str = "") -> None:
+            """Explain the actual model/context inputs for the next turn."""
+
+            requested = argument.strip().casefold()
+            if requested not in {"", "full"}:
+                self._write_notice(
+                    self._label("Формат: /context [full]", "Usage: /context [full]"),
+                    "warning",
+                )
+                return
+            from .effort import AUTO_EFFORT, budget_for
+            from .memory import KaroXMemory, MemoryScope
+            from .project_context import discover_project_context
+            from .project_registry import _generated_project_id
+
+            selected = _selected_model()
+            goal = "inspect current project context"
+            active_record = None
+            if self.active_session:
+                with contextlib.suppress(Exception):
+                    active_record = SessionStore(session_dir()).load(self.active_session)
+                    goal = active_record.task or goal
+            try:
+                context = discover_project_context(
+                    self.repository,
+                    branch=(active_record.branch if active_record is not None else None),
+                    verification_commands=self.verification,
+                    goal=goal,
+                    session_id=self.active_session or f"context-{uuid.uuid4().hex[:12]}",
+                    recursive_context="auto",
+                )
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            memory_text = ""
+            with contextlib.suppress(Exception):
+                scopes = [
+                    (MemoryScope.USER, "default"),
+                    (MemoryScope.PROJECT, _generated_project_id(self.repository)),
+                ]
+                if self.active_session:
+                    scopes.append((MemoryScope.SESSION, self.active_session))
+                memory_text = KaroXMemory(session_dir() / "memory").context(
+                    scopes=tuple(scopes),
+                    budget_chars=1500,
+                    task=goal,
+                    fresh_only=True,
+                )
+            effort_text = self.effort_level
+            if self.effort_level == AUTO_EFFORT:
+                budget_text = self._label("решится при отправке задачи", "resolved at task submission")
+            else:
+                budget = budget_for(self.effort_level)
+                budget_text = (
+                    f"{budget.agent_limits.max_steps} steps · "
+                    f"{budget.agent_limits.max_seconds:.0f}s · "
+                    f"context {budget.context.utilization:.0%} · "
+                    f"tool result {budget.context.max_tool_result_chars} chars"
+                )
+            model_line = self._label("не выбрана", "not selected")
+            if selected is not None:
+                model_line = f"{selected.provider_id}/{selected.model_id}"
+                if selected.context_window:
+                    model_line += f" · {selected.context_window:,} input"
+                if selected.max_output_tokens:
+                    model_line += f" · {selected.max_output_tokens:,} output"
+            map_meta = dict(context.project_map_metadata or {})
+            lines = [
+                f"[bold #e0dccc]{self._label('Контекст KaroX', 'KaroX context')}[/]",
+                f"  {self._label('Модель', 'Model')}: {escape(model_line)}",
+                f"  Effort: {escape(effort_text)} · {escape(budget_text)}",
+                f"  {self._label('Project instructions', 'Project instructions')}: {len(context.sources)} source(s) · {len(context.instructions)} chars",
+                f"  {self._label('Project map', 'Project map')}: {len(context.project_map)} chars · {escape(str(map_meta.get('enabled', False)))}",
+                f"  Memory: {len(memory_text)} chars",
+                f"  Skill: {escape(self.active_skill or self._label('нет', 'none'))}",
+                f"  {self._label('Вложения следующего turn', 'Next-turn attachments')}: {len(self._pending_images)}",
+                f"  {self._label('Verification commands', 'Verification commands')}: {len(self.verification)}",
+            ]
+            for source in context.sources:
+                lines.append(
+                    f"  · {escape(source.path)} · {source.bytes_read} bytes"
+                    + (" · truncated" if source.truncated else "")
+                )
+            if context.skipped:
+                lines.append(f"  {self._label('Пропущено инструкций', 'Skipped instructions')}: {len(context.skipped)}")
+            if requested == "full":
+                if context.skipped:
+                    for item in context.skipped:
+                        lines.append("  · skipped: " + escape(item))
+                if map_meta:
+                    lines.append("  map metadata: " + escape(json.dumps(map_meta, ensure_ascii=False, sort_keys=True)[:4000]))
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "Полный текст инструкций/памяти не печатается здесь: /context показывает состав и бюджеты, а не дублирует prompt.",
+                        "Full instruction/memory text is not dumped here: /context shows composition and budgets, not a duplicate prompt.",
+                    )
+                    + "[/]"
+                )
+            self._write("\n".join(lines))
+
+        def _diagnostics_command(self, argument: str = "") -> None:
+            """Run bounded language-server diagnostics without mutating the repo."""
+
+            from .lsp_diagnostics import LspDiagnostics, available_language_servers
+
+            raw = argument.strip().strip('"')
+            if not raw or raw.casefold() in {"servers", "list"}:
+                rows = available_language_servers()
+                lines = [f"[bold #e0dccc]{self._label('Language servers', 'Language servers')}[/]"]
+                for row in rows:
+                    mark = "✓" if row["available"] else "○"
+                    executable = str(row.get("executable") or self._label("не установлен", "not installed"))
+                    lines.append(
+                        f"  {mark} [#d4b676]{escape(str(row['name']))}[/] · "
+                        f"{escape(', '.join(row['extensions']))} · [dim]{escape(executable)}[/]"
+                    )
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "Проверка файла: /diagnostics PATH",
+                        "Check a file: /diagnostics PATH",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+            self._set_activity(
+                self._label("Language server проверяет файл…", "Language server is checking the file…"),
+                "working",
+            )
+
+            def execute() -> None:
+                try:
+                    payload: dict[str, Any] = LspDiagnostics(self.repository).diagnose(raw)
+                    error = ""
+                except Exception as exc:
+                    payload = {}
+                    error = str(redact(exc))
+                self.call_from_thread(self._diagnostics_finished, raw, payload, error)
+
+            self.run_worker(execute, thread=True, exclusive=True, group="diagnostics")
+
+        def _diagnostics_finished(self, path: str, payload: dict[str, Any], error: str) -> None:
+            self._reset_activity()
+            if error:
+                self._write_notice(error, "error")
+                return
+            diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+            lines = [
+                f"[bold #e0dccc]{self._label('Diagnostics', 'Diagnostics')}[/] · {escape(path)}",
+                f"  {self._label('Сервер', 'Server')}: {escape(str(payload.get('server') or '—'))} · {len(diagnostics)}",
+            ]
+            for row in diagnostics[:80]:
+                if not isinstance(row, dict):
+                    continue
+                severity = str(row.get("severity") or "unknown")
+                line = row.get("line") or "?"
+                character = row.get("character") or "?"
+                source = str(row.get("source") or "")
+                message = str(row.get("message") or "").replace("\n", " ")
+                if len(message) > 280:
+                    message = message[:279] + "…"
+                lines.append(
+                    f"  {escape(severity)} · {escape(str(line))}:{escape(str(character))}"
+                    + (f" · {escape(source)}" if source else "")
+                    + f" · {escape(message)}"
+                )
+            if not diagnostics:
+                lines.append("  " + self._label("Диагностик нет.", "No diagnostics."))
+            self._write("\n".join(lines))
+
+        def _attach_command(self, argument: str = "") -> None:
+            """Manage one-shot repository image attachments for the next turn."""
+
+            raw = argument.strip()
+            if not raw or raw.casefold() in {"list", "ls"}:
+                lines = [
+                    f"[bold #e0dccc]{self._label('Вложения следующего запроса', 'Next-turn attachments')}[/]"
+                ]
+                if not self._pending_images:
+                    lines.append("  " + self._label("Нет изображений.", "No images attached."))
+                else:
+                    for index, path in enumerate(self._pending_images, start=1):
+                        lines.append(f"  {index}. {escape(path)}")
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        "/attach PATH · /attach remove N · /attach clear",
+                        "/attach PATH · /attach remove N · /attach clear",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+            if raw.casefold() in {"clear", "off"}:
+                self._pending_images.clear()
+                self._refresh_status()
+                self._write_notice(self._label("Вложения очищены.", "Attachments cleared."), "success")
+                return
+            try:
+                parts = shlex.split(raw)
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            if parts and parts[0].casefold() == "remove":
+                if len(parts) != 2:
+                    self._write_notice(
+                        self._label("Формат: /attach remove N", "Usage: /attach remove N"),
+                        "warning",
+                    )
+                    return
+                try:
+                    index = int(parts[1]) - 1
+                except ValueError:
+                    index = -1
+                if not 0 <= index < len(self._pending_images):
+                    self._write_notice(self._label("Такого вложения нет.", "That attachment does not exist."), "warning")
+                    return
+                removed = self._pending_images.pop(index)
+                self._refresh_status()
+                self._write_notice(f"Removed {removed}", "success")
+                return
+            if len(parts) != 1:
+                self._write_notice(
+                    self._label(
+                        "Путь с пробелами заключите в кавычки: /attach \"path/file.png\"",
+                        "Quote paths with spaces: /attach \"path/file.png\"",
+                    ),
+                    "warning",
+                )
+                return
+            selected = _selected_model()
+            if selected is None:
+                self._write_notice(
+                    self._label("Сначала выберите модель через /models.", "Select a model with /models first."),
+                    "warning",
+                )
+                return
+            if selected.vision != "true":
+                self._write_notice(
+                    self._label(
+                        f"{selected.provider_id}/{selected.model_id} не объявляет vision=true; изображение не будет отправлено вслепую.",
+                        f"{selected.provider_id}/{selected.model_id} does not declare vision=true; KaroX will not send an image blindly.",
+                    ),
+                    "error",
+                )
+                return
+            if len(self._pending_images) >= 8:
+                self._write_notice(
+                    self._label("Максимум 8 изображений на запрос.", "At most 8 images may be attached to one turn."),
+                    "warning",
+                )
+                return
+            from .image_attachments import ImageAttachmentError, load_image_attachments
+
+            try:
+                loaded = load_image_attachments(self.repository, [parts[0]])
+            except (ImageAttachmentError, OSError, ValueError) as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            if not loaded:
+                self._write_notice(self._label("Изображение не найдено.", "Image was not found."), "error")
+                return
+            relative = loaded[0].path
+            if relative not in self._pending_images:
+                self._pending_images.append(relative)
+            self._refresh_status()
+            self._write_notice(
+                self._label(
+                    f"{relative} будет отправлен только со следующим запросом ({loaded[0].mime}, {loaded[0].size} bytes).",
+                    f"{relative} will be sent only with the next turn ({loaded[0].mime}, {loaded[0].size} bytes).",
+                ),
+                "success",
+            )
+
+        def _checkpoint_command(self, argument: str = "") -> None:
+            """Create a Git-aware local rollback checkpoint for the active session."""
+
+            if argument.strip():
+                self._write_notice(
+                    self._label("Формат: /checkpoint", "Usage: /checkpoint"),
+                    "warning",
+                )
+                return
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Checkpoint создаётся только между шагами, когда агент не работает.",
+                        "Create a checkpoint between turns while the agent is idle.",
+                    ),
+                    "warning",
+                )
+                return
+            if not self.active_session:
+                self._write_notice(
+                    self._label(
+                        "Нет активной сессии. Сначала запустите задачу или /resume ID.",
+                        "There is no active session. Run a task or use /resume ID first.",
+                    ),
+                    "warning",
+                )
+                return
+            from .ellipsis_checkpoint import CheckpointError, WorkspaceCheckpointStore
+            from .paths import runtime_dir
+
+            sessions = SessionStore(session_dir())
+            try:
+                record = sessions.load(self.active_session)
+                sessions.validate_repository(record, self.repository)
+                if record.archived:
+                    raise CheckpointError("cannot checkpoint an archived session")
+                checkpoint = WorkspaceCheckpointStore(
+                    runtime_dir() / "vnext" / "checkpoints"
+                ).create(
+                    self.repository,
+                    session_id=record.session_id,
+                    sessions=sessions,
+                )
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self._write_notice(
+                self._label(
+                    f"Checkpoint создан: {checkpoint.checkpoint_id} · tracked {len(checkpoint.tracked_paths)} · untracked {len(checkpoint.untracked_paths)}.",
+                    f"Checkpoint created: {checkpoint.checkpoint_id} · tracked {len(checkpoint.tracked_paths)} · untracked {len(checkpoint.untracked_paths)}.",
+                ),
+                "success",
+            )
+
+        def _undo_command(self, argument: str = "") -> None:
+            """Preview or explicitly restore a recorded KaroX workspace checkpoint."""
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Нельзя откатывать файлы, пока агент работает.",
+                        "Files cannot be rolled back while an agent is running.",
+                    ),
+                    "warning",
+                )
+                return
+            if not self.active_session:
+                self._write_notice(
+                    self._label(
+                        "Нет активной сессии. Сначала /resume ID.",
+                        "There is no active session. Use /resume ID first.",
+                    ),
+                    "warning",
+                )
+                return
+            try:
+                parts = shlex.split(argument.strip()) if argument.strip() else []
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            sessions = SessionStore(session_dir())
+            try:
+                record = sessions.load(self.active_session)
+                sessions.validate_repository(record, self.repository)
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            checkpoint_rows = [
+                row
+                for row in record.checkpoints
+                if isinstance(row, dict)
+                and isinstance(row.get("checkpoint_id"), str)
+                and row.get("checkpoint_id")
+            ]
+            if not checkpoint_rows:
+                self._write_notice(
+                    self._label(
+                        "У этой сессии нет checkpoint. Следующий build-turn создаст его автоматически, либо используйте /checkpoint.",
+                        "This session has no checkpoint. The next build turn creates one automatically, or use /checkpoint.",
+                    ),
+                    "warning",
+                )
+                return
+            checkpoint_id = str(checkpoint_rows[-1]["checkpoint_id"])
+            confirmed = False
+            if parts:
+                checkpoint_id = parts[0]
+                if len(parts) == 3 and parts[1] == "--confirm" and parts[2] == checkpoint_id:
+                    confirmed = True
+                elif len(parts) != 1:
+                    self._write_notice(
+                        self._label(
+                            "Формат: /undo [CHECKPOINT_ID] или /undo CHECKPOINT_ID --confirm CHECKPOINT_ID",
+                            "Usage: /undo [CHECKPOINT_ID] or /undo CHECKPOINT_ID --confirm CHECKPOINT_ID",
+                        ),
+                        "warning",
+                    )
+                    return
+            from .ellipsis_checkpoint import WorkspaceCheckpointStore
+            from .paths import runtime_dir
+
+            checkpoints = WorkspaceCheckpointStore(
+                runtime_dir() / "vnext" / "checkpoints"
+            )
+            try:
+                checkpoint = checkpoints.load(checkpoint_id)
+                if checkpoint.session_id != record.session_id:
+                    raise ValueError("checkpoint belongs to another session")
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            changed = tuple(dict.fromkeys(record.changed_files))
+            if not confirmed:
+                lines = [
+                    f"[bold #e0dccc]{self._label('Undo preview', 'Undo preview')}[/] · {escape(checkpoint_id)}",
+                    f"  {self._label('Сессия', 'Session')}: {escape(record.name or record.session_id)}",
+                    f"  {self._label('Путей KaroX', 'KaroX-changed paths')}: {len(changed)}",
+                ]
+                for path in changed[:20]:
+                    lines.append(f"  · {escape(path)}")
+                if len(changed) > 20:
+                    lines.append(f"  · +{len(changed) - 20}")
+                lines.append(
+                    "  [dim]"
+                    + self._label(
+                        f"Ничего не изменено. Для отката: /undo {checkpoint_id} --confirm {checkpoint_id}",
+                        f"Nothing changed. To restore: /undo {checkpoint_id} --confirm {checkpoint_id}",
+                    )
+                    + "[/]"
+                )
+                self._write("\n".join(lines))
+                return
+            try:
+                # Make rollback itself reversible. If KaroX cannot prove it can
+                # preserve the current state, it refuses to mutate the worktree.
+                safety = checkpoints.create(
+                    self.repository,
+                    session_id=record.session_id,
+                    sessions=sessions,
+                )
+                result = checkpoints.rollback(
+                    self.repository,
+                    session_id=record.session_id,
+                    checkpoint_id=checkpoint_id,
+                    sessions=sessions,
+                )
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self._write_notice(
+                self._label(
+                    f"Откат выполнен: restored {len(result.get('restored', []))}, deleted {len(result.get('deleted', []))}, skipped {len(result.get('skipped', []))}. Safety checkpoint: {safety.checkpoint_id}.",
+                    f"Rollback complete: restored {len(result.get('restored', []))}, deleted {len(result.get('deleted', []))}, skipped {len(result.get('skipped', []))}. Safety checkpoint: {safety.checkpoint_id}.",
+                ),
+                "success",
+            )
+
         def _start_new_task(self) -> None:
             """/new: a fresh conversation and a fresh session on submit.
 
@@ -11732,9 +15618,11 @@ if _HAS_TEXTUAL:
                 return
             self.action_clear_log()
             self.active_session = None
+            self._resume_next_task = False
             self._history_seen = 0
             self._history_fingerprint = None
             self._continuation_context = None
+            self._pending_images.clear()
             self._refresh_status()
             self._write_notice(
                 self._label(
@@ -11746,37 +15634,233 @@ if _HAS_TEXTUAL:
                 "success",
             )
 
-        def _resume_session(self, target: str) -> None:
-            """/resume: the Session Browser act, typed.
+        def _sessions_command(self, argument: str) -> None:
+            """Session browser plus bounded lifecycle operations under one command."""
 
-            Without an argument this opens the Session Browser -- one screen
-            owns the list. With an id it performs exactly what choosing
-            ``resume`` on a row performs: make that session the one on screen
-            and show its detail. Nothing here starts an agent; resuming the
-            work itself stays an explicit task the person types.
-            """
+            raw = argument.strip()
+            if not raw:
+                self.action_session_browser()
+                return
+            if raw in {"--verbose", "list"}:
+                self._run_inspection(["session", "list", "--json"], "/sessions")
+                return
+            if raw in {"all", "--all"}:
+                self._run_inspection(
+                    ["session", "list", "--all", "--json"], "/sessions"
+                )
+                return
+            try:
+                parts = shlex.split(raw)
+            except ValueError as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            action = parts[0].casefold() if parts else ""
+            usage = self._label(
+                "Формат: /sessions [all|archive ID|unarchive ID|rename ID NAME|"
+                "delete ID --confirm ID]",
+                "Usage: /sessions [all|archive ID|unarchive ID|rename ID NAME|"
+                "delete ID --confirm ID]",
+            )
+            if action not in {"archive", "unarchive", "rename", "delete"}:
+                self._write_notice(usage, "warning")
+                return
+            if len(parts) < 2:
+                self._write_notice(usage, "warning")
+                return
+            session_id = parts[1]
+            store = SessionStore(session_dir())
+            try:
+                source = store.load(session_id)
+                store.validate_repository(source, self.repository)
+                if action == "archive":
+                    if len(parts) != 2:
+                        raise ValueError(usage)
+                    record = store.archive(session_id)
+                    if self.active_session == session_id:
+                        self.active_session = None
+                        self._resume_next_task = False
+                    message = self._label(
+                        f"Сессия {record.name or session_id} архивирована.",
+                        f"Session {record.name or session_id} archived.",
+                    )
+                elif action == "unarchive":
+                    if len(parts) != 2:
+                        raise ValueError(usage)
+                    record = store.unarchive(session_id)
+                    message = self._label(
+                        f"Сессия {record.name or session_id} возвращена из архива.",
+                        f"Session {record.name or session_id} restored from archive.",
+                    )
+                elif action == "rename":
+                    if len(parts) < 3:
+                        raise ValueError(usage)
+                    record = store.rename(session_id, " ".join(parts[2:]))
+                    message = self._label(
+                        f"Имя сессии: {record.name or record.session_id}",
+                        f"Session name: {record.name or record.session_id}",
+                    )
+                else:
+                    if (
+                        len(parts) != 4
+                        or parts[2] != "--confirm"
+                        or parts[3] != session_id
+                    ):
+                        raise ValueError(usage)
+                    store.delete_archived(session_id)
+                    if self.active_session == session_id:
+                        self.active_session = None
+                        self._resume_next_task = False
+                    message = self._label(
+                        f"Сессия {session_id} удалена.",
+                        f"Session {session_id} deleted.",
+                    )
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self._refresh_status()
+            self._write_notice(message, "success")
+
+        def _adopt_session_skill(self, record: Any) -> None:
+            """Re-adopt a stored Skill only when its current content still matches."""
+
+            self.active_skill = None
+            if not getattr(record, "skills", None):
+                return
+            candidate = next(
+                (
+                    item
+                    for item in reversed(record.skills)
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                ),
+                None,
+            )
+            if candidate is None:
+                return
+            try:
+                from .skills import SkillCatalog, validate_selection
+
+                catalog = SkillCatalog(self.repository)
+                content = catalog.load(str(candidate["name"]))
+                decisions = validate_selection(content.metadata, candidate)
+            except Exception:
+                # Fail closed. A Skill edited since the previous turn requires a
+                # fresh /skills use and explicit permission review.
+                return
+            self.active_skill = content.metadata.name
+            self._skill_permissions[content.metadata.name] = {
+                capability.value: decision.value
+                for capability, decision in decisions.items()
+            }
+
+        def _resume_session(self, target: str) -> None:
+            """Arm an existing durable session for exactly one next user turn."""
 
             if not target:
                 self.action_session_browser()
                 return
+            store = SessionStore(session_dir())
             try:
-                row = self._view_store.summary(target)
-            except Exception:
-                row = None
-            if row is None:
+                record = store.load(target)
+                store.validate_repository(record, self.repository)
+            except Exception as exc:
                 self._write_notice(
                     self._label(
-                        f"Сессия {escape(target)} не найдена. /sessions покажет, что существует.",
-                        f"Session {escape(target)} was not found. /sessions shows what exists.",
+                        f"Не удалось открыть сессию {escape(target)}: {escape(str(redact(exc)))}",
+                        f"Could not open session {escape(target)}: {escape(str(redact(exc)))}",
                     ),
                     "error",
                 )
                 return
+            if record.archived:
+                self._write_notice(
+                    self._label(
+                        "Сессия архивирована. Сначала: /sessions unarchive ID",
+                        "The session is archived. First use: /sessions unarchive ID",
+                    ),
+                    "warning",
+                )
+                return
             self.active_session = target
+            self._resume_next_task = True
+            self._adopt_session_skill(record)
             self._history_seen = 0
             self._history_fingerprint = None
             self._refresh_status()
-            self._open_session_detail(target)
+            self._write_notice(
+                self._label(
+                    f"Сессия {escape(record.name or target)} выбрана. Следующее сообщение продолжит её.",
+                    f"Session {escape(record.name or target)} selected. Your next message continues it.",
+                ),
+                "success",
+            )
+            with contextlib.suppress(Exception):
+                if self._view_store.summary(target) is not None:
+                    self._open_session_detail(target)
+
+        def _fork_session(self, argument: str) -> None:
+            """Create a safe child session and arm it for the next user turn."""
+
+            if self.agent_busy:
+                self._write_notice(
+                    self._label(
+                        "Сначала дождитесь завершения или остановите текущую задачу.",
+                        "Wait for the current task to finish or stop it first.",
+                    ),
+                    "warning",
+                )
+                return
+            raw = argument.strip()
+            source_id = self.active_session or ""
+            requested_name = ""
+            if "::" in raw:
+                source_part, requested_name = (part.strip() for part in raw.split("::", 1))
+                if source_part:
+                    source_id = source_part
+            elif raw:
+                source_id = raw
+            if not source_id:
+                self._write_notice(
+                    self._label(
+                        "Нет исходной сессии. Сначала /resume ID или /fork ID.",
+                        "No source session. Use /resume ID or /fork ID first.",
+                    ),
+                    "warning",
+                )
+                return
+            store = SessionStore(session_dir())
+            try:
+                source = store.load(source_id)
+                store.validate_repository(source, self.repository)
+                child_id = f"fork-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+                child_name = requested_name or (
+                    f"{source.name} fork" if source.name else f"fork of {source_id}"
+                )
+                child = store.fork(
+                    source_id,
+                    session_id_new=child_id,
+                    name=child_name[:120],
+                )
+            except Exception as exc:
+                self._write_notice(str(redact(exc)), "error")
+                return
+            self.action_clear_log()
+            self.active_session = child.session_id
+            self._resume_next_task = True
+            self._adopt_session_skill(child)
+            self._history_seen = 0
+            self._history_fingerprint = None
+            self._continuation_context = None
+            self._refresh_status()
+            self._write_notice(
+                self._label(
+                    f"Создана ветка {escape(child.name or child.session_id)} из {escape(source_id)}. "
+                    "Следующее сообщение станет новой задачей этой ветки.",
+                    f"Forked {escape(child.name or child.session_id)} from {escape(source_id)}. "
+                    "Your next message becomes the new task in this branch.",
+                ),
+                "success",
+            )
+            self.query_one("#composer", Input).focus()
 
         def _compact_conversation(self) -> None:
             """/compact: handoff document + continuation context.
@@ -11948,8 +16032,11 @@ _CORE_TOOL_NAMES = (
     "repo.write_file",
     "repo.edit_file",
     "repo.list_files",
+    "repo.inspect",
     "repo.search",
     "checks.run",
+    "checks.run_affected",
+    "tests.run",
     "git.status",
     "git.diff",
     "git.log",
@@ -11959,12 +16046,15 @@ _ALIAS_TO_CORE_TOOL = {name.replace(".", "_"): name for name in _CORE_TOOL_NAMES
 
 _TOOL_LABELS = {
     "repo.list_files": ("просматривает файлы", "listing files"),
+    "repo.inspect": ("изучает нужный контекст", "inspecting context"),
     "repo.search": ("ищет по коду", "searching the code"),
     "repo.read_file": ("читает файл", "reading a file"),
     "repo.read_lines": ("читает фрагмент", "reading a region"),
     "repo.write_file": ("изменяет файл", "editing a file"),
     "repo.edit_file": ("правит файл", "editing a file"),
     "checks.run": ("запускает проверку", "running checks"),
+    "checks.run_affected": ("проверяет затронутое", "checking affected work"),
+    "tests.run": ("запускает тесты", "running tests"),
     "git.status": ("проверяет изменения", "checking changes"),
     "git.diff": ("анализирует diff", "reviewing the diff"),
     "git.log": ("читает историю", "reading history"),
@@ -12001,10 +16091,12 @@ def _canonical_tool_name(name: str) -> str:
 # The technical history is not lost, only moved: Session Detail still holds
 # every call, its arguments and its result.
 
+ACTIVITY_REASONING = "reasoning"
 ACTIVITY_READING = "reading"
 ACTIVITY_SEARCHING = "searching"
 ACTIVITY_EDITING = "editing"
 ACTIVITY_TESTING = "testing"
+ACTIVITY_BROWSER = "browser"
 ACTIVITY_WAITING = "waiting"
 ACTIVITY_COMPLETED = "completed"
 ACTIVITY_STOPPED = "stopped"
@@ -12018,21 +16110,52 @@ ACTIVITY_WORKING = "working"
 ACTIVITY_MAX_LINES = 2
 
 _ACTIVITY_WORDS: Dict[str, Tuple[str, str]] = {
-    ACTIVITY_READING: ("Читает код", "Reading code"),
-    ACTIVITY_SEARCHING: ("Ищет причину ошибки", "Finding the cause"),
-    ACTIVITY_EDITING: ("Изменяет код", "Updating code"),
-    ACTIVITY_TESTING: ("Проверяет тесты", "Running tests"),
+    ACTIVITY_REASONING: ("Обдумывает задачу", "Thinking through task"),
+    ACTIVITY_READING: ("Изучает проект", "Exploring project"),
+    ACTIVITY_SEARCHING: ("Ищет нужное в проекте", "Searching project"),
+    ACTIVITY_EDITING: ("Вносит изменения", "Editing"),
+    ACTIVITY_TESTING: ("Запускает проверки", "Running checks"),
+    ACTIVITY_BROWSER: ("Проверяет результат в браузере", "Checking result in browser"),
     ACTIVITY_WAITING: ("Ожидает подтверждения", "Waiting for confirmation"),
     ACTIVITY_COMPLETED: ("Готово", "Done"),
     ACTIVITY_STOPPED: ("Остановлено", "Stopped"),
-    ACTIVITY_FAILED: ("Ошибка проверки", "Check failed"),
+    ACTIVITY_FAILED: ("Ошибка", "Error"),
     ACTIVITY_WORKING: ("Работает", "Working"),
 }
 
-# Where the technical history went, said in the one place a person will look
-# for it. Only a failure earns this: on a good run it is an instruction to go
-# reading for nothing.
-_ACTIVITY_DETAILS_WORDS = ("открыть подробности", "open details")
+# The main chat uses a coding-CLI voice. These are summaries of observed tool
+# phases, not hidden chain-of-thought; Session Browser keeps the neutral wording
+# above because it describes a session rather than speaking as the active agent.
+_ACTIVITY_PROGRESS_WORDS: Dict[str, Tuple[str, str]] = {
+    ACTIVITY_REASONING: ("Обдумываю задачу", "Thinking through the task"),
+    ACTIVITY_READING: ("Просматриваю код", "Reading code"),
+    ACTIVITY_SEARCHING: ("Ищу нужное место", "Finding the relevant code"),
+    ACTIVITY_EDITING: ("Вношу изменения", "Updating code"),
+    ACTIVITY_TESTING: ("Запускаю проверки", "Running checks"),
+    ACTIVITY_BROWSER: ("Проверяю результат в браузере", "Checking the result in browser"),
+    ACTIVITY_WAITING: ("Жду подтверждения", "Waiting for confirmation"),
+    ACTIVITY_COMPLETED: ("Готово", "Done"),
+    ACTIVITY_STOPPED: ("Остановлено", "Stopped"),
+    ACTIVITY_FAILED: ("Проверка не прошла", "Check failed"),
+    ACTIVITY_WORKING: ("Продолжаю работу", "Working"),
+}
+
+# Stable, public phase summaries for the conversation. These are not hidden
+# chain-of-thought: they are coarse observed phases, shown once per run so the
+# transcript has the same useful sense of motion as coding CLIs without leaking
+# raw reasoning or low-level tool calls.
+_ACTIVITY_MILESTONE_WORDS: Dict[str, Tuple[str, str]] = {
+    # Reasoning already has the live elapsed row. A permanent generic
+    # "Разбираюсь с задачей" looked like a thought while adding no information.
+    ACTIVITY_READING: ("Смотрю нужные места в коде", "Inspecting the relevant code"),
+    ACTIVITY_EDITING: ("Вношу изменения", "Applying changes"),
+    ACTIVITY_TESTING: ("Запускаю проверки", "Running checks"),
+    ACTIVITY_BROWSER: ("Проверяю результат в браузере", "Checking the result in browser"),
+}
+
+# Where the technical history went, said as an actual command rather than a
+# vague instruction. Only a failure earns this row.
+_ACTIVITY_DETAILS_WORDS = ("/sessions — детали", "/sessions — details")
 
 # The whole of the tool vocabulary the screen is allowed to know. A name absent
 # from this table is not an error and is not printed -- it resolves to
@@ -12042,6 +16165,7 @@ _TOOL_ACTIVITY_KINDS: Dict[str, str] = {
     "repo.read_file": ACTIVITY_READING,
     "repo.read_lines": ACTIVITY_READING,
     "repo.list_files": ACTIVITY_READING,
+    "repo.inspect": ACTIVITY_READING,
     "git.status": ACTIVITY_READING,
     "git.diff": ACTIVITY_READING,
     "git.log": ACTIVITY_READING,
@@ -12050,6 +16174,8 @@ _TOOL_ACTIVITY_KINDS: Dict[str, str] = {
     "repo.edit_file": ACTIVITY_EDITING,
     "git.commit": ACTIVITY_EDITING,
     "checks.run": ACTIVITY_TESTING,
+    "checks.run_affected": ACTIVITY_TESTING,
+    "tests.run": ACTIVITY_TESTING,
 }
 
 # Why a run ended, in words. Keyed by the identifiers the agent already
@@ -12065,6 +16191,7 @@ _ACTIVITY_REASON_WORDS: Dict[str, Tuple[str, str]] = {
     "answer": ("вопрос без правки кода", "a question, not an edit"),
     "malformed_report": ("агент не вернул результат", "the agent returned nothing"),
     "contract_mismatch": ("противоречивый результат", "a contradictory result"),
+    "provider_error": ("ошибка ответа модели", "model response error"),
 }
 
 
@@ -12073,10 +16200,12 @@ _ACTIVITY_REASON_WORDS: Dict[str, Tuple[str, str]] = {
 # the one this line reports and belongs to Session Detail.
 _ACTIVITY_IN_PROGRESS = frozenset(
     {
+        ACTIVITY_REASONING,
         ACTIVITY_READING,
         ACTIVITY_SEARCHING,
         ACTIVITY_EDITING,
         ACTIVITY_TESTING,
+        ACTIVITY_BROWSER,
         ACTIVITY_WORKING,
     }
 )
@@ -12105,18 +16234,19 @@ _ACTIVITY_OUTCOME_KINDS: Dict[str, str] = {
 # instead of the warning-coloured Stopped a real abort earns.
 _BENIGN_STOP_REASONS = frozenset({"no_changes"})
 
-# Margin, padding and the left rule the `#activity` pane spends before a
-# character of text: 2 + 2 margin, 1 + 1 padding, 1 border. Measured against the
-# window instead, a line fits the terminal and still wraps inside its own frame.
-_ACTIVITY_CHROME_COLUMNS = 7
+# Only the two-column left/right margin remains around the borderless live
+# progress line. Measure against the pane, not the whole terminal, so it never
+# steals a second row by wrapping at a narrow width.
+_ACTIVITY_CHROME_COLUMNS = 4
 
 
 def _activity_kind_for_tool(name: Any) -> str:
     """What a tool call *means*, never what it is called."""
 
-    return _TOOL_ACTIVITY_KINDS.get(
-        _canonical_tool_name(_identifier(name)), ACTIVITY_WORKING
-    )
+    tool = _canonical_tool_name(_identifier(name))
+    if tool.startswith("browser."):
+        return ACTIVITY_BROWSER
+    return _TOOL_ACTIVITY_KINDS.get(tool, ACTIVITY_WORKING)
 
 
 def _activity_reason_words(reason: Any, english: bool) -> str:
@@ -12160,6 +16290,12 @@ def _activity_files_words(count: int, english: bool) -> str:
     return f"{count} {_russian_plural(count, 'файл', 'файла', 'файлов')}"
 
 
+def _activity_searches_words(count: int, english: bool) -> str:
+    if english:
+        return f"{count} search" if count == 1 else f"{count} searches"
+    return f"{count} {_russian_plural(count, 'поиск', 'поиска', 'поисков')}"
+
+
 def _activity_tests_words(count: int, english: bool) -> str:
     if english:
         return f"{count} test passed" if count == 1 else f"{count} tests passed"
@@ -12189,6 +16325,8 @@ class ActivityAction:
 
     kind: str = ACTIVITY_WORKING
     files: Optional[int] = None
+    files_read: Optional[int] = None
+    searches: Optional[int] = None
     tests_passed: Optional[int] = None
     elapsed_seconds: Optional[float] = None
     reason: str = ""
@@ -12203,12 +16341,18 @@ def _activity_lines(action: ActivityAction, english: bool) -> Tuple[str, ...]:
     """
 
     kind = action.kind if action.kind in _ACTIVITY_WORDS else ACTIVITY_WORKING
-    russian, plain_english = _ACTIVITY_WORDS[kind]
+    russian, plain_english = _ACTIVITY_PROGRESS_WORDS[kind]
     parts: List[str] = [plain_english if english else russian]
 
     files = _optional_positive_int(action.files)
     if files and kind in {ACTIVITY_EDITING, ACTIVITY_COMPLETED}:
         parts.append(_activity_files_words(files, english))
+    files_read = _optional_positive_int(action.files_read)
+    if files_read and kind == ACTIVITY_READING:
+        parts.append(_activity_files_words(files_read, english))
+    searches = _optional_positive_int(action.searches)
+    if searches and kind == ACTIVITY_SEARCHING:
+        parts.append(_activity_searches_words(searches, english))
     passed = _optional_positive_int(action.tests_passed)
     if passed:
         parts.append(_activity_tests_words(passed, english))
@@ -12219,8 +16363,25 @@ def _activity_lines(action: ActivityAction, english: bool) -> Tuple[str, ...]:
         parts.append(_activity_elapsed_words(float(elapsed), english))
 
     if kind == ACTIVITY_FAILED:
+        reason_id = _identifier(action.reason)
+        if reason_id.startswith("provider_error:"):
+            parts[0] = "Model response error" if english else "Ошибка ответа модели"
+        elif reason_id in {"unverified_changes", "verification_failed"}:
+            parts[0] = (
+                "Project checks failed"
+                if english
+                else "Проверки проекта не прошли"
+            )
         parts.append(_ACTIVITY_DETAILS_WORDS[1 if english else 0])
-        reason = _activity_reason_words(action.reason, english)
+        # The provider-error label already says what failed; repeating the same
+        # fact on a second line wastes the one extra row reserved for actionable
+        # failure detail. Real verification/contract failures may still add a
+        # distinct reason below the headline.
+        reason = (
+            ""
+            if reason_id.startswith("provider_error:")
+            else _activity_reason_words(action.reason, english)
+        )
         first = " · ".join(parts)
         return (first, reason) if reason else (first,)
 
@@ -12313,10 +16474,70 @@ def _line_writer(stream: Any) -> Callable[[str], None]:
     return write
 
 
-def _line_help(out: Callable[[str], Any]) -> None:
+def _line_help(out: Callable[[str], Any], *, all_commands: bool = False) -> None:
     out("KaroX commands:\n")
-    for command, description in _commands("en").items():
+    catalog = _discoverable_commands("en") if all_commands else _commands("en")
+    for command, description in catalog.items():
         out(f"  {command:<18} {description}\n")
+    if not all_commands:
+        out("  /help all          show advanced commands\n")
+
+
+def _line_local_command(value: str, out: Callable[[str], Any]) -> bool:
+    """Handle lightweight preference commands without requiring Textual.
+
+    Line mode is used by redirected terminals, remote shells, and minimal hosts.
+    Choosing Effort or Mode changes only KaroX's local preferences, so forcing a
+    full-screen UI for those two everyday controls adds friction without adding
+    safety. No model is called and no repository permission is widened here.
+    """
+
+    command, _, argument = value.partition(" ")
+    requested = argument.strip()
+    if command == "/effort":
+        if not requested:
+            current = _load_effort_level()
+            out(f"Effort: {current} - {effort_user_summary(current, 'en')}\n")
+            out("Use /effort <level> to change it or /effort details [level] for exact budgets.\n")
+            return True
+        parts = requested.split()
+        if parts and parts[0].casefold() == "details":
+            if len(parts) > 2:
+                out("Usage: /effort details [low|medium|high|extra-high|ultra]\n")
+                return True
+            raw_level = parts[1] if len(parts) == 2 else _load_effort_level()
+            try:
+                level = normalize_effort(raw_level)
+            except ValueError:
+                out("Usage: /effort details [low|medium|high|extra-high|ultra]\n")
+                return True
+            if level == AUTO_EFFORT:
+                out("AUTO has no single fixed budget; name a concrete level, for example /effort details ultra.\n")
+            else:
+                out(effort_summary(level, "en") + "\n")
+            return True
+        try:
+            level = normalize_effort(requested)
+        except ValueError:
+            out("Use /effort to choose a level or /effort details [level] for exact budgets.\n")
+            return True
+        _save_effort_level(level)
+        out(f"Effort: {level} - {effort_user_summary(level, 'en')}\n")
+        return True
+    if command == "/mode":
+        if not requested:
+            current = _load_agent_mode()
+            out(f"Mode: {current} - {mode_summary(current, 'en')}\n")
+            return True
+        try:
+            mode = normalize_mode(requested)
+        except ModeError:
+            out("Usage: /mode build|plan|ideate\n")
+            return True
+        _save_agent_mode(mode)
+        out(f"Mode: {mode} - {mode_summary(mode, 'en')}\n")
+        return True
+    return False
 
 
 # Zero-width marks a shell can put in front of a piped line. Windows PowerShell
@@ -12355,8 +16576,10 @@ def _run_line_mode(
             continue
         if value in {"/quit", "/exit"}:
             return 0
-        if value == "/help":
-            _line_help(out)
+        if value in {"/help", "/help all"}:
+            _line_help(out, all_commands=value == "/help all")
+            continue
+        if _line_local_command(value, out):
             continue
         if value in _BACKEND_SLASH:
             code, output = _capture_cli(_BACKEND_SLASH[value])

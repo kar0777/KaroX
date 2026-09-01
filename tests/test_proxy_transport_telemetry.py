@@ -5,6 +5,7 @@ from typing import Any, Optional
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401
+import karox.proxy_server as proxy_server
 from karox.proxy import ProxyToolDescriptor
 from karox.proxy_server import build_proxy_asgi_app, transport_activity_snapshot
 from test_hosted_bridge import _jsonrpc_result, _tools_call, _wire_requests
@@ -37,6 +38,78 @@ class _TelemetryRuntime:
     ) -> dict[str, Any]:
         del tool_name, arguments, idempotency_key, deadline_seconds
         return {"ok": True, "summary": "done"}
+
+
+def test_control_plane_thread_work_isolated_from_long_tool_workers() -> None:
+    token = "control-plane-token"
+    observed: list[tuple[str, object]] = []
+
+    async def recording_run_sync(func: Any, *args: Any, **kwargs: Any) -> Any:
+        observed.append((getattr(func, "__name__", type(func).__name__), kwargs.get("limiter")))
+        return func(*args)
+
+    with patch("karox.proxy_server.anyio.to_thread.run_sync", new=recording_run_sync):
+        app = build_proxy_asgi_app(_TelemetryRuntime(), lambda: token)
+        response = _wire_requests(
+            app,
+            [_tools_call(token, "karox.repo.read_file", {})],
+        )[0]
+
+    assert response.status == 200
+    assert not _jsonrpc_result(response)["isError"]
+    control_plane = [
+        limiter
+        for name, limiter in observed
+        if name in {"resolve_token", "descriptors"}
+    ]
+    assert control_plane
+    assert all(limiter is proxy_server._CONTROL_PLANE_THREAD_LIMITER for limiter in control_plane)
+    tool_execution = [
+        limiter for name, limiter in observed if name == "<lambda>"
+    ]
+    assert tool_execution
+    assert all(
+        limiter is proxy_server._TOOL_EXECUTION_THREAD_LIMITER
+        for limiter in tool_execution
+    )
+
+
+def test_long_tool_execution_uses_separate_worker_limiter() -> None:
+    token = "long-tool-token"
+    observed: list[object] = []
+
+    class _LongRuntime(_TelemetryRuntime):
+        def descriptors(self) -> list[ProxyToolDescriptor]:
+            return [
+                *super().descriptors(),
+                ProxyToolDescriptor(
+                    name="karox.command.run",
+                    description="Synthetic long command",
+                    input_schema={"type": "object", "properties": {}},
+                    read_only=False,
+                ),
+            ]
+
+    async def recording_run_sync(func: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(func, "__name__", type(func).__name__) == "<lambda>":
+            observed.append(kwargs.get("limiter"))
+        return func(*args)
+
+    with patch("karox.proxy_server.anyio.to_thread.run_sync", new=recording_run_sync):
+        app = build_proxy_asgi_app(_LongRuntime(), lambda: token)
+        read_response, long_response = _wire_requests(
+            app,
+            [
+                _tools_call(token, "karox.repo.read_file", {}),
+                _tools_call(token, "karox.command.run", {}),
+            ],
+        )
+
+    assert read_response.status == 200
+    assert long_response.status == 200
+    assert len(observed) == 2
+    assert observed[0] is proxy_server._TOOL_EXECUTION_THREAD_LIMITER
+    assert observed[1] is proxy_server._LONG_TOOL_EXECUTION_THREAD_LIMITER
 
 
 def test_transport_diagnostics_correlate_http_and_mcp_tool_completion() -> None:

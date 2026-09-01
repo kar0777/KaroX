@@ -6,9 +6,11 @@ logs and snapshots.  These helpers wrap the platform clipboard behind a
 fail-soft, monkeypatchable interface so the flow can be exercised in tests
 without a desktop session and without ever materialising the secret in a log.
 
-Nothing here logs or returns the secret.  Callers pass the secret only to
-:func:`write_text`, which forwards it verbatim to the platform clipboard and
-reports only a boolean success.
+Nothing here logs clipboard contents.  Secret-delivery callers use
+:func:`write_text`, which forwards the value verbatim and reports only a boolean
+success.  :func:`read_text` is a separate, user-gesture-only paste helper for the
+local TUI; it returns clipboard text to that local process and is never polled in
+the background.
 """
 
 from __future__ import annotations
@@ -51,6 +53,58 @@ def _platform_command() -> Optional[list[str]]:
     if shutil.which("xsel"):
         return ["xsel", "--clipboard", "--input"]
     return None
+
+
+def read_text(*, max_chars: int = 2_000_000) -> Optional[str]:
+    """Read clipboard text after an explicit local paste gesture.
+
+    Windows uses the native clipboard API directly: no shell, command line, log,
+    or background polling sees the clipboard. Other platforms intentionally
+    return ``None`` for now and keep relying on the terminal's Paste event.
+    """
+    try:
+        limit = max(1, int(max_chars))
+    except (TypeError, ValueError):
+        limit = 2_000_000
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+        user32.GetClipboardData.argtypes = [wintypes.UINT]
+        user32.GetClipboardData.restype = wintypes.HANDLE
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+        if not user32.OpenClipboard(None):
+            return None
+        try:
+            handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+            if not handle:
+                return None
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                return None
+            try:
+                value = ctypes.wstring_at(pointer)
+            finally:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return None
+    if not value or len(value) > limit:
+        return None
+    return value
 
 
 def write_text(text: str) -> bool:

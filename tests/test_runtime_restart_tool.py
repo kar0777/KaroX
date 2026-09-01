@@ -136,6 +136,30 @@ class RuntimeRestartToolTests(unittest.TestCase):
             browser_process_preserved=False,
         )
 
+    def test_direct_runtime_restart_derives_replay_key_from_required_request_id(self) -> None:
+        runtime = self._runtime(saved_profile_name="chatgpt-dev")
+        with patch(
+            "karox.runtime_restart.schedule_saved_bridge_child_restart",
+            return_value={"ok": True, "status": "restart_scheduled"},
+        ) as schedule:
+            result = runtime.execute(
+                RUNTIME_RESTART,
+                {
+                    "request_id": "direct-tool-restart-001",
+                    "reason": "recover a degraded hosted bridge",
+                },
+            )
+
+        self.assertFalse(result.isError)
+        schedule.assert_called_once_with(
+            session_id=self.session_id,
+            saved_profile="chatgpt-dev",
+            idempotency_key="runtime-restart:direct-tool-restart-001",
+            reason="recover a degraded hosted bridge",
+            browser_backend="playwright",
+            browser_process_preserved=False,
+        )
+
     def test_restart_refuses_active_playwright_browser_state(self) -> None:
         runtime = self._runtime(saved_profile_name="chatgpt-dev")
         runtime._browser = MagicMock(is_open=True, takeover_active=False)

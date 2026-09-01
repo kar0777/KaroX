@@ -1,10 +1,7 @@
-"""/new, /resume, and /compact are first-class session commands.
+"""Session lifecycle stays discoverable without crowding the bare slash menu.
 
-/clear stays log-only per SESSION-MODEL.md; /new adds only screen state on top
-of it; /resume is the Session Browser act, typed; /compact is the structured
-handoff turned into a bounded continuation preamble. These tests pin the
-catalog/routing data and the handoff rendering -- the part that must stay
-redacted and bounded.
+/new and /resume are everyday actions. /fork and /compact are searchable power
+commands; /sessions owns archive/rename/delete lifecycle operations.
 """
 
 from karox import tui as karox_tui
@@ -12,24 +9,29 @@ from karox.tui import _CONTINUATION_CONTEXT_LIMIT, _continuation_from_handoff
 
 
 def test_session_commands_are_cataloged_in_both_languages():
-    for name in ("/new", "/resume", "/compact"):
+    for name in ("/new", "/resume", "/fork", "/compact"):
         assert name in karox_tui.SLASH_COMMANDS
         assert name in karox_tui._COMMANDS_RU
         assert karox_tui.SLASH_COMMANDS[name].strip()
         assert karox_tui._COMMANDS_RU[name].strip()
 
 
-def test_session_commands_are_visible_menu_entries():
-    for name in ("/new", "/resume", "/compact"):
-        assert name in karox_tui.VISIBLE_COMMANDS
+def test_new_and_resume_are_visible_while_compact_stays_advanced():
+    assert "/new" in karox_tui.VISIBLE_COMMANDS
+    assert "/resume" in karox_tui.VISIBLE_COMMANDS
+    assert "/fork" not in karox_tui.VISIBLE_COMMANDS
+    assert "/fork" in karox_tui.DISCOVERABLE_COMMANDS
+    assert "/compact" not in karox_tui.VISIBLE_COMMANDS
     for language in ("en", "ru"):
         heads = {n.split(" ", 1)[0] for n in karox_tui._commands(language)}
-        for name in ("/new", "/resume", "/compact"):
-            assert name in heads
+        assert "/new" in heads
+        assert "/resume" in heads
+        assert "/fork" not in heads
+        assert "/compact" not in heads
 
 
 def test_session_commands_are_interactive_only_in_line_mode():
-    for name in ("/new", "/resume", "/compact"):
+    for name in ("/new", "/resume", "/fork", "/compact"):
         assert name in karox_tui._LINE_INTERACTIVE_ONLY
 
 

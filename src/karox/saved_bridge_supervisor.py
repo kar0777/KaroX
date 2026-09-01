@@ -32,7 +32,10 @@ from .paths import runtime_dir
 from .process_identity import process_is_running, read_process_create_time_ns
 
 SUPERVISOR_SCHEMA_VERSION = 1
-SUPERVISOR_PROTOCOL_VERSION = 2
+SUPERVISOR_PROTOCOL_VERSION = 4
+RESTART_MIGRATION_SCHEMA_VERSION = 1
+RESTART_MIGRATION_TTL_SECONDS = 90.0
+RESTART_RECOVERY_SCHEMA_VERSION = 1
 SUPERVISOR_POLL_SECONDS = 2.0
 SUPERVISOR_MIN_BACKOFF_SECONDS = 2.0
 SUPERVISOR_MAX_BACKOFF_SECONDS = 60.0
@@ -62,6 +65,17 @@ def supervisor_heartbeat_path(profile_name: str) -> Path:
 def supervisor_desired_state_path(profile_name: str) -> Path:
     digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
     return supervisor_dir() / f"{digest}.desired.json"
+
+
+def supervisor_restart_migration_path(profile_name: str) -> Path:
+    digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
+    return supervisor_dir() / f"{digest}.restart.json"
+
+
+def supervisor_restart_recovery_path(profile_name: str) -> Path:
+    """Durable post-mortem for the latest owner-level Restart transaction."""
+    digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:24]
+    return supervisor_dir() / f"{digest}.restart-recovery.json"
 
 
 def _read_desired_running(profile_name: str) -> Optional[bool]:
@@ -225,6 +239,186 @@ def set_saved_bridge_desired_running(profile_name: str, desired_running: bool) -
             pass
 
 
+def request_saved_bridge_restart_migration(profile_name: str, owner_pid: int) -> Path:
+    """Persist a short-lived hand-off from a request-v1 owner to current recovery.
+
+    A request-v1 owner understands only ordinary cooperative Stop and therefore
+    writes ``desired_running=false`` while exiting. The detached current
+    supervisor sees this marker, restores the already-requested running intent,
+    and launches the same saved profile after the old owner disappears.
+    """
+
+    if isinstance(owner_pid, bool) or not isinstance(owner_pid, int) or owner_pid <= 0:
+        raise ValueError("restart migration owner_pid must be a positive integer")
+    path = supervisor_restart_migration_path(profile_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    payload = {
+        "schema_version": RESTART_MIGRATION_SCHEMA_VERSION,
+        "saved_profile": profile_name,
+        "owner_pid": owner_pid,
+        "requested_at": now,
+        "expires_at": now + RESTART_MIGRATION_TTL_SECONDS,
+    }
+    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temp.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temp, path)
+    return path
+
+
+def _read_restart_migration(profile_name: str) -> Optional[dict[str, Any]]:
+    path = supervisor_restart_migration_path(profile_name)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        schema = int(payload.get("schema_version", 0))
+        owner_pid = int(payload["owner_pid"])
+        expires_at = float(payload["expires_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        schema != RESTART_MIGRATION_SCHEMA_VERSION
+        or payload.get("saved_profile") != profile_name
+        or owner_pid <= 0
+    ):
+        return None
+    if expires_at < time.time():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    return {
+        "owner_pid": owner_pid,
+        "requested_at": payload.get("requested_at"),
+        "expires_at": expires_at,
+    }
+
+
+def clear_saved_bridge_restart_migration(
+    profile_name: str,
+    *,
+    owner_pid: Optional[int] = None,
+) -> None:
+    """Remove one migration marker, optionally only for its exact old owner."""
+
+    path = supervisor_restart_migration_path(profile_name)
+    if owner_pid is not None:
+        current = _read_restart_migration(profile_name)
+        if current is None or current.get("owner_pid") != owner_pid:
+            return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+_RESTART_RECOVERY_PHASES = frozenset(
+    {
+        "armed",
+        "shutdown_requested",
+        "waiting_old_owner",
+        "recovering",
+        "blocked",
+        "retrying",
+        "recovered",
+        "failed",
+        "cancelled",
+    }
+)
+_RESTART_RECOVERY_TERMINAL_PHASES = frozenset({"recovered", "failed", "cancelled"})
+
+
+def _read_restart_recovery(profile_name: str) -> Optional[dict[str, Any]]:
+    """Read the secret-free durable record for the latest Restart transaction."""
+
+    path = supervisor_restart_recovery_path(profile_name)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != RESTART_RECOVERY_SCHEMA_VERSION:
+        return None
+    if payload.get("saved_profile") != profile_name:
+        return None
+    phase = payload.get("phase")
+    if phase not in _RESTART_RECOVERY_PHASES:
+        return None
+    return dict(payload)
+
+
+def record_saved_bridge_restart_recovery(
+    profile_name: str,
+    *,
+    phase: str,
+    owner_pid: Optional[int] = None,
+    new_owner_pid: Optional[int] = None,
+    stop_protocol: Optional[str] = None,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Persist one restart phase so recovery survives caller/bridge loss.
+
+    The record is deliberately metadata-only: profile name, process ids, protocol,
+    timestamps and a bounded error string. It never stores credentials, arguments,
+    tool output or user content.
+    """
+
+    if phase not in _RESTART_RECOVERY_PHASES:
+        raise ValueError(f"unsupported restart recovery phase: {phase}")
+    now = time.time()
+    current = _read_restart_recovery(profile_name)
+    if phase == "armed" or current is None:
+        restart_seed = f"{profile_name}:{os.getpid()}:{time.time_ns()}"
+        payload: dict[str, Any] = {
+            "schema_version": RESTART_RECOVERY_SCHEMA_VERSION,
+            "saved_profile": profile_name,
+            "restart_id": "rst-" + hashlib.sha256(restart_seed.encode("utf-8")).hexdigest()[:16],
+            "started_at": now,
+        }
+    else:
+        payload = current
+    payload["phase"] = phase
+    payload["updated_at"] = now
+    if owner_pid is not None:
+        payload["owner_pid"] = int(owner_pid)
+    if new_owner_pid is not None:
+        payload["new_owner_pid"] = int(new_owner_pid)
+    if stop_protocol is not None:
+        payload["stop_protocol"] = str(stop_protocol)[:40]
+    if error:
+        payload["error"] = str(error)[:300]
+    elif phase in {"armed", "shutdown_requested", "waiting_old_owner", "recovering", "recovered"}:
+        payload.pop("error", None)
+    if phase in _RESTART_RECOVERY_TERMINAL_PHASES:
+        payload["completed_at"] = now
+    else:
+        payload.pop("completed_at", None)
+
+    path = supervisor_restart_recovery_path(profile_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return dict(payload)
+
+
+def saved_bridge_restart_recovery_status(profile_name: str) -> Optional[dict[str, Any]]:
+    """Return the latest secret-free owner-level Restart post-mortem."""
+    return _read_restart_recovery(profile_name)
+
+
 def saved_bridge_supervisor_status(profile_name: str) -> dict[str, Any]:
     """Return supervisor state with process-identity and heartbeat liveness."""
     state = _read_state(profile_name)
@@ -270,8 +464,15 @@ def saved_bridge_supervisor_status(profile_name: str) -> dict[str, Any]:
     )
     if main_busy_active:
         main_progress_fresh = True
+    restart_migration = _read_restart_migration(profile_name)
+    restart_recovery = _read_restart_recovery(profile_name)
     return {
         **state,
+        "restart_migration_pending": restart_migration is not None,
+        "restart_recovery": restart_recovery,
+        "restart_migration_owner_pid": (
+            restart_migration.get("owner_pid") if restart_migration is not None else None
+        ),
         "state_heartbeat_at": state.get("heartbeat_at"),
         "heartbeat_at": float(heartbeat_at) if isinstance(heartbeat_at, (int, float)) else None,
         "main_progress_at": (
@@ -579,6 +780,21 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
     session/OAuth identity and the saved public profile remain unchanged.
     """
     state = _read_state(profile_name)
+    restart_migration = _read_restart_migration(profile_name)
+    restart_recovery = _read_restart_recovery(profile_name)
+    if restart_migration is not None and not bool(state.get("desired_running")):
+        # A request-v1 owner turns desired_running off as part of its only known
+        # cooperative shutdown protocol. The migration marker was written by an
+        # explicit Restart before that shutdown, so restore the durable intent
+        # before deciding whether this supervisor should exit.
+        try:
+            set_saved_bridge_desired_running(profile_name, True)
+        except OSError as exc:
+            return {
+                "status": "recovery_failed",
+                "error": f"restart migration could not restore desired state: {type(exc).__name__}",
+            }
+        state = _read_state(profile_name)
     if not bool(state.get("desired_running")):
         return {"status": "disabled"}
 
@@ -593,6 +809,81 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
         return {"status": "profile_error", "error": type(exc).__name__}
 
     ownership = check_port_ownership(profile_name, port=profile.port)
+    if (
+        restart_recovery is not None
+        and restart_recovery.get("phase") not in _RESTART_RECOVERY_TERMINAL_PHASES
+        and ownership.verdict == "reuse_same_profile"
+        and ownership.metadata.pid_proven
+    ):
+        old_owner_pid = restart_recovery.get("owner_pid")
+        current_owner_pid = ownership.metadata.pid
+        if (
+            isinstance(old_owner_pid, int)
+            and old_owner_pid > 0
+            and isinstance(current_owner_pid, int)
+            and current_owner_pid > 0
+            and current_owner_pid != old_owner_pid
+        ):
+            try:
+                record_saved_bridge_restart_recovery(
+                    profile_name,
+                    phase="recovered",
+                    owner_pid=old_owner_pid,
+                    new_owner_pid=current_owner_pid,
+                    stop_protocol=str(restart_recovery.get("stop_protocol") or "unknown"),
+                )
+            except (OSError, ValueError):
+                pass
+            restart_recovery = _read_restart_recovery(profile_name)
+
+    if restart_migration is not None:
+        target_owner_pid = int(restart_migration["owner_pid"])
+        if ownership.verdict == "reuse_same_profile" and ownership.metadata.pid_proven:
+            current_owner_pid = ownership.metadata.pid
+            if current_owner_pid == target_owner_pid:
+                # The old request-v1 owner has not consumed its cooperative stop
+                # yet. Do not recycle it from the supervisor: that owner may have
+                # spawned this process, and a Windows tree kill can otherwise take
+                # recovery down with the process it is meant to replace.
+                try:
+                    record_saved_bridge_restart_recovery(
+                        profile_name,
+                        phase="waiting_old_owner",
+                        owner_pid=target_owner_pid,
+                        stop_protocol="request-v1",
+                    )
+                except (OSError, ValueError):
+                    pass
+                return {
+                    "status": "migration_waiting",
+                    "owner_pid": current_owner_pid,
+                }
+            # A different proven owner already serves this profile; the migration
+            # completed through the caller or another recovery race.
+            try:
+                record_saved_bridge_restart_recovery(
+                    profile_name,
+                    phase="recovered",
+                    owner_pid=target_owner_pid,
+                    new_owner_pid=current_owner_pid,
+                    stop_protocol="request-v1",
+                )
+            except (OSError, ValueError):
+                pass
+            clear_saved_bridge_restart_migration(
+                profile_name,
+                owner_pid=target_owner_pid,
+            )
+            restart_migration = None
+        elif ownership.verdict == "unrelated_process":
+            # The targeted KaroX owner is gone. Keep desired_running=true but do
+            # not let a stale migration marker override a later explicit Stop.
+            clear_saved_bridge_restart_migration(
+                profile_name,
+                owner_pid=target_owner_pid,
+            )
+            restart_migration = None
+
     if ownership.verdict == "reuse_same_profile" and ownership.metadata.pid_proven:
         heartbeat = _read_owner_heartbeat(
             getattr(ownership.metadata, "watchdog_path", None)
@@ -640,6 +931,20 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
             }
 
     if ownership.verdict == "unrelated_process":
+        if (
+            restart_recovery is not None
+            and restart_recovery.get("phase") not in _RESTART_RECOVERY_TERMINAL_PHASES
+        ):
+            try:
+                record_saved_bridge_restart_recovery(
+                    profile_name,
+                    phase="blocked",
+                    owner_pid=restart_recovery.get("owner_pid"),
+                    stop_protocol=str(restart_recovery.get("stop_protocol") or "unknown"),
+                    error=ownership.reason[:200],
+                )
+            except (OSError, ValueError, TypeError):
+                pass
         return {
             "status": "blocked_foreign_process",
             "error": ownership.reason[:200],
@@ -647,21 +952,69 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
 
     from .web_bridge_launcher import start_saved_bridge
 
+    if (
+        restart_recovery is not None
+        and restart_recovery.get("phase") not in _RESTART_RECOVERY_TERMINAL_PHASES
+    ):
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="recovering",
+                owner_pid=restart_recovery.get("owner_pid"),
+                stop_protocol=str(restart_recovery.get("stop_protocol") or "unknown"),
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+
     previous_owner_exit = _last_owner_exit(profile_name)
     result = start_saved_bridge(
         profile_name,
         timeout_seconds=120.0,
     )
     if result.get("action") in {"started", "reused"}:
+        if restart_migration is not None:
+            clear_saved_bridge_restart_migration(
+                profile_name,
+                owner_pid=int(restart_migration["owner_pid"]),
+            )
+        if (
+            restart_recovery is not None
+            and restart_recovery.get("phase") not in _RESTART_RECOVERY_TERMINAL_PHASES
+        ):
+            try:
+                record_saved_bridge_restart_recovery(
+                    profile_name,
+                    phase="recovered",
+                    owner_pid=restart_recovery.get("owner_pid"),
+                    new_owner_pid=result.get("owner_pid"),
+                    stop_protocol=str(restart_recovery.get("stop_protocol") or "unknown"),
+                )
+            except (OSError, ValueError, TypeError):
+                pass
         return {
             "status": "recovered",
             "owner_pid": result.get("owner_pid"),
             "bridge_pid": result.get("bridge_pid"),
             "previous_owner_exit": previous_owner_exit,
         }
+    recovery_error = str(result.get("error") or "saved bridge recovery failed")[:200]
+    if (
+        restart_recovery is not None
+        and restart_recovery.get("phase") not in _RESTART_RECOVERY_TERMINAL_PHASES
+    ):
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="retrying",
+                owner_pid=restart_recovery.get("owner_pid"),
+                stop_protocol=str(restart_recovery.get("stop_protocol") or "unknown"),
+                error=recovery_error,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
     return {
         "status": "recovery_failed",
-        "error": str(result.get("error") or "saved bridge recovery failed")[:200],
+        "error": recovery_error,
     }
 
 
@@ -685,7 +1038,18 @@ def run_saved_bridge_supervisor(profile_name: str) -> int:
             main_progress["at"] = time.time()
             state = _read_state(profile_name)
             if not bool(state.get("desired_running")):
-                return 0
+                # request-v1 owners can only express shutdown by persisting
+                # desired_running=false. A pre-existing, unexpired restart marker
+                # makes that one transition part of migration rather than a user
+                # Stop. Explicit Stop clears the marker before writing false.
+                if _read_restart_migration(profile_name) is not None:
+                    try:
+                        set_saved_bridge_desired_running(profile_name, True)
+                    except OSError:
+                        return 1
+                    state = _read_state(profile_name)
+                if not bool(state.get("desired_running")):
+                    return 0
 
             # A newer supervisor may have won a race.  Do not run two recovery loops.
             if state.get("supervisor_pid") != os.getpid():
@@ -717,7 +1081,7 @@ def run_saved_bridge_supervisor(profile_name: str) -> int:
                 # restart cycle never recorded anywhere.
                 state["last_owner_exit"] = result.get("previous_owner_exit")
                 backoff = SUPERVISOR_MIN_BACKOFF_SECONDS
-            elif status_name == "healthy":
+            elif status_name in {"healthy", "migration_waiting"}:
                 state["last_error"] = None
                 backoff = SUPERVISOR_MIN_BACKOFF_SECONDS
             elif status_name == "disabled":
@@ -731,7 +1095,11 @@ def run_saved_bridge_supervisor(profile_name: str) -> int:
                 state["last_failure_at"] = time.time()
                 backoff = min(SUPERVISOR_MAX_BACKOFF_SECONDS, max(backoff * 2.0, SUPERVISOR_MIN_BACKOFF_SECONDS))
             _write_state(profile_name, state)
-            time.sleep(SUPERVISOR_POLL_SECONDS if status_name in {"healthy", "recovered"} else backoff)
+            time.sleep(
+                SUPERVISOR_POLL_SECONDS
+                if status_name in {"healthy", "recovered", "migration_waiting"}
+                else backoff
+            )
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=1.0)

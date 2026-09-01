@@ -291,6 +291,91 @@ class ProviderController:
             credential_cleanup=cleanup,
         )
 
+    def configure_provider(
+        self,
+        provider: ProviderRecord,
+        *,
+        secret: Optional[str] = None,
+        credential_name: Optional[str] = None,
+    ) -> ProviderMutation:
+        """Persist provider + optional credential without requiring a model.
+
+        This is the durable first half of the human setup flow: once model
+        discovery proves the endpoint/key pair is valid, the connection can be
+        saved immediately and model choice becomes a separate reversible step.
+        The keyring and registry are restored together on failure.
+        """
+
+        try:
+            previous_provider = self.registry.provider(provider.provider_id)
+        except RegistryError:
+            previous_provider = None
+        previous_reference = (
+            previous_provider.credential_ref if previous_provider is not None else None
+        )
+        previous_secret: Optional[str] = None
+        previous_keyring_name: Optional[str] = None
+        if previous_reference:
+            parsed = CredentialReference.parse(previous_reference)
+            if parsed.scheme == KEYRING_SCHEME:
+                previous_keyring_name = parsed.name
+                try:
+                    previous_secret = self.credentials.resolve(parsed)
+                except CredentialError:
+                    previous_secret = None
+
+        new_keyring_name: Optional[str] = None
+        try:
+            base = provider
+            if secret is None and previous_provider is not None and not base.credential_ref:
+                base = replace(base, credential_ref=previous_provider.credential_ref)
+            if previous_provider is not None:
+                base = replace(base, enabled=previous_provider.enabled)
+            saved_provider = self.registry.put_provider(base)
+            fingerprint: Optional[str] = None
+            if secret is not None:
+                credential_result = self.set_credential(
+                    provider.provider_id,
+                    secret,
+                    credential_name=credential_name,
+                )
+                assert credential_result.provider is not None
+                saved_provider = credential_result.provider
+                fingerprint = credential_result.credential_fingerprint
+                parsed_new = CredentialReference.parse(saved_provider.credential_ref or "")
+                if parsed_new.scheme == KEYRING_SCHEME:
+                    new_keyring_name = parsed_new.name
+            return ProviderMutation(
+                status="connected",
+                provider=saved_provider,
+                selected_model=self.registry.selected_model(),
+                credential_fingerprint=(
+                    fingerprint
+                    or self._credential_status(saved_provider).get("fingerprint")
+                    or None
+                ),
+            )
+        except Exception:
+            if previous_provider is None:
+                try:
+                    self.registry.remove_provider(provider.provider_id, cascade=False)
+                except RegistryError:
+                    pass
+            else:
+                self.registry.put_provider(previous_provider)
+
+            if previous_keyring_name is not None and previous_secret is not None:
+                self.credentials.set(previous_keyring_name, previous_secret)
+            if (
+                new_keyring_name is not None
+                and new_keyring_name != previous_keyring_name
+            ):
+                try:
+                    self.credentials.delete(new_keyring_name)
+                except CredentialError:
+                    pass
+            raise
+
     def configure_provider_model(
         self,
         provider: ProviderRecord,

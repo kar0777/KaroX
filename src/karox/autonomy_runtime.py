@@ -14,6 +14,8 @@ import os
 import re
 import subprocess
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -24,6 +26,10 @@ from .client_capabilities import (
     ClientCapabilityStore,
     negotiate_client_capabilities,
 )
+from .chatgpt_project_binding import (
+    ChatGPTProjectBindingError,
+    ChatGPTProjectBindingStore,
+)
 from .hosted_bridge import (
     AUTONOMY_TOOL_NAMES,
     CORE_TOOL_NAMES,
@@ -32,13 +38,14 @@ from .hosted_bridge import (
 )
 from .models import AccessProfile, Capability, Origin
 from .plan_executor import PlanExecutionError, PlanExecutor
+from .paths import runtime_dir
 from .policy import CapabilityPolicy
 from .project_registry import ProjectRegistry, ProjectRegistryError
 from .proxy import ProxyToolDescriptor
 from .repo_context import RepositoryContextEngine
 from .repository_lease import RepositoryLeaseStore
 from .security import redact
-from .sessions import IdempotencyConflict, SessionStore, mutation_lease_context
+from .sessions import IdempotencyConflict, SessionBusy, SessionStore, mutation_lease_context
 from .memory import KaroXMemory, MemoryError, MemoryKind, MemoryScope
 from .project_map import ProjectFactMap
 from .task_state import FactOrigin, TaskFact, TaskStateStore, fact
@@ -51,14 +58,26 @@ TASK_WORKSTREAMS = "karox.task.workstreams"
 REPO_INSPECT = "karox.repo.inspect"
 TASK_EXECUTE_PLAN = "karox.task.execute_plan"
 CHECKS_RUN_AFFECTED = "karox.checks.run_affected"
+INTELLIGENCE_LIST = "karox.intelligence.list"
+ORCHESTRATE_RECIPES = "karox.orchestrate.recipes"
+ORCHESTRATE_PLAN = "karox.orchestrate.plan"
+ORCHESTRATE_START = "karox.orchestrate.start"
+ORCHESTRATE_STATUS = "karox.orchestrate.status"
+ORCHESTRATE_CONTROL = "karox.orchestrate.control"
 MEMORY_REMEMBER = "karox.memory.remember"
 MEMORY_RECALL = "karox.memory.recall"
 MEMORY_CONTEXT = "karox.memory.context"
 MEMORY_LIST = "karox.memory.list"
 MEMORY_FORGET = "karox.memory.forget"
+CHATGPT_PROJECT_BIND = "karox.chatgpt_project.bind"
+CHATGPT_PROJECT_RESUME = "karox.chatgpt_project.resume"
 
 _AUTONOMY_MUTATION_LEASE_TTL_SECONDS = 60.0
 _AUTONOMY_MUTATION_LEASE_HEARTBEAT_SECONDS = 20.0
+_AUTONOMY_MUTATION_LEASE_WAIT_SECONDS = 2.0
+_WORKTREE_FINGERPRINT_MAX_FILES = 2048
+_WORKTREE_FINGERPRINT_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
+_WORKTREE_FINGERPRINT_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 def _practical_output_size_limit_from_bridge_diagnostics(
@@ -103,11 +122,19 @@ if AUTONOMY_TOOL_NAMES != frozenset(
         REPO_INSPECT,
         TASK_EXECUTE_PLAN,
         CHECKS_RUN_AFFECTED,
+        INTELLIGENCE_LIST,
+        ORCHESTRATE_RECIPES,
+        ORCHESTRATE_PLAN,
+        ORCHESTRATE_START,
+        ORCHESTRATE_STATUS,
+        ORCHESTRATE_CONTROL,
         MEMORY_REMEMBER,
         MEMORY_RECALL,
         MEMORY_CONTEXT,
         MEMORY_LIST,
         MEMORY_FORGET,
+        CHATGPT_PROJECT_BIND,
+        CHATGPT_PROJECT_RESUME,
     }
 ):
     raise RuntimeError("autonomy tool catalogue is out of sync")
@@ -170,6 +197,163 @@ _MEMORY_SCOPE_ENUM = ["user", "project", "workstream", "session"]
 _MEMORY_KIND_ENUM = ["fact", "preference", "decision", "note", "todo", "handoff"]
 
 _TOOLS: dict[str, _ToolMeta] = {
+    INTELLIGENCE_LIST: _ToolMeta(
+        description=(
+            "List the secret-free KaroX 5 intelligence pool across configured API "
+            "models, already-paid subscription agents, local models, and explicitly "
+            "registered external agents. This is inventory only; no model is invoked."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "include_disabled": {"type": "boolean", "default": True},
+            },
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    ORCHESTRATE_RECIPES: _ToolMeta(
+        description=(
+            "List built-in and user-installed data-only KaroX orchestration recipes. "
+            "Listing a recipe never starts an agent or changes repository state."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    ORCHESTRATE_PLAN: _ToolMeta(
+        description=(
+            "Build a read-only KaroX orchestration plan from the current intelligence "
+            "pool, verified routing evidence, quota observations, risk, and role/effort "
+            "overrides. The plan selects workers but does not execute them."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20000,
+                },
+                "recipe": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "default": "feature",
+                },
+                "preset": {
+                    "type": "string",
+                    "enum": [
+                        "balanced",
+                        "custom",
+                        "maximum_economy",
+                        "maximum_quality",
+                    ],
+                    "default": "balanced",
+                },
+                "risk": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "default": "medium",
+                },
+                "orchestrator_endpoint_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                },
+                "role_assignments": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                    },
+                },
+                "effort_assignments": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                    },
+                },
+                "run_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                },
+            },
+            "required": ["objective"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    ORCHESTRATE_START: _ToolMeta(
+        description=(
+            "Start a durable guarded KaroX multi-agent run for this bound ChatGPT Project. "
+            "Implementers are always isolated in KaroX worktrees and the bridge's approved "
+            "verification commands are reused; the client cannot disable either guard."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binding": {"type": "string", "minLength": 20, "maxLength": 96},
+                "objective": {"type": "string", "minLength": 1, "maxLength": 20000},
+                "recipe": {"type": "string", "minLength": 1, "maxLength": 128},
+                "preset": {"type": "string", "enum": ["balanced", "custom", "maximum_economy", "maximum_quality"]},
+                "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+                "run_id": {"type": "string", "minLength": 1, "maxLength": 100},
+                "orchestrator_endpoint_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "role_assignments": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 256}},
+                "effort_assignments": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 200},
+                "max_seconds": {"type": "number", "minimum": 1, "maximum": 7200},
+            },
+            "required": ["binding", "objective"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.PROCESS_RUN,
+    ),
+    ORCHESTRATE_STATUS: _ToolMeta(
+        description=(
+            "Return a compact status snapshot for a guarded background multi-agent run owned "
+            "by this KaroX repository and bound ChatGPT Project."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binding": {"type": "string", "minLength": 20, "maxLength": 96},
+                "run_id": {"type": "string", "minLength": 1, "maxLength": 100},
+            },
+            "required": ["binding", "run_id"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
+    ORCHESTRATE_CONTROL: _ToolMeta(
+        description=(
+            "Pause, resume, stop, or steer a guarded background multi-agent run through "
+            "Mission Control safe boundaries. This never kills an arbitrary PID."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binding": {"type": "string", "minLength": 20, "maxLength": 96},
+                "run_id": {"type": "string", "minLength": 1, "maxLength": 100},
+                "command": {"type": "string", "enum": ["pause", "resume", "stop", "steer"]},
+                "target": {"type": "string", "minLength": 1, "maxLength": 128},
+                "text": {"type": "string", "maxLength": 4000},
+            },
+            "required": ["binding", "run_id", "command"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.PROCESS_RUN,
+    ),
     MEMORY_REMEMBER: _ToolMeta(
         description=(
             "Store one durable fact, preference, decision, note, todo, or handoff in "
@@ -270,6 +454,39 @@ _TOOLS: dict[str, _ToolMeta] = {
         },
         read_only=False,
     ),
+    CHATGPT_PROJECT_BIND: _ToolMeta(
+        description=(
+            "Bind this durable KaroX session to one ChatGPT Project and return a short "
+            "instruction capsule to paste into that ChatGPT Project. The binding is a "
+            "scope marker for accidental cross-project use, not an authentication secret."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "rotate": {"type": "boolean"},
+            },
+            "required": ["project_name"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+    ),
+    CHATGPT_PROJECT_RESUME: _ToolMeta(
+        description=(
+            "Verify the ChatGPT Project binding and return a compact continuation capsule "
+            "covering the durable KaroX session and parallel workstreams, so a new chat or "
+            "reconnect can continue without replaying large tool outputs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binding": {"type": "string", "minLength": 20, "maxLength": 96}
+            },
+            "required": ["binding"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+    ),
     TASK_BOOTSTRAP: _ToolMeta(
         description=(
             "Create or refresh authoritative task state and return a compact recovery "
@@ -325,8 +542,8 @@ _TOOLS: dict[str, _ToolMeta] = {
     ),
     TASK_RESUME: _ToolMeta(
         description=(
-            "Resume a task from authoritative state and compare stored repository facts "
-            "with the current branch/revision/dirty state before recommending a safe action."
+            "Resume a task from authoritative state, self-heal missing or stale recovery metadata, "
+            "and compare branch/revision/working-tree evidence before recommending a safe action."
         ),
         input_schema={
             "type": "object",
@@ -339,7 +556,10 @@ _TOOLS: dict[str, _ToolMeta] = {
         capability=Capability.REPO_READ,
     ),
     TASK_STATUS: _ToolMeta(
-        description="Return the current authoritative task state with fact provenance.",
+        description=(
+            "Return authoritative task state with provenance, using the same bounded "
+            "reconnect/staleness self-heal as task.resume when recovery metadata drifted."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -352,13 +572,17 @@ _TOOLS: dict[str, _ToolMeta] = {
     ),
     TASK_WORKSTREAMS: _ToolMeta(
         description=(
-            "List compact read-only summaries of parallel task workstreams in this "
-            "repository session so one chat can coordinate with sibling chats without "
-            "loading or mutating their full context."
+            "List compact read-only summaries of parallel task workstreams so one chat can "
+            "coordinate without loading sibling contexts. Large sessions return the most "
+            "recent lanes first within a bounded limit (24 by default, up to 100) and report "
+            "whether older lanes were omitted."
         ),
         input_schema={
             "type": "object",
-            "properties": {"include_default": {"type": "boolean", "default": True}},
+            "properties": {
+                "include_default": {"type": "boolean", "default": True},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 24},
+            },
             "additionalProperties": False,
         },
         read_only=True,
@@ -571,6 +795,7 @@ class AutonomyRuntime:
         self._allowed = tuple(dict.fromkeys(allowed_tool_names))
         self.client_kind = client_kind.strip() or "hosted-mcp"
         self.task_states = TaskStateStore(sessions)
+        self.chatgpt_project = ChatGPTProjectBindingStore(sessions, session_id)
         # Universal memory lives beside the session store: durable across
         # sessions, shared by every client of this runtime, and isolated in
         # tests because tests always construct SessionStore on a temp root.
@@ -865,6 +1090,34 @@ class AutonomyRuntime:
                 idempotency_key,
                 lambda value: self._run_affected(value, idempotency_key),
             )
+        if tool_name == INTELLIGENCE_LIST:
+            return self._intelligence_list(arguments)
+        if tool_name == ORCHESTRATE_RECIPES:
+            return self._orchestration_recipes(arguments)
+        if tool_name == ORCHESTRATE_PLAN:
+            return self._orchestration_plan(arguments)
+        if tool_name == ORCHESTRATE_START:
+            return self._mutating(
+                tool_name,
+                arguments,
+                idempotency_key,
+                lambda value: self._orchestration_start(value, idempotency_key),
+                reconcile_pending=lambda value: self._orchestration_start(
+                    value, idempotency_key, reconcile_pending=True
+                ),
+            )
+        if tool_name == ORCHESTRATE_STATUS:
+            return self._orchestration_status(arguments)
+        if tool_name == ORCHESTRATE_CONTROL:
+            return self._mutating(
+                tool_name,
+                arguments,
+                idempotency_key,
+                lambda value: self._orchestration_control(value, idempotency_key),
+                reconcile_pending=lambda value: self._orchestration_control(
+                    value, idempotency_key
+                ),
+            )
         if tool_name == MEMORY_REMEMBER:
             return self._memory_remember(arguments)
         if tool_name == MEMORY_RECALL:
@@ -875,7 +1128,836 @@ class AutonomyRuntime:
             return self._memory_list(arguments)
         if tool_name == MEMORY_FORGET:
             return self._memory_forget(arguments)
+        if tool_name == CHATGPT_PROJECT_BIND:
+            return self._chatgpt_project_bind(arguments)
+        if tool_name == CHATGPT_PROJECT_RESUME:
+            return self._chatgpt_project_resume(arguments)
         raise HostedBridgeAccessDenied(f"autonomy tool has no handler: {tool_name}")
+
+    def _chatgpt_project_bind(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(arguments).difference({"project_name", "rotate"})
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"chatgpt_project.bind received unknown arguments: {sorted(unknown)}"
+            )
+        rotate = arguments.get("rotate", False)
+        if not isinstance(rotate, bool):
+            raise HostedBridgeAccessDenied("rotate must be a boolean")
+        try:
+            binding = self.chatgpt_project.bind(arguments.get("project_name", ""), rotate=rotate)
+        except ChatGPTProjectBindingError as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "project_name": binding.project_name,
+            "binding": binding.binding_id,
+            "binding_is_authentication": False,
+            "instruction_capsule": binding.instruction_capsule(),
+            "next_safe_action": (
+                "paste instruction_capsule into this ChatGPT Project instructions, then call "
+                "karox.chatgpt_project.resume with the binding"
+            ),
+        }
+
+    def _chatgpt_project_resume(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(arguments).difference({"binding"})
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"chatgpt_project.resume received unknown arguments: {sorted(unknown)}"
+            )
+        try:
+            payload = self.chatgpt_project.compact_snapshot(arguments.get("binding", ""))
+        except ChatGPTProjectBindingError as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+        # Active/recent subagent runs are part of project continuity too. A new
+        # ChatGPT chat sees them without replaying Mission Control history.
+        payload["orchestration_runs"] = self._owned_orchestration_runs(limit=8)
+        payload["continuation"]["orchestration_run_count"] = len(
+            payload["orchestration_runs"]
+        )
+        payload["active_jobs"] = self._active_durable_jobs()
+        payload["continuation"]["active_job_count"] = payload["active_jobs"]["count"]
+        return payload
+
+    # -- orchestration discovery/planning ------------------------------------
+
+    @staticmethod
+    def _short_mapping(
+        value: Any,
+        *,
+        label: str,
+        value_limit: int,
+    ) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise HostedBridgeAccessDenied(f"{label} must be an object")
+        if len(value) > 100:
+            raise HostedBridgeAccessDenied(f"{label} has too many entries")
+        result: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            if (
+                not isinstance(raw_key, str)
+                or not raw_key.strip()
+                or len(raw_key) > 256
+            ):
+                raise HostedBridgeAccessDenied(
+                    f"{label} keys must be short non-empty strings"
+                )
+            if (
+                not isinstance(raw_value, str)
+                or not raw_value.strip()
+                or len(raw_value) > value_limit
+                or any(char in raw_value for char in "\r\n\x00")
+            ):
+                raise HostedBridgeAccessDenied(
+                    f"{label} values must be short non-empty strings"
+                )
+            result[raw_key.strip()] = raw_value.strip()
+        return result
+
+    def _intelligence_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(arguments).difference({"include_disabled"})
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"intelligence.list received unknown arguments: {sorted(unknown)}"
+            )
+        include_disabled = arguments.get("include_disabled", True)
+        if not isinstance(include_disabled, bool):
+            raise HostedBridgeAccessDenied("include_disabled must be a boolean")
+
+        from .intelligence_pool import IntelligencePool, IntelligencePoolError
+
+        try:
+            endpoints = IntelligencePool().list(include_disabled=include_disabled)
+        except IntelligencePoolError as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "intelligence_pool_unavailable",
+                "error": str(redact(str(exc))),
+            }
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "count": len(endpoints),
+            "endpoints": [dict(redact(item.to_dict())) for item in endpoints],
+        }
+
+    def _orchestration_recipes(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if arguments:
+            raise HostedBridgeAccessDenied("orchestrate.recipes takes no arguments")
+
+        from .recipe_registry import RecipeRegistry, RecipeRegistryError
+
+        try:
+            recipes = RecipeRegistry().list()
+        except RecipeRegistryError as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_recipes_unavailable",
+                "error": str(redact(str(exc))),
+            }
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "count": len(recipes),
+            "recipes": [dict(redact(item.to_dict())) for item in recipes],
+        }
+
+    def _orchestration_plan(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "objective",
+            "recipe",
+            "preset",
+            "risk",
+            "orchestrator_endpoint_id",
+            "role_assignments",
+            "effort_assignments",
+            "run_id",
+        }
+        unknown = set(arguments).difference(allowed)
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"orchestrate.plan received unknown arguments: {sorted(unknown)}"
+            )
+
+        objective = arguments.get("objective")
+        if (
+            not isinstance(objective, str)
+            or not objective.strip()
+            or len(objective) > 20000
+        ):
+            raise HostedBridgeAccessDenied(
+                "objective must be a non-empty string up to 20000 characters"
+            )
+
+        recipe_name = arguments.get("recipe", "feature")
+        preset = arguments.get("preset", "balanced")
+        risk = arguments.get("risk", "medium")
+        for label, value, limit in (
+            ("recipe", recipe_name, 128),
+            ("preset", preset, 64),
+            ("risk", risk, 64),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > limit
+            ):
+                raise HostedBridgeAccessDenied(
+                    f"{label} must be a short non-empty string"
+                )
+
+        orchestrator_endpoint_id = arguments.get("orchestrator_endpoint_id")
+        if orchestrator_endpoint_id is not None and (
+            not isinstance(orchestrator_endpoint_id, str)
+            or not orchestrator_endpoint_id.strip()
+            or len(orchestrator_endpoint_id) > 256
+        ):
+            raise HostedBridgeAccessDenied("orchestrator_endpoint_id is invalid")
+
+        run_id = arguments.get("run_id")
+        if run_id is not None and (
+            not isinstance(run_id, str)
+            or not run_id.strip()
+            or len(run_id) > 256
+        ):
+            raise HostedBridgeAccessDenied("run_id is invalid")
+
+        role_assignments = self._short_mapping(
+            arguments.get("role_assignments"),
+            label="role_assignments",
+            value_limit=256,
+        )
+        raw_efforts = self._short_mapping(
+            arguments.get("effort_assignments"),
+            label="effort_assignments",
+            value_limit=64,
+        )
+
+        from .effort import normalize_effort
+        from .intelligence_pool import IntelligencePool, IntelligencePoolError
+        from .orchestration_routing import (
+            RoutingError,
+            RoutingTelemetry,
+            VerifiedSmartRouter,
+        )
+        from .orchestrator import (
+            OrchestrationError,
+            OrchestrationPolicy,
+            Orchestrator,
+        )
+        from .quota_brain import QuotaBrain
+        from .risk_engine import RiskLevel
+
+        try:
+            effort_assignments = {
+                name: normalize_effort(value)
+                for name, value in raw_efforts.items()
+            }
+            pool = IntelligencePool()
+            telemetry = RoutingTelemetry()
+            router = VerifiedSmartRouter(
+                pool=pool,
+                telemetry=telemetry,
+                quota_brain=QuotaBrain(),
+            )
+            plan = Orchestrator(
+                pool=pool,
+                router=router,
+                telemetry=telemetry,
+            ).plan(
+                objective=objective.strip(),
+                recipe_name=recipe_name.strip(),
+                risk_level=RiskLevel(risk.strip()),
+                policy=OrchestrationPolicy.from_preset(preset.strip()),
+                orchestrator_endpoint_id=(
+                    orchestrator_endpoint_id.strip()
+                    if isinstance(orchestrator_endpoint_id, str)
+                    else None
+                ),
+                role_assignments=role_assignments,
+                effort_assignments=effort_assignments,
+                run_id=run_id.strip() if isinstance(run_id, str) else None,
+            )
+        except (
+            IntelligencePoolError,
+            OrchestrationError,
+            RoutingError,
+            KeyError,
+            ValueError,
+        ) as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_plan_rejected",
+                "error": str(redact(str(exc))),
+            }
+
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "executed": False,
+            "plan": dict(redact(plan.to_dict())),
+        }
+
+    @staticmethod
+    def _hosted_run_id(
+        session_id: str,
+        requested: Any,
+        *,
+        stable_key: Optional[str] = None,
+    ) -> str:
+        """Return a globally collision-resistant Mission Control run id.
+
+        ChatGPT Projects do not supply a trusted conversation/project id over MCP,
+        so KaroX namespaces hosted run ids by the durable KaroX session. A friendly
+        caller-provided suffix is preserved when possible, while the real run id
+        stays safe for the global Mission Control namespace.
+        """
+
+        prefix = f"web-{hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:10]}-"
+        if requested is None:
+            if stable_key:
+                stable_material = f"{session_id}\0{stable_key}".encode("utf-8")
+                suffix = hashlib.sha256(stable_material).hexdigest()[:20]
+            else:
+                suffix = uuid.uuid4().hex[:20]
+        else:
+            if not isinstance(requested, str):
+                raise HostedBridgeAccessDenied("run_id must be text")
+            suffix = requested.strip()
+            if (
+                not suffix
+                or len(suffix) > 64
+                or any(
+                    char
+                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                    for char in suffix
+                )
+            ):
+                raise HostedBridgeAccessDenied(
+                    "run_id must contain 1-64 letters, digits, '-' or '_'"
+                )
+        return prefix + suffix
+
+    def _require_owned_orchestration_run(self, binding_id: Any, run_id: Any) -> tuple[Any, Any]:
+        """Resolve one background run only after project + session ownership checks."""
+
+        try:
+            self.chatgpt_project.require(binding_id)
+        except ChatGPTProjectBindingError as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise HostedBridgeAccessDenied("run_id is required")
+
+        from .background_orchestration import (
+            BackgroundOrchestrationError,
+            BackgroundOrchestrationRegistry,
+        )
+        from .mission_control import MissionControlError, MissionControlStore
+
+        registry = BackgroundOrchestrationRegistry()
+        try:
+            record = registry.get(run_id.strip())
+        except BackgroundOrchestrationError as exc:
+            raise HostedBridgeAccessDenied(f"unknown hosted orchestration run: {run_id}") from exc
+
+        try:
+            recorded_repo = Path(record.repository).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise HostedBridgeAccessDenied("hosted orchestration repository no longer exists") from exc
+        if os.path.normcase(str(recorded_repo)) != os.path.normcase(str(self.repository)):
+            raise HostedBridgeAccessDenied("hosted orchestration run belongs to another repository")
+
+        session = self.sessions.load(self.session_id)
+        mission = MissionControlStore(record.run_id)
+        try:
+            mission.require_owner(
+                session_id=self.session_id,
+                repo_fingerprint=session.repo_fingerprint,
+            )
+        except MissionControlError as exc:
+            raise HostedBridgeAccessDenied(
+                "hosted orchestration run belongs to another KaroX session"
+            ) from exc
+        return registry, record
+
+    @staticmethod
+    def _orchestration_recovery_hint(run_id: str, *, alive: bool) -> dict[str, Any]:
+        """Return read-only crash/retry guidance from the durable journal."""
+
+        try:
+            from .orchestration_recovery import OrchestrationJournal
+
+            recovery = OrchestrationJournal(run_id).snapshot()
+        except Exception as exc:
+            return {
+                "available": False,
+                "error": str(redact(type(exc).__name__)),
+            }
+        running = [item.step_id for item in recovery.steps if item.status == "running"]
+        pending = [
+            item.step_id
+            for item in recovery.steps
+            if item.status in {"pending", "failed", "reconcile_required"}
+        ]
+        requires_reconciliation = (not alive) and bool(running)
+        return {
+            "available": True,
+            "running_at_last_journal": running,
+            "pending_or_retryable": pending,
+            "completed": list(recovery.completed),
+            "requires_reconciliation": requires_reconciliation,
+            "safe_against_blind_replay": True,
+            "next_safe_action": (
+                "run is alive; poll status or steer it"
+                if alive
+                else (
+                    "reconcile the interrupted running step before any retry"
+                    if requires_reconciliation
+                    else "no in-flight journaled mutation remains; inspect evidence before restarting"
+                )
+            ),
+        }
+
+    @staticmethod
+    def _compact_orchestration_view(view: Any) -> dict[str, Any]:
+        snapshot = view.snapshot
+        agents: list[dict[str, Any]] = []
+        if snapshot is not None:
+            for item in snapshot.agents[:32]:
+                activity = " ".join(str(redact(item.activity)).split())
+                if len(activity) > 320:
+                    activity = activity[:319] + "…"
+                agents.append(
+                    {
+                        "step_id": item.step_id,
+                        "role": item.role,
+                        "endpoint_id": item.endpoint_id,
+                        "status": item.status,
+                        "activity": activity,
+                        "evidence_count": item.evidence_count,
+                        "total_tokens": item.total_tokens,
+                        "cost_usd": item.cost_usd,
+                        "updated_at": item.updated_at,
+                    }
+                )
+        return {
+            "run_id": view.record.run_id,
+            "status": view.status,
+            "alive": view.alive,
+            "identity_proven": view.identity_proven,
+            "recipe": view.record.recipe,
+            "preset": view.record.preset,
+            "label": " ".join(str(redact(view.record.label)).split())[:500],
+            "progress_percent": None if snapshot is None else snapshot.progress_percent,
+            "completed_agents": 0 if snapshot is None else snapshot.completed_agents,
+            "running_agents": 0 if snapshot is None else snapshot.running_agents,
+            "total_agents": 0 if snapshot is None else snapshot.total_agents,
+            "actual_cost_usd": 0.0 if snapshot is None else snapshot.actual_cost_usd,
+            "total_tokens": 0 if snapshot is None else snapshot.total_tokens,
+            "context_reused_chars": 0 if snapshot is None else snapshot.context_reused_chars,
+            "agents": agents,
+            "recovery": AutonomyRuntime._orchestration_recovery_hint(
+                view.record.run_id, alive=view.alive
+            ),
+            "updated_at": view.record.started_at if snapshot is None else snapshot.updated_at,
+        }
+
+    def _owned_orchestration_runs(self, *, limit: int = 8) -> list[dict[str, Any]]:
+        """List only runs cryptographically bound to this durable KaroX session."""
+
+        from .background_orchestration import BackgroundOrchestrationRegistry
+        from .mission_control import MissionControlError, MissionControlStore
+
+        session = self.sessions.load(self.session_id)
+        registry = BackgroundOrchestrationRegistry()
+        result: list[dict[str, Any]] = []
+        for record in registry.list_records():
+            if len(result) >= max(0, limit):
+                break
+            try:
+                recorded_repo = Path(record.repository).expanduser().resolve(strict=True)
+                if os.path.normcase(str(recorded_repo)) != os.path.normcase(str(self.repository)):
+                    continue
+                MissionControlStore(record.run_id).require_owner(
+                    session_id=self.session_id,
+                    repo_fingerprint=session.repo_fingerprint,
+                )
+                result.append(self._compact_orchestration_view(registry.view(record.run_id)))
+            except (OSError, MissionControlError, ValueError):
+                continue
+        return result
+
+    def _orchestration_start(
+        self,
+        arguments: dict[str, Any],
+        idempotency_key: Optional[str],
+        *,
+        reconcile_pending: bool = False,
+    ) -> dict[str, Any]:
+        allowed = {
+            "binding",
+            "objective",
+            "recipe",
+            "preset",
+            "risk",
+            "run_id",
+            "orchestrator_endpoint_id",
+            "role_assignments",
+            "effort_assignments",
+            "max_steps",
+            "max_seconds",
+        }
+        unknown = set(arguments).difference(allowed)
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"orchestrate.start received unknown arguments: {sorted(unknown)}"
+            )
+        try:
+            binding = self.chatgpt_project.require(arguments.get("binding", ""))
+        except ChatGPTProjectBindingError as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+
+        objective = arguments.get("objective")
+        if not isinstance(objective, str) or not objective.strip() or len(objective) > 20000:
+            raise HostedBridgeAccessDenied(
+                "objective must be a non-empty string up to 20000 characters"
+            )
+        objective = objective.strip()
+        recipe = arguments.get("recipe", "feature")
+        preset = arguments.get("preset", "balanced")
+        risk = arguments.get("risk", "medium")
+        for label, value, limit in (
+            ("recipe", recipe, 128),
+            ("preset", preset, 64),
+            ("risk", risk, 64),
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise HostedBridgeAccessDenied(f"{label} must be a short non-empty string")
+        recipe = recipe.strip()
+        preset = preset.strip()
+        risk = risk.strip()
+
+        orchestrator_endpoint_id = arguments.get("orchestrator_endpoint_id")
+        if orchestrator_endpoint_id is not None and (
+            not isinstance(orchestrator_endpoint_id, str)
+            or not orchestrator_endpoint_id.strip()
+            or len(orchestrator_endpoint_id) > 256
+        ):
+            raise HostedBridgeAccessDenied("orchestrator_endpoint_id is invalid")
+        role_assignments = self._short_mapping(
+            arguments.get("role_assignments"),
+            label="role_assignments",
+            value_limit=256,
+        )
+        effort_assignments = self._short_mapping(
+            arguments.get("effort_assignments"),
+            label="effort_assignments",
+            value_limit=64,
+        )
+        try:
+            max_steps = int(arguments.get("max_steps", 96))
+            max_seconds = float(arguments.get("max_seconds", 3600.0))
+        except (TypeError, ValueError) as exc:
+            raise HostedBridgeAccessDenied("max_steps/max_seconds are invalid") from exc
+        if not 1 <= max_steps <= 200:
+            raise HostedBridgeAccessDenied("max_steps must be between 1 and 200")
+        if not 1.0 <= max_seconds <= 7200.0:
+            raise HostedBridgeAccessDenied("max_seconds must be between 1 and 7200")
+
+        run_id = self._hosted_run_id(
+            self.session_id,
+            arguments.get("run_id"),
+            stable_key=idempotency_key,
+        )
+
+        if reconcile_pending:
+            try:
+                existing_registry, existing_record = self._require_owned_orchestration_run(
+                    binding.binding_id,
+                    run_id,
+                )
+            except HostedBridgeAccessDenied as exc:
+                if "unknown hosted orchestration run" not in str(exc):
+                    raise
+            else:
+                view = existing_registry.view(existing_record.run_id)
+                return {
+                    "ok": True,
+                    "schema_version": 1,
+                    "project_name": binding.project_name,
+                    "recovered_pending_start": True,
+                    **self._compact_orchestration_view(view),
+                    "guards": {
+                        "implementers_isolated": True,
+                        "routing_pinned_after_preflight": True,
+                        "mission_control_owner_bound": True,
+                        "raw_pid_control": False,
+                        "blind_duplicate_launch": False,
+                    },
+                    "next_safe_action": "poll karox.orchestrate.status before any new launch",
+                }
+
+        from .orchestration_cli import _validate_cli_execution_plan
+        from .orchestration_planning import build_orchestration_plan
+        from .risk_engine import RiskLevel
+
+        try:
+            selection = build_orchestration_plan(
+                repository=self.repository,
+                objective=objective,
+                recipe_name=recipe,
+                preset=preset,
+                risk_level=RiskLevel(risk),
+                orchestrator_endpoint_id=(
+                    orchestrator_endpoint_id.strip()
+                    if isinstance(orchestrator_endpoint_id, str)
+                    else None
+                ),
+                role_assignments=role_assignments,
+                effort_assignments=effort_assignments,
+                run_id=run_id,
+                # ChatGPT Web is already the supervising planner. Do not spend a
+                # second orchestrator turn merely to choose the same workers.
+                delegate_workers=False,
+            )
+            _validate_cli_execution_plan(selection.plan, isolate_implementers=True)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_start_rejected",
+                "error": str(redact(str(exc))),
+            }
+
+        # Pin the exact preflight plan so the detached child cannot re-route to a
+        # different endpoint between this response and actual execution.
+        pinned_assignments: dict[str, str] = {
+            "orchestrator": selection.plan.orchestrator_endpoint.endpoint_id
+        }
+        pinned_efforts: dict[str, str] = {}
+        planned_agents: list[dict[str, Any]] = []
+        for item in selection.plan.steps:
+            pinned_assignments[item.step.step_id] = item.endpoint.endpoint_id
+            pinned_efforts[item.step.step_id] = item.effort_level
+            planned_agents.append(
+                {
+                    "step_id": item.step.step_id,
+                    "role": item.step.role,
+                    "endpoint_id": item.endpoint.endpoint_id,
+                    "effort": item.effort_level,
+                }
+            )
+
+        argv = [
+            "orchestrate",
+            "run",
+            "--repository",
+            str(self.repository),
+            "--objective",
+            objective,
+            "--recipe",
+            recipe,
+            "--preset",
+            preset,
+            "--risk",
+            risk,
+            "--run-id",
+            run_id,
+            "--no-delegate-workers",
+            "--isolate-implementers",
+            "--hosted-project-run",
+            "--max-steps",
+            str(max_steps),
+            "--max-seconds",
+            str(max_seconds),
+            "--json",
+        ]
+        argv.extend(("--orchestrator", selection.plan.orchestrator_endpoint.endpoint_id))
+        for name, endpoint_id in sorted(pinned_assignments.items()):
+            argv.extend(("--assign", f"{name}={endpoint_id}"))
+        for name, effort in sorted(pinned_efforts.items()):
+            argv.extend(("--worker-effort", f"{name}={effort}"))
+        for command in self.verification_commands:
+            argv.extend(
+                (
+                    "--verification-command",
+                    json.dumps(list(command), ensure_ascii=False, separators=(",", ":")),
+                )
+            )
+
+        from .background_orchestration import (
+            BackgroundOrchestrationError,
+            BackgroundOrchestrationRegistry,
+        )
+        from .mission_control import MissionControlError, MissionControlStore
+
+        session = self.sessions.load(self.session_id)
+        mission = MissionControlStore(run_id)
+        try:
+            mission.bind_owner(
+                session_id=self.session_id,
+                repo_fingerprint=session.repo_fingerprint,
+            )
+            record = BackgroundOrchestrationRegistry().start(
+                run_id=run_id,
+                repository=self.repository,
+                cli_argv=argv,
+                recipe=recipe,
+                preset=preset,
+                label=f"{binding.project_name}: {objective[:180]}",
+            )
+        except (BackgroundOrchestrationError, MissionControlError, OSError, ValueError) as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_start_failed",
+                "error": str(redact(str(exc))),
+                "run_id": run_id,
+            }
+
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "run_id": record.run_id,
+            "status": "starting",
+            "project_name": binding.project_name,
+            "planned_agents": planned_agents[:32],
+            "guards": {
+                "implementers_isolated": True,
+                "verification_commands": len(self.verification_commands),
+                "routing_pinned_after_preflight": True,
+                "mission_control_owner_bound": True,
+                "raw_pid_control": False,
+            },
+            "next_safe_action": (
+                "poll karox.orchestrate.status; use karox.orchestrate.control only for "
+                "pause/resume/stop or a targeted steer"
+            ),
+        }
+
+    def _orchestration_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(arguments).difference({"binding", "run_id"})
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"orchestrate.status received unknown arguments: {sorted(unknown)}"
+            )
+        registry, record = self._require_owned_orchestration_run(
+            arguments.get("binding", ""), arguments.get("run_id", "")
+        )
+        try:
+            view = registry.view(record.run_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_status_unavailable",
+                "error": str(redact(str(exc))),
+                "run_id": record.run_id,
+            }
+        return {
+            "ok": True,
+            "schema_version": 1,
+            **self._compact_orchestration_view(view),
+        }
+
+    def _orchestration_control(
+        self,
+        arguments: dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> dict[str, Any]:
+        unknown = set(arguments).difference({"binding", "run_id", "command", "target", "text"})
+        if unknown:
+            raise HostedBridgeAccessDenied(
+                f"orchestrate.control received unknown arguments: {sorted(unknown)}"
+            )
+        registry, record = self._require_owned_orchestration_run(
+            arguments.get("binding", ""), arguments.get("run_id", "")
+        )
+        command = arguments.get("command")
+        if command not in {"pause", "resume", "stop", "steer"}:
+            raise HostedBridgeAccessDenied("command must be pause, resume, stop, or steer")
+        target = arguments.get("target", "all" if command == "steer" else "orchestrator")
+        if (
+            not isinstance(target, str)
+            or not target
+            or len(target) > 128
+            or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:" for char in target)
+        ):
+            raise HostedBridgeAccessDenied("target is invalid")
+        text = arguments.get("text", "")
+        if not isinstance(text, str) or len(text) > 4000:
+            raise HostedBridgeAccessDenied("text must be at most 4000 characters")
+        if command == "steer" and not text.strip():
+            raise HostedBridgeAccessDenied("steer requires non-empty text")
+        if command != "steer" and text.strip():
+            raise HostedBridgeAccessDenied("text is accepted only for steer")
+
+        try:
+            view = registry.view(record.run_id)
+        except Exception as exc:
+            raise HostedBridgeAccessDenied(
+                "cannot prove the owned orchestration process before control"
+            ) from exc
+        if not view.alive:
+            raise HostedBridgeAccessDenied(
+                "owned orchestration process is no longer alive; control was not queued"
+            )
+        if not view.identity_proven:
+            raise HostedBridgeAccessDenied(
+                "owned orchestration process identity is not proven; control was not queued"
+            )
+
+        # Once a snapshot exists, reject typos instead of silently broadcasting a
+        # steer to a target that does not exist.
+        if command == "steer":
+            snapshot = view.snapshot
+            if snapshot is not None and target not in {"all", "orchestrator"}:
+                valid_targets = {
+                    *(item.step_id for item in snapshot.agents),
+                    *(item.role for item in snapshot.agents),
+                }
+                if target not in valid_targets:
+                    raise HostedBridgeAccessDenied(
+                        "steer target is not an active role or step; call orchestrate.status first"
+                    )
+
+        control_command_id = None
+        if idempotency_key:
+            material = f"{self.session_id}\0{record.run_id}\0{idempotency_key}".encode("utf-8")
+            control_command_id = "cmd-" + hashlib.sha256(material).hexdigest()[:32]
+
+        try:
+            queued = registry.request(
+                record.run_id,
+                command,
+                target=target,
+                text=text.strip(),
+                command_id=control_command_id,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": 1,
+                "error_code": "orchestration_control_failed",
+                "error": str(redact(str(exc))),
+                "run_id": record.run_id,
+            }
+        return {
+            "ok": True,
+            "schema_version": 1,
+            "run_id": record.run_id,
+            "queued": True,
+            "command": command,
+            "target": target,
+            "command_id": queued.get("command_id"),
+            "delivery": "safe orchestration boundary",
+        }
 
     # -- project intelligence --------------------------------------------------
 
@@ -1073,14 +2155,28 @@ class AutonomyRuntime:
         arguments: dict[str, Any],
         idempotency_key: Optional[str],
         handler: Callable[[dict[str, Any]], dict[str, Any]],
+        reconcile_pending: Optional[
+            Callable[[dict[str, Any]], dict[str, Any]]
+        ] = None,
     ) -> dict[str, Any]:
         if not idempotency_key:
             raise HostedBridgeAccessDenied("mutating autonomy tools require an idempotency key")
-        lease = self.sessions.acquire(
-            self.session_id,
-            f"autonomy-{tool_name}",
-            ttl_seconds=_AUTONOMY_MUTATION_LEASE_TTL_SECONDS,
-        )
+        lease_deadline = time.monotonic() + _AUTONOMY_MUTATION_LEASE_WAIT_SECONDS
+        while True:
+            try:
+                lease = self.sessions.acquire(
+                    self.session_id,
+                    f"autonomy-{tool_name}",
+                    ttl_seconds=_AUTONOMY_MUTATION_LEASE_TTL_SECONDS,
+                )
+                break
+            except SessionBusy as exc:
+                if time.monotonic() >= lease_deadline:
+                    raise HostedBridgeAccessDenied(
+                        "mutation queue is briefly busy; no permission was lost and no "
+                        "side effect was started. Retry the same idempotent request."
+                    ) from exc
+                time.sleep(0.05)
         heartbeat_stop = threading.Event()
         heartbeat_errors: list[Exception] = []
 
@@ -1103,22 +2199,42 @@ class AutonomyRuntime:
         heartbeat_thread.start()
         try:
             record = self.sessions.load(self.session_id)
+            input_digest = self._digest(tool_name, arguments)
+            pending_recovery = False
             try:
                 replay = self.sessions.begin_idempotent(
                     record,
                     lease,
                     idempotency_key,
-                    self._digest(tool_name, arguments),
+                    input_digest,
                 )
             except IdempotencyConflict as exc:
-                raise HostedBridgeAccessDenied(str(exc)) from exc
+                entry = record.idempotency.get(idempotency_key)
+                if (
+                    reconcile_pending is not None
+                    and isinstance(entry, Mapping)
+                    and entry.get("input_digest") == input_digest
+                    and entry.get("status") == "pending"
+                ):
+                    replay = None
+                    pending_recovery = True
+                else:
+                    raise HostedBridgeAccessDenied(
+                        "idempotency conflict, not a permission denial: a previous "
+                        "attempt is recorded with different input or cannot be "
+                        "safely reconciled. Use a new idempotency key only after "
+                        f"inspecting the prior operation. ({exc})"
+                    ) from exc
             if replay is not None:
                 return {**replay, "idempotent_replay": True}
             # Nested checks/patches use the exact same fenced lease only inside
             # this synchronous execution context. A parallel hosted request does
             # not inherit the ContextVar and therefore remains blocked.
+            selected_handler = reconcile_pending if pending_recovery else handler
+            if selected_handler is None:  # defensive; pending_recovery implies one exists
+                raise HostedBridgeAccessDenied("pending mutation cannot be reconciled")
             with mutation_lease_context(lease):
-                result = handler(arguments)
+                result = selected_handler(arguments)
             if heartbeat_errors:
                 raise HostedBridgeAccessDenied(
                     "autonomy mutation lease heartbeat failed; the result is not trusted"
@@ -1145,6 +2261,7 @@ class AutonomyRuntime:
         *arguments: str,
         repository: Optional[Path] = None,
         allow_failure: bool = False,
+        strip_output: bool = True,
     ) -> str:
         target = (repository or self.repository).expanduser().resolve(strict=True)
         completed = subprocess.run(
@@ -1162,27 +2279,164 @@ class AutonomyRuntime:
             if allow_failure:
                 return ""
             raise HostedBridgeAccessDenied("read-only Git inspection failed")
-        return completed.stdout.strip()
+        return completed.stdout.strip() if strip_output else completed.stdout
 
     def _git_snapshot(self, repository: Optional[Path] = None) -> dict[str, Any]:
-        branch = self._git("branch", "--show-current", repository=repository) or "detached"
+        target = (repository or self.repository).expanduser().resolve(strict=True)
+        # A saved project is an allowed filesystem root, not necessarily a Git
+        # repository. Never synthesize a repository (especially at C:\, D:\, or
+        # a user directory) merely to satisfy bootstrap metadata.
+        if not (target / ".git").exists():
+            return {
+                "repository_kind": "directory",
+                "git_applicable": False,
+                "branch": None,
+                "revision": None,
+                "dirty": None,
+                "dirty_count": 0,
+                "dirty_summary": [],
+                "dirty_truncated": False,
+                "working_tree_fingerprint": None,
+            }
+        branch = self._git("branch", "--show-current", repository=target) or "detached"
         revision = self._git(
             "rev-parse",
             "--verify",
             "HEAD",
-            repository=repository,
+            repository=target,
             allow_failure=True,
         ) or "unborn"
-        status = self._git("status", "--porcelain=v1", repository=repository)
-        dirty_lines = [line for line in status.splitlines() if line]
+        status = self._git(
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            repository=target,
+            strip_output=False,
+        )
+        dirty_lines, changed_paths = self._parse_git_status_z(status)
+        working_tree_fingerprint = self._working_tree_fingerprint(
+            target,
+            branch=branch,
+            revision=revision,
+            status=status,
+            paths=changed_paths,
+        )
         return {
+            "repository_kind": "git",
+            "git_applicable": True,
             "branch": branch,
             "revision": revision,
             "dirty": bool(dirty_lines),
             "dirty_count": len(dirty_lines),
             "dirty_summary": dirty_lines[:50],
             "dirty_truncated": len(dirty_lines) > 50,
+            "working_tree_fingerprint": working_tree_fingerprint,
         }
+
+    @staticmethod
+    def _parse_git_status_z(status: str) -> tuple[list[str], tuple[str, ...]]:
+        """Parse porcelain-v1 -z without losing spaces or rename source paths."""
+
+        summaries: list[str] = []
+        paths: list[str] = []
+        seen: set[str] = set()
+        records = status.split("\x00")
+        index = 0
+        while index < len(records):
+            entry = records[index]
+            index += 1
+            if not entry:
+                continue
+            if len(entry) < 3:
+                summaries.append(entry)
+                continue
+            code = entry[:2]
+            primary = entry[3:] if entry[2] == " " else entry[2:].lstrip()
+            source: Optional[str] = None
+            if ("R" in code or "C" in code) and index < len(records):
+                source = records[index]
+                index += 1
+            for candidate in (primary, source):
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    paths.append(candidate)
+            if source:
+                summaries.append(f"{code} {source} -> {primary}")
+            else:
+                summaries.append(f"{code} {primary}")
+        return summaries, tuple(paths)
+
+    def _working_tree_fingerprint(
+        self,
+        repository: Path,
+        *,
+        branch: str,
+        revision: str,
+        status: str,
+        paths: Sequence[str],
+    ) -> str:
+        """Return bounded evidence that changes when a dirty worktree changes."""
+
+        digest = hashlib.sha256()
+        for value in (branch, revision, status):
+            digest.update(value.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+
+        # ``git status --porcelain=v1 -z`` is already the authoritative bounded
+        # change inventory for this snapshot. Reuse those parsed paths instead of
+        # issuing three more Git commands and accidentally disagreeing with the
+        # status bytes that are part of this same fingerprint.
+        root = os.path.normcase(os.path.abspath(str(repository)))
+        content_budget = _WORKTREE_FINGERPRINT_CONTENT_BUDGET_BYTES
+        ordered = sorted(set(paths))
+        for relative in ordered[:_WORKTREE_FINGERPRINT_MAX_FILES]:
+            digest.update(relative.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+            candidate = os.path.abspath(os.path.join(str(repository), relative))
+            try:
+                if os.path.commonpath((root, os.path.normcase(candidate))) != root:
+                    digest.update(b"outside-root\0")
+                    continue
+                stat = os.lstat(candidate)
+            except (OSError, ValueError):
+                digest.update(b"missing\0")
+                continue
+
+            digest.update(
+                f"{stat.st_mode}:{stat.st_size}:{stat.st_mtime_ns}".encode("ascii")
+            )
+            digest.update(b"\0")
+            if os.path.islink(candidate):
+                try:
+                    digest.update(
+                        os.readlink(candidate).encode("utf-8", errors="surrogatepass")
+                    )
+                except OSError:
+                    digest.update(b"unreadable-link")
+                digest.update(b"\0")
+                continue
+            if (
+                not os.path.isfile(candidate)
+                or stat.st_size > _WORKTREE_FINGERPRINT_MAX_FILE_BYTES
+                or stat.st_size > content_budget
+            ):
+                continue
+            try:
+                with open(candidate, "rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+            except OSError:
+                digest.update(b"unreadable\0")
+            else:
+                content_budget -= stat.st_size
+            digest.update(b"\0")
+
+        digest.update(f"paths:{len(ordered)}".encode("ascii"))
+        if len(ordered) > _WORKTREE_FINGERPRINT_MAX_FILES:
+            digest.update(b":truncated")
+        return "sha256:" + digest.hexdigest()
 
     def _architecture(self, repository: Optional[Path] = None) -> list[dict[str, Any]]:
         target = (repository or self.repository).expanduser().resolve(strict=True)
@@ -1218,6 +2472,10 @@ class AutonomyRuntime:
         allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
         if any(char not in allowed for char in value):
             raise HostedBridgeAccessDenied("workstream_id contains unsafe characters")
+        # Responses name the legacy/no-workstream task `default`. Treat an echoed
+        # value as that same task instead of creating a second named default lane.
+        if value == "default":
+            return None
         return value
 
     def _base_facts(
@@ -1245,12 +2503,23 @@ class AutonomyRuntime:
             for item in record.unfinished_actions
             if isinstance(item, dict) and item.get("requires_user") is True
         ]
+        git_source = "git" if git["git_applicable"] else "not_applicable.non_git"
         facts = {
             "objective": fact(objective.strip(), FactOrigin.VERIFIED, "session.task"),
             "project_id": fact(project_id, FactOrigin.VERIFIED, "project.registry"),
             "repository": fact(str(repository), FactOrigin.VERIFIED, "project.registry"),
-            "branch": fact(git["branch"], FactOrigin.OBSERVED, "git.branch"),
-            "repository_revision": fact(git["revision"], FactOrigin.OBSERVED, "git.rev-parse"),
+            "branch": fact(git["branch"], FactOrigin.OBSERVED, f"{git_source}.branch"),
+            "repository_revision": fact(
+                git["revision"], FactOrigin.OBSERVED, f"{git_source}.revision"
+            ),
+            "working_tree_fingerprint": fact(
+                git.get("working_tree_fingerprint"),
+                FactOrigin.OBSERVED,
+                f"{git_source}.working_tree_fingerprint",
+            ),
+            "repository_kind": fact(
+                git["repository_kind"], FactOrigin.OBSERVED, "filesystem.root"
+            ),
             "connection_profile": fact(profile.strip(), FactOrigin.VERIFIED, "bridge.profile"),
             "client_capabilities": fact(
                 self.client_capability_snapshot.to_dict(),
@@ -1272,16 +2541,88 @@ class AutonomyRuntime:
 
     def _bootstrap(self, arguments: dict[str, Any]) -> dict[str, Any]:
         workstream = self._workstream_id(arguments)
-        project = self._project_for_workstream(
-            workstream,
-            arguments.get("project_id"),
+        existing = self.task_states.load_optional(
+            self.session_id,
+            workstream_id=workstream,
         )
+        binding_recovery: Optional[dict[str, str]] = None
+        if existing is not None:
+            # A durable workstream's verified project binding is authoritative.
+            # Hosted clients may replay a stale/default project_id after a bridge
+            # reconnect; treating that hint as a requested rebind turned a safe
+            # bootstrap refresh into an opaque permission denial.  Preserve the
+            # immutable binding, while still validating that any explicit hint is
+            # an approved project and reporting the recovery to the caller.
+            project = self._project_for_workstream(workstream)
+            requested_raw = arguments.get("project_id")
+            if requested_raw is not None:
+                if not isinstance(requested_raw, str):
+                    raise HostedBridgeAccessDenied("project_id must be a string")
+                requested_id = requested_raw.strip()
+                try:
+                    requested_project = self._current_project_registry().get(requested_id)
+                except ProjectRegistryError as exc:
+                    raise HostedBridgeAccessDenied(str(exc)) from exc
+                if requested_project.project_id != project.project_id:
+                    binding_recovery = {
+                        "reason": "existing_workstream_binding_preserved",
+                        "requested_project_id": requested_project.project_id,
+                        "bound_project_id": project.project_id,
+                        "recovery_action": "continued_with_saved_binding",
+                    }
+        else:
+            project = self._project_for_workstream(
+                workstream,
+                arguments.get("project_id"),
+            )
         repository = Path(project.path)
+        effective_arguments = dict(arguments)
+        if "objective" not in effective_arguments:
+            existing_objective = existing.facts.get("objective") if existing is not None else None
+            if existing_objective is not None:
+                effective_arguments["objective"] = str(existing_objective.value)
         facts, git = self._base_facts(
-            arguments,
+            effective_arguments,
             project_id=project.project_id,
             repository=repository,
         )
+        if workstream is not None:
+            # Named workstreams are parallel task lanes, not aliases for the
+            # session-global mutation ledger. Copying record.changed_files,
+            # checks and failures into every lane made 60+ workstreams carry the
+            # same large payload and falsely suggested every agent owned every
+            # sibling's changes. Preserve already-scoped facts on refresh; start
+            # new lanes empty while keeping verified repository/project facts.
+            for name in (
+                "files_changed",
+                "checks_executed",
+                "current_blockers",
+                "pending_user_gates",
+            ):
+                prior = existing.facts.get(name) if existing is not None else None
+                if prior is not None:
+                    facts[name] = prior
+                else:
+                    facts[name] = fact([], FactOrigin.HISTORICAL, "workstream.initial")
+            repository_fresh = False
+            if existing is not None:
+                prior_branch = existing.facts.get("branch")
+                prior_revision = existing.facts.get("repository_revision")
+                prior_worktree = existing.facts.get("working_tree_fingerprint")
+                repository_fresh = (
+                    prior_branch is not None
+                    and prior_branch.value == git["branch"]
+                    and prior_revision is not None
+                    and prior_revision.value == git["revision"]
+                    and prior_worktree is not None
+                    and prior_worktree.value == git.get("working_tree_fingerprint")
+                )
+            if (
+                existing is not None
+                and repository_fresh
+                and "next_safe_action" in existing.facts
+            ):
+                facts["next_safe_action"] = existing.facts["next_safe_action"]
         state = self.task_states.bootstrap(
             self.session_id,
             facts,
@@ -1296,10 +2637,14 @@ class AutonomyRuntime:
             "task": state.compact(),
             "project_id": project.project_id,
             "project_name": project.label,
+            "project_binding_recovered": binding_recovery is not None,
+            "binding_recovery": binding_recovery,
             "project_fact_map": self._project_fact_map_summary(
                 project.project_id, repository
             ),
             "repository": str(repository),
+            "repository_kind": git["repository_kind"],
+            "git_applicable": git["git_applicable"],
             "branch": git["branch"],
             "repository_revision": git["revision"],
             "dirty_summary": {
@@ -1372,6 +2717,16 @@ class AutonomyRuntime:
                 project_id=project.project_id,
                 repository=Path(project.path),
             )
+            if workstream is not None:
+                # The session mutation ledger belongs to all clients sharing the
+                # durable session, not to this newly-created parallel lane.
+                for name in (
+                    "files_changed",
+                    "checks_executed",
+                    "current_blockers",
+                    "pending_user_gates",
+                ):
+                    facts[name] = fact([], FactOrigin.HISTORICAL, "workstream.initial")
             self.task_states.bootstrap(
                 self.session_id,
                 facts,
@@ -1399,34 +2754,151 @@ class AutonomyRuntime:
             raise HostedBridgeAccessDenied(
                 f"task.status received unknown arguments: {sorted(unknown)}"
             )
-        workstream = self._workstream_id(arguments)
-        state = self.task_states.load_optional(
+        # Status is the control-plane view agents poll most often. Reuse the
+        # same bounded recovery path as resume so a reconnect cannot leave a
+        # client staring at stale task metadata while the repository changed.
+        return self._resume(arguments)
+
+    def _bootstrap_missing_task_state(self, workstream: Optional[str]) -> Any:
+        """Self-heal missing recovery metadata without touching repository state."""
+
+        project = self._project_for_workstream(workstream)
+        facts, _git = self._base_facts(
+            {},
+            project_id=project.project_id,
+            repository=Path(project.path),
+        )
+        if workstream is not None:
+            for name in (
+                "files_changed",
+                "checks_executed",
+                "current_blockers",
+                "pending_user_gates",
+            ):
+                facts[name] = fact([], FactOrigin.HISTORICAL, "workstream.initial")
+        return self.task_states.bootstrap(
             self.session_id,
+            facts,
             workstream_id=workstream,
         )
-        available = list(self.task_states.list_workstreams(self.session_id))
-        if state is None:
-            return {
-                "ok": False,
-                "schema_version": 1,
-                "workstream_id": workstream or "default",
-                "available_workstreams": available,
-                "error_code": "task_not_initialized",
-                "error": "task state is not initialized for this workstream",
-                "next_safe_action": "call karox.task.bootstrap for this workstream before task.status or task.resume",
-            }
+
+    @staticmethod
+    def _repository_freshness_mismatches(
+        state: Any,
+        git: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        mismatches: list[dict[str, Any]] = []
+        for fact_name, git_name in (
+            ("branch", "branch"),
+            ("repository_revision", "revision"),
+            ("working_tree_fingerprint", "working_tree_fingerprint"),
+        ):
+            stored = state.facts.get(fact_name)
+            current = git.get(git_name)
+            if stored is None or stored.value != current:
+                mismatches.append(
+                    {
+                        "fact": fact_name,
+                        "stored": stored.value if stored else None,
+                        "current": current,
+                    }
+                )
+        return mismatches
+
+    def _active_durable_jobs(
+        self,
+        *,
+        limit: int = 8,
+        workstream_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Return a bounded, secret-free continuation view of active durable jobs.
+
+        ``None`` means project/session coordination and includes every lane. Task
+        resume/status passes its concrete lane so sibling agents do not surface
+        or accidentally act on each other's newly scoped durable work.
+        """
+
+        from .check_jobs import CheckJobError, CheckJobStore, effective_job_status
+
+        final_statuses = {"passed", "failed", "cancelled", "timed_out"}
+        bases = (
+            ("check", runtime_dir() / "vnext" / "check-jobs"),
+            ("command", runtime_dir() / "vnext" / "dev-command-jobs"),
+        )
+        jobs: list[dict[str, Any]] = []
+        unreadable = 0
+        stale = 0
+        for kind, base in bases:
+            store = CheckJobStore(self.session_id, root=base)
+            try:
+                paths = sorted(store.root.glob("job-*.json"))
+            except OSError:
+                unreadable += 1
+                continue
+            for path in paths:
+                try:
+                    state = store.get(path.stem)
+                    scope = store.get_scope(path.stem)
+                except (CheckJobError, OSError, ValueError):
+                    unreadable += 1
+                    continue
+                job_workstream = (
+                    str(scope.get("workstream_id")) if scope is not None else "default"
+                )
+                if workstream_id is not None and job_workstream != workstream_id:
+                    continue
+                effective_status, effective_error = effective_job_status(state)
+                if effective_status in final_statuses:
+                    if state.status not in final_statuses:
+                        stale += 1
+                    continue
+                jobs.append(
+                    {
+                        "job_id": state.job_id,
+                        "kind": kind,
+                        "status": effective_status,
+                        "updated_at": state.updated_at,
+                        "command": Path(state.argv[0]).name if state.argv else None,
+                        "error_code": effective_error,
+                        "artifact_id": state.artifact_id,
+                        "workstream_id": job_workstream,
+                        "project_id": scope.get("project_id") if scope is not None else None,
+                    }
+                )
+        jobs.sort(key=lambda item: float(item["updated_at"]), reverse=True)
+        total = len(jobs)
         return {
-            "ok": True,
-            "schema_version": 1,
-            "workstream_id": workstream or "default",
-            "available_workstreams": available,
-            "task": state.compact(),
+            "count": min(total, limit),
+            "total_count": total,
+            "unreadable_count": unreadable,
+            "stale_count": stale,
+            "jobs": jobs[:limit],
+            "truncated": total > limit,
         }
 
     def _workstream_summary(self, workstream_id: str, state: Any) -> dict[str, Any]:
         def value(name: str, default: Any = None) -> Any:
             item = state.facts.get(name)
             return item.value if item is not None else default
+
+        def short_text(raw: Any, limit: int) -> Optional[str]:
+            if raw is None:
+                return None
+            text = " ".join(str(redact(raw)).split())
+            return text if len(text) <= limit else text[: limit - 1] + "…"
+
+        def short_list(raw: Any, *, limit: int, item_limit: int) -> tuple[list[str], int]:
+            if raw is None:
+                return [], 0
+            if isinstance(raw, (list, tuple, set)):
+                items = list(raw)
+            else:
+                items = [raw]
+            preview: list[str] = []
+            for item in items[:limit]:
+                text = " ".join(str(redact(item)).split())
+                preview.append(text if len(text) <= item_limit else text[: item_limit - 1] + "…")
+            return preview, len(items)
 
         registry = self._current_project_registry()
         default = registry.default
@@ -1437,6 +2909,41 @@ class AutonomyRuntime:
                 project_name = registry.get(project_id).label
             except ProjectRegistryError:
                 project_name = None
+        blockers_fact = state.facts.get("current_blockers")
+        files_fact = state.facts.get("files_changed")
+        legacy_session_fields: list[str] = []
+
+        blockers, blockers_count = short_list(
+            value("current_blockers", []), limit=4, item_limit=300
+        )
+        legacy_blockers_count = 0
+        if (
+            workstream_id != "default"
+            and blockers_fact is not None
+            and "session.failures" in blockers_fact.evidence
+        ):
+            # Early named lanes copied the session-wide failure ledger at creation.
+            # Keep that evidence in task.status for audit, but do not present it as
+            # lane-owned coordination state where sibling agents could act on it.
+            legacy_blockers_count = blockers_count
+            blockers, blockers_count = [], 0
+            legacy_session_fields.append("current_blockers")
+
+        files, files_count = short_list(
+            value("files_changed", []), limit=8, item_limit=240
+        )
+        legacy_files_count = 0
+        if (
+            workstream_id != "default"
+            and files_fact is not None
+            and "session.changed_files" in files_fact.evidence
+        ):
+            # Same migration rule as blockers: old snapshots are truthful session
+            # history, but false attribution when shown as one lane's own changes.
+            legacy_files_count = files_count
+            files, files_count = [], 0
+            legacy_session_fields.append("files_changed")
+
         return {
             "project_id": project_id,
             "project_name": project_name,
@@ -1444,15 +2951,22 @@ class AutonomyRuntime:
             "task_id": state.task_id,
             "revision": state.revision,
             "updated_at": state.updated_at,
-            "objective": value("objective"),
-            "current_phase": value("current_phase"),
-            "current_blockers": value("current_blockers", []),
-            "next_safe_action": value("next_safe_action"),
-            "files_changed": value("files_changed", []),
+            "objective": short_text(value("objective"), 800),
+            "current_phase": short_text(value("current_phase"), 240),
+            "current_blockers": blockers,
+            "current_blockers_count": blockers_count,
+            "current_blockers_truncated": blockers_count > len(blockers),
+            "legacy_session_blockers_count": legacy_blockers_count,
+            "next_safe_action": short_text(value("next_safe_action"), 800),
+            "files_changed": files,
+            "files_changed_count": files_count,
+            "files_changed_truncated": files_count > len(files),
+            "legacy_session_files_changed_count": legacy_files_count,
+            "legacy_session_snapshot_fields": legacy_session_fields,
         }
 
     def _workstreams(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(arguments).difference({"include_default"})
+        unknown = set(arguments).difference({"include_default", "limit"})
         if unknown:
             raise HostedBridgeAccessDenied(
                 f"task.workstreams received unknown arguments: {sorted(unknown)}"
@@ -1460,6 +2974,10 @@ class AutonomyRuntime:
         include_default = arguments.get("include_default", True)
         if not isinstance(include_default, bool):
             raise HostedBridgeAccessDenied("include_default must be a boolean")
+
+        limit = arguments.get("limit", 24)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise HostedBridgeAccessDenied("limit must be an integer between 1 and 100")
 
         summaries: list[dict[str, Any]] = []
         if include_default:
@@ -1473,6 +2991,22 @@ class AutonomyRuntime:
             )
             if state is not None:
                 summaries.append(self._workstream_summary(workstream_id, state))
+        total_count = len(summaries)
+        if total_count > limit:
+            default_summary = next(
+                (item for item in summaries if item["workstream_id"] == "default"),
+                None,
+            )
+            named = [item for item in summaries if item["workstream_id"] != "default"]
+            named.sort(
+                key=lambda item: (item["updated_at"], str(item["workstream_id"])),
+                reverse=True,
+            )
+            slots = limit - (1 if default_summary is not None else 0)
+            selected_named = named[: max(0, slots)]
+            selected_named.sort(key=lambda item: str(item["workstream_id"]))
+            summaries = ([default_summary] if default_summary is not None else []) + selected_named
+
         registry = self._current_project_registry()
         projects = [
             {
@@ -1490,6 +3024,10 @@ class AutonomyRuntime:
             "default_project_id": registry.default_project_id,
             "projects": projects,
             "count": len(summaries),
+            "total_count": total_count,
+            "limit": limit,
+            "truncated": total_count > len(summaries),
+            "omitted_count": total_count - len(summaries),
             "workstreams": summaries,
         }
 
@@ -1528,20 +3066,21 @@ class AutonomyRuntime:
             self.session_id,
             workstream_id=workstream,
         ) is None:
-            facts, _git = self._base_facts(
-                {},
-                project_id=project.project_id,
-                repository=Path(project.path),
-            )
-            self.task_states.bootstrap(
-                self.session_id,
-                facts,
-                workstream_id=workstream,
-            )
-        plan_key = self._execute_plan_key(arguments)
+            self._bootstrap_missing_task_state(workstream)
+
+        # Canonicalize the public legacy-default alias before deriving plan
+        # identity. A retry that first omitted workstream_id and later echoes the
+        # returned `default` label must address the same journal and operation
+        # idempotency keys, not execute the same side effects twice.
+        plan_arguments = dict(arguments)
+        if workstream is None:
+            plan_arguments.pop("workstream_id", None)
+        else:
+            plan_arguments["workstream_id"] = workstream
+        plan_key = self._execute_plan_key(plan_arguments)
         try:
             return self._plan_executor_for(project.project_id, workstream).execute(
-                arguments,
+                plan_arguments,
                 plan_key,
                 workstream_id=workstream,
             )
@@ -1569,16 +3108,7 @@ class AutonomyRuntime:
             self.session_id,
             workstream_id=workstream,
         ) is None:
-            facts, _git = self._base_facts(
-                {},
-                project_id=project.project_id,
-                repository=Path(project.path),
-            )
-            self.task_states.bootstrap(
-                self.session_id,
-                facts,
-                workstream_id=workstream,
-            )
+            self._bootstrap_missing_task_state(workstream)
         engine_arguments = dict(arguments)
         engine_arguments.pop("workstream_id", None)
         try:
@@ -1607,53 +3137,58 @@ class AutonomyRuntime:
             self.session_id,
             workstream_id=workstream,
         )
-        available = list(self.task_states.list_workstreams(self.session_id))
+        auto_bootstrapped = False
         if state is None:
-            return {
-                "ok": False,
-                "schema_version": 1,
-                "workstream_id": workstream or "default",
-                "available_workstreams": available,
-                "error_code": "task_not_initialized",
-                "error": "task state is not initialized for this workstream",
-                "next_safe_action": "call karox.task.bootstrap for this workstream before task.status or task.resume",
-            }
+            state = self._bootstrap_missing_task_state(workstream)
+            auto_bootstrapped = True
+
         project = self._project_for_workstream(workstream)
         git = self._git_snapshot(Path(project.path))
-        stored_branch = state.facts.get("branch")
-        stored_revision = state.facts.get("repository_revision")
-        mismatches: list[dict[str, Any]] = []
-        if stored_branch is None or stored_branch.value != git["branch"]:
-            mismatches.append(
-                {
-                    "fact": "branch",
-                    "stored": stored_branch.value if stored_branch else None,
-                    "current": git["branch"],
-                }
+        mismatches = self._repository_freshness_mismatches(state, git)
+        previous_mismatches = list(mismatches)
+        recovered_stale_state = False
+        if mismatches:
+            refresh_arguments: dict[str, Any] = {}
+            if workstream is not None:
+                refresh_arguments["workstream_id"] = workstream
+            self._bootstrap(refresh_arguments)
+            state = self.task_states.load(
+                self.session_id,
+                workstream_id=workstream,
             )
-        if stored_revision is None or stored_revision.value != git["revision"]:
-            mismatches.append(
-                {
-                    "fact": "repository_revision",
-                    "stored": stored_revision.value if stored_revision else None,
-                    "current": git["revision"],
-                }
-            )
+            git = self._git_snapshot(Path(project.path))
+            mismatches = self._repository_freshness_mismatches(state, git)
+            recovered_stale_state = not mismatches
+
+        available = list(self.task_states.list_workstreams(self.session_id))
+        active_jobs = self._active_durable_jobs(workstream_id=workstream or "default")
         return {
             "ok": True,
             "schema_version": 1,
             "workstream_id": workstream or "default",
             "available_workstreams": available,
             "task": state.compact(),
+            "auto_bootstrapped": auto_bootstrapped,
             "freshness": {
                 "current": not mismatches,
                 "mismatches": mismatches,
+                "recovered": auto_bootstrapped or recovered_stale_state,
+                "previous_mismatches": previous_mismatches,
                 "dirty": git["dirty"],
                 "dirty_count": git["dirty_count"],
             },
+            "active_jobs": active_jobs,
             "next_safe_action": (
-                "refresh task.bootstrap before mutating because repository facts are stale"
+                "inspect current diff and sibling workstreams before mutating because "
+                "repository state is changing concurrently"
                 if mismatches
-                else state.facts.get("next_safe_action", fact(None, FactOrigin.PENDING)).value
+                else (
+                    "reconcile the active durable job(s) before starting duplicate work"
+                    if active_jobs["count"]
+                    else state.facts.get(
+                        "next_safe_action",
+                        fact(None, FactOrigin.PENDING),
+                    ).value
+                )
             ),
         }

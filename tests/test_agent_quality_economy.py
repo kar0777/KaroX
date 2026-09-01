@@ -182,7 +182,9 @@ class QualityEconomyWiringTests(unittest.TestCase):
             {"role": "tool", "content": big, "tool_call_id": "dup-2"},
         ]
 
-    def _bare_kernel(self, economy: bool) -> AgentKernel:
+    def _bare_kernel(
+        self, economy: bool, *, lossless_context_rewrite: bool = True
+    ) -> AgentKernel:
         return AgentKernel(
             provider=_EconomyQueueProvider([]),
             model="test-model",
@@ -192,10 +194,28 @@ class QualityEconomyWiringTests(unittest.TestCase):
             limits=AgentLimits(max_seconds=30),
             system_prompt=SYSTEM_PROMPT,
             economy_mode=economy,
+            lossless_context_rewrite=lossless_context_rewrite,
         )
 
-    def test_context_compiler_measures_without_rewriting(self) -> None:
+    def test_context_compiler_rewrites_exact_duplicates_in_normal_mode(self) -> None:
         kernel = self._bare_kernel(economy=False)
+        big = "y" * 1_500
+        messages = list(kernel._request_messages(self._duplicate_history(big)))
+        tool_messages = [m for m in messages if m.role == "tool"]
+        self.assertEqual(tool_messages[0].content, big)
+        replaced = tool_messages[1].content or ""
+        self.assertIn("identical_tool_result_reused", replaced)
+        self.assertIn("dup-1", replaced)
+        compiled = kernel._context_compilation
+        self.assertIsNotNone(compiled)
+        assert compiled is not None
+        self.assertEqual(compiled.stats.referenced, 1)
+        self.assertGreater(kernel._economy_reused_chars_pending, 0)
+
+    def test_lossless_rewrite_has_an_explicit_diagnostic_escape_hatch(self) -> None:
+        kernel = self._bare_kernel(
+            economy=False, lossless_context_rewrite=False
+        )
         big = "y" * 1_500
         messages = list(kernel._request_messages(self._duplicate_history(big)))
         tool_contents = [m.content for m in messages if m.role == "tool"]
@@ -206,7 +226,7 @@ class QualityEconomyWiringTests(unittest.TestCase):
         self.assertEqual(compiled.stats.referenced, 1)
         self.assertEqual(kernel._economy_reused_chars_pending, 0)
 
-    def test_context_compiler_rewrites_only_in_economy_mode(self) -> None:
+    def test_economy_mode_keeps_the_same_lossless_context_rewrite(self) -> None:
         kernel = self._bare_kernel(economy=True)
         big = "y" * 1_500
         messages = list(kernel._request_messages(self._duplicate_history(big)))
@@ -224,6 +244,9 @@ class QualityEconomyWiringTests(unittest.TestCase):
         rendered = json.dumps(usage, ensure_ascii=False, sort_keys=True)
         self.assertIn("economy_context_items", rendered)
         self.assertIn("economy_context_applied", rendered)
+        self.assertIn("lossless_context_rewrite_applied", rendered)
+        self.assertIn('"lossless_context_rewrite_applied": true', rendered)
+        self.assertIn('"economy_context_applied": false', rendered)
 
 
 if __name__ == "__main__":

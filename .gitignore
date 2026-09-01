@@ -41,6 +41,8 @@ Thumbs.db
 
 # Agent tooling scratch
 .zcode/
+.tmp/
+/tmp/
 
 # Local scratch and probe output.
 #

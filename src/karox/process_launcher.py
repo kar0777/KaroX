@@ -57,7 +57,37 @@ def _has_executable_suffix(name: str) -> bool:
     )
 
 
+def _real_python_from_path(name: str) -> str | None:
+    """Prefer a real CPython install over Windows Store/Manager aliases.
+
+    Microsoft Store aliases can be first on PATH while a normal CPython install
+    appears immediately afterwards. They work in an interactive shell because
+    Windows may broker them, but they are not a reliable target for guarded
+    ``CreateProcess`` launches. Preserve PATH order and only skip entries whose
+    directory is a WindowsApps alias location.
+    """
+    lower = name.lower()
+    if lower not in {"python", "python.exe", "python3", "python3.exe"}:
+        return None
+    executable = "python3.exe" if lower.startswith("python3") else "python.exe"
+    for raw_dir in os.environ.get("PATH", "").split(os.pathsep):
+        directory = raw_dir.strip().strip('"')
+        if not directory:
+            continue
+        normalized = os.path.normcase(os.path.abspath(directory))
+        if "windowsapps" in normalized:
+            continue
+        candidate = os.path.join(directory, executable)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
 def _resolve_windows_first(name: str) -> str:
+    real_python = _real_python_from_path(name)
+    if real_python:
+        return real_python
+
     # An absolute or relative path with a suffix is handed straight to
     # ``CreateProcess`` (which accepts an explicit script path).  A bare name
     # needs the suffix probe because ``shell=False`` skips ``PATHEXT``.

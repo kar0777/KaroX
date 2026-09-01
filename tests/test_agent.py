@@ -73,6 +73,7 @@ def model_response(
     *calls: ToolCall,
     content: str | None = None,
     finish_reason: str | None = None,
+    reasoning_summary: str | None = None,
 ) -> ModelResponse:
     return ModelResponse(
         content=content,
@@ -80,6 +81,7 @@ def model_response(
         finish_reason=finish_reason or ("tool_calls" if calls else "stop"),
         usage={"prompt_tokens": 2, "completion_tokens": 1},
         response_id=None,
+        reasoning_summary=reasoning_summary,
     )
 
 
@@ -1360,13 +1362,20 @@ class StreamingQueueProvider(QueueProvider):
 
     def stream(self, request: ModelRequest):
         response = self.complete(request)
-        for index, chunk in enumerate(_fragments(response.content)):
+        # Reasoning can precede content entirely and a tool-calling turn may have
+        # no assistant content at all, which is the common long-thinking agent case.
+        if response.reasoning:
+            yield ModelEvent(
+                ModelEventKind.REASONING_DELTA,
+                reasoning_delta=response.reasoning,
+            )
+        if response.reasoning_summary:
+            yield ModelEvent(
+                ModelEventKind.REASONING_SUMMARY_DELTA,
+                reasoning_summary_delta=response.reasoning_summary,
+            )
+        for chunk in _fragments(response.content):
             yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=chunk)
-            if index == 0 and response.reasoning:
-                yield ModelEvent(
-                    ModelEventKind.REASONING_DELTA,
-                    reasoning_delta=response.reasoning,
-                )
         for index, item in enumerate(response.tool_calls):
             yield ModelEvent(
                 ModelEventKind.TOOL_CALL_DELTA,
@@ -1437,6 +1446,39 @@ class AgentEventChannelTests(_AgentKernelFixture):
         self.assertEqual(last.reason, "verified")
         self.assertEqual(last.status, "verified")
         self.assertTrue(last.ok)
+
+    def test_watcher_gets_public_reasoning_summary_on_separate_channel(self) -> None:
+        responses = self.successful_responses()
+        responses[0] = model_response(
+            call(
+                "write",
+                "repo_write_file",
+                {"path": "sample.txt", "content": "after\n"},
+            ),
+            reasoning_summary="Preparing the verified edit.",
+        )
+        seen: list[AgentEvent] = []
+
+        report = self.kernel(
+            StreamingQueueProvider(responses),
+            AgentLimits(max_seconds=30),
+            on_event=seen.append,
+        ).run("session")
+
+        self.assertTrue(report.verified)
+        summaries = [
+            item.summary
+            for item in seen
+            if item.kind is AgentEventKind.REASONING_SUMMARY_DELTA
+        ]
+        self.assertEqual(summaries, ["Preparing the verified edit."])
+        persisted = self.sessions.load("session").provider_history
+        assistant = next(
+            item
+            for item in persisted
+            if item.get("role") == "assistant" and item.get("reasoning_summary")
+        )
+        self.assertEqual(assistant["reasoning_summary"], "Preparing the verified edit.")
 
     def test_a_failed_tool_is_reported_as_failed_with_its_reason(self) -> None:
         provider = StreamingQueueProvider(

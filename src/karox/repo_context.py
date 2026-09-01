@@ -386,6 +386,7 @@ class RepositoryContextEngine:
         self.policy_profile = policy_profile
         self._git_directory = self._resolve_git_directory()
         self._common_git_directory = self._resolve_common_git_directory(self._git_directory)
+        self.is_git_repository = self._git_directory is not None
         repo_key = hashlib.sha256(str(self.repository).encode("utf-8")).hexdigest()[:20]
         self.cache_root = (
             runtime_dir()
@@ -460,6 +461,8 @@ class RepositoryContextEngine:
         return None
 
     def _head_revision(self) -> str:
+        if not self.is_git_repository:
+            return "not_applicable"
         git_directory = self._git_directory
         common_directory = self._common_git_directory
         if git_directory is None:
@@ -508,6 +511,8 @@ class RepositoryContextEngine:
         return self._git("rev-parse", "--verify", "HEAD", allow_failure=True) or "unborn"
 
     def _status_snapshot(self, *, untracked_files: str) -> tuple[str, str]:
+        if not self.is_git_repository:
+            return "not_applicable", ""
         before = self._head_revision()
         status = self._git(
             "--no-optional-locks",
@@ -528,6 +533,69 @@ class RepositoryContextEngine:
                 preserve_whitespace=True,
             )
         return after, status
+
+    def _non_git_identity(self, *, max_entries: int = 5_000) -> dict[str, Any]:
+        """Return a bounded filesystem identity without invoking or creating Git."""
+
+        digest = hashlib.sha256()
+        visited = 0
+        truncated = False
+        stack = [self.repository]
+        while stack and visited < max_entries:
+            current = stack.pop()
+            try:
+                entries = sorted(
+                    os.scandir(current), key=lambda item: os.path.normcase(item.name)
+                )
+            except OSError:
+                continue
+            child_directories: list[Path] = []
+            for entry in entries:
+                if visited >= max_entries:
+                    truncated = True
+                    break
+                child = Path(entry.path)
+                try:
+                    relative = child.relative_to(self.repository).as_posix()
+                except ValueError:
+                    continue
+                if any(
+                    part.lower() in _IGNORED_STATUS_COMPONENTS
+                    or part.lower().endswith(".egg-info")
+                    for part in Path(relative).parts
+                ):
+                    continue
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                    is_symlink = entry.is_symlink()
+                    is_directory = entry.is_dir(follow_symlinks=False) and not is_symlink
+                except OSError:
+                    continue
+                kind = "symlink" if is_symlink else ("dir" if is_directory else "file")
+                # Directory timestamps may change as a side-effect of indexing or
+                # antivirus activity even though the visible tree did not. Child
+                # paths already capture structural changes, so only regular-file
+                # metadata belongs in the cache identity.
+                identity = (
+                    f"{relative}\0{kind}\0"
+                    if is_directory
+                    else f"{relative}\0{kind}\0{metadata.st_size}\0{metadata.st_mtime_ns}\0"
+                )
+                digest.update(identity.encode("utf-8", errors="surrogatepass"))
+                visited += 1
+                if is_directory:
+                    child_directories.append(child)
+            stack.extend(reversed(child_directories))
+        if stack:
+            truncated = True
+        return {
+            "revision": None,
+            "dirty": [],
+            "repository_kind": "directory",
+            "directory_state": digest.hexdigest(),
+            "entries_considered": visited,
+            "truncated": truncated,
+        }
 
     def _content_tree_digest(self, path: Path, *, status_code: str, relative: str) -> str:
         """Hash dirty content exactly while collapsing wholly-untracked trees.
@@ -691,6 +759,8 @@ class RepositoryContextEngine:
 
     def _revision_identity(self) -> dict[str, Any]:
         """Return the strict per-path identity used by mutation safety checks."""
+        if not self.is_git_repository:
+            return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="all")
         dirty: list[dict[str, str]] = []
         for entry in status.split("\0"):
@@ -723,6 +793,8 @@ class RepositoryContextEngine:
 
     def _compact_content_revision_identity(self) -> dict[str, Any]:
         """Return content-aware identity with collapsed wholly-untracked trees."""
+        if not self.is_git_repository:
+            return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="normal")
         dirty: list[dict[str, str]] = []
         for entry in status.split("\0"):
@@ -829,6 +901,8 @@ class RepositoryContextEngine:
         This keeps read-only plan drift detection while avoiding recursive Git
         porcelain expansion and oversized plan artifacts.
         """
+        if not self.is_git_repository:
+            return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="normal")
         work: list[tuple[str, str, Path]] = []
         for entry in status.split("\0"):
@@ -915,13 +989,57 @@ class RepositoryContextEngine:
             pass
 
     def _files(self, budget: InspectBudget) -> list[str]:
+        if not self.is_git_repository:
+            files: list[str] = []
+            stack = [self.repository]
+            max_candidates = max(1_000, budget.max_files * 50)
+            considered = 0
+            while stack and considered < max_candidates:
+                current = stack.pop()
+                try:
+                    entries = sorted(
+                        os.scandir(current), key=lambda item: os.path.normcase(item.name)
+                    )
+                except OSError:
+                    continue
+                child_directories: list[Path] = []
+                for entry in entries:
+                    if considered >= max_candidates:
+                        break
+                    child = Path(entry.path)
+                    try:
+                        relative = child.relative_to(self.repository).as_posix()
+                        is_symlink = entry.is_symlink()
+                        is_directory = entry.is_dir(follow_symlinks=False) and not is_symlink
+                    except (OSError, ValueError):
+                        continue
+                    if any(
+                        part.lower() in _IGNORED_STATUS_COMPONENTS
+                        or part.lower().endswith(".egg-info")
+                        for part in Path(relative).parts
+                    ):
+                        continue
+                    considered += 1
+                    if is_directory:
+                        child_directories.append(child)
+                        continue
+                    if is_symlink or child.suffix.lower() not in _TEXT_SUFFIXES:
+                        continue
+                    try:
+                        if entry.stat(follow_symlinks=False).st_size > budget.max_file_bytes:
+                            continue
+                    except OSError:
+                        continue
+                    files.append(relative)
+                stack.extend(reversed(child_directories))
+            return sorted(dict.fromkeys(files))
         listed = self._git("ls-files", "-co", "--exclude-standard")
-        files: list[str] = []
+        git_files: list[str] = []
         for raw in listed.splitlines():
-            relative = _safe_relative(self.repository, raw)
-            if relative is None:
+            git_relative = _safe_relative(self.repository, raw)
+            if git_relative is None:
                 continue
-            path = self.repository / relative
+            path = self.repository / git_relative
             if path.suffix.lower() not in _TEXT_SUFFIXES or not path.is_file():
                 continue
             try:
@@ -929,8 +1047,8 @@ class RepositoryContextEngine:
                     continue
             except OSError:
                 continue
-            files.append(relative)
-        return sorted(dict.fromkeys(files))
+            git_files.append(git_relative)
+        return sorted(dict.fromkeys(git_files))
 
     def _git_grep_search(
         self,
@@ -938,6 +1056,8 @@ class RepositoryContextEngine:
         budget: InspectBudget,
     ) -> Optional[list[dict[str, Any]]]:
         """Use Git to shortlist token-matching files when ripgrep is unavailable."""
+        if not self.is_git_repository:
+            return None
         if not tokens:
             return []
         argv = [

@@ -199,9 +199,13 @@ class TestMapParticipation:
 
 
 class TestMemoryCommandSurface:
-    def test_memory_is_a_visible_first_class_command(self):
-        assert "/memory" in karox_tui.VISIBLE_COMMANDS
+    def test_memory_is_searchable_without_bloating_bare_slash(self):
+        assert "/memory" not in karox_tui.VISIBLE_COMMANDS
         assert "/memory" in karox_tui.SLASH_COMMANDS
         assert "/memory" in karox_tui._COMMANDS_RU
         for language in ("en", "ru"):
-            assert "/memory" in karox_tui._commands(language)
+            assert "/memory" not in karox_tui._commands(language)
+            assert "/memory" in {
+                name.split(" ", 1)[0]
+                for name in karox_tui._discoverable_commands(language)
+            }

@@ -55,6 +55,12 @@ class TestCore:
         normalized = " ".join(CONSTITUTION_CORE.split())
         assert "Never invent progress percentages" in normalized
 
+    def test_public_progress_is_phase_bounded_not_chain_of_thought(self):
+        normalized = " ".join(CONSTITUTION_CORE.split())
+        assert "progress sentence when the immediate intent meaningfully changes" in normalized
+        assert "not before every tool call" in normalized
+        assert "public progress summary, never private chain-of-thought" in normalized
+
     def test_stays_compact(self):
         assert len(CONSTITUTION_CORE) <= CORE_MAX_CHARS
         for delta in PROVIDER_DELTAS.values():

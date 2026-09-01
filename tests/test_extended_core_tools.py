@@ -16,6 +16,7 @@ from pathlib import Path
 
 from _support import SRC, initialize_git_repository  # noqa: F401
 
+from karox.core import InvalidCommand
 from karox.core_tools import is_ignored_path
 from karox.hosted_bridge import CoreToolBridge
 from karox.models import AccessProfile
@@ -173,21 +174,32 @@ class ExtendedCoreToolTests(unittest.TestCase):
                 idempotency_key="project-must-not-run-full-command",
             )
 
-    def test_full_dev_command_accepts_trusted_shell_push_publish_auth_deploy_and_global_install(self) -> None:
+    def test_full_dev_command_keeps_global_no_push_publish_auth_deploy_invariants(self) -> None:
         bridge = self._full_bridge("karox.command.run")
         runtime = bridge._core()
-        candidates = (
+        blocked = (
             ["git", "push", "origin", "HEAD"],
             ["npm", "publish"],
             ["gh", "auth", "login"],
             ["vercel", "deploy", "--prod"],
+            ["docker", "login"],
+            ["twine", "upload", "dist/pkg.whl"],
+            ["cmd", "/c", "echo full"] if os.name == "nt" else ["bash", "-lc", "echo full"],
+            [sys.executable, "-c", "import os; os.system('git push origin HEAD')"],
+        )
+        for argv in blocked:
+            with self.subTest(argv=argv):
+                with self.assertRaises(InvalidCommand):
+                    runtime._prepare_dev_command({"argv": argv}, 60.0)
+
+        allowed = (
             ["npm", "install", "-g", "typescript"],
             ["pip", "install", "--user", "build"],
             [sys.executable, "-c", "print('inline')"],
             ["node", "-e", "console.log('inline')"],
-            ["cmd", "/c", "echo full"] if os.name == "nt" else ["bash", "-lc", "echo full"],
+            ["vercel", "status"],
         )
-        for argv in candidates:
+        for argv in allowed:
             with self.subTest(argv=argv):
                 prepared, timeout = runtime._prepare_dev_command({"argv": argv}, 60.0)
                 self.assertEqual(prepared, argv)

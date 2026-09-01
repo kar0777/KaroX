@@ -54,6 +54,58 @@ decomposition of the terminal client) is done before any of these features is
 added, because each new screen built on the current transcript widget would
 reproduce the same class of defect.
 
+## Scope amendment 2 (2026-08-23)
+
+**What changed.** KaroX 5 adds an opt-in intelligence-orchestration and economy
+surface. It unifies registered API models with explicitly configured
+subscription/local/external agent metadata, adds role-based orchestration
+recipes, locally verified routing evidence, quota-aware routing, shared
+content-addressed context with deltas, cache-friendly stable prompt envelopes,
+typed evidence-linked worker handoffs, independent review requirements,
+crash-safe orchestration recovery, detached worktree isolation helpers, measured
+savings receipts, shadow/replay analysis, and local/mobile Mission Control.
+
+The implementation contract is documented in
+`docs/KAROX_5_ORCHESTRATION_ECONOMY.md`.
+
+**Why.** The new layer is not a second policy engine or an attempt to replace the
+Core. KaroX already owns providers, model metadata, budgets, context compilation,
+usage/cost accounting, risk, workstreams, evidence, checkpoints and durable
+recovery. Coordinating those existing services allows KaroX to reduce duplicated
+context and marginal model spend without achieving economy by silently
+substituting a weaker model or removing verification.
+
+**Routing evidence rule.** Automatic quality selection may use only local KaroX
+outcomes that were both accepted and verified for the same task class. Model
+names, marketing tiers, community rankings and unversioned benchmark claims do
+not become routing evidence. Before enough local evidence exists, explicit user
+role assignments and capabilities remain authoritative. High-risk automatic
+routes require verified evidence or an explicit route.
+
+**Subscription/external rule.** Registering a subscription or external endpoint
+is metadata, not a compatibility claim and not permission to launch arbitrary
+software. Execution requires a separately registered guarded adapter. The
+orchestration layer accepts no generic shell command, scraped browser cookie or
+raw provider credential as an execution fallback. Native API workers continue to
+run through `AgentKernel`, Core policy, repository confinement, leases,
+idempotency, RiskEngine and the verification allowlist.
+
+**Safety rule.** Multi-agent orchestration remains opt-in, not the default
+workflow. Git push, package publishing, authentication commands and automatic
+merge remain outside this surface. A mobile `approve_request` is only a request
+to the normal Smart Stop flow; it is not a confirmation token. A worker that was
+running during a restart becomes `reconcile_required` and is not blindly
+replayed. Detached worker worktrees are never auto-merged.
+
+**Economy-claim rule.** KaroX may publish a dollar or percentage savings claim
+only when the corresponding measured baseline or reproducible benchmark is
+attached. Shadow routing and Replay Lab counterfactuals are labelled projections
+and never claim that the alternative worker would have succeeded.
+
+This amendment does not make orchestration a requirement of the primary release
+scenario. The original single-agent/hosted-client scenario must remain green on
+its own.
+
 ## Product promise
 
 KaroX is a local control plane for AI coding agents. It lets ChatGPT, Claude,

@@ -8,6 +8,7 @@ stale recovery; a live owner is never taken over automatically.
 
 from __future__ import annotations
 
+import contextvars
 import ctypes
 import hashlib
 import json
@@ -35,9 +36,45 @@ class RepositoryLeaseConflict(RepositoryLeaseError):
         self.details = details
 
 
+def _windows_process_alive(pid: int) -> bool:
+    """Conservatively query a Windows PID without using os.kill(pid, 0).
+
+    Repository leases are a fencing boundary, so a transient/ambiguous process
+    query must never be interpreted as proof that the owner died.
+    """
+    if os.name != "nt" or pid <= 0:
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_exit_code.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ACCESS_DENIED cannot prove death (protected/system processes). All
+        # other failures are treated as absent; INVALID_PARAMETER is the normal
+        # result for a PID that no longer exists.
+        return ctypes.get_last_error() == 5
+    try:
+        exit_code = ctypes.c_uint32()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            # Query failure after opening a live process is ambiguous. Fail closed.
+            return True
+        return exit_code.value == 259  # STILL_ACTIVE
+    finally:
+        close_handle(handle)
+
+
 def _process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_process_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -52,8 +89,14 @@ def _process_alive(pid: int) -> bool:
 def _windows_creation_marker(pid: int) -> Optional[str]:
     if os.name != "nt":
         return None
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    process = kernel32.OpenProcess(0x1000, False, pid)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    process = open_process(0x1000, False, pid)
     if not process:
         return None
     try:
@@ -70,7 +113,7 @@ def _windows_creation_marker(pid: int) -> Optional[str]:
         )
         return str(creation.value) if ok else None
     finally:
-        kernel32.CloseHandle(process)
+        close_handle(process)
 
 
 def _posix_creation_marker(pid: int) -> Optional[str]:
@@ -152,6 +195,29 @@ class RepositoryLease:
         )
 
 
+_CURRENT_REPOSITORY_LEASE: contextvars.ContextVar[Optional[RepositoryLease]] = (
+    contextvars.ContextVar("karox_current_repository_lease", default=None)
+)
+
+
+def current_repository_lease(repository: Optional[Path] = None) -> Optional[RepositoryLease]:
+    """Return the mutation lease inherited by the current execution context.
+
+    The context is process-local/thread-task-local evidence only. Callers that
+    intend to reuse it must still validate session/task ownership and the
+    on-disk fencing record before treating it as authority.
+    """
+
+    lease = _CURRENT_REPOSITORY_LEASE.get()
+    if lease is None or repository is None:
+        return lease
+    try:
+        identity = RepositoryLeaseStore.repository_identity(repository)
+    except (OSError, ValueError):
+        return None
+    return lease if lease.repository_identity == identity else None
+
+
 class RepositoryLeaseStore:
     def __init__(self, root: Optional[Path] = None) -> None:
         self.root = (root or (runtime_dir() / "vnext" / "repository-leases")).resolve()
@@ -181,6 +247,20 @@ class RepositoryLeaseStore:
     def load(self, repository: Path) -> Optional[RepositoryLease]:
         path, _lock = self._paths(repository)
         return self._load_path(path)
+
+    def validate(self, repository: Path, lease: RepositoryLease) -> RepositoryLease:
+        """Validate that *lease* is still the live on-disk fence for repository."""
+
+        path, lock_path = self._paths(repository)
+        with _exclusive_file_lock(lock_path):
+            current = self._load_path(path)
+            if current is None or current.lease_id != lease.lease_id:
+                raise RepositoryLeaseError("repository lease ownership was lost")
+            if current.repository_identity != self.repository_identity(repository):
+                raise RepositoryLeaseError("repository lease is bound to another repository")
+            if not self._same_process(current):
+                raise RepositoryLeaseError("repository lease owner is no longer alive")
+            return current
 
     @staticmethod
     def _same_process(lease: RepositoryLease) -> bool:
@@ -214,6 +294,66 @@ class RepositoryLeaseStore:
                 "recover_stale_after_strict_process_check",
             ],
             "automatic_takeover_allowed": False,
+        }
+
+    def doctor(self) -> dict[str, Any]:
+        """Return a compact, read-only health report for repository mutation leases.
+
+        A dead owner is intentionally reported as ``stale`` rather than removed
+        here. Acquisition remains the only recovery path, so diagnostics cannot
+        race or revoke a live mutation. Live owners are never auto-taken over.
+        """
+
+        now = time.time()
+        active = 0
+        stale = 0
+        unreadable = 0
+        leases: list[dict[str, Any]] = []
+        try:
+            paths = sorted(self.root.glob("*.json"))
+        except OSError:
+            paths = []
+            unreadable = 1
+        for path in paths:
+            try:
+                lease = self._load_path(path)
+            except RepositoryLeaseError:
+                unreadable += 1
+                continue
+            if lease is None:
+                continue
+            owner_alive = self._same_process(lease)
+            if owner_alive:
+                active += 1
+            else:
+                stale += 1
+            leases.append(
+                {
+                    "lease_id": lease.lease_id,
+                    "repository": lease.repository,
+                    "session_id": lease.session_id,
+                    "task_id": lease.task_id,
+                    "connection_id": lease.connection_id,
+                    "current_operation": lease.current_operation,
+                    "owner_pid": lease.owner_pid,
+                    "owner_alive": owner_alive,
+                    "heartbeat_age_seconds": round(max(0.0, now - lease.heartbeat_at), 3),
+                    "lease_age_seconds": round(max(0.0, now - lease.created_at), 3),
+                }
+            )
+        degraded = bool(stale or unreadable)
+        return {
+            "status": "degraded" if degraded else "ok",
+            "active": active,
+            "stale": stale,
+            "unreadable": unreadable,
+            "count": len(leases),
+            "leases": leases[:32],
+            "truncated": len(leases) > 32,
+            "recovery": (
+                "stale leases are recovered automatically on the next guarded mutation; "
+                "live owners are never taken over automatically"
+            ),
         }
 
     def acquire(
@@ -255,8 +395,15 @@ class RepositoryLeaseStore:
                         current_operation=current_operation,
                     )
                     _atomic_json(path, refreshed.to_dict())
+                    _CURRENT_REPOSITORY_LEASE.set(refreshed)
                     return refreshed, False
-                if existing.expires_at > now or self._same_process(existing):
+                # A lease is authority only while its exact owner process is
+                # still alive. TTL is a crash-recovery backstop, not a reason to
+                # freeze the repository after the OS has already proved that the
+                # owner exited or that the PID was reused. `_same_process` is
+                # deliberately conservative: a live PID with no creation marker
+                # is treated as the original owner and is never auto-taken over.
+                if self._same_process(existing):
                     raise RepositoryLeaseConflict(self.conflict_details(existing, now))
                 recovered_stale = True
             pid = os.getpid()
@@ -275,6 +422,7 @@ class RepositoryLeaseStore:
                 current_operation=current_operation,
             )
             _atomic_json(path, lease.to_dict())
+            _CURRENT_REPOSITORY_LEASE.set(lease)
             return lease, recovered_stale
 
     def heartbeat(
@@ -306,17 +454,25 @@ class RepositoryLeaseStore:
                 current_operation=current_operation,
             )
             _atomic_json(path, updated.to_dict())
+            inherited = _CURRENT_REPOSITORY_LEASE.get()
+            if inherited is not None and inherited.lease_id == updated.lease_id:
+                _CURRENT_REPOSITORY_LEASE.set(updated)
             return updated
 
     def release(self, repository: Path, lease: RepositoryLease) -> None:
         path, lock_path = self._paths(repository)
-        with _exclusive_file_lock(lock_path):
-            current = self._load_path(path)
-            if current is None:
-                return
-            if current.lease_id != lease.lease_id:
-                raise RepositoryLeaseError("cannot release another session's repository lease")
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        try:
+            with _exclusive_file_lock(lock_path):
+                current = self._load_path(path)
+                if current is None:
+                    return
+                if current.lease_id != lease.lease_id:
+                    raise RepositoryLeaseError("cannot release another session's repository lease")
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        finally:
+            inherited = _CURRENT_REPOSITORY_LEASE.get()
+            if inherited is not None and inherited.lease_id == lease.lease_id:
+                _CURRENT_REPOSITORY_LEASE.set(None)

@@ -67,6 +67,18 @@ class _BareManager:
     takeover_active = False
 
 
+class _ExtensionRecordingManager:
+    engine = "chrome_extension_mv3"
+    takeover_active = False
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+
+    def _call(self, method: str, payload: dict[str, Any], deadline_seconds: float) -> dict[str, Any]:
+        self.calls.append((method, dict(payload), deadline_seconds))
+        return {"shown": True, "window_id": 7}
+
+
 def _runtime(manager: Any) -> Any:
     return SimpleNamespace(_browser=manager)
 
@@ -84,6 +96,16 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(result["action"], action)
                 self.assertEqual(result["result"], "success")
                 self.assertEqual(manager.calls, [(method_name, {"selector": "#x"})])
+
+    def test_show_window_routes_only_to_extension_protocol(self) -> None:
+        manager = _ExtensionRecordingManager()
+        result = execute_browser_command(
+            _runtime(manager),
+            {"action": "show_window", "payload": {"left": 120, "top": 80}},
+            5.0,
+        )
+        self.assertTrue(result["shown"])
+        self.assertEqual(manager.calls, [("show_window", {"left": 120, "top": 80}, 5.0)])
 
     def test_an_engine_without_the_action_refuses_honestly(self) -> None:
         for action in _EXTENDED_ACTIONS:
@@ -117,6 +139,7 @@ class TaxonomyTests(unittest.TestCase):
             "extension is not connected": "browser_disconnected",
             "net::ERR_NAME_NOT_RESOLVED": "network_error",
             "download_failure: interrupted": "download_failure",
+            "Failed to capture tab: image readback failed": "screenshot_capture_failed",
             "permission_denied: downloads permission is not granted": "permission_denied",
             "user takeover is active; agent click is paused": "user_takeover_required",
             "something nobody classified": "browser_error",
@@ -139,6 +162,7 @@ class TaxonomyTests(unittest.TestCase):
             "browser_disconnected",
             "network_error",
             "download_failure",
+            "screenshot_capture_failed",
             "permission_denied",
             "user_takeover_required",
         ):

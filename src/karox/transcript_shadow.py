@@ -99,6 +99,7 @@ def close_transcript_store() -> None:
 _AGENT_KIND_MAP: dict[AgentEventKind, str] = {
     AgentEventKind.STEP_STARTED: "AgentStepStarted",
     AgentEventKind.STEP_FINISHED: "AgentStepCompleted",
+    AgentEventKind.REASONING_SUMMARY_DELTA: "ReasoningSummaryDelta",
     AgentEventKind.TOOL_STARTED: "ToolCallStarted",
     AgentEventKind.TOOL_FINISHED: "ToolCallCompleted",
     AgentEventKind.FINISHED: "SessionStateChanged",
@@ -144,9 +145,11 @@ def make_transcript_observer(
 
         kind = _AGENT_KIND_MAP.get(event.kind)
         if kind is None:
-            # TEXT_DELTA and REASONING_DELTA are streaming fragments; they
-            # are not transcript messages (the final text arrives in
-            # provider_history). Skip them to avoid a flood of partial events.
+            # TEXT_DELTA and raw REASONING_DELTA are streaming fragments; they
+            # are not transcript messages (the final answer arrives in
+            # provider_history, while raw reasoning stays private). The explicit
+            # provider-labeled REASONING_SUMMARY_DELTA is mapped above because it
+            # is the bounded public progress channel.
             return
 
         payload: dict[str, Any] = {

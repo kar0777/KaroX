@@ -251,7 +251,7 @@ class TestAgentRuntimeFeeding:
 
 
 class TestMapCommandSurface:
-    def test_map_is_a_visible_first_class_command(self):
+    def test_map_is_a_first_class_karox_command(self):
         assert "/map" in karox_tui.VISIBLE_COMMANDS
         assert "/map" in karox_tui.SLASH_COMMANDS
         assert "/map" in karox_tui._COMMANDS_RU

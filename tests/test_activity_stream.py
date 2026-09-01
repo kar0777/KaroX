@@ -351,9 +351,9 @@ class KernelToRendererIntegrationTests(unittest.TestCase):
 
                 lines = render_stream_lines(stream, english=True)
                 joined = "\n".join(lines)
-                self.assertIn("● Investigating", joined)
+                self.assertIn("● Exploring project", joined)
                 self.assertIn("● Implementing", joined)
-                self.assertIn("● Verifying", joined)
+                self.assertIn("● Verifying result", joined)
                 self.assertIn("1 file changed", joined)
                 # Raw tool identifiers and paths stay off this surface.
                 self.assertNotIn("repo_write_file", joined)

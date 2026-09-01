@@ -9,6 +9,7 @@ an ordinary subprocess.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
@@ -88,6 +89,35 @@ class ProcessMappingTests(unittest.TestCase):
     def test_git_push_hiding_inside_process_run_is_still_a_push(self) -> None:
         kind = risk_kind_for("process.run", {"argv": ["git", "push", "origin", "main"]})
         self.assertEqual(kind, "git.push")
+
+    def test_full_dev_command_keeps_the_semantic_risk_of_its_argv(self) -> None:
+        self.assertEqual(
+            risk_kind_for("dev.command", {"argv": ["git", "push", "origin", "main"]}),
+            "git.push",
+        )
+        self.assertEqual(
+            risk_kind_for("dev.command", {"argv": ["npm", "publish"]}),
+            "package.publish",
+        )
+        self.assertEqual(
+            risk_kind_for("dev.command", {"argv": ["npm", "install"]}),
+            "package.install",
+        )
+
+    def test_direct_delete_argv_exposes_the_real_target_to_the_action_engine(self) -> None:
+        action = action_for_command(
+            _command("dev.command", {"argv": ["rm", "-rf", "build/cache"]})
+        )
+        self.assertTrue(action.details["deletion_requested"])
+        self.assertEqual(action.details["deletion_paths"], ["build/cache"])
+        self.assertEqual(action.paths, ("build/cache",))
+
+    def test_absolute_delete_target_is_marked_outside_repository(self) -> None:
+        action = action_for_command(
+            _command("dev.command", {"argv": ["rm", "C:/Users/me/old.tmp"]}),
+            repository=Path("C:/work/repo"),
+        )
+        self.assertTrue(action.outside_repository)
 
     def test_a_forced_push_is_recognised_separately(self) -> None:
         kind = risk_kind_for(

@@ -489,6 +489,25 @@ def execute_browser_command(
         raise InvalidCommand("browser.command action must be a non-empty string")
     if not isinstance(payload, dict):
         raise InvalidCommand("browser.command payload must be object")
+    if action.startswith("model."):
+        # Model delegation actions are developed behind this stable hot command
+        # surface. Reload their isolated module so new guarded actions become
+        # available without rotating the durable hosted bridge.
+        from importlib import reload
+        from . import model_hot_actions
+
+        handler = reload(model_hot_actions).execute_model_action
+        return {
+            "action": action,
+            **handler(runtime, action, payload, deadline_seconds),
+        }
+    if action.startswith("app."):
+        from .desktop_apps import execute_desktop_app_action
+
+        return {
+            "action": action,
+            **execute_desktop_app_action(runtime, action, payload, deadline_seconds),
+        }
     manager = runtime._browser
     if action == "_temporary_fill_plain_text":
         if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
@@ -515,6 +534,14 @@ def execute_browser_command(
         if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
             raise InvalidCommand(f"browser.command {action} requires the extension browser backend")
         return {"action": action, **manager._call(action, payload, deadline_seconds)}
+    if action == "show_window":
+        if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
+            raise InvalidCommand("browser.command show_window requires the extension browser backend")
+        left = int(payload.get("left", 100))
+        top = int(payload.get("top", 100))
+        if not 0 <= left <= 10_000 or not 0 <= top <= 10_000:
+            raise InvalidCommand("browser show_window coordinates must be between 0 and 10000")
+        return {"action": action, **manager._call("show_window", {"left": left, "top": top}, deadline_seconds)}
     # Bound lazily so a partial engine is an engine-honest refusal at
     # dispatch time, never an AttributeError while the table is built.
     known_actions = (

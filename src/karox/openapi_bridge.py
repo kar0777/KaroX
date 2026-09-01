@@ -39,6 +39,7 @@ _ERROR_STATUS: dict[str, int] = {
     "executable_not_found": 500,
     "denied": 403,
     "invalid_request": 400,
+    "verification_not_approved": 400,
     "idempotency_key_required": 400,
     "idempotency_key_invalid": 400,
     # The caller disconnected mid-call; the answer is best-effort because the

@@ -101,7 +101,10 @@ class _StreamingAdapter:
 
     provider_name = "provider"
     MAX_SSE_LINE_CHARS = 1_048_576
-    MAX_SSE_EVENTS = 10_000
+    # Tiny reasoning/tool deltas can legitimately produce far more than 10k
+    # frames. The byte ceiling below is the authoritative memory/network bound;
+    # this count only rejects pathological event fragmentation.
+    MAX_SSE_EVENTS = 100_000
     MAX_SSE_TOTAL_CHARS = 16_777_216
 
     def __init__(

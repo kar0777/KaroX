@@ -15,9 +15,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Collection, Iterable, Optional
 
+from .agent_modes import DEFAULT_MODE, MODES, mode_display_name, mode_summary
+from .effort import (
+    AUTO_EFFORT,
+    EFFORT_LEVELS,
+    effort_display_name,
+    effort_summary,
+    effort_user_summary,
+)
 from .paths import config_dir, session_dir
 from .registry import ProviderRegistry
-from .providers import REASONING_EFFORTS
 from .sessions import SessionStore
 from .usage_analytics import UsageSummary, summarize_records
 
@@ -365,6 +372,16 @@ def model_row_text(record: Any, width: int, selected: bool = False) -> str:
     return (mark + "  ".join(cells)).rstrip()
 
 
+def model_simple_row_text(record: Any, selected: bool = False) -> str:
+    """Calm default model row: identity first, technical metadata on demand."""
+
+    model_id = str(getattr(record, "model_id", "") or "?")
+    provider_id = str(getattr(record, "provider_id", "") or "?")
+    suffix = " · free" if model_free_state(record) == "true" else ""
+    mark = "✓ " if selected else "  "
+    return f"{mark}{model_id}  ·  {provider_id}{suffix}"
+
+
 def _verdict(value: str, language: str) -> str:
     if value == "true":
         return _label(language, "да", "yes")
@@ -422,24 +439,22 @@ def model_detail_lines(record: Any, language: str) -> list[str]:
 
 
 class ModelPickerScreen(ModalScreen[Optional[str]]):
-    """One model browser for search, filters, metadata, refresh, and Effort.
+    """One focused model browser: search, metadata, refresh, and selection.
 
-    A single list holds an Effort section and a Model section, so switching
-    either is one screen and one Enter. Selecting an effort row returns
-    ``effort:<value>``; a model row returns ``model:<provider>:<id>``; the
-    connections row returns :data:`MODEL_PICKER_CONNECT`. Those ids are the
-    stable contract with ``_model_picker_done`` and must not change.
+    Model choice and Effort are deliberately separate product actions. A model
+    row returns ``model:<provider>:<id>`` and the connections row returns
+    :data:`MODEL_PICKER_CONNECT`. Effort lives in :class:`EffortPickerScreen`.
 
     The list renders honest responsive metadata columns (see
     :func:`model_browser_columns`), filters only on explicit "true" verdicts,
     and can rediscover the catalog in place over the exact wire the wizard
-    and ``/model refresh`` use.
+    and ``/models refresh`` use.
     """
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=False),
-        Binding("e", "effort_section", "Effort", show=False),
         Binding("c", "connections", "Connections", show=False),
+        Binding("d", "toggle_details", "Details", show=False),
         Binding("slash", "focus_search", "Search", show=False),
         Binding("f", "toggle_free", "Free", show=False),
         Binding("t", "toggle_tools", "Tools", show=False),
@@ -462,10 +477,10 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
     #model-picker-hint { color: #8a7e6a; margin-top: 1; }
     """
 
-    def __init__(self, language: str, *, effort: Optional[str] = None) -> None:
+    def __init__(self, language: str) -> None:
         super().__init__()
         self.language = language
-        self.effort = effort
+        self.show_advanced = False
         self._query = ""
         self._filters: set[str] = set()
         self._status = ""
@@ -501,15 +516,13 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
             if self._selected is not None
             else _label(self.language, "не выбрана", "not selected")
         )
-        effort = self.effort or "auto"
         with Vertical(id="model-picker"):
             yield Static(
-                _label(self.language, "Модель и Effort", "Model and Effort"),
+                _label(self.language, "Модели", "Models"),
                 id="model-picker-title",
             )
             yield Static(
-                _label(self.language, "Сейчас", "Current")
-                + f": {current}  ·  Effort {effort}",
+                _label(self.language, "Сейчас", "Current") + f": {current}",
                 id="model-picker-current",
             )
             yield Input(
@@ -526,8 +539,8 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
             yield Static(
                 _label(
                     self.language,
-                    "Enter — выбрать · / — поиск · f/t/v/o/s — фильтры · Ctrl+R — обновить · E — Effort · C — подключения · Esc — назад · TVJS = tools/vision/json/stream",
-                    "Enter — select · / — search · f/t/v/o/s — filters · Ctrl+R — refresh · E — Effort · C — connections · Esc — back · TVJS = tools/vision/json/stream",
+                    "Enter — использовать · / — поиск · D — детали · Ctrl+R — обновить · C — подключения · Esc — назад",
+                    "Enter — use · / — search · D — details · Ctrl+R — refresh · C — connections · Esc — back",
                 ),
                 id="model-picker-hint",
             )
@@ -545,24 +558,12 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
                 options.highlighted = index
                 break
         else:
-            options.highlighted = self._first_effort_index()
+            options.highlighted = 0 if options.option_count else None
         options.focus()
 
     def _rebuild(self) -> None:
         options = self.query_one("#model-picker-list", OptionList)
         options.clear_options()
-        options.add_option(
-            Option(_label(self.language, "Effort", "Effort"), disabled=True)
-        )
-        effort = self.effort or "auto"
-        for value in ("auto", *REASONING_EFFORTS):
-            active = effort == value
-            options.add_option(
-                Option(("✓ " if active else "  ") + value, id=f"effort:{value}")
-            )
-        options.add_option(
-            Option(_label(self.language, "Модель", "Model"), disabled=True)
-        )
         self._visible = apply_model_filters(self._models, self._query, self._filters)
         width = self._width()
         if self._visible:
@@ -572,11 +573,13 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
                     and self._selected.provider_id == item.provider_id
                     and self._selected.model_id == item.model_id
                 )
+                row_text = (
+                    model_row_text(item, width, selected=active)
+                    if self.show_advanced
+                    else model_simple_row_text(item, selected=active)
+                )
                 options.add_option(
-                    Option(
-                        model_row_text(item, width, selected=active),
-                        id=f"model:{item.provider_id}:{item.model_id}",
-                    )
+                    Option(row_text, id=f"model:{item.provider_id}:{item.model_id}")
                 )
         elif not self._models:
             options.add_option(
@@ -604,6 +607,9 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
         self._render_details()
 
     def _render_filters(self) -> None:
+        if not self.show_advanced:
+            self.query_one("#model-picker-filters", Static).update(self._status)
+            return
         labels = {
             "free": "Free",
             "tools": "Tools",
@@ -626,6 +632,9 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
 
     def _render_details(self) -> None:
         details = self.query_one("#model-picker-details", Static)
+        if not self.show_advanced:
+            details.update("")
+            return
         record = self._highlighted_record()
         if record is None:
             details.update("")
@@ -650,14 +659,6 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
                 return item
         return None
 
-    def _first_effort_index(self) -> int:
-        options = self.query_one("#model-picker-list", OptionList)
-        for index, option in enumerate(options.options):
-            option_id = str(getattr(option, "id", "") or "")
-            if option_id.startswith("effort:"):
-                return index
-        return 0
-
     def on_input_changed(self, event: Any) -> None:
         if str(getattr(getattr(event, "input", None), "id", "") or "") != (
             "model-picker-search"
@@ -681,11 +682,25 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
         self.dismiss(option_id or None)
 
     def _toggle(self, name: str) -> None:
+        self.show_advanced = True
         if name in self._filters:
             self._filters.discard(name)
         else:
             self._filters.add(name)
         self._rebuild()
+
+    def action_toggle_details(self) -> None:
+        record = self._highlighted_record()
+        self.show_advanced = not self.show_advanced
+        self._rebuild()
+        if record is not None:
+            target = f"model:{record.provider_id}:{record.model_id}"
+            options = self.query_one("#model-picker-list", OptionList)
+            for index, option in enumerate(options.options):
+                if str(getattr(option, "id", "") or "") == target:
+                    options.highlighted = index
+                    break
+        self._render_details()
 
     def action_toggle_free(self) -> None:
         self._toggle("free")
@@ -784,15 +799,192 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
         self._read_registry()
         self._rebuild()
 
-    def action_effort_section(self) -> None:
-        options = self.query_one("#model-picker-list", OptionList)
-        options.highlighted = self._first_effort_index()
-
-    def action_effort(self) -> None:
-        self.action_effort_section()
-
     def action_connections(self) -> None:
         self.dismiss(MODEL_PICKER_CONNECT)
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
+class ModePickerScreen(ModalScreen[Optional[str]]):
+    """Human-first Build/Plan/Ideate picker used by ``/mode``."""
+
+    BINDINGS = [Binding("escape", "back", "Back", show=False)]
+
+    DEFAULT_CSS = """
+    ModePickerScreen { align: center middle; background: rgba(0,0,0,0.35); }
+    #mode-picker { width: 62; max-width: 94%; height: auto; padding: 1 2;
+      background: #181511; border: round #6b5c3e; }
+    #mode-picker-title { text-style: bold; color: #e5e5e5; }
+    #mode-picker-current { color: #c6bca8; margin-top: 1; }
+    #mode-picker-list { height: auto; max-height: 5; margin-top: 1;
+      background: #1a1712; border: none; }
+    #mode-picker-details { color: #c6bca8; height: auto; min-height: 2; }
+    #mode-picker-hint { color: #8a7e6a; margin-top: 1; }
+    """
+
+    def __init__(self, language: str, *, mode: str = DEFAULT_MODE) -> None:
+        super().__init__()
+        self.language = language
+        self.mode = mode if mode in MODES else DEFAULT_MODE
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mode-picker"):
+            yield Static(
+                _label(self.language, "Как KaroX должен работать?", "How should KaroX work?"),
+                id="mode-picker-title",
+            )
+            yield Static(
+                _label(self.language, "Сейчас", "Current")
+                + f": {mode_display_name(self.mode, self.language)}",
+                id="mode-picker-current",
+            )
+            yield OptionList(id="mode-picker-list")
+            yield Static("", id="mode-picker-details", markup=False)
+            yield Static(
+                _label(
+                    self.language,
+                    "Enter — применить · ↑/↓ — выбрать · Esc — назад",
+                    "Enter — apply · ↑/↓ — choose · Esc — back",
+                ),
+                id="mode-picker-hint",
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#mode-picker-list", OptionList)
+        for value in MODES:
+            options.add_option(
+                Option(
+                    ("✓ " if value == self.mode else "  ")
+                    + mode_display_name(value, self.language),
+                    id=value,
+                )
+            )
+        options.highlighted = next(
+            (
+                index
+                for index, option in enumerate(options.options)
+                if getattr(option, "id", None) == self.mode
+            ),
+            0,
+        )
+        options.focus()
+        self._render_details()
+
+    def on_option_list_option_highlighted(self, _event: Any) -> None:
+        self._render_details()
+
+    def on_option_list_option_selected(self, event: Any) -> None:
+        value = str(getattr(event.option, "id", "") or "")
+        self.dismiss(value or None)
+
+    def _render_details(self) -> None:
+        options = self.query_one("#mode-picker-list", OptionList)
+        index = options.highlighted
+        if index is None:
+            return
+        try:
+            value = str(getattr(options.get_option_at_index(index), "id", "") or "")
+        except Exception:
+            return
+        text = mode_summary(value, self.language) if value in MODES else ""
+        self.query_one("#mode-picker-details", Static).update(text)
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
+class EffortPickerScreen(ModalScreen[Optional[str]]):
+    """Small dedicated Effort picker; model selection lives in /models."""
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=False),
+        Binding("d", "toggle_details", "Details", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    EffortPickerScreen { align: center middle; background: rgba(0,0,0,0.35); }
+    #effort-picker { width: 58; max-width: 94%; height: auto; padding: 1 2;
+      background: #181511; border: round #6b5c3e; }
+    #effort-picker-title { text-style: bold; color: #e5e5e5; }
+    #effort-picker-current { color: #c6bca8; margin-top: 1; }
+    #effort-picker-list { height: auto; max-height: 9; margin-top: 1;
+      background: #1a1712; border: none; }
+    #effort-picker-details { color: #c6bca8; height: auto; min-height: 2; }
+    #effort-picker-hint { color: #8a7e6a; margin-top: 1; }
+    """
+
+    def __init__(self, language: str, *, effort: str = AUTO_EFFORT) -> None:
+        super().__init__()
+        self.language = language
+        self.effort = effort if effort in {AUTO_EFFORT, *EFFORT_LEVELS} else AUTO_EFFORT
+        self.show_advanced = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="effort-picker"):
+            yield Static(_label(self.language, "Effort", "Effort"), id="effort-picker-title")
+            yield Static(
+                _label(self.language, "Сейчас", "Current")
+                + f": {effort_display_name(self.effort, self.language)}",
+                id="effort-picker-current",
+            )
+            yield OptionList(id="effort-picker-list")
+            yield Static("", id="effort-picker-details", markup=False)
+            yield Static(
+                _label(
+                    self.language,
+                    "Enter — применить · ↑/↓ — выбрать · D — детали · Esc — назад",
+                    "Enter — apply · ↑/↓ — choose · D — details · Esc — back",
+                ),
+                id="effort-picker-hint",
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#effort-picker-list", OptionList)
+        for value in (AUTO_EFFORT, *EFFORT_LEVELS):
+            options.add_option(
+                Option(
+                    ("✓ " if value == self.effort else "  ")
+                    + effort_display_name(value, self.language),
+                    id=value,
+                )
+            )
+        options.highlighted = next(
+            (index for index, option in enumerate(options.options) if getattr(option, "id", None) == self.effort),
+            0,
+        )
+        options.focus()
+        self._render_details()
+
+    def on_option_list_option_highlighted(self, _event: Any) -> None:
+        self._render_details()
+
+    def on_option_list_option_selected(self, event: Any) -> None:
+        value = str(getattr(event.option, "id", "") or "")
+        self.dismiss(value or None)
+
+    def _render_details(self) -> None:
+        options = self.query_one("#effort-picker-list", OptionList)
+        index = options.highlighted
+        if index is None:
+            return
+        try:
+            value = str(getattr(options.get_option_at_index(index), "id", "") or "")
+        except Exception:
+            return
+        if value in {AUTO_EFFORT, *EFFORT_LEVELS}:
+            text = (
+                effort_summary(value, self.language)
+                if self.show_advanced and value != AUTO_EFFORT
+                else effort_user_summary(value, self.language)
+            )
+        else:
+            text = ""
+        self.query_one("#effort-picker-details", Static).update(text)
+
+    def action_toggle_details(self) -> None:
+        self.show_advanced = not self.show_advanced
+        self._render_details()
 
     def action_back(self) -> None:
         self.dismiss(None)
@@ -929,6 +1121,8 @@ __all__ = [
     "MODEL_BROWSER_FILTERS",
     "MODEL_PICKER_CONNECT",
     "MODEL_PICKER_EFFORT",
+    "EffortPickerScreen",
+    "ModePickerScreen",
     "ModelPickerScreen",
     "UsageCostScreen",
     "apply_model_filters",

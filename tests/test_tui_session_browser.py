@@ -757,6 +757,7 @@ class SelectedActionTests(_BrowserCase):
             self.assertEqual(app.active_session, "s-open")
 
     async def test_enter_resumes_a_stopped_session(self) -> None:
+        self.harness.create_session("s-resume")
         self.harness.publish_state(
             "s-resume",
             tui.SUMMARY_RUN_STOPPED,

@@ -1358,7 +1358,42 @@ class ChromeExtensionBrowserSessionManager:
             params: dict[str, Any] = {}
             if arguments.get("selector") is not None:
                 params["selector"] = self._selector(arguments.get("selector"))
-            result = self._call("screenshot", params, deadline_seconds)
+            recovered = False
+            try:
+                result = self._call("screenshot", params, deadline_seconds)
+            except BrowserError as exc:
+                # Chrome 151 can fail captureVisibleTab with ``image readback
+                # failed`` while a managed Windows window is minimized. Older
+                # KaroX extension instances do not yet contain the in-extension
+                # restore/retry path, so self-heal from Python as well.
+                message = str(exc).lower()
+                recoverable = (
+                    "image readback failed" in message
+                    or "view is invisible" in message
+                    or "failed to capture tab" in message
+                )
+                if not recoverable:
+                    raise
+                if self.takeover_active:
+                    raise BrowserError(
+                        "screenshot_capture_failed: screenshot recovery would move the browser "
+                        "window while the user has control; resume agent control and retry"
+                    ) from exc
+                try:
+                    # ``show_window`` is already part of the extension protocol,
+                    # so this fallback also repairs browser instances launched by
+                    # an older KaroX runtime without requiring a new extension.
+                    self._call("show_window", {"left": 100, "top": 100}, deadline_seconds)
+                    # Let Chromium composite one visible frame and stay below
+                    # captureVisibleTab's documented two-calls-per-second limit.
+                    time.sleep(0.6)
+                    result = self._call("screenshot", params, deadline_seconds)
+                    recovered = True
+                except BrowserError as retry_exc:
+                    raise BrowserError(
+                        "screenshot_capture_failed: Chrome could not capture the KaroX tab "
+                        "after restoring its managed window and retrying"
+                    ) from retry_exc
             if result.get("error_kind"):
                 # Typed resolution failure (not found / ambiguous with
                 # candidates) surfaces as data, never as a PNG that lies.
@@ -1382,6 +1417,8 @@ class ChromeExtensionBrowserSessionManager:
                 "viewport_only": bool(result.get("viewport_only", True)),
                 "element": bool(result.get("element", False)),
                 "tab_id": result.get("tab_id"),
+                "capture_recovered": bool(result.get("capture_recovered", False) or recovered),
+                "capture_attempts": int(result.get("capture_attempts", 1)) + int(recovered),
             }
 
     def console(self, arguments: Mapping[str, Any], deadline_seconds: float) -> dict[str, Any]:

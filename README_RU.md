@@ -156,6 +156,44 @@ KaroX не должен незаметно менять провайдера, pr
 мутаций. Fallback разрешён только для узко классифицированных ошибок и явно
 настроенных routes.
 
+## Оркестрация интеллекта и экономия
+
+KaroX 5 умеет объединять API-модели, уже оплаченные подписочные агенты, локальные
+модели и явно подключённые внешние agents в один **Intelligence Pool**. Пользователь
+выбирает одного оркестратора, а роли planner/implementer/tester/reviewer могут
+выполняться разными endpoints. Автоматический роутинг учитывает качество только
+по локальным результатам KaroX, которые одновременно были accepted и verified.
+
+Экономия строится не на тихом даунгрейде модели, а на shared context, context
+delta, стабильном prompt prefix, повторном использовании project map, quota
+reserve, already-paid capacity и независимой проверке. Savings Receipt показывает
+процент/доллары только при наличии измеренного baseline.
+
+На компьютере можно обнаружить установленные subscription CLIs:
+
+```bash
+karox intelligence discover-agents --apply
+```
+
+Встроенный adapter Codex допускает implementation только внутри отдельного KaroX
+worktree с workspace-write sandbox. Встроенный Claude Code adapter намеренно
+read/review-only и использует safe mode с `Read,Glob,Grep`. Gemini CLI и OpenCode
+могут отображаться как найденные, но не запускаются автоматически, пока KaroX не
+может доказать эквивалентную границу записи.
+
+```bash
+karox orchestrate plan --objective "Исправить retry semantics" --recipe bug-fix
+karox orchestrate run --objective "Исправить retry semantics" --recipe bug-fix \
+  --isolate-implementers \
+  --verification-command '["python","-m","pytest","-q"]'
+```
+
+Выбранный orchestrator реально участвует в работе: planner по умолчанию закреплён
+за ним, а в конце `orchestrator-judge` получает evidence от tester/reviewer и
+выносит финальное решение. В TUI доступны `/orchestrate`, `/agents` и `/mission`,
+при этом slash-menu ограничен восемью основными командами; advanced-команды не
+удалены и продолжают работать при ручном вводе.
+
 ## Профили доступа
 
 Понятные названия UI соответствуют стабильным идентификаторам policy:
@@ -178,8 +216,9 @@ session, а не отдельный уровень прав. Во время м�
 ## CLI для автоматизации
 
 ```text
-karox paths | session | credential | provider | model | skill | mcp | bridge
-      | pack | target | tool | integration | agent | migrate | doctor
+karox paths | session | credential | provider | model | intelligence | skill | mcp
+      | bridge | orchestrate | mission-control | economy | pack | target | tool
+      | integration | agent | migrate | doctor
 ```
 
 Примеры:
@@ -242,7 +281,7 @@ publishing. Неудачный check нельзя превратить в под
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3136 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3317 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

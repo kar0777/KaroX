@@ -16,7 +16,8 @@ from typing import Any, Callable, Optional
 
 
 DEFAULT_ROUTE_PROBE_INTERVAL_SECONDS = 5.0
-DEFAULT_ROUTE_FAILURE_THRESHOLD = 3
+DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS = 1.0
+DEFAULT_ROUTE_FAILURE_THRESHOLD = 2
 DEFAULT_ROUTE_PROBE_TIMEOUT_SECONDS = 2.0
 
 
@@ -55,6 +56,7 @@ class RouteHealthTracker:
     """Debounce transient route failures before recovery is requested."""
 
     interval_seconds: float = DEFAULT_ROUTE_PROBE_INTERVAL_SECONDS
+    failure_probe_interval_seconds: float = DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS
     failure_threshold: int = DEFAULT_ROUTE_FAILURE_THRESHOLD
     consecutive_failures: int = 0
     next_probe_at: float = 0.0
@@ -63,6 +65,10 @@ class RouteHealthTracker:
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError("route probe interval must be positive")
+        if self.failure_probe_interval_seconds <= 0:
+            raise ValueError("route failure probe interval must be positive")
+        if self.failure_probe_interval_seconds > self.interval_seconds:
+            raise ValueError("route failure probe interval must not exceed healthy interval")
         if self.failure_threshold < 1:
             raise ValueError("route failure threshold must be positive")
 
@@ -70,12 +76,19 @@ class RouteHealthTracker:
         return float(now) >= self.next_probe_at
 
     def observe(self, *, now: float, healthy: bool) -> bool:
-        """Record one due probe; return True when recovery should be attempted."""
-        self.next_probe_at = float(now) + self.interval_seconds
+        """Record one due probe; return True when recovery should be attempted.
+
+        Healthy routes stay on the low-cost steady cadence. The first failed
+        public probe switches to a short confirmation cadence so a real Funnel
+        outage is repaired quickly, while one transient network hiccup remains
+        debounced and never mutates the owned route by itself.
+        """
         if healthy:
             self.consecutive_failures = 0
+            self.next_probe_at = float(now) + self.interval_seconds
             return False
         self.consecutive_failures += 1
+        self.next_probe_at = float(now) + self.failure_probe_interval_seconds
         return self.consecutive_failures >= self.failure_threshold
 
     def recovered(self, *, now: float) -> None:
@@ -85,6 +98,7 @@ class RouteHealthTracker:
 
 
 __all__ = [
+    "DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS",
     "DEFAULT_ROUTE_FAILURE_THRESHOLD",
     "DEFAULT_ROUTE_PROBE_INTERVAL_SECONDS",
     "DEFAULT_ROUTE_PROBE_TIMEOUT_SECONDS",

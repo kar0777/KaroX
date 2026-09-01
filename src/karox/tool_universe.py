@@ -32,6 +32,7 @@ FAMILY_ORDER: tuple[str, ...] = (
     "core",
     "task",
     "memory",
+    "disk",
     "browser",
     "process",
     "admin",
@@ -47,6 +48,7 @@ ALWAYS_FAMILIES: tuple[str, ...] = ("core", "task", "memory")
 # Kernel-space names are dotted without the ``karox.`` prefix; hosted names
 # carry it. ``family_of`` strips the prefix so both resolve identically.
 _FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("disk.", "disk"),
     ("browser.", "browser"),
     ("dev_server.", "process"),
     ("dev.", "process"),
@@ -64,6 +66,14 @@ _FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
 # A false positive only costs the bytes of one family's schemas; a false
 # negative is recovered by discovery, so the stems stay deliberately narrow.
 _FAMILY_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "disk",
+        re.compile(
+            r"(?:\b(?:disk|drive|storage|cleanup|clean\s?up|free\s+space|delete|remove|cache|temp)\b"
+            r"|\b(?:диск|накопител|очист|освобод|удал|мусор|кэш|кеш|временн)\w*)",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "browser",
         re.compile(

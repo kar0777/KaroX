@@ -147,34 +147,16 @@ def mode_display_name(mode: object, language: str = "en") -> str:
 
 _MODE_SUMMARIES = {
     "build": {
-        "en": (
-            "Build: implement, test, and verify; mutations follow the "
-            "normal safety policy."
-        ),
-        "ru": (
-            "Сборка: реализация, тесты и проверка; изменения идут по "
-            "обычной политике безопасности."
-        ),
+        "en": "Build: change code, run checks, and verify the result.",
+        "ru": "Сборка: менять код, запускать проверки и проверять результат.",
     },
     "plan": {
-        "en": (
-            "Plan: no production-code mutation by default; leaves a durable "
-            "Plan artifact. Build starts only on your explicit go-ahead."
-        ),
-        "ru": (
-            "План: по умолчанию без изменений кода; создаёт долговременный "
-            "артефакт плана. Сборка — только после вашего явного решения."
-        ),
+        "en": "Plan: study the project and prepare a concrete plan without changing code.",
+        "ru": "План: изучить проект и подготовить конкретный план без изменений кода.",
     },
     "ideate": {
-        "en": (
-            "Ideate: no production-code mutation by default; hunts for "
-            "opportunities and records durable Concept artifacts."
-        ),
-        "ru": (
-            "Идеи: по умолчанию без изменений кода; ищет возможности и "
-            "сохраняет долговременные артефакты концепций."
-        ),
+        "en": "Ideate: explore opportunities and develop ideas without changing code.",
+        "ru": "Идеи: исследовать возможности и развивать идеи без изменений кода.",
     },
 }
 

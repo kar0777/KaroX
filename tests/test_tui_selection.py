@@ -180,24 +180,23 @@ class TranscriptWidthTests(unittest.IsolatedAsyncioTestCase):
         "ошибки при непустом коде возврата."
     )
 
-    async def test_an_answer_uses_the_width_of_a_wide_window(self) -> None:
-        # UX-014. RichLog.write takes expand=False, and the transcript never
-        # overrode it, so a renderable was laid out at its own measured width
-        # while the content region served only as an upper bound: measured, a
-        # 116-column conversation drew the answer 37 columns wide and left 79
-        # empty. A CSS-framed widget at `width: 1fr` takes what it is given.
+    async def test_an_answer_uses_a_readable_width_in_a_wide_window(self) -> None:
+        # A coding CLI should not draw a 116-column rectangle around a short
+        # answer. Markdown has its own 1fr default, so KaroX supplies a readable
+        # preferred width and lets max-width:100% clamp it on narrow terminals.
         async with karox_app(size=(120, 30)) as (app, pilot):
             app._write_assistant(self.LONG_ANSWER)
             await pilot.pause(0.4)
             transcript = _transcript(app)
             answer = transcript.children[-1]
 
-            self.assertGreaterEqual(
+            self.assertLess(
                 answer.size.width,
                 int(transcript.size.width * 0.9),
-                f"answer laid out at {answer.size.width} of "
+                f"answer still spans {answer.size.width} of "
                 f"{transcript.size.width} available columns",
             )
+            self.assertGreaterEqual(answer.size.width, 70)
 
     async def test_an_answer_is_relaid_out_when_the_window_changes(self) -> None:
         # UX-015. RichLog rendered each write once into a list of lines and kept

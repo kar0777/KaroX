@@ -208,7 +208,15 @@ def continuity_lines(
 
 def _reuse_marker(first_call_id: str) -> str:
     return json.dumps(
-        {"karox": _REUSE_MARKER, "same_as_tool_call_id": first_call_id},
+        {
+            "karox": _REUSE_MARKER,
+            "same_as_tool_call_id": first_call_id,
+            # The exact bytes already exist earlier in the request. This tiny
+            # deterministic hint converts a repeated observation into progress
+            # guidance without forbidding further inspection when a genuinely
+            # new question remains.
+            "next": "act_or_change_query",
+        },
         ensure_ascii=False,
         sort_keys=True,
     )

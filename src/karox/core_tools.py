@@ -34,6 +34,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .command_guard import DeveloperCommandBlocked, validate_developer_command_argv
 from .core import (
     CoreError,
     CoreRuntime,
@@ -110,10 +111,19 @@ class ExtendedCoreRuntime(CoreRuntime):
     MAX_DIFF_PATHS = 100
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        maintenance_protected_paths = kwargs.pop("maintenance_protected_paths", ())
+        if not isinstance(maintenance_protected_paths, (list, tuple)):
+            raise ValueError("maintenance_protected_paths must be a list or tuple")
+        self._maintenance_protected_paths = tuple(
+            str(Path(item).expanduser().resolve(strict=False))
+            for item in maintenance_protected_paths
+        )
         super().__init__(*args, **kwargs)
         handlers = dict(self._handlers)
         handlers["repo.edit_file"] = self._edit_file
         handlers["repo.read_lines"] = self._read_lines
+        handlers["disk.scan"] = self._disk_scan
+        handlers["disk.plan_cleanup"] = self._disk_plan_cleanup
         handlers["repo.command"] = self._repo_command
         handlers["dev.command"] = self._dev_command
         handlers["tests.run"] = self._tests_run
@@ -166,6 +176,48 @@ class ExtendedCoreRuntime(CoreRuntime):
                         "count": {"type": "number"},
                     },
                     "required": ["path"],
+                    "additionalProperties": False,
+                },
+            ),
+            "disk.scan": ToolDefinition(
+                "disk.scan",
+                (
+                    "Scan the selected drive/workspace for bounded cleanup candidates using "
+                    "metadata only (names, sizes, categories, age/impact labels). Never reads "
+                    "file contents and never deletes anything."
+                ),
+                Capability.DISK_READ,
+                False,
+                {
+                    "type": "object",
+                    "properties": {
+                        "max_candidates": {"type": "number"},
+                        "min_size_mb": {"type": "number"},
+                        "scan_seconds": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            "disk.plan_cleanup": ToolDefinition(
+                "disk.plan_cleanup",
+                (
+                    "Freeze an exact cleanup plan for selected relative paths. This only "
+                    "prepares a short impact preview; it cannot delete. The KaroX UI must "
+                    "obtain explicit user confirmation and apply the frozen plan separately."
+                ),
+                Capability.DISK_READ,
+                False,
+                {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 32,
+                        }
+                    },
+                    "required": ["paths"],
                     "additionalProperties": False,
                 },
             ),
@@ -239,7 +291,7 @@ class ExtendedCoreRuntime(CoreRuntime):
             ),
             "dev.command": ToolDefinition(
                 "dev.command",
-                "Run a repository-scoped developer command without a shell. Available only when the hosted Full developer access profile explicitly selects it.",
+                "Run a short repository-scoped developer command synchronously without a shell. Available only with hosted Full developer access. Prefer karox.command.start for Claude/OpenCode/benchmarks, long tests, or any command that may run longer than a normal MCP request, so tunnel/reconnect interruptions cannot strand the tool call.",
                 Capability.DEV_COMMAND,
                 True,
                 {
@@ -251,6 +303,16 @@ class ExtendedCoreRuntime(CoreRuntime):
                             "description": "Executable and arguments. Shell syntax is not supported.",
                         },
                         "timeout_seconds": {"type": "number"},
+                        "request_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                            "description": (
+                                "Optional execution generation for durable hosted command.run. "
+                                "Reuse it to poll one run; change it to force a new run of identical argv."
+                            ),
+                        },
                     },
                     "required": ["argv"],
                     "additionalProperties": False,
@@ -329,6 +391,41 @@ class ExtendedCoreRuntime(CoreRuntime):
             },
         )
 
+    # -- disk maintenance --------------------------------------------------
+
+    def _disk_scan(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        from .disk_maintenance import scan_cleanup_candidates
+
+        max_candidates = arguments.get("max_candidates", 24)
+        min_size_mb = arguments.get("min_size_mb", 25.0)
+        scan_seconds = arguments.get("scan_seconds", min(8.0, deadline_seconds))
+        return scan_cleanup_candidates(
+            self.repository,
+            max_candidates=int(max_candidates),
+            min_size_mb=float(min_size_mb),
+            scan_seconds=min(float(scan_seconds), float(deadline_seconds)),
+            protected_roots=self._maintenance_protected_paths,
+        )
+
+    def _disk_plan_cleanup(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        del deadline_seconds
+        from .disk_maintenance import create_cleanup_plan
+
+        paths = arguments.get("paths")
+        if not isinstance(paths, list) or not paths or not all(
+            isinstance(item, str) for item in paths
+        ):
+            raise InvalidCommand("disk.plan_cleanup paths must be a non-empty string array")
+        return create_cleanup_plan(
+            self.repository,
+            paths,
+            protected_roots=self._maintenance_protected_paths,
+        )
+
     # -- hot developer worker ---------------------------------------------
 
     def _repo_command(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
@@ -340,21 +437,14 @@ class ExtendedCoreRuntime(CoreRuntime):
         raw_argv = arguments.get("argv")
         if not isinstance(raw_argv, list):
             raise InvalidCommand("dev.command argv must be an array")
-        # Full developer access is intentionally a trusted command surface. It
-        # does not reuse CoreRuntime._validate_process(), because that validator
-        # is the protected Project/checks boundary and deliberately rejects
-        # shells, Git, authentication and publishing. The Full switch is the
-        # explicit user grant that removes those command-class restrictions.
-        #
-        # Popen still receives argv with shell=False, so an argv call is executed
-        # exactly as supplied. A shell is available by explicitly invoking one
-        # (cmd /c, powershell -Command, bash -lc, ...), which is important for
-        # real coding agents and makes the trust boundary unambiguous.
-        argv = list(raw_argv)
-        if not argv or len(argv) > 100 or not all(isinstance(item, str) for item in argv):
-            raise InvalidCommand("dev.command argv must contain 1-100 strings")
-        if any("\x00" in item or len(item) > 10_000 for item in argv):
-            raise InvalidCommand("dev.command argv contains an invalid value")
+        # Full developer access broadens the local development surface; it does
+        # not remove KaroX's global no-push/no-publish/no-auth/no-deploy
+        # invariants. Keep one shared guard with durable command jobs so a long
+        # command cannot gain powers that the synchronous path would refuse.
+        try:
+            argv = list(validate_developer_command_argv(raw_argv))
+        except DeveloperCommandBlocked as exc:
+            raise InvalidCommand(str(exc)) from exc
 
         raw_timeout = arguments.get("timeout_seconds", deadline_seconds)
         if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):

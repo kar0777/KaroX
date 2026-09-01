@@ -64,6 +64,7 @@ EVENT_TYPES = frozenset({
     "ToolCallFailed",
     "AgentStepStarted",
     "AgentStepCompleted",
+    "ReasoningSummaryDelta",
     "AgentPhaseChanged",
     "AgentWarning",
     "AgentErrorEvent",

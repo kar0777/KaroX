@@ -48,6 +48,9 @@ dependencies = [
   "starlette>=0.37,<2.0",
   # Process ownership, PID-reuse protection, and managed-service identity checks.
   "psutil>=5.9,<8.0",
+  # Native desktop screenshots encode the HWND-scoped PrintWindow bitmap with
+  # Pillow; declare it explicitly instead of relying on a transitive install.
+  "Pillow>=11.2,<13.0",
   # tomllib is standard from 3.11; the declared 3.10 floor needs the backport.
   "tomli>=2.0,<3.0; python_version < '3.11'",
 ]

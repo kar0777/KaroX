@@ -18,6 +18,7 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
         {
             Capability.REPO_READ,
             Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
             # Browser read is non-mutating observation of a localhost UI
             # (snapshot/screenshot/console/network) -- the same tier as
             # repo.read.  The TUI exposes it through its own checkbox, and the
@@ -30,6 +31,7 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
         {
             Capability.REPO_READ,
             Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
             Capability.BROWSER_READ,
             Capability.BROWSER_INPUT,
             Capability.NETWORK,
@@ -39,9 +41,11 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
         {
             Capability.REPO_READ,
             Capability.REPO_WRITE,
+            Capability.DISK_READ,
             Capability.PROCESS_RUN,
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
             Capability.MCP_CALL,
             # Browser read is reachable from read-only; browser *input*
             # (open/click/fill/select/press/close) drives a localhost UI and
@@ -55,10 +59,12 @@ _PROFILE_CAPABILITIES: Mapping[AccessProfile, FrozenSet[Capability]] = {
         {
             Capability.REPO_READ,
             Capability.REPO_WRITE,
+            Capability.DISK_READ,
             Capability.PROCESS_RUN,
             Capability.DEV_COMMAND,
             Capability.CHECKS_RUN,
             Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
             Capability.GIT_COMMIT,
             Capability.BROWSER_READ,
             Capability.BROWSER_INPUT,

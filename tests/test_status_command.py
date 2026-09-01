@@ -1,10 +1,4 @@
-"""/status and /effort are first-class, visible, and bilingual.
-
-The command catalogs are the routing contract: a command that routes but is
-missing from a catalog cannot drift into one language only, and the visible
-menu must stay a subset of the catalog heads (the existing _commands filter
-guarantees the rendering; these tests guarantee the data).
-"""
+"""/status and /effort stay visible and bilingual in the daily command surface."""
 
 from karox import tui as karox_tui
 
@@ -17,7 +11,7 @@ def test_status_and_effort_are_cataloged_in_both_languages():
         assert karox_tui._COMMANDS_RU[name].strip()
 
 
-def test_status_and_effort_are_visible_menu_entries():
+def test_status_and_effort_are_visible_daily_controls():
     assert "/effort" in karox_tui.VISIBLE_COMMANDS
     assert "/status" in karox_tui.VISIBLE_COMMANDS
     for language in ("en", "ru"):

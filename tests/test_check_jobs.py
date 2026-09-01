@@ -26,6 +26,7 @@ from karox.check_jobs import (
     CheckJobState,
     CheckJobStore,
     build_job_argv,
+    effective_job_status,
 )
 from karox.core import CoreRuntime
 from karox.hosted_tools_runtime import (
@@ -128,6 +129,20 @@ class CheckJobStoreTests(unittest.TestCase):
             log_truncated=False,
         )
 
+    def test_effective_status_drops_dead_worker_from_running_state(self) -> None:
+        state = replace(
+            self._state(),
+            status="running",
+            started_at=time.time(),
+            worker_identity=capture_process_identity(os.getpid()),
+        )
+        status, error_code = effective_job_status(
+            state,
+            pid_alive=lambda _pid: False,
+        )
+        self.assertEqual(status, "failed")
+        self.assertEqual(error_code, "worker_exited_without_final_state")
+
     def test_checksum_mismatch_is_fail_safe(self) -> None:
         state = self._state()
         self.store.put(state)
@@ -143,6 +158,21 @@ class CheckJobStoreTests(unittest.TestCase):
         self.store.state_path(state.job_id).write_text("{", encoding="utf-8")
         with self.assertRaisesRegex(CheckJobError, "unreadable"):
             self.store.get(state.job_id)
+
+    def test_job_scope_sidecar_round_trips_without_changing_state_schema(self) -> None:
+        state = self._state()
+        self.store.put(state)
+        self.store.put_scope(
+            state.job_id,
+            workstream_id="frontend",
+            project_id="project-a",
+        )
+        self.assertEqual(
+            self.store.get_scope(state.job_id),
+            {"workstream_id": "frontend", "project_id": "project-a"},
+        )
+        self.assertEqual(self.store.get(state.job_id).schema_version, 1)
+        self.assertTrue(self.store.scope_path(state.job_id).is_file())
 
     def test_state_read_retries_transient_sharing_error(self) -> None:
         state = self._state()
@@ -569,6 +599,7 @@ class CheckJobRuntimeSurfaceTests(unittest.TestCase):
 
     def test_start_passes_mcp_idempotency_key_to_manager(self) -> None:
         fake = mock.Mock()
+        fake.store = self.runtime._check_jobs.store
         fake.start.return_value = {"job_id": "job-" + "a" * 20, "status": "running"}
         self.runtime._check_jobs = fake
         result = self.runtime.execute(

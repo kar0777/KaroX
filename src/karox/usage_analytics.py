@@ -77,6 +77,12 @@ def usage_event_from_response(
         "total_tokens": total_tokens,
         "cache_read_tokens": _usage_count(usage, "cache_read_tokens"),
         "cache_write_tokens": _usage_count(usage, "cache_write_tokens"),
+        # Zero is meaningful only when the provider actually emitted a cache
+        # counter. Keep that provenance beside the event so compact UI can
+        # render `cache 0` (measured) separately from `cache —` (unavailable).
+        "cache_metrics_reported": any(
+            name in usage for name in ("cache_read_tokens", "cache_write_tokens")
+        ),
         "reasoning_tokens": _usage_count(usage, "reasoning_tokens"),
         "transport_attempts": max(1, int(response.transport_attempts)),
         "route_retries": _route_retries(response),

@@ -73,6 +73,21 @@ class TaskStateTests(unittest.TestCase):
         self.assertEqual(second.facts["branch"].value, "feat/new")
         self.assertEqual(second.facts["objective"].value, "Implement persistent task state")
 
+    def test_bootstrap_semantic_noop_does_not_advance_revision(self) -> None:
+        first = self.store.bootstrap("session-a", self._baseline())
+        second = self.store.bootstrap("session-a", self._baseline())
+        self.assertEqual(second.task_id, first.task_id)
+        self.assertEqual(second.revision, first.revision)
+        self.assertEqual(second.updated_at, first.updated_at)
+
+    def test_bootstrap_value_change_still_advances_revision(self) -> None:
+        first = self.store.bootstrap("session-a", self._baseline())
+        changed = self._baseline()
+        changed["branch"] = fact("feat/changed", FactOrigin.OBSERVED, "git.branch")
+        second = self.store.bootstrap("session-a", changed)
+        self.assertEqual(second.revision, first.revision + 1)
+        self.assertEqual(second.facts["branch"].value, "feat/changed")
+
     def test_checkpoint_is_atomic_and_revision_guarded(self) -> None:
         initial = self.store.bootstrap("session-a", self._baseline())
         current = self.store.checkpoint(
@@ -164,6 +179,18 @@ class TaskStateTests(unittest.TestCase):
         self.assertEqual(self.store.list_workstreams("session-a"), ("backend", "frontend"))
         self.assertTrue(self.store.path("session-a", "frontend").is_file())
         self.assertTrue(self.store.path("session-a").is_file())
+
+    def test_explicit_default_workstream_is_alias_for_legacy_default(self) -> None:
+        default = self.store.bootstrap("session-a", self._baseline())
+        echoed = self.store.bootstrap(
+            "session-a",
+            self._baseline(),
+            workstream_id="default",
+        )
+
+        self.assertEqual(self.store.path("session-a", "default"), self.store.path("session-a"))
+        self.assertEqual(echoed.task_id, default.task_id)
+        self.assertEqual(self.store.list_workstreams("session-a"), ())
 
     def test_workstream_checkpoint_does_not_advance_a_sibling_revision(self) -> None:
         first = self.store.bootstrap(

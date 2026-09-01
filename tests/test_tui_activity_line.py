@@ -60,10 +60,10 @@ class ActivityVocabularyTests(unittest.TestCase):
 
     def test_reading_editing_and_testing_get_human_names(self) -> None:
         expected = {
-            tui.ACTIVITY_READING: ("Reading code", "Читает код"),
-            tui.ACTIVITY_SEARCHING: ("Finding the cause", "Ищет причину ошибки"),
-            tui.ACTIVITY_EDITING: ("Updating code", "Изменяет код"),
-            tui.ACTIVITY_TESTING: ("Running tests", "Проверяет тесты"),
+            tui.ACTIVITY_READING: ("Reading code", "Просматриваю код"),
+            tui.ACTIVITY_SEARCHING: ("Finding the relevant code", "Ищу нужное место"),
+            tui.ACTIVITY_EDITING: ("Updating code", "Вношу изменения"),
+            tui.ACTIVITY_TESTING: ("Running checks", "Запускаю проверки"),
         }
         for kind, (english, russian) in expected.items():
             with self.subTest(kind=kind):
@@ -112,7 +112,7 @@ class ActivityDetailTests(unittest.TestCase):
     def test_changed_files_are_shown_when_there_are_any(self) -> None:
         action = tui.ActivityAction(kind=tui.ACTIVITY_EDITING, files=2)
         self.assertEqual(line(action, True), "Updating code · 2 files")
-        self.assertEqual(line(action, False), "Изменяет код · 2 файла")
+        self.assertEqual(line(action, False), "Вношу изменения · 2 файла")
 
     def test_no_changed_files_leaves_no_stray_separator(self) -> None:
         for files in (None, 0):
@@ -131,14 +131,14 @@ class ActivityDetailTests(unittest.TestCase):
 
     def test_elapsed_is_shown_when_there_is_any(self) -> None:
         action = tui.ActivityAction(kind=tui.ACTIVITY_TESTING, elapsed_seconds=28.4)
-        self.assertEqual(line(action, True), "Running tests · 28s")
-        self.assertEqual(line(action, False), "Проверяет тесты · 28 с")
+        self.assertEqual(line(action, True), "Running checks · 28s")
+        self.assertEqual(line(action, False), "Запускаю проверки · 28 с")
 
     def test_a_sub_second_action_shows_no_number(self) -> None:
         """Below a second the figure is the poll interval, not the agent's work."""
 
         action = tui.ActivityAction(kind=tui.ACTIVITY_TESTING, elapsed_seconds=0.3)
-        self.assertEqual(line(action, True), "Running tests")
+        self.assertEqual(line(action, True), "Running checks")
 
     def test_completion_becomes_a_short_summary(self) -> None:
         action = tui.ActivityAction(
@@ -164,12 +164,12 @@ class ActivityDetailTests(unittest.TestCase):
     def test_waiting_for_confirmation_is_visible(self) -> None:
         action = tui.ActivityAction(kind=tui.ACTIVITY_WAITING)
         self.assertEqual(line(action, True), "Waiting for confirmation")
-        self.assertEqual(line(action, False), "Ожидает подтверждения")
+        self.assertEqual(line(action, False), "Жду подтверждения")
 
     def test_a_failure_points_at_the_technical_history(self) -> None:
         action = tui.ActivityAction(kind=tui.ACTIVITY_FAILED)
-        self.assertEqual(line(action, True), "Check failed · open details")
-        self.assertEqual(line(action, False), "Ошибка проверки · открыть подробности")
+        self.assertEqual(line(action, True), "Check failed · /sessions — details")
+        self.assertEqual(line(action, False), "Проверка не прошла · /sessions — детали")
 
 
 class ActivityFailSoftTests(unittest.TestCase):
@@ -258,7 +258,7 @@ class ActivityShapeTests(unittest.TestCase):
         )
         lines = tui._activity_lines(action, True)
         self.assertEqual(len(lines), 2)
-        self.assertEqual(lines[0], "Check failed · open details")
+        self.assertEqual(lines[0], "Check failed · /sessions — details")
         self.assertEqual(lines[1], "a contradictory result")
         self.assertLessEqual(len(lines), tui.ACTIVITY_MAX_LINES)
 
@@ -336,9 +336,9 @@ class ActivityWidgetTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(app.query("#activity")), 1)
                 rendered = str(app.query_one("#activity", tui.Static).render())
                 self.assertEqual(rendered.count("\n"), 0)
-                self.assertIn("Running tests", rendered)
-                self.assertNotIn("Reading code", rendered)
-                self.assertNotIn("Updating code", rendered)
+                self.assertIn("Running checks", rendered)
+                self.assertNotIn("Exploring project", rendered)
+                self.assertNotIn("Updating code", rendered.replace("Running checks", ""))
                 for forbidden in FORBIDDEN:
                     self.assertNotIn(forbidden, rendered)
 
@@ -442,7 +442,7 @@ class ActivityWidgetTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 rendered = str(app.query_one("#activity", tui.Static).render())
-                self.assertEqual(rendered, "Done · 2 files")
+                self.assertEqual(rendered, "› Done · 2 files")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation

@@ -82,10 +82,11 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             screen = await self._screen(pilot, app, self.known_preset())
 
-            # What a person must supply is on screen ...
+            # What a person must supply is on screen: key + one obvious Connect action.
             self.assertTrue(_visible(screen, "#provider-key"))
             self.assertTrue(_visible(screen, "#provider-discover"))
-            self.assertTrue(_visible(screen, "#provider-save"))
+            self.assertFalse(_visible(screen, "#provider-save"))
+            self.assertIn("Connect", str(screen.query_one("#provider-discover", tui.Button).label))
             # ... and what the preset already knows is not.
             self.assertFalse(_visible(screen, "#provider-url"))
             self.assertFalse(_visible(screen, "#provider-id"))
@@ -259,7 +260,8 @@ class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             screen = await self._screen(pilot, app, self.known_preset())
             self.assertTrue(_visible(screen, "#provider-key"))
-            self.assertTrue(_visible(screen, "#provider-save"))
+            self.assertTrue(_visible(screen, "#provider-discover"))
+            self.assertFalse(_visible(screen, "#provider-save"))
             dialog = screen.query_one("#provider-dialog")
             # Width is the property B2 fixed: a fixed 82 columns overflowed a
             # 46-column terminal. Height was already handled by the percentage

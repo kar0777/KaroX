@@ -16,6 +16,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 from urllib.parse import urlsplit
@@ -47,7 +48,7 @@ from .tailscale import (
 )
 from .paths import runtime_dir, session_dir
 from .project_registry import ProjectRegistry, ProjectRegistryError
-from .proxy_server import ALLOWED_HOSTS_ENVIRONMENT
+from .proxy_server import ALLOWED_HOSTS_ENVIRONMENT, wire_tool_name
 from .sessions import SessionError, SessionStore
 
 
@@ -111,6 +112,16 @@ DEFAULT_WEB_TOOLS = (
     "karox.task.resume",
     "karox.task.status",
     "karox.task.workstreams",
+    # ChatGPT Project continuity. bind writes only session-local binding metadata;
+    # resume is compact/read-only. Both are safe in the default hosted bundle.
+    "karox.chatgpt_project.bind",
+    "karox.chatgpt_project.resume",
+    # High-level multi-agent surfaces are intentionally small. Planning/status are
+    # read-only; actual worker launch/control stay in WRITE_WEB_TOOLS below.
+    "karox.intelligence.list",
+    "karox.orchestrate.recipes",
+    "karox.orchestrate.plan",
+    "karox.orchestrate.status",
     # Universal memory ships in the default bundle: cross-client memory only
     # works when every connected client can remember and recall. These tools
     # write local memory files only, never the repository.
@@ -146,6 +157,10 @@ WRITE_WEB_TOOLS = (
     "karox.repo.write_file",
     "karox.repo.command",
     "karox.tests.run",
+    # Real subagents are available only on write-capable hosted sessions. Start
+    # and control are process-state mutations; status stays read-only above.
+    "karox.orchestrate.start",
+    "karox.orchestrate.control",
     # Stateful browser and dev-server control. These drive a UI or start a
     # process, so legacy profiles still gate them behind --write. The explicit
     # external-browser mode uses the narrower browser_control access profile.
@@ -176,6 +191,8 @@ MUTATING_WEB_TOOLS: frozenset[str] = frozenset(
         *WRITE_WEB_TOOLS,
         "karox.checks.run",
         "karox.command.run",
+        "karox.command.start",
+        "karox.command.cancel",
         "karox.git.commit",
         "karox.runtime.restart",
     }
@@ -240,12 +257,44 @@ _REPOSITORY_WRITE_TOOL_NAMES = {
     "karox.repo.write_file",
 }
 
+# Durable ChatGPT bridges are expected to survive both KaroX upgrades and new
+# ChatGPT chats. Older saved profiles persisted a point-in-time explicit tool
+# list, which meant newly added continuity/autonomy tools stayed implemented but
+# invisible forever. These bundles deliberately contain only session-local or
+# read-only coordination tools, plus process control for profiles that already
+# have a workspace-write/elevated capability grant. They never add repository
+# write, browser input, network, publish, push, or credential capabilities.
+_DURABLE_CHATGPT_CONTINUITY_TOOLS = (
+    "karox.runtime.status",
+    "karox.task.bootstrap",
+    "karox.task.resume",
+    "karox.task.status",
+    "karox.task.workstreams",
+    "karox.chatgpt_project.bind",
+    "karox.chatgpt_project.resume",
+    "karox.intelligence.list",
+    "karox.orchestrate.recipes",
+    "karox.orchestrate.plan",
+    "karox.orchestrate.status",
+    "karox.memory.remember",
+    "karox.memory.recall",
+    "karox.memory.context",
+    "karox.memory.list",
+    "karox.memory.forget",
+)
+_DURABLE_CHATGPT_WRITE_AUTONOMY_TOOLS = (
+    "karox.orchestrate.start",
+    "karox.orchestrate.control",
+)
+
 
 def _include_stable_worker_commands(
     tools: tuple[str, ...],
     *,
     access_profile: AccessProfile,
     verification_commands: tuple[tuple[str, ...], ...],
+    target_profile: Optional[str] = None,
+    saved_profile_name: Optional[str] = None,
 ) -> tuple[str, ...]:
     """Merge stable worker commands implied by an already-selected tool family."""
     ordered = list(tools)
@@ -265,6 +314,10 @@ def _include_stable_worker_commands(
         # user already enabled instead of silently exposing a crippled subset.
         if access_profile == AccessProfile.ELEVATED:
             include("karox.command.run")
+            include("karox.command.start")
+            include("karox.command.status")
+            include("karox.command.logs")
+            include("karox.command.cancel")
             include("karox.git.commit")
         # Supplying a verification allowlist is the explicit approval needed by
         # checks.run. Hiding the tool after accepting that allowlist produced a
@@ -278,6 +331,26 @@ def _include_stable_worker_commands(
             include("karox.checks.status")
             include("karox.checks.logs")
             include("karox.checks.cancel")
+
+    # A durable ChatGPT bridge is a product surface rather than a frozen raw
+    # MCP allowlist. Backfill the stable continuity contract even when an old
+    # saved profile supplied an explicit legacy --tool list. Ad-hoc launches
+    # and non-ChatGPT targets remain exact so intentionally narrow integrations
+    # are not widened. Start/control are added only when the profile already
+    # grants workspace process execution.
+    compatible_selected = selected.difference(
+        profile_incompatible_tools(tuple(selected), access_profile)
+    )
+    if (
+        saved_profile_name
+        and target_profile == "chatgpt-web"
+        and compatible_selected
+    ):
+        for name in _DURABLE_CHATGPT_CONTINUITY_TOOLS:
+            include(name)
+        if access_profile in _WORKSPACE_WRITE_PROFILES:
+            for name in _DURABLE_CHATGPT_WRITE_AUTONOMY_TOOLS:
+                include(name)
 
     browser_family = set(BROWSER_READ_TOOL_NAMES) | set(BROWSER_INPUT_TOOL_NAMES)
     if selected.intersection(browser_family):
@@ -497,6 +570,8 @@ class WebBridgeConnectConfig:
                 tuple(self.tools),
                 access_profile=self.access_profile,
                 verification_commands=tuple(self.verification_commands),
+                target_profile=self.profile,
+                saved_profile_name=self.saved_profile_name,
             ),
         )
         if (
@@ -1669,6 +1744,63 @@ def _port_is_available(port: int) -> bool:
     return True
 
 
+@lru_cache(maxsize=256)
+def _windows_parent_pid(pid: int) -> Optional[int]:
+    """Return a Windows process parent without requiring optional psutil.
+
+    The launcher venv intentionally keeps dependencies small.  A bridge
+    listener can nevertheless be a grandchild of the spawned process (for
+    example when the interpreter re-execs itself), so comparing only the
+    listener PID incorrectly rejects a healthy child.  Cache the bounded CIM
+    lookup because readiness polls run frequently while the port is opening.
+    """
+    if os.name != "nt" or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "$p=Get-CimInstance Win32_Process -Filter "
+                    f"'ProcessId = {pid}'; "
+                    "if($null -ne $p){[Console]::Write($p.ParentProcessId)}"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="ascii",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=2.0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+        value = completed.stdout.strip()
+        return int(value) if value.isdigit() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _windows_pid_descends_from(holder_pid: int, root_pid: int) -> Optional[bool]:
+    """Prove a listener PID is the spawned process or one of its descendants."""
+    seen: set[int] = set()
+    current = holder_pid
+    for _ in range(32):
+        if current == root_pid:
+            return True
+        if current <= 0 or current in seen:
+            return False
+        seen.add(current)
+        parent = _windows_parent_pid(current)
+        if parent is None:
+            return None
+        current = parent
+    return False
+
+
 def _listener_belongs_to_process_tree(port: int, root_pid: int) -> Optional[bool]:
     """Best-effort proof that the local listener belongs to ``root_pid``.
 
@@ -1680,6 +1812,39 @@ def _listener_belongs_to_process_tree(port: int, root_pid: int) -> Optional[bool
     try:
         import psutil  # type: ignore[import-untyped]
     except ImportError:
+        # psutil is optional in the runtime venv. On Windows, netstat is a
+        # dependency-free fallback that still gives us the critical ownership
+        # proof: uvicorn binds in the bridge child itself, so a different PID is
+        # definitively a stale/foreign listener. Unknown output remains None and
+        # is handled conservatively by callers that need stronger proof.
+        if os.name != "nt":
+            return None
+        try:
+            completed = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                encoding="ascii",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=2.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        wanted = f":{int(port)}"
+        for line in completed.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 5 or fields[0].upper() != "TCP":
+                continue
+            if fields[3].upper() != "LISTENING" or not fields[1].endswith(wanted):
+                continue
+            try:
+                holder_pid = int(fields[4])
+            except ValueError:
+                return None
+            return _windows_pid_descends_from(holder_pid, root_pid)
         return None
     try:
         holder_pid: Optional[int] = None
@@ -1717,11 +1882,18 @@ def _wait_for_local_port_release(
     return _port_is_available(port)
 
 
+# A fresh Python child on Windows may spend several seconds importing the
+# browser/runtime surface before uvicorn can bind. This is a bounded startup
+# budget, not a readiness claim: acceptance still requires the child's own
+# lifespan canary and a reachable listener.
+_BRIDGE_STARTUP_TIMEOUT_SECONDS = 45.0
+
+
 def _wait_for_bridge(
     process: subprocess.Popen[str],
     port: int,
     *,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = _BRIDGE_STARTUP_TIMEOUT_SECONDS,
     output: Optional[MirroredChildOutput] = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
@@ -1888,16 +2060,33 @@ def _stop_request_path(session_id: str) -> Path:
     return watchdog_dir() / f"{session_id}.stop.json"
 
 
-def _write_stop_request(session_id: str, owner_pid: int) -> Path:
-    """Ask the saved-bridge supervisor to exit through its own finally-block."""
+def _write_stop_request(
+    session_id: str,
+    owner_pid: int,
+    *,
+    intent: str = "stop",
+) -> Path:
+    """Ask the exact saved-bridge owner to stop or hand off for restart.
 
+    ``stop`` is final user intent and disables recovery. ``restart`` is a
+    lifecycle hand-off: the owner exits but the durable desired-running state
+    stays armed so the sibling supervisor can recover the endpoint even if the
+    caller disappears between shutdown and relaunch.
+    """
+
+    if intent not in {"stop", "restart"}:
+        raise ValueError("saved bridge stop request intent must be stop or restart")
     root = watchdog_dir()
     root.mkdir(parents=True, exist_ok=True)
     path = _stop_request_path(session_id)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         json.dumps(
-            {"owner_pid": owner_pid, "requested_at": time.time()},
+            {
+                "owner_pid": owner_pid,
+                "requested_at": time.time(),
+                "intent": intent,
+            },
             ensure_ascii=False,
             sort_keys=True,
         ),
@@ -1907,12 +2096,17 @@ def _write_stop_request(session_id: str, owner_pid: int) -> Path:
     return path
 
 
-def _consume_stop_request(session_id: str, owner_pid: int) -> bool:
-    """Consume only a stop request addressed to this exact supervisor PID."""
+def _consume_stop_request(session_id: str, owner_pid: int) -> Optional[str]:
+    """Consume an addressed request and return ``stop`` or ``restart``.
+
+    Request-v1 files from older KaroX builds have no ``intent`` field. They are
+    deliberately interpreted as ``stop`` so an old or malformed request can
+    never silently widen itself into a self-restarting lifecycle action.
+    """
 
     path = _stop_request_path(session_id)
     if not path.exists():
-        return False
+        return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1920,8 +2114,8 @@ def _consume_stop_request(session_id: str, owner_pid: int) -> bool:
     addressed = isinstance(raw, dict) and raw.get("owner_pid") == owner_pid
     if not addressed:
         # Multiple owners should never exist, but older builds could race two
-        # saved-bridge launchers. A stop request is addressed to one exact owner;
-        # a different owner must not steal/delete it before the target sees it.
+        # saved-bridge launchers. A request is addressed to one exact owner; a
+        # different owner must not steal/delete it before the target sees it.
         # Malformed requests are the only safe exception because nobody can ever
         # consume them successfully.
         if raw is None:
@@ -1929,12 +2123,14 @@ def _consume_stop_request(session_id: str, owner_pid: int) -> bool:
                 path.unlink()
             except OSError:
                 pass
-        return False
+        return None
+    raw_intent = raw.get("intent") if isinstance(raw, dict) else None
+    intent = raw_intent if raw_intent in {"stop", "restart"} else "stop"
     try:
         path.unlink()
     except OSError:
         pass
-    return True
+    return intent
 
 
 def _current_process_is_descendant_of(ancestor_pid: int) -> Optional[bool]:
@@ -1968,14 +2164,21 @@ def _current_process_is_descendant_of(ancestor_pid: int) -> Optional[bool]:
         return None
 
 
-def _watchdog_supports_stop_request(path_value: Optional[str]) -> bool:
+def _watchdog_stop_protocol(path_value: Optional[str]) -> Optional[str]:
     if not path_value:
-        return False
+        return None
     try:
         raw = json.loads(Path(path_value).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
-    return isinstance(raw, dict) and raw.get("stop_protocol") == "request-v1"
+        return None
+    if not isinstance(raw, dict):
+        return None
+    protocol = raw.get("stop_protocol")
+    return protocol if protocol in {"request-v1", "request-v2"} else None
+
+
+def _watchdog_supports_stop_request(path_value: Optional[str]) -> bool:
+    return _watchdog_stop_protocol(path_value) is not None
 
 
 # How long the port may take to come back after the orphaned listener exits.
@@ -3385,6 +3588,10 @@ def web_bridge_diagnostics(
         practical_output_size_limit=4 * 1024 * 1024,
         persistent_session=bool(config.saved_profile_name),
     )
+    try:
+        from . import __version__ as runtime_version
+    except Exception:
+        runtime_version = "unknown"
     return {
         "schema_version": 1,
         "saved_profile": config.saved_profile_name,
@@ -3396,6 +3603,11 @@ def web_bridge_diagnostics(
         "repository_exists": repo_exists,
         "repository_is_dir": repo_is_dir,
         "runtime_cwd": os.getcwd(),
+        "runtime_build": {
+            "version": str(runtime_version),
+            "commit": os.environ.get("KAROX_BUILD_COMMIT") or None,
+        },
+        "ports": {"mcp_loopback": config.port},
         "executable_resolution": executable_resolution,
         "access_profile": config.access_profile.value,
         "write_permission": config.access_profile in {
@@ -3420,7 +3632,21 @@ def web_bridge_diagnostics(
                 for group, names in catalog_groups(config.tools).items()
             },
             "permission_toggle_changes_tool_catalog": config.profile != "hyperagent-web",
+            # HyperAgent keeps one fully stable catalogue. ChatGPT cannot refresh a
+            # cached MCP schema in-place, but the old high-value tool names now
+            # deliberately remain useful: long command.run calls detach into a
+            # durable worker, task state self-heals, and browser.command is a
+            # stable action envelope. Be explicit about this partial compatibility
+            # instead of reporting a misleading all-or-nothing False.
             "legacy_cached_catalog_compatible": config.profile == "hyperagent-web",
+            "legacy_cached_catalog_mode": (
+                "full"
+                if config.profile == "hyperagent-web"
+                else "compatibility_fallbacks"
+                if config.profile == "chatgpt-web"
+                else "reconnect_required"
+            ),
+            "catalog_refresh_required_for_new_tool_names": config.profile != "hyperagent-web",
             "legacy_fallbacks": (
                 {
                     "repo.search": "task.execute_plan action=search",
@@ -3434,6 +3660,18 @@ def web_bridge_diagnostics(
                     "tests.run": "project-aware: pytest for Python, package test script for Node/Vite",
                 }
                 if config.profile == "hyperagent-web"
+                else {
+                    "command.run": (
+                        "long commands detach into a durable worker; repeating the same "
+                        "legacy call reconciles the same job instead of duplicating it"
+                    ),
+                    "task.status": "missing task metadata is rebuilt from verified session/project facts",
+                    "task.resume": "missing task metadata self-heals and stale repository facts are refreshed",
+                    "task.bootstrap": "saved workstream objective and project binding survive reconnect hints",
+                    "task.workstreams": "large sessions return bounded recent workstream summaries",
+                    "browser.command": "stable action envelope can add guarded actions without changing its schema",
+                }
+                if config.profile == "chatgpt-web"
                 else {}
             ),
         },
@@ -3506,21 +3744,14 @@ def web_bridge_diagnostics(
         "deadline_advisory": advisory,
         "mode_restrictions": {
             "read_only": config.access_profile == AccessProfile.READ_ONLY,
-            # Hyperagent Full is a trusted unrestricted developer command grant.
-            # Protected profiles keep the legacy hard stops; Full/Elevated with
-            # karox.command.run intentionally permits push/publish/auth/deploy.
-            "no_git_push": not (
-                config.access_profile == AccessProfile.ELEVATED
-                and "karox.command.run" in config.tools
-            ),
-            "no_publish": not (
-                config.access_profile == AccessProfile.ELEVATED
-                and "karox.command.run" in config.tools
-            ),
-            "no_auth_commands": not (
-                config.access_profile == AccessProfile.ELEVATED
-                and "karox.command.run" in config.tools
-            ),
+            # These are product invariants, not permission-profile toggles.
+            # Elevated/Full broadens guarded *local* developer execution only;
+            # it never authorizes remote Git push, publishing, authentication,
+            # deployment or release actions.
+            "no_git_push": True,
+            "no_publish": True,
+            "no_auth_commands": True,
+            "no_deploy_release": True,
         },
         "tunnel": config.tunnel,
         "url_stability": stability,
@@ -3630,7 +3861,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             "saved_profile": config.saved_profile_name,
             "repository": str(repository),
             "persistent_session": persistent_session,
-            "stop_protocol": "request-v1",
+            "stop_protocol": "request-v2",
             "port": config.port,
             "public_url": public_url,
             "tunnel": config.tunnel,
@@ -3646,6 +3877,10 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 else "owned_child"
             ),
             "bridge_pid": None,
+            # A PID alone is not readiness. The child flips this after its
+            # lifespan canary has completed and the listener is reachable.
+            "bridge_ready": False,
+            "readiness_state": "STARTING",
         }
         # `watchdog` is what the cleanup below deletes, so it is assigned only
         # once the claim succeeded: this process must never remove a record it
@@ -3806,6 +4041,9 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                     "and will be repaired independently.",
                     flush=True,
                 )
+        watchdog_record["bridge_ready"] = True
+        watchdog_record["readiness_state"] = "READY"
+        publish()
         bridge_ready = True
 
         # Durable saved bridges get a credential-free sibling supervisor. The
@@ -3893,8 +4131,16 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             )
 
         while True:
-            if _consume_stop_request(session_id, os.getpid()):
-                if persistent_session and config.saved_profile_name:
+            stop_intent = _consume_stop_request(session_id, os.getpid())
+            if stop_intent:
+                exit_reason = (
+                    "restart_requested" if stop_intent == "restart" else "stop_requested"
+                )
+                if (
+                    persistent_session
+                    and config.saved_profile_name
+                    and stop_intent != "restart"
+                ):
                     try:
                         from .saved_bridge_supervisor import set_saved_bridge_desired_running
 
@@ -3907,7 +4153,10 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                         # A state-write failure is still surfaced indirectly by a
                         # supervisor restart, but must not trap the owner forever.
                         pass
-                print("KaroX saved bridge stop requested; shutting down cleanly...", flush=True)
+                print(
+                    f"KaroX saved bridge {stop_intent} requested; shutting down cleanly...",
+                    flush=True,
+                )
                 return 0
 
             loop_now = time.monotonic()
@@ -3950,6 +4199,8 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 watchdog_record["last_bridge_exit_code"] = bridge_code
                 watchdog_record["last_bridge_exit_detail"] = detail.lstrip(": ")[:1000]
                 watchdog_record["bridge_pid"] = None
+                watchdog_record["bridge_ready"] = False
+                watchdog_record["readiness_state"] = "RECONNECTING"
                 watchdog_record["bridge_recoveries"] = bridge_recovery_count
                 watchdog_record["last_bridge_recovery_at"] = time.time()
                 publish()
@@ -3970,8 +4221,13 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 try:
                     bridge, bridge_output = spawn_bridge_child()
                     watchdog_record["bridge_pid"] = _pid_of(bridge)
+                    watchdog_record["bridge_ready"] = False
+                    watchdog_record["readiness_state"] = "STARTING"
                     publish()
                     _wait_for_bridge(bridge, config.port, output=bridge_output)
+                    watchdog_record["bridge_ready"] = True
+                    watchdog_record["readiness_state"] = "READY"
+                    publish()
                 except WebBridgeLaunchError as exc:
                     # A failed *replacement* is a recoverable condition, not a
                     # reason to end the durable session. Ending it here dropped
@@ -4324,6 +4580,8 @@ def _verify_bridge_endpoint(
       * ``auth_initialized``: True if an authenticated MCP initialize succeeded.
       * ``tools_list_ok``: True if an authenticated tools/list succeeded.
       * ``tool_count``: number of tools discovered (0 if tools/list failed).
+      * ``first_tool_call_ok``: True only when the advertised diagnostics tool
+        succeeds immediately after discovery on the same MCP session.
     Never returns the secret, Authorization header, or tool arguments.
     """
     import httpx
@@ -4336,6 +4594,9 @@ def _verify_bridge_endpoint(
         "auth_initialized": False,
         "tools_list_ok": False,
         "tool_count": 0,
+        "first_tool_call_ok": False,
+        "first_tool_name": wire_tool_name("karox.bridge.diagnostics"),
+        "probe_failure_class": None,
         "endpoint": endpoint,
     }
 
@@ -4357,7 +4618,7 @@ def _verify_bridge_endpoint(
         from .mcp_client import streamable_http_transport
         import anyio
 
-        async def _run() -> list[Any]:
+        async def _run() -> None:
             with anyio.fail_after(timeout_seconds):
                 async with streamable_http_transport(
                     endpoint,
@@ -4371,16 +4632,30 @@ def _verify_bridge_endpoint(
                         read_timeout_seconds=timedelta(seconds=timeout_seconds),
                     ) as session:
                         await session.initialize()
+                        result["auth_initialized"] = True
                         response = await session.list_tools()
-                        return list(response.tools)
+                        tools = list(response.tools)
+                        result["tools_list_ok"] = True
+                        result["tool_count"] = len(tools)
+                        canary = str(result["first_tool_name"])
+                        if canary not in {tool.name for tool in tools}:
+                            result["probe_failure_class"] = "CanaryToolNotAdvertised"
+                            return
+                        call = await session.call_tool(canary, {})
+                        if bool(getattr(call, "isError", False)):
+                            result["probe_failure_class"] = "CanaryToolReturnedError"
+                            return
+                        payload = getattr(call, "structuredContent", None)
+                        if not isinstance(payload, dict) or not payload:
+                            result["probe_failure_class"] = "CanaryPayloadInvalid"
+                            return
+                        result["first_tool_call_ok"] = True
 
-        tools = anyio.run(_run)
-        result["auth_initialized"] = True
-        result["tools_list_ok"] = True
-        result["tool_count"] = len(tools)
-    except Exception:
-        # Classification is the caller's job; this helper just reports booleans.
-        pass
+        anyio.run(_run)
+    except Exception as exc:
+        # Keep error output content-free: exception messages can contain paths,
+        # URLs, or upstream credential-backend details.
+        result["probe_failure_class"] = type(exc).__name__
 
     return result
 
@@ -4389,6 +4664,7 @@ def start_saved_bridge(
     profile_name: str,
     *,
     timeout_seconds: float = 120.0,
+    allow_legacy_migration: bool = False,
 ) -> dict[str, Any]:
     """Start or repair the production persistent bridge for a saved profile.
 
@@ -4513,6 +4789,9 @@ def start_saved_bridge(
                     "auth_initialized": False,
                     "tools_list_ok": False,
                     "tool_count": 0,
+                    "first_tool_call_ok": False,
+                    "first_tool_name": wire_tool_name("karox.bridge.diagnostics"),
+                    "probe_failure_class": "CredentialUnavailable",
                     "endpoint": web_bridge_mcp_endpoint(public_url, profile.target_profile),
                 }
             return {
@@ -4532,10 +4811,14 @@ def start_saved_bridge(
                 "auth_initialized": verification.get("auth_initialized", False),
                 "tools_list_ok": verification.get("tools_list_ok", False),
                 "tool_count": verification.get("tool_count", 0),
+                "first_tool_call_ok": verification.get("first_tool_call_ok", False),
+                "first_tool_name": verification.get("first_tool_name"),
+                "probe_failure_class": verification.get("probe_failure_class"),
                 "overall": _overall_status(
                     verification.get("auth_initialized", False),
                     verification.get("tools_list_ok", False),
                     verification.get("tool_count", 0),
+                    verification.get("first_tool_call_ok", False),
                 ),
                 "action": "reused",
                 "error": None,
@@ -4657,6 +4940,10 @@ def start_saved_bridge(
                     and public_url
                     and isinstance(owner_pid, int)
                     and _process_is_alive(owner_pid)
+                    # Records written by pre-readiness versions have no flag;
+                    # keep them verifiable for backwards compatibility while
+                    # requiring the explicit READY marker from new owners.
+                    and watchdog_record.get("bridge_ready", True) is True
                 ):
                     break
         # If the detached process died early, stop waiting. Read the owner exit
@@ -4797,10 +5084,14 @@ def start_saved_bridge(
         "auth_initialized": verification.get("auth_initialized", False),
         "tools_list_ok": verification.get("tools_list_ok", False),
         "tool_count": verification.get("tool_count", 0),
+        "first_tool_call_ok": verification.get("first_tool_call_ok", False),
+        "first_tool_name": verification.get("first_tool_name"),
+        "probe_failure_class": verification.get("probe_failure_class"),
         "overall": _overall_status(
             verification.get("auth_initialized", False),
             verification.get("tools_list_ok", False),
             verification.get("tool_count", 0),
+            verification.get("first_tool_call_ok", False),
         ),
         "action": "started",
         "error": None,
@@ -4811,9 +5102,10 @@ def _overall_status(
     auth_initialized: bool,
     tools_list_ok: bool,
     tool_count: int,
+    first_tool_call_ok: bool,
 ) -> str:
     """Compute the redacted overall status from verification booleans."""
-    if auth_initialized and tools_list_ok and tool_count > 0:
+    if auth_initialized and tools_list_ok and tool_count > 0 and first_tool_call_ok:
         return "ready_for_chatgpt_setup"
     if auth_initialized:
         return "waiting_for_chatgpt"
@@ -4869,13 +5161,13 @@ def restart_saved_bridge(
     timeout_seconds: float = 120.0,
     allow_legacy_migration: bool = False,
 ) -> dict[str, Any]:
-    """Safely restart one saved bridge without exposing CLI details to the user.
+    """Safely restart one saved bridge without a recovery dead zone.
 
-    The existing ownership-checked stop path runs first. KaroX then waits for the
-    local listener to disappear before using the canonical detached start path.
-    Credentials, OAuth grants, saved profile identity, and public hostname are
-    preserved. A foreign or still-live listener fails closed rather than being
-    terminated or replaced.
+    Restart first persists ``desired_running=true`` and proves a healthy detached
+    supervisor. Only then may the old owner receive restart intent. The supervisor
+    is allowed to win the relaunch race, while the canonical start call remains
+    idempotent. Credentials, OAuth grants, profile identity and public hostname
+    are preserved; if recovery cannot be armed, the live endpoint is left alone.
     """
     from .web_bridge_profiles import WebBridgeProfileError, WebBridgeProfileStore
 
@@ -4894,49 +5186,149 @@ def restart_saved_bridge(
             "error": f"cannot load saved profile: {type(exc).__name__}",
         }
 
+    # Restart is a durable desired-state transition, not Stop + best-effort Start.
+    # Arm the sibling supervisor *before* asking the current owner to leave. If
+    # this caller, its MCP request, or the public route disappears after shutdown,
+    # desired_running remains true and the supervisor restores the same profile.
+    previous_desired_running: Optional[bool] = None
+    try:
+        from .saved_bridge_supervisor import (
+            clear_saved_bridge_restart_migration,
+            ensure_saved_bridge_supervisor,
+            record_saved_bridge_restart_recovery,
+            saved_bridge_supervisor_status,
+            set_saved_bridge_desired_running,
+        )
+
+        previous_supervisor = saved_bridge_supervisor_status(profile_name)
+        previous_desired_running = bool(previous_supervisor.get("desired_running"))
+        set_saved_bridge_desired_running(profile_name, True)
+        supervisor_pid = ensure_saved_bridge_supervisor(
+            profile_name,
+            desired_running=True,
+        )
+        if supervisor_pid is None:
+            if not previous_desired_running:
+                try:
+                    set_saved_bridge_desired_running(profile_name, False)
+                except OSError:
+                    pass
+            return {
+                "saved_profile": profile_name,
+                "action": "error",
+                "phase": "supervisor",
+                "error": "restart recovery supervisor could not be armed; existing bridge was left untouched",
+            }
+        record_saved_bridge_restart_recovery(profile_name, phase="armed")
+    except Exception as exc:
+        if previous_desired_running is False:
+            try:
+                from .saved_bridge_supervisor import set_saved_bridge_desired_running
+
+                set_saved_bridge_desired_running(profile_name, False)
+            except Exception:
+                pass
+        return {
+            "saved_profile": profile_name,
+            "action": "error",
+            "phase": "supervisor",
+            "error": f"cannot arm restart recovery: {type(exc).__name__}"[:200],
+        }
+
     stopped = stop_saved_bridge(
         profile_name,
         allow_legacy_migration=allow_legacy_migration,
+        restart_intent=True,
     )
     if stopped.get("action") == "error":
+        restart_error = str(stopped.get("error") or "bridge stop failed")[:200]
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="failed",
+                owner_pid=stopped.get("pid"),
+                error=restart_error,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
         return {
             "saved_profile": profile_name,
             "action": "error",
             "phase": "stop",
-            "error": str(stopped.get("error") or "bridge stop failed")[:200],
+            "recovery_armed": True,
+            "supervisor_pid": supervisor_pid,
+            "error": restart_error,
         }
 
-    # taskkill/SIGTERM may return just before the TCP listener has completely
-    # disappeared. Do not let that tiny race turn the old owner into an
-    # "unrelated process" on the immediate start attempt.
-    release_deadline = time.monotonic() + min(max(timeout_seconds, 1.0), 15.0)
-    while not _port_is_available(profile.port):
-        if time.monotonic() >= release_deadline:
-            return {
-                "saved_profile": profile_name,
-                "action": "error",
-                "phase": "stop",
-                "port": profile.port,
-                "error": "owned bridge stopped but its local listener did not release in time",
-            }
-        time.sleep(0.1)
+    # A restart-intent stop waits for the *old owner PID* to exit, not for the
+    # port to become free. The armed supervisor is allowed to win the race and
+    # bind the port immediately; start_saved_bridge is idempotent and will then
+    # report/reuse that recovered owner instead of fighting it.
 
     try:
         _sync_saved_bridge_session_access_profile(profile_name, profile)
     except (OSError, SessionError, ValueError) as exc:
+        recovery_error = (
+            f"cannot update durable session access profile: {type(exc).__name__}: {exc}"
+        )[:200]
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="retrying",
+                owner_pid=stopped.get("pid"),
+                error=recovery_error,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
         return {
             "saved_profile": profile_name,
             "action": "error",
             "phase": "session_profile",
             "port": profile.port,
-            "error": f"cannot update durable session access profile: {type(exc).__name__}: {exc}"[:200],
+            "recovery_armed": True,
+            "supervisor_pid": supervisor_pid,
+            "error": recovery_error,
         }
 
     started = dict(start_saved_bridge(profile_name, timeout_seconds=timeout_seconds))
     if started.get("action") == "error":
+        recovery_error = str(started.get("error") or "saved bridge restart start failed")[:200]
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="retrying",
+                owner_pid=stopped.get("pid"),
+                error=recovery_error,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
         started["phase"] = "start"
+        started["recovery_armed"] = True
+        started["supervisor_pid"] = supervisor_pid
         return started
+    try:
+        record_saved_bridge_restart_recovery(
+            profile_name,
+            phase="recovered",
+            owner_pid=stopped.get("pid"),
+            new_owner_pid=started.get("owner_pid"),
+        )
+    except (OSError, ValueError, TypeError):
+        pass
+    stopped_pid = stopped.get("pid")
+    if isinstance(stopped_pid, int) and stopped_pid > 0:
+        try:
+            clear_saved_bridge_restart_migration(
+                profile_name,
+                owner_pid=stopped_pid,
+            )
+        except OSError:
+            # The marker is short-lived and the supervisor also clears it once a
+            # different proven owner is live, so cleanup failure is non-fatal.
+            pass
     started["action"] = "restarted"
+    started["recovery_armed"] = True
+    started["supervisor_pid"] = supervisor_pid
     return started
 
 
@@ -4944,6 +5336,7 @@ def stop_saved_bridge(
     profile_name: str,
     *,
     allow_legacy_migration: bool = False,
+    restart_intent: bool = False,
 ) -> dict[str, Any]:
     """Stop the owned bridge/tunnel for a saved profile.
 
@@ -4993,18 +5386,48 @@ def stop_saved_bridge(
 
     port = profile.port
 
-    # Persist the user's intent before touching the owner process. Otherwise a
-    # sibling supervisor could correctly observe the owner disappearing and
-    # immediately resurrect a bridge the user explicitly asked to stop.
+    # Stop and Restart have opposite durable intent. A user Stop must disarm
+    # recovery before touching the owner; a Restart must prove recovery was
+    # already armed by restart_saved_bridge before it is allowed to take the
+    # endpoint down. This removes the historical dead zone where Stop persisted
+    # desired_running=false and the subsequent Start could disappear with its
+    # caller, leaving no supervisor willing to recover the bridge.
     try:
-        from .saved_bridge_supervisor import set_saved_bridge_desired_running
+        from .saved_bridge_supervisor import (
+            clear_saved_bridge_restart_migration,
+            record_saved_bridge_restart_recovery,
+            saved_bridge_supervisor_status,
+            set_saved_bridge_desired_running,
+        )
 
-        set_saved_bridge_desired_running(profile_name, False)
+        if restart_intent:
+            supervisor = saved_bridge_supervisor_status(profile_name)
+            if not (
+                bool(supervisor.get("desired_running"))
+                and bool(supervisor.get("supervisor_alive"))
+                and bool(supervisor.get("supervisor_heartbeat_fresh", True))
+            ):
+                return _result(
+                    "error",
+                    verdict="supervisor_state_error",
+                    reason=(
+                        "restart recovery is not armed; refusing to stop the live bridge"
+                    ),
+                    error="restart recovery supervisor is unavailable",
+                )
+        else:
+            # Explicit Stop wins over any in-flight restart migration marker.
+            # Clearing first prevents the supervisor from interpreting the
+            # user's stopped state as the temporary request-v1 migration false.
+            clear_saved_bridge_restart_migration(profile_name)
+            set_saved_bridge_desired_running(profile_name, False)
     except OSError as exc:
         return _result(
             "error",
             verdict="supervisor_state_error",
-            reason="could not persist stopped state; refusing a stop that might auto-restart",
+            reason=(
+                "could not persist or verify bridge desired state; refusing lifecycle change"
+            ),
             error=str(exc)[:200],
         )
 
@@ -5057,7 +5480,51 @@ def stop_saved_bridge(
             pid=pid,
         )
 
-    supports_request = _watchdog_supports_stop_request(ownership.metadata.watchdog_path)
+    stop_protocol = _watchdog_stop_protocol(ownership.metadata.watchdog_path)
+    supports_request = stop_protocol is not None
+    restart_migration_owner_pid: Optional[int] = None
+
+    if restart_intent:
+        try:
+            record_saved_bridge_restart_recovery(
+                profile_name,
+                phase="shutdown_requested",
+                owner_pid=pid,
+                stop_protocol=stop_protocol or "legacy",
+            )
+        except (OSError, ValueError) as exc:
+            return _result(
+                "error",
+                verdict="supervisor_state_error",
+                reason=(
+                    "could not persist restart post-mortem before shutdown; "
+                    "live bridge was left untouched"
+                ),
+                pid=pid,
+                error=str(exc)[:200],
+            )
+
+    if restart_intent and stop_protocol == "request-v1":
+        # request-v1 owners understand the cooperative request file but always
+        # persist desired_running=false while consuming it. A current detached
+        # supervisor is already proven alive by the restart caller, so leave it a
+        # short-lived migration marker before asking the old owner to exit. The
+        # supervisor re-arms desired_running after that v1 transition and restores
+        # a request-v2 owner. No process-tree kill is needed from this MCP caller.
+        from .saved_bridge_supervisor import request_saved_bridge_restart_migration
+
+        try:
+            request_saved_bridge_restart_migration(profile_name, pid)
+        except (OSError, ValueError) as exc:
+            return _result(
+                "error",
+                verdict="supervisor_state_error",
+                reason="could not persist request-v1 restart migration; live bridge was left untouched",
+                pid=pid,
+                error=str(exc)[:200],
+            )
+        restart_migration_owner_pid = pid
+
     if not supports_request:
         # Compatibility for a bridge started before request-v1 existed. A TUI
         # process is outside the bridge tree, so a one-time Windows tree kill is
@@ -5090,7 +5557,9 @@ def stop_saved_bridge(
                 )
             legacy_deadline = time.monotonic() + 10.0
             while time.monotonic() < legacy_deadline:
-                if not _process_is_alive(pid) and _port_is_available(port):
+                if not _process_is_alive(pid) and (
+                    restart_intent or _port_is_available(port)
+                ):
                     watchdog_path = ownership.metadata.watchdog_path
                     if watchdog_path:
                         try:
@@ -5100,7 +5569,11 @@ def stop_saved_bridge(
                     return _result(
                         "stopped",
                         verdict="reuse_same_profile",
-                        reason=f"stopped legacy owned bridge PID {pid}",
+                        reason=(
+                            f"stopped legacy owned bridge PID {pid}; restart recovery remains armed"
+                            if restart_intent
+                            else f"stopped legacy owned bridge PID {pid}"
+                        ),
                         pid=pid,
                     )
                 time.sleep(0.1)
@@ -5119,12 +5592,28 @@ def stop_saved_bridge(
             error="legacy bridge restart requires KaroX UI",
         )
 
-    # Ask a request-v1 supervisor to leave through run_web_bridge's finally-block.
-    # The caller survives because no broad descendant-tree termination occurs.
+    # Ask the request-capable owner to leave through run_web_bridge's finally-block.
+    # request-v2 preserves restart intent directly; request-v1 additionally has a
+    # supervisor migration marker that re-arms desired state after its legacy
+    # shutdown transition. No broad descendant-tree termination occurs here.
     session_id = ownership.metadata.session_id or saved_web_bridge_session_id(profile_name)
     try:
-        request_path = _write_stop_request(session_id, pid)
+        request_path = _write_stop_request(
+            session_id,
+            pid,
+            intent="restart" if restart_intent else "stop",
+        )
     except OSError as exc:
+        if restart_migration_owner_pid is not None:
+            try:
+                from .saved_bridge_supervisor import clear_saved_bridge_restart_migration
+
+                clear_saved_bridge_restart_migration(
+                    profile_name,
+                    owner_pid=restart_migration_owner_pid,
+                )
+            except OSError:
+                pass
         return _result(
             "error",
             verdict="reuse_same_profile",
@@ -5135,11 +5624,27 @@ def stop_saved_bridge(
 
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
-        if not _process_is_alive(pid) and _port_is_available(port):
+        if not _process_is_alive(pid) and (
+            restart_intent or _port_is_available(port)
+        ):
             try:
                 request_path.unlink()
             except OSError:
                 pass
+
+            if restart_intent:
+                # The new supervisor-owned process is allowed to bind the port
+                # immediately. Waiting for a free port here would mistake fast
+                # successful recovery for a shutdown timeout.
+                return _result(
+                    "stopped",
+                    verdict="reuse_same_profile",
+                    reason=(
+                        f"cleanly stopped old bridge owner PID {pid}; "
+                        "restart recovery remains armed"
+                    ),
+                    pid=pid,
+                )
 
             from .saved_bridge_supervisor import saved_bridge_supervisor_status
 
@@ -5168,6 +5673,16 @@ def stop_saved_bridge(
         request_path.unlink()
     except OSError:
         pass
+    if restart_migration_owner_pid is not None:
+        try:
+            from .saved_bridge_supervisor import clear_saved_bridge_restart_migration
+
+            clear_saved_bridge_restart_migration(
+                profile_name,
+                owner_pid=restart_migration_owner_pid,
+            )
+        except OSError:
+            pass
 
     return _result(
         "error",

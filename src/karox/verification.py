@@ -39,6 +39,8 @@ _NPM_VERIFICATION_SCRIPTS: tuple[str, ...] = (
     "type-check",
     "check:types",
     "lint",
+    "format:check",
+    "i18n:check",
     "build",
     "check:migrations",
     "check:encoding",

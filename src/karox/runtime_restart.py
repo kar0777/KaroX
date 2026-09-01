@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from .paths import runtime_dir
+from .port_ownership import prove_bridge_process_identity, prove_saved_bridge_owner_identity
 from .process_identity import process_is_running
 
 SELF_RESTART_EXIT_CODE = 75
@@ -108,6 +109,29 @@ def _claim_timeout_reschedule(receipt_path: Path, attempt: int) -> bool:
     return True
 
 
+def _process_parent_pid(pid: int) -> Optional[int]:
+    """Return a live process parent PID when it can be proven, else ``None``.
+
+    The saved bridge may be launched through a Windows venv ``python.exe`` shim.
+    In that topology the watchdog records the shim PID while the actual Python
+    runtime serving MCP is the shim's direct child.  ``psutil`` is already an
+    optional KaroX runtime dependency used by the ownership layer; if it is not
+    available we fail closed and keep the historical direct-parent rule.
+    """
+
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        import psutil  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        parent = int(psutil.Process(pid).ppid())
+    except Exception:
+        return None
+    return parent if parent > 0 else None
+
+
 def _validate_current_saved_child(session_id: str, saved_profile: str) -> dict[str, Any]:
     if not isinstance(saved_profile, str) or _SAFE_PROFILE.fullmatch(saved_profile) is None:
         raise RuntimeRestartError("runtime restart requires a valid saved profile")
@@ -120,15 +144,38 @@ def _validate_current_saved_child(session_id: str, saved_profile: str) -> dict[s
         raise RuntimeRestartError("saved-bridge watchdog belongs to another profile")
     if watchdog.get("persistent_session") is not True:
         raise RuntimeRestartError("runtime restart is available only for durable saved bridges")
-    if watchdog.get("bridge_pid") != os.getpid():
-        raise RuntimeRestartError("current process is not the saved bridge MCP child")
+
+    bridge_pid = watchdog.get("bridge_pid")
+    if not isinstance(bridge_pid, int) or isinstance(bridge_pid, bool) or bridge_pid <= 0:
+        raise RuntimeRestartError("saved bridge MCP PID is unavailable")
     owner_pid = watchdog.get("owner_pid")
     if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
         raise RuntimeRestartError("saved bridge owner PID is unavailable")
-    # The durable owner directly Popen()s this MCP child. Parent proof prevents
-    # a stale/reused watchdog PID from authorizing an unrelated process.
-    if os.getppid() != owner_pid or not process_is_running(owner_pid):
+    if not process_is_running(owner_pid):
         raise RuntimeRestartError("saved bridge owner relationship cannot be proven")
+
+    current_pid = os.getpid()
+    current_parent = os.getppid()
+    if current_pid == bridge_pid:
+        # Historical/native topology: owner -> MCP runtime.
+        if current_parent != owner_pid:
+            raise RuntimeRestartError("saved bridge owner relationship cannot be proven")
+        return watchdog
+
+    # Windows venv topology: owner -> venv python shim (watchdog bridge_pid) ->
+    # base CPython runtime (this process).  Do not accept an arbitrary descendant:
+    # every hop must be exact and both KaroX roles must prove themselves from
+    # their own command lines before a self-exit is authorized.
+    if current_parent != bridge_pid or not process_is_running(bridge_pid):
+        raise RuntimeRestartError("current process is not the saved bridge MCP child")
+    if prove_bridge_process_identity(current_pid, (session_id,)) != session_id:
+        raise RuntimeRestartError("current bridge runtime identity cannot be proven")
+    if prove_bridge_process_identity(bridge_pid, (session_id,)) != session_id:
+        raise RuntimeRestartError("saved bridge launcher identity cannot be proven")
+    if _process_parent_pid(bridge_pid) != owner_pid:
+        raise RuntimeRestartError("saved bridge launcher parent cannot be proven")
+    if not prove_saved_bridge_owner_identity(owner_pid, saved_profile):
+        raise RuntimeRestartError("saved bridge owner identity cannot be proven")
     return watchdog
 
 

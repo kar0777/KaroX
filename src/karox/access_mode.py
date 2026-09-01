@@ -49,7 +49,14 @@ __all__ = [
 # and then kept stable across ON/OFF transitions: several clients cache the
 # MCP tool catalogue for the lifetime of a thread, so only the runtime
 # permission profile may change on a toggle.
-BYPASS_TOOL_NAMES: tuple[str, ...] = ("karox.command.run", "karox.git.commit")
+BYPASS_TOOL_NAMES: tuple[str, ...] = (
+    "karox.command.run",
+    "karox.command.start",
+    "karox.command.status",
+    "karox.command.logs",
+    "karox.command.cancel",
+    "karox.git.commit",
+)
 
 
 def saved_profile_bypass_enabled(profile: Any) -> bool:

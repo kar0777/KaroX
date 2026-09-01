@@ -27,6 +27,7 @@ PAGE_CLOSED = "page_closed"
 BROWSER_DISCONNECTED = "browser_disconnected"
 NETWORK_ERROR = "network_error"
 DOWNLOAD_FAILURE = "download_failure"
+SCREENSHOT_CAPTURE_FAILED = "screenshot_capture_failed"
 PERMISSION_DENIED = "permission_denied"
 USER_TAKEOVER_REQUIRED = "user_takeover_required"
 # The fail-soft kind: a failure nobody classified is still a failure, said
@@ -41,6 +42,7 @@ BROWSER_ERROR_KINDS: Tuple[str, ...] = (
     BROWSER_DISCONNECTED,
     NETWORK_ERROR,
     DOWNLOAD_FAILURE,
+    SCREENSHOT_CAPTURE_FAILED,
     PERMISSION_DENIED,
     USER_TAKEOVER_REQUIRED,
     BROWSER_ERROR,
@@ -72,6 +74,14 @@ _PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     (
         DOWNLOAD_FAILURE,
         re.compile(r"download", re.IGNORECASE),
+    ),
+    (
+        SCREENSHOT_CAPTURE_FAILED,
+        re.compile(
+            r"image readback failed|view is invisible|failed to capture tab|"
+            r"screenshot(?: capture)? failed|capturevisibletab",
+            re.IGNORECASE,
+        ),
     ),
     (
         NAVIGATION_TIMEOUT,

@@ -174,7 +174,7 @@ class TestEffortPreferencePersistence:
 
 
 class TestEffortCommandSurface:
-    def test_effort_is_a_visible_first_class_command(self):
+    def test_effort_is_a_first_class_visible_command(self):
         assert "/effort" in karox_tui.VISIBLE_COMMANDS
         assert "/effort" in karox_tui.SLASH_COMMANDS
         assert "/effort" in karox_tui._COMMANDS_RU

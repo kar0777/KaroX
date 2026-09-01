@@ -695,3 +695,410 @@ All names below were @kar-deduped before investigation (`files_scanned: 1093`, `
 ### Sozin — `NEW / REJECTED_AGE`
 - **Offer:** current public pricing advertises a free no-card web-chat tier with **20 messages/day** and access to all models, including Claude Fable 5.
 - **Blocker:** current Terms require users to be **18+**. Do not recommend a fake-age account for Egor; retain only for dedup/history.
+
+## Strict Claude Opus 5 API + Hvoy wave — 2026-08-25
+
+Strict success rule for this wave: `VERIFIED_FREE` requires free balance/quota, a real API key, and a successful Hvoy.ai request to exact Opus 5. No API keys are stored here.
+
+### Requesty — `PROMISING / LIVE_FREE_CREDITS_VERIFIED / HVOY_AUTH_FLOW_BLOCKED`
+- First-party offer: **$10 free signup credits, no card**, exact Opus 5 routes and an EU gateway.
+- Live Browser Use Karo: authenticated workspace showed **Available Credits $7.95**; Billing History showed **No payment history found**.
+- Live Playground on the same account exposed Opus 5 deployments from Anthropic, Bedrock and Vertex; `claude-opus-5@eu-central-1` was selected for a tiny test.
+- API-key management is live, but fresh-key creation requires a credential-protected name field. Karo correctly blocks agent-side credential-flow entry; existing key pages do not reveal secrets again. Do not bypass this guard.
+- Hvoy was initially 502/522, then recovered and loaded normally. The final Hvoy key test still could not be completed because a fresh secret could not be transferred without crossing the credential boundary.
+- Therefore this is **not `VERIFIED_FREE`**. Best current practical candidate; next retest is user-completed key creation → Hvoy exact Opus 5 → post-request balance check.
+
+### KernelFold — `CHANGED / PROMISING / EXACT_CLAUDE_OPUS_5`
+- Material change: current first-party docs now list literal **`claude-opus-5`**; the older tracker objection that exact Opus 5 was absent is obsolete.
+- Free tier: **$0, 1.5M tokens/month, no card**, shared across API/models.
+- OpenAI-compatible and Anthropic-compatible `/v1/messages` APIs are documented, suitable for Hvoy and OpenCode/Cline/Aider.
+- Live signup page loaded with no payment step; auth could not be completed through the currently available Karo credential reference. Keep `PROMISING` until dashboard quota + key + Hvoy pass.
+
+### Vercel AI Gateway — `PROMISING / $5_EVERY_30_DAYS`
+- First-party Opus 5 page lists `anthropic/claude-opus-5`; free users who have never paid receive **$5 every 30 days**.
+- Live Browser Use Karo signup reached the one-time-code gate. No OTP/OAuth bypass was attempted. Needs completed signup + key + Hvoy.
+
+### Anthropic Claude Platform — `CHANGED / PROMISING_OFFICIAL`
+- Official pricing FAQ now says **new users receive a small amount of free credits to test the API**; amount is not published.
+- Live browser profile was not authenticated into Claude Platform, so account balance/key were not verified. Normal usage after promo credits is paid/prepaid.
+
+### Keyplex / TokenTable — `PROMISING`
+- Keyplex docs list `anthropic/claude-opus-5`, no-card Free Trial quota **20 RPM / 40k TPM / 100k tokens/day**; signup surface was reached but auth/Hvoy were not completed.
+- TokenTable remains a no-card exact-Opus-5 API candidate with a small Starter quota; signup form was reached but auth could not be completed without credential/OAuth takeover.
+
+### Other findings / exclusions
+- APIVALE: exact Opus 5, no-card **$0.20** starter credit; `LOW_VALUE / PROMISING` only.
+- Atoms: Opus 5 with **15 hosted-app credits/day**, but no proven raw API key; exclude from strict API winners.
+- Sozdai / you.bot: technically interesting, but current terms/format make them unsuitable for this strict route; never fake eligibility.
+- TaBiToken/TaBiAI and similar public-benefit relays: `RISKY / DO_NOT_USE`; upstream provenance is not strong enough for this task.
+
+### Strict shortlist after 2026-08-25
+1. **Requesty** — strongest live free-balance/account evidence; Hvoy blocked only by protected fresh-key flow.
+2. **KernelFold** — strongest literal `claude-opus-5` free-tier paper route; 1.5M tokens/month, no card.
+3. **Vercel AI Gateway** — strongest recurring mainstream offer; $5 every 30 days.
+4. **Anthropic Claude Platform** — official new-user test credits, amount/account entitlement still needs live proof.
+5. **Keyplex / TokenTable** — small no-card candidates awaiting auth + Hvoy.
+
+**No route is `VERIFIED_FREE` until Hvoy succeeds and the post-request free balance/quota is checked.**
+
+## Late strict verifier update — 2026-08-25
+
+### Requesty — `LIVE_OPUS5_CONFIRMED / VERIFIED_CREDITS / AGE_RESTRICTED / HVOY_NOT_COMPLETED`
+- Re-used the already authenticated production workspace; no duplicate signup was created.
+- Live balance remained **$7.95** with no payment history. The same account exposes exact Opus 5 routes from Anthropic, Bedrock and Vertex.
+- Browser Use Karo sent one tiny Playground prompt through **`bedrock/claude-opus-5@eu-central-1`**. It returned normally in **0.5 s**, used **23 tokens** and debited **$0.0008**; this is direct proof that the promotional balance can fund an Opus 5 route.
+- Hvoy.ai recovered from its earlier 502/522 outage and the API Connectivity Test is live again. However, Requesty only reveals a newly created API secret once, while Karo currently classifies the harmless `api-key-name` field as credential-sensitive. Existing keys cannot be revealed again. Do not bypass this secret boundary merely to satisfy the tester.
+- Current Requesty Terms require users to be **18+**. Therefore this technically strongest account proof is **not a legal route for the current user** and must not be promoted as the winner.
+- Final strict status remains below `VERIFIED_FREE`: Hvoy exact `claude-opus-5` did not run.
+
+### Boundless API — `NEW / STRONG_PROMISING / $5_NO_CARD / EXACT_OPUS5`
+- First-party production pages advertise **$5 signup credits with no card** and list exact **`claude-opus-5`** with an OpenAI-compatible base URL. However, the marketing pages are internally inconsistent about trial eligibility: the English homepage says roughly **100–200 requests “to try any model”**, while the FAQ limits free/welcome accounts to **Starter models** and another localized page describes a **new-user model pool**. Therefore the $5 balance is real marketing, but spending it on Opus 5 is **not proven** until the live dashboard/request succeeds.
+- Browser Use Karo reached the real registration service at `oneapi.boundlessapi.com`, including GitHub/Google or username signup, then the username/password/email-verification form. No payment gate appeared before account creation.
+- Signup was not completed because password/OAuth/email-code steps are protected user-auth actions; no bypass was attempted.
+- Terms allow users 13+, but users between 13 and their local age of majority require parent/legal-guardian permission. Treat as usable only when that condition is legitimately satisfied.
+- Status stays `PROMISING` until dashboard balance, API key, exact Opus 5 and Hvoy all pass.
+
+### Flatkey — `NEW / PROMISING / $1_BASE_FREE / UP_TO_$40_MARKETING / EXACT_OPUS5`
+- Current first-party homepage exposes exact Claude Opus 5, unified API/official endpoint claims and **“Get Up to $40 in Free Credits.”** Pricing is more conservative: ordinary new users start with **$1 free credit**; a separate Discord promotion advertises $5.
+- Browser Use Karo reached the live signup page headed **“Create API key, get free credits”**, with Google/GitHub or email verification and no card shown in the initial flow.
+- Do not record `$40` as guaranteed. The only normal public base amount currently supported is $1 until the production dashboard proves more.
+- Terms require 13+ and parent/legal-guardian permission under 18. Keep `PROMISING`, not `VERIFIED_FREE`, pending legitimate signup + dashboard + key + Hvoy.
+
+### Vercel AI Gateway — `CONFIRMED_PROMISING / $5_EVERY_30_DAYS / EXACT_OPUS5`
+- Fresh first-party model page confirms exact **`anthropic/claude-opus-5`**, Anthropic Messages/OpenAI-compatible API support, and explicitly states that **free users who have never made a payment receive $5 of credits every 30 days**.
+- Current Vercel Terms require at least 16; AI Product Terms additionally require parent/legal-guardian permission for users under 18.
+- Existing Karo signup attempt already reached the one-time-code gate; no OTP bypass was attempted. Still needs dashboard/key/Hvoy proof.
+
+### Hvoy.ai — `RECOVERED`
+- During this wave Hvoy returned 502 and then 522, but a later fresh Browser Use Karo tab loaded the full **API Connectivity Test** normally.
+- It supports custom model ID override and Anthropic Messages/OpenAI-compatible formats, so exact `claude-opus-5` remains testable once a newly issued key can be transferred through a legitimate secret-input path.
+
+### RelayGPU — `EXISTING_ACCOUNT_ZERO / PROMO_NOT_PRESENT`
+- Rechecked the already-existing authenticated account instead of creating another account. Production Credits page shows **Balance $0**, **Remaining Promo —**, **No active promos**, Total Promo $0 and no invoices, while the live model catalog does contain Claude Opus 5.
+- Public `$100 promo` marketing therefore cannot be treated as an entitlement on this account. Do not create duplicate accounts to chase it.
+
+### Fresh rejects / downgrades
+- **Tokenator** — `BILLING_REQUIRED`: although it advertises a free Opus 5 route/quota, first-party integration flow and live Karo page say **Sign up → Buy a bundle → Use the key**. A usable key is payment-gated, so it is not an absolutely free route.
+- **Composite (lucidity.sh)** — `BILLING_REQUIRED_FOR_OPUS5`: free/no-card account exists, but free-model filtering is for open models; Opus 5 belongs to paid usage.
+- **FreeRouter** — `BILLING_REQUIRED_FOR_OPUS5`: free account is not equivalent to free Opus 5; full-model access is tied to paid plans.
+- **UseAIToken** — `PROMISING / UNVERIFIED_AMOUNT`: public pages list exact Opus 5, OpenAI-compatible `/v1`, no-card signup credits usable across models, but do not publish the amount; live signup reaches CAPTCHA, so no autonomous bypass was attempted.
+- **TaBiToken/TaBiAI** — keep `RISKY`: production catalog lists exact Opus 5, but live pricing contradicted circulating social claims and upstream provenance remains insufficient for this strict task.
+
+### Updated strict shortlist — 2026-08-25
+1. **KernelFold** — strongest recurring paper entitlement: 1.5M tokens/month, no card, exact `claude-opus-5`; still needs real account/key/Hvoy.
+2. **Vercel AI Gateway** — mainstream recurring $5 every 30 days with exact `anthropic/claude-opus-5`; legitimate under-18 use requires guardian permission.
+3. **Boundless API** — $5 no-card signup credit and exact Opus 5 are both public, but contradictory Starter/new-user-pool wording means Opus 5 eligibility for the promo is still unproven; legitimate under-majority use requires guardian permission.
+4. **Keyplex** — 100k tokens/day free trial and exact Opus 5; still needs account/key/Hvoy.
+5. **Flatkey** — normal $1 new-user credit (larger promos conditional), exact Opus 5; still needs account/key/Hvoy.
+
+**Strict result after this wave: `VERIFIED_FREE = none`. Requesty has direct live free-credit Opus 5 proof but is age-restricted and still lacks the required Hvoy exact-model test.**
+
+## Non-Requesty continuation — 2026-08-25
+
+Per the user's explicit instruction, Requesty is excluded from all further testing in this continuation.
+
+### KernelFold — `VERIFIED_EMAIL / FREE_PLAN / KEY_CREATED / HVOY_SECRET_PASTE_GATE`
+- Browser Use Karo is logged into the real KernelFold account; Billing shows the **Free** plan with **1.5M tokens/month**, no payment/card requirement, and the dashboard no longer shows the email-verification block.
+- Live dashboard Model Health exposes **Claude Opus 5** as `UP`; first-party docs list exact `claude-opus-5` through both OpenAI-compatible and Anthropic-compatible APIs.
+- A dedicated least-privilege **chat-scoped** key named `hvoy-test` was created successfully. The key value was never written to chat/tracker/logs; it was copied only to the local browser clipboard.
+- Hvoy has already been configured with endpoint `https://api.kernelfold.com`, Custom Model ID `claude-opus-5`, Anthropic Messages, and a 2-character test prompt. Agent-side secret insertion is correctly blocked by Karo; user takeover was requested only to paste the copied key into Hvoy's API-key field.
+- Next strict action after that local paste: resume agent control → Start Test → record HTTP/model/latency/tokens → return to KernelFold Billing/Dashboard and verify the free token-pool debit. If Hvoy returns 200 on exact Opus 5, this can become the first `VERIFIED_FREE` route.
+
+### Anthropic Claude Platform — `BILLING_REQUIRED_ON_LIVE_ACCOUNT`
+- Fresh production check of the authenticated Claude Console account shows **Credits $0.00** and **Buy credits to get started**.
+- Therefore the official Anthropic route is not a currently usable free Opus 5 API route for this account, regardless of generic documentation mentioning small test credits for some new users.
+
+### you.bot — `REJECTED_AGE / LOW_VALUE`
+- First-party site advertises exact Claude Opus 5, one developer API key, **50 free credits**, no card.
+- First-party pricing defines **1 credit = $0.01**, so the signup grant is only **$0.50**.
+- Current privacy/terms surfaces say the service is intended for users **18+**. Do not use a fake-age account.
+
+### AgentSky — `PROMISING_LOW_VALUE`
+- First-party production pages advertise exact **Claude Opus 5**, a real cloud-agent API/API key, **$3 free credit**, and **no card required**.
+- This is enough for a small Opus 5 test at published $5/M input + $25/M output, but it remains below the stronger recurring routes and still needs account/key/Hvoy verification.
+
+### Synthorai — `PROMISING_LOW_VALUE`
+- First-party Opus 5 page advertises exact `claude-opus-5`, OpenAI-compatible API, **10 trial calls / up to $1 free credit**, no card.
+- Keep as a small fallback candidate; do not call it verified until signup/key/Hvoy succeeds.
+
+### Node AI Gateway — `CARD_REQUIRED`
+- First-party Opus 5 page confirms exact `claude-opus-5`, OpenAI-compatible API and **£25 free credit on signup**.
+- The route is partner-routed and account activation/payment verification may require a card; therefore it is not the preferred absolutely-free/no-card route. Do not label it `VERIFIED_FREE` without a production signup check proving otherwise.
+
+### Fresh hype that stays rejected
+- **AgentRouter / GoRouter**: recent social/referral posts advertise very large free balances and Opus 5, but the tracker already records unresolved upstream/provenance concerns. Do not upgrade them from `RISKY` based on affiliate/community claims alone.
+- **Qubax**: exact Opus 5 exists, but current route is prepaid crypto top-up; `BILLING_REQUIRED`.
+
+### Non-Requesty priority now
+1. **KernelFold** — live Free account is already created; only legitimate email verification stands between it and the decisive Hvoy test.
+2. **Vercel AI Gateway** — $5 every 30 days for eligible never-paid Free users; exact Opus 5; auth gate still unfinished.
+3. **Keyplex** — exact Opus 5 + published free-trial request quota; authenticated proof still missing.
+4. **AgentSky** — $3 no-card credit + exact Opus 5 cloud API; good small fallback.
+5. **Synthorai / Flatkey** — $1-class no-card fallback routes.
+
+**Current strict result excluding Requesty: `VERIFIED_FREE = none` until an Hvoy exact-Opus-5 request succeeds.**
+
+## Fresh non-Requesty discovery wave — 2026-08-25 13:xx Europe/Warsaw
+
+### Run BiOS — `STRONG_PROMISING / $10_NO_CARD / EXACT_OPUS5`
+- Fresh repo-wide dedup before this entry found no prior `Run BiOS|runbios.ai` match.
+- First-party Opus 5 page lists exact `claude-opus-5` at the official `$5/M input + $25/M output` rate and says **new accounts start with $10 welcome credit**.
+- Main site and signup page explicitly say **$10 free credit · no card required**; Browser Use Karo reached the real `platform.runbios.ai/register` form with name/email/password fields and no payment step before account creation.
+- Run BIOS INC. is identified as the operator (San Francisco; Delaware governing law). Current Terms checked in this wave do not publish an explicit minimum-age clause.
+- One OpenAI-compatible inference platform/API is documented; API keys are created in the dashboard and shown once. Do not create or expose a secret outside the protected key flow.
+- **Next strict action:** legitimate signup/auth → confirm $10 wallet → create key → Hvoy exact `claude-opus-5` → post-request wallet delta.
+
+### Kyma API — `PROMISING_LIMITED / $0.50_NO_CARD / EXACT_OPUS5`
+- First-party pages advertise exact `claude-opus-5`, OpenAI-compatible `https://kymaapi.com/v1`, and **$0.50 signup credit with no card**.
+- Browser Use Karo reached the real signup form; no payment step appeared before account creation.
+- Operator is Affitor LLC (Wyoming). Terms allow 13+; users below local age of majority require legitimate parent/legal-guardian acceptance. One account per person; do not farm trials.
+- Small but potentially enough for a strict Hvoy smoke test. Keep below Run BiOS/Vercel/KernelFold until account-level debit is proven.
+
+### Tokenly — `PROMISING_LIMITED / REAL_PHONE_VERIFY / EARNABLE_CREDITS`
+- Current `tokenly.us` signup is live and includes Poland (+48). Signup grants **50 credits**, and additional credits can be earned through surveys/offerwall participation; no card is advertised.
+- OpenAI-compatible API and Claude Opus 5 are advertised. Terms require accurate information, one account per person and real phone verification; SMS must use user takeover, never disposable numbers.
+- Historical tracker entry for `tokenly.llc` rejected the offer under an older `$20+` threshold. That threshold does not apply to the present strict task, so the current route should be treated as a limited candidate rather than automatically discarded, pending proof that the current domains/service are the same operator and Opus 5 consumes the free credit pool.
+
+### Mume AI — `BILLING_REQUIRED_FOR_TARGET`
+- Free plan genuinely provides a recurring small model credit, but Browser Use Karo queried the public live model endpoint for `anthropic/claude-opus-5`; the returned model object has **`plus_exclusive: true`**.
+- Therefore the free recurring credit cannot establish free Opus 5 API access. Do not rediscover Mume as a target route unless this entitlement changes.
+
+### Stormfire — `REJECTED_TARGET_MISSING`
+- Fresh first-party marketing still advertises a **$5 signup bonus**, no deposit/no KYC, and an OpenAI-compatible gateway.
+- Browser Use Karo inspected the current live **55-model** catalog across all three pages. Claude entries top out at Opus 4 / Opus 4.6 aliases (`wf-max`, `wf-opus-prev`, `wf-ultra` etc.); **literal `claude-opus-5` is absent**.
+- Free money exists, but the target model does not. Keep rejected until the live catalog materially changes.
+
+### Sozdai — `REJECTED_AGE`
+- First-party pages advertise exact `claude-opus-5`, both OpenAI- and Anthropic-compatible APIs, and free trial credits without a card.
+- Current first-party Privacy Policy states the services are **not directed to individuals under 18**. Do not create an ineligible account or fake age.
+
+### Synthorai — `REJECTED_AGE` (downgrade)
+- Earlier entry correctly recorded exact Opus 5 plus **10 trial calls / up to $1 free credit, no card**.
+- Fresh first-party privacy check says the services are not directed to individuals under 18 and the Terms require account holders to be at least 18. Downgrade the previous `PROMISING_LOW_VALUE` status for the current-user route; do not attempt signup.
+
+### OneHop — `REJECTED_AGE / CHANGED_FREE_OFFER`
+- Live Browser Use Karo confirms exact `anthropic/claude-opus-5`, native Anthropic Messages endpoint `https://api.onehop.ai/anthropic`, a registered Singapore operator (DEEPQUEST PTE. LTD.), and current production traffic statistics.
+- The current new-user offer is **not the older automatic $5/$10 claim**: the live page now says **join the Telegram group and contact the owner to claim $1**.
+- Current Terms require users to be at least 18 (or the higher local age of majority). Do not use for the current-user route.
+
+### Zrelay — `RISKY / PRIVATE_$2_TRIAL`
+- Live page offers a generated **$2 / 7-day** private trial key and exact Claude-family access through native-format endpoints; no account/email/KYC is advertised.
+- Karo refused the `Generate trial key` action as an ambiguous free-trial action and correctly required user takeover. No bypass was attempted.
+- Legal/operator transparency remains insufficient for a recommended route. Keep only as a risky research lead, not a winner.
+
+### Cloud routes — fresh hard rejections
+- **Microsoft Foundry Free Trial:** Microsoft first-party rate-limit table gives `claude-opus-5` **0 RPM / 0 TPM** on Free Trial; Claude partner-model access requires eligible pay-as-you-go billing. `BILLING_REQUIRED`.
+- **Google Cloud Express:** 90-day no-card Express Mode is restricted to Google-published Gemini models (`publishers/google/models/*`); it does not expose Claude Opus 5. `TARGET_UNAVAILABLE`.
+
+### Updated non-Requesty priority
+1. **KernelFold** — live Free account + 1.5M tokens/month; only legitimate email verification blocks key/Hvoy.
+2. **Run BiOS** — strongest fresh automatic-dollar offer: $10, no card, exact Opus 5, normal API.
+3. **Vercel AI Gateway** — recurring $5 every 30 days for eligible never-paid Free users, exact `anthropic/claude-opus-5`.
+4. **Keyplex** — published no-card free-trial quota + exact Opus 5; authenticated debit still unproven.
+5. **Kyma / AgentSky / Flatkey / Tokenly** — smaller or workflow-limited backups worth smoke-testing if higher-priority auth gates remain blocked.
+
+**Strict result remains `VERIFIED_FREE = none` until Hvoy succeeds on exact Opus 5 and the free balance/quota debit is checked.**
+
+## Search continuation — 2026-08-25 14:xx Europe/Warsaw
+
+This continuation excludes Requesty from any further interaction per the user's explicit instruction. Shared/public API keys are also excluded even when a provider publishes them; only a personal signup entitlement is eligible.
+
+### PEKPIK LLM / `aiapiv2.pekpik.com` — `STRONG_FREE_ENTITLEMENT / EXACT_OPUS5 / REJECTED_AGE_FOR_CURRENT_ROUTE`
+- Fresh repo-wide dedup before this entry returned no prior PEKPIK match.
+- First-party free-credit page says a personal account receives **$1 immediately after email verification**, then daily claims build the welcome pack to **$20 during the first 40 days**; the personal key is permanent and no card is required.
+- First-party live `model_catalog.json` lists literal **`claude-opus-5`**, provider Anthropic, with the model in the **`free`** group and live channels. The free-credit page explicitly says the personal route reaches Claude Opus 5.
+- Operator is **LAND4X4 PTY LTD** (Australia). Terms disclose third-party upstream routing; Privacy says prompt/completion content is not stored by PEKPIK but is forwarded to upstream AI providers.
+- The site also publishes shared/demo keys. **Never use those**: the user forbids public/shared keys and the strict task requires a personal signup route.
+- Current Privacy says the service is not directed at individuals under 18. Therefore do not open an ineligible account or fake age; retain only as a strong technical/reference route for eligible adults.
+
+### LTN AI / `ltnproxy.com` — `STRONG_PROMISING / $10_NO_CARD / EXACT_OPUS5 / PROVENANCE_NEEDS_WORK`
+- Fresh repo-wide dedup returned no prior LTN match.
+- First-party homepage advertises **$10 credit for new Gmail signups**, no card, one API key, native Anthropic + OpenAI-compatible protocols, and literal `anthropic/claude-opus-5`.
+- Documented base URL is `https://ltnproxy.com/v1`; integrations include Claude Code, Codex, OpenCode and other coding clients.
+- Main blocker is legal/upstream transparency: no sufficiently clear corporate/legal identity or provider-provenance documentation was found in this wave. Keep below mainstream/transparent candidates until signup, dashboard debit, Hvoy and operator/upstream checks pass.
+
+### apiToken.sale — `PROMISING / $5_NO_CARD / EXACT_OPUS5 / LEGAL_CAPACITY_CAVEAT`
+- Fresh repo-wide dedup returned no prior match.
+- First-party docs advertise a **$5 platform bonus** for eligible new B2C accounts created via Google/GitHub, no card, and say the bonus can be spent on Claude/GPT/Gemini.
+- Router exposes native Anthropic `/v1/messages` plus OpenAI-compatible endpoints and lists literal `claude-opus-5`.
+- Anti-fraud rules can withhold the bonus from duplicate/linked accounts; never create multiple accounts to farm it.
+- Terms/Privacy use legal-capacity/children restrictions; do not use this route where the account holder does not satisfy them legitimately.
+
+### ModelAPI / `aimodelapi.ai` — `PROMISING_LIMITED / $1_NO_CARD / EXACT_OPUS5 / LICENSED_UPSTREAM_CLAIM`
+- Fresh repo-wide dedup returned no prior match.
+- Current first-party site says email signup auto-creates an API key and gives **$1 welcome/test credit with no card**.
+- Literal `claude-opus-5` is live behind the OpenAI-compatible base `https://api.aimodelapi.ai/v1`; integrations cover common coding clients.
+- First-party model/platform material claims licensed B2B upstreams rather than scraped consumer accounts or subscription splitting. This is a useful provenance signal but still needs a real account-level Opus 5 debit + Hvoy before promotion.
+
+### Orq.ai AI Gateway — `MAINSTREAM_PROMISING_LIMITED / €1_NO_CARD / EXACT_OPUS5`
+- Fresh repo-wide dedup returned no prior Orq.ai match.
+- First-party AI Gateway says signup gives **€1/$1 of free credit, no card**, then one API key and an OpenAI-compatible endpoint.
+- Current provider catalog lists Anthropic **`claude-opus-5`** and Bedrock variants such as `eu.anthropic.claude-opus-5`; pricing describes Orq-managed model usage from the same credit system.
+- Orq is an established EU gateway with GDPR/ISO-oriented documentation and transparent pay-as-you-go pricing. Best new low-value mainstream candidate from this continuation; exact free-credit debit on Opus 5 still needs live signup + Hvoy.
+
+### LLMAI / `llmai.dev` — `PROMISING_LIMITED / $2_MANUAL_TRIAL / EXACT_OPUS5`
+- Fresh repo-wide dedup returned no prior match.
+- First-party docs list exact `claude-opus-5`, OpenAI-compatible `https://api.llmai.dev/v1`, and say models are available across accounts.
+- Provider offers **$2 free trial credit on request** rather than an automatic signup grant. No card is required for the account itself.
+- Privacy indicates service intended for users 16+. Because the credit is manual/requested, keep below automatic-credit candidates until the entitlement actually appears in dashboard.
+
+### KissAPI / `kissapi.ai` — `PROMISING_LOW_VALUE / $1 / EXACT_OPUS5 / AGE_18+`
+- Fresh repo-wide dedup returned no prior match.
+- First-party site lists exact Opus 5 through an OpenAI-compatible endpoint and offers **$1 free credit** usable for testing; credits do not expire.
+- Current Terms require users to be at least 18. Do not use an ineligible account; retain as an adult-only low-value reference route.
+
+### AssetMeld — `BETA_PROMISING / $0.50_COMMUNITY_CLAIM_UNVERIFIED`
+- Fresh repo-wide dedup returned no prior match.
+- First-party site exposes OpenAI-compatible `https://api.assetmeld.com/v1`, API keys and literal `claude-opus-5`; it also claims external model verification through cctest.ai/Hvoy.ai.
+- A fresh builder/community post claims **$0.50 early-test credit with no card**, but the current first-party pricing surface still looks prepaid and does not publish that bonus. Do not count the $0.50 until a live dashboard proves it.
+
+### Aerolink — `CHANGED / $35_WEEK_TRIAL / EXACT_OPUS5_CLAIM / IDENTITY_ROUTE_CONFLICT`
+- This is not new; the old tracker rejected Aerolink after poor Opus identity evidence. The financial offer has materially changed.
+- Current first-party pricing advertises a **1-week free Starter trial, $5 per rolling 5h / $35 per week, no payment**, with API key management/logs.
+- Current social/route material advertises exact `claude-opus-5`, but independent identity checks conflict sharply by endpoint: a recent `capi.aerolink.lat` probe scored extremely poorly while a separate `api.aerolink.lat` Opus 5 probe scored strongly and passed Anthropic thinking-signature checks.
+- Therefore the new free allowance does **not** clear the strict model-identity gate. Retest the exact endpoint issued to a real free account through Hvoy before any recommendation.
+
+### EveryAPI — `LOW_PRIORITY / $2_NO_CARD / USER_CHANNEL_ROUTING / AGE_18+`
+- Fresh repo-wide dedup returned no prior match.
+- First-party site offers **$2 signup credit**, no card, balance does not expire, one API key and multi-provider routing; public material includes Claude Opus 5.
+- Terms require adulthood and disclose that requests can route through platform-operated or approved user-supplied upstream-credit channels. Because the strict task rejects gray/shared-subscription-style provenance, keep this out of the winner list despite transparent disclosure.
+
+### Kadegate — `REJECTED_TARGET_MISSING / $5_FREE`
+- First-party site advertises **$5 credit to every new account, no card**, but the current public model/pricing surface does not expose Claude Opus 5; Claude listings top out at older Opus generations.
+- Terms also require adulthood. Keep rejected until literal Opus 5 appears in the live model catalog.
+
+### Official cloud routes — strengthened hard rejection
+- **Microsoft Foundry:** current Microsoft documentation requires an eligible paid Azure subscription/PAYG for Claude partner models; ordinary free/student/startup-credit-only subscriptions are unsupported, and Marketplace/third-party-branded use is excluded from generic free Azure credit. `BILLING_REQUIRED`.
+- **Google Cloud Vertex AI:** Google Free Program documentation excludes generative-AI partner model managed APIs / Marketplace from the $300 Welcome Credit. Claude on Vertex is a partner-model route. `BILLING_REQUIRED_FOR_CLAUDE`.
+- **AWS Bedrock ordinary Free Tier:** keep the existing rejection; generic promo credits do not make normal Anthropic Marketplace/third-party charges free. Separate AWS Activate startup treatment is a special-program route, not general signup.
+
+### Official Anthropic programs — legitimate but not instant general-user routes
+- **External Researcher Access Program:** official Anthropic program can grant about **$1,000 API credits** to approved prioritized AI-safety/alignment research; monthly review/application, not instant signup.
+- **AI for Science:** official program can grant up to **$20,000 API credits for six months** to qualifying academic/nonprofit high-impact scientific research; application/review required.
+- **Startups / Community Ambassador / selected community events:** legitimate API-credit routes exist through eligibility/application/event participation. Recent Claude community workshops have advertised event API credits, but these are not guaranteed general-user signup offers.
+
+### New practical priority after this search continuation
+1. **KernelFold** — live Free account already exists; email verification is the only current gate before key → Hvoy.
+2. **Run BiOS** — $10 automatic, no card, exact Opus 5 and normal API; cleanest fresh dollar offer awaiting signup/Hvoy.
+3. **Vercel AI Gateway** — recurring $5/30 days on eligible never-paid Free accounts; mainstream route.
+4. **Orq.ai** — only €1, but mainstream EU gateway, exact Opus 5, no card, one-key API; excellent Hvoy smoke-test candidate.
+5. **LTN AI** — $10 and exact Opus 5, but operator/upstream transparency must improve before recommendation.
+6. **ModelAPI / Kyma / AgentSky / Flatkey / Tokenly / LLMAI** — smaller backups that can still satisfy a strict exact-model smoke test if their live signup entitlements hold.
+7. **PEKPIK / KissAPI / EveryAPI / other age-restricted routes** — technical/reference only where account eligibility is legitimately satisfied; never fake eligibility.
+
+**No new route is `VERIFIED_FREE` yet because Browser Use remains paused at the legitimate KernelFold email-verification takeover. Continue discovery meanwhile; resume Browser Use only after the user completes that auth step.**
+
+## Discovery continuation — 2026-08-25 15–16:xx Europe/Warsaw
+
+Requesty is explicitly excluded from all further interaction per user instruction.
+
+### Lightning Deals / `lightningdeals.store` — `PAUSED / DEAD_CURRENT_TRIAL`
+- Fresh repo-wide dedup before this entry returned no prior match.
+- Public docs/marketing advertise an OpenAI-compatible gateway, literal `claude-opus-5`, and **1,000,000 free tokens with no card and no account**.
+- Browser Use Karo opened the live `/trial` page. Production UI explicitly says **“Free trials aren’t open right now”** and **“There is nothing to claim at the moment.”**
+- Therefore this is not a current free route despite the still-visible marketing. Retest only if the live claim page reopens.
+
+### AskAI.free — `BILLING_REQUIRED_API`
+- Fresh repo-wide dedup returned no prior match.
+- Current docs list exact `claude-opus-5`, but API keys are issued to paid Pro/Max accounts only after the first payment clears; the web trial does not include API access.
+- Do not present the chat trial as a free Opus 5 API route.
+
+### GlobalModels.ai — `PAUSED / SIGNUPS_CLOSED`
+- Fresh repo-wide dedup returned no prior match.
+- First-party homepage exposes exact `claude-opus-5`, an OpenAI-compatible gateway and a `$2 trial credit` claim.
+- Browser Use Karo reached the live sign-in page; it currently states **“New sign-ups are temporarily closed.”**
+- Keep as a retest lead only. No current signup means no current free API route.
+
+### NexAIX / `nexaix.net` — `PROMISING_BUT_UNPROVEN / MARKETING_CONSOLE_MISMATCH / LEGAL_DOCS_404`
+- Fresh repo-wide dedup returned no prior match.
+- First-party marketing lists exact `claude-opus-5`, a claimed **official commercial channel**, OpenAI-compatible access, zero-log/no-dilution commitments, and says new accounts get trial credit sufficient for an eval suite.
+- Browser Use Karo reached the real signup form, but the public production console `/pricing` currently exposes only seven open-weight models (DeepSeek/GLM/MiniMax/Doubao) and does **not** expose Claude/GPT before authentication.
+- First-party legal links currently return a branded 404 instead of Terms/Privacy content. Operator identity and the exact trial amount were not established.
+- Keep below transparent candidates until a real account shows the trial balance + Opus 5 entitlement and Hvoy succeeds.
+
+### Stark Relay / `starkrelay.bond` — `RISKY / $20_LIVE_CLAIM / OPERATOR_UPSTREAM_UNPROVEN`
+- Fresh repo-wide dedup returned no prior match.
+- Browser Use Karo live page currently advertises **$20 New Starknet user credit** after registering with a Starknet wallet, and the live model table lists exact `claude-opus-5`, Anthropic, `$5/$25` per 1M, 1M context.
+- The product uses wallet-based signup and one relay key. Wallet connection is an auth action and was not automated.
+- No sufficient company/legal/privacy identity or transparent Anthropic upstream proof was found on the live site; visible contact surfaces are X/Telegram.
+- Attractive amount, but not a strict legal/provenance winner until operator/upstream evidence is much stronger.
+
+### lightningapi.pro — `RISKY / LEGAL_ENTITY_PLACEHOLDER / UPSTREAM_UNPROVEN`
+- Separate service from `lightningdeals.store`.
+- First-party pages advertise a one-day / 1M-token no-payment trial and exact Opus 5.
+- Current Terms/Privacy leave the business identity as a literal placeholder (`[BUSINESS LEGAL NAME]`) and describe third-party upstream/proxy operation rather than a clearly documented Anthropic commercial channel.
+- Keep out of the winner list despite the nominal free quota.
+
+### NeuralSpace / `neuralspace.pro` — `PROMISING_FREE_DELAYED / 7_TOKENS_DAY / API_MIN_BALANCE_50`
+- Fresh repo-wide dedup returned no prior match.
+- First-party operator is publicly identified as **ИП Козлов Андрей Анатольевич** with business identifiers/address in Bishkek, Kyrgyzstan.
+- First-party site gives **7 free balance tokens per day** (1 token = 1 RUB), no subscription; bonus issuance can be changed/stopped by the operator.
+- Public API docs expose exact **`claude-opus-5`**, Anthropic-compatible `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, API keys and the same unified account balance.
+- Critical gate: API docs require **minimum account balance 50 tokens to access text models**. A fresh free account with 7 tokens therefore cannot call Opus 5 immediately.
+- If daily bonus tokens persist and accumulate, this could become a legitimate recurring free API route after roughly 8 days. **Accumulation/expiry and whether bonus tokens count toward the 50-token API minimum are not yet proven.** Do not call it WORKS until that is established in a real account.
+
+### Venice — `CONTRADICTORY_MARKETING / FREE_PLAN_PREMIUM_API_NOT_PROVEN`
+- First-party Opus 5 model page says new accounts include a free daily allowance and 500 welcome credits with no card, but the current main pricing table shows **Free: 0 monthly credits and no welcome credits**, while 500 welcome credits begin on paid Pro.
+- Current help/API material says premium API usage is metered and access is obtained via Pro, DIEM or deposited USD; free web-app prompts are not equivalent to free premium API use.
+- Therefore do not count the Opus-page “500 welcome credits” copy as a general free Opus 5 API entitlement without a production-account proof.
+
+### CometAPI — `CHANGED_MARKETING / RETEST_EXISTING_ACCOUNT_ONLY`
+- Historical live account check in this tracker showed `$0.00`, so it remains rejected by production evidence.
+- Fresh first-party 2026 material now mentions test credits / typical `$1–$5` new-user credits with no card and exact Opus 5.
+- Treat as a changed marketing signal, not a new entitlement. Recheck the existing account only; never create a duplicate account to chase a new-user bonus.
+
+### Fresh rejects from this continuation
+- **QuickSilver Pro** — free trial is browser/chat access; API key requires purchase. `BILLING_REQUIRED_API`.
+- **UVC (`uvc.lol`)** — free 30-minute trial exposes Sonnet-class models; Opus 5 is on the paid Builder tier. `FREE_TIER_EXCLUDES_TARGET`.
+- **Piramyd** — Opus trial requires a payment card. `CARD_REQUIRED`.
+- **LarpRouter** — small free key exists, but the free pool is explicitly Kiro/cache-routed and current routing surfaces expose Kiro/Claude-Max/Copilot-style pools; transparent original-upstream gate fails. `RISKY`.
+- **Relay (`relaythe.app`)** — hosted frontier usage requires a paid licence/provider-cost billing; local free mode is BYOK. `BILLING_REQUIRED_FOR_HOSTED_OPUS`.
+- **Cyberzai** — exact Opus 5 is in the paid catalog, but the $0 tier's $3.50 credit is limited to free models and does not allow API-key generation; Opus 5 starts on paid tiers. `BILLING_REQUIRED_FOR_OPUS5`.
+- **Magicdoor.ai** — first-party Opus 5 page says Opus 5 requires an active $6/month subscription and is unavailable on the free tier. `BILLING_REQUIRED_FOR_TARGET`.
+- **Cloudflare AI Gateway** — the gateway/control plane can be free, but third-party model inference requires loaded Unified Billing credits or BYOK provider credentials. `BILLING_REQUIRED_OR_BYOK`.
+- **JBridge** — a free account/API key can be created, but inference endpoints explicitly deduct prepaid credit; active bonuses require a paid top-up/referral top-up. `BILLING_REQUIRED_FOR_INFERENCE`.
+- **EcoRouter** — personal Trial advertises 5M tokens, no expiry and all 18 models including `ecorouter/claude-opus-5-b`, but the same first-party plan table sets Trial to **0 requests/min**. Shared promo key is prohibited by this task. Treat the personal free tier as `ZERO_RPM / UNUSABLE` until a live account proves a non-zero request allowance.
+
+### Priority after this continuation
+1. **KernelFold** — email verified, live Free account + 1.5M tokens/month, Opus 5 `UP`, dedicated chat-scoped key created; Hvoy is fully configured and waits only for the local secret paste before Start Test.
+2. **Vercel AI Gateway** — recurring $5/30 days for eligible never-paid Free accounts; mainstream exact Opus 5 route.
+3. **Orq.ai** — €1 free credit, no card, exact Opus 5 on a transparent mainstream EU gateway.
+4. **ModelAPI** — $1 automatic test credit, no card, exact `claude-opus-5`; first-party site claims licensed upstream routing.
+5. **Kyma** — $0.50 automatic, no card, exact Opus 5; useful small smoke-test route.
+6. **Tokenly** — 50 signup credits and earn-to-refill path, exact Opus 5 via OpenAI-compatible API.
+7. **Run BiOS** — $10 welcome wallet and Playground Opus 5 are real, but fresh external `bios-...` keys currently fail `/v1/chat/completions` with 401; `BROKEN_EXTERNAL_API_AUTH`.
+8. **NeuralSpace** — potentially recurring zero-payment route if 7/day bonus tokens accumulate to the 50-token API minimum; needs account-level proof.
+9. **Keyplex / AgentSky / Flatkey / LLMAI** — smaller fallbacks awaiting live entitlement + Hvoy; LLMAI's $2 trial is manual-on-request rather than automatic.
+10. **NexAIX / Stark Relay / LTN AI** — interesting quota/model claims but provenance/legal/account evidence is insufficient for a recommendation.
+
+**Strict result excluding Requesty remains: `VERIFIED_FREE = none` until the prepared KernelFold Hvoy request returns successfully and the free-quota debit is confirmed.**
+
+## Run BiOS serverless verification — 2026-08-25 17:xx Europe/Warsaw
+
+### Run BiOS — `PLAYGROUND_WORKS / $10_WELCOME_CREDIT / EXTERNAL_API_KEY_AUTH_BROKEN`
+- Live authenticated dashboard exposes a dedicated **Serverless** product and lists **Claude Opus 5** with 1M context alongside `bios-adaptive`, Sonnet 5, DeepSeek V4 Pro, GLM-5.2 and Kimi K2.7 Code.
+- Live Billing shows **Wallet Balance $10.00**, **No card saved**, `Welcome credit / Signup credit +$10.00`, Tier 1 serverless limits of **600 requests/min, 200K tokens/min, 60M tokens/day**.
+- Live Analytics proves the free wallet funded successful **Claude Opus 5** Serverless requests in the web Playground, so the target model and free wallet entitlement themselves are real.
+- The live Playground's successful generation was observed as `POST https://platform.runbios.ai/v1/chat/completions` under the authenticated web session. Run BiOS docs explicitly say web-console calls may use short-lived JWT Bearer auth, which is separate from normal API-key auth and is not a stable external credential for OpenCode.
+- Current live API Keys UI creates ordinary `bios-...` keys; both Read Only and Full Access include the `serverless` scope. This disproves the earlier hypothesis that a separate `sk-bios-sl-...` credential class is required.
+- Two independent fresh `bios-...` keys were introspected as `active` with `serverless=True`; `/v1/models` accepts the saved key, but `/v1/chat/completions` returns **HTTP 401 `invalid_api_key`** for `bios-adaptive`, `glm-5.2`, and exact `claude-opus-5`.
+- Bearer, `X-API-Key`, both headers together, explicit `X-Org-ID`/`X-Workspace-ID`, both `api.runbios.ai` and `platform.runbios.ai`, and the official OpenAI Node SDK quickstart were tested. The official SDK still returns the same 401 for all three models.
+- Therefore the problem is not OpenCode, model selection, balance, scopes, or a stale key: the current external Serverless API-key authentication path is inconsistent with Run BiOS's own live quickstart. Treat it as **`BROKEN_EXTERNAL_API_AUTH`** until Run BiOS fixes the gateway.
+- Do **not** use/extract the web JWT as an OpenCode credential: it is a short-lived browser-session token refreshed by the console, not a documented long-lived API key.
+- Do **not** create a paid GPU Deployment for Claude: dedicated Deployments are a separate per-second GPU product and are unnecessary for hosted Serverless Opus 5.
+
+**Status:** Run BiOS proves that the $10 welcome credit can pay for Opus 5 in its web Playground, but it currently fails the strict task because a fresh normal API key cannot authenticate external `/v1/chat/completions`.
+
+## Fresh non-China instant-credit services — 2026-08-26
+
+- **InferenceHub** — newly GA on 2026-07-16; operated by **InferenceHub Labs, Inc.** New accounts start with **$1 free credit, no card required**. The API key reaches every model over Anthropic and OpenAI-compatible wires. Exact `claude-opus-5` went live on 2026-07-26 at Anthropic list pricing. Strongest fresh candidate because first-party docs explicitly state the free API credit is usable over the API on every model; hosted-chat gating does not apply to API keys. Status: `PROMISING / NEW / $1_AUTO / NO_CARD / EXACT_OPUS5`.
+- **OpusGate** — EU-based gateway; signup gives **$1 welcome credit with no card**, and its live catalog exposes exact `claude-opus-5`. Supports both native Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`, with explicit OpenCode setup docs. Pricing claims are unusually aggressive, so provenance still needs a live Hvoy check before trust. Status: `PROMISING / NEW / $1_AUTO / NO_CARD / EXACT_OPUS5 / PROVENANCE_RECHECK`.
+- **Standard Compute** — a very new service whose current terms say new accounts can start a **real API free trial with no card** and its frontier pool includes Claude Opus 5. However its public API uses the router model `standardcompute` rather than guaranteeing exact `claude-opus-5` per request, so it does **not** yet satisfy the strict exact-model requirement. Status: `FREE_TRIAL / NON_CHINA / TARGET_NOT_PINNABLE`.
+- **CodeGateway** — UK company WHITEDIT LTD and exact Opus 5 support, but first-party pages conflict: registration advertises `$2 to explore on signup`, while the FAQ says free credit requires binding a card. Reject under the strict no-card rule until the live account proves otherwise. Status: `CARD_REQUIREMENT_CONFLICT`.
+- **EvoLink.ai** — automatic free credits/no card and exact Opus 5, but the operator is EVO GLOBAL TECHNOLOGIES LIMITED in Hong Kong. Excluded from the user's non-China filter.
+- **April API** — advertises $1 free credit and exact Opus 5, but the domain is extremely new, operator identity is opaque, prices are implausibly far below list, and independent reputation signals are weak. Do not recommend without stronger provenance. Status: `RISKY / REJECT_FOR_NOW`.
+
+### New priority
+1. **InferenceHub** — first live signup/Hvoy target.
+2. **OpusGate** — second, but only after provenance sanity check.
+3. Continue discovery for additional US/EU services with automatic signup balance; do not pad the list with BYOK, cards, surveys, waitlists, Hong Kong/mainland-China operators, or non-pinnable routers.

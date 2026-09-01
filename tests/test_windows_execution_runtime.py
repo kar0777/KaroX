@@ -61,6 +61,27 @@ class ExecutableResolutionTests(unittest.TestCase):
         resolved = resolve_executable(["npx", "some-pkg"])
         self.assertTrue(pathlib.Path(resolved[0]).is_absolute())
 
+    def test_python_skips_windowsapps_alias_when_real_python_follows(self) -> None:
+        if not _is_windows():
+            self.skipTest("WindowsApps alias resolution is Windows-only")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            alias_dir = root / "WindowsApps"
+            real_dir = root / "Python313"
+            alias_dir.mkdir()
+            real_dir.mkdir()
+            (alias_dir / "python.exe").write_bytes(b"alias")
+            real_python = real_dir / "python.exe"
+            real_python.write_bytes(b"real")
+            with _mock.patch.dict(
+                os.environ,
+                {"PATH": os.pathsep.join((str(alias_dir), str(real_dir)))},
+                clear=False,
+            ):
+                resolved = resolve_executable(["python", "-V"])
+        self.assertEqual(Path(resolved[0]), real_python)
+        self.assertEqual(resolved[1:], ["-V"])
+
     def test_unknown_executable_raises_clear_error(self) -> None:
         with self.assertRaises(ExecutableResolutionError) as cm:
             resolve_executable(["karox-definitely-not-real-xyz", "arg"])

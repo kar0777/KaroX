@@ -1,9 +1,9 @@
-  0|  model-a · effort auto · @demo-repo
+  0|  model-a · @demo-repo · глубина auto
   1|
-  2|  KaroX готов.
-  3|  Напишите задачу обычным текстом.
-  4|  Ctrl+G — модель и Effort; / — остальные
-  5|  действия.
+  2|  KaroX готов.  /models · /effort · /
+  3|
+  4|
+  5|
   6|
   7|
   8|

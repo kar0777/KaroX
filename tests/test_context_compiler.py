@@ -75,6 +75,7 @@ class DuplicateTests(unittest.TestCase):
         marker = json.loads(second.replacement or "{}")
         self.assertEqual(marker["karox"], "identical_tool_result_reused")
         self.assertEqual(marker["same_as_tool_call_id"], "c1")
+        self.assertEqual(marker["next"], "act_or_change_query")
         self.assertEqual(second.chars_saved, len(BIG) - len(second.replacement or ""))
 
     def test_near_duplicate_is_never_collapsed(self) -> None:

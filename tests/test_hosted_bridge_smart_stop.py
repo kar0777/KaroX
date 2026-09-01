@@ -11,19 +11,23 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _support import initialize_git_repository
 from karox.event_bus import EventBus, EventKind
 from karox.hosted_bridge import CoreToolBridge
-from karox.models import AccessProfile
+from karox.action_policy import ActionConfirmationRequired, ActionDisposition
+from karox.models import AccessProfile, CoreResult
 from karox.risk_engine import RiskEngine, RiskLevel, SmartStopRequired
 from karox.sessions import SessionStore
+from karox.task_state import FactOrigin, TaskFact, TaskStateStore
 
 BULK = 12
 TOOLS = (
     "karox.repo.read_file",
     "karox.repo.write_file",
     "karox.git.commit",
+    "karox.command.run",
 )
 
 
@@ -77,54 +81,90 @@ class HostedSmartStopTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
 
-    def test_a_bulk_commit_from_a_hosted_client_is_stopped(self) -> None:
-        with self.assertRaises(SmartStopRequired) as stop:
-            self.bridge().execute(
-                "karox.git.commit",
-                {"message": "bulk", "paths": list(self.tracked)},
-                idempotency_key="bulk-1",
+    def test_workstream_objective_is_carried_as_out_of_band_user_intent(self) -> None:
+        TaskStateStore(self.sessions).bootstrap(
+            "hosted-session",
+            {
+                "objective": TaskFact(
+                    "delete the obsolete generated file",
+                    FactOrigin.REPORTED_BY_AGENT,
+                )
+            },
+            workstream_id="cleanup",
+        )
+        bridge = self.bridge()
+        captured: dict[str, str] = {}
+
+        class StubRuntime:
+            def execute(self, command, *, lease=None):  # type: ignore[no-untyped-def]
+                del lease
+                captured["intent"] = command.user_intent
+                captured["arguments"] = repr(command.arguments)
+                return CoreResult(
+                    ok=True,
+                    command=command.name,
+                    data={},
+                    correlation_id=command.correlation_id,
+                )
+
+        with patch.object(bridge, "_core", return_value=StubRuntime()):
+            result = bridge.execute(
+                "karox.repo.read_file",
+                {"path": "generated_0.txt", "workstream_id": "cleanup"},
             )
-        self.assertEqual(stop.exception.assessment.level, RiskLevel.HIGH)
-        self.assertIn("bulk_mutation", stop.exception.assessment.reasons)
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["intent"], "delete the obsolete generated file")
+        self.assertNotIn("workstream_id", captured["arguments"])
+        self.assertNotIn("delete the obsolete generated file", captured["arguments"])
+
+    def test_a_bulk_local_commit_is_guarded_auto_not_a_user_prompt(self) -> None:
+        result = self.bridge().execute(
+            "karox.git.commit",
+            {"message": "bulk", "paths": list(self.tracked)},
+            idempotency_key="bulk-1",
+        )
+        self.assertTrue(result["ok"])
+        decisions = self.events.snapshot(kinds=(EventKind.RISK_DECISION,))
+        self.assertTrue(decisions)
+        self.assertTrue(decisions[-1].data["allowed"])
+        self.assertEqual(decisions[-1].data["risk"], RiskLevel.HIGH.value)
+        self.assertEqual(decisions[-1].data["reason"], ActionDisposition.GUARDED_AUTO.value)
 
     def test_a_hosted_agent_has_no_channel_to_confirm_its_own_action(self) -> None:
-        # The bridge never forwards a confirmation token, by construction: it
-        # builds the CoreCommand itself and leaves the field unset. Even a
-        # token smuggled into the arguments cannot become an approval, because
-        # arguments are schema-validated against the tool.
+        # A local commit no longer needs a prompt, so use a real external side
+        # effect for the exact-human-boundary contract. The bridge still never
+        # accepts a confirmation token from model-visible tool arguments.
         bridge = self.bridge()
-        with self.assertRaises(SmartStopRequired):
+        with self.assertRaises(ActionConfirmationRequired) as stopped:
             bridge.execute(
-                "karox.git.commit",
-                {"message": "bulk", "paths": list(self.tracked)},
-                idempotency_key="bulk-2",
+                "karox.command.run",
+                {"argv": ["git", "push"]},
+                idempotency_key="push-1",
             )
-        grant = self.risk.ledger.issue(
-            self.risk.assess(stop_action(self.tracked))
-        )
+        grant = self.risk.ledger.issue(stopped.exception.decision.assessment)
         with self.assertRaises(Exception) as smuggled:
             bridge.execute(
-                "karox.git.commit",
+                "karox.command.run",
                 {
-                    "message": "bulk",
-                    "paths": list(self.tracked),
+                    "argv": ["git", "push"],
                     "confirmation_token": grant.token,
                 },
-                idempotency_key="bulk-3",
+                idempotency_key="push-2",
             )
         self.assertNotIsInstance(smuggled.exception, type(None))
         self.assertIn("confirmation_token", str(smuggled.exception))
 
-    def test_the_stop_is_visible_on_the_event_stream(self) -> None:
-        with self.assertRaises(SmartStopRequired):
+    def test_a_real_confirmation_boundary_is_visible_on_the_event_stream(self) -> None:
+        with self.assertRaises(ActionConfirmationRequired):
             self.bridge().execute(
-                "karox.git.commit",
-                {"message": "bulk", "paths": list(self.tracked)},
-                idempotency_key="bulk-4",
+                "karox.command.run",
+                {"argv": ["git", "push"]},
+                idempotency_key="push-3",
             )
         decisions = self.events.snapshot(kinds=(EventKind.RISK_DECISION,))
         self.assertTrue(decisions)
         self.assertFalse(decisions[-1].data["allowed"])
+        self.assertEqual(decisions[-1].data["reason"], "confirmation_required")
 
     def test_passing_no_engine_explicitly_opts_out(self) -> None:
         # A caller that wants the previous behaviour must say so; the default is

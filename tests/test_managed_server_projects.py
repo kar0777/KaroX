@@ -185,6 +185,31 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual([item.argv for item in profiles], [("npm", "start")])
         self.assertEqual(profiles[0].env["HOST"], "127.0.0.1")
 
+    def test_plain_html_project_gets_durable_loopback_static_server(self) -> None:
+        project = self.root / "static"
+        project.mkdir()
+        (project / "aquarium-test.html").write_text("<!doctype html><title>Aquarium</title>", encoding="utf-8")
+        profiles = server_profiles_for_repository(project)
+        self.assertEqual([item.argv for item in profiles], [("python", "-m", "karox.static_server")])
+        self.assertEqual(profiles[0].name, "static-html-loopback")
+        self.assertEqual(profiles[0].env, {"HOST": "127.0.0.1", "PORT": "8765"})
+        self.assertEqual(profiles[0].env_allowlist, frozenset({"PORT"}))
+        self.assertEqual(profiles[0].host_hint, "127.0.0.1")
+
+    def test_html_fallback_does_not_override_a_declared_or_safe_app_server(self) -> None:
+        project = self.root / "html-node"
+        _write_package(project, {"start": "node server.js"})
+        (project / "index.html").write_text("<!doctype html>", encoding="utf-8")
+        profiles = server_profiles_for_repository(project)
+        self.assertEqual([item.argv for item in profiles], [("npm", "start")])
+
+    def test_html_fallback_is_used_when_package_scripts_are_not_safe_runners(self) -> None:
+        project = self.root / "html-unsafe-package"
+        _write_package(project, {"start": "docker compose up"})
+        (project / "index.html").write_text("<!doctype html>", encoding="utf-8")
+        profiles = server_profiles_for_repository(project)
+        self.assertEqual([item.argv for item in profiles], [("python", "-m", "karox.static_server")])
+
     def test_composite_and_unknown_runners_are_refused(self) -> None:
         composite = self.root / "composite"
         _write_package(composite, {"start": "npm run build && node server.js"})

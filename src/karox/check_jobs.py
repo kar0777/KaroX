@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from .artifacts import ArtifactStore
+from .command_guard import DeveloperCommandBlocked, validate_developer_command_argv
 from .core import ProcessTree, VerificationRule
 from .evidence_packets import ArtifactRef, checks_job_packet
 from .paths import runtime_dir
@@ -34,10 +35,13 @@ from .process_identity import (
     verify_process_identity,
 )
 from .process_launcher import resolve_process_argv
-from .security import child_process_environment, redact
+from .repository_lease import RepositoryLease, RepositoryLeaseConflict, RepositoryLeaseStore
+from .security import child_process_environment, contains_credential, redact
 
 _SCHEMA_VERSION = 1
+_JOB_SCOPE_SCHEMA_VERSION = 1
 _JOB_ID = re.compile(r"job-[0-9a-f]{20}")
+_JOB_SCOPE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_LOG_BYTES = 24 * 1024 * 1024
 _DEFAULT_LOG_TAIL = 64 * 1024
 _MAX_LOG_TAIL = 1024 * 1024
@@ -50,6 +54,9 @@ _WORKER_EXIT_STATE_GRACE_SECONDS = 2.0
 _ATOMIC_REPLACE_TIMEOUT_SECONDS = 5.0
 _ATOMIC_REPLACE_RETRY_SECONDS = 0.025
 _LOG_TRIM_TO_BYTES = 16 * 1024 * 1024
+_DEV_REPOSITORY_LEASE_TTL_SECONDS = 90.0
+_DEV_REPOSITORY_LEASE_HEARTBEAT_SECONDS = 20.0
+_DEV_REPOSITORY_LEASE_RETRY_SECONDS = 0.25
 
 
 class CheckJobError(RuntimeError):
@@ -344,6 +351,27 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def effective_job_status(
+    state: CheckJobState,
+    *,
+    pid_alive: Callable[[int], bool] = _pid_alive,
+) -> tuple[str, Optional[str]]:
+    """Return the liveness-aware status used by continuation/read surfaces.
+
+    Job state is durable across bridge loss, so a worker can disappear before it
+    writes its terminal state. Treating the persisted ``running`` string as truth
+    then leaves task.resume/status blocked forever on a process that no longer
+    exists. This mirrors ``CheckJobManager.public_status`` without mutating the
+    journal: callers can safely exclude a proven-dead worker from active jobs.
+    """
+
+    if state.status in {"queued", "running"} and state.worker_identity is not None:
+        worker = verify_process_identity(state.worker_identity, pid_alive=pid_alive)
+        if not worker.alive:
+            return "failed", "worker_exited_without_final_state"
+    return state.status, state.error_code
+
+
 def _retryable_atomic_replace_error(exc: OSError) -> bool:
     """Return whether Windows may clear this replace failure after a short retry."""
 
@@ -408,6 +436,7 @@ class CheckJobStore:
     def __init__(self, session_id: str, *, root: Optional[Path] = None) -> None:
         if not isinstance(session_id, str) or not session_id:
             raise CheckJobError("check-job store requires a session id")
+        self.session_id = session_id
         base = Path(root) if root is not None else runtime_dir() / "vnext" / "check-jobs"
         self.root = (base / session_id).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -446,6 +475,74 @@ class CheckJobStore:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+
+    def scope_path(self, job_id: str) -> Path:
+        if not _JOB_ID.fullmatch(job_id):
+            raise CheckJobError("job_id is malformed")
+        return self.root / "scopes" / f"{job_id}.json"
+
+    def put_scope(
+        self,
+        job_id: str,
+        *,
+        workstream_id: str,
+        project_id: Optional[str] = None,
+    ) -> None:
+        """Persist secret-free logical ownership for accidental cross-lane isolation.
+
+        The session remains the security boundary. This sidecar prevents sibling
+        agents in one durable session from accidentally surfacing/cancelling each
+        other's jobs while keeping the job-state schema backward compatible.
+        """
+
+        self.state_path(job_id)  # validates the durable job id
+        if not isinstance(workstream_id, str) or not _JOB_SCOPE_ID.fullmatch(workstream_id):
+            raise CheckJobError("job workstream scope is invalid")
+        if project_id is not None and (
+            not isinstance(project_id, str) or not _JOB_SCOPE_ID.fullmatch(project_id)
+        ):
+            raise CheckJobError("job project scope is invalid")
+        payload: dict[str, Any] = {
+            "schema_version": _JOB_SCOPE_SCHEMA_VERSION,
+            "job_id": job_id,
+            "session_id": self.session_id,
+            "workstream_id": workstream_id,
+            "project_id": project_id,
+        }
+        self._atomic_json(
+            self.scope_path(job_id),
+            {**payload, "checksum": _checksum(payload)},
+        )
+
+    def get_scope(self, job_id: str) -> Optional[dict[str, Any]]:
+        path = self.scope_path(job_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CheckJobError("managed job scope is unreadable") from exc
+        if not isinstance(raw, dict):
+            raise CheckJobError("managed job scope is malformed")
+        checksum = raw.pop("checksum", None)
+        if not isinstance(checksum, str) or checksum != _checksum(raw):
+            raise CheckJobError("managed job scope checksum mismatch")
+        if raw.get("schema_version") != _JOB_SCOPE_SCHEMA_VERSION:
+            raise CheckJobError("managed job scope schema is unsupported")
+        if raw.get("job_id") != job_id or raw.get("session_id") != self.session_id:
+            raise CheckJobError("managed job scope identity mismatch")
+        workstream_id = raw.get("workstream_id")
+        project_id = raw.get("project_id")
+        if not isinstance(workstream_id, str) or not _JOB_SCOPE_ID.fullmatch(workstream_id):
+            raise CheckJobError("managed job workstream scope is invalid")
+        if project_id is not None and (
+            not isinstance(project_id, str) or not _JOB_SCOPE_ID.fullmatch(project_id)
+        ):
+            raise CheckJobError("managed job project scope is invalid")
+        return {
+            "workstream_id": workstream_id,
+            "project_id": project_id,
+        }
 
     def put(self, state: CheckJobState) -> None:
         payload = state.to_payload()
@@ -571,6 +668,31 @@ def _default_worker_launcher(state_path: Path) -> subprocess.Popen[Any]:
     )
 
 
+def developer_worker_launcher(state_path: Path) -> subprocess.Popen[Any]:
+    """Launch a durable Full-developer worker with the bridge user environment."""
+    argv = [sys.executable, "-m", "karox.check_jobs", "--worker", str(state_path)]
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    package_parent = Path(__file__).resolve().parents[1]
+    if package_parent.name == "src":
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = str(package_parent) + (
+            os.pathsep + existing if existing else ""
+        )
+    return subprocess.Popen(
+        argv,
+        cwd=state_path.parent,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        creationflags=_worker_creationflags(),
+        start_new_session=(os.name != "nt"),
+    )
+
+
 def _test_files(repository: Path) -> list[str]:
     return [
         path.relative_to(repository).as_posix()
@@ -607,8 +729,26 @@ def build_job_argv(
     repository: Path,
     arguments: Mapping[str, Any],
     verification_commands: Iterable[Iterable[str]],
+    *,
+    allow_developer_commands: bool = False,
 ) -> tuple[str, ...]:
     kind = arguments.get("kind", "pytest")
+    if kind == "dev":
+        if not allow_developer_commands:
+            raise CheckJobError("developer commands are not enabled for this job manager")
+        raw = arguments.get("argv")
+        if not isinstance(raw, list):
+            raise CheckJobError("developer argv must be an array")
+        try:
+            checked = validate_developer_command_argv(raw)
+        except DeveloperCommandBlocked as exc:
+            raise CheckJobError(str(exc)) from exc
+        if contains_credential(" ".join(checked)):
+            raise CheckJobError(
+                "credential-shaped argv cannot be persisted in a durable command job; "
+                "use environment, keyring, or file references"
+            )
+        return checked
     if kind == "check":
         raw = arguments.get("argv")
         if not isinstance(raw, list) or not raw or not all(
@@ -621,7 +761,7 @@ def build_job_argv(
             raise CheckJobError("check command is not in the verification allowlist")
         return checked_argv
     if kind != "pytest":
-        raise CheckJobError("kind must be pytest or check")
+        raise CheckJobError("kind must be pytest, check, or dev")
     if arguments.get("argv") is not None:
         raise CheckJobError("pytest jobs do not accept argv")
     suite = arguments.get("suite", "full")
@@ -662,6 +802,9 @@ class CheckJobManager:
         root: Optional[Path] = None,
         worker_launcher: WorkerLauncher = _default_worker_launcher,
         pid_alive: Callable[[int], bool] = _pid_alive,
+        allow_developer_commands: bool = False,
+        workspace_sensitive: bool = True,
+        wait_for_child: bool = True,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         self.session_id = session_id
@@ -669,6 +812,9 @@ class CheckJobManager:
         self.store = CheckJobStore(session_id, root=root)
         self.worker_launcher = worker_launcher
         self.pid_alive = pid_alive
+        self.allow_developer_commands = bool(allow_developer_commands)
+        self.workspace_sensitive = bool(workspace_sensitive)
+        self.wait_for_child = bool(wait_for_child)
         self._thread_lock = threading.RLock()
 
     def start(
@@ -686,9 +832,18 @@ class CheckJobManager:
         timeout_value = float(timeout)
         if not math.isfinite(timeout_value) or not 1 <= timeout_value <= 86400:
             raise CheckJobError("timeout_seconds must be between 1 and 86400")
-        argv = build_job_argv(self.repository, arguments, self.verification_commands)
+        argv = build_job_argv(
+            self.repository,
+            arguments,
+            self.verification_commands,
+            allow_developer_commands=self.allow_developer_commands,
+        )
         command_sha256 = _command_fingerprint(argv)
-        workspace_sha256 = _workspace_state_fingerprint(self.repository)
+        workspace_sha256 = (
+            _workspace_state_fingerprint(self.repository)
+            if self.workspace_sensitive
+            else hashlib.sha256(str(self.repository).encode("utf-8")).hexdigest()
+        )
         idempotency_sha256 = _idempotency_fingerprint(idempotency_key)
         now = time.time()
         owner_pid = int(bridge_pid or os.getpid())
@@ -751,6 +906,8 @@ class CheckJobManager:
                 )
                 self.store.put(failed)
                 raise CheckJobError("managed check worker could not start") from exc
+        if not self.wait_for_child:
+            return {**self.public_status(state), "idempotent_replay": False}
         deadline = time.monotonic() + _WORKER_READY_TIMEOUT_SECONDS
         observed = state
         while time.monotonic() < deadline:
@@ -813,11 +970,10 @@ class CheckJobManager:
         now = time.time()
         worker = self._identity_verdict(state.worker_identity)
         child = self._identity_verdict(state.child_identity)
-        effective_status = state.status
-        diagnostic = state.error_code
-        if state.status in {"queued", "running"} and state.worker_identity is not None and not worker.alive:
-            effective_status = "failed"
-            diagnostic = "worker_exited_without_final_state"
+        effective_status, diagnostic = effective_job_status(
+            state,
+            pid_alive=self.pid_alive,
+        )
         log = read_job_log(Path(state.log_path), limit=_DEFAULT_LOG_TAIL)
         summary = summarize_log(log["text"])
         duration_seconds = round(
@@ -853,6 +1009,8 @@ class CheckJobManager:
             "duration_seconds": duration_seconds,
             "timeout_budget": state.timeout_seconds,
             "exit_code": state.exit_code,
+            "error_code": diagnostic,
+            "error": str(redact(state.error))[:1000] if state.error else None,
             "artifact_id": state.artifact_id,
             "summary": summary["summary"],
             "first_failure": summary["first_failure"],
@@ -897,6 +1055,33 @@ class CheckJobManager:
             raise CheckJobError("worker identity is unproven; refusing to signal a PID")
         self.store.request_cancel(job_id)
         return {**self.public_status(state), "cancel_requested": True, "idempotent": False}
+
+    def cancel_active(self) -> dict[str, Any]:
+        """Request cancellation for every non-final job in this manager's store.
+
+        This is intentionally marker-only: the detached worker remains the sole
+        owner allowed to signal its child tree. It is used when a durable bridge
+        revokes the capability that originally authorized developer jobs.
+        """
+        requested: list[str] = []
+        unreadable: list[str] = []
+        for path in sorted(self.store.root.glob("job-*.json")):
+            job_id = path.stem
+            try:
+                state = self.store.get(job_id)
+            except CheckJobError:
+                # A cancel marker does not signal a PID. Writing one for a
+                # syntactically valid job id is safe even when its state cannot
+                # be trusted, and is the fail-closed choice during revocation.
+                self.store.request_cancel(job_id)
+                requested.append(job_id)
+                unreadable.append(job_id)
+                continue
+            if state.status in _FINAL_STATUSES:
+                continue
+            self.store.request_cancel(job_id)
+            requested.append(job_id)
+        return {"cancel_requested": requested, "unreadable_state": unreadable}
 
 
 def read_job_log(path: Path, *, limit: int) -> dict[str, Any]:
@@ -1033,11 +1218,15 @@ def run_worker(state_path: Path) -> int:
     session_id = state_path.parent.name
     store = CheckJobStore(session_id, root=state_path.parent.parent)
     state = store.get(state_path.stem)
+    developer_job = state_path.parent.parent.name == "dev-command-jobs"
     stop_reader = threading.Event()
     log_truncated = [state.log_truncated]
     tree: Optional[ProcessTree] = None
     reader: Optional[threading.Thread] = None
     process: Optional[subprocess.Popen[Any]] = None
+    repository_lease_store: Optional[RepositoryLeaseStore] = None
+    repository_lease: Optional[RepositoryLease] = None
+    repository_lease_heartbeat_at = 0.0
     try:
         worker_argv = [
             sys.executable,
@@ -1057,6 +1246,46 @@ def run_worker(state_path: Path) -> int:
             worker_identity=worker_identity,
         )
         store.put(state)
+        deadline = time.monotonic() + state.timeout_seconds
+        if developer_job:
+            repository = Path(state.repository).expanduser().resolve(strict=True)
+            repository_lease_store = RepositoryLeaseStore()
+            while True:
+                if store.cancel_path(state.job_id).exists():
+                    cancelled = replace(
+                        state,
+                        status="cancelled",
+                        updated_at=time.time(),
+                        finished_at=time.time(),
+                        cancellation_source="worker_start_cancelled",
+                    )
+                    store.put(cancelled)
+                    return 0
+                try:
+                    repository_lease, _recovered = repository_lease_store.acquire(
+                        repository,
+                        session_id=state.session_id,
+                        task_id=state.job_id,
+                        connection_id="durable-command-job",
+                        current_operation="durable_developer_command",
+                        ttl_seconds=_DEV_REPOSITORY_LEASE_TTL_SECONDS,
+                    )
+                    repository_lease_heartbeat_at = time.monotonic()
+                    break
+                except RepositoryLeaseConflict:
+                    if time.monotonic() >= deadline:
+                        failed = replace(
+                            state,
+                            status="failed",
+                            updated_at=time.time(),
+                            finished_at=time.time(),
+                            cancellation_source="repository_busy",
+                            error_code="repository_busy",
+                            error="repository mutation lease remained busy until the command deadline",
+                        )
+                        store.put(failed)
+                        return 1
+                    time.sleep(_DEV_REPOSITORY_LEASE_RETRY_SECONDS)
         log_path = Path(state.log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if store.cancel_path(state.job_id).exists():
@@ -1070,10 +1299,15 @@ def run_worker(state_path: Path) -> int:
             store.put(cancelled)
             return 0
         resolved_argv = resolve_process_argv(state.argv)
+        child_environment = (
+            os.environ.copy() if developer_job else child_process_environment()
+        )
+        child_environment["PYTHONIOENCODING"] = "utf-8"
+        child_environment["PYTHONUTF8"] = "1"
         process = subprocess.Popen(
             resolved_argv,
             cwd=state.repository,
-            env=child_process_environment(),
+            env=child_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1107,7 +1341,6 @@ def run_worker(state_path: Path) -> int:
             daemon=True,
         )
         reader.start()
-        deadline = time.monotonic() + state.timeout_seconds
         final_status = "failed"
         cancellation_source: Optional[str] = None
         signal_sent: Optional[str] = None
@@ -1119,12 +1352,25 @@ def run_worker(state_path: Path) -> int:
                 final_status = "passed" if code == 0 else "failed"
                 break
             if store.cancel_path(state.job_id).exists():
-                cancellation_source = "checks.cancel"
+                cancellation_source = "command.cancel" if developer_job else "checks.cancel"
                 signal_sent = "terminate_owned_child_job"
                 tree.terminate()
                 exit_code = process.poll()
                 final_status = "cancelled"
                 break
+            if (
+                repository_lease_store is not None
+                and repository_lease is not None
+                and time.monotonic() - repository_lease_heartbeat_at
+                >= _DEV_REPOSITORY_LEASE_HEARTBEAT_SECONDS
+            ):
+                repository_lease = repository_lease_store.heartbeat(
+                    Path(state.repository),
+                    repository_lease,
+                    current_operation="durable_developer_command",
+                    ttl_seconds=_DEV_REPOSITORY_LEASE_TTL_SECONDS,
+                )
+                repository_lease_heartbeat_at = time.monotonic()
             if time.monotonic() >= deadline:
                 cancellation_source = "command_timeout"
                 signal_sent = "terminate_owned_child_job"
@@ -1174,6 +1420,14 @@ def run_worker(state_path: Path) -> int:
         store.put(failed)
         return 1
     finally:
+        if repository_lease_store is not None and repository_lease is not None:
+            try:
+                repository_lease_store.release(Path(state.repository), repository_lease)
+            except Exception:
+                # The worker is exiting, so strict process identity makes any
+                # unreleased lease recoverable by the next owner. Never turn a
+                # completed command into a second failure during cleanup.
+                pass
         if tree is not None:
             tree.close()
 
@@ -1195,6 +1449,7 @@ __all__ = [
     "CheckJobState",
     "CheckJobStore",
     "build_job_argv",
+    "developer_worker_launcher",
     "read_job_log",
     "run_worker",
     "summarize_log",

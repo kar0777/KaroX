@@ -23,7 +23,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from starlette.responses import JSONResponse, Response
 
 from .artifacts import ArtifactStore
-from .core import CoreError
+from .core import CoreError, VerificationCommandNotApproved
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     HostedBridgeError,
@@ -62,6 +62,35 @@ HOST_REJECTION_HINT = (
 _TRANSPORT_ACTIVITY_LOCK = threading.Lock()
 _TRANSPORT_ACTIVE_REQUESTS = 0
 _TRANSPORT_RESPONSES_COMPLETED = 0
+_LOGGER = logging.getLogger(__name__)
+
+# Auth/discovery are the bridge control plane. They must stay responsive even
+# when many agents are simultaneously running long repository/check commands in
+# AnyIO's default worker pool. A separate capacity limiter makes run_sync create
+# control-plane workers without waiting for a default-pool token, while keeping
+# live credential resolution (and therefore immediate key rotation) intact.
+_CONTROL_PLANE_THREAD_LIMITER = anyio.CapacityLimiter(8)
+# Tool execution gets its own bounded worker budget as well. Without this,
+# several long-running hosted agents consume AnyIO's shared default tokens and
+# unrelated MCP calls start timing out or looking like bridge outages. Keep the
+# control plane fully independent, while still bounding CPU/disk pressure from
+# actual tools when many chats share one durable bridge.
+_TOOL_EXECUTION_THREAD_LIMITER = anyio.CapacityLimiter(24)
+# Keep genuinely long synchronous calls out of the latency-sensitive tool pool.
+# A few model/pytest/server operations may legitimately occupy a worker for
+# minutes; they must never consume every token needed by repo.read/status/search.
+_LONG_TOOL_EXECUTION_THREAD_LIMITER = anyio.CapacityLimiter(8)
+_LONG_RUNNING_TOOL_NAMES = frozenset(
+    {
+        "karox.command.run",
+        "karox.checks.run",
+        "karox.tests.run",
+        "karox.checks.run_affected",
+        "karox.task.execute_plan",
+        "karox.dev_server.start",
+        "karox.dev_server.restart",
+    }
+)
 
 
 def _transport_activity_started() -> None:
@@ -107,6 +136,11 @@ BRIDGE_ERROR_MESSAGES: dict[str, str] = {
         "(install the missing tool or use a command in the allowlist)"
     ),
     "invalid_request": "the call was rejected as invalid",
+    "verification_not_approved": (
+        "the check command is outside the user-approved verification set; "
+        "use an approved checks.run command, or on Full developer access use "
+        "karox.command.run/start for repository-scoped developer verification"
+    ),
     "request_interrupted": "the call was interrupted before it finished",
     "internal": "the tool failed",
 }
@@ -431,6 +465,8 @@ def bridge_error_code(exc: BaseException) -> str:
         return "executable_not_found"
     if isinstance(exc, FileNotFoundError):
         return "not_found"
+    if isinstance(exc, VerificationCommandNotApproved):
+        return "verification_not_approved"
     if isinstance(exc, (PermissionError, SessionError)):
         return "denied"
     if isinstance(exc, (CoreError, HostedBridgeError, TypeError, ValueError)):
@@ -626,6 +662,7 @@ def build_proxy_asgi_app(
             raise ValueError("bridge diagnostics must be a JSON object")
 
     transport_runtime: dict[str, Any] = {
+        "started_at": time.time(),
         "requests_started": 0,
         "responses_started": 0,
         "responses_completed": 0,
@@ -634,8 +671,15 @@ def build_proxy_asgi_app(
         "unauthorized_requests": 0,
         "mcp_tool_calls_started": 0,
         "mcp_tool_calls_completed": 0,
+        "mcp_tool_calls_succeeded": 0,
+        "mcp_tool_calls_failed": 0,
         "last_mcp_tool_call_started_at": None,
         "last_mcp_tool_call_completed_at": None,
+        "last_mcp_protocol_version": None,
+        "last_mcp_dispatch_path": None,
+        "last_correlation_id": None,
+        "last_successful_invocation_at": None,
+        "last_failure_class": None,
         "last_http_version": None,
         "last_method": None,
         "last_status": None,
@@ -646,12 +690,63 @@ def build_proxy_asgi_app(
         "last_response_body_bytes": None,
         "max_response_body_bytes": 0,
     }
+    lifecycle_runtime: dict[str, Any] = {
+        "state": "STARTING",
+        "ready": False,
+        "ready_at": None,
+        "canary_result": "PENDING",
+        "canary_failure_class": None,
+        "server_pid": os.getpid(),
+        # Hosted tools execute in bounded worker threads in this server process;
+        # there is no second mutable global worker process to lose or orphan.
+        "worker_pid": os.getpid(),
+    }
 
     def current_diagnostics() -> Optional[dict[str, Any]]:
         if diagnostics_payload is None:
             return None
         live = dict(diagnostics_payload)
         live["transport_runtime"] = dict(transport_runtime)
+        activity = transport_activity_snapshot()
+        started_at = float(transport_runtime["started_at"])
+        live["lifecycle"] = {
+            **dict(lifecycle_runtime),
+            "uptime_seconds": round(max(0.0, time.time() - started_at), 3),
+            "active_requests_count": activity["active_requests"],
+            # Streamable HTTP is deliberately stateless, and the protocol does
+            # not expose a stable client identity on each request. Report that
+            # limitation instead of inventing a misleading session count.
+            "active_sessions_count": None,
+            "active_sessions_reason": "stateless_transport_has_no_client_identity",
+            "server_state": lifecycle_runtime["state"],
+            "worker_state": "READY" if lifecycle_runtime["ready"] else lifecycle_runtime["state"],
+            "registration_state": (
+                "ENDPOINT_READY" if lifecycle_runtime["ready"] else "NOT_READY"
+            ),
+            "transport_state": (
+                "READY" if lifecycle_runtime["ready"] else lifecycle_runtime["state"]
+            ),
+        }
+        live.update(
+            {
+                "process_state": lifecycle_runtime["state"],
+                "worker_state": live["lifecycle"]["worker_state"],
+                "server_state": live["lifecycle"]["server_state"],
+                "registration_state": live["lifecycle"]["registration_state"],
+                "transport_state": live["lifecycle"]["transport_state"],
+                "uptime_seconds": live["lifecycle"]["uptime_seconds"],
+                "active_sessions_count": live["lifecycle"]["active_sessions_count"],
+                "active_requests_count": live["lifecycle"]["active_requests_count"],
+                "last_successful_invocation": transport_runtime[
+                    "last_successful_invocation_at"
+                ],
+                "last_failure_class": transport_runtime["last_failure_class"],
+                "server_pid": lifecycle_runtime["server_pid"],
+                "worker_pid": lifecycle_runtime["worker_pid"],
+                "readiness_result": bool(lifecycle_runtime["ready"]),
+                "end_to_end_canary_result": lifecycle_runtime["canary_result"],
+            }
+        )
 
         # Saved bridges have an external credential-free supervisor. Diagnostics
         # must read this state live instead of freezing it into the child process
@@ -688,12 +783,21 @@ def build_proxy_asgi_app(
                     "last_restart_at": supervisor.get("last_restart_at"),
                     "last_error": supervisor.get("last_error"),
                 }
+                live["reconnect_count"] = int(supervisor.get("restart_count") or 0)
             except Exception as exc:
                 live["durable_supervisor"] = {
                     "desired_running": True,
                     "supervisor_alive": False,
                     "last_error": f"status_unavailable:{type(exc).__name__}",
                 }
+                live["reconnect_count"] = 0
+        live["human_summary"] = (
+            f"KaroX {lifecycle_runtime['state']} | "
+            f"canary={lifecycle_runtime['canary_result']} | "
+            f"active_requests={activity['active_requests']} | "
+            f"tool_calls_ok={transport_runtime['mcp_tool_calls_succeeded']} | "
+            f"tool_calls_failed={transport_runtime['mcp_tool_calls_failed']}"
+        )
         return live
 
     trace_context = ToolTraceContext.from_runtime(proxy, diagnostics_payload)
@@ -758,6 +862,14 @@ def build_proxy_asgi_app(
     ) -> None:
         transport_runtime["mcp_tool_calls_completed"] += 1
         transport_runtime["last_mcp_tool_call_completed_at"] = time.time()
+        failed = bool(forced_error_code) or bool(getattr(result, "isError", False))
+        if failed:
+            transport_runtime["mcp_tool_calls_failed"] += 1
+            transport_runtime["last_failure_class"] = forced_error_code or "tool_error"
+        else:
+            transport_runtime["mcp_tool_calls_succeeded"] += 1
+            transport_runtime["last_successful_invocation_at"] = time.time()
+            transport_runtime["last_failure_class"] = None
         if span is None:
             return
         try:
@@ -805,7 +917,10 @@ def build_proxy_asgi_app(
         return descriptor_routes
 
     async def exposed_tools() -> list[Tool]:
-        descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
+        descriptors = await anyio.to_thread.run_sync(
+            proxy.descriptors,
+            limiter=_CONTROL_PLANE_THREAD_LIMITER,
+        )
         update_descriptor_routes(descriptors)
         tools = [
             Tool(
@@ -858,6 +973,8 @@ def build_proxy_asgi_app(
         idempotency_key: Optional[str] = None
         span: Optional[ToolTraceSpan] = None
         result: dict[str, Any] | CallToolResult
+        correlation_id = f"mcp-{secrets.token_hex(16)}"
+        transport_runtime["last_correlation_id"] = correlation_id
         try:
             if (
                 diagnostics_payload is not None
@@ -893,7 +1010,10 @@ def build_proxy_asgi_app(
                 return result
             routes = descriptor_routes
             if routes is None:
-                descriptors = await anyio.to_thread.run_sync(proxy.descriptors)
+                descriptors = await anyio.to_thread.run_sync(
+                    proxy.descriptors,
+                    limiter=_CONTROL_PLANE_THREAD_LIMITER,
+                )
                 routes = update_descriptor_routes(descriptors)
             by_internal, by_wire = routes
             # Exact internal names still win over a normalized wire alias, which
@@ -949,13 +1069,19 @@ def build_proxy_asgi_app(
                 read_only=bool(descriptor.read_only),
                 idempotency_key=idempotency_key,
             )
+            execution_limiter = (
+                _LONG_TOOL_EXECUTION_THREAD_LIMITER
+                if resolved_name in _LONG_RUNNING_TOOL_NAMES
+                else _TOOL_EXECUTION_THREAD_LIMITER
+            )
             result = await anyio.to_thread.run_sync(
                 lambda: proxy.execute(
                     resolved_name,
                     dict(arguments),
                     idempotency_key=idempotency_key,
                     deadline_seconds=deadline_seconds,
-                )
+                ),
+                limiter=execution_limiter,
             )
             result = compact_result(resolved_name, result)
             # Record client evidence when an external client (e.g. ChatGPT)
@@ -995,6 +1121,11 @@ def build_proxy_asgi_app(
                     idempotency_key=idempotency_key,
                 )
             finish_trace(span, result, forced_error_code=code)
+            _LOGGER.warning(
+                "MCP tool invocation failed correlation_id=%s failure_class=%s",
+                correlation_id,
+                type(exc).__name__,
+            )
             return result
 
     @server.call_tool()
@@ -1158,6 +1289,12 @@ def build_proxy_asgi_app(
                     *LEGACY_MCP_PROTOCOL_VERSIONS,
                 ],
                 "capabilities": {"tools": {}},
+                # MCP 2026-07-28 makes discovery/list results explicitly cacheable.
+                # The bridge catalog is stable for a running child, so a short
+                # private TTL reduces redundant remote discovery without hiding
+                # profile/source changes for more than one minute.
+                "ttlMs": 60_000,
+                "cacheScope": "private",
                 "resultType": "complete",
                 "_meta": modern_result_meta(),
             }
@@ -1170,6 +1307,8 @@ def build_proxy_asgi_app(
             tools = await exposed_tools()
             list_result: dict[str, Any] = {
                 "tools": [modern_tool_payload(tool) for tool in tools],
+                "ttlMs": 60_000,
+                "cacheScope": "private",
                 "resultType": "complete",
                 "_meta": modern_result_meta(),
             }
@@ -1260,12 +1399,19 @@ def build_proxy_asgi_app(
         if bearer_authorizer is not None:
             try:
                 return bool(
-                    await anyio.to_thread.run_sync(bearer_authorizer, supplied)
+                    await anyio.to_thread.run_sync(
+                        bearer_authorizer,
+                        supplied,
+                        limiter=_CONTROL_PLANE_THREAD_LIMITER,
+                    )
                 )
             except Exception:
                 return False
         try:
-            expected = await anyio.to_thread.run_sync(resolve_token)
+            expected = await anyio.to_thread.run_sync(
+                resolve_token,
+                limiter=_CONTROL_PLANE_THREAD_LIMITER,
+            )
         except Exception:
             return False
         # compare_digest rejects a non-ASCII str with TypeError, which turned a
@@ -1282,8 +1428,54 @@ def build_proxy_asgi_app(
                     while True:
                         message = await receive()
                         if message["type"] == "lifespan.startup":
-                            await send({"type": "lifespan.startup.complete"})
+                            try:
+                                tools = await exposed_tools()
+                                if not tools:
+                                    raise RuntimeError("empty tool catalog")
+                                if diagnostics_payload is not None:
+                                    metrics_before_canary = dict(transport_runtime)
+                                    try:
+                                        canary = await execute_tool(_DIAGNOSTICS_TOOL_NAME, {})
+                                    finally:
+                                        # The startup canary is reported through
+                                        # lifecycle.canary_result, not counted as
+                                        # an external client invocation.
+                                        transport_runtime.clear()
+                                        transport_runtime.update(metrics_before_canary)
+                                    if bool(getattr(canary, "isError", False)):
+                                        raise RuntimeError("diagnostics canary returned an error")
+                                lifecycle_runtime.update(
+                                    {
+                                        "state": "READY",
+                                        "ready": True,
+                                        "ready_at": time.time(),
+                                        "canary_result": "PASS",
+                                        "canary_failure_class": None,
+                                    }
+                                )
+                                await send({"type": "lifespan.startup.complete"})
+                            except Exception as exc:
+                                lifecycle_runtime.update(
+                                    {
+                                        "state": "DEGRADED",
+                                        "ready": False,
+                                        "canary_result": "FAIL",
+                                        "canary_failure_class": type(exc).__name__,
+                                    }
+                                )
+                                _LOGGER.error(
+                                    "MCP startup canary failed failure_class=%s",
+                                    type(exc).__name__,
+                                )
+                                await send(
+                                    {
+                                        "type": "lifespan.startup.failed",
+                                        "message": "KaroX MCP startup canary failed",
+                                    }
+                                )
+                                return
                         elif message["type"] == "lifespan.shutdown":
+                            lifecycle_runtime.update({"state": "STOPPED", "ready": False})
                             await send({"type": "lifespan.shutdown.complete"})
                             return
             finally:
@@ -1374,6 +1566,13 @@ def build_proxy_asgi_app(
                 _transport_activity_finished(completed=True)
 
         try:
+            if not lifecycle_runtime["ready"]:
+                await Response(
+                    "bridge not ready",
+                    status_code=503,
+                    headers={"Retry-After": "1"},
+                )(scope, tracked_receive, tracked_send)
+                return
             if not await authorized(scope):
                 transport_runtime["unauthorized_requests"] += 1
                 await Response(
@@ -1383,9 +1582,15 @@ def build_proxy_asgi_app(
                 )(scope, tracked_receive, tracked_send)
                 return
             transport_runtime["authorized_requests"] += 1
-            if scope_headers(scope).get("mcp-protocol-version") == MODERN_MCP_PROTOCOL_VERSION:
+            protocol_version = scope_headers(scope).get("mcp-protocol-version")
+            transport_runtime["last_mcp_protocol_version"] = (
+                protocol_version[:64] if isinstance(protocol_version, str) else None
+            )
+            if protocol_version == MODERN_MCP_PROTOCOL_VERSION:
+                transport_runtime["last_mcp_dispatch_path"] = "direct_json"
                 await modern_mcp_request(scope, tracked_receive, tracked_send)
                 return
+            transport_runtime["last_mcp_dispatch_path"] = "sdk_streamable_http"
             await manager.handle_request(scope, tracked_receive, tracked_send)
         finally:
             if not activity_finished:

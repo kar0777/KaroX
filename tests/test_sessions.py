@@ -153,6 +153,97 @@ class SessionStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionError, "revoked"):
             self.store.acquire("sample", "new-holder")
 
+    def test_archive_hides_from_normal_list_and_blocks_new_mutation(self) -> None:
+        archived = self.store.archive("sample")
+        self.assertTrue(archived.archived)
+        self.assertEqual(self.store.list(include_archived=False), [])
+        self.assertEqual([item.session_id for item in self.store.list()], ["sample"])
+        with self.assertRaisesRegex(SessionError, "archived"):
+            self.store.acquire("sample", "writer", ttl_seconds=5)
+        restored = self.store.unarchive("sample")
+        self.assertFalse(restored.archived)
+        lease = self.store.acquire("sample", "writer", ttl_seconds=5)
+        self.store.release(lease)
+
+    def test_archive_refuses_a_live_mutation_owner(self) -> None:
+        lease = self.store.acquire("sample", "writer", ttl_seconds=5)
+        try:
+            with self.assertRaises(SessionBusy):
+                self.store.archive("sample")
+        finally:
+            self.store.release(lease)
+
+    def test_delete_requires_archive_and_removes_the_session_directory(self) -> None:
+        with self.assertRaisesRegex(SessionError, "archive"):
+            self.store.delete_archived("sample")
+        self.store.archive("sample")
+        self.store.delete_archived("sample")
+        self.assertFalse(self.store.session_dir("sample").exists())
+        with self.assertRaises(SessionError):
+            self.store.load("sample")
+
+    def test_fork_copies_context_but_not_live_or_idempotent_state(self) -> None:
+        lease = self.store.acquire("sample", "writer", ttl_seconds=5)
+        try:
+            source = self.store.load("sample")
+            source.summary = "architecture understood"
+            source.plan = [{"step": "implement"}]
+            source.decisions = [{"decision": "keep API stable"}]
+            source.changed_files = ["src/example.py"]
+            source.evidence = [{"kind": "test", "summary": "green"}]
+            source.jobs = [{"pid": 1234}]
+            source.connected_clients = [{"client": "old"}]
+            source.usage = {"tokens": 9000}
+            source.idempotency = {"old": {"status": "complete"}}
+            self.store.save(source, source.revision, lease)
+        finally:
+            self.store.release(lease)
+
+        child = self.store.fork(
+            "sample", session_id_new="child", name="experiment branch"
+        )
+        self.assertEqual(child.parent_session_id, "sample")
+        self.assertEqual(child.name, "experiment branch")
+        self.assertEqual(child.task_history, ["repair the sample"])
+        self.assertIn('"source_session": "sample"', child.continuation_context)
+        self.assertEqual(child.provider_history, [])
+        self.assertEqual(child.summary, "architecture understood")
+        self.assertEqual(child.plan, [{"step": "implement"}])
+        self.assertEqual(child.changed_files, ["src/example.py"])
+        self.assertEqual(child.evidence, [{"kind": "test", "summary": "green"}])
+        self.assertEqual(child.jobs, [])
+        self.assertEqual(child.connected_clients, [])
+        self.assertEqual(child.usage, {})
+        self.assertEqual(child.idempotency, {})
+        self.assertFalse(child.archived)
+        self.assertFalse(child.revoked)
+
+    def test_rename_is_single_line(self) -> None:
+        renamed = self.store.rename("sample", "  release\n candidate  ")
+        self.assertEqual(renamed.name, "release candidate")
+
+    def test_continue_task_appends_a_new_user_turn_and_preserves_task_history(self) -> None:
+        lease = self.store.acquire("sample", "seed", ttl_seconds=5)
+        try:
+            record = self.store.load("sample")
+            record.provider_history = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "repair the sample"},
+                {"role": "assistant", "content": "first answer"},
+            ]
+            record.status = "verified"
+            self.store.save(record, record.revision, lease)
+        finally:
+            self.store.release(lease)
+
+        continued = self.store.continue_task("sample", "now review the fix")
+        self.assertEqual(continued.task, "now review the fix")
+        self.assertEqual(continued.task_history, ["repair the sample"])
+        self.assertEqual(continued.status, "active")
+        self.assertEqual(continued.provider_history[-1]["role"], "user")
+        self.assertEqual(continued.provider_history[-1]["content"], "now review the fix")
+        self.assertEqual(continued.provider_history[-1]["kind"], "continuation")
+
     def test_cross_process_takeover_save_and_heartbeat_are_serialized(self) -> None:
         original = self.store.acquire("sample", "expired-owner", ttl_seconds=5)
         lease_path = self.store.lease_path("sample")

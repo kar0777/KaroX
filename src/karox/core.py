@@ -48,6 +48,10 @@ class InvalidCommand(CoreError):
     pass
 
 
+class VerificationCommandNotApproved(InvalidCommand):
+    """A checks.run argv is valid, but outside the user's verification allowlist."""
+
+
 WILDCARD_ARGUMENT = "*"
 
 # Options that hand a program text to the executable instead of a file to work
@@ -505,6 +509,7 @@ class CoreRuntime:
         verification_commands: Optional[Iterable[Iterable[str]]] = None,
         risk: Optional[RiskEngine] = None,
         events: Optional[EventBus] = None,
+        mutation_reviewer: Optional[Callable[[CoreCommand, ToolDefinition, float], CoreCommand]] = None,
         session_repository_validator: Optional[Callable[[SessionRecord, Path], None]] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
@@ -514,6 +519,7 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
+        self._mutation_reviewer = mutation_reviewer
         self._session_repository_validator = session_repository_validator
         # Tool availability is stable for one runtime process. Resolve ripgrep
         # once during runtime construction so the first user search does not pay
@@ -546,6 +552,7 @@ class CoreRuntime:
             "git.status": self._git_status,
             "git.diff": self._git_diff,
             "repo.search": self._search,
+            "lsp.diagnostics": self._lsp_diagnostics,
             "git.commit": self._git_commit,
         }
         self._definitions = {
@@ -646,6 +653,21 @@ class CoreRuntime:
                         "max_results": {"type": "number"},
                     },
                     "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            "lsp.diagnostics": ToolDefinition(
+                "lsp.diagnostics",
+                "Read bounded diagnostics from an allowlisted installed language server for one repository file.",
+                Capability.DIAGNOSTICS_READ,
+                False,
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "timeout_seconds": {"type": "number"},
+                    },
+                    "required": ["path"],
                     "additionalProperties": False,
                 },
             ),
@@ -775,6 +797,36 @@ class CoreRuntime:
         if definition is None or (handler is None and not is_mcp):
             raise InvalidCommand(f"unknown Core command: {command.name}")
         self._validate_arguments(definition, command.arguments)
+        if self._mutation_reviewer is not None and definition.mutates:
+            original = command
+            reviewed = self._mutation_reviewer(
+                original, definition, float(original.deadline_seconds)
+            )
+            if not isinstance(reviewed, CoreCommand):
+                raise InvalidCommand("mutation reviewer returned an invalid command")
+            if (
+                reviewed.session_id != original.session_id
+                or reviewed.origin != original.origin
+                or reviewed.correlation_id != original.correlation_id
+                or reviewed.idempotency_key != original.idempotency_key
+                or reviewed.deadline_seconds != original.deadline_seconds
+                or reviewed.confirmation_token != original.confirmation_token
+            ):
+                raise InvalidCommand("mutation reviewer changed immutable command identity")
+            command = reviewed
+            definition = self._definitions.get(command.name)
+            handler = self._handlers.get(command.name)
+            is_mcp = (
+                definition is not None
+                and handler is None
+                and self._mcp_binding is not None
+                and command.name.startswith("mcp.")
+            )
+            if definition is None or (handler is None and not is_mcp):
+                raise InvalidCommand(
+                    f"mutation reviewer returned unknown Core command: {command.name}"
+                )
+            self._validate_arguments(definition, command.arguments)
         try:
             input_digest = command.input_digest()
         except (TypeError, ValueError) as exc:
@@ -1668,7 +1720,7 @@ class CoreRuntime:
         # Refusing here rather than after the run keeps a rejected command from
         # reserving a durable idempotency intent that then needs reconciliation.
         if self._verification_rules is not None and not eligible:
-            raise InvalidCommand(
+            raise VerificationCommandNotApproved(
                 "check command is not in the user-approved verification set"
             )
         requested = float(
@@ -2272,6 +2324,25 @@ class CoreRuntime:
             "truncated": truncated,
             "backend": "git-grep",
         }
+
+    def _lsp_diagnostics(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        path = self._required(arguments, "path", str)
+        if not path or len(path) > 1000 or "\x00" in path:
+            raise InvalidCommand("diagnostic path must contain 1-1000 characters")
+        requested = arguments.get("timeout_seconds", min(8.0, deadline_seconds))
+        if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+            raise InvalidCommand("diagnostic timeout must be a number")
+        if not math.isfinite(float(requested)) or not 1.0 <= float(requested) <= 30.0:
+            raise InvalidCommand("diagnostic timeout must be between 1 and 30 seconds")
+        timeout = min(float(requested), max(1.0, float(deadline_seconds)))
+        from .lsp_diagnostics import LspDiagnostics, LspDiagnosticsError
+
+        try:
+            return LspDiagnostics(self.repository).diagnose(path, timeout_seconds=timeout)
+        except LspDiagnosticsError as exc:
+            raise CoreError(str(exc)) from exc
 
     def _search(
         self, arguments: Dict[str, Any], deadline_seconds: float

@@ -61,11 +61,11 @@ STATUS_DONE = "done"
 STATUS_ATTENTION = "attention"
 
 _GROUP_WORDS: Dict[str, Tuple[str, str]] = {
-    GROUP_INVESTIGATING: ("Изучает код", "Investigating"),
+    GROUP_INVESTIGATING: ("Изучает проект", "Exploring project"),
     GROUP_IMPLEMENTING: ("Вносит изменения", "Implementing"),
-    GROUP_VERIFYING: ("Проверяет", "Verifying"),
-    GROUP_BROWSER: ("Браузер", "Browser"),
-    GROUP_WORKING: ("Работает", "Working"),
+    GROUP_VERIFYING: ("Проверяет результат", "Verifying result"),
+    GROUP_BROWSER: ("Проверяет интерфейс", "Checking UI"),
+    GROUP_WORKING: ("Продолжает работу", "Working"),
 }
 
 # The canonical dotted Core names the kernel publishes. A name absent from

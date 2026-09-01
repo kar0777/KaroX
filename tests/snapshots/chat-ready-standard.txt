@@ -1,8 +1,8 @@
-  0|  openai/model-a · effort auto · @demo-repo
+  0|  openai/model-a · глубина auto · @demo-repo
   1|
-  2|  KaroX готов.
-  3|  Напишите задачу обычным текстом.
-  4|  Ctrl+G — модель и Effort; / — остальные действия.
+  2|  KaroX готов.  /models · /effort · /
+  3|
+  4|
   5|
   6|
   7|

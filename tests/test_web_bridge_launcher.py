@@ -36,6 +36,7 @@ from karox.web_bridge_launcher import (
     _mirror_child_output,
     _reclaim_orphaned_bridge_listener,
     _release_saved_bridge_owner_lock,
+    _stop_request_path,
     _sync_external_mcp_selections,
     _try_acquire_saved_bridge_owner_lock,
     _wait_for_bridge,
@@ -164,6 +165,37 @@ class WebBridgeConfigTests(unittest.TestCase):
                     item["name"] for item in diagnostics["disabled_tools"]
                 }
                 self.assertNotIn("karox.runtime.status", disabled)
+
+    def test_chatgpt_diagnostics_advertise_stale_catalog_fallbacks(self) -> None:
+        diagnostics = web_bridge_diagnostics(
+            WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path.cwd(),
+                access_profile=AccessProfile.ELEVATED,
+            )
+        )
+        catalog = diagnostics["tool_catalog"]
+        self.assertFalse(catalog["legacy_cached_catalog_compatible"])
+        self.assertEqual(catalog["legacy_cached_catalog_mode"], "compatibility_fallbacks")
+        self.assertTrue(catalog["catalog_refresh_required_for_new_tool_names"])
+        self.assertIn("command.run", catalog["legacy_fallbacks"])
+        self.assertIn("task.resume", catalog["legacy_fallbacks"])
+        self.assertIn("browser.command", catalog["legacy_fallbacks"])
+
+    def test_elevated_diagnostics_keep_global_remote_side_effect_blocks(self) -> None:
+        diagnostics = web_bridge_diagnostics(
+            WebBridgeConnectConfig(
+                profile="chatgpt-web",
+                repository=Path.cwd(),
+                access_profile=AccessProfile.ELEVATED,
+                tools=("karox.repo.read_file", "karox.command.run"),
+            )
+        )
+        restrictions = diagnostics["mode_restrictions"]
+        self.assertTrue(restrictions["no_git_push"])
+        self.assertTrue(restrictions["no_publish"])
+        self.assertTrue(restrictions["no_auth_commands"])
+        self.assertTrue(restrictions["no_deploy_release"])
 
     def test_explicit_legacy_tool_families_keep_stable_worker_commands(self) -> None:
         config = WebBridgeConnectConfig(
@@ -578,7 +610,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                     "karox.web_bridge_launcher._wait_for_public_mcp_route",
                     side_effect=WebBridgeLaunchError("Funnel is not ready"),
                 ),
-                patch("karox.web_bridge_launcher._consume_stop_request", return_value=True),
+                patch("karox.web_bridge_launcher._consume_stop_request", return_value="stop"),
                 patch(
                     "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
                     return_value=7777,
@@ -1253,10 +1285,50 @@ class BridgeDiagnosticsTests(unittest.TestCase):
             },
         ):
             request = _write_stop_request("session-duplicate-owner", 111)
-            self.assertFalse(_consume_stop_request("session-duplicate-owner", 222))
+            self.assertIsNone(_consume_stop_request("session-duplicate-owner", 222))
             self.assertTrue(request.exists())
-            self.assertTrue(_consume_stop_request("session-duplicate-owner", 111))
+            self.assertEqual(
+                _consume_stop_request("session-duplicate-owner", 111),
+                "stop",
+            )
             self.assertFalse(request.exists())
+
+    def test_restart_stop_request_preserves_distinct_lifecycle_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": tmp,
+            },
+        ):
+            request = _write_stop_request(
+                "session-restart-owner",
+                333,
+                intent="restart",
+            )
+            payload = json.loads(request.read_text(encoding="utf-8"))
+            self.assertEqual(payload["intent"], "restart")
+            self.assertEqual(
+                _consume_stop_request("session-restart-owner", 333),
+                "restart",
+            )
+            self.assertFalse(request.exists())
+
+    def test_legacy_stop_request_without_intent_fails_closed_to_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "KAROX_RUNTIME_DIR": tmp,
+                "KAROX_VNEXT_RUNTIME_DIR": tmp,
+            },
+        ):
+            path = _stop_request_path("session-legacy-stop")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"owner_pid": 444}), encoding="utf-8")
+            self.assertEqual(
+                _consume_stop_request("session-legacy-stop", 444),
+                "stop",
+            )
 
     def test_saved_bridge_owner_lock_is_exclusive_and_released_with_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -1425,7 +1497,7 @@ class EphemeralUrlWarningTests(unittest.TestCase):
                 note = ephemeral_url_warning(profile, None)
                 self.assertIsNotNone(note)
                 assert note is not None
-                self.assertIn("temporary", note)
+                self.assertTrue("temporary" in note or "временный" in note)
                 self.assertIn("--public-url", note)
 
     def test_a_declared_origin_is_not_warned_about(self) -> None:
@@ -1446,7 +1518,7 @@ class EphemeralUrlWarningTests(unittest.TestCase):
         note = ephemeral_url_warning("notion", None)
         self.assertIsNotNone(note)
         assert note is not None
-        self.assertIn("temporary", note)
+        self.assertTrue("temporary" in note or "временный" in note)
         self.assertIn("--public-url", note)
 
     def test_a_profile_that_never_needed_a_stable_url_is_left_alone(self) -> None:

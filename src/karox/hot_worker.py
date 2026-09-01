@@ -29,6 +29,10 @@ _REQUIRED_ENTRY_POINTS = (
 _DEFAULT_MODULE_GROUP = (
     "karox.workspace_transaction",
     "karox.unified_patch",
+    # Desktop app actions are dispatched from workspace_worker but implemented
+    # separately. Keep them in the same last-known-good generation so desktop
+    # safety fixes never require recycling the persistent bridge.
+    "karox.desktop_apps",
     "karox.workspace_worker",
 )
 
@@ -43,6 +47,7 @@ class WorkerSnapshot:
     source_mtime_ns: int
     watched_sources: tuple[str, ...]
     last_reload_error: Optional[str]
+    bridge_restart_required: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,7 +63,7 @@ class WorkerSnapshot:
             "watched_sources": list(self.watched_sources),
             "last_reload_error": self.last_reload_error,
             "hot_reload": True,
-            "bridge_restart_required": False,
+            "bridge_restart_required": self.bridge_restart_required,
         }
 
 
@@ -81,6 +86,13 @@ class HotWorkerSupervisor:
         self._source_mtime_ns = 0
         self._watched_sources: tuple[str, ...] = ()
         self._last_reload_error: Optional[str] = None
+        self._supervisor_source_path = Path(__file__).resolve()
+        try:
+            self._supervisor_source_sha256 = self._digest(self._supervisor_source_path)
+        except OSError:
+            # If the supervisor source cannot be established, status must prefer
+            # a conservative restart recommendation over a false all-clear.
+            self._supervisor_source_sha256 = ""
 
     def _module_names(self) -> tuple[str, ...]:
         if self.MODULE_GROUP is not None:
@@ -128,6 +140,23 @@ class HotWorkerSupervisor:
     ) -> str:
         body = "\n".join(f"{name}:{digest}" for name, _mtime, _size, digest in signature)
         return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def _bridge_restart_required(self) -> bool:
+        """Return True when the non-reloadable supervisor source changed.
+
+        The worker module group can update in-place, but this supervisor owns the
+        composition of that group. A change to ``hot_worker.py`` therefore cannot
+        safely self-apply; report the need for one durable child recycle instead
+        of claiming hot reload covers it.
+        """
+
+        if not self._supervisor_source_sha256:
+            return True
+        try:
+            current = self._digest(self._supervisor_source_path)
+        except OSError:
+            return True
+        return current != self._supervisor_source_sha256
 
     def _update_snapshot(
         self,
@@ -268,6 +297,7 @@ class HotWorkerSupervisor:
                 source_mtime_ns=self._source_mtime_ns,
                 watched_sources=self._watched_sources,
                 last_reload_error=self._last_reload_error,
+                bridge_restart_required=self._bridge_restart_required(),
             ).to_dict()
 
     def validate_repo(self, arguments: dict[str, Any]) -> None:

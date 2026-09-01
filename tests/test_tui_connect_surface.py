@@ -47,8 +47,26 @@ class VisibleCommandSurfaceTests(unittest.TestCase):
         english = {name.split(" ", 1)[0] for name in tui._commands("en")}
         self.assertEqual(russian, english, "a command must not be visible in one language only")
         self.assertEqual(russian, set(tui.VISIBLE_COMMANDS))
-        # A coding agent, not a control panel: the menu stays short.
-        self.assertLessEqual(len(russian), 8)
+        # Bare `/` is the task-first surface, not a cockpit. KaroX's advanced
+        # differentiators remain searchable by prefix and in `/help all`.
+        self.assertLessEqual(len(russian), 10)
+        self.assertEqual(
+            russian,
+            {
+                "/models",
+                "/effort",
+                "/mode",
+                "/review",
+                "/map",
+                "/resume",
+                "/new",
+                "/project",
+                "/connect",
+                "/help",
+            },
+        )
+        for advanced in ("/status", "/economy", "/orchestrate"):
+            self.assertIn(advanced, tui.DISCOVERABLE_COMMANDS)
 
     def test_every_visible_command_has_a_description_in_both_languages(self) -> None:
         for language in ("ru", "en"):
@@ -98,6 +116,17 @@ class SlashMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/connect", suggestions)
             for retired in RETIRED_COMMANDS:
                 self.assertNotIn(retired, suggestions)
+
+    async def test_typing_prefix_searches_all_human_commands(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(120, 42)) as pilot:
+            await pilot.pause()
+            app._update_command_menu("/m")
+            offered = {name.split(" ", 1)[0] for name in app._filtered_commands}
+            self.assertTrue({"/models", "/mode", "/map", "/memory", "/mcp", "/mission"} <= offered)
+            # Advanced KaroX features are discoverable without bloating bare `/`.
+            self.assertIn("/memory", offered)
+            self.assertIn("/mission", offered)
 
     async def test_typing_a_retired_name_does_not_suggest_it(self) -> None:
         app = self.app()
@@ -183,8 +212,8 @@ class ConnectRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_models_opens_the_single_picker_not_a_management_screen(self) -> None:
         """`/models` is a model question, not a connection-management one.
 
-        Model and Effort are one picker (the same one Ctrl+G opens), so
-        `/models` lands there instead of a second models screen.
+        `/models` owns model choice directly. Effort is a separate `/effort`
+        control, so model selection never opens a combined cockpit screen.
         """
 
         _pushed, names = await self._routed("/models")

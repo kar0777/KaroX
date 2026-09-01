@@ -27,6 +27,7 @@ from session B, and the browser/process context dies with the session.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import threading
@@ -38,7 +39,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .artifacts import ArtifactStore
-from .check_jobs import CheckJobError, CheckJobManager
+from .check_jobs import CheckJobError, CheckJobManager, developer_worker_launcher
 from .browser_access import BrowserAccessPolicy, SecureBrowserSessionManager
 from .extension_browser import ChromeExtensionBrowserSessionManager
 from .browser_session import (
@@ -87,6 +88,10 @@ from .task_state import TaskStateStore
 # by default -- exposing it would let a hosted client start real Facebook
 # actions from a verification run.
 SAFE_NPM = ("npm", "run", "start:safe")
+STATIC_HTML_SERVER = ("python", "-m", "karox.static_server")
+# Deliberately runnable as a managed child. Other karox.* modules stay protected
+# from process-control operations because they may be the bridge/control plane.
+_MANAGED_KAROX_SERVICE_MODULES = frozenset({"karox.static_server"})
 
 
 @dataclass(frozen=True)
@@ -284,6 +289,26 @@ def server_profiles_from_manifest(repository: Path) -> tuple[ManagedServerProfil
     return tuple(profiles)
 
 
+def _static_html_server_profiles(repository: Path) -> tuple[ManagedServerProfile, ...]:
+    """Offer one safe durable server for a plain top-level HTML project."""
+
+    try:
+        has_html = any(path.is_file() for path in repository.glob("*.html"))
+    except OSError:
+        has_html = False
+    if not has_html:
+        return ()
+    return (
+        ManagedServerProfile(
+            name="static-html-loopback",
+            argv=STATIC_HTML_SERVER,
+            env={"HOST": "127.0.0.1", "PORT": "8765"},
+            env_allowlist=frozenset({"PORT"}),
+            host_hint="127.0.0.1",
+        ),
+    )
+
+
 def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfile, ...]:
     """Return loopback-only dev-server profiles that actually belong to *repository*.
 
@@ -296,14 +321,17 @@ def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfi
     """
 
     manifest_profiles = server_profiles_from_manifest(repository)
+    static_profiles = _static_html_server_profiles(repository)
     package_json = repository / "package.json"
     try:
         payload = json.loads(package_json.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return _deduplicate_server_profiles(manifest_profiles)
+        declared = _deduplicate_server_profiles(manifest_profiles)
+        return declared if declared else static_profiles
     scripts_raw = payload.get("scripts") if isinstance(payload, dict) else None
     if not isinstance(scripts_raw, dict):
-        return _deduplicate_server_profiles(manifest_profiles)
+        declared = _deduplicate_server_profiles(manifest_profiles)
+        return declared if declared else static_profiles
     scripts = {
         str(name): str(command)
         for name, command in scripts_raw.items()
@@ -358,6 +386,8 @@ def server_profiles_for_repository(repository: Path) -> tuple[ManagedServerProfi
                 )
             )
             break
+    if not profiles:
+        profiles.extend(static_profiles)
     return _deduplicate_server_profiles(tuple(profiles))
 
 
@@ -431,6 +461,10 @@ CHECKS_START = "karox.checks.start"
 CHECKS_STATUS = "karox.checks.status"
 CHECKS_LOGS = "karox.checks.logs"
 CHECKS_CANCEL = "karox.checks.cancel"
+COMMAND_START = "karox.command.start"
+COMMAND_STATUS = "karox.command.status"
+COMMAND_LOGS = "karox.command.logs"
+COMMAND_CANCEL = "karox.command.cancel"
 RUNTIME_RESTART = "karox.runtime.restart"
 ARTIFACT_GET = "karox.artifact.get"
 ARTIFACT_READ_IMAGE = "karox.artifact.read_image"
@@ -459,9 +493,12 @@ def _selector_schema(required: bool = True) -> dict[str, Any]:
 _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
     BROWSER_COMMAND: _ToolMeta(
         description=(
-            "Stable hot-reload browser command. The schema remains fixed while "
-            "new guarded actions can be added inside the worker without "
-            "reconnecting the hosted client."
+            "Stable hot-reload browser/desktop command. The schema remains fixed while "
+            "new guarded actions can be added inside the worker without reconnecting the "
+            "hosted client. Native app actions: app.discover and app.attach require "
+            "user_confirmed=true in an elevated session; then use app.status, app.snapshot, "
+            "app.focus, app.click, app.type, app.key, or app.detach. Traycer is built in; "
+            "other visible apps can be attached with app_id plus title_contains."
         ),
         input_schema={
             "type": "object",
@@ -863,6 +900,84 @@ _HOSTED_EXTRA_TOOLS: dict[str, _ToolMeta] = {
         read_only=False,
         capability=Capability.CHECKS_RUN,
     ),
+    COMMAND_START: _ToolMeta(
+        description=(
+            "Start a durable elevated developer command and return immediately. "
+            "Use this instead of command.run for long model, build, benchmark, or CLI tasks; "
+            "the detached worker survives MCP/tunnel interruptions and exposes status/logs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100},
+                "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 86400},
+                "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                },
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["argv", "request_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.DEV_COMMAND,
+    ),
+    COMMAND_STATUS: _ToolMeta(
+        description=(
+            "Return durable status for a detached elevated developer command. "
+            "Pass the workstream_id returned by command.start when available."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+        capability=Capability.DEV_COMMAND,
+    ),
+    COMMAND_LOGS: _ToolMeta(
+        description=(
+            "Return a bounded redacted log tail for a detached elevated developer command. "
+            "Pass the workstream_id returned by command.start when available."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1048576},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=True,
+        capability=Capability.DEV_COMMAND,
+    ),
+    COMMAND_CANCEL: _ToolMeta(
+        description=(
+            "Request cancellation of a detached elevated developer command. "
+            "The bridge never signals a caller-supplied PID; the durable worker terminates only its own child tree. "
+            "Pass the workstream_id returned by command.start when available."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "workstream_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            },
+            "required": ["job_id"],
+            "additionalProperties": False,
+        },
+        read_only=False,
+        capability=Capability.DEV_COMMAND,
+    ),
     RUNTIME_RESTART: _ToolMeta(
         description=(
             "Safely recycle only this durable saved bridge's local MCP child after "
@@ -1142,6 +1257,22 @@ class HostedToolsRuntime:
             session_id,
             verification_commands,
         )
+        # Full/elevated long commands use the same durable worker engine as
+        # checks, but a separate state root and a developer-only argv mode. The
+        # start handler constructs a manager for the workstream's approved
+        # project path; status/log/cancel can use this anchor manager because the
+        # durable store is session-scoped rather than repository-scoped.
+        self._command_job_root = self._check_jobs.store.root.parent.parent / "dev-command-jobs"
+        self._command_jobs = CheckJobManager(
+            self.repository,
+            session_id,
+            (),
+            root=self._command_job_root,
+            worker_launcher=developer_worker_launcher,
+            allow_developer_commands=True,
+            workspace_sensitive=False,
+            wait_for_child=False,
+        )
         # Managed servers are per project, not per bridge.  The anchor
         # repository is only the session's identity; a hosted client that works
         # across several approved projects must be able to start each project's
@@ -1203,6 +1334,146 @@ class HostedToolsRuntime:
             "artifacts": [a.to_dict() for a in self._artifacts.list()],
         }
 
+    def execute_command_run_compat(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+        deadline_seconds: float,
+    ) -> Optional[dict[str, Any]]:
+        """Run a legacy hosted command.run through the durable job backend.
+
+        Older MCP clients may cache a catalogue that contains command.run but not
+        the newer command.start/status/logs tools.  For long elevated commands,
+        preserve the old call shape while making execution bridge-independent.
+        Returning None tells CompositeHostedBridge to use the historical Core
+        synchronous path (short calls and project-only routing stay unchanged).
+        """
+        self._assert_session_alive()
+        if not {COMMAND_START, COMMAND_STATUS, COMMAND_LOGS}.issubset(self._allowed):
+            return None
+        try:
+            self.policy.require(self.hosted_origin, Capability.DEV_COMMAND)
+        except PolicyDenied as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+        raw_timeout = arguments.get("timeout_seconds")
+        if raw_timeout is None:
+            return None
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+            return None
+        requested_timeout = float(raw_timeout)
+        if requested_timeout < 20.0:
+            return None
+        # command.start routes by durable workstream binding. An explicit project
+        # hint without a workstream cannot be reproduced faithfully here, so keep
+        # that uncommon form on the original Core path rather than guessing.
+        workstream_id = arguments.get("workstream_id")
+        if arguments.get("project_id") is not None and not isinstance(workstream_id, str):
+            return None
+        raw_argv = arguments.get("argv")
+        if not isinstance(raw_argv, list):
+            return None
+        caller_request_id = arguments.get("request_id")
+        if caller_request_id is not None:
+            if (
+                not isinstance(caller_request_id, str)
+                or not 1 <= len(caller_request_id) <= 128
+                or not (caller_request_id[0].isascii() and caller_request_id[0].isalnum())
+                or any(
+                    not ((char.isascii() and char.isalnum()) or char in "._-")
+                    for char in caller_request_id
+                )
+            ):
+                raise HostedBridgeAccessDenied(
+                    "command.run request_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+                )
+        compat_idempotency = idempotency_key
+        if caller_request_id is not None:
+            compat_idempotency = (
+                idempotency_key + "\0command-run-request-id\0" + caller_request_id
+            )
+        request_id = (
+            "compat-"
+            + hashlib.sha256(compat_idempotency.encode("utf-8")).hexdigest()[:32]
+        )
+        start_arguments: dict[str, Any] = {
+            "argv": list(raw_argv),
+            "timeout_seconds": requested_timeout,
+            "request_id": request_id,
+            "_idempotency_key": compat_idempotency,
+        }
+        if isinstance(workstream_id, str) and workstream_id:
+            start_arguments["workstream_id"] = workstream_id
+        started = self._command_start(start_arguments, deadline_seconds)
+        job_id = str(started["job_id"])
+
+        # Preserve the legacy synchronous shape for genuinely quick commands, but
+        # never occupy a hosted MCP request for the lifetime of a long subprocess.
+        # A fresh durable job gets only a short grace window; an idempotent replay
+        # gets no grace at all, so polling a still-running job is effectively
+        # instantaneous. The detached worker remains bridge-independent and a
+        # byte-identical retry resolves to this same job.
+        compatibility_grace = (
+            0.0
+            if bool(started.get("idempotent_replay"))
+            else min(1.5, max(0.0, float(deadline_seconds) - 0.75))
+        )
+        poll_deadline = time.monotonic() + compatibility_grace
+        final_statuses = {"passed", "failed", "cancelled", "timed_out"}
+        status = started
+        while str(status.get("status")) not in final_statuses:
+            if time.monotonic() >= poll_deadline:
+                return {
+                    "argv": list(raw_argv),
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": False,
+                    "detached": True,
+                    "durable_job_id": job_id,
+                    "durable_status": status.get("status"),
+                    "idempotent_replay": bool(started.get("idempotent_replay")),
+                    "request_id": caller_request_id,
+                    "detail": (
+                        "command continues in a durable worker; repeat command.run "
+                        "with the same request_id to reconcile it, or use a new "
+                        "request_id to intentionally rerun identical argv"
+                    ),
+                }
+            time.sleep(0.1)
+            status_arguments: dict[str, Any] = {"job_id": job_id}
+            if isinstance(workstream_id, str) and workstream_id:
+                status_arguments["workstream_id"] = workstream_id
+            status = self._command_status(status_arguments, deadline_seconds)
+
+        log_arguments: dict[str, Any] = {"job_id": job_id, "limit": 1024 * 1024}
+        if isinstance(workstream_id, str) and workstream_id:
+            log_arguments["workstream_id"] = workstream_id
+        log_result = self._command_logs(log_arguments, deadline_seconds)
+        log = log_result.get("log") if isinstance(log_result, dict) else None
+        text = str((log or {}).get("text") or "") if isinstance(log, dict) else ""
+        return {
+            "argv": list(raw_argv),
+            "exit_code": status.get("exit_code"),
+            # Durable jobs intentionally merge stderr into one ordered, redacted
+            # stream. Keep the legacy fields while exposing that fact explicitly.
+            "stdout": text,
+            "stderr": "",
+            "timed_out": status.get("status") == "timed_out",
+            "detached": False,
+            "durable_job_id": job_id,
+            "durable_status": status.get("status"),
+            "duration_seconds": status.get("duration_seconds"),
+            "artifact_id": status.get("artifact_id"),
+            "first_failure": status.get("first_failure"),
+            "combined_output": True,
+            "idempotent_replay": bool(started.get("idempotent_replay")),
+            "request_id": caller_request_id,
+            "error_code": status.get("error_code")
+            or (status.get("diagnostics") or {}).get("error_code"),
+            "error": status.get("error"),
+        }
+
     def execute(
         self,
         tool_name: str,
@@ -1224,7 +1495,7 @@ class HostedToolsRuntime:
         if handler is None:
             raise HostedBridgeAccessDenied(f"hosted tool has no handler: {tool_name}")
         try:
-            if tool_name in {CHECKS_START, RUNTIME_RESTART}:
+            if tool_name in {CHECKS_START, COMMAND_START, RUNTIME_RESTART}:
                 arguments = dict(arguments)
                 arguments["_idempotency_key"] = idempotency_key
             if (
@@ -1638,6 +1909,21 @@ class HostedToolsRuntime:
             }
 
         effective_ready_url = ready_url or profile.ready_url
+        if effective_ready_url is None:
+            # Most local web servers already expose PORT through their guarded
+            # profile. Derive a readiness URL automatically so an agent gets a
+            # usable localhost URL instead of only a PID and does not need to
+            # guess the port or launch an unmanaged second server.
+            raw_port = env.get("PORT")
+            try:
+                derived_port = int(raw_port) if raw_port is not None else None
+            except (TypeError, ValueError):
+                derived_port = None
+            if derived_port is not None and 1 <= derived_port <= 65535:
+                ready_host = profile.host_hint
+                if ":" in ready_host and not ready_host.startswith("["):
+                    ready_host = f"[{ready_host}]"
+                effective_ready_url = f"http://{ready_host}:{derived_port}/"
         url: Optional[str] = None
         ready = False
         ready_error: Optional[str] = None
@@ -1889,6 +2175,65 @@ class HostedToolsRuntime:
             )
         return value
 
+    @staticmethod
+    def _bind_job_scope(
+        manager: CheckJobManager,
+        result: Mapping[str, Any],
+        *,
+        workstream_id: str,
+        project_id: Optional[str],
+    ) -> None:
+        """Attach new durable work to one logical lane without changing job schema.
+
+        An already-running legacy job may predate scope sidecars; keep it usable
+        rather than guessing ownership during an idempotent replay. New jobs fail
+        closed if their scope cannot be persisted, because otherwise they would
+        surface as default/session-global work to sibling agents.
+        """
+
+        job_id = result.get("job_id")
+        if not isinstance(job_id, str):
+            raise CheckJobError("managed job start returned no job_id")
+        existing = manager.store.get_scope(job_id)
+        if existing is not None:
+            if existing.get("workstream_id") != workstream_id:
+                raise HostedBridgeAccessDenied(
+                    "durable job idempotency belongs to another workstream; use a new request_id"
+                )
+            return
+        if bool(result.get("idempotent_replay")):
+            # Backward compatibility for jobs started before workstream sidecars.
+            return
+        try:
+            manager.store.put_scope(
+                job_id,
+                workstream_id=workstream_id,
+                project_id=project_id,
+            )
+        except (CheckJobError, OSError) as exc:
+            try:
+                manager.cancel(job_id)
+            except Exception:
+                pass
+            raise CheckJobError("failed to persist durable job workstream scope") from exc
+
+    @staticmethod
+    def _assert_job_scope(
+        manager: CheckJobManager,
+        job_id: str,
+        *,
+        workstream_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Prevent accidental sibling-lane status/log/cancel on newly scoped jobs."""
+
+        scope = manager.store.get_scope(job_id)
+        if scope is None:
+            # Pre-upgrade jobs are intentionally session-scoped for continuity.
+            return None
+        if scope.get("workstream_id") != workstream_id:
+            raise HostedBridgeAccessDenied("durable job belongs to another workstream")
+        return scope
+
     def _write_process_identity(
         self, process_id: str, identity: ProcessIdentity
     ) -> bool:
@@ -2050,7 +2395,12 @@ class HostedToolsRuntime:
             first = logical[0].rsplit("/", 1)[-1]
             if first in {"karox", "karox.exe", "karox-vnext", "karox-vnext.exe"}:
                 return "refusing to stop a KaroX launcher"
-            if len(logical) >= 3 and logical[1] == "-m" and logical[2].startswith("karox"):
+            if (
+                len(logical) >= 3
+                and logical[1] == "-m"
+                and logical[2].startswith("karox")
+                and logical[2] not in _MANAGED_KAROX_SERVICE_MODULES
+            ):
                 return "refusing to stop a KaroX Python module"
         executable = (live.executable or "").replace("\\", "/")
         basename = executable.rsplit("/", 1)[-1].lower()
@@ -2259,14 +2609,18 @@ class HostedToolsRuntime:
         idempotency_key = arguments.pop("_idempotency_key", None)
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise CheckJobError("checks.start requires an idempotency key")
-        return {
-            "ok": True,
-            **self._check_jobs.start(
-                arguments,
-                idempotency_key=idempotency_key,
-                bridge_pid=os.getpid(),
-            ),
-        }
+        result = self._check_jobs.start(
+            arguments,
+            idempotency_key=idempotency_key,
+            bridge_pid=os.getpid(),
+        )
+        self._bind_job_scope(
+            self._check_jobs,
+            result,
+            workstream_id="default",
+            project_id=self._anchor_project_id,
+        )
+        return {"ok": True, **result, "workstream_id": "default"}
 
     def _checks_status(
         self, arguments: dict[str, Any], deadline_seconds: float
@@ -2292,6 +2646,117 @@ class HostedToolsRuntime:
         job_id = self._required(arguments, "job_id", str)
         return {"ok": True, **self._check_jobs.cancel(job_id)}
 
+    def _command_start(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        request_id = self._required(arguments, "request_id", str)
+        if (
+            not 1 <= len(request_id) <= 128
+            or not request_id[0].isalnum()
+            or not all(ch.isalnum() or ch in "._-" for ch in request_id)
+        ):
+            raise CheckJobError("command.start request_id must use [A-Za-z0-9._-]")
+        workstream_id = self._requested_workstream(arguments)
+        project_id, project_path = self._project_for_workstream(workstream_id)
+        idempotency_key = arguments.pop("_idempotency_key", None)
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            idempotency_key = f"command-start:{request_id}"
+        payload: dict[str, Any] = {
+            "kind": "dev",
+            "argv": self._required(arguments, "argv", list),
+        }
+        if "timeout_seconds" in arguments:
+            payload["timeout_seconds"] = arguments["timeout_seconds"]
+        manager = CheckJobManager(
+            project_path,
+            self.session_id,
+            (),
+            root=self._command_job_root,
+            worker_launcher=developer_worker_launcher,
+            allow_developer_commands=True,
+            workspace_sensitive=False,
+            wait_for_child=False,
+        )
+        result = manager.start(
+            payload,
+            idempotency_key=idempotency_key,
+            bridge_pid=os.getpid(),
+        )
+        self._bind_job_scope(
+            manager,
+            result,
+            workstream_id=workstream_id,
+            project_id=project_id,
+        )
+        return {
+            "ok": True,
+            **result,
+            "project_id": project_id,
+            "workstream_id": workstream_id,
+            "request_id": request_id,
+        }
+
+    def _command_status(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        workstream_id = self._requested_workstream(arguments)
+        scope = self._assert_job_scope(
+            self._command_jobs,
+            job_id,
+            workstream_id=workstream_id,
+        )
+        return {
+            "ok": True,
+            **self._command_jobs.status(job_id),
+            "workstream_id": (
+                str(scope["workstream_id"]) if scope is not None else "legacy-unscoped"
+            ),
+        }
+
+    def _command_logs(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        workstream_id = self._requested_workstream(arguments)
+        scope = self._assert_job_scope(
+            self._command_jobs,
+            job_id,
+            workstream_id=workstream_id,
+        )
+        limit = arguments.get("limit", 64 * 1024)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise CheckJobError("limit must be an integer")
+        return {
+            "ok": True,
+            **self._command_jobs.logs(job_id, limit=limit),
+            "workstream_id": (
+                str(scope["workstream_id"]) if scope is not None else "legacy-unscoped"
+            ),
+        }
+
+    def _command_cancel(
+        self, arguments: dict[str, Any], deadline_seconds: float
+    ) -> dict[str, Any]:
+        del deadline_seconds
+        job_id = self._required(arguments, "job_id", str)
+        workstream_id = self._requested_workstream(arguments)
+        scope = self._assert_job_scope(
+            self._command_jobs,
+            job_id,
+            workstream_id=workstream_id,
+        )
+        return {
+            "ok": True,
+            **self._command_jobs.cancel(job_id),
+            "workstream_id": (
+                str(scope["workstream_id"]) if scope is not None else "legacy-unscoped"
+            ),
+        }
+
     def _runtime_restart(
         self, arguments: dict[str, Any], deadline_seconds: float
     ) -> dict[str, Any]:
@@ -2301,8 +2766,6 @@ class HostedToolsRuntime:
                 "runtime restart is available only for a durable saved bridge"
             )
         idempotency_key = arguments.pop("_idempotency_key", None)
-        if not isinstance(idempotency_key, str) or not idempotency_key:
-            raise HostedBridgeAccessDenied("runtime restart requires an idempotency key")
         request_id = arguments.get("request_id")
         if (
             not isinstance(request_id, str)
@@ -2311,6 +2774,14 @@ class HostedToolsRuntime:
             or not all(ch.isalnum() or ch in "._-" for ch in request_id)
         ):
             raise HostedBridgeAccessDenied("runtime restart requires a safe request_id")
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            # ChatGPT's direct tool surface does not currently supply MCP-level
+            # idempotency metadata. request_id is already a required explicit
+            # owner intent and receipts are session-scoped, so derive a stable
+            # replay key from it instead of advertising a restart tool that can
+            # never be invoked directly. Transport idempotency still wins when
+            # a client provides it.
+            idempotency_key = f"runtime-restart:{request_id}"
         reason = arguments.get("reason", "")
         if self._browser.takeover_active:
             raise HostedBridgeAccessDenied(
@@ -2447,6 +2918,10 @@ HostedToolsRuntime._dispatch = {
     CHECKS_STATUS: HostedToolsRuntime._checks_status,
     CHECKS_LOGS: HostedToolsRuntime._checks_logs,
     CHECKS_CANCEL: HostedToolsRuntime._checks_cancel,
+    COMMAND_START: HostedToolsRuntime._command_start,
+    COMMAND_STATUS: HostedToolsRuntime._command_status,
+    COMMAND_LOGS: HostedToolsRuntime._command_logs,
+    COMMAND_CANCEL: HostedToolsRuntime._command_cancel,
     RUNTIME_RESTART: HostedToolsRuntime._runtime_restart,
     ARTIFACT_GET: HostedToolsRuntime._artifact_get,
     ARTIFACT_READ_IMAGE: HostedToolsRuntime._artifact_read_image,

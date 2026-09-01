@@ -37,7 +37,7 @@ from karox.models import AccessProfile
 from karox.openapi_bridge import build_openapi_bridge_app
 from karox.proxy import ProxyToolDescriptor
 from karox.proxy_server import build_proxy_asgi_app, derive_idempotency_key
-from karox.sessions import SessionStore
+from karox.sessions import SessionBusy, SessionStore
 
 
 class _FakeCredentialBackend:
@@ -364,6 +364,22 @@ class HostedCoreBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(HostedBridgeAccessDenied, "not exposed"):
             bridge.execute("karox.repo.list_files", {})
 
+    def test_whole_drive_root_keeps_filesystem_tools_and_rejects_only_git(self) -> None:
+        bridge = self._bridge("karox.repo.list_files", "karox.git.status")
+        with patch("karox.hosted_bridge.is_drive_root", return_value=True):
+            listed = bridge.execute(
+                "karox.repo.list_files",
+                {"pattern": "sample.txt"},
+            )
+            with self.assertRaisesRegex(
+                HostedBridgeAccessDenied,
+                "Git metadata is not applicable",
+            ):
+                bridge.execute("karox.git.status", {})
+
+        self.assertTrue(listed["ok"])
+        self.assertEqual(listed["data"]["files"], ["sample.txt"])
+
     def test_mutation_requires_idempotency_and_replays_safely(self) -> None:
         bridge = self._bridge("karox.repo.write_file")
         arguments = {"path": "sample.txt", "content": "after\n"}
@@ -397,6 +413,35 @@ class HostedCoreBridgeTests(unittest.TestCase):
         self.assertEqual(
             (self.repository / "sample.txt").read_text(encoding="utf-8"),
             "after\n",
+        )
+
+    def test_short_parallel_mutation_contention_queues_instead_of_failing(self) -> None:
+        bridge = self._bridge("karox.repo.write_file")
+        real_acquire = self.sessions.acquire
+        attempts = 0
+
+        def contended_acquire(session_id, owner, ttl_seconds=30.0):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                raise SessionBusy("synthetic sibling mutation")
+            return real_acquire(session_id, owner, ttl_seconds)
+
+        with patch.object(self.sessions, "acquire", side_effect=contended_acquire), patch(
+            "karox.hosted_bridge.time.sleep"
+        ) as sleeper:
+            result = bridge.execute(
+                "karox.repo.write_file",
+                {"path": "sample.txt", "content": "queued\n"},
+                idempotency_key="queued-write-1",
+            )
+
+        self.assertTrue(result["data"]["changed"])
+        self.assertEqual(attempts, 3)
+        self.assertEqual(sleeper.call_count, 2)
+        self.assertEqual(
+            (self.repository / "sample.txt").read_text(encoding="utf-8"),
+            "queued\n",
         )
 
     def test_checks_require_an_explicit_command_allowlist(self) -> None:

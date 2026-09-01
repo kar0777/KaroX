@@ -291,11 +291,19 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(self.run_lines("")[0], 0)
 
     def test_help_describes_human_commands(self) -> None:
-        code, output = self.run_lines("/help\n/quit\n")
+        code, output = self.run_lines("/help\n/help all\n/quit\n")
         self.assertEqual(code, 0)
         self.assertIn("KaroX commands", output)
         self.assertIn("/connect", output)
-        self.assertIn("/model", output)
+        self.assertIn("/models", output)
+        self.assertIn("/effort", output)
+        self.assertIn("/review", output)
+        # Multi-agent orchestration remains discoverable, but it no longer has
+        # to sit in the first task-oriented help surface.
+        self.assertIn("/orchestrate", output)
+        short = output.split("/help all", 1)[0]
+        self.assertNotIn("/orchestrate", short)
+        self.assertNotIn("  /model ", output)
         # The curated menu is the contract: one entry point per scenario.
         # Retired aliases stay routable but are not advertised as new surface.
         self.assertNotIn("/connections", output)
@@ -911,9 +919,14 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#command-menu", tui.Static).styles.display,
                     "block",
                 )
-                self.assertIn("/model", tui._commands("ru"))
-                self.assertNotIn("/home", tui._commands("ru"))
+                self.assertNotIn("/orchestrate", tui._commands("ru"))
+                self.assertIn("/orchestrate", tui._discoverable_commands("ru"))
+                self.assertIn("/models", tui._commands("ru"))
+                self.assertIn("/effort", tui._commands("ru"))
                 self.assertNotIn("/doctor", tui._commands("ru"))
+                self.assertIn("/doctor", tui._discoverable_commands("ru"))
+                self.assertNotIn("/model", tui._commands("ru"))
+                self.assertNotIn("/home", tui._commands("ru"))
 
     async def test_model_selection_is_a_direct_chat_control(self) -> None:
         registry = Mock()
@@ -940,53 +953,50 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 from karox.tui_dashboard import ModelPickerScreen
                 self.assertNotIsInstance(app.screen, ModelPickerScreen)
 
-    async def test_the_picker_binding_is_a_key_terminals_can_send(self) -> None:
-        """Ctrl+G opens the picker; Ctrl+M must not be advertised anywhere.
-
-        Every terminal sends carriage return for Ctrl+M, so Textual can only
-        ever see Enter and the old binding silently submitted the composer
-        instead of opening the picker. The binding now lives on Ctrl+G, a key
-        that arrives intact everywhere, and no hint may promise the dead key.
-        """
+    async def test_models_and_effort_are_separate_first_class_commands(self) -> None:
+        """The ordinary UX has no combined model/Effort control or hidden hotkey."""
 
         app = tui.KaroXApp(Path.cwd(), language="en")
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
             keys = {binding.key for binding in app.BINDINGS}
-            self.assertIn("ctrl+g", keys)
+            self.assertNotIn("ctrl+g", keys)
             self.assertNotIn("ctrl+m", keys)
-            await pilot.press("ctrl+g")
-            await pilot.pause()
-            from karox.tui_dashboard import ModelPickerScreen
-            self.assertIsInstance(app.screen, ModelPickerScreen)
-            await pilot.press("escape")
-            await pilot.pause()
+            from karox.tui_dashboard import EffortPickerScreen, ModelPickerScreen
+
+            with patch.object(app, "push_screen") as pushed:
+                app._handle_command("/models")
+                self.assertIsInstance(pushed.call_args.args[0], ModelPickerScreen)
+            with patch.object(app, "push_screen") as pushed:
+                app._handle_command("/effort")
+                self.assertIsInstance(pushed.call_args.args[0], EffortPickerScreen)
         for language in ("ru", "en"):
             for name in ("hint", "welcome_ready"):
-                self.assertNotIn("Ctrl+M", tui._TEXT[language][name])
-                self.assertIn("Ctrl+G", tui._TEXT[language][name])
+                self.assertNotIn("Ctrl+G", tui._TEXT[language][name])
+                self.assertIn("/models", tui._TEXT[language][name])
+                self.assertIn("/effort", tui._TEXT[language][name])
 
-    async def test_effort_choice_from_the_picker_persists_and_reaches_the_header(
+    async def test_effort_choice_from_dedicated_picker_persists_and_reaches_header(
         self,
     ) -> None:
         with (
             patch.object(tui, "_selected_model", return_value=None),
-            patch.object(tui, "_save_preferences") as save_preferences,
+            patch.object(tui, "_save_effort_level") as save_effort,
         ):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
                 await pilot.pause()
-                app._model_picker_done("effort:high")
+                app._effort_picker_done("high")
                 await pilot.pause()
-                self.assertEqual(app.reasoning_effort, "high")
-                save_preferences.assert_called_once_with(reasoning_effort="high")
+                self.assertEqual(app.effort_level, "high")
+                save_effort.assert_called_once_with("high")
                 self.assertIn(
                     "effort high",
                     str(app.query_one("#header-status", tui.Static).render()),
                 )
                 self.assertEqual(getattr(app.focused, "id", None), "composer")
-                app._model_picker_done("effort:auto")
-                self.assertIsNone(app.reasoning_effort)
+                app._effort_picker_done("auto")
+                self.assertEqual(app.effort_level, "auto")
 
     async def test_cost_command_persists_explicit_economy_profile(self) -> None:
         with (
@@ -1022,7 +1032,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
                 # The composer shows a marker rather than one enormous line,
                 # and the base widget must not also append line one after it.
-                self.assertEqual(composer.value, "[paste #1: 4 lines]")
+                self.assertEqual(composer.value, "[paste #1: 4 lines · 118 chars]")
                 # The text the agent receives is the whole trace.
                 self.assertEqual(app._expand_pasted_blocks(composer.value), trace)
 
@@ -1050,7 +1060,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
                 rendered = str(app.query_one("#activity", tui.Static).render())
 
-                self.assertEqual(rendered, "Running tests")
+                self.assertEqual(rendered, "› Checking the result")
                 self.assertNotIn("repo.read_file", rendered)
                 self.assertNotIn("repo.write_file", rendered)
                 self.assertNotIn("checks.run", rendered)
@@ -1399,6 +1409,10 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(tui, "_selected_model", return_value=None),
             patch.object(tui, "_discover_models_result", return_value=discovered),
+            # Credential persistence has its own in-memory integration tests;
+            # this case isolates keyboard discovery/model selection and must not
+            # touch the developer machine's OS keyring.
+            patch.object(tui, "_save_provider_connection", return_value=2),
         ):
             app = tui.KaroXApp(Path.cwd(), language="ru")
             errors = []
@@ -1758,7 +1772,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("**Готово**", rendered)
                 activity = str(app.query_one("#activity", tui.Static).render())
                 # A2: completion is a short summary, not a sentence about itself.
-                self.assertTrue(activity.startswith("Готово"), activity)
+                self.assertTrue(activity.startswith("› Готово"), activity)
 
     async def test_workspace_command_changes_project_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -90,6 +90,41 @@ class RuntimeRestartTests(unittest.TestCase):
                     "restart-session", "chatgpt-dev"
                 )
 
+    def test_current_child_validation_accepts_only_proven_venv_launcher_chain(self) -> None:
+        self._watchdog(bridge_pid=4101, owner_pid=4100)
+        with (
+            patch("karox.runtime_restart.os.getpid", return_value=4102),
+            patch("karox.runtime_restart.os.getppid", return_value=4101),
+            patch("karox.runtime_restart.process_is_running", return_value=True),
+            patch(
+                "karox.runtime_restart.prove_bridge_process_identity",
+                side_effect=lambda pid, sessions: "restart-session"
+                if pid in {4101, 4102} and "restart-session" in tuple(sessions)
+                else None,
+            ),
+            patch("karox.runtime_restart._process_parent_pid", return_value=4100),
+            patch("karox.runtime_restart.prove_saved_bridge_owner_identity", return_value=True),
+        ):
+            value = runtime_restart._validate_current_saved_child(
+                "restart-session", "chatgpt-dev"
+            )
+            self.assertEqual(value["bridge_pid"], 4101)
+
+        with (
+            patch("karox.runtime_restart.os.getpid", return_value=4102),
+            patch("karox.runtime_restart.os.getppid", return_value=4101),
+            patch("karox.runtime_restart.process_is_running", return_value=True),
+            patch("karox.runtime_restart.prove_bridge_process_identity", return_value="restart-session"),
+            patch("karox.runtime_restart._process_parent_pid", return_value=4100),
+            patch("karox.runtime_restart.prove_saved_bridge_owner_identity", return_value=False),
+        ):
+            with self.assertRaisesRegex(
+                runtime_restart.RuntimeRestartError, "owner identity cannot be proven"
+            ):
+                runtime_restart._validate_current_saved_child(
+                    "restart-session", "chatgpt-dev"
+                )
+
     def test_waiter_exits_only_after_new_response_completed_and_transport_idle(self) -> None:
         receipt = self.root / "receipt.json"
         receipt.write_text(json.dumps({"status": "scheduled"}), encoding="utf-8")

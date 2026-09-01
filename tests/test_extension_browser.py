@@ -472,6 +472,45 @@ class ExtensionManagerSafetyTests(unittest.TestCase):
         self.assertEqual(record.mime, "image/png")
         self.assertEqual(result["tab_id"], "tab-42")
         self.assertTrue(result["viewport_only"])
+        self.assertFalse(result["capture_recovered"])
+        self.assertEqual(result["capture_attempts"], 1)
+
+    def test_screenshot_recovers_from_minimized_chrome_readback_failure(self) -> None:
+        png = b"\x89PNG\r\n\x1a\nKaroX-recovered"
+        encoded = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        self.manager._call = mock.Mock(  # type: ignore[method-assign]
+            side_effect=[
+                BrowserError("screenshot_capture_failed: Failed to capture tab: image readback failed"),
+                {"shown": True, "window_id": 7},
+                {"data_url": encoded, "tab_id": "tab-42", "capture_attempts": 1},
+            ]
+        )
+        with mock.patch("karox.extension_browser.time.sleep") as sleep:
+            result = self.manager.screenshot({"name": "extension-recovered"}, 5)
+        stored, _ = self.manager._artifacts.read(result["artifact_id"])
+        self.assertEqual(stored, png)
+        self.assertTrue(result["capture_recovered"])
+        self.assertEqual(result["capture_attempts"], 2)
+        sleep.assert_called_once_with(0.6)
+        self.manager._call.assert_has_calls(
+            [
+                mock.call("screenshot", {}, 5),
+                mock.call("show_window", {"left": 100, "top": 100}, 5),
+                mock.call("screenshot", {}, 5),
+            ]
+        )
+
+    def test_service_worker_screenshot_restores_minimized_window_and_retries(self) -> None:
+        root = Path(__file__).parents[1] / "src" / "karox" / "browser_extension"
+        worker = (root / "service_worker.js").read_text(encoding="utf-8")
+        self.assertIn("async function captureVisibleTabResilient", worker)
+        self.assertIn("chrome.windows.get(tab.windowId)", worker)
+        self.assertIn('windowState?.state === "minimized"', worker)
+        self.assertIn('chrome.windows.update(tab.windowId, { state: "normal" })', worker)
+        self.assertIn("image readback failed|view is invisible", worker)
+        self.assertIn("setTimeout(resolve, 600)", worker)
+        self.assertIn('chrome.windows.update(tab.windowId, { state: "minimized" })', worker)
+        self.assertIn("capture_recovered", worker)
 
     def test_takeover_blocks_agent_input_without_closing_profile(self) -> None:
         self.manager._ensure_started = mock.Mock()  # type: ignore[method-assign]

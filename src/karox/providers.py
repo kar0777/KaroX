@@ -7,6 +7,7 @@ agent task succeeded.
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import math
@@ -149,6 +150,24 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ImageAttachment:
+    mime: str
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if self.mime not in {"image/png", "image/jpeg", "image/webp"}:
+            raise ValueError("image attachment must be PNG, JPEG, or WebP")
+        if not isinstance(self.data, bytes) or not self.data:
+            raise ValueError("image attachment data must be non-empty bytes")
+        if len(self.data) > 10 * 1024 * 1024:
+            raise ValueError("image attachment exceeds 10 MiB")
+
+    @property
+    def data_url(self) -> str:
+        return f"data:{self.mime};base64,{base64.b64encode(self.data).decode('ascii')}"
+
+
+@dataclass(frozen=True)
 class ModelMessage:
     role: str
     content: Optional[str] = None
@@ -157,6 +176,10 @@ class ModelMessage:
     # The deliberation that preceded this turn's content, in the order the model
     # produced it. A transport that signs its thinking needs it back.
     reasoning_blocks: tuple[ReasoningBlock, ...] = ()
+    # Request-only multimodal content. Kept last so existing positional
+    # ModelMessage(role, content, tool_calls, ...) call sites retain their exact
+    # meaning; new code passes images by keyword.
+    images: tuple[ImageAttachment, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role not in {"system", "user", "assistant", "tool"}:
@@ -165,6 +188,10 @@ class ModelMessage:
             raise ValueError("model message content must be text or null")
         if self.role == "tool" and not self.tool_call_id:
             raise ValueError("tool messages require a tool call ID")
+        if self.images and self.role != "user":
+            raise ValueError("only user messages may contain image attachments")
+        if len(self.images) > 8:
+            raise ValueError("a model message may contain at most 8 image attachments")
         if self.role != "assistant" and self.tool_calls:
             raise ValueError("only assistant messages may contain tool calls")
         if self.role != "assistant" and self.reasoning_blocks:
@@ -254,9 +281,12 @@ class ModelResponse:
     cumulative_cost: Optional[float] = None
     budget_exceeded: bool = False
     budget_reason: Optional[str] = None
-    # Whatever reasoning the provider chose to expose, kept apart from
+    # Whatever raw reasoning the provider chose to expose, kept apart from
     # ``content`` so it is never mistaken for the model's answer.
     reasoning: Optional[str] = None
+    # A provider-labeled high-level summary is a different, explicitly public
+    # channel. It may be shown as progress; raw ``reasoning`` above may not.
+    reasoning_summary: Optional[str] = None
     # The same reasoning still in blocks, with the signatures that authenticate
     # them. ``reasoning`` is for showing a human; this is for handing back.
     reasoning_blocks: tuple[ReasoningBlock, ...] = ()
@@ -268,6 +298,9 @@ class ModelEventKind(str, Enum):
     # Merging it into TEXT_DELTA would put private deliberation into the
     # assistant content that KaroX persists and re-sends as the answer.
     REASONING_DELTA = "reasoning_delta"
+    # A provider explicitly labeled this as a high-level summary rather than
+    # private reasoning text. This is the only reasoning channel UI may render.
+    REASONING_SUMMARY_DELTA = "reasoning_summary_delta"
     TOOL_CALL_DELTA = "tool_call_delta"
     USAGE = "usage"
     COMPLETION = "completion"
@@ -286,6 +319,7 @@ class ModelEvent:
     kind: ModelEventKind
     text_delta: Optional[str] = None
     reasoning_delta: Optional[str] = None
+    reasoning_summary_delta: Optional[str] = None
     # Emitted once, when a reasoning block closes and its text and signature are
     # both complete. The deltas above stream the same words to a screen; this is
     # the whole block, kept so it can be returned to the provider intact.
@@ -318,6 +352,7 @@ def accumulate_response(
 
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    reasoning_summary_parts: list[str] = []
     reasoning_blocks: list[ReasoningBlock] = []
     saw_content = False
     call_parts: Dict[int, Dict[str, list[str]]] = {}
@@ -340,6 +375,8 @@ def accumulate_response(
             reasoning_parts.append(event.reasoning_delta or "")
             if event.reasoning_block is not None:
                 reasoning_blocks.append(event.reasoning_block)
+        elif event.kind == ModelEventKind.REASONING_SUMMARY_DELTA:
+            reasoning_summary_parts.append(event.reasoning_summary_delta or "")
         elif event.kind == ModelEventKind.TOOL_CALL_DELTA:
             delta = event.tool_call_delta
             if delta is None:
@@ -384,6 +421,7 @@ def accumulate_response(
             f"invalid streamed tool call: {exc}",
         ) from exc
     reasoning = "".join(reasoning_parts)
+    reasoning_summary = "".join(reasoning_summary_parts)
     return ModelResponse(
         content="".join(content_parts) if saw_content else None,
         tool_calls=tool_calls,
@@ -392,6 +430,7 @@ def accumulate_response(
         response_id=response_id,
         transport_attempts=transport_attempts,
         reasoning=reasoning or None,
+        reasoning_summary=reasoning_summary or None,
         reasoning_blocks=tuple(reasoning_blocks),
     )
 
@@ -425,7 +464,11 @@ class OpenAIChatCompletionsProvider:
     """
 
     MAX_SSE_LINE_CHARS = 1_048_576
-    MAX_SSE_EVENTS = 10_000
+    # Reasoning-heavy gateways can legitimately emit one tiny SSE frame per
+    # reasoning token/fragment. Ox Alpha on ultra exceeded the old 10k ceiling
+    # before producing its first tool call. Keep a generous event-count bound,
+    # while the independent 16 MiB byte ceiling remains the hard resource cap.
+    MAX_SSE_EVENTS = 100_000
     MAX_SSE_TOTAL_CHARS = 16_777_216
 
     def __init__(
@@ -530,7 +573,20 @@ class OpenAIChatCompletionsProvider:
 
     @staticmethod
     def _message_payload(message: ModelMessage) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.images:
+            content: list[Dict[str, Any]] = []
+            if message.content:
+                content.append({"type": "text", "text": message.content})
+            content.extend(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image.data_url, "detail": "auto"},
+                }
+                for image in message.images
+            )
+            payload: Dict[str, Any] = {"role": message.role, "content": content}
+        else:
+            payload = {"role": message.role, "content": message.content}
         if message.tool_calls:
             payload["tool_calls"] = [
                 {
@@ -625,6 +681,15 @@ class OpenAIChatCompletionsProvider:
 
     def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
         payload = self._request_payload(request)
+        # OpenRouter can return an explicit high-level reasoning summary without
+        # changing the model's reasoning budget. Keep the existing flat
+        # reasoning_effort exactly as before and only request summary display;
+        # other OpenAI-compatible gateways never see this OpenRouter extension.
+        hostname = (urlsplit(self.endpoint).hostname or "").lower()
+        if request.reasoning_effort is not None and (
+            hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
+        ):
+            payload["reasoning"] = {"summary": "auto"}
         headers = self._request_headers()
         deadline = time.monotonic() + float(request.deadline_seconds)
         attempts = 0
@@ -865,9 +930,18 @@ class OpenAIChatCompletionsProvider:
             choice = choices[0]
             if not isinstance(choice, dict):
                 raise ValueError("choice must be an object")
-            delta = choice.get("delta")
-            if not isinstance(delta, dict):
-                raise ValueError("choice delta must be an object")
+            # OpenAI-compatible gateways are not perfectly uniform at the
+            # terminal/tool-call boundaries. OpenRouter can emit ``delta: null``
+            # on a finish-only chunk. That is an empty fragment, not a malformed
+            # response. Non-null non-objects remain invalid so bad schemas still
+            # fail closed.
+            raw_delta = choice.get("delta")
+            if raw_delta is None:
+                delta: Dict[str, Any] = {}
+            elif isinstance(raw_delta, dict):
+                delta = raw_delta
+            else:
+                raise ValueError("choice delta must be an object or null")
             content = delta.get("content")
             if content is not None:
                 if not isinstance(content, str):
@@ -881,10 +955,10 @@ class OpenAIChatCompletionsProvider:
                     )
                 )
 
-            # Reasoning models on the OpenAI-compatible wire put their visible
-            # thinking on a separate key. Dropping it left the user staring at a
-            # blank screen for the whole thinking phase; both spellings are in
-            # use across compatible vendors and gateways.
+            # Reasoning models on the OpenAI-compatible wire may put raw private
+            # deliberation on a separate key. Preserve it on the private reasoning
+            # channel for protocol/replay needs, but never merge it into content or
+            # public progress; both spellings are used by compatible gateways.
             for name in ("reasoning_content", "reasoning"):
                 thought = delta.get(name)
                 if isinstance(thought, str) and thought:
@@ -898,9 +972,46 @@ class OpenAIChatCompletionsProvider:
                     )
                     break
 
-            raw_calls = delta.get("tool_calls", [])
+            # OpenRouter standardizes structured reasoning into reasoning_details.
+            # Only the explicitly public ``reasoning.summary`` type may cross into
+            # KaroX progress UI. Raw ``reasoning.text`` and encrypted details are
+            # deliberately ignored here; the raw reasoning channel above remains
+            # private and never becomes assistant/progress content.
+            raw_reasoning_details = delta.get("reasoning_details")
+            if raw_reasoning_details is not None:
+                if not isinstance(raw_reasoning_details, list):
+                    raise ValueError("reasoning_details must be an array or null")
+                for detail in raw_reasoning_details:
+                    if not isinstance(detail, dict):
+                        raise ValueError("reasoning detail must be an object")
+                    detail_type = detail.get("type")
+                    if detail_type != "reasoning.summary":
+                        continue
+                    summary = detail.get("summary")
+                    if summary is not None and not isinstance(summary, str):
+                        raise ValueError("reasoning summary must be text or null")
+                    if summary:
+                        events.append(
+                            ModelEvent(
+                                ModelEventKind.REASONING_SUMMARY_DELTA,
+                                reasoning_summary_delta=summary,
+                                response_id=response_id,
+                                transport_attempts=attempts,
+                            )
+                        )
+
+            # Streaming tool calls are fragments. Only the first chunk is
+            # required to carry id/name; later chunks commonly carry those fields
+            # as null and append only ``arguments``. Treat null optional fields as
+            # empty fragments, while preserving strict validation for genuinely
+            # wrong types. The accumulated ToolCall still requires a non-empty
+            # final id and name, so an actually incomplete stream is rejected at
+            # assembly time.
+            raw_calls = delta.get("tool_calls")
+            if raw_calls is None:
+                raw_calls = []
             if not isinstance(raw_calls, list):
-                raise ValueError("tool-call deltas must be an array")
+                raise ValueError("tool-call deltas must be an array or null")
             for raw in raw_calls:
                 if not isinstance(raw, dict):
                     raise ValueError("tool-call delta must be an object")
@@ -914,14 +1025,25 @@ class OpenAIChatCompletionsProvider:
                 raw_type = raw.get("type")
                 if raw_type is not None and raw_type != "function":
                     raise ValueError("only function tool-call deltas are supported")
-                call_id = raw.get("id", "")
-                function = raw.get("function", {})
-                if not isinstance(call_id, str) or not isinstance(function, dict):
-                    raise ValueError("tool-call ID and function must be valid")
-                name = function.get("name", "")
-                arguments = function.get("arguments", "")
-                if not isinstance(name, str) or not isinstance(arguments, str):
-                    raise ValueError("tool-call name and arguments must be text")
+                raw_call_id = raw.get("id")
+                if raw_call_id is not None and not isinstance(raw_call_id, str):
+                    raise ValueError("tool-call ID must be text or null")
+                raw_function = raw.get("function")
+                if raw_function is None:
+                    function: Dict[str, Any] = {}
+                elif isinstance(raw_function, dict):
+                    function = raw_function
+                else:
+                    raise ValueError("tool-call function must be an object or null")
+                raw_name = function.get("name")
+                raw_arguments = function.get("arguments")
+                if raw_name is not None and not isinstance(raw_name, str):
+                    raise ValueError("tool-call name must be text or null")
+                if raw_arguments is not None and not isinstance(raw_arguments, str):
+                    raise ValueError("tool-call arguments must be text or null")
+                call_id = raw_call_id or ""
+                name = raw_name or ""
+                arguments = raw_arguments or ""
                 events.append(
                     ModelEvent(
                         ModelEventKind.TOOL_CALL_DELTA,

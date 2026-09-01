@@ -138,6 +138,52 @@ configuration, session state, logs, support bundles, or MCP descriptors.
 KaroX never silently changes provider, privacy boundary, or mutation behavior.
 Fallback is restricted to classified failures and explicit configured routes.
 
+## Intelligence orchestration and economy
+
+KaroX 5 now has an opt-in orchestration layer over the same guarded Core. Add API
+models, already-paid subscription agents, local models, and explicitly attached
+external agents to one **Intelligence Pool**, then assign one orchestrator and
+role-specific workers. Automatic quality routing learns only from local KaroX
+outcomes that were both accepted and verified; it does not rank models from their
+names or unversioned marketing benchmarks.
+
+The economy path reduces duplicated work before it reduces model quality:
+content-addressed shared context, role-specific context projections, delta
+transfer, deterministic stable prompt prefixes, already-paid-capacity preference,
+quota reserve, measured pricing, and independent review. A Savings Receipt shows
+dollar/percentage savings only when a measured baseline exists; shadow/replay
+counterfactuals are labelled projections.
+
+```bash
+karox intelligence list --json
+karox intelligence discover-agents --apply
+karox orchestrate recipes --json
+karox orchestrate plan --objective "Fix retry semantics" --recipe bug-fix --preset maximum_economy
+karox orchestrate run --objective "Fix retry semantics" --recipe bug-fix --isolate-implementers --verification-command '["python","-m","pytest","-q"]'
+karox orchestrate status RUN_ID
+karox mission-control serve RUN_ID
+```
+
+`orchestrate run` executes registered API endpoints through the existing
+`AgentKernel` and Core policy. It also has guarded built-in adapters for already-
+paid Codex and Claude Code subscriptions: Codex implementation is confined to a
+KaroX worktree with its workspace-write sandbox, while the Claude built-in path
+is read/review-only in safe mode with Read/Glob/Grep. Gemini CLI and OpenCode can
+be discovered, but automatic built-in execution stays off until KaroX can prove
+an equivalent write boundary. Other local/external workers still require a
+separately registered guarded adapter; KaroX never falls back to arbitrary shell
+commands, scraped cookies, or raw credentials.
+
+The selected orchestrator owns planner work by default and runs the final
+`orchestrator-judge` after independent review/test evidence. High-risk plans add
+an independent security review, interrupted running workers require reconciliation
+before retry, and detached worker worktrees are never auto-merged. In the TUI,
+`/orchestrate`, `/agents`, and `/mission` use the same CLI/runtime services; the
+slash menu stays deliberately compact at eight high-frequency commands.
+
+See [Intelligence Orchestration and Economy](docs/KAROX_5_ORCHESTRATION_ECONOMY.md)
+for the exact contracts and commands.
+
 ## Access profiles
 
 Friendly UI labels map to stable policy identifiers:
@@ -162,8 +208,9 @@ migration.
 Scripts and CI use explicit subcommands:
 
 ```text
-karox paths | session | credential | provider | model | skill | mcp | bridge
-      | pack | target | tool | integration | agent | migrate | doctor
+karox paths | session | credential | provider | model | intelligence | skill | mcp | bridge
+      | orchestrate | mission-control | economy | pack | target | tool | integration
+      | agent | migrate | doctor
 ```
 
 Examples:
@@ -234,16 +281,16 @@ See [Migrating from KaroX 4.x to KaroX 5](docs/MIGRATION_V4_TO_V5.md).
 
 ## Verification
 
-The suite is 3136 tests. CI runs:
+The suite is 3317 tests. CI runs:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3136 tests`.
+A clean run reports `Ran 3317 tests`.
 
 2420 is the number collected under `tests` by the documented runner. The
-repository root collects 3141 because a bare pytest collection also finds five
+repository root collects 3322 because a bare pytest collection also finds five
 legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

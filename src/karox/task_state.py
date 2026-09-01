@@ -33,6 +33,7 @@ TASK_FACT_NAMES = (
     "repository",
     "branch",
     "repository_revision",
+    "working_tree_fingerprint",
     "connection_profile",
     "client_capabilities",
     "access_profile",
@@ -57,6 +58,7 @@ SYSTEM_VERIFIED_TASK_FACTS = frozenset(
         "repository",
         "branch",
         "repository_revision",
+        "working_tree_fingerprint",
         "connection_profile",
         "client_capabilities",
         "access_profile",
@@ -79,6 +81,11 @@ def _validate_workstream_id(workstream_id: Optional[str]) -> Optional[str]:
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
     if any(char not in allowed for char in value):
         raise SessionError("workstream_id contains unsafe characters")
+    # Public task APIs render the legacy/no-workstream task as `default`. Clients
+    # naturally echo that value on later calls, so it must be an alias for None,
+    # never a second named lane at workstreams/default.json.
+    if value == "default":
+        return None
     return value
 
 
@@ -151,6 +158,19 @@ class TaskFact:
             recorded_at=float(recorded_at),
             evidence=tuple(evidence),
         )
+
+
+def _fact_semantically_equal(left: TaskFact, right: TaskFact) -> bool:
+    """Compare durable task meaning while ignoring observation timestamps."""
+
+    if left.origin is not right.origin or left.evidence != right.evidence:
+        return False
+    try:
+        return bool(left.value == right.value)
+    except Exception:
+        # Task facts are expected to be JSON-like. A custom object with unusual
+        # equality semantics must never make a refresh look safely idempotent.
+        return False
 
 
 def _checksum(payload: Mapping[str, Any]) -> str:
@@ -312,11 +332,16 @@ class TaskStateStore:
         for path in candidates:
             candidate = path.stem
             try:
-                _validate_workstream_id(candidate)
-                self.load(session_id, workstream_id=candidate)
+                normalized = _validate_workstream_id(candidate)
+                if normalized is None:
+                    # `default` is the public alias for the legacy task_state.json.
+                    # Ignore a historical workstreams/default.json rather than
+                    # exposing two indistinguishable default lanes.
+                    continue
+                self.load(session_id, workstream_id=normalized)
             except SessionError:
                 continue
-            result.append(candidate)
+            result.append(normalized)
         return tuple(result)
 
     @staticmethod
@@ -371,6 +396,18 @@ class TaskStateStore:
                     )
                 merged = dict(existing.facts)
                 merged.update(facts)
+                # Reconnect/bootstrap refreshes frequently rebuild the same
+                # verified facts with new recorded_at timestamps. Advancing the
+                # task revision for timestamp-only churn makes another client
+                # holding expected_revision fail even though no task meaning or
+                # repository state changed. Keep a semantic no-op truly read-like.
+                unchanged = len(merged) == len(existing.facts) and all(
+                    name in existing.facts
+                    and _fact_semantically_equal(existing.facts[name], item)
+                    for name, item in merged.items()
+                )
+                if unchanged:
+                    return existing
                 state = TaskState(
                     task_id=existing.task_id,
                     session_id=session_id,

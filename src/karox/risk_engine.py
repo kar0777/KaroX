@@ -157,6 +157,7 @@ LOW_KINDS: frozenset[str] = frozenset(
         "repo.read",
         "repo.search",
         "repo.list",
+        "disk.read",
         "git.read",
         "status.read",
         "diagnostics.read",

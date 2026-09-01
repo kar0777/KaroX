@@ -358,15 +358,17 @@ _HUB_STATUS_WORDS: Dict[str, Tuple[str, str]] = {
 _HUB_ADD_WORDS: Dict[str, Tuple[str, str]] = {
     HUB_ADD_MODEL: ("AI-модель", "AI model"),
     HUB_ADD_SERVICE: (
-        "ChatGPT / Claude / Hyperagent / Notion / ClickUp / Adapt",
-        "ChatGPT / Claude / Hyperagent / Notion / ClickUp / Adapt",
+        "Приложение или сервис — ChatGPT, Claude, Notion…",
+        "App or service — ChatGPT, Claude, Notion…",
     ),
-    HUB_ADD_OTHER: ("Другой MCP/OpenAPI", "Another MCP/OpenAPI"),
+    # Protocol choice belongs to the next screen. The root should ask what the
+    # person wants to connect, not whether they know what MCP/OpenAPI means.
+    HUB_ADD_OTHER: ("Своё подключение", "Custom connection"),
 }
 
 _HUB_MANAGE_WORDS: Dict[str, Tuple[str, str]] = {
-    HUB_MANAGE_MODELS: ("Все AI-модели", "All AI models"),
-    HUB_MANAGE_CONNECTIONS: ("Сохранённые подключения", "Saved connections"),
+    HUB_MANAGE_MODELS: ("Все модели", "All models"),
+    HUB_MANAGE_CONNECTIONS: ("Все подключения", "All connections"),
 }
 
 # Which presets are a product a person recognises by name, and which are a
@@ -3137,7 +3139,7 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 except (ConnectionError, ConnectionRuntimeError) as exc:
                     result = {"error": str(exc)}
                 with contextlib.suppress(Exception):
-                    self.app.call_from_thread(self._stop_connection_done, result)
+                    self.app.call_from_thread(self._stop_connection_done, target, result)
 
             self.app.run_worker(
                 execute,
@@ -3146,12 +3148,15 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 group="mcp-connection-stop",
             )
 
-        def _stop_connection_done(self, result: Dict[str, Any]) -> None:
+        def _stop_connection_done(
+            self, target: McpClientTarget, result: Dict[str, Any]
+        ) -> None:
             if not self.is_mounted:
                 return
             if result.get("error"):
                 self._set_error(str(result["error"]))
                 return
+            state = str(result.get("state") or "stopped")
             if result.get("already_stopped"):
                 self._set_error(
                     self._label("Подключение уже остановлено.", "The connection is already stopped."),
@@ -3160,11 +3165,25 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             else:
                 self._set_error(
                     self._label(
-                        f"Остановлено: {result.get('state', 'stopped')}.",
-                        f"Stopped: {result.get('state', 'stopped')}.",
+                        f"Остановлено: {state}.",
+                        f"Stopped: {state}.",
                     ),
                     ok=True,
                 )
+
+            # Stop has already been confirmed by the controller. Reflect that
+            # state immediately instead of waiting for the next background
+            # runtime/PID reconciliation worker. Under a busy full-suite or a
+            # loaded desktop this refresh can arrive noticeably later, leaving
+            # a successful Stop action displayed as [running]. The periodic
+            # refresh below remains authoritative and will reconcile again.
+            options = self.query_one("#mcp-connections", OptionList)
+            prompt = (
+                f"{target.name}  [{state}]  "
+                f"({target.preset_id} · {target.transport} · {target.auth_scheme})"
+            )
+            with contextlib.suppress(Exception):
+                options.replace_option_prompt(target.connection_id, prompt)
             self._schedule_refresh(force=True)
 
         def action_previous(self) -> None:
@@ -4357,14 +4376,14 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 # every service connection.
                 with Horizontal(id="provider-bypass-row"):
                     yield Label(
-                        self._label("Bypass режим", "Bypass mode"),
+                        self._label("Расширенные права", "Elevated access"),
                         id="provider-bypass-label",
                     )
                     yield Switch(value=provider.bypass, id="provider-bypass")
                 yield Static(
                     self._label(
-                        "Минимум ограничений KaroX для автономной разработки",
-                        "Minimal KaroX restrictions for autonomous development",
+                        "Добавляет dev.command, git commit, network и desktop input. Push/publish/auth всё равно требуют отдельного разрешения.",
+                        "Adds dev.command, git commit, network, and desktop input. Push/publish/auth still require separate approval.",
                     ),
                     id="provider-bypass-hint",
                     markup=False,
@@ -4571,8 +4590,8 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                 return
             self.query_one("#provider-details-error", Static).update(
                 self._label(
-                    "Bypass режим включён." if requested else "Bypass режим выключен.",
-                    "Bypass mode enabled." if requested else "Bypass mode disabled.",
+                    "Расширенные права включены." if requested else "Обычные права включены.",
+                    "Elevated access enabled." if requested else "Normal access enabled.",
                 )
             )
 

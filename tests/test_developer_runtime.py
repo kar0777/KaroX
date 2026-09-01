@@ -789,6 +789,35 @@ class HotWorkerSupervisorTests(unittest.TestCase):
                 sys.modules.pop("temporary_dependency", None)
                 sys.modules.pop("temporary_group_worker", None)
 
+    def test_status_requests_restart_when_supervisor_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            worker = root / "temporary_restart_worker.py"
+            supervisor_source = root / "supervisor-source.py"
+            worker.write_text(
+                "def validate_repo_command(*args): return None\n"
+                "def execute_repo_command(*args): return {}\n"
+                "def execute_tests(*args): return {}\n"
+                "def execute_browser_command(*args): return {}\n",
+                encoding="utf-8",
+            )
+            supervisor_source.write_text("version = 1\n", encoding="utf-8")
+            sys.path.insert(0, str(root))
+            try:
+                supervisor = HotWorkerSupervisor()
+                supervisor.MODULE_NAME = "temporary_restart_worker"
+                supervisor.module()
+                supervisor._supervisor_source_path = supervisor_source
+                supervisor._supervisor_source_sha256 = supervisor._digest(
+                    supervisor_source
+                )
+                self.assertFalse(supervisor.status()["bridge_restart_required"])
+                supervisor_source.write_text("version = 2\n", encoding="utf-8")
+                self.assertTrue(supervisor.status()["bridge_restart_required"])
+            finally:
+                sys.path.remove(str(root))
+                sys.modules.pop("temporary_restart_worker", None)
+
 
 if __name__ == "__main__":
     unittest.main()

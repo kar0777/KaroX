@@ -386,8 +386,45 @@ def budget_for(
     return _BUDGETS[resolved]
 
 
+_EFFORT_NAMES: Dict[str, Dict[str, str]] = {
+    "en": {AUTO_EFFORT: "auto — recommended", "low": "low — quick", "medium": "medium — standard", "high": "high — thorough", "extra-high": "extra-high — deep", "ultra": "ultra — maximum"},
+    "ru": {AUTO_EFFORT: "auto — рекомендуется", "low": "low — быстро", "medium": "medium — обычно", "high": "high — тщательно", "extra-high": "extra-high — глубоко", "ultra": "ultra — максимум"},
+}
+
+_EFFORT_USER_SUMMARIES: Dict[str, Dict[str, str]] = {
+    "en": {
+        AUTO_EFFORT: "Recommended for most work. KaroX chooses the depth from the task and risk.",
+        "low": "Small, clear changes where speed matters more than broad investigation.",
+        "medium": "Normal coding work: fixes, small features, and everyday verification.",
+        "high": "Complex bugs or multi-file work that deserves broader investigation and stronger checks.",
+        "extra-high": "Architecture, large refactors, and difficult dependency-heavy changes.",
+        "ultra": "Hardest work only. Maximum investigation and verification; slowest and most resource-intensive.",
+    },
+    "ru": {
+        AUTO_EFFORT: "Рекомендуется для большинства задач. KaroX сам выбирает глубину по задаче и риску.",
+        "low": "Небольшие понятные изменения, где важнее скорость, чем широкий анализ.",
+        "medium": "Обычная разработка: исправления, небольшие фичи и стандартная проверка.",
+        "high": "Сложные баги или работа в нескольких файлах с более глубоким анализом и проверкой.",
+        "extra-high": "Архитектура, большие рефакторы и сложные изменения с множеством зависимостей.",
+        "ultra": "Только для самых сложных задач. Максимальная глубина и проверка; самый долгий и ресурсоёмкий режим.",
+    },
+}
+
+
+def effort_display_name(level: str, language: str = "en") -> str:
+    """Human-first label that keeps the canonical level visible."""
+    resolved = normalize_effort(level)
+    return _EFFORT_NAMES["ru" if language == "ru" else "en"][resolved]
+
+
+def effort_user_summary(level: str, language: str = "en") -> str:
+    """Explain when a person should choose an Effort level, without runtime jargon."""
+    resolved = normalize_effort(level)
+    return _EFFORT_USER_SUMMARIES["ru" if language == "ru" else "en"][resolved]
+
+
 def effort_summary(level: str, language: str = "en") -> str:
-    """One status line for ``/status`` and the model picker: honest numbers."""
+    """Advanced status line with the exact runtime budget."""
 
     budget = budget_for(level)
     if language == "ru":

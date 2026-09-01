@@ -29,10 +29,13 @@ class VerificationDiscoveryTests(unittest.TestCase):
                             "verify": "npm run lint && npm run typecheck",
                             "typecheck": "tsc --noEmit",
                             "lint": "eslint .",
+                            "format:check": "prettier --check .",
+                            "i18n:check": "node scripts/i18n-check.mjs",
                             "build": "vite build",
                             "check:migrations": "tsx scripts/check-migrations.ts",
                             "ci": "npm run build && firebase deploy",
                             "test:smoke": "eslint . --fix",
+                            "format": "prettier --write .",
                         }
                     }
                 ),
@@ -48,6 +51,8 @@ class VerificationDiscoveryTests(unittest.TestCase):
                 ("npm", "run", "verify"),
                 ("npm", "run", "typecheck"),
                 ("npm", "run", "lint"),
+                ("npm", "run", "format:check"),
+                ("npm", "run", "i18n:check"),
                 ("npm", "run", "build"),
                 ("npm", "run", "check:migrations"),
             ),

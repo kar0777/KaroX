@@ -312,6 +312,54 @@ class TestChecksAndServerProfiles(_Base):
         self.assertFalse(payload["ready"])
         self.assertIsNone(payload["ready_error"])
 
+    def test_port_profile_derives_loopback_readiness_url_automatically(self) -> None:
+        is_alive, kill_tree, register = _fake_pid_alive()
+        register(44004)
+        profile = ManagedServerProfile(
+            name="static-html-loopback",
+            argv=("python", "-m", "karox.static_server"),
+            env={"HOST": "127.0.0.1", "PORT": "8765"},
+            env_allowlist=frozenset({"PORT"}),
+            host_hint="127.0.0.1",
+        )
+        runtime = self._runtime(
+            tools=(DEV_SERVER_START,), server_profiles=(profile,),
+            popen_factory=self._fake_popen(pid=44004),
+        )
+        with (
+            mock.patch.multiple(_htr_mod, _pid_alive=is_alive, _kill_pid_tree=kill_tree),
+            mock.patch.object(_htr_mod.ProcessIdentity, "capture", side_effect=_fake_process_identity),
+            mock.patch.object(runtime, "_poll_ready", return_value=(True, None)) as poll,
+        ):
+            result = runtime.execute(
+                DEV_SERVER_START,
+                {"argv": ["python", "-m", "karox.static_server"]},
+                deadline_seconds=10,
+            )
+        payload = result if isinstance(result, dict) else result.structuredContent
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["url"], "http://127.0.0.1:8765/")
+        poll.assert_called_once_with("http://127.0.0.1:8765/", 10)
+
+    def test_static_server_module_is_the_only_managed_karox_module_allowed_for_stop(self) -> None:
+        runtime = self._runtime(tools=(DEV_SERVER_STATUS,), server_profiles=default_server_profiles())
+        live = _htr_mod.ProcessIdentity(
+            pid=55001, created_at=1.0, executable="python.exe", cmdline_digest="digest"
+        )
+        static_record = _htr_mod.ManagedProcessRecord(
+            process_id="static", pid=55001, session_id="sess",
+            argv=("python", "-m", "karox.static_server"), started_at=1.0,
+            stdout_path="out", stderr_path="err",
+        )
+        control_record = _htr_mod.ManagedProcessRecord(
+            process_id="control", pid=55002, session_id="sess",
+            argv=("python", "-m", "karox.cli"), started_at=1.0,
+            stdout_path="out", stderr_path="err",
+        )
+        self.assertIsNone(runtime._protected_process_reason(static_record, live))
+        self.assertIn("KaroX Python module", runtime._protected_process_reason(control_record, live) or "")
+
     def test_a3_bare_npm_start_is_denied(self) -> None:
         # The safe profile permits start:safe, not the bare `npm start` which
         # enables live publication by default in the Vacancy Control project.

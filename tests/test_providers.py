@@ -269,6 +269,69 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertEqual(events[-1].kind, ModelEventKind.COMPLETION)
         self.assertEqual(events[-1].finish_reason, "tool_calls")
 
+    def test_openrouter_reasoning_summary_is_public_but_raw_detail_is_not(self) -> None:
+        events = [
+            {
+                "id": "summary-1",
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_details": [
+                                {
+                                    "type": "reasoning.summary",
+                                    "summary": "Inspecting the ",
+                                    "id": "s1",
+                                    "format": "openai-responses-v1",
+                                },
+                                {
+                                    "type": "reasoning.text",
+                                    "text": "private deliberation must stay private",
+                                    "id": "r1",
+                                    "format": "openai-responses-v1",
+                                },
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "summary-1",
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_details": [
+                                {
+                                    "type": "reasoning.summary",
+                                    "summary": "relevant code.",
+                                    "id": "s1",
+                                    "format": "openai-responses-v1",
+                                }
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ]
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        client = FakeClient([sse_response(events), sse_response(events)])
+        with patch("karox.providers.httpx.Client", return_value=client):
+            streamed = list(provider.stream(self.request()))
+            completed = provider.complete(self.request())
+
+        summaries = [
+            event.reasoning_summary_delta
+            for event in streamed
+            if event.kind == ModelEventKind.REASONING_SUMMARY_DELTA
+        ]
+        self.assertEqual(summaries, ["Inspecting the ", "relevant code."])
+        self.assertEqual(completed.reasoning_summary, "Inspecting the relevant code.")
+        self.assertNotIn(
+            "private deliberation",
+            "".join(item or "" for item in summaries),
+        )
+
     def test_retries_only_transport_errors_before_response(self) -> None:
         request = httpx.Request("POST", "https://provider.example")
         client = FakeClient(
@@ -678,6 +741,29 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
             provider.complete(self.request())
 
         self.assertNotIn("reasoning_effort", client.calls[0]["json"])
+
+    def test_openrouter_requests_summary_without_changing_reasoning_effort(self) -> None:
+        response = sse_response(
+            [{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+        )
+        request = replace(self.request(), reasoning_effort="high")
+
+        openrouter_client = FakeClient([response])
+        openrouter = OpenAIChatCompletionsProvider("https://openrouter.ai/api/v1")
+        with patch("karox.providers.httpx.Client", return_value=openrouter_client):
+            openrouter.complete(request)
+        openrouter_payload = openrouter_client.calls[0]["json"]
+        self.assertEqual(openrouter_payload["reasoning_effort"], "high")
+        self.assertEqual(openrouter_payload["reasoning"], {"summary": "auto"})
+
+        generic_client = FakeClient(
+            [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
+        )
+        generic = OpenAIChatCompletionsProvider("https://provider.example/v1")
+        with patch("karox.providers.httpx.Client", return_value=generic_client):
+            generic.complete(request)
+        self.assertEqual(generic_client.calls[0]["json"]["reasoning_effort"], "high")
+        self.assertNotIn("reasoning", generic_client.calls[0]["json"])
 
     def test_reasoning_families_do_not_receive_temperature(self) -> None:
         """o-series/gpt-5 models reject temperature with a 400."""

@@ -32,6 +32,10 @@ class AccessProfile(str, Enum):
 class Capability(str, Enum):
     REPO_READ = "repo.read"
     REPO_WRITE = "repo.write"
+    # Metadata-only filesystem maintenance outside the normal repository file
+    # API. It can scan sizes/categories and freeze a cleanup plan, but it never
+    # carries permission to apply deletion; the human-facing layer owns apply.
+    DISK_READ = "disk.read"
     PROCESS_RUN = "process.run"
     DEV_COMMAND = "dev.command"
     CHECKS_RUN = "checks.run"
@@ -43,6 +47,7 @@ class Capability(str, Enum):
     DESKTOP_INPUT = "desktop.input"
     NETWORK = "network"
     MCP_CALL = "mcp.call"
+    DIAGNOSTICS_READ = "diagnostics.read"
     PACKAGE_PUBLISH = "package.publish"
     AUTH_COMMAND = "auth.command"
 
@@ -77,6 +82,12 @@ class CoreCommand:
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     idempotency_key: Optional[str] = None
     deadline_seconds: float = 120.0
+    # Human task authority carried out-of-band by the runtime. Hosted bridges
+    # fill this from the active workstream objective; native runs may leave it
+    # empty and fall back to the session task. It is deliberately excluded from
+    # ``input_digest`` and tool arguments: changing safety context must not
+    # change the identity of the work or become model-visible tool payload.
+    user_intent: str = ""
     # A human decision carried alongside the command. It is deliberately not
     # part of ``input_digest``: the digest identifies the work, and an approval
     # must never change the identity of the thing that was approved. It is also
@@ -104,6 +115,8 @@ class CoreCommand:
             or not 0.1 <= float(self.deadline_seconds) <= 3600.0
         ):
             raise ValueError("deadline must be between 0.1 and 3600 seconds")
+        if not isinstance(self.user_intent, str) or len(self.user_intent) > 8000:
+            raise ValueError("user intent context must contain at most 8000 characters")
         if self.confirmation_token is not None and (
             not isinstance(self.confirmation_token, str)
             or not self.confirmation_token.strip()

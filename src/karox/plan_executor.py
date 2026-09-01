@@ -510,15 +510,37 @@ class PlanExecutor:
         budgets: PlanBudgets,
         remaining_seconds: float,
         delegate_names: set[str],
+        *,
+        synchronous: bool = False,
     ) -> dict[str, Any] | CallToolResult:
         if self.delegate is None or tool_name not in delegate_names:
             raise PlanExecutionError(
                 "capability_unavailable", f"required low-level tool is not exposed: {tool_name}"
             )
         try:
-            result = self.delegate.execute(
+            call_inputs = inputs
+            runner = None
+            if synchronous:
+                runner = getattr(self.delegate, "execute_synchronous", None)
+                if not callable(runner):
+                    # AutonomyRuntime uses a tiny workstream-scoped wrapper around
+                    # the real CompositeHostedBridge. Avoid coupling imports here,
+                    # but preserve that routing when using the internal synchronous
+                    # surface so a long command cannot detach after the plan has
+                    # released its repository lease.
+                    inner = getattr(self.delegate, "_delegate", None)
+                    inner_runner = getattr(inner, "execute_synchronous", None)
+                    workstream_id = getattr(self.delegate, "_workstream_id", None)
+                    if callable(inner_runner):
+                        runner = inner_runner
+                        if isinstance(workstream_id, str) and workstream_id:
+                            call_inputs = dict(inputs)
+                            call_inputs["workstream_id"] = workstream_id
+            if not callable(runner):
+                runner = self.delegate.execute
+            result = runner(
                 tool_name,
-                inputs,
+                call_inputs,
                 idempotency_key=None if tool_name in {
                     "karox.repo.search",
                     "karox.repo.read_file",
@@ -622,7 +644,15 @@ class PlanExecutor:
                 else "karox.checks.run"
             )
             return self._normalize_result(
-                self._tool_call(tool_name, inputs, operation, budgets, remaining_seconds, delegate_names)
+                self._tool_call(
+                    tool_name,
+                    inputs,
+                    operation,
+                    budgets,
+                    remaining_seconds,
+                    delegate_names,
+                    synchronous=True,
+                )
             )
         if action == "checks":
             tool = str(inputs.pop("tool", "tests"))

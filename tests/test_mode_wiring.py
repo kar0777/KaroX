@@ -158,7 +158,7 @@ class TestModePreferencePersistence:
 
 
 class TestModeCommandSurface:
-    def test_mode_is_a_visible_first_class_command(self):
+    def test_mode_is_a_first_class_visible_command(self):
         assert "/mode" in karox_tui.VISIBLE_COMMANDS
         assert "/mode" in karox_tui.SLASH_COMMANDS
         assert "/mode" in karox_tui._COMMANDS_RU

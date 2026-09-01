@@ -22,6 +22,7 @@ from .agent import (
     AgentLimits,
     AgentReport,
     ContextBudget,
+    MAINTENANCE_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
 )
 from .agent_modes import MODES, ModePolicy, mode_policy
@@ -40,10 +41,12 @@ from .bridge import (
 from .connections import ConnectionError as SavedConnectionError
 from .connection_controller import connection_controller
 from .connection_runtime import ConnectionRuntimeError
+from .action_execution import CapabilityCoreRuntime
+from .action_policy import ActionDecisionEngine
 from .constitution import compose_system_prompt, provider_family
-from .core import CoreError, CoreRuntime
-from .core_tools import ExtendedCoreRuntime
+from .core import CoreError, CoreRuntime, InvalidCommand
 from .credentials import CredentialError, CredentialStore
+from .disk_maintenance import is_drive_root, workspace_system_reason
 from .ecosystem import (
     INTEGRATION_PRESETS,
     TARGET_PRESETS,
@@ -96,11 +99,17 @@ from .output_policy import (
     render_turn_report,
     resolve_mode,
 )
+from .orchestration_cli import (
+    handle_orchestration_command,
+    register_orchestration_commands,
+)
 from .promptql_outbound import (
     PromptQLInvocationError,
     PromptQLNaturalLanguageClient,
     load_promptql_target,
 )
+from .risk_engine import RiskEngine
+from .risk_mapping import command_requests_deletion
 from .packs import (
     PackError,
     PackRegistry,
@@ -134,6 +143,7 @@ from .provider_factory import ProviderFactory
 from .provider_pricing import PricingRegistry
 from .provider_presets import provider_preset, provider_presets
 from .providers import (
+    ImageAttachment,
     ModelMessage,
     ModelRequest,
     OpenAIChatCompletionsProvider,
@@ -152,6 +162,7 @@ from .registry import (
 )
 from .routing import RouteTarget, RoutedProvider, RoutingPolicy
 from .handoff import build_handoff
+from .repository_lease import RepositoryLeaseStore
 from .security import redact
 from .sessions import SessionError, SessionRecord, SessionStore
 from .skills import (
@@ -343,6 +354,9 @@ def _record_summary(record: SessionRecord) -> dict[str, Any]:
     checks = [item for item in record.checks if isinstance(item, dict)]
     return {
         "session_id": record.session_id,
+        "name": record.name,
+        "parent_session_id": record.parent_session_id,
+        "archived": record.archived,
         "repository": record.repository,
         "branch": record.branch,
         "access_profile": record.access_profile,
@@ -433,6 +447,43 @@ def _parser() -> argparse.ArgumentParser:
     paths = commands.add_parser("paths", help="show resolved application paths")
     paths.add_argument("--json", action="store_true")
 
+    status = commands.add_parser(
+        "status", help="show one compact project/model/task/bridge reliability view"
+    )
+    status.add_argument("--repository", type=Path, default=Path.cwd())
+    status.add_argument("--json", action="store_true")
+
+    jobs = commands.add_parser(
+        "jobs", help="show recent durable verification and developer-command jobs"
+    )
+    jobs.add_argument("--session-id")
+    jobs.add_argument("--limit", type=int, default=20)
+    jobs.add_argument("--json", action="store_true")
+
+    cancel = commands.add_parser(
+        "cancel", help="request safe cancellation of one owned durable job"
+    )
+    cancel.add_argument("job_id")
+    cancel.add_argument("--session-id")
+    cancel.add_argument("--json", action="store_true")
+
+    effort_pref = commands.add_parser(
+        "effort", help="show or set the default KaroX Effort for new work"
+    )
+    effort_pref.add_argument("level", nargs="?", help="auto|low|medium|high|extra-high|ultra")
+    effort_pref.add_argument(
+        "--details",
+        action="store_true",
+        help="show the exact internal step/time/verification budget",
+    )
+    effort_pref.add_argument("--json", action="store_true")
+
+    mode_pref = commands.add_parser(
+        "mode", help="show or set the default agent mode for new work"
+    )
+    mode_pref.add_argument("mode", nargs="?", help="build|plan|ideate")
+    mode_pref.add_argument("--json", action="store_true")
+
     session = commands.add_parser("session", help="manage durable KaroX sessions")
     sessions = session.add_subparsers(dest="session_command", required=True)
     create = sessions.add_parser("create", help="create a repository-bound session")
@@ -445,9 +496,35 @@ def _parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--branch", default="")
     create.add_argument("--id")
+    create.add_argument("--name", default="", help="short user-facing session name")
     create.add_argument("--json", action="store_true")
     listing = sessions.add_parser("list", help="list sessions")
+    listing.add_argument("--all", action="store_true", help="include archived sessions")
     listing.add_argument("--json", action="store_true")
+    fork = sessions.add_parser("fork", help="fork safe structured context into a new session")
+    fork.add_argument("session_id")
+    fork.add_argument("--id", dest="new_session_id")
+    fork.add_argument("--task")
+    fork.add_argument("--name", default="")
+    fork.add_argument("--json", action="store_true")
+    rename = sessions.add_parser("rename", help="set or clear a session display name")
+    rename.add_argument("session_id")
+    rename.add_argument("name")
+    rename.add_argument("--json", action="store_true")
+    archive = sessions.add_parser("archive", help="archive a session without deleting evidence")
+    archive.add_argument("session_id")
+    archive.add_argument("--json", action="store_true")
+    unarchive = sessions.add_parser("unarchive", help="restore an archived session")
+    unarchive.add_argument("session_id")
+    unarchive.add_argument("--json", action="store_true")
+    delete = sessions.add_parser("delete", help="permanently delete an already archived session")
+    delete.add_argument("session_id")
+    delete.add_argument(
+        "--confirm",
+        required=True,
+        help="repeat the exact session ID; deletion is refused otherwise",
+    )
+    delete.add_argument("--json", action="store_true")
     revoke = sessions.add_parser("revoke", help="emergency-revoke a session")
     revoke.add_argument("session_id")
     revoke.add_argument("--json", action="store_true")
@@ -1648,6 +1725,8 @@ def _parser() -> argparse.ArgumentParser:
     pack_disable.add_argument("identity")
     pack_disable.add_argument("--json", action="store_true")
 
+    register_orchestration_commands(commands)
+
     tui = commands.add_parser("tui", help="run the optional interactive TUI shell")
     tui.add_argument("--session-id")
     tui.add_argument("--repository", type=Path, default=Path.cwd())
@@ -1664,7 +1743,40 @@ def _parser() -> argparse.ArgumentParser:
         help="name of an environment variable containing the provider API key",
     )
     run.add_argument("--session-id")
+    run.add_argument(
+        "--continue-task",
+        action="store_true",
+        help=(
+            "append --task as a new turn when --session-id already exists; "
+            "without this flag a changed task is refused"
+        ),
+    )
+    run.add_argument(
+        "--auto-checkpoint",
+        action="store_true",
+        help=(
+            "create a local Git-aware rollback checkpoint before a build turn; "
+            "checkpoint failure is recorded but never weakens the run policy"
+        ),
+    )
+    run.add_argument(
+        "--maintenance-mode",
+        action="store_true",
+        help="metadata-only disk cleanup planning; deletion stays in the user-confirmed UI",
+    )
+    run.add_argument(
+        "--protected-path",
+        action="append",
+        default=[],
+        help="absolute project/runtime root that cleanup planning must never target directly",
+    )
     run.add_argument("--skill")
+    run.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="attach one repository-confined PNG/JPEG/WebP to the next model turn (repeatable)",
+    )
     run.add_argument("--skill-dir", type=Path, action="append", default=[])
     run.add_argument(
         "--skill-permission",
@@ -2358,6 +2470,43 @@ def _agent_access_profile(args: argparse.Namespace) -> AccessProfile:
     return profile
 
 
+def _agent_images(
+    args: argparse.Namespace, repository: Path
+) -> tuple[tuple[ImageAttachment, ...], tuple[dict[str, Any], ...]]:
+    values = list(getattr(args, "image", []) or [])
+    if not values:
+        return (), ()
+    from .image_attachments import load_image_attachments
+
+    direct = args.model is not None or args.base_url is not None or args.api_key_env
+    if direct:
+        raise ValueError(
+            "image attachments require a registry model with vision=true; direct --base-url mode has no verified vision metadata"
+        )
+    registry = _registry()
+    routes = tuple(_route(value) for value in args.route)
+    if not routes:
+        selected = registry.selected_model()
+        if selected is None:
+            raise ValueError("image attachments require a selected routed model")
+        routes = (RouteTarget(selected.provider_id, selected.model_id),)
+    unsupported: list[str] = []
+    for target in routes:
+        entry = registry.model(target.provider_id, target.model)
+        if entry.vision != "true":
+            unsupported.append(f"{entry.provider_id}/{entry.model_id}:{entry.vision}")
+    if unsupported:
+        raise ValueError(
+            "every fallback route must explicitly declare vision=true before images can be sent; unsupported: "
+            + ", ".join(unsupported)
+        )
+    loaded = load_image_attachments(repository, values)
+    return (
+        tuple(item.image for item in loaded),
+        tuple(item.public_dict() for item in loaded),
+    )
+
+
 def _agent_provider(
     args: argparse.Namespace, record: SessionRecord | None, limits: AgentLimits
 ) -> tuple[Any, str, int | None, int | None]:
@@ -2890,6 +3039,9 @@ def _upgrade_saved_profile_tools(profile: SavedWebBridgeProfile) -> tuple[str, .
             "karox.task.status",
             "karox.task.resume",
             "karox.task.workstreams",
+            "karox.intelligence.list",
+            "karox.orchestrate.recipes",
+            "karox.orchestrate.plan",
             "karox.memory.remember",
             "karox.memory.recall",
             "karox.memory.context",
@@ -2930,7 +3082,16 @@ def _upgrade_saved_profile_tools(profile: SavedWebBridgeProfile) -> tuple[str, .
     can_verify = bool({"karox.checks.run", "karox.tests.run"}.intersection(names))
     if can_patch and can_verify and "karox.task.execute_plan" not in names:
         tools.append("karox.task.execute_plan")
-    return tuple(tools)
+
+    # Use the same durable bundle as the launched worker. This keeps profile
+    # previews/connect-time migration and child-restart behavior in sync.
+    return _include_stable_worker_commands(
+        tuple(tools),
+        access_profile=profile.access_profile,
+        verification_commands=tuple(profile.verification_commands),
+        target_profile=profile.target_profile,
+        saved_profile_name=profile.name,
+    )
 
 
 def _web_bridge_access_profile(
@@ -4293,6 +4454,8 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             tuple(args.tool),
             access_profile=access_profile,
             verification_commands=parsed_verification_commands,
+            target_profile=args.profile,
+            saved_profile_name=args.saved_profile_name,
         )
         core_tools = [name for name in effective_tools if name in CORE_TOOL_NAMES]
         extra_tools = [
@@ -4632,12 +4795,466 @@ def _provider_credential_doctor() -> dict[str, Any]:
     }
 
 
+def _durable_job_bases() -> tuple[tuple[str, Path], ...]:
+    root = runtime_dir() / "vnext"
+    return (
+        ("check", root / "check-jobs"),
+        ("command", root / "dev-command-jobs"),
+    )
+
+
+def _collect_durable_jobs(
+    *,
+    session_id: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return a compact, liveness-aware view of recent durable jobs."""
+
+    from .check_jobs import CheckJobError, CheckJobStore, effective_job_status
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("jobs limit must be between 1 and 100")
+    candidates: list[tuple[float, str, Path, Path]] = []
+    unreadable = 0
+    for kind, base in _durable_job_bases():
+        try:
+            paths = (
+                list((base / session_id).glob("job-*.json"))
+                if session_id
+                else list(base.glob("*/job-*.json"))
+            )
+        except OSError:
+            unreadable += 1
+            continue
+        for path in paths:
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                unreadable += 1
+                continue
+            candidates.append((stamp, kind, base, path))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    items: list[dict[str, Any]] = []
+    active_count = 0
+    stale_count = 0
+    final_statuses = {"passed", "failed", "cancelled", "timed_out"}
+    # Bound checksum reads even on a machine with years of retained sessions.
+    for _stamp, kind, base, path in candidates[:500]:
+        sid = path.parent.name
+        try:
+            store = CheckJobStore(sid, root=base)
+            state = store.get(path.stem)
+            scope = store.get_scope(path.stem)
+        except (CheckJobError, OSError, ValueError):
+            unreadable += 1
+            continue
+        effective_status, effective_error = effective_job_status(state)
+        if effective_status not in final_statuses:
+            active_count += 1
+        elif state.status not in final_statuses:
+            stale_count += 1
+        duration = None
+        if state.started_at is not None:
+            end = state.finished_at if state.finished_at is not None else state.updated_at
+            duration = round(max(0.0, float(end) - float(state.started_at)), 3)
+        items.append(
+            {
+                "job_id": state.job_id,
+                "kind": kind,
+                "session_id": state.session_id,
+                "status": effective_status,
+                "persisted_status": state.status,
+                "updated_at": state.updated_at,
+                "duration_seconds": duration,
+                "command": Path(state.argv[0]).name if state.argv else None,
+                "exit_code": state.exit_code,
+                "error_code": effective_error,
+                "artifact_id": state.artifact_id,
+                "workstream_id": (
+                    str(scope.get("workstream_id")) if scope is not None else "legacy-unscoped"
+                ),
+                "project_id": scope.get("project_id") if scope is not None else None,
+            }
+        )
+    items.sort(key=lambda item: float(item["updated_at"]), reverse=True)
+    total_loaded = len(items)
+    return {
+        "status": "degraded" if unreadable else "ok",
+        "count": min(total_loaded, limit),
+        "total_count": len(candidates),
+        "active_count": active_count,
+        "stale_count": stale_count,
+        "unreadable_count": unreadable,
+        "recent": items[:limit],
+        "truncated": len(candidates) > limit,
+    }
+
+
+def _find_durable_job(
+    job_id: str,
+    *,
+    session_id: str | None = None,
+) -> tuple[str, Path, Any]:
+    from .check_jobs import CheckJobError, CheckJobStore
+
+    matches: list[tuple[str, Path, Any]] = []
+    for kind, base in _durable_job_bases():
+        session_dirs: list[Path]
+        if session_id:
+            session_dirs = [base / session_id]
+        else:
+            try:
+                session_dirs = [path for path in base.iterdir() if path.is_dir()]
+            except FileNotFoundError:
+                session_dirs = []
+            except OSError as exc:
+                raise ValueError(f"cannot inspect durable jobs: {exc}") from exc
+        for directory in session_dirs:
+            path = directory / f"{job_id}.json"
+            if not path.is_file():
+                continue
+            try:
+                state = CheckJobStore(directory.name, root=base).get(job_id)
+            except CheckJobError as exc:
+                raise ValueError(str(exc)) from exc
+            matches.append((kind, base, state))
+    if not matches:
+        raise ValueError(f"durable job does not exist: {job_id}")
+    if len(matches) > 1:
+        raise ValueError("job id is ambiguous across sessions; pass --session-id")
+    return matches[0]
+
+
+def _handle_jobs(args: argparse.Namespace) -> int:
+    report = _collect_durable_jobs(
+        session_id=getattr(args, "session_id", None),
+        limit=int(getattr(args, "limit", 20)),
+    )
+    if args.json:
+        _json(report)
+    else:
+        if not report["recent"]:
+            _write_line("No durable jobs found.")
+        for item in report["recent"]:
+            duration = item.get("duration_seconds")
+            duration_text = f" {duration:.1f}s" if isinstance(duration, (int, float)) else ""
+            _write_line(
+                f"{item['job_id']}  {item['status']:<10}  {item['kind']:<7}  "
+                f"{item.get('command') or '-'}{duration_text}"
+            )
+        if report["truncated"]:
+            _write_line(
+                f"Showing {report['count']} of {report['total_count']} jobs; use --limit to expand."
+            )
+    return 0
+
+
+def _handle_cancel(args: argparse.Namespace) -> int:
+    from .check_jobs import CheckJobManager
+
+    kind, base, state = _find_durable_job(
+        args.job_id,
+        session_id=getattr(args, "session_id", None),
+    )
+    repository = Path(state.repository).expanduser().resolve(strict=True)
+    manager = CheckJobManager(
+        repository,
+        state.session_id,
+        (),
+        root=base,
+        allow_developer_commands=(kind == "command"),
+        workspace_sensitive=False,
+        wait_for_child=False,
+    )
+    result = manager.cancel(state.job_id)
+    payload = {"kind": kind, **result}
+    if args.json:
+        _json(payload)
+    else:
+        requested = bool(payload.get("cancel_requested"))
+        _write_line(
+            f"{state.job_id}: "
+            + ("cancellation requested" if requested else f"already {payload.get('status')}")
+        )
+    # This command never signals a caller-supplied PID; CheckJobManager owns
+    # cancellation and writes only its verified marker.
+    return 0
+
+
+def _handle_status(args: argparse.Namespace) -> int:
+    """Show the operator the state needed to decide whether KaroX can keep working."""
+
+    repository = args.repository.expanduser().resolve(strict=False)
+    repository_key = os.path.normcase(str(repository))
+    registry = _registry()
+    selected = registry.selected_model()
+    from .tui import _load_agent_mode, _load_effort_level
+    from .task_state import TaskStateStore
+
+    sessions = SessionStore(session_dir())
+    matching: list[SessionRecord] = []
+    for record in sessions.list(include_archived=False):
+        try:
+            candidate = Path(record.repository).expanduser().resolve(strict=False)
+        except OSError:
+            continue
+        if os.path.normcase(str(candidate)) == repository_key and not record.revoked:
+            matching.append(record)
+    matching.sort(key=lambda item: item.updated_at, reverse=True)
+    latest = matching[0] if matching else None
+
+    task_payload: dict[str, Any] | None = None
+    workstream_payload: dict[str, Any] = {"count": 0, "recent": []}
+    if latest is not None:
+        task_states = TaskStateStore(sessions)
+        candidates: list[tuple[str, Any]] = []
+        default = task_states.load_optional(latest.session_id)
+        if default is not None:
+            candidates.append(("default", default))
+
+        recent: list[dict[str, Any]] = []
+        workstream_ids = task_states.list_workstreams(latest.session_id)
+        for workstream_id in workstream_ids:
+            state = task_states.load_optional(latest.session_id, workstream_id=workstream_id)
+            if state is None:
+                continue
+            candidates.append((workstream_id, state))
+            objective = state.facts.get("objective")
+            phase = state.facts.get("current_phase")
+            next_action = state.facts.get("next_safe_action")
+            recent.append(
+                {
+                    "workstream_id": workstream_id,
+                    "revision": state.revision,
+                    "updated_at": state.updated_at,
+                    "objective": objective.value if objective is not None else None,
+                    "current_phase": phase.value if phase is not None else None,
+                    "next_safe_action": next_action.value if next_action is not None else None,
+                }
+            )
+
+        if candidates:
+            active_workstream_id, active_state = max(
+                candidates,
+                key=lambda item: float(item[1].updated_at),
+            )
+            objective = active_state.facts.get("objective")
+            phase = active_state.facts.get("current_phase")
+            next_action = active_state.facts.get("next_safe_action")
+            blockers = active_state.facts.get("current_blockers")
+            task_payload = {
+                "workstream_id": active_workstream_id,
+                "task_id": active_state.task_id,
+                "revision": active_state.revision,
+                "updated_at": active_state.updated_at,
+                "objective": objective.value if objective is not None else latest.task,
+                "current_phase": phase.value if phase is not None else latest.phase,
+                "next_safe_action": next_action.value if next_action is not None else None,
+                "blockers": blockers.value if blockers is not None else [],
+            }
+
+        recent.sort(key=lambda item: float(item["updated_at"]), reverse=True)
+        workstream_payload = {
+            "count": len(recent),
+            "recent": recent[:8],
+            "truncated": len(recent) > 8,
+        }
+
+    bridge_profiles: list[dict[str, Any]] = []
+    try:
+        from .saved_bridge_supervisor import saved_bridge_supervisor_status
+
+        for profile in WebBridgeProfileStore().list():
+            try:
+                profile_repository = Path(profile.repository).expanduser().resolve(strict=False)
+            except OSError:
+                continue
+            if os.path.normcase(str(profile_repository)) != repository_key:
+                continue
+            supervisor = saved_bridge_supervisor_status(profile.name)
+            bridge_profiles.append(
+                {
+                    "name": profile.name,
+                    "desired_running": bool(supervisor.get("desired_running")),
+                    "supervisor_alive": bool(supervisor.get("supervisor_alive")),
+                    "supervisor_heartbeat_fresh": bool(
+                        supervisor.get("supervisor_heartbeat_fresh")
+                    ),
+                    "bridge_pid": supervisor.get("bridge_pid"),
+                }
+            )
+    except Exception as exc:
+        bridge_profiles = [{"status": "unavailable", "error": str(redact(str(exc)))[:300]}]
+
+    lease_report = RepositoryLeaseStore().doctor()
+    repository_leases = [
+        item
+        for item in lease_report.get("leases", [])
+        if os.path.normcase(str(item.get("repository", ""))) == repository_key
+    ]
+    stale_repository_lease = any(not bool(item.get("owner_alive")) for item in repository_leases)
+    unhealthy_desired_bridges = [
+        str(item.get("name"))
+        for item in bridge_profiles
+        if item.get("status") != "unavailable"
+        and bool(item.get("desired_running"))
+        and not bool(item.get("supervisor_alive"))
+        and item.get("name")
+    ]
+    unhealthy_desired_bridge = bool(unhealthy_desired_bridges)
+    unresolved_failures = (
+        [item for item in latest.failures if isinstance(item, dict) and item.get("resolved") is not True]
+        if latest is not None
+        else []
+    )
+    durable_jobs = (
+        _collect_durable_jobs(session_id=latest.session_id, limit=8)
+        if latest is not None
+        else {
+            "status": "ok",
+            "count": 0,
+            "total_count": 0,
+            "active_count": 0,
+            "unreadable_count": 0,
+            "recent": [],
+            "truncated": False,
+        }
+    )
+    payload = {
+        "status": (
+            "degraded"
+            if (
+                stale_repository_lease
+                or unhealthy_desired_bridge
+                or durable_jobs.get("status") == "degraded"
+            )
+            else "ok"
+        ),
+        "repository": str(repository),
+        "repository_exists": repository.is_dir(),
+        "model": (
+            {"provider_id": selected.provider_id, "model_id": selected.model_id}
+            if selected is not None
+            else None
+        ),
+        "effort": _load_effort_level(),
+        "mode": _load_agent_mode(),
+        "session": (
+            {
+                "session_id": latest.session_id,
+                "status": latest.status,
+                "phase": latest.phase,
+                "updated_at": latest.updated_at,
+                "task": latest.task,
+                "changed_files_count": len(latest.changed_files),
+                "recorded_jobs_count": len(latest.jobs),
+                "unresolved_failures_count": len(unresolved_failures),
+            }
+            if latest is not None
+            else None
+        ),
+        "task": task_payload,
+        "workstreams": workstream_payload,
+        "bridges": bridge_profiles,
+        "repository_leases": {
+            "count": len(repository_leases),
+            "leases": repository_leases,
+        },
+        "jobs": durable_jobs,
+        "next": (
+            f"run `karox bridge restart --saved {unhealthy_desired_bridges[0]}` to restore its supervisor"
+            if unhealthy_desired_bridges
+            else (
+                "run `karox jobs` to reconcile active durable work before starting a duplicate"
+                if int(durable_jobs.get("active_count") or 0) > 0
+                else (
+                    task_payload.get("next_safe_action")
+                    if isinstance(task_payload, dict) and task_payload.get("next_safe_action")
+                    else "run `karox doctor` if work cannot continue"
+                )
+            )
+        ),
+    }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
+def _saved_bridge_runtime_doctor() -> dict[str, Any]:
+    """Report desired saved bridges whose detached supervisor is not healthy."""
+
+    try:
+        from .saved_bridge_supervisor import saved_bridge_supervisor_status
+
+        profiles = WebBridgeProfileStore().list()
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "error_type": type(exc).__name__,
+            "error": str(redact(str(exc)))[:300],
+            "bridges": [],
+        }
+
+    bridges: list[dict[str, Any]] = []
+    unhealthy = 0
+    desired = 0
+    for profile in profiles:
+        try:
+            supervisor = saved_bridge_supervisor_status(profile.name)
+        except Exception as exc:
+            bridges.append(
+                {
+                    "name": profile.name,
+                    "status": "unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            unhealthy += 1
+            continue
+        wants_running = bool(supervisor.get("desired_running"))
+        supervisor_alive = bool(supervisor.get("supervisor_alive"))
+        heartbeat_fresh = bool(supervisor.get("supervisor_heartbeat_fresh"))
+        healthy = (not wants_running) or (supervisor_alive and heartbeat_fresh)
+        if wants_running:
+            desired += 1
+        if not healthy:
+            unhealthy += 1
+        bridges.append(
+            {
+                "name": profile.name,
+                "desired_running": wants_running,
+                "supervisor_alive": supervisor_alive,
+                "supervisor_heartbeat_fresh": heartbeat_fresh,
+                "supervisor_pid": supervisor.get("supervisor_pid"),
+                "restart_count": supervisor.get("restart_count"),
+                "last_error": supervisor.get("last_error"),
+                "healthy": healthy,
+            }
+        )
+    return {
+        "status": "degraded" if unhealthy else "ok",
+        "profile_count": len(bridges),
+        "desired_running_count": desired,
+        "unhealthy_count": unhealthy,
+        "bridges": bridges,
+        "recovery": (
+            "a live saved-bridge supervisor self-heals its owned MCP child and tunnel; "
+            "a desired profile with a dead supervisor needs the guarded saved-bridge "
+            "Start/Restart path to recreate that supervisor"
+        ),
+    }
+
+
 def _handle_doctor(args: argparse.Namespace) -> int:
     checks: dict[str, Any] = {}
     probes = {
         "provider_credentials": _provider_credential_doctor,
         "mcp_credentials": lambda: McpCredentialStore().doctor(),
         "bridge_credentials": lambda: BridgeCredentialStore().doctor(),
+        "saved_bridges": lambda: WebBridgeProfileStore().doctor(),
+        "saved_bridge_runtime": _saved_bridge_runtime_doctor,
+        "tailscale": tailscale_doctor,
+        "repository_leases": lambda: RepositoryLeaseStore().doctor(),
         "sessions": lambda: {
             "status": "ok",
             "count": len(SessionStore(session_dir()).list()),
@@ -4656,11 +5273,15 @@ def _handle_doctor(args: argparse.Namespace) -> int:
                 "error_type": type(exc).__name__,
                 "error": str(redact(str(exc))),
             }
+    degraded_statuses = {"unavailable", "degraded", "error", "failed", "broken"}
     payload = {
         "status": (
-            "ok"
-            if all(item.get("status") != "unavailable" for item in checks.values())
-            else "degraded"
+            "degraded"
+            if any(
+                str(item.get("status") or "").strip().lower() in degraded_statuses
+                for item in checks.values()
+            )
+            else "ok"
         ),
         "checks": checks,
     }
@@ -4756,6 +5377,22 @@ def _effort_runtime(
         budget.reasoning_effort if budget else None
     )
     return max_steps, max_seconds, context, reasoning
+
+
+def _resolved_effort_budget(args: argparse.Namespace) -> Any | None:
+    """Return the concrete Effort budget that shaped this run, if any."""
+
+    auto = getattr(args, "effort_auto", None)
+    if isinstance(auto, dict):
+        level = auto.get("level")
+        if isinstance(level, str):
+            return effort_budget_for(level)
+    raw = getattr(args, "effort_level", None)
+    if isinstance(raw, str) and raw:
+        normalized = normalize_effort_level(raw)
+        if normalized != AUTO_EFFORT:
+            return effort_budget_for(normalized)
+    return None
 
 
 def _mode_rules(args: argparse.Namespace) -> ModePolicy | None:
@@ -4880,10 +5517,42 @@ def _constitution_provider(args: argparse.Namespace) -> str | None:
         return None
 
 
+def _native_mutation_reviewer(
+    command: CoreCommand, _definition: Any, _deadline_seconds: float
+) -> CoreCommand:
+    """Route intentional deletion through the user-reviewed cleanup planner.
+
+    Writes and edits remain normal coding operations. Only operations whose
+    explicit purpose is deletion are refused here, before Core can mutate. The
+    model can recover in the same run by using ``disk.plan_cleanup``; the TUI
+    then owns the confirmation and apply step, so the model never sees or forges
+    an approval token.
+    """
+
+    if command_requests_deletion(command.name, command.arguments):
+        raise InvalidCommand(
+            "deletion requires user review: inspect with disk.scan when useful, "
+            "then call disk.plan_cleanup with the exact relative paths; KaroX UI "
+            "will show the impact and apply only after explicit confirmation"
+        )
+    return command
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
+    maintenance_mode = bool(
+        getattr(args, "maintenance_mode", False) or is_drive_root(repository)
+    )
+    unsafe_workspace = workspace_system_reason(repository)
+    if unsafe_workspace is not None:
+        raise ValueError(
+            "Windows/system folders cannot be agent workspaces; select the whole "
+            "drive for cleanup or a normal project folder"
+        )
+    if maintenance_mode and (getattr(args, "skill", None) or getattr(args, "image", ())):
+        raise ValueError("disk-maintenance mode does not load Skills or file/image content")
     max_steps, max_seconds, effort_context, effort_reasoning = _effort_runtime(args)
     # Like the effort ladder: resolved once here, before a session is leased,
     # so an unknown mode fails with nothing to clean up.
@@ -4903,8 +5572,15 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             AccessProfile.ELEVATED.value,
         }:
             raise SessionError("native agent requires a workspace_write session")
-        if record.task != str(redact(args.task)):
-            raise SessionError("resume task differs from the existing session task")
+        requested_task = str(redact(args.task))
+        if getattr(args, "continue_task", False):
+            record = store.continue_task(args.session_id, args.task)
+        elif record.task != requested_task:
+            raise SessionError(
+                "resume task differs from the existing session task; "
+                "use --continue-task to append a new turn explicitly"
+            )
+    request_images, image_metadata = _agent_images(args, repository)
     provider, model, context_window, max_output_tokens = _agent_provider(
         args, record, limits
     )
@@ -4932,7 +5608,11 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     access_profile = (
         AccessProfile(record.access_profile)
         if record is not None
-        else _agent_access_profile(args)
+        else (
+            AccessProfile.WORKSPACE_WRITE
+            if maintenance_mode
+            else _agent_access_profile(args)
+        )
     )
     if record is None:
         record = store.create(
@@ -4942,47 +5622,104 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             session_id=args.session_id,
         )
 
-    mcp_binding, _ = _selected_mcp_runtime(record, repository)
+    # Human TUI runs opt into one local Git-aware checkpoint before every build
+    # turn. The checkpoint stores Git objects + bounded untracked backups under
+    # KaroX runtime storage and never edits the worktree. If a repository cannot
+    # be checkpointed (non-Git, oversized untracked data, etc.), the run remains
+    # usable but the failure is recorded honestly instead of advertising undo.
+    # Only the checkpoint created for this exact turn is allowed to widen
+    # destructive workspace autonomy; an older session checkpoint is not proof
+    # that today's work can be rolled back.
+    rollback_checkpoint_id: Optional[str] = None
+    mode_name = getattr(mode_rules, "mode", None) if mode_rules is not None else "build"
+    if (
+        getattr(args, "auto_checkpoint", False)
+        and mode_name == "build"
+        and not maintenance_mode
+    ):
+        try:
+            from .ellipsis_checkpoint import WorkspaceCheckpointStore
+
+            checkpoint = WorkspaceCheckpointStore(
+                runtime_dir() / "vnext" / "checkpoints"
+            ).create(repository, session_id=record.session_id, sessions=store)
+            rollback_checkpoint_id = checkpoint.checkpoint_id
+            record = store.load(record.session_id)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                with store.mutate(
+                    record.session_id,
+                    f"auto-checkpoint-failure-{os.getpid()}",
+                    ttl_seconds=5.0,
+                ) as current:
+                    current.failures.append(
+                        {
+                            "kind": "checkpoint_unavailable",
+                            "message": str(redact(exc))[:1000],
+                            "timestamp": time.time(),
+                        }
+                    )
+
+    mcp_binding = None
+    if not maintenance_mode:
+        mcp_binding, _ = _selected_mcp_runtime(record, repository)
 
     native_origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
     origin = native_origin
     policy = CapabilityPolicy(access_profile)
-    grants = {
-        Capability.REPO_READ,
-        Capability.REPO_WRITE,
-        Capability.PROCESS_RUN,
-        Capability.CHECKS_RUN,
-        Capability.GIT_READ,
-        Capability.MCP_CALL,
-    }
-    if access_profile == AccessProfile.ELEVATED:
-        # Bypass grants the elevated developer capabilities the policy layer
-        # already defines -- and nothing beyond it.  Push, publish, and auth
-        # commands stay outside every profile by design.
-        grants.update(
-            {
-                Capability.DEV_COMMAND,
-                Capability.GIT_COMMIT,
-                Capability.NETWORK,
-            }
-        )
-    grants = _mode_grants(grants, mode_rules)
+    if maintenance_mode:
+        # Whole-drive maintenance is deliberately metadata-only. The model can
+        # scan and freeze a cleanup plan but receives none of the repository,
+        # process, Git, browser or network capabilities that could bypass it.
+        grants = {Capability.DISK_READ}
+    else:
+        grants = {
+            Capability.REPO_READ,
+            Capability.REPO_WRITE,
+            Capability.DISK_READ,
+            Capability.PROCESS_RUN,
+            Capability.CHECKS_RUN,
+            Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
+            Capability.MCP_CALL,
+        }
+        if access_profile == AccessProfile.ELEVATED:
+            # Bypass grants the elevated developer capabilities the policy layer
+            # already defines -- and nothing beyond it. Push, publish, and auth
+            # commands stay outside every profile by design.
+            grants.update(
+                {
+                    Capability.DEV_COMMAND,
+                    Capability.GIT_COMMIT,
+                    Capability.NETWORK,
+                }
+            )
+        grants = _mode_grants(grants, mode_rules)
     policy.set_grants(native_origin, grants)
-    verification_commands = [
-        _verification_command(value) for value in args.verification_command
-    ]
+    verification_commands = (
+        []
+        if maintenance_mode
+        else [_verification_command(value) for value in args.verification_command]
+    )
     # Project instructions and environment facts join the request-only part of
     # the prompt, exactly like Skill content: the durable history keeps the base
     # prompt, so an edited AGENTS.md cannot retroactively change what a past run
     # was told and a handoff document carries no third-party text. Sections are
     # collected here and composed once through the Constitution composer, which
     # owns the ordering and the stable-prefix boundary.
-    mode_delta = mode_rules.prompt_delta if mode_rules is not None else None
+    mode_delta = (
+        None
+        if maintenance_mode
+        else (mode_rules.prompt_delta if mode_rules is not None else None)
+    )
     project_suffix: str | None = None
     skill_suffix: str | None = None
     research_context: str | None = None
-    project_context: dict[str, Any] = {"enabled": False}
-    if not args.no_project_context:
+    project_context: dict[str, Any] = {
+        "enabled": False,
+        "images": [dict(item) for item in image_metadata],
+    }
+    if not maintenance_mode and not args.no_project_context:
         project = discover_project_context(
             repository,
             branch=record.branch,
@@ -4993,6 +5730,17 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         )
         project_suffix = project.prompt_suffix
         project_context = {"enabled": True, **project.to_dict()}
+    if maintenance_mode:
+        project_context["maintenance_mode"] = True
+    else:
+        from .file_mentions import collect_file_mentions
+
+        mentions = collect_file_mentions(repository, args.task)
+        if mentions.prompt:
+            project_suffix = "\n\n".join(
+                item for item in (project_suffix, mentions.prompt) if item
+            )
+        project_context["file_mentions"] = mentions.to_dict()
     if content is not None and selection is not None:
         origin = configure_skill_policy(
             policy,
@@ -5009,16 +5757,27 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             store.validate_repository(current, repository)
             _replace_stored_skill(current, content.metadata.name, selection)
     # The native agent gets the same extended tool table the hosted bridge hands
-    # to a web client: exact-string editing, windowed reads, commit history and a
-    # file listing that skips dependency directories. Running KaroX's own agent
-    # on the narrower base runtime made it rewrite whole files and walk .venv.
-    core = ExtendedCoreRuntime(
+    # to a web client, plus the v5 capability-first decision layer. Risk is still
+    # measured by the mature RiskEngine; ActionDecisionEngine decides whether a
+    # specific consequence is normal, locally guarded, confirmation-worthy, or
+    # a hard boundary. The drive-maintenance reviewer stays only on a whole-drive
+    # workspace, where deletion must keep the frozen plan/fingerprint workflow.
+    action_risk = RiskEngine()
+    action_decisions = ActionDecisionEngine(action_risk)
+    core = CapabilityCoreRuntime(
         repository,
         policy,
         store,
         runtime_dir() / "vnext" / "audit.jsonl",
         mcp_binding=mcp_binding,
         verification_commands=verification_commands,
+        risk=action_risk,
+        action_decisions=action_decisions,
+        rollback_checkpoint_id=rollback_checkpoint_id,
+        mutation_reviewer=_native_mutation_reviewer if maintenance_mode else None,
+        maintenance_protected_paths=tuple(
+            getattr(args, "protected_path", ()) or ()
+        ),
     )
     if getattr(args, "recursive_context", "off") == "research" and project_context.get(
         "enabled"
@@ -5040,46 +5799,76 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             "branches": [],
         }
         if focuses:
-            branch_count = min(2, len(focuses))
-            research_total_seconds = min(
-                60.0, max(1.0, float(args.max_seconds) * 0.10)
-            )
-            research_branch_seconds = research_total_seconds / branch_count
-            research_limits = ResearchLimits(
-                max_steps=3,
-                max_seconds=research_branch_seconds,
-                max_output_tokens=min(2_000, max_output_tokens or 2_000),
-            )
-            try:
-                research_block, research_metadata = build_research_context(
-                    ResearchSubagent(
-                        provider=provider,
-                        model=model,
-                        core=core,
-                        limits=research_limits,
-                        reasoning_effort=getattr(args, "effort", None),
-                    ),
-                    session_id=record.session_id,
-                    goal=args.task,
-                    focuses=focuses,
-                    parent_origin=origin,
-                    max_branches=2,
-                )
-            except Exception as exc:
-                research_block = ""
-                research_metadata = {
-                    **research_metadata,
-                    "error": type(exc).__name__,
+            effort_budget = _resolved_effort_budget(args)
+            # Explicit Effort is authority for fan-out. A legacy run without an
+            # Effort flag keeps the historical cap=2 for compatibility; once the
+            # ladder is involved, low/medium genuinely spend zero subagents.
+            branch_cap = 2 if effort_budget is None else effort_budget.allowed_subagents
+            branch_count = min(branch_cap, len(focuses))
+            if branch_count <= 0:
+                research_metadata["reason"] = "effort_disallows_subagents"
+                research_metadata["budget"] = {
+                    "branches": 0,
+                    "allowed_subagents": branch_cap,
+                    "parent_effort": None if effort_budget is None else effort_budget.level,
                 }
-            research_metadata["budget"] = {
-                "branches": branch_count,
-                "total_seconds": research_total_seconds,
-                "per_branch_seconds": research_branch_seconds,
-                "max_steps_per_branch": research_limits.max_steps,
-                "max_output_tokens_per_branch": research_limits.max_output_tokens,
-            }
-            if research_block:
-                research_context = research_block
+            else:
+                parent_seconds = float(args.max_seconds)
+                if effort_budget is None:
+                    research_total_seconds = min(60.0, max(1.0, parent_seconds * 0.10))
+                    steps_per_branch = 3
+                    output_per_branch = min(2_000, max_output_tokens or 2_000)
+                else:
+                    # Subagents are a bounded slice of the parent budget, never an
+                    # additive second budget. Higher Effort may fan out more, but
+                    # no branch gets more than 8 steps or 4k output tokens.
+                    research_total_seconds = min(
+                        180.0,
+                        max(15.0, parent_seconds * 0.12),
+                    )
+                    steps_per_branch = min(
+                        8,
+                        max(3, effort_budget.agent_limits.max_steps // max(8, branch_count * 4)),
+                    )
+                    output_per_branch = min(4_000, max_output_tokens or 4_000)
+                research_branch_seconds = research_total_seconds / branch_count
+                research_limits = ResearchLimits(
+                    max_steps=steps_per_branch,
+                    max_seconds=research_branch_seconds,
+                    max_output_tokens=output_per_branch,
+                )
+                try:
+                    research_block, research_metadata = build_research_context(
+                        ResearchSubagent(
+                            provider=provider,
+                            model=model,
+                            core=core,
+                            limits=research_limits,
+                            reasoning_effort=effort_reasoning,
+                        ),
+                        session_id=record.session_id,
+                        goal=args.task,
+                        focuses=focuses,
+                        parent_origin=origin,
+                        max_branches=branch_count,
+                    )
+                except Exception as exc:
+                    research_block = ""
+                    research_metadata = {
+                        **research_metadata,
+                        "error": type(exc).__name__,
+                    }
+                research_metadata["budget"] = {
+                    "branches": branch_count,
+                    "allowed_subagents": branch_cap,
+                    "parent_effort": None if effort_budget is None else effort_budget.level,
+                    "total_seconds": research_total_seconds,
+                    "per_branch_seconds": research_branch_seconds,
+                    "max_steps_per_branch": research_limits.max_steps,
+                    "max_output_tokens_per_branch": research_limits.max_output_tokens,
+                }
+                if research_block:
+                    research_context = research_block
         project_context["research"] = research_metadata
     # Phase 3 shadow mode: publish typed events to the transcript store
     # alongside the existing stream observer. The typed stream runs in
@@ -5132,7 +5921,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     # whole database. Scope ids mirror the TUI /memory convention exactly so
     # the CLI reads the same files the rest of the product writes.
     memory_block: str | None = None
-    if not getattr(args, "no_memory_context", False):
+    if not maintenance_mode and not getattr(args, "no_memory_context", False):
         try:
             from .memory import KaroXMemory, MemoryScope
             from .project_registry import _generated_project_id
@@ -5161,7 +5950,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     # evidence.
     composed = compose_system_prompt(
         provider=_constitution_provider(args),
-        runtime_contract=SYSTEM_PROMPT,
+        runtime_contract=(
+            MAINTENANCE_SYSTEM_PROMPT if maintenance_mode else SYSTEM_PROMPT
+        ),
         mode_delta=mode_delta,
         effort_line=effort_line,
         project_suffix=project_suffix,
@@ -5187,14 +5978,20 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         context=ContextBudget(max_input_tokens=context_window, **context_options),
         max_output_tokens=max_output_tokens,
         project_context=project_context,
-        require_change=args.expect == "change",
+        require_change=(False if maintenance_mode else args.expect == "change"),
         reasoning_effort=effort_reasoning,
         economy_mode=bool(getattr(args, "economy", False)),
-        mode=mode_rules.mode if mode_rules is not None else None,
+        mode=(
+            None
+            if maintenance_mode
+            else (mode_rules.mode if mode_rules is not None else None)
+        ),
+        maintenance_mode=maintenance_mode,
+        request_images=request_images,
         pricing_registry=_load_pricing_registry(),
         on_event=transcript_observer,
     ).run(record.session_id)
-    if mode_rules is not None:
+    if mode_rules is not None and not maintenance_mode:
         _attach_mode_artifact(
             report,
             mode_rules,
@@ -5709,6 +6506,80 @@ def _handle_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_human_preference(args: argparse.Namespace) -> int:
+    """Read or update the same default Effort/Mode used by the interactive TUI."""
+
+    # Kept as a local import so ordinary script-oriented CLI commands do not pay
+    # the Textual import cost. These helpers are the existing source of truth for
+    # ui.json, so shell and TUI commands cannot silently drift apart.
+    from .tui import (
+        _load_agent_mode,
+        _load_effort_level,
+        _save_agent_mode,
+        _save_effort_level,
+    )
+
+    if args.command == "effort":
+        from .effort import effort_summary, effort_user_summary
+
+        level = _load_effort_level()
+        requested = getattr(args, "level", None)
+        if requested is not None:
+            level = normalize_effort_level(requested)
+            _save_effort_level(level)
+        if bool(getattr(args, "details", False)):
+            summary = (
+                "AUTO has no single fixed budget; choose a concrete level to inspect exact limits."
+                if level == AUTO_EFFORT
+                else effort_summary(level, "en")
+            )
+        else:
+            summary = effort_user_summary(level, "en")
+        _emit({"effort": level, "summary": summary}, json_output=args.json)
+        return 0
+
+    from .agent_modes import mode_summary, normalize_mode
+
+    mode = _load_agent_mode()
+    requested_mode = getattr(args, "mode", None)
+    if requested_mode is not None:
+        mode = normalize_mode(requested_mode)
+        _save_agent_mode(mode)
+    _emit({"mode": mode, "summary": mode_summary(mode, "en")}, json_output=args.json)
+    return 0
+
+
+def _normalize_root_arguments(arguments: Sequence[str]) -> list[str]:
+    """Compatibility wrapper around the single task-first shortcut normalizer."""
+
+    from .cli_shortcuts import normalize_cli_arguments
+
+    return normalize_cli_arguments(arguments)
+
+
+def _human_root_help() -> str:
+    """Small default help; the complete parser catalog is ``karox help all``."""
+
+    return """KaroX — guarded local AI coding workspace
+
+Start with:
+  karox                         open the interactive client
+  karox models                  list available models
+  karox effort [LEVEL]          show or set work depth (auto → ultra)
+  karox mode [MODE]             choose Build, Plan, or Ideate
+  karox sessions                show previous tasks
+  karox status                  show project/model/task/bridge state
+  karox jobs                    show recent durable jobs
+  karox cancel JOB_ID           safely cancel one owned durable job
+  karox agents                  show available AI models and agents
+  karox orchestrate TASK        run multi-agent work
+  karox doctor                  run diagnostics
+
+Inside the interactive client, use /connect to add models or external AI clients.
+Advanced/admin commands are still available: karox help all
+"""
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
@@ -5716,12 +6587,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return run_tui(repository=str(Path.cwd().resolve()))
 
-    # Documented plural spelling; preserve the original singular command.
-    if arguments[0] == "models":
-        arguments[0] = "model"
+    if arguments in (["-h"], ["--help"], ["help"]):
+        print(_human_root_help(), end="")
+        return 0
+    if arguments == ["help", "all"]:
+        print(_parser().format_help(), end="")
+        return 0
 
+    # One normalizer owns both root aliases and task-first verbs. Keeping this a
+    # single pass prevents the human CLI and canonical argparse tree from
+    # drifting into subtly different shortcut semantics.
+    arguments = _normalize_root_arguments(arguments)
     args = _parser().parse_args(arguments)
     try:
+        if args.command in {"effort", "mode"}:
+            return _handle_human_preference(args)
+
         if args.command == "paths":
             payload = {
                 "config_dir": str(config_dir()),
@@ -5771,11 +6652,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "connect":
             return _handle_connect(args)
 
+        if args.command == "status":
+            return _handle_status(args)
+
+        if args.command == "jobs":
+            return _handle_jobs(args)
+
+        if args.command == "cancel":
+            return _handle_cancel(args)
+
         if args.command == "doctor":
             return _handle_doctor(args)
 
         if args.command == "pack":
             return _handle_pack(args)
+
+        if args.command in {"intelligence", "orchestrate", "mission-control", "economy"}:
+            handled = handle_orchestration_command(args)
+            if handled is None:
+                raise ValueError(f"unsupported orchestration command: {args.command}")
+            return handled
 
         if args.command == "tui":
             from .tui import run_tui
@@ -5804,20 +6700,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 AccessProfile(args.access_profile),
                 branch=args.branch,
                 session_id=args.id,
+                name=args.name,
             )
             payload = _record_summary(record)
             _json(payload) if args.json else _print_mapping(payload)
             return 0
         if args.session_command == "list":
-            records = [_record_summary(item) for item in store.list()]
+            records = [
+                _record_summary(item)
+                for item in store.list(include_archived=bool(args.all))
+            ]
             if args.json:
                 _json(records)
             else:
                 for record in records:
+                    label = record.get("name") or record["session_id"]
+                    archived = "\tarchived" if record.get("archived") else ""
                     print(
-                        f"{record['session_id']}\t{record['status']}\t"
-                        f"{record['access_profile']}\t{record['repository']}"
+                        f"{record['session_id']}\t{label}\t{record['status']}\t"
+                        f"{record['access_profile']}\t{record['repository']}{archived}"
                     )
+            return 0
+        if args.session_command == "fork":
+            record = store.fork(
+                args.session_id,
+                session_id_new=args.new_session_id,
+                task=args.task,
+                name=args.name,
+            )
+            payload = _record_summary(record)
+            _json(payload) if args.json else _print_mapping(payload)
+            return 0
+        if args.session_command == "rename":
+            record = store.rename(args.session_id, args.name)
+            payload = _record_summary(record)
+            _json(payload) if args.json else _print_mapping(payload)
+            return 0
+        if args.session_command == "archive":
+            record = store.archive(args.session_id)
+            payload = _record_summary(record)
+            _json(payload) if args.json else _print_mapping(payload)
+            return 0
+        if args.session_command == "unarchive":
+            record = store.unarchive(args.session_id)
+            payload = _record_summary(record)
+            _json(payload) if args.json else _print_mapping(payload)
+            return 0
+        if args.session_command == "delete":
+            if args.confirm != args.session_id:
+                raise ValueError("--confirm must exactly match the session ID")
+            store.delete_archived(args.session_id)
+            payload = {"session_id": args.session_id, "status": "deleted"}
+            _json(payload) if args.json else _print_mapping(payload)
             return 0
         if args.session_command == "revoke":
             record = store.revoke(args.session_id)

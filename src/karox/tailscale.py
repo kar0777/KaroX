@@ -111,6 +111,12 @@ def parse_tailscale_status(
     dns_name = _text(self_node.get("DNSName") or payload.get("DNSName"))
     if not dns_name and host_name and suffix:
         dns_name = f"{host_name}.{suffix}".strip(".")
+    raw_ips = self_node.get("TailscaleIPs") or payload.get("TailscaleIPs") or []
+    tailscale_ips = [
+        str(item).strip()
+        for item in raw_ips
+        if isinstance(item, str) and item.strip()
+    ] if isinstance(raw_ips, list) else []
 
     state = backend_state.lower()
     if state == "running" and dns_name:
@@ -143,6 +149,7 @@ def parse_tailscale_status(
         "auth_url": auth_url or None,
         "host_name": host_name or None,
         "magic_dns_suffix": suffix or None,
+        "tailscale_ips": tailscale_ips,
     }
 
 

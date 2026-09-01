@@ -24,6 +24,7 @@ class FakeDelegate:
     def __init__(self, repository: Path) -> None:
         self.repository = repository
         self.calls: list[tuple[str, dict[str, Any], Optional[str]]] = []
+        self.synchronous_calls: list[tuple[str, dict[str, Any], Optional[str]]] = []
         self.fail_once: set[str] = set()
         self.fail_always: set[str] = set()
         self.failed: set[str] = set()
@@ -48,6 +49,22 @@ class FakeDelegate:
 
     def session_info(self) -> dict[str, Any]:
         return {"access_profile": self.access_profile}
+
+    def execute_synchronous(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = 30.0,
+    ) -> dict[str, Any] | CallToolResult:
+        self.synchronous_calls.append((tool_name, dict(arguments), idempotency_key))
+        return self.execute(
+            tool_name,
+            arguments,
+            idempotency_key=idempotency_key,
+            deadline_seconds=deadline_seconds,
+        )
 
     def execute(
         self,
@@ -301,6 +318,10 @@ class PlanExecutorTests(unittest.TestCase):
         )
         self.assertTrue(
             any(call[0] == "karox.command.run" for call in self.delegate.calls)
+        )
+        self.assertEqual(
+            [call[0] for call in self.delegate.synchronous_calls],
+            ["karox.command.run"],
         )
         self.assertFalse(
             any(call[0] == "karox.checks.run" for call in self.delegate.calls)

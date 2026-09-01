@@ -153,12 +153,25 @@ class TranscriptShadowTests(unittest.TestCase):
             store.appended[2]["payload"]["detail"], "tool is not available"
         )
 
-    def test_streaming_deltas_are_still_skipped(self) -> None:
+    def test_private_streaming_deltas_are_skipped_but_public_summary_is_kept(self) -> None:
         store = _FakeStore()
         observe = make_transcript_observer("s1", store=store)
         observe(AgentEvent(AgentEventKind.TEXT_DELTA, 1, text_delta="x"))
-        observe(AgentEvent(AgentEventKind.REASONING_DELTA, 1, reasoning_delta="y"))
-        self.assertEqual(store.appended, [])
+        observe(AgentEvent(AgentEventKind.REASONING_DELTA, 1, reasoning_delta="private"))
+        observe(
+            AgentEvent(
+                AgentEventKind.REASONING_SUMMARY_DELTA,
+                1,
+                summary="Checking the relevant code.",
+            )
+        )
+        self.assertEqual(len(store.appended), 1)
+        self.assertEqual(store.appended[0]["kind"], "ReasoningSummaryDelta")
+        self.assertEqual(
+            store.appended[0]["payload"]["summary"],
+            "Checking the relevant code.",
+        )
+        self.assertNotIn("private", str(store.appended))
 
 
 class RendererTests(unittest.TestCase):

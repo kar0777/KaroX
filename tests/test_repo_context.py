@@ -73,6 +73,52 @@ class RepositoryContextTests(unittest.TestCase):
         self.assertIn("start_saved_bridge", names)
         self.assertEqual(record.sha256, result["content_hash"])
 
+    def test_non_git_directory_inspects_without_invoking_git(self) -> None:
+        plain = Path(self.temp.name) / "plain-directory"
+        (plain / "src").mkdir(parents=True)
+        source = plain / "src" / "plain_handler.py"
+        source.write_text(
+            "def plain_handler():\n    return 'directory-ok'\n",
+            encoding="utf-8",
+        )
+        artifacts = ArtifactStore("inspect-non-git-session")
+        engine = RepositoryContextEngine(
+            plain,
+            artifacts,
+            policy_profile="workspace_write",
+        )
+
+        self.assertFalse(engine.is_git_repository)
+        with mock.patch.object(
+            engine,
+            "_git",
+            side_effect=AssertionError("Git must not run for a non-Git root"),
+        ):
+            first = engine.inspect("plain_handler directory", "focused")
+            cached = engine.inspect("plain_handler directory", "focused")
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(cached["cache_hit"])
+        self.assertIn(
+            "src/plain_handler.py",
+            [item["path"] for item in first["important_findings"]],
+        )
+        identity = engine._revision_identity()
+        self.assertEqual(identity["repository_kind"], "directory")
+        self.assertIsNone(identity["revision"])
+
+        source.write_text(
+            "def plain_handler():\n    return 'directory-updated'\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            engine,
+            "_git",
+            side_effect=AssertionError("Git must not run for a non-Git root"),
+        ):
+            refreshed = engine.inspect("plain_handler directory", "focused")
+        self.assertFalse(refreshed["cache_hit"])
+
     def test_dependency_hints_add_one_hop_local_imports_and_callers(self) -> None:
         (self.repo / "src" / "helper.py").write_text(
             "def format_state(value):\n    return value\n", encoding="utf-8"

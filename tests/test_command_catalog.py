@@ -44,11 +44,19 @@ class CommandCatalogTests(unittest.TestCase):
         for alias in tui.DEPRECATED_COMMAND_ALIASES:
             self.assertNotIn(alias, tui.VISIBLE_COMMANDS)
 
-    def test_workspace_is_accepted_alias_but_not_duplicate_menu_entry(self) -> None:
+    def test_workspace_and_clear_remain_routable_without_duplicate_menu_entries(self) -> None:
         self.assertIn("/workspace", _heads(tui.SLASH_COMMANDS))
         self.assertNotIn("/workspace", tui.VISIBLE_COMMANDS)
         self.assertIn("/project", tui.VISIBLE_COMMANDS)
-        self.assertIn("/clear", tui.VISIBLE_COMMANDS)
+        self.assertIn("/clear", _heads(tui.SLASH_COMMANDS))
+        self.assertNotIn("/clear", tui.VISIBLE_COMMANDS)
+
+    def test_bare_menu_is_task_first_while_power_features_stay_discoverable(self) -> None:
+        self.assertLessEqual(len(tui.VISIBLE_COMMANDS), 10)
+        self.assertIn("/help", tui.VISIBLE_COMMANDS)
+        for command in ("/status", "/economy", "/orchestrate", "/agents", "/mission", "/permissions"):
+            self.assertNotIn(command, tui.VISIBLE_COMMANDS)
+            self.assertIn(command, tui.DISCOVERABLE_COMMANDS)
 
 
 if __name__ == "__main__":

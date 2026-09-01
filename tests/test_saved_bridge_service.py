@@ -26,7 +26,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
@@ -49,6 +49,36 @@ from karox.web_bridge_launcher import (
     start_saved_bridge,
     stop_saved_bridge,
 )
+
+
+# This suite exercises saved-bridge lifecycle code that persists desired state and
+# restart journals. Keep every such write inside a disposable runtime tree so a
+# unit test can never alter the developer's live saved bridge or supervisor.
+_MODULE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
+_MODULE_RUNTIME_ENV: object | None = None
+
+
+def setUpModule() -> None:  # noqa: N802 - unittest module hook
+    global _MODULE_RUNTIME, _MODULE_RUNTIME_ENV
+    _MODULE_RUNTIME = tempfile.TemporaryDirectory()
+    _MODULE_RUNTIME_ENV = patch.dict(
+        os.environ,
+        {
+            "KAROX_RUNTIME_DIR": _MODULE_RUNTIME.name,
+            "KAROX_VNEXT_RUNTIME_DIR": _MODULE_RUNTIME.name,
+        },
+    )
+    _MODULE_RUNTIME_ENV.start()  # type: ignore[attr-defined]
+
+
+def tearDownModule() -> None:  # noqa: N802 - unittest module hook
+    global _MODULE_RUNTIME, _MODULE_RUNTIME_ENV
+    if _MODULE_RUNTIME_ENV is not None:
+        _MODULE_RUNTIME_ENV.stop()  # type: ignore[attr-defined]
+    if _MODULE_RUNTIME is not None:
+        _MODULE_RUNTIME.cleanup()
+    _MODULE_RUNTIME_ENV = None
+    _MODULE_RUNTIME = None
 
 
 # ---------------------------------------------------------------------------
@@ -807,20 +837,46 @@ class OverallStatusTests(unittest.TestCase):
 
     def test_fully_verified(self) -> None:
         self.assertEqual(
-            _overall_status(auth_initialized=True, tools_list_ok=True, tool_count=37),
+            _overall_status(
+                auth_initialized=True,
+                tools_list_ok=True,
+                tool_count=37,
+                first_tool_call_ok=True,
+            ),
             "ready_for_chatgpt_setup",
         )
 
     def test_initialized_only(self) -> None:
         self.assertEqual(
-            _overall_status(auth_initialized=True, tools_list_ok=False, tool_count=0),
+            _overall_status(
+                auth_initialized=True,
+                tools_list_ok=False,
+                tool_count=0,
+                first_tool_call_ok=False,
+            ),
             "waiting_for_chatgpt",
         )
 
     def test_not_initialized(self) -> None:
         self.assertEqual(
-            _overall_status(auth_initialized=False, tools_list_ok=False, tool_count=0),
+            _overall_status(
+                auth_initialized=False,
+                tools_list_ok=False,
+                tool_count=0,
+                first_tool_call_ok=False,
+            ),
             "bridge_started_unverified",
+        )
+
+    def test_discovery_without_first_invocation_is_not_ready(self) -> None:
+        self.assertEqual(
+            _overall_status(
+                auth_initialized=True,
+                tools_list_ok=True,
+                tool_count=37,
+                first_tool_call_ok=False,
+            ),
+            "waiting_for_chatgpt",
         )
 
 
@@ -870,12 +926,22 @@ class RestartSavedBridgeTests(unittest.TestCase):
 
     @patch("karox.web_bridge_launcher.start_saved_bridge")
     @patch("karox.web_bridge_launcher.stop_saved_bridge")
-    @patch("karox.web_bridge_launcher._port_is_available", return_value=True)
+    @patch(
+        "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+        return_value=7777,
+    )
+    @patch(
+        "karox.saved_bridge_supervisor.saved_bridge_supervisor_status",
+        return_value={"desired_running": False, "supervisor_alive": False},
+    )
+    @patch("karox.saved_bridge_supervisor.set_saved_bridge_desired_running")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
-    def test_restart_stops_waits_then_starts_without_rotating_identity(
+    def test_restart_arms_recovery_before_stop_then_starts_idempotently(
         self,
         mock_store_cls: MagicMock,
-        mock_port_free: MagicMock,
+        mock_desired: MagicMock,
+        mock_supervisor_status: MagicMock,
+        mock_ensure_supervisor: MagicMock,
         mock_stop: MagicMock,
         mock_start: MagicMock,
     ) -> None:
@@ -896,15 +962,51 @@ class RestartSavedBridgeTests(unittest.TestCase):
 
         result = restart_saved_bridge("chatgpt-pc")
 
+        mock_supervisor_status.assert_called_once_with("chatgpt-pc")
+        mock_desired.assert_called_once_with("chatgpt-pc", True)
+        mock_ensure_supervisor.assert_called_once_with(
+            "chatgpt-pc",
+            desired_running=True,
+        )
         mock_stop.assert_called_once_with(
             "chatgpt-pc",
             allow_legacy_migration=False,
+            restart_intent=True,
         )
-        mock_port_free.assert_called_with(8765)
         mock_start.assert_called_once_with("chatgpt-pc", timeout_seconds=120.0)
         self.assertEqual(result["action"], "restarted")
         self.assertEqual(result["public_url"], "https://example.ts.net")
         self.assertEqual(result["tool_count"], 37)
+        _assert_no_secrets(self, result)
+
+    def test_restart_refuses_to_drop_endpoint_when_supervisor_cannot_be_armed(self) -> None:
+        with (
+            patch("karox.web_bridge_profiles.WebBridgeProfileStore") as store_cls,
+            patch(
+                "karox.saved_bridge_supervisor.saved_bridge_supervisor_status",
+                return_value={"desired_running": False, "supervisor_alive": False},
+            ),
+            patch(
+                "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                return_value=None,
+            ),
+            patch(
+                "karox.saved_bridge_supervisor.set_saved_bridge_desired_running"
+            ) as desired,
+            patch("karox.web_bridge_launcher.stop_saved_bridge") as stop,
+            patch("karox.web_bridge_launcher.start_saved_bridge") as start,
+        ):
+            store_cls.return_value.get.return_value = _fake_profile()
+            result = restart_saved_bridge("chatgpt-pc")
+
+        self.assertEqual(result["action"], "error")
+        self.assertEqual(result["phase"], "supervisor")
+        stop.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(
+            desired.call_args_list,
+            [call("chatgpt-pc", True), call("chatgpt-pc", False)],
+        )
         _assert_no_secrets(self, result)
 
     @patch("karox.web_bridge_launcher.start_saved_bridge")
@@ -923,11 +1025,27 @@ class RestartSavedBridgeTests(unittest.TestCase):
             "error": "owner could not be stopped safely",
         }
 
-        result = restart_saved_bridge("chatgpt-pc")
+        with (
+            patch(
+                "karox.saved_bridge_supervisor.saved_bridge_supervisor_status",
+                return_value={
+                    "desired_running": True,
+                    "supervisor_alive": True,
+                    "supervisor_heartbeat_fresh": True,
+                },
+            ),
+            patch(
+                "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                return_value=7777,
+            ),
+            patch("karox.saved_bridge_supervisor.set_saved_bridge_desired_running"),
+        ):
+            result = restart_saved_bridge("chatgpt-pc")
 
         mock_start.assert_not_called()
         self.assertEqual(result["action"], "error")
         self.assertEqual(result["phase"], "stop")
+        self.assertTrue(result["recovery_armed"])
         _assert_no_secrets(self, result)
 
 
@@ -947,7 +1065,7 @@ class StopSavedBridgeTests(unittest.TestCase):
 
         request_path = MagicMock()
         with (
-            patch("karox.web_bridge_launcher._watchdog_supports_stop_request", return_value=True),
+            patch("karox.web_bridge_launcher._watchdog_stop_protocol", return_value="request-v2"),
             patch("karox.web_bridge_launcher._write_stop_request", return_value=request_path) as request_stop,
             patch("karox.web_bridge_launcher._process_is_alive", return_value=False),
             patch("karox.web_bridge_launcher._port_is_available", return_value=True),
@@ -961,12 +1079,118 @@ class StopSavedBridgeTests(unittest.TestCase):
 
         # Stop is cooperative: never kill the whole descendant tree. That is what
         # lets an MCP-triggered restart worker survive long enough to start again.
-        request_stop.assert_called_once_with("web-saved-abc", 99999)
+        request_stop.assert_called_once_with(
+            "web-saved-abc",
+            99999,
+            intent="stop",
+        )
         mock_run.assert_not_called()
         request_path.unlink.assert_called_once_with()
         self.assertEqual(supervisor_status.call_count, 2)
         self.assertEqual(result["action"], "stopped")
         self.assertEqual(result["pid"], 99999)
+        _assert_no_secrets(self, result)
+
+    @patch("karox.port_ownership.check_port_ownership")
+    @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
+    def test_restart_intent_keeps_supervisor_armed_and_accepts_fast_rebind(
+        self,
+        mock_store_cls: MagicMock,
+        mock_ownership: MagicMock,
+    ) -> None:
+        mock_store_cls.return_value.get.return_value = _fake_profile()
+        mock_ownership.return_value = _verdict(
+            OWNERSHIP_REUSE_SAME,
+            pid=99999,
+            pid_proven=True,
+            public_url="https://example.ts.net",
+        )
+
+        request_path = MagicMock()
+        with (
+            patch("karox.web_bridge_launcher._watchdog_stop_protocol", return_value="request-v2"),
+            patch("karox.web_bridge_launcher._write_stop_request", return_value=request_path) as request_stop,
+            patch("karox.web_bridge_launcher._process_is_alive", return_value=False),
+            patch("karox.web_bridge_launcher._port_is_available", return_value=False) as port_free,
+            patch(
+                "karox.saved_bridge_supervisor.saved_bridge_supervisor_status",
+                return_value={
+                    "desired_running": True,
+                    "supervisor_alive": True,
+                    "supervisor_heartbeat_fresh": True,
+                },
+            ) as supervisor_status,
+            patch(
+                "karox.saved_bridge_supervisor.set_saved_bridge_desired_running"
+            ) as desired,
+            patch("karox.web_bridge_launcher.subprocess.run") as mock_run,
+        ):
+            result = stop_saved_bridge("chatgpt-pc", restart_intent=True)
+
+        desired.assert_not_called()
+        supervisor_status.assert_called_once_with("chatgpt-pc")
+        request_stop.assert_called_once_with(
+            "web-saved-abc",
+            99999,
+            intent="restart",
+        )
+        # A freshly recovered owner may already hold the port. Restart succeeds
+        # once the old owner PID is gone instead of waiting for a free-port gap.
+        port_free.assert_not_called()
+        mock_run.assert_not_called()
+        self.assertEqual(result["action"], "stopped")
+        self.assertIn("recovery remains armed", result["reason"])
+        _assert_no_secrets(self, result)
+
+    @patch("karox.port_ownership.check_port_ownership")
+    @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
+    def test_restart_migrates_request_v1_owner_without_disarming_recovery(
+        self,
+        mock_store_cls: MagicMock,
+        mock_ownership: MagicMock,
+    ) -> None:
+        mock_store_cls.return_value.get.return_value = _fake_profile()
+        mock_ownership.return_value = _verdict(
+            OWNERSHIP_REUSE_SAME,
+            pid=99999,
+            pid_proven=True,
+            public_url="https://example.ts.net",
+        )
+
+        request_path = MagicMock()
+        with (
+            patch("karox.web_bridge_launcher._watchdog_stop_protocol", return_value="request-v1"),
+            patch(
+                "karox.saved_bridge_supervisor.request_saved_bridge_restart_migration"
+            ) as migrate,
+            patch(
+                "karox.web_bridge_launcher._write_stop_request",
+                return_value=request_path,
+            ) as request_stop,
+            patch("karox.web_bridge_launcher._process_is_alive", return_value=False),
+            patch(
+                "karox.saved_bridge_supervisor.saved_bridge_supervisor_status",
+                return_value={
+                    "desired_running": True,
+                    "supervisor_alive": True,
+                    "supervisor_heartbeat_fresh": True,
+                },
+            ),
+            patch(
+                "karox.saved_bridge_supervisor.set_saved_bridge_desired_running"
+            ) as desired,
+        ):
+            result = stop_saved_bridge("chatgpt-pc", restart_intent=True)
+
+        desired.assert_not_called()
+        migrate.assert_called_once_with("chatgpt-pc", 99999)
+        request_stop.assert_called_once_with(
+            "web-saved-abc",
+            99999,
+            intent="restart",
+        )
+        self.assertEqual(result["action"], "stopped")
+        self.assertIn("recovery remains armed", result["reason"])
         _assert_no_secrets(self, result)
 
     @patch("karox.port_ownership.check_port_ownership")
@@ -986,7 +1210,7 @@ class StopSavedBridgeTests(unittest.TestCase):
         mock_ownership.return_value = metadata
         completed = MagicMock(returncode=0)
         with (
-            patch("karox.web_bridge_launcher._watchdog_supports_stop_request", return_value=False),
+            patch("karox.web_bridge_launcher._watchdog_stop_protocol", return_value=None),
             patch("karox.web_bridge_launcher._current_process_is_descendant_of", return_value=None),
             patch("karox.web_bridge_launcher._process_is_alive", return_value=False),
             patch("karox.web_bridge_launcher._port_is_available", return_value=True),
@@ -1017,7 +1241,7 @@ class StopSavedBridgeTests(unittest.TestCase):
             public_url="https://example.ts.net",
         )
         with (
-            patch("karox.web_bridge_launcher._watchdog_supports_stop_request", return_value=False),
+            patch("karox.web_bridge_launcher._watchdog_stop_protocol", return_value=None),
             patch("karox.web_bridge_launcher._current_process_is_descendant_of", return_value=None),
             patch("karox.web_bridge_launcher.subprocess.run") as run,
         ):

@@ -78,6 +78,17 @@ class VocabularyConsistencyTests(unittest.TestCase):
                     self.assertNotEqual(english, action)
                     self.assertNotEqual(russian, action)
 
+    def test_root_add_choices_describe_user_intent_not_protocols(self) -> None:
+        for english in (False, True):
+            with self.subTest(english=english):
+                labels = [hub.hub_add_words(action, english) for action in hub.HUB_ADD_ACTIONS]
+                joined = " ".join(labels).casefold()
+                self.assertNotIn("mcp", joined)
+                self.assertNotIn("openapi", joined)
+                self.assertTrue(any("model" in label.casefold() or "модель" in label.casefold() for label in labels))
+        self.assertEqual(hub.hub_add_words(hub.HUB_ADD_OTHER, True), "Custom connection")
+        self.assertEqual(hub.hub_add_words(hub.HUB_ADD_OTHER, False), "Своё подключение")
+
 
 class StatusHonestyTests(unittest.TestCase):
     """"Works" is a claim, and only one thing may make it."""
@@ -212,7 +223,7 @@ class CommandSurfaceTests(unittest.TestCase):
         """`/models` opens the single model picker, not a connection screen."""
 
         self.assertNotIn("/models", tui.DEPRECATED_COMMAND_ALIASES)
-        self.assertNotIn("/models", tui.VISIBLE_COMMANDS)
+        self.assertIn("/models", tui.VISIBLE_COMMANDS)
 
 
 class KeyboardContractTests(unittest.TestCase):

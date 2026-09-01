@@ -146,6 +146,7 @@ class TranscriptStoreTests(unittest.TestCase):
             "TranscriptMessageAdded", "TranscriptMessageUpdated",
             "ToolCallStarted", "ToolCallProgress", "ToolCallCompleted",
             "ToolCallFailed", "AgentStepStarted", "AgentStepCompleted",
+            "ReasoningSummaryDelta",
             "AgentPhaseChanged", "AgentWarning", "AgentErrorEvent",
             "FileRead", "FileEdited", "TestRunStarted", "TestRunCompleted",
             "ArtifactCreated",

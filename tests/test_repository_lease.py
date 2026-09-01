@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -82,6 +85,40 @@ class RepositoryLeaseTests(unittest.TestCase):
         self.assertTrue(recovered)
         self.assertEqual(replacement.session_id, "session-b")
 
+    def test_unexpired_dead_owner_is_recovered_immediately(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        path, _lock = self.store._paths(self.repo)
+        unexpired = RepositoryLease(
+            **{
+                **lease.to_dict(),
+                "heartbeat_at": time.time() - 120,
+                "expires_at": time.time() + 1800,
+            }
+        )
+        path.write_text(json.dumps(unexpired.to_dict()), encoding="utf-8")
+        with patch("karox.repository_lease._process_alive", return_value=False):
+            replacement, recovered = self._acquire("session-b", "task-b", "chat-b")
+        self.assertTrue(recovered)
+        self.assertEqual(replacement.session_id, "session-b")
+
+    def test_unexpired_pid_reuse_is_recovered_immediately(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        path, _lock = self.store._paths(self.repo)
+        unexpired_payload = {
+            **lease.to_dict(),
+            "owner_creation_marker": "old-process",
+            "heartbeat_at": time.time() - 120,
+            "expires_at": time.time() + 1800,
+        }
+        path.write_text(json.dumps(unexpired_payload), encoding="utf-8")
+        with (
+            patch("karox.repository_lease._process_alive", return_value=True),
+            patch("karox.repository_lease.process_creation_marker", return_value="new-process"),
+        ):
+            replacement, recovered = self._acquire("session-b", "task-b", "chat-b")
+        self.assertTrue(recovered)
+        self.assertEqual(replacement.session_id, "session-b")
+
     def test_expired_but_live_owner_is_never_taken_over(self) -> None:
         lease, _ = self._acquire("session-a", "task-a", "chat-a")
         path, _lock = self.store._paths(self.repo)
@@ -121,12 +158,68 @@ class RepositoryLeaseTests(unittest.TestCase):
         self.assertTrue(recovered)
         self.assertEqual(replacement.session_id, "session-b")
 
+    def test_live_external_process_lease_is_never_recovered_until_exit(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            path, _lock = self.store._paths(self.repo)
+            external = RepositoryLease(
+                **{
+                    **lease.to_dict(),
+                    "owner_pid": child.pid,
+                    "owner_creation_marker": __import__(
+                        "karox.repository_lease", fromlist=["process_creation_marker"]
+                    ).process_creation_marker(child.pid),
+                    "heartbeat_at": time.time(),
+                    "expires_at": time.time() + 1800,
+                }
+            )
+            path.write_text(json.dumps(external.to_dict()), encoding="utf-8")
+            with self.assertRaises(RepositoryLeaseConflict):
+                self._acquire("session-b", "task-b", "chat-b")
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
+
+        replacement, recovered = self._acquire("session-b", "task-b", "chat-b")
+        self.assertTrue(recovered)
+        self.assertEqual(replacement.session_id, "session-b")
+
     def test_release_refuses_another_lease_id(self) -> None:
         lease, _ = self._acquire("session-a", "task-a", "chat-a")
         impostor = RepositoryLease(**{**lease.to_dict(), "lease_id": "different"})
         with self.assertRaisesRegex(RepositoryLeaseError, "another session"):
             self.store.release(self.repo, impostor)
         self.assertIsNotNone(self.store.load(self.repo))
+
+    def test_doctor_reports_live_owner_without_mutating_it(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        report = self.store.doctor()
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["active"], 1)
+        self.assertEqual(report["stale"], 0)
+        self.assertEqual(report["count"], 1)
+        self.assertTrue(report["leases"][0]["owner_alive"])
+        self.assertEqual(report["leases"][0]["lease_id"], lease.lease_id)
+        self.assertIsNotNone(self.store.load(self.repo))
+
+    def test_doctor_reports_stale_owner_but_leaves_recovery_to_acquire(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        path, _lock = self.store._paths(self.repo)
+        path.write_text(json.dumps(lease.to_dict()), encoding="utf-8")
+        with patch("karox.repository_lease._process_alive", return_value=False):
+            report = self.store.doctor()
+        self.assertEqual(report["status"], "degraded")
+        self.assertEqual(report["active"], 0)
+        self.assertEqual(report["stale"], 1)
+        self.assertIsNotNone(self.store.load(self.repo))
+        self.assertIn("next guarded mutation", report["recovery"])
 
     def test_concurrent_acquire_has_one_winner(self) -> None:
         barrier = threading.Barrier(2)

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import hashlib
 import hmac
 import json
 import os
+import shutil
 import socket
 import time
 import uuid
@@ -38,6 +40,35 @@ class IdempotencyConflict(SessionError):
     pass
 
 
+def _clean_session_name(value: str) -> str:
+    """Return a short single-line, secret-filtered display name."""
+
+    if not isinstance(value, str):
+        raise SessionError("session name must be text")
+    cleaned = " ".join(str(redact(value)).split()).strip()
+    if len(cleaned) > 120:
+        raise SessionError("session name must be 120 characters or fewer")
+    return cleaned
+
+
+def _fork_context(record: "SessionRecord", limit: int = 6000) -> str:
+    """Render bounded structured lineage context without executable state."""
+
+    payload = {
+        "source_session": record.session_id,
+        "source_task": record.task,
+        "summary": record.summary,
+        "plan": record.plan[-20:],
+        "decisions": record.decisions[-20:],
+        "changed_files": record.changed_files[-100:],
+        "checks": record.checks[-20:],
+        "evidence": record.evidence[-20:],
+        "unfinished_actions": record.unfinished_actions[-20:],
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return str(redact(text))[:limit]
+
+
 def _checksum(value: Dict[str, Any]) -> str:
     payload = dict(value)
     payload.pop("checksum", None)
@@ -48,6 +79,40 @@ def _checksum(value: Dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _process_is_running(pid: int) -> bool:
+    """Conservatively report whether a local PID can still own a lease."""
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _lease_owner_is_provably_dead(payload: Dict[str, Any]) -> bool:
+    """Recover only same-host leases whose owner PID is definitely gone.
+
+    A bridge child restart used to leave a still-unexpired session lease behind,
+    blocking every writer for the full TTL even though the OS had already proved
+    that its owner no longer existed. Cross-host or malformed ownership remains
+    conservative and waits for normal expiry; PID reuse can only delay recovery,
+    never steal a live lease.
+    """
+
+    if str(payload.get("hostname") or "") != socket.gethostname():
+        return False
+    pid = payload.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    return not _process_is_running(pid)
 
 
 @dataclass
@@ -107,6 +172,13 @@ class SessionRecord:
     task: str
     created_at: float
     updated_at: float
+    # The current user objective plus previous turn objectives. Keeping task as
+    # the current turn preserves the existing agent contract, while task_history
+    # makes resume/fork lineage inspectable without replaying transcripts.
+    task_history: List[str] = field(default_factory=list)
+    # Bounded structured context used only when a fork starts with a fresh model
+    # history. It never contains raw tool arguments, credentials, or live jobs.
+    continuation_context: str = ""
     revision: int = 0
     schema_version: int = SCHEMA_VERSION
     checksum: str = ""
@@ -130,6 +202,13 @@ class SessionRecord:
     evidence: List[Dict[str, Any]] = field(default_factory=list)
     unfinished_actions: List[Dict[str, Any]] = field(default_factory=list)
     idempotency: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # User-facing lifecycle metadata. These fields intentionally have defaults so
+    # schema-v1 session files written before KaroX 5 can still be loaded without
+    # migration; the checksum is always verified against the fields actually
+    # present in the file before the dataclass defaults are applied.
+    name: str = ""
+    parent_session_id: str = ""
+    archived: bool = False
     revoked: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -276,6 +355,9 @@ class SessionStore:
         access_profile: AccessProfile = AccessProfile.WORKSPACE_WRITE,
         branch: str = "",
         session_id: Optional[str] = None,
+        *,
+        name: str = "",
+        parent_session_id: str = "",
     ) -> SessionRecord:
         if not isinstance(task, str) or not task.strip():
             raise SessionError("session task must be a non-empty string")
@@ -283,6 +365,10 @@ class SessionStore:
         if not repo.is_dir():
             raise SessionError(f"repository is not a directory: {repo}")
         sid = self._validate_id(session_id or uuid.uuid4().hex)
+        clean_name = _clean_session_name(name)
+        parent = self._validate_id(parent_session_id) if parent_session_id else ""
+        if parent == sid:
+            raise SessionError("a session cannot be its own parent")
         target = self.state_path(sid)
         with _exclusive_file_lock(self.lock_path(sid)):
             if target.exists():
@@ -297,6 +383,8 @@ class SessionStore:
                 task=str(redact(task)),
                 created_at=now,
                 updated_at=now,
+                name=clean_name,
+                parent_session_id=parent,
             )
             payload = record.to_dict()
             _atomic_json(target, payload)
@@ -323,12 +411,14 @@ class SessionStore:
             record.repo_fingerprint = repository_fingerprint(repo)
             record.access_profile = access_profile.value
             record.revoked = False
+            record.archived = False
             record.status = "active"
             payload = record.to_dict()
             payload["repository"] = str(repo)
             payload["repo_fingerprint"] = repository_fingerprint(repo)
             payload["access_profile"] = access_profile.value
             payload["revoked"] = False
+            payload["archived"] = False
             payload["status"] = "active"
             payload["revision"] = record.revision + 1
             payload["updated_at"] = time.time()
@@ -339,13 +429,16 @@ class SessionStore:
     def load(self, session_id: str) -> SessionRecord:
         return SessionRecord.from_dict(_read_json(self.state_path(session_id)))
 
-    def list(self) -> List[SessionRecord]:
+    def list(self, *, include_archived: bool = True) -> List[SessionRecord]:
         records: List[SessionRecord] = []
         for state in sorted(self.root.glob("*/session.json")):
             try:
-                records.append(SessionRecord.from_dict(_read_json(state)))
+                record = SessionRecord.from_dict(_read_json(state))
             except SessionError:
                 continue
+            if record.archived and not include_archived:
+                continue
+            records.append(record)
         return records
 
     def revoke(self, session_id: str) -> SessionRecord:
@@ -366,6 +459,173 @@ class SessionStore:
                 pass
             return SessionRecord.from_dict(payload)
 
+    def _ensure_no_active_lease_unlocked(self, session_id: str) -> None:
+        """Refuse lifecycle changes while another owner still holds the session."""
+
+        path = self.lease_path(session_id)
+        if not path.exists():
+            return
+        try:
+            current = _read_json(path)
+            expires_at = float(current.get("expires_at", 0))
+        except (SessionError, TypeError, ValueError):
+            # A malformed lease cannot prove ownership. Remove it only while the
+            # session state lock is held, so a valid owner cannot race this path.
+            expires_at = 0.0
+        if expires_at >= time.time():
+            raise SessionBusy(
+                f"session {session_id} is locked by {current.get('owner', 'unknown')}"
+            )
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
+    def _metadata_update_unlocked(
+        self, record: SessionRecord, **changes: Any
+    ) -> SessionRecord:
+        payload = record.to_dict()
+        payload.update(changes)
+        payload["revision"] = record.revision + 1
+        payload["updated_at"] = time.time()
+        payload["checksum"] = _checksum(payload)
+        _atomic_json(self.state_path(record.session_id), payload)
+        return SessionRecord.from_dict(payload)
+
+    def rename(self, session_id: str, name: str) -> SessionRecord:
+        """Set or clear the short user-facing name of one durable session."""
+
+        sid = self._validate_id(session_id)
+        clean_name = _clean_session_name(name)
+        with _exclusive_file_lock(self.lock_path(sid)):
+            record = self.load(sid)
+            return self._metadata_update_unlocked(record, name=clean_name)
+
+    def archive(self, session_id: str) -> SessionRecord:
+        """Hide a session from normal resume lists without deleting evidence."""
+
+        sid = self._validate_id(session_id)
+        with _exclusive_file_lock(self.lock_path(sid)):
+            self._ensure_no_active_lease_unlocked(sid)
+            record = self.load(sid)
+            if record.archived:
+                return record
+            return self._metadata_update_unlocked(record, archived=True)
+
+    def unarchive(self, session_id: str) -> SessionRecord:
+        sid = self._validate_id(session_id)
+        with _exclusive_file_lock(self.lock_path(sid)):
+            record = self.load(sid)
+            if not record.archived:
+                return record
+            return self._metadata_update_unlocked(record, archived=False)
+
+    def continue_task(self, session_id: str, task: str) -> SessionRecord:
+        """Append a new user turn to an existing durable session atomically."""
+
+        if not isinstance(task, str) or not task.strip():
+            raise SessionError("continuation task must be a non-empty string")
+        safe_task = str(redact(task)).strip()
+        sid = self._validate_id(session_id)
+        with self.mutate(
+            sid, f"session-continue-{os.getpid()}", ttl_seconds=10.0
+        ) as record:
+            if record.task != safe_task:
+                record.task_history.append(record.task)
+                record.task = safe_task
+            if record.provider_history:
+                last = record.provider_history[-1]
+                duplicate = (
+                    isinstance(last, dict)
+                    and last.get("role") == "user"
+                    and last.get("content") == safe_task
+                )
+                if not duplicate:
+                    record.provider_history.append(
+                        {
+                            "role": "user",
+                            "content": safe_task,
+                            "kind": "continuation",
+                        }
+                    )
+            record.status = "active"
+            record.phase = "execution" if record.provider_history else "planning"
+        return self.load(sid)
+
+    def fork(
+        self,
+        session_id: str,
+        *,
+        session_id_new: Optional[str] = None,
+        task: Optional[str] = None,
+        name: str = "",
+    ) -> SessionRecord:
+        """Create an active child session carrying only safe structured context.
+
+        Lineage/context is copied; ownership and side-effect state is not. In
+        particular leases, idempotency reservations, live jobs, connected
+        clients, usage/cost counters, and provider attempt history start empty.
+        """
+
+        source_id = self._validate_id(session_id)
+        source = self.load(source_id)
+        if source.revoked:
+            raise SessionError(f"cannot fork a revoked session: {source_id}")
+        repository = Path(source.repository).expanduser().resolve(strict=True)
+        forked = self.create(
+            repository,
+            task if task is not None else source.task,
+            AccessProfile(source.access_profile),
+            branch=source.branch,
+            session_id=session_id_new,
+            name=name,
+            parent_session_id=source_id,
+        )
+        lease = self.acquire(
+            forked.session_id,
+            f"session-fork-{os.getpid()}",
+            ttl_seconds=10.0,
+        )
+        try:
+            child = self.load(forked.session_id)
+            child.phase = source.phase
+            child.task_history = [*source.task_history, source.task]
+            child.continuation_context = _fork_context(source)
+            child.plan = copy.deepcopy(source.plan)
+            child.summary = source.summary
+            child.decisions = copy.deepcopy(source.decisions)
+            child.changed_files = list(source.changed_files)
+            child.git_state = copy.deepcopy(source.git_state)
+            child.checkpoints = copy.deepcopy(source.checkpoints)
+            child.checks = copy.deepcopy(source.checks)
+            child.failures = copy.deepcopy(source.failures)
+            child.skills = copy.deepcopy(source.skills)
+            child.mcp_servers = copy.deepcopy(source.mcp_servers)
+            child.packs = copy.deepcopy(source.packs)
+            child.evidence = copy.deepcopy(source.evidence)
+            child.unfinished_actions = copy.deepcopy(source.unfinished_actions)
+            self.save(child, child.revision, lease)
+            return child
+        finally:
+            self.release(lease)
+
+    def delete_archived(self, session_id: str) -> None:
+        """Permanently delete an archived session after fencing future mutation."""
+
+        sid = self._validate_id(session_id)
+        directory = self.session_dir(sid)
+        with _exclusive_file_lock(self.lock_path(sid)):
+            self._ensure_no_active_lease_unlocked(sid)
+            record = self.load(sid)
+            if not record.archived:
+                raise SessionError("archive the session before deleting it")
+            # Fence any process that obtained a stale record before this lock.
+            self._metadata_update_unlocked(record, revoked=True, status="deleted_pending")
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise SessionError(f"cannot delete session {sid}: {exc}") from exc
+
     def acquire(
         self, session_id: str, owner: str, ttl_seconds: float = 30.0
     ) -> MutationLease:
@@ -375,14 +635,20 @@ class SessionStore:
             record = self.load(session_id)
             if record.revoked:
                 raise SessionError(f"session has been revoked: {session_id}")
+            if record.archived:
+                raise SessionError(f"session is archived: {session_id}")
             path = self.lease_path(session_id)
             now = time.time()
             if path.exists():
                 current = _read_json(path)
-                if float(current.get("expires_at", 0)) >= now:
+                unexpired = float(current.get("expires_at", 0)) >= now
+                if unexpired and not _lease_owner_is_provably_dead(current):
                     raise SessionBusy(
                         f"session {session_id} is locked by {current.get('owner', 'unknown')}"
                     )
+                # Expired leases are always stale. An unexpired lease is stale
+                # only when its same-host owner PID is provably gone (for
+                # example after the durable MCP child was recycled).
                 stale = path.with_name(f"lease.stale.{uuid.uuid4().hex}.json")
                 os.replace(path, stale)
             lease = MutationLease(

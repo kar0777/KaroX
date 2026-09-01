@@ -48,6 +48,8 @@ _WRITE_TOOLS = frozenset(
         "karox.checks.run_affected",
         "karox.checks.start",
         "karox.checks.cancel",
+        "karox.command.start",
+        "karox.command.cancel",
         "karox.tests.run",
         "karox.dev_server.start",
         "karox.dev_server.stop",

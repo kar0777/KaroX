@@ -16,9 +16,14 @@ from karox.saved_bridge_supervisor import (
     _force_stop_proven_supervisor,
     _write_supervisor_heartbeat,
     ensure_saved_bridge_supervisor,
+    record_saved_bridge_restart_recovery,
+    request_saved_bridge_restart_migration,
+    saved_bridge_restart_recovery_status,
     saved_bridge_supervisor_status,
     set_saved_bridge_desired_running,
     supervisor_heartbeat_path,
+    supervisor_restart_migration_path,
+    supervisor_restart_recovery_path,
     supervisor_state_path,
     supervisor_tick,
 )
@@ -48,6 +53,44 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
             self.assertFalse(
                 status["desired_running"],
                 "telemetry must never override an explicit persisted Stop",
+            )
+
+    def test_restart_recovery_postmortem_survives_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "karox.saved_bridge_supervisor.runtime_dir", return_value=Path(tmp)
+        ):
+            armed = record_saved_bridge_restart_recovery(
+                "hyperagent-auto",
+                phase="armed",
+            )
+            requested = record_saved_bridge_restart_recovery(
+                "hyperagent-auto",
+                phase="shutdown_requested",
+                owner_pid=111,
+                stop_protocol="request-v2",
+            )
+            recovered = record_saved_bridge_restart_recovery(
+                "hyperagent-auto",
+                phase="recovered",
+                owner_pid=111,
+                new_owner_pid=222,
+            )
+
+            self.assertEqual(armed["restart_id"], requested["restart_id"])
+            self.assertEqual(requested["restart_id"], recovered["restart_id"])
+            self.assertEqual(recovered["phase"], "recovered")
+            self.assertEqual(recovered["owner_pid"], 111)
+            self.assertEqual(recovered["new_owner_pid"], 222)
+            self.assertEqual(recovered["stop_protocol"], "request-v2")
+            self.assertIsInstance(recovered["completed_at"], float)
+            self.assertTrue(supervisor_restart_recovery_path("hyperagent-auto").exists())
+            self.assertEqual(
+                saved_bridge_restart_recovery_status("hyperagent-auto"),
+                recovered,
+            )
+            self.assertEqual(
+                saved_bridge_supervisor_status("hyperagent-auto")["restart_recovery"],
+                recovered,
             )
 
     def test_ensure_reuses_proven_supervisor(self) -> None:
@@ -246,6 +289,68 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
 
 
 class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
+    def test_request_v1_migration_rearms_desired_state_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("karox.saved_bridge_supervisor.runtime_dir", return_value=root),
+                patch("karox.web_bridge_profiles.WebBridgeProfileStore") as profile_store,
+                patch("karox.port_ownership.check_port_ownership") as ownership,
+                patch("karox.web_bridge_launcher.start_saved_bridge") as start,
+            ):
+                set_saved_bridge_desired_running("hyperagent-auto", False)
+                request_saved_bridge_restart_migration("hyperagent-auto", 4242)
+                profile_store.return_value.get.return_value = SimpleNamespace(port=8768)
+                ownership.return_value = SimpleNamespace(
+                    verdict="free",
+                    reason="old request-v1 owner exited",
+                    metadata=SimpleNamespace(pid=None, pid_proven=False),
+                )
+                start.return_value = {
+                    "action": "started",
+                    "owner_pid": 5001,
+                    "bridge_pid": 5002,
+                }
+
+                result = supervisor_tick("hyperagent-auto")
+                status = saved_bridge_supervisor_status("hyperagent-auto")
+
+            self.assertEqual(result["status"], "recovered")
+            self.assertTrue(status["desired_running"])
+            self.assertFalse(status["restart_migration_pending"])
+            self.assertFalse(supervisor_restart_migration_path("hyperagent-auto").exists())
+            start.assert_called_once_with("hyperagent-auto", timeout_seconds=120.0)
+
+    def test_request_v1_migration_waits_for_exact_old_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("karox.saved_bridge_supervisor.runtime_dir", return_value=root),
+                patch("karox.web_bridge_profiles.WebBridgeProfileStore") as profile_store,
+                patch("karox.port_ownership.check_port_ownership") as ownership,
+                patch("karox.web_bridge_launcher.start_saved_bridge") as start,
+            ):
+                set_saved_bridge_desired_running("hyperagent-auto", True)
+                request_saved_bridge_restart_migration("hyperagent-auto", 4242)
+                profile_store.return_value.get.return_value = SimpleNamespace(port=8768)
+                ownership.return_value = SimpleNamespace(
+                    verdict="reuse_same_profile",
+                    reason="old owner still serving",
+                    metadata=SimpleNamespace(
+                        pid=4242,
+                        pid_proven=True,
+                        watchdog_path=None,
+                    ),
+                )
+
+                result = supervisor_tick("hyperagent-auto")
+                marker = supervisor_restart_migration_path("hyperagent-auto")
+
+            self.assertEqual(result["status"], "migration_waiting")
+            self.assertEqual(result["owner_pid"], 4242)
+            self.assertTrue(marker.exists())
+            start.assert_not_called()
+
     def test_tick_recovers_missing_owner_through_canonical_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with (
@@ -417,6 +522,9 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
             patch("karox.web_bridge_profiles.WebBridgeProfileStore") as profile_store,
             patch("karox.port_ownership.check_port_ownership", return_value=ownership),
             patch(
+                "karox.saved_bridge_supervisor.clear_saved_bridge_restart_migration"
+            ) as clear_migration,
+            patch(
                 "karox.saved_bridge_supervisor.set_saved_bridge_desired_running"
             ) as desired,
         ):
@@ -424,6 +532,7 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
             result = stop_saved_bridge("hyperagent-auto")
 
         self.assertEqual(result["action"], "no_action")
+        clear_migration.assert_called_once_with("hyperagent-auto")
         desired.assert_called_once_with("hyperagent-auto", False)
 
 
