@@ -542,6 +542,9 @@ def connection_controller() -> ConnectionController:
         )
 
     def launcher(target: McpClientTarget) -> Any:
+        # Historical function name kept for patch/backward compatibility; the
+        # implementation now serves every managed Streamable HTTP + Bearer MCP
+        # target, not only ClickUp.
         from .clickup_setup import start_saved_clickup_connection
 
         return start_saved_clickup_connection(target)

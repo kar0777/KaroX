@@ -4,9 +4,11 @@ A saved connection can be syntactically valid without being launchable by the
 current KaroX runtime.  This module keeps that distinction explicit and returns
 machine-stable blocker codes before a child process is spawned.
 
-The first managed launcher is the saved ClickUp bearer/Streamable HTTP path.
-Other presets remain visible and testable as configurations, but ``start`` and
-``restart`` fail early until a launcher with an end-to-end contract is added.
+The managed launcher serves repository-bound Streamable HTTP + Bearer targets
+through the same guarded bridge runtime.  ClickUp is one preset on that path;
+generic/custom/web-agent/IDE targets use it too once their saved credential is
+bound to a durable KaroX repository session.  Other wire/auth combinations stay
+visible and testable as configurations but fail before any child is spawned.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from .connections import McpClientTarget
+from .connections import McpClientTarget, is_managed_streamable_bearer_target
 
 
 BLOCKER_TRANSPORT_UNSUPPORTED = "transport_unsupported"
@@ -24,6 +26,7 @@ BLOCKER_STABLE_URL_UNAVAILABLE = "stable_url_unavailable"
 BLOCKER_OAUTH_NEEDS_STABLE_URL = "oauth_requires_stable_url"
 BLOCKER_CREDENTIAL_MISSING = "credential_missing"
 BLOCKER_AUTH_UNSUPPORTED = "auth_scheme_unsupported"
+BLOCKER_REPOSITORY_BINDING_MISSING = "repository_binding_missing"
 BLOCKER_LAUNCHER_UNAVAILABLE = "launcher_unavailable"
 
 LAUNCHABLE_TRANSPORTS: frozenset[str] = frozenset({"streamable_http", "openapi"})
@@ -164,13 +167,21 @@ def launch_support(
         blockers.append(BLOCKER_CREDENTIAL_MISSING)
 
     launcher_id: Optional[str] = None
-    if (
-        target.preset_id == "clickup"
-        and target.transport == "streamable_http"
-        and target.auth_scheme == "bearer"
-        and target.tunnel in MANAGED_TUNNELS
-    ):
-        launcher_id = "saved-clickup"
+    if is_managed_streamable_bearer_target(target):
+        # The launcher reconstructs the repository boundary from the SessionStore
+        # record named by a bridge credential.  A legacy KaroX/connection token
+        # has no repository identity, so it is deliberately not launchable until
+        # the edit/save flow migrates it transactionally.
+        if (
+            target.preset_id != "clickup"
+            and not (target.credential_ref or "").startswith("os-keyring:bridge/")
+        ):
+            blockers.append(BLOCKER_REPOSITORY_BINDING_MISSING)
+        else:
+            # ClickUp keeps its historical capability assessment for backward
+            # compatibility with old registry/test fixtures.  Its real saved
+            # launcher still validates the bridge reference before spawning.
+            launcher_id = "saved-clickup" if target.preset_id == "clickup" else "saved-mcp"
     else:
         blockers.append(BLOCKER_LAUNCHER_UNAVAILABLE)
 
@@ -199,6 +210,7 @@ __all__ = [
     "BLOCKER_OAUTH_NEEDS_STABLE_URL",
     "BLOCKER_CREDENTIAL_MISSING",
     "BLOCKER_AUTH_UNSUPPORTED",
+    "BLOCKER_REPOSITORY_BINDING_MISSING",
     "BLOCKER_LAUNCHER_UNAVAILABLE",
     "LAUNCHABLE_TRANSPORTS",
     "MANAGED_TUNNELS",

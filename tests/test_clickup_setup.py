@@ -20,7 +20,7 @@ os.environ.setdefault("KAROX_TEST_ALLOW_REAL_KEYRING", "1")
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
@@ -41,6 +41,7 @@ from karox.clickup_setup import (
     run_resilient_handshake,
     setup_clickup_connection,
     start_saved_clickup_connection,
+    start_saved_mcp_connection,
 )
 
 
@@ -796,6 +797,153 @@ class ClickupSavedRestartTests(unittest.TestCase):
         outcome.stop()
         self.assertTrue(stopped["server"])
         self.assertTrue(stopped["tunnel"])
+
+    def test_saved_custom_mcp_runs_beside_chatgpt_on_tailscale_10000(self) -> None:
+        """Generic bearer MCP uses a non-443 Funnel listener on first launch."""
+
+        import time
+
+        from karox.connections import McpClientTarget
+        from karox.models import AccessProfile
+        from karox.paths import session_dir
+        from karox.sessions import SessionStore
+
+        session_id = "mcp-c-custom1234567890"
+        repository = Path(self._tmp)
+        SessionStore(session_dir()).create(
+            repository,
+            "Managed MCP bridge: Brainbase",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id=session_id,
+        )
+        target = McpClientTarget(
+            connection_id="c-custom1234567890",
+            name="Brainbase",
+            preset_id="custom",
+            transport="streamable_http",
+            endpoint_path="/mcp",
+            auth_scheme="bearer",
+            tunnel="tailscale",
+            runtime_profile="generic-streamable-http",
+            url_stability="stable",
+            credential_ref=f"os-keyring:bridge/{session_id}",
+            port=8768,
+            created_at=time.time(),
+            updated_at=time.time(),
+        )
+        seen: dict[str, object] = {}
+        stopped = {"server": False, "tunnel": False}
+
+        def server_launcher(
+            port,
+            secret,
+            *,
+            repository,
+            credential_name=None,
+            reuse_existing_session=False,
+        ):
+            seen["repository"] = repository
+            seen["credential_name"] = credential_name
+            return ServerHandle(
+                local_endpoint=f"http://127.0.0.1:{port}/mcp",
+                secret=secret,
+                port=port,
+                credential_name=credential_name or "unexpected",
+                stop=lambda: stopped.__setitem__("server", True),
+                stop_process=lambda: stopped.__setitem__("server", True),
+                pid=111,
+            )
+
+        def tunnel_side_effect(kind, port, *, https_port=443):
+            seen["tunnel"] = kind
+            seen["https_port"] = https_port
+            seen["local_port"] = port
+            return TunnelHandle(
+                public_url="https://monsterpc.example.ts.net:10000",
+                stop=lambda: stopped.__setitem__("tunnel", True),
+                pid=222,
+            )
+
+        def handshake(target, *, endpoint_url, secret, timeout_seconds=15.0):
+            seen["endpoint_url"] = endpoint_url
+            return {
+                "state": "ok",
+                "wire": "streamable_http",
+                "tool_count": 4,
+                "detail": "ok",
+            }
+
+        with (
+            patch("karox.connections.resolve_connection_secret", return_value="saved-secret"),
+            patch(
+                "karox.clickup_setup.default_tunnel_launcher",
+                side_effect=tunnel_side_effect,
+            ),
+        ):
+            outcome = start_saved_mcp_connection(
+                target,
+                server_launcher=server_launcher,
+                handshake=handshake,
+            )
+
+        self.assertTrue(outcome.success, outcome.failure_detail)
+        self.assertEqual(seen["https_port"], 10000)
+        self.assertEqual(seen["local_port"], 8768)
+        self.assertEqual(seen["credential_name"], session_id)
+        self.assertEqual(seen["repository"], repository.resolve())
+        self.assertEqual(
+            seen["endpoint_url"],
+            "https://monsterpc.example.ts.net:10000/mcp",
+        )
+        self.assertIsNotNone(outcome.target)
+        assert outcome.target is not None
+        self.assertEqual(
+            outcome.target.public_url,
+            "https://monsterpc.example.ts.net:10000",
+        )
+
+    def test_saved_custom_mcp_refuses_busy_local_port_before_tunnel_mutation(self) -> None:
+        import time
+
+        from karox.connections import McpClientTarget
+        from karox.models import AccessProfile
+        from karox.paths import session_dir
+        from karox.sessions import SessionStore
+
+        session_id = "mcp-c-busy12345678901"
+        repository = Path(self._tmp)
+        SessionStore(session_dir()).create(
+            repository,
+            "Managed MCP bridge: Busy",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id=session_id,
+        )
+        target = McpClientTarget(
+            connection_id="c-busy12345678901",
+            name="Busy custom MCP",
+            preset_id="custom",
+            transport="streamable_http",
+            endpoint_path="/mcp",
+            auth_scheme="bearer",
+            tunnel="tailscale",
+            runtime_profile="generic-streamable-http",
+            url_stability="stable",
+            credential_ref=f"os-keyring:bridge/{session_id}",
+            port=8768,
+            created_at=time.time(),
+            updated_at=time.time(),
+        )
+        tunnel = Mock()
+        with (
+            patch("karox.connections.resolve_connection_secret", return_value="saved-secret"),
+            patch("karox.web_bridge_launcher._port_is_available", return_value=False),
+            patch("karox.clickup_setup.default_tunnel_launcher", tunnel),
+        ):
+            outcome = start_saved_mcp_connection(target)
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.failure_kind, "port_in_use")
+        tunnel.assert_not_called()
 
     def test_saved_restart_refuses_an_unmanaged_live_runtime(self) -> None:
         import time

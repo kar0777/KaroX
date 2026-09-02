@@ -41,7 +41,10 @@ from .connections import (
     connection_test_endpoint,
     mcp_client_preset,
     mcp_client_presets,
+    prepare_managed_mcp_binding,
     resolve_clickup_defaults,
+    resolve_connection_secret,
+    rollback_managed_mcp_binding,
 
     apply_clickup_overrides,
 )
@@ -3426,7 +3429,11 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                     yield Label(self._label(_C["ru"]["endpoint_path"], _C["en"]["endpoint_path"]), classes="field-label")
                     yield Input(value=self.target.endpoint_path if self.target else preset.endpoint_path, id="mcf-endpoint")
                     yield Label(self._label("Локальный порт", "Local port"), classes="field-label")
-                    yield Input(value=str(self.target.port if self.target else 8765), id="mcf-port")
+                    # 8765 is the primary ChatGPT/Claude bridge port.  Manual
+                    # custom clients default to a separate local listener so a
+                    # newly-created connection cannot collide with the bridge
+                    # the user is already talking to from ChatGPT Web.
+                    yield Input(value=str(self.target.port if self.target else 8770), id="mcf-port")
                     yield Label(self._label(_C["ru"]["url_stability"], _C["en"]["url_stability"]), classes="field-label")
                     stability = self.target.url_stability if self.target else "temporary"
                     with RadioSet(id="mcp-form-stability"):
@@ -3579,6 +3586,21 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             connection_id = self.target.connection_id if self.target else _new_connection_id()
             created_at = self.target.created_at if self.target else _now()
 
+            # A manual Streamable HTTP + Bearer connection is not just metadata:
+            # KaroX must later be able to launch a repository-scoped bridge for
+            # it.  Bind those cards to a durable SessionStore record and the
+            # bridge keyring namespace now, while this screen still knows which
+            # repository is selected.  Other auth/wire combinations remain plain
+            # connection metadata and keep using KaroX/connection.
+            managed_candidate = bool(
+                self.preset_id in {"clickup", "generic-mcp", "custom", "web-agent", "ide"}
+                and transport == "streamable_http"
+                and scheme == "bearer"
+                and tunnel in {"cloudflare", "tailscale", "local"}
+            )
+            pending_managed_ref: Optional[str] = None
+            legacy_connection_ref: Optional[str] = None
+
             # ``none`` is only ever saved when the user explicitly chose it; the
             # radio set is the opt-in, and the field is empty by design.
             if scheme == "none":
@@ -3607,6 +3629,43 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                         return
                     credential_ref = self.target.credential_ref
                     credential_fingerprint = self.target.credential_fingerprint
+                    # Records created by older KaroX builds have only a
+                    # KaroX/connection secret.  Migrate them transactionally the
+                    # first time they are saved as a managed bearer bridge.
+                    if managed_candidate and not credential_ref.startswith("os-keyring:bridge/"):
+                        try:
+                            old_secret = resolve_connection_secret(self.target)
+                            repo = Path(getattr(self.app, "repository", Path.cwd())).expanduser().resolve(strict=True)
+                            info = prepare_managed_mcp_binding(
+                                connection_id,
+                                repo,
+                                secret=old_secret,
+                                bypass=self.target.bypass,
+                                display_name=name,
+                            )
+                            pending_managed_ref = info["reference"]
+                            legacy_connection_ref = credential_ref
+                            credential_ref = info["reference"]
+                            credential_fingerprint = info["fingerprint"]
+                        except Exception as exc:
+                            self._set_status(str(exc))
+                            return
+                elif managed_candidate:
+                    try:
+                        repo = Path(getattr(self.app, "repository", Path.cwd())).expanduser().resolve(strict=True)
+                        info = prepare_managed_mcp_binding(
+                            connection_id,
+                            repo,
+                            secret=secret_value or None,
+                            bypass=False,
+                            display_name=name,
+                        )
+                        pending_managed_ref = info["reference"]
+                        credential_ref = info["reference"]
+                        credential_fingerprint = info["fingerprint"]
+                    except Exception as exc:
+                        self._set_status(str(exc))
+                        return
                 else:
                     try:
                         info = store.set(connection_id, secret_value or None)
@@ -3663,22 +3722,38 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
                         **edited,
                     )
             except (ConnectionConfigurationError, ValueError) as exc:
+                if pending_managed_ref:
+                    rollback_managed_mcp_binding(pending_managed_ref)
                 self._set_status(str(exc))
                 return
 
             try:
                 connection_registry().put(target)
             except ConnectionError as exc:
-                # A new secret is written before the atomic registry update. If
-                # that update fails, remove the just-created keyring entry so a
-                # failed save cannot leave an orphaned credential.
-                if self.target is None and credential_ref and credential_ref.startswith("os-keyring:connection/"):
+                # A new secret/session is prepared before the atomic registry
+                # update. Roll it back if the metadata did not commit, otherwise
+                # a failed save would leave a live-looking orphan in keyring and
+                # SessionStore.
+                if pending_managed_ref:
+                    rollback_managed_mcp_binding(pending_managed_ref)
+                elif self.target is None and credential_ref and credential_ref.startswith("os-keyring:connection/"):
                     try:
                         ConnectionCredentialStore().delete(connection_id)
                     except CredentialError:
                         pass
                 self._set_status(str(exc))
                 return
+
+            # Migration is committed: only now remove the old generic secret.
+            # Until this point the old card remained fully usable if anything
+            # failed while preparing the managed bridge binding.
+            if legacy_connection_ref and legacy_connection_ref.startswith("os-keyring:connection/"):
+                try:
+                    ConnectionCredentialStore().delete(
+                        legacy_connection_ref.removeprefix("os-keyring:connection/")
+                    )
+                except CredentialError:
+                    pass
             self.app.notify(_t(self.language, "saved"))
             self.dismiss(target)
 

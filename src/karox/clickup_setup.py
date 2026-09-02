@@ -39,6 +39,7 @@ from .connections import (
     ConnectionConfigurationError,
     McpClientTarget,
     connection_registry,
+    is_managed_streamable_bearer_target,
 )
 
 # Public step names the progress callback reports, in order.  Kept as constants
@@ -358,6 +359,8 @@ def default_server_launcher(
 def default_tunnel_launcher(
     tunnel_kind: str,
     port: int,
+    *,
+    https_port: int = 443,
 ) -> TunnelHandle:
     """Start the requested tunnel and return its public URL.
 
@@ -387,7 +390,9 @@ def default_tunnel_launcher(
             pid=getattr(cf.process, "pid", None),
         )
     if tunnel_kind == "tailscale":
-        ts = start_tailscale_foreground_funnel(port, timeout_seconds=30.0)
+        ts = start_tailscale_foreground_funnel(
+            port, https_port=https_port, timeout_seconds=30.0
+        )
         return TunnelHandle(
             public_url=ts.public_url,
             stop=ts.stop,
@@ -701,6 +706,60 @@ def setup_clickup_connection(
         )
 
 
+def _saved_tailscale_https_candidates(target: McpClientTarget) -> tuple[int, ...]:
+    """Return safe public Funnel listeners for a saved managed MCP target.
+
+    ChatGPT/Claude own the conventional HTTPS 443 listener.  Generic saved MCP
+    clients prefer the other Tailscale Funnel ports so they can run beside that
+    bridge.  Once a public URL has been saved, its explicit listener is pinned on
+    restart: silently moving a configured remote client to another port would be
+    worse than a clear route-in-use failure.
+    """
+
+    if target.public_url:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(target.public_url)
+        return (parsed.port or 443,)
+    if target.preset_id == "clickup":
+        # Preserve the historical ClickUp behavior for existing setup flows.
+        return (443,)
+    preferred = 10000 if target.port != 8767 else 8443
+    ordered = (preferred, 8443, 10000, 443)
+    return tuple(dict.fromkeys(ordered))
+
+
+def _start_saved_target_tunnel(
+    target: McpClientTarget,
+    tunnel_launcher: Optional[Callable[[str, int], TunnelHandle]],
+) -> TunnelHandle:
+    """Start only the tunnel owned by ``target``, preserving sibling bridges."""
+
+    if tunnel_launcher is not None:
+        # Test/custom seams keep their long-standing two-argument contract.
+        return tunnel_launcher(target.tunnel, target.port)
+    if target.tunnel != "tailscale":
+        return default_tunnel_launcher(target.tunnel, target.port)
+
+    last_error: Optional[Exception] = None
+    candidates = _saved_tailscale_https_candidates(target)
+    for index, https_port in enumerate(candidates):
+        try:
+            return default_tunnel_launcher(
+                target.tunnel, target.port, https_port=https_port
+            )
+        except Exception as exc:
+            last_error = exc
+            detail = str(exc).lower()
+            conflict = "route_in_use" in detail or "https_port_in_use" in detail
+            # A saved URL is pinned to one listener.  Fallback is only for first
+            # launch, where no remote client has been configured yet.
+            if target.public_url or not conflict or index == len(candidates) - 1:
+                raise
+    assert last_error is not None
+    raise last_error
+
+
 def start_saved_clickup_connection(
     target: McpClientTarget,
     *,
@@ -710,11 +769,13 @@ def start_saved_clickup_connection(
     on_progress: Optional[Callable[[str, str, Optional[str]], None]] = None,
     cancellation: Optional[Callable[[], bool]] = None,
 ) -> ClickupSetupOutcome:
-    """Start or restart one already-saved ClickUp connection.
+    """Start/restart one saved repository-bound Streamable HTTP bearer bridge.
 
-    The saved bridge credential and repository-bound session are reused. No new
-    connection ID or secret is created. A Cloudflare restart may produce a new
-    public URL; it is written back only after the public handshake succeeds.
+    ClickUp, Generic MCP, Custom MCP, Web Agent and IDE presets share this exact
+    guarded runtime path.  The saved bridge credential and repository-bound
+    session are reused; no new connection ID or secret is created.  A temporary
+    tunnel may produce a new public URL, which is persisted only after the real
+    MCP handshake succeeds.
     """
     from dataclasses import replace
 
@@ -758,21 +819,14 @@ def start_saved_clickup_connection(
             ),
             remediation="stop it from the KaroX process that owns it",
         )
-    if target.preset_id != "clickup":
+    if not is_managed_streamable_bearer_target(target):
         return ClickupSetupOutcome(
             success=False,
             target=target,
             failure_kind="unsupported_preset",
-            failure_detail="saved restart is currently implemented for ClickUp only",
-        )
-    if target.transport != "streamable_http" or target.auth_scheme != "bearer":
-        return ClickupSetupOutcome(
-            success=False,
-            target=target,
-            failure_kind="invalid_config",
             failure_detail=(
-                "the saved ClickUp connection must use Streamable HTTP and "
-                "Authorization header bearer auth"
+                "this saved connection is not a managed Streamable HTTP + Bearer "
+                "KaroX bridge target"
             ),
         )
     credential_ref = target.credential_ref or ""
@@ -781,7 +835,7 @@ def start_saved_clickup_connection(
             success=False,
             target=target,
             failure_kind="invalid_credential",
-            failure_detail="the saved ClickUp connection has no bridge credential",
+            failure_detail="the saved MCP connection has no bridge credential",
             remediation="recreate the connection",
         )
     session_id = credential_ref[len(_BRIDGE_REFERENCE_PREFIX) :]
@@ -798,7 +852,7 @@ def start_saved_clickup_connection(
             success=False,
             target=target,
             failure_kind="saved_state_unavailable",
-            failure_detail=f"cannot load saved ClickUp state: {type(exc).__name__}",
+            failure_detail=f"cannot load saved MCP bridge state: {type(exc).__name__}",
             remediation="recreate the connection",
         )
 
@@ -814,7 +868,6 @@ def start_saved_clickup_connection(
         tunnel_action="none",
     )
     start_server = server_launcher or default_server_launcher
-    start_tunnel = tunnel_launcher or default_tunnel_launcher
     run_handshake = handshake or _default_handshake
     server: Optional[ServerHandle] = None
     tunnel: Optional[TunnelHandle] = None
@@ -829,8 +882,21 @@ def start_saved_clickup_connection(
                 defaults=defaults,
             )
 
+        if server_launcher is None:
+            from .web_bridge_launcher import _port_is_available
+
+            if not _port_is_available(defaults.port):
+                return ClickupSetupOutcome(
+                    success=False,
+                    target=target,
+                    failure_kind="port_in_use",
+                    failure_detail=f"local port {defaults.port} is already in use",
+                    remediation="choose a different local port and retry",
+                    defaults=defaults,
+                )
+
         step(STEP_TUNNEL, "running")
-        tunnel = start_tunnel(defaults.tunnel, defaults.port)
+        tunnel = _start_saved_target_tunnel(target, tunnel_launcher)
         step(STEP_TUNNEL, "ok", tunnel.public_url)
         if cancelled():
             _cleanup(None, tunnel)
@@ -958,6 +1024,11 @@ def start_saved_clickup_connection(
             remediation="retry",
             defaults=defaults,
         )
+
+
+# Public generic name for the controller and new callers.  Keep the historical
+# ClickUp function as the compatibility entry point used by older tests/code.
+start_saved_mcp_connection = start_saved_clickup_connection
 
 
 def _generate_secret() -> str:

@@ -931,6 +931,8 @@ def prepare_tailscale_funnel(
     return TailscaleLaunchPlan(
         executable=resolved,
         public_url=published_url,
-        argv=tailscale_funnel_argv(resolved, port, https_port=https_port),
+        argv=tailscale_funnel_argv(
+            resolved, port, https_port=https_port, mount_path=normalized_path
+        ),
         ownership=ownership,
     )

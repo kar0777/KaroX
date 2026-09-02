@@ -1310,6 +1310,8 @@ def start_cloudflare_quick_tunnel(
 def start_tailscale_foreground_funnel(
     port: int,
     *,
+    https_port: int = 443,
+    mount_path: str = "/",
     executable: Optional[str] = None,
     timeout_seconds: float = 30.0,
     popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
@@ -1331,6 +1333,8 @@ def start_tailscale_foreground_funnel(
     try:
         plan = prepare_tailscale_funnel(
             port,
+            https_port=https_port,
+            mount_path=mount_path,
             executable=executable,
             emit=emit,
             restart_service=restart_service,

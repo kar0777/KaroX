@@ -17,6 +17,7 @@ from karox.launch_support import (
     BLOCKER_AUTH_UNSUPPORTED,
     BLOCKER_CREDENTIAL_MISSING,
     BLOCKER_LAUNCHER_UNAVAILABLE,
+    BLOCKER_REPOSITORY_BINDING_MISSING,
     BLOCKER_STABLE_URL_UNAVAILABLE,
     BLOCKER_TUNNEL_UNSUPPORTED,
     ConnectionLaunchResult,
@@ -56,6 +57,30 @@ class LaunchSupportTests(unittest.TestCase):
         self.assertFalse(support.supported)
         self.assertIn(BLOCKER_LAUNCHER_UNAVAILABLE, support.blockers)
         self.assertIsNone(support.launcher_id)
+
+    def test_repository_bound_custom_bearer_mcp_is_launchable(self) -> None:
+        support = launch_support(
+            _target(
+                preset_id="custom",
+                runtime_profile="generic-streamable-http",
+                credential_ref="os-keyring:bridge/mcp-c-1234567890abcdef",
+            )
+        )
+        self.assertTrue(support.supported)
+        self.assertEqual(support.blockers, ())
+        self.assertEqual(support.launcher_id, "saved-mcp")
+
+    def test_legacy_custom_secret_requires_repository_binding_before_launch(self) -> None:
+        support = launch_support(
+            _target(
+                preset_id="custom",
+                runtime_profile="generic-streamable-http",
+                credential_ref="os-keyring:connection/c-1234567890abcdef",
+            )
+        )
+        self.assertFalse(support.supported)
+        self.assertIn(BLOCKER_REPOSITORY_BINDING_MISSING, support.blockers)
+        self.assertNotIn(BLOCKER_LAUNCHER_UNAVAILABLE, support.blockers)
 
     def test_a_quick_tunnel_cannot_be_published_as_a_stable_url(self) -> None:
         # This is the expired-hostname case: promising stability on a Quick

@@ -77,6 +77,17 @@ _CONNECTION_SERVICE = "KaroX/connection"
 # at a bridge credential via this prefix, so a single ``resolve_connection_secret``
 # dispatcher serves both connection-owned and bridge-owned secrets.
 _BRIDGE_REFERENCE_PREFIX = "os-keyring:bridge/"
+
+# Saved connections in this family can be launched as their own guarded KaroX
+# Streamable HTTP bridge.  Keeping the list explicit prevents a generic launcher
+# from accidentally claiming OAuth/OpenAPI presets whose wire/auth contracts are
+# different.  ``adapt`` is intentionally absent: its TUI alias may reuse the
+# existing ChatGPT bridge, so spawning a second bearer bridge would violate that
+# ownership contract.
+MANAGED_STREAMABLE_BEARER_PRESETS: frozenset[str] = frozenset(
+    {"clickup", "generic-mcp", "custom", "web-agent", "ide"}
+)
+
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9-]+$")
 _PATH = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%-]*$")
@@ -735,6 +746,133 @@ class ConnectionCredentialStore:
         return {"status": "ok", "backend": "os-keyring", "scope": "connection"}
 
 
+def managed_mcp_session_id(connection_id: str) -> str:
+    """Return the durable repository-session ID owned by one managed MCP card."""
+
+    _safe_id(connection_id, "connection ID")
+    return f"mcp-{connection_id}"
+
+
+def is_managed_streamable_bearer_target(target: "McpClientTarget") -> bool:
+    """Whether ``target`` has the wire contract the generic launcher can serve."""
+
+    runtime_matches = target.runtime_profile == "generic-streamable-http" or (
+        target.preset_id == "clickup" and target.runtime_profile == "clickup"
+    )
+    return bool(
+        target.preset_id in MANAGED_STREAMABLE_BEARER_PRESETS
+        and runtime_matches
+        and target.transport == "streamable_http"
+        and target.auth_scheme == "bearer"
+        and target.tunnel in {"cloudflare", "tailscale", "local"}
+    )
+
+
+def prepare_managed_mcp_binding(
+    connection_id: str,
+    repository: Path,
+    *,
+    secret: Optional[str] = None,
+    bypass: bool = False,
+    display_name: str = "Custom MCP client",
+) -> dict[str, str]:
+    """Bind a saved bearer MCP card to a guarded repository session and token.
+
+    Manual connection credentials used to live only in ``KaroX/connection``.
+    That is enough to *describe* a remote client, but not enough to launch a
+    KaroX bridge later: a bridge also needs a durable repository-scoped session,
+    and it validates its bearer against ``KaroX/bridge``.  This helper creates
+    those two pieces together and returns only the opaque reference/fingerprint.
+
+    The stable session ID is derived from the immutable connection ID, so a
+    rename never changes the security boundary.  A retry after a failed registry
+    write may find the rollback-revoked session; it is reactivated only for the
+    same repository after repository validation.
+    """
+
+    from types import SimpleNamespace
+
+    from .access_mode import provider_access_profile
+    from .bridge import BridgeCredentialStore
+    from .paths import session_dir
+    from .sessions import SessionStore
+
+    repository = repository.expanduser().resolve(strict=True)
+    if not repository.is_dir():
+        raise ConnectionConfigurationError(
+            f"repository is not a directory: {repository}"
+        )
+
+    sid = managed_mcp_session_id(connection_id)
+    sessions = SessionStore(session_dir())
+    session_path = sessions.state_path(sid)
+    access_profile = provider_access_profile(SimpleNamespace(bypass=bool(bypass)))
+    created_or_reactivated = False
+
+    if session_path.exists():
+        record = sessions.load(sid)
+        sessions.validate_repository(record, repository)
+        if record.revoked or record.archived:
+            sessions.reactivate(sid, repository, access_profile)
+            created_or_reactivated = True
+    else:
+        sessions.create(
+            repository,
+            f"Managed MCP bridge: {display_name}",
+            access_profile,
+            session_id=sid,
+            name=display_name,
+        )
+        created_or_reactivated = True
+
+    bridge_store = BridgeCredentialStore()
+    try:
+        info = bridge_store.set(sid, secret)
+    except Exception:
+        if created_or_reactivated:
+            try:
+                sessions.revoke(sid)
+            except Exception:
+                pass
+        raise
+
+    # Never let a generated plaintext token escape this helper in a serializable
+    # result.  Callers only need the reference and fingerprint; copy actions
+    # resolve the value directly from the OS keyring when the user asks for it.
+    return {
+        "session_id": sid,
+        "reference": info["reference"],
+        "fingerprint": info["fingerprint"],
+    }
+
+
+def rollback_managed_mcp_binding(reference: Optional[str]) -> None:
+    """Best-effort rollback for a bridge binding whose metadata was not saved."""
+
+    if not reference or not reference.startswith(_BRIDGE_REFERENCE_PREFIX):
+        return
+    sid = reference[len(_BRIDGE_REFERENCE_PREFIX) :]
+    if not sid.startswith("mcp-"):
+        return
+    try:
+        from .bridge import BridgeCredentialStore
+
+        BridgeCredentialStore().delete(sid)
+    except Exception:
+        pass
+    try:
+        from .paths import session_dir
+        from .sessions import SessionStore
+
+        sessions = SessionStore(session_dir())
+        if sessions.state_path(sid).exists():
+            record = sessions.load(sid)
+            if not record.revoked:
+                sessions.revoke(sid)
+    except Exception:
+        pass
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -923,17 +1061,24 @@ def remove_connection(
         except CredentialError:
             pass
     elif ref and ref.startswith(_BRIDGE_REFERENCE_PREFIX):
-        # Lazy import: ``bridge`` pulls uvicorn and the tool runtime, which the
-        # connection module never imports otherwise.  Importing at module load
-        # would couple the connection registry to the bridge runtime for every
-        # consumer, even ones that never start a bridge.
-        from .bridge import BridgeCredentialStore
-
         name = ref[len(_BRIDGE_REFERENCE_PREFIX):]
-        try:
-            BridgeCredentialStore().delete(name)
-        except CredentialError:
-            pass
+        if name.startswith("mcp-"):
+            # Manual managed MCP cards own both this bridge credential and the
+            # repository-scoped SessionStore record with the same name.  Revoke
+            # them together so deleting a card cannot leave a reusable bridge
+            # identity behind.
+            rollback_managed_mcp_binding(ref)
+        else:
+            # Lazy import: ``bridge`` pulls uvicorn and the tool runtime, which the
+            # connection module never imports otherwise. Importing at module load
+            # would couple the connection registry to the bridge runtime for every
+            # consumer, even ones that never start a bridge.
+            from .bridge import BridgeCredentialStore
+
+            try:
+                BridgeCredentialStore().delete(name)
+            except CredentialError:
+                pass
     return removed
 
 
