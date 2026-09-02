@@ -889,15 +889,13 @@ def prepare_tailscale_funnel(
                     "Clearing the stale KaroX Funnel listener "
                     f"HTTPS {https_port} -> localhost:{port}…"
                 )
+            cleanup_argv = [resolved, "funnel", f"--https={https_port}"]
+            if normalized_path != "/":
+                cleanup_argv.append(f"--set-path={normalized_path}")
+            cleanup_argv.extend((f"http://127.0.0.1:{port}", "off"))
             try:
                 result = run(
-                    [
-                        resolved,
-                        "funnel",
-                        f"--https={https_port}",
-                        f"http://127.0.0.1:{port}",
-                        "off",
-                    ],
+                    cleanup_argv,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -917,7 +915,9 @@ def prepare_tailscale_funnel(
                 )
             remaining = inventory_tailscale_routes(resolved, run=run)
             if any(
-                route.public_port == https_port and route.local_port == port
+                route.public_port == https_port
+                and (route.path.rstrip("/") or "/") == normalized_path
+                and route.local_port == port
                 for route in remaining
             ):
                 raise TailscaleError(

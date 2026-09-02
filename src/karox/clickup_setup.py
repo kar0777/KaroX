@@ -306,6 +306,13 @@ def default_server_launcher(
     environment = dict(os.environ)
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
+    # This managed MCP bridge exposes repo/git/check tools only.  A parent KaroX
+    # hosted session may carry KAROX_BROWSER_BACKEND=extension for its own
+    # headed Chrome, but inheriting that into a non-browser child makes CLI
+    # policy validation fail (extension requires headed user takeover).  Do not
+    # let an unrelated parent browser mode become a dependency of Brainbase or
+    # other generic MCP clients.
+    environment.pop("KAROX_BROWSER_BACKEND", None)
 
     popen = spawn or subprocess.Popen
     process = popen(
@@ -361,6 +368,7 @@ def default_tunnel_launcher(
     port: int,
     *,
     https_port: int = 443,
+    mount_path: str = "/",
 ) -> TunnelHandle:
     """Start the requested tunnel and return its public URL.
 
@@ -379,6 +387,7 @@ def default_tunnel_launcher(
         )
     from .web_bridge_launcher import (
         start_cloudflare_quick_tunnel,
+        start_tailscale_background_funnel,
         start_tailscale_foreground_funnel,
     )
 
@@ -390,8 +399,27 @@ def default_tunnel_launcher(
             pid=getattr(cf.process, "pid", None),
         )
     if tunnel_kind == "tailscale":
+        if mount_path != "/":
+            # A listener can already be owned by a foreground ChatGPT/Notion
+            # Funnel. Tailscale rejects a second *foreground* process for that
+            # listener, but its daemon-managed --bg config can add a sibling path
+            # without replacing the existing root handler (live-proven on
+            # Windows/Tailscale). Keep path mounts daemon-owned for that reason.
+            ts_bg = start_tailscale_background_funnel(
+                port,
+                https_port=https_port,
+                mount_path=mount_path,
+                timeout_seconds=30.0,
+            )
+            return TunnelHandle(
+                public_url=ts_bg.public_url.rstrip("/") + mount_path,
+                stop=ts_bg.stop,
+                pid=None,
+            )
         ts = start_tailscale_foreground_funnel(
-            port, https_port=https_port, timeout_seconds=30.0
+            port,
+            https_port=https_port,
+            timeout_seconds=30.0,
         )
         return TunnelHandle(
             public_url=ts.public_url,
@@ -741,9 +769,24 @@ def _start_saved_target_tunnel(
     if target.tunnel != "tailscale":
         return default_tunnel_launcher(target.tunnel, target.port)
 
+    # A previously successful path-mounted route is part of the public contract:
+    # restart it on exactly the same listener and path instead of moving the
+    # client's URL behind its back.
+    if target.public_url:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(target.public_url)
+        if parsed.path and parsed.path != "/":
+            return default_tunnel_launcher(
+                target.tunnel,
+                target.port,
+                https_port=parsed.port or 443,
+                mount_path=parsed.path,
+            )
+
     last_error: Optional[Exception] = None
     candidates = _saved_tailscale_https_candidates(target)
-    for index, https_port in enumerate(candidates):
+    for https_port in candidates:
         try:
             return default_tunnel_launcher(
                 target.tunnel, target.port, https_port=https_port
@@ -752,10 +795,26 @@ def _start_saved_target_tunnel(
             last_error = exc
             detail = str(exc).lower()
             conflict = "route_in_use" in detail or "https_port_in_use" in detail
-            # A saved URL is pinned to one listener.  Fallback is only for first
-            # launch, where no remote client has been configured yet.
-            if target.public_url or not conflict or index == len(candidates) - 1:
+            # A saved root URL is pinned to one listener. Fallback is only for a
+            # first launch where no remote client has been configured yet.
+            if target.public_url or not conflict:
                 raise
+
+    # Tailscale exposes only three HTTPS listener ports, and KaroX may already
+    # use all of them (ChatGPT=443, Notion=8443, Hyperagent=10000).  Funnel can
+    # safely host sibling path mounts on the same listener, so a generic MCP
+    # bridge falls back to its own deterministic path instead of fighting those
+    # services for the root route.  The public base saved on the card includes
+    # this mount; ``effective_url`` then appends the target's /mcp endpoint.
+    if target.public_url is None and target.preset_id != "clickup":
+        mount_path = f"/karox-{target.connection_id}"
+        return default_tunnel_launcher(
+            target.tunnel,
+            target.port,
+            https_port=443,
+            mount_path=mount_path,
+        )
+
     assert last_error is not None
     raise last_error
 

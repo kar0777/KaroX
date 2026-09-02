@@ -795,6 +795,7 @@ class TailscaleBackgroundFunnel:
     public_url: str
     port: int
     https_port: int = 443
+    mount_path: str = "/"
 
     def stop(self) -> None:
         # Background Funnel survives the launcher process by design, so normal
@@ -1456,16 +1457,23 @@ def recover_tailscale_foreground_funnel(
 
 
 def _background_funnel_argv(
-    executable: str, port: int, *, https_port: int = 443
+    executable: str,
+    port: int,
+    *,
+    https_port: int = 443,
+    mount_path: str = "/",
 ) -> list[str]:
-    return [
+    argv = [
         executable,
         "funnel",
         "--bg",
         "--yes",
         f"--https={https_port}",
-        f"http://127.0.0.1:{port}",
     ]
+    if mount_path != "/":
+        argv.append(f"--set-path={mount_path}")
+    argv.append(f"http://127.0.0.1:{port}")
+    return argv
 
 
 def _matching_background_funnel_routes(
@@ -1474,19 +1482,23 @@ def _matching_background_funnel_routes(
     public_url: str,
     port: int,
     https_port: int = 443,
+    mount_path: str = "/",
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[list[Any], list[Any]]:
     from .tailscale_routes import inventory_tailscale_routes
 
     host = urlsplit(public_url).hostname or ""
+    normalized_path = mount_path.rstrip("/") or "/"
     routes = inventory_tailscale_routes(executable, run=run)
-    same_listener = [
+    same_mount = [
         route
         for route in routes
-        if route.public_port == https_port and (not route.host or route.host == host)
+        if route.public_port == https_port
+        and (not route.host or route.host == host)
+        and (route.path.rstrip("/") or "/") == normalized_path
     ]
-    owned = [route for route in same_listener if route.local_port == port]
-    foreign = [route for route in same_listener if route.local_port != port]
+    owned = [route for route in same_mount if route.local_port == port]
+    foreign = [route for route in same_mount if route.local_port != port]
     return owned, foreign
 
 
@@ -1496,6 +1508,7 @@ def _apply_tailscale_background_funnel(
     public_url: str,
     port: int,
     https_port: int = 443,
+    mount_path: str = "/",
     timeout_seconds: float,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     expected_stale_ports: frozenset[int] = frozenset(),
@@ -1512,7 +1525,12 @@ def _apply_tailscale_background_funnel(
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         result = run(
-            _background_funnel_argv(executable, port, https_port=https_port),
+            _background_funnel_argv(
+                executable,
+                port,
+                https_port=https_port,
+                mount_path=mount_path,
+            ),
             **kwargs,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1537,6 +1555,7 @@ def _apply_tailscale_background_funnel(
             public_url=public_url,
             port=port,
             https_port=https_port,
+            mount_path=mount_path,
             run=run,
         )
         # During an owned retarget the daemon may briefly still report the
@@ -1566,6 +1585,7 @@ def start_tailscale_background_funnel(
     port: int,
     *,
     https_port: int = 443,
+    mount_path: str = "/",
     executable: Optional[str] = None,
     timeout_seconds: float = 30.0,
     emit: Optional[Callable[[str], None]] = None,
@@ -1578,6 +1598,7 @@ def start_tailscale_background_funnel(
         plan = prepare_tailscale_funnel(
             port,
             https_port=https_port,
+            mount_path=mount_path,
             executable=executable,
             run=run,
             emit=emit,
@@ -1591,13 +1612,18 @@ def start_tailscale_background_funnel(
         public_url=plan.public_url,
         port=port,
         https_port=https_port,
+        mount_path=mount_path,
         timeout_seconds=timeout_seconds,
         run=run,
     )
     if emit is not None:
         emit(f"Background Funnel is ready: {plan.public_url}")
     return TailscaleBackgroundFunnel(
-        plan.executable, plan.public_url, port, https_port=https_port
+        plan.executable,
+        plan.public_url,
+        port,
+        https_port=https_port,
+        mount_path=mount_path,
     )
 
 
@@ -1613,6 +1639,7 @@ def refresh_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=tunnel.port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         run=run,
     )
     if foreign:
@@ -1626,6 +1653,7 @@ def refresh_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=tunnel.port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         timeout_seconds=timeout_seconds,
         run=run,
     )
@@ -1658,6 +1686,7 @@ def retarget_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=tunnel.port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         run=run,
     )
     # A route already pointing at the requested port is an interrupted
@@ -1673,6 +1702,7 @@ def retarget_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=requested_port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         timeout_seconds=timeout_seconds,
         run=run,
         expected_stale_ports=frozenset({tunnel.port}),
@@ -1682,6 +1712,7 @@ def retarget_tailscale_background_funnel(
         tunnel.public_url,
         requested_port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
     )
 
 
@@ -1696,6 +1727,7 @@ def stop_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=tunnel.port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         run=run,
     )
     if not owned:
@@ -1714,15 +1746,21 @@ def stop_tailscale_background_funnel(
     }
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cleanup_argv = [
+        tunnel.executable,
+        "funnel",
+        f"--https={tunnel.https_port}",
+    ]
+    if tunnel.mount_path != "/":
+        # Tailscale path routes are daemon config entries. This exact form was
+        # live-verified beside an existing foreground root listener: it removes
+        # only the selected path and preserves the root handler.
+        cleanup_argv.extend((f"--set-path={tunnel.mount_path}", "off"))
+    else:
+        cleanup_argv.extend((f"http://127.0.0.1:{tunnel.port}", "off"))
     try:
         result = run(
-            [
-                tunnel.executable,
-                "funnel",
-                f"--https={tunnel.https_port}",
-                f"http://127.0.0.1:{tunnel.port}",
-                "off",
-            ],
+            cleanup_argv,
             **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1734,6 +1772,7 @@ def stop_tailscale_background_funnel(
         public_url=tunnel.public_url,
         port=tunnel.port,
         https_port=tunnel.https_port,
+        mount_path=tunnel.mount_path,
         run=run,
     )
     return not remaining

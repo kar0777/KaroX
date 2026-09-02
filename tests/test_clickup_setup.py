@@ -902,6 +902,114 @@ class ClickupSavedRestartTests(unittest.TestCase):
             "https://monsterpc.example.ts.net:10000",
         )
 
+    def test_saved_custom_mcp_falls_back_to_shared_443_path_when_all_roots_are_busy(self) -> None:
+        """All three Tailscale HTTPS roots may be occupied by other KaroX clients."""
+
+        import time
+
+        from karox.connections import McpClientTarget
+        from karox.models import AccessProfile
+        from karox.paths import session_dir
+        from karox.sessions import SessionStore
+
+        session_id = "mcp-c-path123456789012"
+        repository = Path(self._tmp)
+        SessionStore(session_dir()).create(
+            repository,
+            "Managed MCP bridge: Brainbase path fallback",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id=session_id,
+        )
+        target = McpClientTarget(
+            connection_id="c-path123456789012",
+            name="Brainbase",
+            preset_id="custom",
+            transport="streamable_http",
+            endpoint_path="/mcp",
+            auth_scheme="bearer",
+            tunnel="tailscale",
+            runtime_profile="generic-streamable-http",
+            url_stability="stable",
+            credential_ref=f"os-keyring:bridge/{session_id}",
+            port=8770,
+            created_at=time.time(),
+            updated_at=time.time(),
+        )
+        attempts: list[tuple[int, str]] = []
+
+        def tunnel_side_effect(kind, port, *, https_port=443, mount_path="/"):
+            attempts.append((https_port, mount_path))
+            if mount_path == "/":
+                raise RuntimeError(
+                    f"route_in_use: HTTPS {https_port} root is already occupied"
+                )
+            return TunnelHandle(
+                public_url=f"https://monsterpc.example.ts.net{mount_path}",
+                stop=lambda: None,
+                pid=222,
+            )
+
+        def server_launcher(
+            port,
+            secret,
+            *,
+            repository,
+            credential_name=None,
+            reuse_existing_session=False,
+        ):
+            return ServerHandle(
+                local_endpoint=f"http://127.0.0.1:{port}/mcp",
+                secret=secret,
+                port=port,
+                credential_name=credential_name or "unexpected",
+                stop=lambda: None,
+                stop_process=lambda: None,
+                pid=111,
+            )
+
+        def handshake(target, *, endpoint_url, secret, timeout_seconds=15.0):
+            self.assertEqual(
+                endpoint_url,
+                "https://monsterpc.example.ts.net/karox-c-path123456789012/mcp",
+            )
+            return {
+                "state": "ok",
+                "wire": "streamable_http",
+                "tool_count": 4,
+                "detail": "ok",
+            }
+
+        with (
+            patch("karox.connections.resolve_connection_secret", return_value="saved-secret"),
+            patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+            patch(
+                "karox.clickup_setup.default_tunnel_launcher",
+                side_effect=tunnel_side_effect,
+            ),
+        ):
+            outcome = start_saved_mcp_connection(
+                target,
+                server_launcher=server_launcher,
+                handshake=handshake,
+            )
+
+        self.assertTrue(outcome.success, outcome.failure_detail)
+        self.assertEqual(
+            attempts,
+            [
+                (10000, "/"),
+                (8443, "/"),
+                (443, "/"),
+                (443, "/karox-c-path123456789012"),
+            ],
+        )
+        self.assertIsNotNone(outcome.target)
+        assert outcome.target is not None
+        self.assertEqual(
+            outcome.target.public_url,
+            "https://monsterpc.example.ts.net/karox-c-path123456789012",
+        )
+
     def test_saved_custom_mcp_refuses_busy_local_port_before_tunnel_mutation(self) -> None:
         import time
 
@@ -1066,7 +1174,11 @@ class ClickupServerLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
             os.environ,
-            {"KAROX_CONFIG_DIR": tmp, "KAROX_VNEXT_CONFIG_DIR": tmp},
+            {
+                "KAROX_CONFIG_DIR": tmp,
+                "KAROX_VNEXT_CONFIG_DIR": tmp,
+                "KAROX_BROWSER_BACKEND": "extension",
+            },
             clear=False,
         ):
                 with patch("karox.web_bridge_launcher._wait_for_bridge", lambda *a, **k: None):
@@ -1080,6 +1192,7 @@ class ClickupServerLauncherTests(unittest.TestCase):
                     )
         self.assertEqual(captured["env"].get("PYTHONIOENCODING"), "utf-8")
         self.assertEqual(captured["env"].get("PYTHONUTF8"), "1")
+        self.assertNotIn("KAROX_BROWSER_BACKEND", captured["env"])
         # Decoding must match the encoding forced on the child, and an
         # undecodable byte must not crash the drain thread.
         self.assertTrue(captured["kwargs"].get("text"))
