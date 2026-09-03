@@ -4076,7 +4076,7 @@ if _HAS_TEXTUAL:
                         "Choose a connection. Keys 1–3 work without a mouse; "
                         "Tab moves focus and Enter confirms."
                         if english
-                        else "Выерите сценарий. Клавиши 1–3 работают без мыши; "
+                        else "Выберите подключение. Клавиши 1–3 работают без мыши; "
                         "Tab меняет фокус, Enter подтверждает."
                     ),
                     classes="hint",
