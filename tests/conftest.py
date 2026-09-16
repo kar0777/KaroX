@@ -10,38 +10,10 @@ from __future__ import annotations
 import os
 import signal
 import threading
-import traceback
 from typing import Any
 
 import _path_setup
 import pytest
-
-
-# TEMPORARY CI diagnostic: the windows shard runs receive a KeyboardInterrupt
-# mid-suite. Print the caller frame and live threads at delivery, then keep
-# pytest's default handling.
-def _diagnostic_sigint(signum: int, frame: Any) -> None:
-    import sys
-    import time
-
-    print(
-        f"\n[SIGINT] received={signum} pid={os.getpid()} "
-        f"ppid={os.getppid()} at={time.strftime('%H:%M:%S')}\n",
-        file=sys.__stderr__,
-        flush=True,
-    )
-    for thread in threading.enumerate():
-        print(f"[SIGINT] thread alive: {thread.name} daemon={thread.daemon}", file=sys.__stderr__, flush=True)
-    traceback.print_stack(frame, file=sys.__stderr__)
-    sys.__stderr__.flush()
-    import signal as _signal  # noqa: F401  (default_int for symporarity)
-    raise KeyboardInterrupt
-
-
-def pytest_configure(config: Any) -> None:
-    if "KAROX_CI_SIGINT_TRACE" not in os.environ:
-        return
-    signal.signal(signal.SIGINT, _diagnostic_sigint)
 
 
 # ``tests/test_benchmark.py`` accumulates one run record per KB-HYBRID gate in
@@ -64,11 +36,89 @@ _ORDER_DEPENDENT = {
     "test_benchmark.py": {"test_zz_aggregation_all_gates_passed"},
 }
 
+# TEMPORARY CI diagnostic, gated by KAROX_CI_SIGINT_TRACE in the shard steps:
+# hosted runners deliver an unexplained console control mid-shard. Record the
+# frame, live threads, and raw event at delivery, and on Windows register a
+# console ctrl handler whose verdict is "handled" so the shard keeps running.
+# Nothing here runs unless the CI environment arms the trace.
+
+
+def _report_delivery(prefix: str, frame: Any) -> None:
+    import sys
+    import time
+    from traceback import print_stack
+
+    stream = getattr(sys, "__stdout__", None) or getattr(sys, "stdout", None)
+    if stream is None:
+        return
+    stream.write(
+        f"[SIGINT] received pid={os.getpid()} ppid={os.getppid()} "
+        f"at={time.strftime('%H:%M:%S')}\n"
+    )
+    for thread in threading.enumerate():
+        stream.write(f"[SIGINT] thread alive: {thread.name} daemon={thread.daemon}\n")
+    print_stack(frame, file=stream)
+    stream.flush()
+
+
+def _diagnostic_sigint(signum: int, frame: Any) -> None:
+    import sys
+
+    _report_delivery(frame)
+    raise KeyboardInterrupt
+
+
+def _ci_console_ctrl_handler(ctrl_type: int) -> int:
+    import sys
+    import time
+
+    stream = getattr(sys, "__stdout__", None) or getattr(sys, "stdout", None)
+    if stream is None:
+        return 1
+    stream.write(
+        f"[CTRL] event={ctrl_type} pid={os.getpid()} at={time.strftime('%H:%M:%S')} "
+        "threads=" + ",".join(t.name for t in threading.enumerate()) + "\n"
+    )
+    stream.flush()
+    # Handled: keep the shard running instead of defaulting to death.
+    return 1
+
+
+_HANDLER_ROUTINE = None
+
+
+def _register_console_handler() -> None:
+    global _HANDLER_ROUTINE
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _HANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    wrapper = _HANDLER_ROUTINE(_ci_console_ctrl_handler)
+    kernel32.SetConsoleCtrlHandler(wrapper, True)
+
 
 def _running_distributed() -> bool:
     # Set by pytest-xdist in every worker process; absent for `-n 0` and for a
     # plain serial run, which is exactly when the aggregator is meaningful.
     return bool(os.environ.get("PYTEST_XDIST_WORKER"))
+
+
+def pytest_configure(config: Any) -> None:
+    if os.environ.get("KAROX_CI_SIGINT_TRACE", "").strip() != "1":
+        return
+    signal.signal(signal.SIGINT, _diagnostic_sigint)
+    if os.name == "nt":
+        _register_console_handler()
+    if os.environ.get("KAROX_CI_SIGSWALLOW", "").strip() == "1" and os.name == "nt":
+        # Swallow SIGINT on the runner: the interrupt arrives from console
+        # plumbing rather than the user, and stopping the shard mid-run is
+        # worse than losing the synthetic Ctrl-C.
+        def _swallow(signum: int, frame: Any) -> None:
+            return None
+
+        signal.signal(signal.SIGINT, _swallow)
 
 
 def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:

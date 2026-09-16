@@ -108,6 +108,10 @@ class FreshProcessBootstrapTests(unittest.TestCase):
             "    os.environ.pop(n, None)\n"
             "for n in ('APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'):\n"
             "    os.environ[n] = tmp\n"
+            # macOS resolves user state through ~/Library/Application Support
+            # and ignores the APPDATA/XDG_* spellings, so the rebase has to
+            # move HOME as well.
+            "os.environ['HOME'] = tmp\n"
             "resolved = os.path.normcase(str(paths.config_dir()))\n"
             "import pathlib\n"
             "base = os.path.normcase(str(pathlib.Path(tmp).resolve()))\n"

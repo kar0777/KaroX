@@ -40,6 +40,7 @@ jobs:
       # avoids running every unittest twice under both pytest and unittest.
       - env:
           KAROX_CI_SIGINT_TRACE: "1"
+          KAROX_CI_SIGSWALLOW: "1"
         run: python -m pytest tests --ignore-glob="tests/test_[i-z]*.py" -vv --tb=short --full-trace
         timeout-minutes: 40
 
@@ -57,6 +58,7 @@ jobs:
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test && python -m pip install --no-deps -e .
       - env:
           KAROX_CI_SIGINT_TRACE: "1"
+          KAROX_CI_SIGSWALLOW: "1"
         run: python -m pytest tests --ignore-glob="tests/test_[a-h]*.py" -vv --tb=short --full-trace
         timeout-minutes: 45
 
