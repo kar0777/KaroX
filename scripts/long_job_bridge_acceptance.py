@@ -108,7 +108,10 @@ def _abrupt_client_disconnect(port: int, token: str) -> None:
         handle.sendall(request)
         # Abortive close forces a real client disconnect instead of a graceful
         # response drain. The next fresh client must still reach the same bridge.
-        handle.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+        # POSIX linger fields are native ints (8 bytes); Windows uses
+        # u_short/u_short. Linux rejects the two-short encoding with EINVAL.
+        linger = struct.pack("hh", 1, 0) if os.name == "nt" else struct.pack("ii", 1, 0)
+        handle.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
     finally:
         handle.close()
 
