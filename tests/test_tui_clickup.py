@@ -196,6 +196,7 @@ class ClickupTuiTests(unittest.IsolatedAsyncioTestCase):
                 "Esc should dismiss the ClickUp auto screen",
             )
 
+    @unittest.skipUnless(os.name == "nt", "Windows run_test result-card contract")
     async def test_connect_is_non_blocking_and_shows_result_card(self) -> None:
         async for app, pilot in self._app():
             await _open_clickup_auto_screen(pilot, app)

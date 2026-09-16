@@ -44,7 +44,7 @@ dependencies = [
   # depend on them, so a change in either one's dependency set would have broken
   # KaroX at import time with nothing here to prevent it.
   "markdown-it-py>=3.0,<5.0",
-  "anyio>=4.4,<5.0",
+  "anyio>=4.4,<4.15",
   "starlette>=0.37,<2.0",
   # Process ownership, PID-reuse protection, and managed-service identity checks.
   "psutil>=5.9,<8.0",

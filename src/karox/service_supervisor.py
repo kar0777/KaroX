@@ -172,7 +172,10 @@ def verify_identity(
                 return IdentityVerdict(False, IdentityVerdict.REFUSE_EXECUTABLE)
     if stored.cmdline_digest and live.cmdline_digest:
         checked = True
-        if stored.cmdline_digest != live.cmdline_digest:
+        # See the comment on the creation-time gate: a matched creation time
+        # has already proven PID identity; launcher digest differences belong
+        # to probe spelling, and the cmdline read can race the exec swap.
+        if not proven and stored.cmdline_digest != live.cmdline_digest:
             return IdentityVerdict(False, IdentityVerdict.REFUSE_CMDLINE)
     if not checked:
         return IdentityVerdict(False, IdentityVerdict.REFUSE_UNPROVABLE)
