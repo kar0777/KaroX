@@ -194,11 +194,36 @@ class HostedSmartStopTests(unittest.TestCase):
                 idempotency_key="push-approved-1",
             )
 
+        # Approval is for the exact commit that was reviewed, not merely for a
+        # remote/branch pair. Advancing HEAD invalidates the first approval even
+        # though the visible tool arguments are unchanged.
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "advance after approval"],
+            cwd=self.repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self.assertRaisesRegex(Exception, "no longer matches"):
+            bridge.execute_approved(
+                "karox.git.push",
+                arguments,
+                expected_action_digest=stopped.exception.action_digest,
+                idempotency_key="push-approved-stale-head",
+            )
+        with self.assertRaises(HostedApprovalRequired) as refreshed:
+            bridge.execute(
+                "karox.git.push",
+                arguments,
+                idempotency_key="push-approved-2",
+            )
+
         result = bridge.execute_approved(
             "karox.git.push",
             arguments,
-            expected_action_digest=stopped.exception.action_digest,
-            idempotency_key="push-approved-1",
+            expected_action_digest=refreshed.exception.action_digest,
+            idempotency_key="push-approved-2",
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["data"]["pushed"])

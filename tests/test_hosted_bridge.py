@@ -230,8 +230,8 @@ async def _asgi_request(app: Any, request: dict[str, Any]) -> _AsgiResponse:
         "path": request["path"],
         "raw_path": request["path"].encode("utf-8"),
         "root_path": "",
-        "scheme": "http",
-        "query_string": b"",
+        "scheme": request.get("scheme", "http"),
+        "query_string": request.get("query_string", b""),
         "headers": [
             (name.lower().encode("utf-8"), value.encode("utf-8"))
             for name, value in request.get("headers", ())

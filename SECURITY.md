@@ -61,7 +61,11 @@ authentication authority. Those effects remain outside every stable access
 profile. A durable Advanced ChatGPT Web bridge may expose the dedicated
 `karox.git.push` operation, but each invocation crosses a separate one-shot user
 approval bound to the exact action; ordinary developer commands remain unable to
-push.
+push. Modern MCP clients use the native elicitation round. If a client does not
+advertise elicitation, KaroX falls back to a short-lived browser approval page
+bound to that same exact action. The user enters the OAuth approval password
+there; the password is never returned to the MCP client or model, and the
+approval is consumed by the first matching retry.
 
 ## What KaroX Does Not Do
 

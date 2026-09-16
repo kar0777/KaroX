@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from _support import SRC  # noqa: F401
 from karox.hosted_bridge import HostedApprovalRequired
@@ -292,6 +293,103 @@ def test_modern_approval_round_requires_real_elicitation_and_exact_retry() -> No
     assert runtime.approved_digests == ["a" * 64]
     assert replay.status == 400
     assert replay.json()["error"]["code"] == -32602
+
+
+def _without_elicitation(request: dict[str, Any]) -> dict[str, Any]:
+    value = dict(request)
+    payload = json.loads(bytes(value["body"]).decode("utf-8"))
+    meta = payload["params"]["_meta"]
+    meta["io.modelcontextprotocol/clientCapabilities"] = {}
+    value["body"] = json.dumps(payload).encode("utf-8")
+    return value
+
+
+def test_modern_approval_browser_fallback_is_human_bound_and_one_shot() -> None:
+    runtime = _ApprovalRuntime()
+    app = build_proxy_asgi_app(
+        runtime,
+        "modern-test-token",
+        human_approval_secret="human-approval-secret",
+        human_approval_base_url="https://public.example.test",
+    )
+    arguments = {"remote": "origin", "branch": "main"}
+
+    async def scenario() -> tuple[Any, Any, Any, Any, Any, Any]:
+        tool_request = _without_elicitation(
+            _modern_request(
+                "tools/call",
+                {"name": "karox_git_push", "arguments": arguments},
+                name="karox_git_push",
+            )
+        )
+        first = await _asgi_request(app, tool_request)
+        first_payload = first.json()["result"]["structuredContent"]
+        approval_url = first_payload["approval_url"]
+        assert approval_url.startswith("https://public.example.test/mcp/approval?")
+        parsed = urlsplit(approval_url)
+        states = parse_qs(parsed.query).get("state", [])
+        assert len(states) == 1
+        state = states[0]
+        page = await _asgi_request(
+            app,
+            {
+                "method": "GET",
+                "path": parsed.path,
+                "query_string": parsed.query.encode("ascii"),
+                "headers": [("host", "127.0.0.1:8765")],
+            },
+        )
+        wrong = await _asgi_request(
+            app,
+            {
+                "method": "POST",
+                "path": parsed.path,
+                "headers": [
+                    ("host", "127.0.0.1:8765"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "body": urlencode({"state": state, "password": "wrong"}).encode(),
+            },
+        )
+        assert runtime.approved_digests == []
+        approved_page = await _asgi_request(
+            app,
+            {
+                "method": "POST",
+                "path": parsed.path,
+                "headers": [
+                    ("host", "127.0.0.1:8765"),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                "body": urlencode(
+                    {"state": state, "password": "human-approval-secret"}
+                ).encode(),
+            },
+        )
+        approved = await _asgi_request(app, tool_request)
+        replay = await _asgi_request(app, tool_request)
+        return first, page, wrong, approved_page, approved, replay
+
+    first, page, wrong, approved_page, approved, replay = _run_with_lifespan(app, scenario)
+    assert first.status == 200
+    first_result = first.json()["result"]
+    assert first_result["resultType"] == "complete"
+    assert first_result["isError"] is True
+    assert first_result["structuredContent"]["error_code"] == "approval_browser_required"
+    assert page.status == 200
+    assert "human-approval-secret" not in page.text
+    assert "Approve one KaroX action" in page.text
+    assert wrong.status == 403
+    assert approved_page.status == 200
+    assert "Action approved" in approved_page.text
+    assert approved.status == 200
+    approved_result = approved.json()["result"]
+    assert approved_result["structuredContent"]["approved"] is True
+    assert runtime.approved_digests == ["a" * 64]
+    assert replay.status == 200
+    replay_result = replay.json()["result"]
+    assert replay_result["structuredContent"]["error_code"] == "approval_browser_required"
+    assert runtime.approved_digests == ["a" * 64]
 
 
 def test_modern_approval_decline_and_tampered_state_never_execute() -> None:

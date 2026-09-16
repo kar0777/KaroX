@@ -21,6 +21,8 @@ later cannot slip past Smart Stop just by not being listed here yet.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -462,6 +464,35 @@ def risk_kind_for(name: str, arguments: Mapping[str, Any]) -> str:
     return name
 
 
+def _git_head_identity(repository: Path | None) -> str:
+    """Return the exact commit a push would send, or ``unborn`` fail-closed identity."""
+
+    if repository is None:
+        return "unborn"
+    kwargs: dict[str, Any] = {
+        "cwd": repository,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "check": False,
+        "timeout": 5.0,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unborn"
+    head = completed.stdout.strip()
+    if completed.returncode == 0 and len(head) == 40:
+        return head
+    return "unborn"
+
+
 def action_for_command(
     command: CoreCommand,
     *,
@@ -499,6 +530,23 @@ def action_for_command(
         or arguments.get("recurse")
         or any(item.endswith(("/**", "/*")) for item in paths)
     )
+    details: dict[str, Any] = {
+        "command": command.name,
+        "deletion_requested": deletion_requested,
+        "deletion_paths": list(deletion_paths),
+    }
+    if kind == "git.push":
+        # A push approval is for one exact commit as well as one destination.
+        # Both the hosted preflight and Core execution call this mapper, so a
+        # HEAD change after the human says yes changes the action digest and the
+        # one-shot confirmation can no longer be redeemed.
+        details.update(
+            {
+                "remote": arguments.get("remote"),
+                "branch": arguments.get("branch"),
+                "head": _git_head_identity(repository),
+            }
+        )
 
     return RiskAction(
         kind=kind,
@@ -514,11 +562,7 @@ def action_for_command(
         recursive=recursive,
         outside_repository=_outside_repository(paths, repository),
         reversible_by_checkpoint=reversible_by_checkpoint,
-        details={
-            "command": command.name,
-            "deletion_requested": deletion_requested,
-            "deletion_paths": list(deletion_paths),
-        },
+        details=details,
     )
 
 

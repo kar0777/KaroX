@@ -1948,11 +1948,13 @@ class CoreRuntime:
     ) -> Dict[str, Any]:
         remote, branch = self._prepare_push(arguments, deadline_seconds)
         revision = self._git(["rev-parse", "HEAD"], deadline_seconds)
-        commit_sha = (
-            revision["stdout"].strip()
-            if revision["exit_code"] == 0 and not revision["timed_out"]
-            else None
-        )
+        commit_sha = revision["stdout"].strip()
+        if (
+            revision["timed_out"]
+            or revision["exit_code"] != 0
+            or len(commit_sha) != 40
+        ):
+            raise InvalidCommand("git.push cannot prove the current Git HEAD")
         result = self._git(
             ["push", "--porcelain", remote, f"HEAD:refs/heads/{branch}"],
             deadline_seconds,

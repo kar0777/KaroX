@@ -24,6 +24,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from starlette.responses import JSONResponse, Response
 
 from .artifacts import ArtifactStore
+from .browser_approval import BrowserApprovalBroker
 from .core import CoreError, VerificationCommandNotApproved
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
@@ -610,6 +611,8 @@ def build_proxy_asgi_app(
     allowed_hosts: Optional[Sequence[str]] = None,
     diagnostics: Optional[Mapping[str, Any]] = None,
     inline_result_bytes: Optional[int] = None,
+    human_approval_secret: str | Callable[[], str] | None = None,
+    human_approval_base_url: Optional[str] = None,
 ) -> Any:
     """Expose selected Core and/or proxied tools as authenticated MCP."""
     if (bearer_token is None) == (bearer_authorizer is None):
@@ -750,6 +753,11 @@ def build_proxy_asgi_app(
         resolve_token()
     if not isinstance(path, str) or not path.startswith("/") or "?" in path:
         raise ValueError("bridge MCP path must be an absolute URL path")
+    browser_approval = BrowserApprovalBroker(
+        path=path,
+        secret_resolver=human_approval_secret,
+        base_url=human_approval_base_url,
+    )
     if not 0.1 <= float(deadline_seconds) <= 3600.0:
         raise ValueError("bridge deadline must be between 0.1 and 3600 seconds")
     diagnostics_payload: Optional[dict[str, Any]] = None
@@ -1619,13 +1627,69 @@ def build_proxy_asgi_app(
                         else None
                     )
                     if not isinstance(elicitation, dict):
-                        call_result = bridge_error_result(
-                            "denied",
-                            detail=(
-                                "this action needs an exact user approval and the client "
-                                "did not advertise MCP elicitation support"
-                            ),
-                        )
+                        arguments_sha256 = _approval_arguments_digest(name, arguments)
+                        if browser_approval.available and browser_approval.take_if_approved(
+                            wire_name=name,
+                            arguments_sha256=arguments_sha256,
+                            action_digest=approval.action_digest,
+                        ):
+                            call_result = await execute_tool(
+                                name,
+                                arguments,
+                                meta_extra=meta_extra,
+                                approved_action_digest=approval.action_digest,
+                            )
+                        elif browser_approval.available:
+                            candidate_state = _seal_approval_state(
+                                wire_name=name,
+                                arguments=arguments,
+                                approval=approval,
+                            )
+                            record = browser_approval.ensure_pending(
+                                wire_name=name,
+                                arguments_sha256=arguments_sha256,
+                                action_digest=approval.action_digest,
+                                request_state=candidate_state,
+                                message=approval.message,
+                                preview=approval.preview,
+                            )
+                            approval_url = browser_approval.approval_url(
+                                scope,
+                                str(record["request_state"]),
+                            )
+                            call_result = CallToolResult(
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=(
+                                            "approval_browser_required: open the KaroX "
+                                            "approval page, approve this exact action, "
+                                            "then retry"
+                                        ),
+                                    )
+                                ],
+                                structuredContent={
+                                    "ok": False,
+                                    "error_code": "approval_browser_required",
+                                    "error": (
+                                        "this client does not support MCP elicitation; "
+                                        "approve this exact one-shot action in the KaroX "
+                                        "approval page, then retry the same tool call"
+                                    ),
+                                    "approval_url": approval_url,
+                                    "approval_message": approval.message,
+                                    "approval_expires_in_seconds": 300,
+                                },
+                                isError=True,
+                            )
+                        else:
+                            call_result = bridge_error_result(
+                                "denied",
+                                detail=(
+                                    "this action needs an exact user approval and the client "
+                                    "did not advertise MCP elicitation support"
+                                ),
+                            )
                     else:
                         input_required = {
                             "resultType": "input_required",
@@ -1829,6 +1893,9 @@ def build_proxy_asgi_app(
             await rejection(scope, receive, send)
             return
         request_path = scope.get("path")
+        if request_path == browser_approval.approval_path:
+            await browser_approval.handle(scope, receive, send)
+            return
         if request_path == f"{path}/":
             # Serve /mcp/ in place rather than redirecting to /mcp: several MCP
             # clients do not resend the Authorization header across a redirect,
