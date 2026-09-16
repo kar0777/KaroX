@@ -770,6 +770,15 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             session_id = await self._run_task(
                 app, pilot, (0, ""), stop_during_run=True
             )
+            # Stop delivery is asynchronous on a loaded runner; pump the app
+            # until the cancellation becomes visible before asserting the
+            # published contract.
+            deadline = time.monotonic() + 10
+            while (
+                self._states(session_id)[-1]["status"] != tui.STATUS_CANCELLED
+                and time.monotonic() < deadline
+            ):
+                await pilot.pause()
             states = self._states(session_id)
             self.assertEqual(states[-1]["status"], tui.STATUS_CANCELLED)
             # A run the user stopped is resumable, so it must not be an error.

@@ -17,11 +17,13 @@ def _hosted_runner_windows() -> bool:
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "Textual is not installed")
+@unittest.skipIf(
+    _hosted_runner_windows(),
+    "IsolatedAsyncioTestCase apps cannot run under the hosted runner",
+)
 class WorkspacePickerV1Tests(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(os.name == "nt", "IsolatedAsyncio pump contract runs on Windows")
     async def test_ctrl_w_opens_manager_adds_and_selects_workspace(self) -> None:
-        if _hosted_runner_windows():
-            self.skipTest("IsolatedAsyncioTestCase apps cannot run under the hosted runner")
         from karox.tui_workspace import WorkspaceManagerScreen
 
         with tempfile.TemporaryDirectory() as root:
@@ -60,8 +62,6 @@ class WorkspacePickerV1Tests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(os.name == "nt", "IsolatedAsyncio pump contract runs on Windows")
     async def test_workspace_switch_is_refused_while_agent_is_running(self) -> None:
-        if _hosted_runner_windows():
-            self.skipTest("IsolatedAsyncioTestCase apps cannot run under the hosted runner")
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
             current = base / "current"
