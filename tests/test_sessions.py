@@ -257,21 +257,32 @@ class SessionStoreTests(unittest.TestCase):
         environment["PYTHONPATH"] = os.pathsep.join(
             [str(Path(__file__).resolve().parent.parent / "src"), environment.get("PYTHONPATH", "")]
         )
-        worker = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parent / "_session_process_worker.py"),
-                str(self.store.root),
-                str(ready),
-                str(release),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=environment,
-        )
+            spawn_kwargs: dict[str, Any] = {}
+            if os.name == "nt":
+                # A dedicated process group: a console ctrl event broadcast to
+                # the parent (the runner cleanup does this) must not take the
+                # worker session down with it.
+                spawn_kwargs["creationflags"] = int(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                )
+            else:
+                spawn_kwargs["start_new_session"] = True
+            worker = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parent / "_session_process_worker.py"),
+                    str(self.store.root),
+                    str(ready),
+                    str(release),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                **spawn_kwargs,
+            )
         try:
             deadline = time.time() + 10
             while not ready.exists() and worker.poll() is None and time.time() < deadline:

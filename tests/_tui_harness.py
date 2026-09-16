@@ -157,6 +157,10 @@ def isolated_karox_directories() -> Iterator[Path]:
         legacy = root / "legacy-config"
         for path in (config, runtime, repository, legacy):
             path.mkdir(parents=True, exist_ok=True)
+        # The runner TEMP paths may carry a Windows 8.3 alias (RUNNER~1);
+        # every consumer of the fixture names the directory the *app itself*
+        # resolves, so canonicalize once here instead of in every assertion.
+        repository = repository.resolve()
         environment = dict(os.environ)
         for names, value in (
             (_CONFIG_OVERRIDES, config),
