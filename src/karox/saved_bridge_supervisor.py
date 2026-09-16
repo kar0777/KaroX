@@ -30,6 +30,7 @@ from typing import Any, Optional
 from .detached_process import detached_flags, spawn_detached
 from .paths import runtime_dir
 from .process_identity import process_is_running, read_process_create_time_ns
+from .remote_tools import _reap_expired_process
 
 SUPERVISOR_SCHEMA_VERSION = 1
 SUPERVISOR_PROTOCOL_VERSION = 4
@@ -575,6 +576,9 @@ def _force_stop_proven_owner(pid: int) -> bool:
 
     deadline = time.monotonic() + OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0
     while time.monotonic() < deadline:
+        # POSIX: a killed child remains a zombie until somebody waits for it;
+        # its /proc entry (and the creation-time proof) stays until then.
+        _reap_expired_process(pid)
         if read_process_create_time_ns(pid) is None:
             return True
         time.sleep(0.1)
@@ -586,6 +590,7 @@ def _force_stop_proven_owner(pid: int) -> bool:
         return False
     deadline = time.monotonic() + OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0
     while time.monotonic() < deadline:
+        _reap_expired_process(pid)
         if read_process_create_time_ns(pid) is None:
             return True
         time.sleep(0.1)
@@ -627,6 +632,7 @@ def _force_stop_proven_supervisor(pid: int, expected_create_time_ns: int) -> boo
 
     deadline = time.monotonic() + SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        _reap_expired_process(pid)
         if not process_is_running(pid):
             return True
         current = read_process_create_time_ns(pid)
@@ -642,6 +648,7 @@ def _force_stop_proven_supervisor(pid: int, expected_create_time_ns: int) -> boo
             return False
         deadline = time.monotonic() + SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
+            _reap_expired_process(pid)
             if not process_is_running(pid):
                 return True
             current = read_process_create_time_ns(pid)
