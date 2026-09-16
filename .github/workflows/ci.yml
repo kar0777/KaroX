@@ -36,7 +36,7 @@ jobs:
       # PowerShell, which does not expand native-command globs the same way Bash
       # does. This keeps the shard definition identical on all three OSes and
       # avoids running every unittest twice under both pytest and unittest.
-      - run: python -m pytest -q tests --ignore-glob="tests/test_[i-z]*.py" -v --tb=no
+      - run: python -m pytest -q tests --ignore-glob="tests/test_[i-z]*.py" -vv --tb=no
         # A two-core hosted runner needs considerably more than the local
         # machine; 10 minutes cancelled the ubuntu/macos shards mid-run (they
         # died at the same progress with a runner-shutdown signal).
@@ -54,7 +54,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test
-      - run: python -m pytest -q tests --ignore-glob="tests/test_[a-h]*.py" -v --tb=no
+      - run: python -m pytest -q tests --ignore-glob="tests/test_[a-h]*.py" -vv --tb=no
         timeout-minutes: 45
 
   wheel:
