@@ -16,7 +16,9 @@ from karox.repo_context import RepositoryContextEngine, _safe_relative
 class RepositoryContextTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
+        # resolve() canonicalizes runner-provided 8.3 TEMP aliases so path
+        # comparisons inside _safe_relative stay consistent on Windows CI.
+        root = Path(self.temp.name).resolve()
         self.repo = root / "repo"
         initialize_git_repository(self.repo)
         for name in ("src", "tests", "docs"):

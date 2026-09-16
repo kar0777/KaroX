@@ -65,10 +65,12 @@ def _capture_real_locations() -> list[str]:
     """Real user locations, computed before this process patches anything."""
     forbidden: list[str] = []
     # Any override inherited from a developer shell names a real location.
+    # realpath canonicalizes Windows 8.3 aliases (runners spell TEMP with
+    # short names) so the long-form comparisons the contract uses are sound.
     for name in _ALL_OVERRIDES:
         value = os.environ.get(name, "").strip()
         if value:
-            forbidden.append(value)
+            forbidden.append(os.path.realpath(value))
     # The platform defaults karox.paths would resolve without overrides.
     saved = {name: os.environ.pop(name, None) for name in _ALL_OVERRIDES}
     flag = os.environ.pop("KAROX_TEST_ISOLATION", None)
@@ -91,7 +93,9 @@ def _ensure_isolated_user_dirs() -> Path | None:
     if _outer_test_process_owns_environment():
         return None  # e.g. an xdist worker inheriting its parent's sandbox
     forbidden = _capture_real_locations()
-    base = Path(tempfile.mkdtemp(prefix=_SANDBOX_PREFIX))
+    # resolve() so the sandbox spelled in the environment uses the long path
+    # even when a runner's TEMP tree carries 8.3 aliases.
+    base = Path(tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)).resolve()
     targets = {
         _CONFIG_OVERRIDES: base / "config",
         _RUNTIME_OVERRIDES: base / "runtime",

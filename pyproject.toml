@@ -76,7 +76,14 @@ coverage = ["coverage>=7.6,<9.0"]
 # pytest is how a contributor actually runs the suite while working, even though
 # the published count and CI's gate use `unittest discover`. It was undeclared,
 # so the parallel runner below depended on whatever happened to be installed.
-test = ["pytest>=8.0,<10.0", "pytest-xdist>=3.5,<4.0"]
+# pytest-asyncio is likewise undeclared-but-imported: tests use
+# `@pytest.mark.asyncio`, and without the plugin CI's pytest fails them with
+# "async def functions are not natively supported".
+test = [
+  "pytest>=8.0,<10.0",
+  "pytest-asyncio>=0.26,<2.0",
+  "pytest-xdist>=3.5,<4.0",
+]
 dev = [
   { include-group = "lint" },
   { include-group = "typing" },
