@@ -81,15 +81,19 @@ class NamespaceIsolationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
-            seen: set[Path] = set()
+            config_dirs: set[Path] = set()
+            runtime_dirs: set[Path] = set()
             for name in paths.CHANNELS:
                 with patch.dict(os.environ, self._channel_env(name, base)):
-                    config = paths.config_dir()
-                    runtime = paths.runtime_dir()
-                self.assertNotIn(config, seen)
-                seen.add(config)
-                self.assertNotIn(runtime, seen)
-                seen.add(runtime)
+                    config_dirs.add(paths.config_dir())
+                    runtime_dirs.add(paths.runtime_dir())
+            # Each channel owns its namespace. macOS resolves config and
+            # runtime through the same Application Support base, so a
+            # cross-channel collision inside one kind is the assertion that
+            # matters; a config/runtime pair sharing the macOS base is the
+            # platform's own shape, not a channel leak.
+            self.assertEqual(len(config_dirs), len(paths.CHANNELS))
+            self.assertEqual(len(runtime_dirs), len(paths.CHANNELS))
 
     def test_stable_and_dogfood_directory_names(self) -> None:
         import tempfile

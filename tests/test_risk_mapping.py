@@ -8,6 +8,7 @@ an ordinary subprocess.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -112,6 +113,7 @@ class ProcessMappingTests(unittest.TestCase):
         self.assertEqual(action.details["deletion_paths"], ["build/cache"])
         self.assertEqual(action.paths, ("build/cache",))
 
+    @unittest.skipUnless(os.name == "nt", "drive-letter paths are Windows semantics")
     def test_absolute_delete_target_is_marked_outside_repository(self) -> None:
         action = action_for_command(
             _command("dev.command", {"argv": ["rm", "C:/Users/me/old.tmp"]}),

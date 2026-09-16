@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -110,6 +111,7 @@ class TailscaleBackgroundFunnelTests(unittest.TestCase):
             ],
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows-only console-flags contract")
     def test_start_hides_the_console_window_on_windows(self) -> None:
         plan = SimpleNamespace(
             executable="tailscale",
@@ -167,6 +169,7 @@ class TailscaleBackgroundFunnelTests(unittest.TestCase):
 
         self.assertNotIn("creationflags", run.call_args.kwargs)
 
+    @unittest.skipUnless(os.name == "nt", "Windows-only console-flags contract")
     def test_stop_hides_the_console_window_on_windows(self) -> None:
         tunnel = TailscaleBackgroundFunnel(
             "tailscale", "https://monster.example.ts.net", 8765

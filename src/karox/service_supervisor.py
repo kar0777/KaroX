@@ -37,7 +37,12 @@ import time
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence
 
-from .remote_tools import _kill_pid_tree, _pid_alive, _read_log
+from .remote_tools import (
+    _kill_pid_tree,
+    _pid_alive,
+    _read_log,
+    _reap_expired_process,
+)
 
 #: Executable basenames that must never be stopped through this supervisor,
 #: even when a recorded service somehow points at them. The control plane
@@ -117,6 +122,21 @@ class IdentityVerdict:
     OK = "identity verified"
 
 
+def _canonical_path(executable: str) -> str:
+    """Compare executables as their real paths.
+
+    psutil can report the interpreter through different spellings on the same
+    host (`python3` shim versus `python3.13`, macOS ``/var`` versus
+    ``/private/var``). realpath resolves symlink and prefix aliases on every
+    platform before the casefold comparison.
+    """
+    try:
+        resolved = os.path.realpath(executable)
+    except (OSError, ValueError):
+        resolved = executable
+    return os.path.normcase(resolved)
+
+
 def verify_identity(
     stored: ProcessIdentity, live: ProcessIdentity, *, alive: bool
 ) -> IdentityVerdict:
@@ -138,7 +158,9 @@ def verify_identity(
             return IdentityVerdict(False, IdentityVerdict.REFUSE_CREATED_AT)
     if stored.executable and live.executable:
         checked = True
-        if os.path.normcase(stored.executable) != os.path.normcase(live.executable):
+        stored_path = _canonical_path(stored.executable)
+        live_path = _canonical_path(live.executable)
+        if stored_path != live_path:
             return IdentityVerdict(False, IdentityVerdict.REFUSE_EXECUTABLE)
     if stored.cmdline_digest and live.cmdline_digest:
         checked = True
@@ -591,17 +613,21 @@ class ServiceSupervisor:
             )
         _kill_pid_tree(pid)
         deadline = _now() + 10.0
-        while _now() < deadline:
-            if not _pid_alive(pid):
-                return ServiceActionResult(
-                    ok=True,
-                    action="stop",
-                    service_id=record.service_id,
-                    reason="stopped",
-                    pid=pid,
-                    exit_confirmed=True,
-                )
+        while _now() < deadline and _pid_alive(pid):
+            # POSIX: a killed child stays a zombie until a parent reaps it, and
+            # _pid_alive keeps reporting zombies as alive. The runtime that
+            # started the service is this process, so it is the reaper.
+            _reap_expired_process(pid)
             time.sleep(0.1)
+        if not _pid_alive(pid):
+            return ServiceActionResult(
+                ok=True,
+                action="stop",
+                service_id=record.service_id,
+                reason="stopped",
+                pid=pid,
+                exit_confirmed=True,
+            )
         return ServiceActionResult(
             ok=False,
             action="stop",

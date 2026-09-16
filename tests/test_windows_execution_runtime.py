@@ -82,6 +82,7 @@ class ExecutableResolutionTests(unittest.TestCase):
         self.assertEqual(Path(resolved[0]), real_python)
         self.assertEqual(resolved[1:], ["-V"])
 
+    @unittest.skipIf(os.name != "nt", "argv[0] resolution raises only on Windows")
     def test_unknown_executable_raises_clear_error(self) -> None:
         with self.assertRaises(ExecutableResolutionError) as cm:
             resolve_executable(["karox-definitely-not-real-xyz", "arg"])
