@@ -859,6 +859,7 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows GUI-launch simulation contract")
     def test_ensure_ready_restarts_service_when_up_leaves_daemon_stuck(self) -> None:
         starting = json.dumps({"BackendState": "NoState", "Self": {"HostName": "x"}})
         ready = json.dumps(
@@ -931,6 +932,7 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         self.assertFalse(status["ready"])
         elevated.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows GUI-launch simulation contract")
     def test_ensure_ready_launches_gui_before_service_restart(self) -> None:
         starting = json.dumps({"BackendState": "NoState", "Self": {"HostName": "x"}})
         ready = json.dumps(
@@ -981,6 +983,7 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         popen.assert_called_once()
         elevated.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "Windows GUI-launch simulation contract")
     def test_ensure_ready_launches_gui_when_status_initially_cannot_reach_daemon(self) -> None:
         ready = json.dumps(
             {

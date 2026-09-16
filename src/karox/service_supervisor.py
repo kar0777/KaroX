@@ -150,18 +150,26 @@ def verify_identity(
     if not alive:
         return IdentityVerdict(False, IdentityVerdict.REFUSE_DEAD)
     checked = False
+    proven = False
     if stored.created_at is not None and live.created_at is not None:
         checked = True
-        # Windows FILETIME jitter: identical processes can differ by <1s
-        # across queries; a reused PID differs by far more.
+        # The creation-time gate is the PID-reuse signal. A match proves the
+        # live PID is the process this record started, whatever psutil calls
+        # its executable this round: macOS names the same interpreter through
+        # python.framework/bin/python3.13 and .../Resources/Python.app/...(MacOS)/
+        # Python depending on when the probe runs, and both spellings are
+        # "differs". Windows FILETIME jitter: identical processes can differ
+        # by <1s across queries.
         if abs(stored.created_at - live.created_at) > 1.0:
             return IdentityVerdict(False, IdentityVerdict.REFUSE_CREATED_AT)
+        proven = True
     if stored.executable and live.executable:
         checked = True
-        stored_path = _canonical_path(stored.executable)
-        live_path = _canonical_path(live.executable)
-        if stored_path != live_path:
-            return IdentityVerdict(False, IdentityVerdict.REFUSE_EXECUTABLE)
+        if not proven:
+            stored_path = _canonical_path(stored.executable)
+            live_path = _canonical_path(live.executable)
+            if stored_path != live_path:
+                return IdentityVerdict(False, IdentityVerdict.REFUSE_EXECUTABLE)
     if stored.cmdline_digest and live.cmdline_digest:
         checked = True
         if stored.cmdline_digest != live.cmdline_digest:

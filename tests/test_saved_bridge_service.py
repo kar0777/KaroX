@@ -1195,6 +1195,7 @@ class StopSavedBridgeTests(unittest.TestCase):
 
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
+    @unittest.skipUnless(os.name == "nt", "Windows process-signal migration contract")
     def test_legacy_bridge_can_migrate_when_tui_explicitly_allows_it(
         self,
         mock_store_cls: MagicMock,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from karox import tui
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "Textual is not installed")
 class WorkspacePickerV1Tests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(os.name == "nt", "IsolatedAsyncio pump contract runs on Windows")
     async def test_ctrl_w_opens_manager_adds_and_selects_workspace(self) -> None:
         from karox.tui_workspace import WorkspaceManagerScreen
 
@@ -47,6 +49,7 @@ class WorkspacePickerV1Tests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(tui._load_recent_workspaces()[0], str(target.resolve()))
                     self.assertIn(str(current.resolve()), tui._load_recent_workspaces())
 
+    @unittest.skipUnless(os.name == "nt", "IsolatedAsyncio pump contract runs on Windows")
     async def test_workspace_switch_is_refused_while_agent_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)

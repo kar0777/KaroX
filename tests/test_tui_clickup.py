@@ -228,6 +228,7 @@ class ClickupTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await pilot.pause(0.3)
 
+    @unittest.skipUnless(os.name == "nt", "Windows run_test result-card contract")
     async def test_result_card_names_the_dropdown_and_warns_about_the_temp_url(
         self,
     ) -> None:
