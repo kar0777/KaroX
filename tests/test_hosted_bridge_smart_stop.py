@@ -8,6 +8,7 @@ its own action.
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,8 +16,8 @@ from unittest.mock import patch
 
 from _support import initialize_git_repository
 from karox.event_bus import EventBus, EventKind
-from karox.hosted_bridge import CoreToolBridge
-from karox.action_policy import ActionConfirmationRequired, ActionDisposition
+from karox.hosted_bridge import CoreToolBridge, HostedApprovalRequired
+from karox.action_policy import ActionDisposition
 from karox.models import AccessProfile, CoreResult
 from karox.risk_engine import RiskEngine, RiskLevel, SmartStopRequired
 from karox.sessions import SessionStore
@@ -27,6 +28,7 @@ TOOLS = (
     "karox.repo.read_file",
     "karox.repo.write_file",
     "karox.git.commit",
+    "karox.git.push",
     "karox.command.run",
 )
 
@@ -130,24 +132,125 @@ class HostedSmartStopTests(unittest.TestCase):
         self.assertEqual(decisions[-1].data["risk"], RiskLevel.HIGH.value)
         self.assertEqual(decisions[-1].data["reason"], ActionDisposition.GUARDED_AUTO.value)
 
+    def test_git_push_requires_protocol_approval_and_executes_only_exact_retry(self) -> None:
+        remote = self.root / "remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)],
+            cwd=self.repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=self.repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertTrue(branch)
+        TaskStateStore(self.sessions).bootstrap(
+            "hosted-session",
+            {
+                "objective": TaskFact(
+                    "push the verified branch to origin",
+                    FactOrigin.REPORTED_BY_AGENT,
+                )
+            },
+            workstream_id="ship",
+        )
+        bridge = self.bridge()
+        committed = bridge.execute(
+            "karox.git.commit",
+            {"message": "baseline for push", "paths": list(self.tracked)},
+            idempotency_key="push-baseline-commit",
+        )
+        self.assertTrue(committed["ok"], committed)
+        arguments = {"remote": "origin", "branch": branch, "workstream_id": "ship"}
+        with self.assertRaises(HostedApprovalRequired) as stopped:
+            bridge.execute(
+                "karox.git.push",
+                arguments,
+                idempotency_key="push-approved-1",
+            )
+        self.assertEqual(stopped.exception.action_kind, "git.push")
+        self.assertEqual(stopped.exception.preview["remote"], "origin")
+        self.assertEqual(stopped.exception.preview["branch"], branch)
+
+        with self.assertRaisesRegex(Exception, "no longer matches"):
+            bridge.execute_approved(
+                "karox.git.push",
+                arguments,
+                expected_action_digest="0" * 64,
+                idempotency_key="push-approved-1",
+            )
+
+        result = bridge.execute_approved(
+            "karox.git.push",
+            arguments,
+            expected_action_digest=stopped.exception.action_digest,
+            idempotency_key="push-approved-1",
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["data"]["pushed"])
+        remote_head = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(remote_head, result["data"]["commit_sha"])
+
+    def test_cached_command_run_push_routes_to_the_same_guarded_approval(self) -> None:
+        bridge = self.bridge()
+        with self.assertRaises(HostedApprovalRequired) as stopped:
+            bridge.execute(
+                "karox.command.run",
+                {"argv": ["git", "push", "origin", "main"]},
+                idempotency_key="cached-push-compat",
+            )
+        self.assertEqual(stopped.exception.tool_name, "karox.git.push")
+        self.assertEqual(stopped.exception.action_kind, "git.push")
+        self.assertEqual(stopped.exception.preview["remote"], "origin")
+        self.assertEqual(stopped.exception.preview["branch"], "main")
+
+        # Flags, force variants, or any more complex Git spelling never enter the
+        # compatibility shim; the ordinary developer-command guard still denies
+        # them before a process can start.
+        with self.assertRaises(Exception):
+            bridge.execute(
+                "karox.command.run",
+                {"argv": ["git", "push", "--force", "origin", "main"]},
+                idempotency_key="cached-force-push-blocked",
+            )
+
     def test_a_hosted_agent_has_no_channel_to_confirm_its_own_action(self) -> None:
         # A local commit no longer needs a prompt, so use a real external side
         # effect for the exact-human-boundary contract. The bridge still never
         # accepts a confirmation token from model-visible tool arguments.
         bridge = self.bridge()
-        with self.assertRaises(ActionConfirmationRequired) as stopped:
+        with self.assertRaises(HostedApprovalRequired):
             bridge.execute(
                 "karox.command.run",
                 {"argv": ["git", "push"]},
                 idempotency_key="push-1",
             )
-        grant = self.risk.ledger.issue(stopped.exception.decision.assessment)
         with self.assertRaises(Exception) as smuggled:
             bridge.execute(
                 "karox.command.run",
                 {
                     "argv": ["git", "push"],
-                    "confirmation_token": grant.token,
+                    "confirmation_token": "model-visible-self-approval-token",
                 },
                 idempotency_key="push-2",
             )
@@ -155,7 +258,7 @@ class HostedSmartStopTests(unittest.TestCase):
         self.assertIn("confirmation_token", str(smuggled.exception))
 
     def test_a_real_confirmation_boundary_is_visible_on_the_event_stream(self) -> None:
-        with self.assertRaises(ActionConfirmationRequired):
+        with self.assertRaises(HostedApprovalRequired):
             self.bridge().execute(
                 "karox.command.run",
                 {"argv": ["git", "push"]},

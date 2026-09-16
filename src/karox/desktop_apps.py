@@ -159,6 +159,21 @@ def _focus(window: Window) -> None:
     del window
 
 
+def _wait_windows(milliseconds: int) -> None:
+    """Bounded synchronous Win32 wait used only inside an explicit user action.
+
+    This is deliberately not a Python sleep/polling worker: desktop control has
+    no background thread, timer, capture loop, or input loop. A restore/launch
+    call may briefly wait for Windows to apply the action it just requested.
+    """
+    if os.name != "nt":
+        raise DesktopAppError("native desktop application control is currently Windows-only")
+    kernel32 = ctypes.windll.kernel32
+    kernel32.Sleep.argtypes = [ctypes.c_ulong]
+    kernel32.Sleep.restype = None
+    kernel32.Sleep(max(0, int(milliseconds)))
+
+
 def _restore_without_activation(window: Window) -> None:
     """Show a pinned minimized window without activating or focusing it."""
     if os.name != "nt":
@@ -175,7 +190,7 @@ def _restore_without_activation(window: Window) -> None:
     for _ in range(20):
         if not user32.IsIconic(window.hwnd):
             return
-        time.sleep(0.025)
+        _wait_windows(25)
     raise DesktopAppError("Windows did not restore the application without activation")
 
 
@@ -250,7 +265,7 @@ def _launch_start_menu_shortcut(raw: Any, title_contains: Any = "") -> dict[str,
             matched = next((window for window in _windows() if needle in window.title.casefold()), None)
             if matched is not None:
                 break
-            time.sleep(0.2)
+            _wait_windows(200)
     return {
         "launched": True,
         "shortcut_name": shortcut.name,
@@ -484,17 +499,38 @@ def _capture_window_png(window: Window, backend: str = "printwindow") -> tuple[b
         user32.ReleaseDC(window.hwnd, window_dc)
 
 
+def _channel_ranges(
+    extrema: tuple[float, float] | tuple[tuple[int, int], ...],
+) -> list[float]:
+    """Return one intensity range per band for either ``getextrema()`` shape.
+
+    Pillow returns a single flat ``(lo, hi)`` pair for a one-band image and one
+    pair per band otherwise, and types the result as that union. The sample is
+    converted to RGB before it is measured, so only the per-band shape occurs
+    today; handling both keeps the verdict independent of that conversion and
+    keeps the module inside the mypy gate instead of unpacking a float.
+    """
+    per_band = [
+        float(item[1]) - float(item[0]) for item in extrema if isinstance(item, tuple)
+    ]
+    if per_band:
+        return per_band
+    flat = [float(item) for item in extrema if isinstance(item, (int, float))]
+    if len(flat) == 2 and len(flat) == len(extrema):
+        return [flat[1] - flat[0]]
+    return []
+
+
 def _png_quality(png: bytes) -> dict[str, Any]:
     """Reject blank/uniform fallback frames before they can replace a real capture."""
     try:
         from PIL import Image  # type: ignore
         image = Image.open(io.BytesIO(png)).convert("RGB")
         sample = image.resize((64, 64))
-        extrema = sample.getextrema()
         colors = sample.getcolors(maxcolors=4097)
         unique = 4097 if colors is None else len(colors)
-        ranges = [hi - lo for lo, hi in extrema]
-        meaningful = unique > 4 and max(ranges) >= 8
+        ranges = _channel_ranges(sample.getextrema())
+        meaningful = unique > 4 and bool(ranges) and max(ranges) >= 8
         return {
             "meaningful": meaningful,
             "sample_unique_colors": unique,

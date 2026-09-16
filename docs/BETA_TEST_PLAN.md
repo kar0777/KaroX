@@ -1,7 +1,7 @@
 # KaroX 5 external beta test plan
 
 Status: planned  
-Target runtime: `5.0.0.dev0` and later release candidates
+Target runtime: `5.0.0rc1` and later release candidates
 
 The beta tests the product, not the maintainer's ability to guide a user through
 it. Testers receive a build, the public quick start, and an issue/report form.

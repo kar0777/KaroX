@@ -14,7 +14,7 @@ The runtime reduces authority through repository confinement, capabilities,
 allowlists, leases, idempotency, and hard blocks; it does not virtualize the
 machine.
 
-> **Release status:** the packaged runtime is `5.0.0.dev0`. Deterministic local
+> **Release status:** the packaged runtime is `5.0.0rc1`. Deterministic local
 > contracts are extensively tested, but live ChatGPT Web, Claude Web, and paid
 > provider conformance records are still pending. See the
 > [5.0 release scope](docs/V5_RELEASE_SCOPE.md),
@@ -36,29 +36,29 @@ A stable KaroX 5 release is defined by one complete workflow:
 Features that do not support this path remain Preview, Experimental, or Legacy
 until their own evidence gates pass.
 
-## Install the preview from a checkout
+## Install
 
-The public bootstrap commands on `main` install the latest stable 4.x release.
-To test the KaroX 5 preview, clone or check out the preview branch and run its
-local installer.
-
-Windows:
-
-```powershell
-.\install.karox.ps1
-```
-
-macOS or Linux:
+KaroX 5 is published on PyPI as a pre-release. One command on any OS:
 
 ```bash
-./install.karox.sh
+pipx install --pre karox-runtime
+# or
+uv tool install --prerelease=allow karox-runtime
 ```
 
-Open a new terminal inside the repository you want to work with and run:
+Then open a terminal inside the Git repository you want to work with and run:
 
 ```bash
 karox
 ```
+
+`karox quickstart` prints what is already connected and the single next command
+to run, so the first minute needs no documentation.
+
+The public bootstrap commands on `main` still install the latest stable 4.x
+release. `bootstrap.sh --channel preview` / `bootstrap.ps1 -Channel preview`
+install the 5.x release candidate through pipx instead. To test from a source
+checkout, run `./install.karox.sh` or `.\install.karox.ps1` in the repository.
 
 On Windows, a terminal opened before installation keeps its old `PATH`. Open a
 new terminal, use the Desktop shortcut, or refresh the environment before
@@ -198,9 +198,12 @@ Friendly UI labels map to stable policy identifiers:
 - **Advanced** (`elevated`) — explicitly adds guarded local commit and the
   browser, desktop-input, and network capabilities present in elevated policy.
 
-No stable profile grants Git push, package publishing, or authentication
-commands. Resuming work is an action on an existing durable session, not a new
-permission level. Some legacy UI may still display a Resume profile during
+No stable profile grants standing Git push, package publishing, or authentication
+authority. An Advanced durable ChatGPT Web bridge may advertise the dedicated
+`karox.git.push` surface, but every push requires a machine-verifiable one-shot
+user approval bound to the exact remote/branch action; `command.run` cannot
+bypass that gate. Resuming work is an action on an existing durable session, not
+a new permission level. Some legacy UI may still display a Resume profile during
 migration.
 
 ## Automation CLI
@@ -262,9 +265,10 @@ Every shipping local action is evaluated against:
 - an idempotency key for mutating operations.
 
 KaroX additionally enforces secret redaction, path and link confinement,
-allowlisted hosted tools, dedicated credential namespaces, and hard blocks on
-Git push and package publishing. A failed check cannot be converted into a
-verified success by model text.
+allowlisted hosted tools, dedicated credential namespaces, a hard block on
+arbitrary developer-command Git push/package publication, and an exact-action
+one-shot user gate on the dedicated push surface. A failed check cannot be
+converted into a verified success by model text.
 
 Read [SECURITY.md](SECURITY.md). Security reports should use the private process
 described there, not a public issue containing a credential or private
@@ -281,16 +285,16 @@ See [Migrating from KaroX 4.x to KaroX 5](docs/MIGRATION_V4_TO_V5.md).
 
 ## Verification
 
-The suite is 3317 tests. CI runs:
+The suite is 3356 tests. CI runs:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3317 tests`.
+A clean run reports `Ran 3356 tests`.
 
 2420 is the number collected under `tests` by the documented runner. The
-repository root collects 3322 because a bare pytest collection also finds five
+repository root collects 3361 because a bare pytest collection also finds five
 legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

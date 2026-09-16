@@ -249,23 +249,41 @@ def _workspace_state_fingerprint(repository: Path) -> str:
     status_result = _git(
         "status",
         "--porcelain=v1",
-        "--untracked-files=normal",
+        "--untracked-files=all",
         "-z",
     )
+    ignored = {
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+    }
     if status_result is not None and status_result.returncode == 0:
         head = (
             (head_result.stdout or "").strip()
             if head_result is not None and head_result.returncode == 0
             else "unborn"
         )
-        status = status_result.stdout or ""
+        raw_status = status_result.stdout or ""
+        filtered_status: list[str] = []
         metadata: list[tuple[str, int, int, bool]] = []
-        for entry in status.split("\0"):
+        for entry in raw_status.split("\0"):
             if len(entry) < 4:
                 continue
             raw_path = entry[3:]
             if " -> " in raw_path:
                 raw_path = raw_path.split(" -> ", 1)[1]
+            path_parts = Path(raw_path).parts
+            if any(part in ignored for part in path_parts):
+                # Test/lint/cache output must not turn an idempotent transport
+                # retry into a new verification job. Source/config changes still
+                # change the fingerprint immediately.
+                continue
+            filtered_status.append(entry)
             path = root / raw_path
             try:
                 info = path.stat()
@@ -277,20 +295,10 @@ def _workspace_state_fingerprint(repository: Path) -> str:
         payload: dict[str, Any] = {
             "mode": "git",
             "head": head,
-            "status": status,
+            "status": filtered_status,
             "metadata": metadata,
         }
     else:
-        ignored = {
-            ".git",
-            "__pycache__",
-            ".pytest_cache",
-            ".mypy_cache",
-            ".ruff_cache",
-            ".venv",
-            "venv",
-            "node_modules",
-        }
         metadata = []
         truncated = False
         for path in sorted(root.rglob("*")):

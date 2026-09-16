@@ -435,7 +435,6 @@ VISIBLE_COMMANDS: Tuple[str, ...] = (
     "/models",
     "/effort",
     "/mode",
-    "/status",
     "/review",
     "/map",
     "/resume",
@@ -13836,8 +13835,8 @@ if _HAS_TEXTUAL:
             )
             if "provider_error:authentication" in lowered:
                 return self._label(
-                    f"{provider} отклонил API-ключ. Откройте /connect и сохраните новый ключ.",
-                    f"{provider} rejected the API key. Open /connect and save a new key.",
+                    f"{provider} отклонил API-ключ. Откройте /connect, введите новый ключ и нажмите «Использовать и сохранить».",
+                    f"{provider} rejected the API key. Open /connect, enter a new key, then choose 'Use and save'.",
                 )
             if "provider_error:malformed_response" in lowered:
                 return self._label(
@@ -14728,18 +14727,22 @@ if _HAS_TEXTUAL:
                     self.active_session or "", self._run_generation
                 )
             elif run != self._active_run:
-                # Late callback from a superseded run. Nothing is touched: not
-                # the busy flag, not the process handle, not the active session,
-                # not the composer, and no terminal event is published.
-                #
-                # Compared against the run the application currently owns, with
-                # no ``_active_run is not None`` escape hatch. That exemption
-                # left a real hole: a run clears ``_active_run`` when it ends, so
-                # a duplicate callback arriving while the application is idle
-                # found ``None``, skipped the check and went on to clear state it
-                # no longer owned. A generation is monotonic and never reused, so
-                # "not the current run" is the whole test -- including when the
-                # current run is no run at all.
+                # Late callback from a superseded run. It may not mutate the
+                # current run or publish a terminal event for either generation.
+                # Reconcile only the presentation from authoritative current-run
+                # state: Textual cancels the previous exclusive worker when a new
+                # one starts, and that cancellation can race the spinner style
+                # even though ``agent_busy`` and ``_active_run`` are already the
+                # new generation. A stale callback must never leave a live run
+                # looking idle. An explicit user stop intentionally hides the
+                # spinner, so do not undo that state.
+                if (
+                    self.agent_busy
+                    and self._active_run is not None
+                    and not self._stop_requested
+                ):
+                    self.query_one("#composer", Input).disabled = True
+                    self.query_one("#busy", LoadingIndicator).styles.display = "block"
                 return
             # No local copy of the session id is needed any more: every terminal
             # publisher below is handed ``run`` and reads ``run.session_id`` from

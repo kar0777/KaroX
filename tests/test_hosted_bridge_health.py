@@ -7,6 +7,11 @@ import time
 from pathlib import Path
 
 from karox.hosted_bridge import _hosted_bridge_health
+from karox.route_health import (
+    DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS,
+    DEFAULT_ROUTE_PROBE_INTERVAL_SECONDS,
+    DEFAULT_ROUTE_FAILURE_THRESHOLD as default_route_failure_threshold,
+)
 
 
 def _write_watchdog(root: Path, *, failures: int, healthy, readiness: str = "READY") -> None:
@@ -54,8 +59,14 @@ def test_hosted_bridge_health_projects_only_safe_operational_state() -> None:
             assert result["owner_pid"] == 101
             assert result["bridge_pid"] == 202
             assert result["public_route_failures"] == 0
-            assert result["probe_policy"]["failure_confirmation_interval_seconds"] == 1.0
-            assert result["probe_policy"]["failure_threshold"] == 2
+            assert result["probe_policy"]["healthy_interval_seconds"] == (
+                DEFAULT_ROUTE_PROBE_INTERVAL_SECONDS
+            )
+            assert (
+                result["probe_policy"]["failure_confirmation_interval_seconds"]
+                == DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS
+            )
+            assert result["probe_policy"]["failure_threshold"] == default_route_failure_threshold
             rendered = json.dumps(result)
             assert "must-never-leak" not in rendered
             assert "bridge_credential" not in rendered

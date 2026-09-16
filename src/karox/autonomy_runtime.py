@@ -47,6 +47,7 @@ from .repository_lease import RepositoryLeaseStore
 from .security import redact
 from .sessions import IdempotencyConflict, SessionBusy, SessionStore, mutation_lease_context
 from .memory import KaroXMemory, MemoryError, MemoryKind, MemoryScope
+from .map_service import stored_map_digest
 from .project_map import ProjectFactMap
 from .task_state import FactOrigin, TaskFact, TaskStateStore, fact
 
@@ -1971,6 +1972,18 @@ class AutonomyRuntime:
         """
 
         try:
+            # Prefer the durable semantic Project Map when one exists. It is the
+            # same compact digest injected into normal agent project context, so
+            # ChatGPT task.bootstrap and native runs start from one project model
+            # instead of two drifting summaries. The digest labels a stale
+            # revision honestly; bootstrap stays cheap and never launches a deep
+            # semantic rebuild on the request path.
+            stored = stored_map_digest(repository, budget_chars=1200)
+            if stored is not None:
+                text, _meta = stored
+                if text:
+                    return text
+
             safe = re.sub(r"[^A-Za-z0-9_.-]", "_", project_id) or "default"
             fact_map = ProjectFactMap(
                 repository,

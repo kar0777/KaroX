@@ -513,7 +513,7 @@ class ExtendedCoreRuntime(CoreRuntime):
         # git.log is a read-only process call, so the base class does not treat a
         # non-zero exit as a failure. It has no idempotency record, so adjusting
         # the flag here cannot desynchronise a stored replay.
-        if command.name in {"git.log", "tests.run", "dev.command"} and (
+        if command.name in {"git.log", "git.push", "tests.run", "dev.command"} and (
             result.data.get("timed_out") or result.data.get("exit_code") != 0
         ):
             result.ok = False

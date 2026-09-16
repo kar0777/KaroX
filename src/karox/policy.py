@@ -82,6 +82,17 @@ _ALWAYS_EXPLICIT = frozenset(
 )
 
 
+def capability_requires_explicit_approval(capability: Capability) -> bool:
+    """Whether a capability may be used only with a one-shot approval token.
+
+    This is intentionally a capability property rather than a profile grant:
+    even an elevated hosted agent must never inherit remote side effects merely
+    because it can run broad local developer commands.
+    """
+
+    return capability in _ALWAYS_EXPLICIT
+
+
 @dataclass(frozen=True)
 class PolicyDecision:
     allowed: bool

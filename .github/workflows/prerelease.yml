@@ -1,0 +1,189 @@
+name: Publish KaroX 5 pre-release
+
+# A release candidate is published from an explicit matching pre-release tag, or
+# by hand. It deliberately does NOT reuse release.yml: that workflow owns the
+# stable channel, rewrites VERSION-derived metadata on `main`, and requires
+# `check_v5_release.py --strict`, which by design fails until live conformance
+# and the external beta are recorded. A candidate must be installable *before*
+# those records exist -- the beta cannot produce them otherwise -- so this
+# workflow runs every deterministic gate, builds and smoke-tests the wheel, and
+# publishes it as a PyPI pre-release plus a GitHub pre-release. It never touches
+# VERSION, RELEASE.json, or the stable bootstrap channel.
+
+on:
+  push:
+    tags:
+      - "v5.*rc*"
+      - "v5.*b*"
+      - "v5.*a*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: karox-prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Quality gate
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Build and smoke-test the candidate wheel
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      wheel: ${{ steps.meta.outputs.wheel }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Validate the candidate tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME="$(python scripts/check_versions.py --print runtime)"
+          # A candidate is a pre-release by definition; a final version must go
+          # through release.yml with its strict evidence gate.
+          case "$RUNTIME" in
+            5.*rc*|5.*b*|5.*a*|5.*dev*) ;;
+            *) echo "runtime $RUNTIME is not a pre-release; use release.yml" >&2; exit 1 ;;
+          esac
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            test "${GITHUB_REF_NAME}" = "v${RUNTIME}"
+          fi
+          python scripts/check_dependencies.py
+          python scripts/check_versions.py
+          python scripts/check_test_count.py
+          python scripts/check_v5_release.py --json
+          python scripts/check_access_profiles.py
+          python scripts/check_release_hygiene.py
+          test -f "RELEASE_NOTES_v${RUNTIME}.md"
+          git diff --check
+
+      - name: Build the wheel and sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build dist
+          python -m pip install --upgrade pip build
+          python -m build --outdir dist .
+          python scripts/check_wheel_contents.py
+
+      - name: Smoke-test the installed wheel outside the source tree
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME="$(python scripts/check_versions.py --print runtime)"
+          WHEEL="$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
+          test -n "$WHEEL"
+          python -m venv .smoke
+          .smoke/bin/python -m pip install --upgrade pip
+          .smoke/bin/python -m pip install "$WHEEL"
+          SMOKE_ROOT="$(mktemp -d)"
+          (
+            cd "$SMOKE_ROOT"
+            INSTALLED="$("$GITHUB_WORKSPACE/.smoke/bin/python" -c 'import karox; print(karox.__version__)')"
+            test "$INSTALLED" = "$RUNTIME"
+            "$GITHUB_WORKSPACE/.smoke/bin/karox" --help >/dev/null
+            "$GITHUB_WORKSPACE/.smoke/bin/karox" quickstart --json >/dev/null
+            "$GITHUB_WORKSPACE/.smoke/bin/karox" paths --json >/dev/null
+          )
+          rm -rf "$SMOKE_ROOT" .smoke
+          (
+            cd dist
+            find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+          echo "version=$RUNTIME" >> "$GITHUB_OUTPUT"
+          echo "wheel=$(basename "$WHEEL")" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the artifacts for the publish jobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: karox-prerelease-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI (trusted publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Trusted publishing: PyPI accepts the GitHub OIDC token for this repository,
+    # workflow file, and environment, so no long-lived API token is stored in
+    # the repository secrets. The `pypi` environment is where a maintainer can
+    # require manual approval before anything leaves the build.
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download the smoke-tested artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: karox-prerelease-dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+          print-hash: true
+
+  github-prerelease:
+    name: GitHub pre-release
+    needs: [build, publish-pypi]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download the smoke-tested artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: karox-prerelease-dist
+          path: dist/
+
+      - name: Create or refresh the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          NOTES="RELEASE_NOTES_${TAG}.md"
+          TITLE="$(sed -n '1s/^# //p' "$NOTES")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --title "$TITLE" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" --verify-tag --prerelease --title "$TITLE" --notes-file "$NOTES"
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          {
+            echo "## $TITLE"
+            echo
+            echo "Pre-release published to PyPI and GitHub."
+            echo
+            echo '```bash'
+            echo "pipx install --pre karox-runtime==${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -385,7 +385,7 @@ class SessionViewWiringTests(unittest.IsolatedAsyncioTestCase):
 
             written: list[str] = []
             with patch.object(
-                app, "_write_assistant", side_effect=lambda text: written.append(text)
+                app, "_write_progress", side_effect=lambda text: written.append(text)
             ):
                 app._poll_typed_transcript()
             await pilot.pause()
@@ -400,7 +400,7 @@ class SessionViewWiringTests(unittest.IsolatedAsyncioTestCase):
             # which says what the agent did rather than which function it called.
             self.assertEqual(len(app.query("#activity")), 1)
             activity = str(app.query_one("#activity", tui.Static).render())
-            self.assertEqual(activity, "Reading code")
+            self.assertEqual(activity, "› Reading code")
             for plumbing in (
                 "call-1",
                 "read_file",
@@ -418,7 +418,7 @@ class SessionViewWiringTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 str(app.query_one("#activity", tui.Static).render()),
-                "\u0427\u0438\u0442\u0430\u0435\u0442 \u043a\u043e\u0434",
+                "› Просматриваю код",
             )
             app.language = "en"
 

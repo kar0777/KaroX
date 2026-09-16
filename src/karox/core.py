@@ -554,6 +554,7 @@ class CoreRuntime:
             "repo.search": self._search,
             "lsp.diagnostics": self._lsp_diagnostics,
             "git.commit": self._git_commit,
+            "git.push": self._git_push,
         }
         self._definitions = {
             "repo.read_file": ToolDefinition(
@@ -685,6 +686,22 @@ class CoreRuntime:
                     "required": ["message", "paths"],
                     "additionalProperties": False,
                 },
+            ),
+            "git.push": ToolDefinition(
+                "git.push",
+                "Push current HEAD to an existing configured Git remote and branch. Requires a one-shot user approval and never force-pushes, changes remotes, or authenticates.",
+                Capability.GIT_PUSH,
+                True,
+                {
+                    "type": "object",
+                    "properties": {
+                        "remote": {"type": "string"},
+                        "branch": {"type": "string"},
+                    },
+                    "required": ["remote", "branch"],
+                    "additionalProperties": False,
+                },
+                replayable=False,
             ),
         }
         if self._mcp_binding is not None:
@@ -840,6 +857,14 @@ class CoreRuntime:
         for capability in definition.additional_capabilities:
             self.policy.require(command.origin, capability, capability_token)
         self._apply_smart_stop(command)
+        # Smart Stop may strengthen a mutation by creating a durable rollback
+        # checkpoint. That safety write advances the session revision under the
+        # same fenced lease; continue from the fresh record so idempotency
+        # reservation cannot race its own checkpoint into StaleSessionRevision.
+        # Reloading also revalidates repository/session revocation before the
+        # side effect, which is the safer boundary even for a no-op policy pass.
+        if definition.mutates:
+            record = self._load_session(command)
         started = time.perf_counter()
         self._audit(
             "core.command.started",
@@ -1226,6 +1251,8 @@ class CoreRuntime:
             self._prepare_check(arguments, deadline_seconds)
         elif command_name == "git.commit":
             self._prepare_commit(arguments)
+        elif command_name == "git.push":
+            self._prepare_push(arguments, deadline_seconds)
 
     def safe_path(self, relative: str, for_write: bool = False) -> Path:
         if not isinstance(relative, str) or not relative.strip() or "\x00" in relative:
@@ -1528,6 +1555,7 @@ class CoreRuntime:
         timeout_seconds: float,
         *,
         inherit_environment: bool = False,
+        redact_output: bool = True,
     ) -> Dict[str, Any]:
         timeout = min(
             max(float(timeout_seconds), self.MIN_PROCESS_TIMEOUT_SECONDS),
@@ -1596,10 +1624,14 @@ class CoreRuntime:
             stdout = self._bounded_stream(stdout_file)
             stderr = self._bounded_stream(stderr_file)
         return {
+            # Redaction of the captured streams is a diagnostic-surface rule:
+            # audit/console rows must never echo a credential a child printed.
+            # Byte-faithful consumers (search backends) opt out; their own
+            # contract is that a matched line round-trips byte for byte.
             "argv": redact(argv),
             "exit_code": exit_code,
-            "stdout": str(redact(stdout.text)),
-            "stderr": str(redact(stderr.text)),
+            "stdout": str(redact(stdout.text)) if redact_output else stdout.text,
+            "stderr": str(redact(stderr.text)) if redact_output else stderr.text,
             "timed_out": timed_out,
             "interrupted": interrupted,
             "child_pid": process.pid,
@@ -1743,8 +1775,18 @@ class CoreRuntime:
             causes.append("runtime_minimum")
         return CheckPlan(argv, requested, effective, "+".join(causes) or None, eligible)
 
-    def _git(self, arguments: List[str], deadline_seconds: float) -> Dict[str, Any]:
-        return self._run(["git", *arguments], min(60.0, deadline_seconds))
+    def _git(
+        self,
+        arguments: List[str],
+        deadline_seconds: float,
+        *,
+        redact_output: bool = True,
+    ) -> Dict[str, Any]:
+        return self._run(
+            ["git", *arguments],
+            min(60.0, deadline_seconds),
+            redact_output=redact_output,
+        )
 
     @staticmethod
     def _git_evidence(kind: str, result: Dict[str, Any]) -> EvidenceRecord:
@@ -1874,6 +1916,70 @@ class CoreRuntime:
         ]
         return result
 
+    def _prepare_push(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> tuple[str, str]:
+        remote = self._required(arguments, "remote", str).strip()
+        branch = self._required(arguments, "branch", str).strip()
+        if (
+            not remote
+            or len(remote) > 200
+            or remote.startswith("-")
+            or any(ord(ch) < 33 or ch.isspace() for ch in remote)
+        ):
+            raise InvalidCommand("git.push remote must be a configured remote name")
+        if not branch or len(branch) > 240 or any(ord(ch) < 33 or ch.isspace() for ch in branch):
+            raise InvalidCommand("git.push branch must be a valid branch name")
+
+        remotes = self._git(["remote"], deadline_seconds)
+        if remotes["timed_out"] or remotes["exit_code"] != 0:
+            raise CoreError("cannot enumerate configured Git remotes")
+        configured = {line.strip() for line in remotes["stdout"].splitlines() if line.strip()}
+        if remote not in configured:
+            raise InvalidCommand("git.push remote is not configured in this repository")
+
+        checked = self._git(["check-ref-format", "--branch", branch], deadline_seconds)
+        if checked["timed_out"] or checked["exit_code"] != 0:
+            raise InvalidCommand("git.push branch is not a valid Git branch name")
+        return remote, branch
+
+    def _git_push(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        remote, branch = self._prepare_push(arguments, deadline_seconds)
+        revision = self._git(["rev-parse", "HEAD"], deadline_seconds)
+        commit_sha = (
+            revision["stdout"].strip()
+            if revision["exit_code"] == 0 and not revision["timed_out"]
+            else None
+        )
+        result = self._git(
+            ["push", "--porcelain", remote, f"HEAD:refs/heads/{branch}"],
+            deadline_seconds,
+        )
+        pushed = not result["timed_out"] and result["exit_code"] == 0
+        result["remote"] = remote
+        result["branch"] = branch
+        result["commit_sha"] = commit_sha
+        result["pushed"] = pushed
+        result["_evidence"] = [
+            EvidenceRecord(
+                kind="git_push",
+                summary=("Pushed" if pushed else "Failed to push")
+                + f" current HEAD to {remote}/{branch}",
+                command=result["argv"],
+                exit_code=result["exit_code"],
+                artifact_sha256=commit_sha,
+                metadata={
+                    "timed_out": result["timed_out"],
+                    "remote": remote,
+                    "branch": branch,
+                    "pushed": pushed,
+                },
+            )
+        ]
+        return result
+
     def _search_ripgrep(
         self,
         *,
@@ -1931,7 +2037,7 @@ class CoreRuntime:
             argv.extend(["--glob", pattern])
         argv.extend(["--", query, "."])
 
-        result = self._run(argv, deadline_seconds)
+        result = self._run(argv, deadline_seconds, redact_output=False)
         exit_code = result.get("exit_code")
         if exit_code not in {0, 1, None}:
             # Preserve portability and unusual glob behaviour by falling back to
@@ -1994,7 +2100,7 @@ class CoreRuntime:
                 {
                     "path": relative,
                     "line": line_number,
-                    "text": str(redact_content(line)),
+                    "text": line,
                     "clipped": clipped,
                 }
             )
@@ -2126,7 +2232,7 @@ class CoreRuntime:
                     {
                         "path": relative,
                         "line": number,
-                        "text": str(redact_content(line)),
+                        "text": line,
                         "clipped": clipped,
                     }
                 )
@@ -2232,7 +2338,7 @@ class CoreRuntime:
         if not case_sensitive:
             arguments.append("-i")
         arguments.extend(["-e", query, "--"])
-        result = self._git(arguments, deadline_seconds)
+        result = self._git(arguments, deadline_seconds, redact_output=False)
         exit_code = result.get("exit_code")
         if exit_code not in {0, 1, None}:
             return None
@@ -2305,7 +2411,7 @@ class CoreRuntime:
                     {
                         "path": relative,
                         "line": number,
-                        "text": str(redact_content(line)),
+                        "text": line,
                         "clipped": clipped,
                     }
                 )
@@ -2453,7 +2559,7 @@ class CoreRuntime:
                         # A matched line is repository content a caller may quote
                         # back, so it follows the same byte-faithful rule as a
                         # read rather than the display rule used for audit rows.
-                        "text": str(redact_content(line)),
+                        "text": line,
                         "clipped": clipped,
                     }
                 )

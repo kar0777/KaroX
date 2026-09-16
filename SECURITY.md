@@ -56,9 +56,12 @@ to durable policy identifiers:
 - **Advanced** -> `elevated`: Build capabilities plus guarded local commit,
   `desktop.input`, and `network` for explicitly elevated work.
 
-Even Advanced does not grant `git push`, package publishing, or authentication
-commands. Git push and package publishing remain outside every stable access
-profile and require a separate explicit boundary.
+Even Advanced does not grant standing `git push`, package publishing, or
+authentication authority. Those effects remain outside every stable access
+profile. A durable Advanced ChatGPT Web bridge may expose the dedicated
+`karox.git.push` operation, but each invocation crosses a separate one-shot user
+approval bound to the exact action; ordinary developer commands remain unable to
+push.
 
 ## What KaroX Does Not Do
 
@@ -67,5 +70,6 @@ profile and require a separate explicit boundary.
 - KaroX does not auto-install system software without explicit consent.
 - KaroX does not disable TLS verification.
 - KaroX does not perform `git push` or `git reset` autonomously. A guarded local
-  commit is available only in the Advanced/`elevated` profile.
+  commit is available in Advanced/`elevated`; remote push requires the dedicated
+  exact-action one-shot user approval and never authorizes force-push.
 - KaroX does not read passwords or paste secrets into external forms.

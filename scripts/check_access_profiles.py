@@ -83,7 +83,12 @@ def collect_problems(root: Path = ROOT) -> list[str]:
     # leave the workspace -- and stay Advanced-only, which the assertions below
     # now pin rather than assume.
     if read_only != frozenset(
-        {Capability.REPO_READ, Capability.GIT_READ, Capability.BROWSER_READ}
+        {
+            Capability.REPO_READ,
+            Capability.GIT_READ,
+            Capability.DIAGNOSTICS_READ,
+            Capability.BROWSER_READ,
+        }
     ):
         problems.append(
             "read_only policy changed; review the Observe product promise "
@@ -93,9 +98,11 @@ def collect_problems(root: Path = ROOT) -> list[str]:
     required_build = {
         Capability.REPO_READ,
         Capability.REPO_WRITE,
+        Capability.DISK_READ,
         Capability.PROCESS_RUN,
         Capability.CHECKS_RUN,
         Capability.GIT_READ,
+        Capability.DIAGNOSTICS_READ,
         Capability.MCP_CALL,
         Capability.BROWSER_READ,
         Capability.BROWSER_INPUT,

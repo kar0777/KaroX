@@ -28,6 +28,7 @@ IMPORT_NAMES = {
     "httpx-sse": "httpx_sse",
     "PyYAML": "yaml",
     "Pygments": "pygments",
+    "Pillow": "PIL",
     "uvicorn[standard]": "uvicorn",
     "tomli": "tomli",
 }

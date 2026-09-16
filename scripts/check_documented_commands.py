@@ -57,6 +57,7 @@ class _BuilderInterpreter:
         self.contract = ParserContract()
         self.parsers: dict[str, tuple[str, ...]] = {}
         self.subparsers: dict[str, tuple[str, ...]] = {}
+        self.constants: dict[str, str] = {}
 
     @staticmethod
     def _target_name(node: ast.AST) -> str | None:
@@ -73,13 +74,14 @@ class _BuilderInterpreter:
             return None
         return function.value.id, node
 
-    @staticmethod
-    def _string_argument(call: ast.Call) -> str | None:
+    def _string_argument(self, call: ast.Call) -> str | None:
         if not call.args:
             return None
         value = call.args[0]
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return value.value
+        if isinstance(value, ast.Name):
+            return self.constants.get(value.id)
         return None
 
     def _record_parser_assignment(self, target: str, value: ast.AST) -> bool:
@@ -139,8 +141,28 @@ class _BuilderInterpreter:
             elif isinstance(statement, ast.Expr):
                 self._record_argument_call(statement.value)
 
+            if isinstance(statement, ast.For) and isinstance(statement.target, ast.Name):
+                values: list[str] = []
+                if isinstance(statement.iter, (ast.Tuple, ast.List)):
+                    for item in statement.iter.elts:
+                        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                            values.append(item.value)
+                if values:
+                    previous = self.constants.get(statement.target.id)
+                    for value in values:
+                        self.constants[statement.target.id] = value
+                        self.visit_statements(statement.body)
+                    if previous is None:
+                        self.constants.pop(statement.target.id, None)
+                    else:
+                        self.constants[statement.target.id] = previous
+                    self.visit_statements(statement.orelse)
+                    continue
+
             nested: list[list[ast.stmt]] = []
-            if isinstance(statement, (ast.If, ast.For, ast.While)):
+            if isinstance(statement, (ast.If, ast.While)):
+                nested.extend((statement.body, statement.orelse))
+            elif isinstance(statement, ast.For):
                 nested.extend((statement.body, statement.orelse))
             elif isinstance(statement, ast.Try):
                 nested.extend((statement.body, statement.orelse, statement.finalbody))
@@ -167,6 +189,28 @@ def _build_contract(root: Path) -> ParserContract:
         raise ValueError("src/karox/cli.py has no _parser/build_parser function")
     interpreter = _BuilderInterpreter()
     interpreter.visit_statements(builder.body)
+
+    # KaroX keeps the orchestration/intelligence command family in a separate
+    # module so cli.py does not become one giant parser function. Interpret that
+    # registered builder too instead of treating delegated parser construction as
+    # nonexistent documentation. The function receives the root ``commands``
+    # subparser collection, so seed that exact binding before walking its body.
+    orchestration_path = root / "src" / "karox" / "orchestration_cli.py"
+    orchestration_tree = ast.parse(orchestration_path.read_text(encoding="utf-8"))
+    register = next(
+        (
+            node
+            for node in orchestration_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "register_orchestration_commands"
+        ),
+        None,
+    )
+    if register is None:
+        raise ValueError("orchestration_cli.py has no register_orchestration_commands")
+    interpreter.subparsers["commands"] = ()
+    interpreter.visit_statements(register.body)
+
     if len(interpreter.contract.paths) < 2:
         raise ValueError("argparse contract contains no subcommands")
     return interpreter.contract

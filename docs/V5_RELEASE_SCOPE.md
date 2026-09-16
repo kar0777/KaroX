@@ -1,7 +1,7 @@
 # KaroX 5.0 release scope
 
 - Status: **frozen preview scope, amended once — see Scope amendment 1**
-- Runtime version: `5.0.0.dev0`
+- Runtime version: `5.0.0rc1`
 
 This is the product and release contract for KaroX 5.0. Code is not part of the
 stable product promise merely because it exists. It is part of 5.0 only when it
@@ -43,10 +43,12 @@ mode only *narrows* an access profile to read-only; checkpoints restore paths
 KaroX itself recorded as written; language-server diagnostics arrive as a gated
 capability; subagents cannot exceed a parent's budget or tool set; marketplace
 cards install as data, pinned by commit and verified by content hash, through the
-Pack machinery that already requires explicit approval. Git push, package
-publishing, arbitrary website automation, automatic execution of extension code,
-and multi-agent orchestration as a default all remain deferred, and no P0 blocker
-is removed.
+Pack machinery that already requires explicit approval. Standing Git-push
+authority, package publishing, arbitrary website automation, automatic execution
+of extension code, and multi-agent orchestration as a default remain deferred.
+An elevated hosted bridge may expose only the dedicated `karox.git.push` action,
+which still requires a fresh MCP user approval bound to the exact remote/branch
+action; no profile or generic command runner inherits that authority.
 
 **What this costs.** The 5.0 surface is larger, so there is more to keep working.
 The mitigation is ordering, not optimism: the UX core (text selection, copy,
@@ -148,7 +150,9 @@ Release-critical capabilities:
 - dedicated read-only Git status and diff;
 - explicit verification commands and durable evidence;
 - secret filtering and credential redaction;
-- hard blocks on Git push, package publishing, and destructive actions;
+- no standing Git-push authority; the dedicated hosted `karox.git.push` path is
+  one-shot user-approved and exact-action-bound, while package publishing and
+  destructive remote actions remain blocked;
 - structured, secret-free handoff and restart recovery;
 - actionable diagnostics for transport, tunnel, and authorization failures.
 
@@ -283,9 +287,11 @@ product's own checkbox and then refused them at the session boundary with exit
 code 2. `scripts/check_access_profiles.py` now pins the tiers above in both
 directions, so the two cannot drift apart again silently.
 
-Even Advanced does not include Git push, package publishing, or authentication
-commands. Those capabilities remain one-shot-explicit and are outside the stable
-5.0 product promise.
+Even Advanced does not include standing Git push, package publishing, or
+authentication authority. A saved elevated hosted bridge may advertise the
+separate `karox.git.push` action, but every invocation remains one-shot-explicit:
+the client must obtain a fresh user approval bound to the exact action digest.
+Package publishing and authentication stay unavailable on the shipping bridge.
 
 Resume is an action on an existing session, not a permission profile. Legacy UI
 may retain a Resume label during migration.
@@ -320,7 +326,9 @@ All items below must pass before `5.0.0` is published:
 - temporary tunnel URL changes produce an actionable diagnostic;
 - traversal, symlink/reparse escape, secret reflection, duplicate mutation,
   concurrent mutation, and failed-verification tests pass;
-- Git push and package publishing remain blocked in every shipping profile;
+- no shipping profile grants standing Git-push/package-publish authority; the
+  dedicated hosted push tool proves exact one-shot user approval and package
+  publishing remains blocked;
 - README, Russian README, quick start, migration, security, release notes, and
   troubleshooting describe the same product and version;
 - five external testers attempt installation without maintainer assistance;

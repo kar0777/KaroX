@@ -105,6 +105,23 @@ resource binding ради старого URL.
 После изменения public origin старые OAuth registrations и resource-bound grants
 могут быть неприменимы. Удали старое подключение и создай его заново с новым URL.
 
+Сохранённый bridge не обязан жить в открытой консоли. Если процесс умер, сам
+supervisor поднимет его заново; проверяй и управляешь через отрывные команды:
+
+```bash
+karox bridge status --saved chatgpt-dev
+karox bridge start --saved chatgpt-dev    # detached relaunch with the same URL
+karox bridge restart --saved chatgpt-dev  # old owner waits down, receipt returned
+karox bridge stop --saved chatgpt-dev
+```
+
+Для диагностики «MCP server does not implement OAuth» сохранённый bridge пишет
+только method+path каждого входящего запроса в
+`%LOCALAPPDATA%\KaroX\vnext\oauth-bridge\*.request-probe.jsonl` — никаких
+заголовков, query-параметров или тел. Если запросы ChatGPT не попадают в файл
+вообще, проверь Tailscale Funnel POP (периодический known-external issue),
+прежде чем чинить KaroX.
+
 ## Страница approval возвращает HTTP 421
 
 Старые preview-сборки могли получать `Origin: null` при POST формы Chromium из-за
@@ -291,7 +308,7 @@ Updater должен использовать staged install и rollback. Не �
 
 ## Release gate показывает pending records
 
-Для `5.0.0.dev0` это ожидаемо:
+Для `5.0.0rc1` это ожидаемо:
 
 ```bash
 python scripts/check_v5_release.py --json

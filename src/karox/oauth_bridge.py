@@ -886,7 +886,19 @@ class OAuthBridgeService:
             _scopes(payload["scope"])
         grants = payload.get("grant_types", ["authorization_code", "refresh_token"])
         responses = payload.get("response_types", ["code"])
-        if grants != ["authorization_code", "refresh_token"] or responses != ["code"]:
+        # RFC 7591: the registration metadata states what the client wants; the
+        # authorization server decides what it grants. ChatGPT registers public
+        # PKCE clients with ``["authorization_code"]`` only, so any subset that
+        # includes the code grant is acceptable. The bridge still issues only
+        # authorization-code with an optional refresh token, and tokens are
+        # never granted beyond what the exchange implements.
+        if (
+            not isinstance(grants, list)
+            or "authorization_code" not in grants
+            or any(grant not in ("authorization_code", "refresh_token") for grant in grants)
+            or len(set(grants)) != len(grants)
+            or responses != ["code"]
+        ):
             raise OAuthBridgeError("client grant or response type is unsupported")
         client_name = payload.get("client_name", "Web MCP client")
         if (
@@ -1329,20 +1341,21 @@ def build_oauth_proxy_asgi_app(
         request = Request(scope, receive=receive)
         request_path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
-        # Opt-in diagnostic trace for connector interoperability work. It records
-        # only the HTTP method and URL path: never query strings, headers, bodies,
-        # cookies, client IDs, authorization codes, or tokens.
-        trace_notion = bool(
-            service.allowed_redirect_hosts
-            and {"notion.so", "www.notion.so", "app.notion.com"}.intersection(
-                service.allowed_redirect_hosts
-            )
-        )
-        if trace_notion and service.state_path is not None:
+        # Interoperability trace for the OAuth discovery edge. It records only
+        # the HTTP method and URL path: never query strings, headers, bodies,
+        # cookies, client IDs, authorization codes, or tokens. Live connector
+        # platforms report broad OAuth failures ("does not implement OAuth")
+        # with no other server-side evidence, so this probe is the record of
+        # what actually reached the bridge.
+        if service.state_path is not None:
             try:
-                with service.state_path.with_suffix(".request-probe.jsonl").open(
-                    "a", encoding="utf-8"
-                ) as handle:
+                probe_path = service.state_path.with_suffix(".request-probe.jsonl")
+                if probe_path.is_file() and probe_path.stat().st_size > 262_144:
+                    keep = probe_path.read_text(encoding="utf-8").splitlines()[-512:]
+                    probe_path.write_text(
+                        "".join(line + "\n" for line in keep), encoding="utf-8"
+                    )
+                with probe_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps({"method": method, "path": str(request_path)}) + "\n")
             except OSError:
                 pass
@@ -1350,6 +1363,7 @@ def build_oauth_proxy_asgi_app(
             if request_path in {
                 "/.well-known/oauth-protected-resource",
                 f"/.well-known/oauth-protected-resource{service.path}",
+                f"{service.path}/.well-known/oauth-protected-resource",
             } and method == "GET":
                 response: Response = JSONResponse(
                     service.protected_resource_metadata(),
@@ -1357,10 +1371,17 @@ def build_oauth_proxy_asgi_app(
                 )
             elif request_path in {
                 "/.well-known/oauth-authorization-server",
+                # RFC 8414 path-inserted discovery: several connector platforms
+                # probe the authorization-server metadata at the MCP path suffix,
+                # and one probe failure reads as "does not implement OAuth".
+                f"/.well-known/oauth-authorization-server{service.path}",
+                f"{service.path}/.well-known/oauth-authorization-server",
                 # OpenID-style alias: HyperAgent's connector discovers the
                 # authorization server through this path, and its removal left
                 # the hyperagent-web profile with no working discovery route.
                 "/.well-known/openid-configuration",
+                f"/.well-known/openid-configuration{service.path}",
+                f"{service.path}/.well-known/openid-configuration",
             } and method == "GET":
                 response = JSONResponse(
                     service.authorization_server_metadata(),

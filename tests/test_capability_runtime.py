@@ -68,6 +68,11 @@ class Harness:
                     "untracked_bytes": 0,
                 }
             )
+        # CapabilityCoreRuntime deliberately trusts only the checkpoint bound to
+        # this build turn, never an arbitrary historical checkpoint found in the
+        # session ledger. Native/TUI construction passes this id explicitly; the
+        # test harness mirrors that production contract here.
+        self.runtime._rollback_checkpoint_id = "cp-test"
 
     def close(self) -> None:
         self.temp.cleanup()

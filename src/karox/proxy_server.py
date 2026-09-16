@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -26,6 +27,7 @@ from .artifacts import ArtifactStore
 from .core import CoreError, VerificationCommandNotApproved
 from .hosted_bridge import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
+    HostedApprovalRequired,
     HostedBridgeError,
     HostedToolRuntime,
 )
@@ -621,6 +623,116 @@ def build_proxy_asgi_app(
     if bearer_authorizer is not None and not callable(bearer_authorizer):
         raise ValueError("bridge bearer authorizer must be callable")
 
+    # MCP 2026-07-28 returns human-input continuations in an opaque
+    # ``requestState`` value that the client echoes on a fresh retry. Treat that
+    # value as attacker-controlled: approval state is integrity-protected,
+    # short-lived, and bound to the exact tool arguments. The sealing key is
+    # process-local by design; if the child recycles mid-dialog the retry fails
+    # closed and the new child can ask again instead of trusting stale state.
+    approval_state_secret = secrets.token_bytes(32)
+    approval_state_used: dict[str, float] = {}
+    approval_state_lock = threading.Lock()
+
+    def _approval_b64_encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    def _approval_b64_decode(value: str) -> bytes:
+        if not isinstance(value, str) or not value or len(value) > 16_384:
+            raise ValueError("approval request state is invalid")
+        padding = "=" * (-len(value) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode((value + padding).encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise ValueError("approval request state is invalid") from exc
+        # urlsafe_b64decode accepts non-canonical trailing bits. Re-encode and
+        # require a byte-exact canonical spelling so changing even the final
+        # character of requestState can never alias the same authenticated bytes.
+        if _approval_b64_encode(decoded) != value:
+            raise ValueError("approval request state is not canonical base64url")
+        return decoded
+
+    def _approval_arguments_digest(name: str, arguments: Mapping[str, Any]) -> str:
+        canonical = json.dumps(
+            {"name": name, "arguments": dict(arguments)},
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _seal_approval_state(
+        *,
+        wire_name: str,
+        arguments: Mapping[str, Any],
+        approval: HostedApprovalRequired,
+    ) -> str:
+        payload = {
+            "v": 1,
+            "wire_name": wire_name,
+            "arguments_sha256": _approval_arguments_digest(wire_name, arguments),
+            "action_digest": approval.action_digest,
+            "expires_at": time.time() + 300.0,
+        }
+        raw = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signature = hmac.new(approval_state_secret, raw, hashlib.sha256).digest()
+        return f"v1.{_approval_b64_encode(raw)}.{_approval_b64_encode(signature)}"
+
+    def _open_approval_state(
+        request_state: Any,
+        *,
+        wire_name: str,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(request_state, str):
+            raise ValueError("approval request state is missing")
+        parts = request_state.split(".")
+        if len(parts) != 3 or parts[0] != "v1":
+            raise ValueError("approval request state is invalid")
+        raw = _approval_b64_decode(parts[1])
+        signature = _approval_b64_decode(parts[2])
+        expected = hmac.new(approval_state_secret, raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("approval request state failed integrity validation")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("approval request state is invalid") from exc
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            raise ValueError("approval request state is invalid")
+        if payload.get("wire_name") != wire_name:
+            raise ValueError("approval retry belongs to another tool")
+        if payload.get("arguments_sha256") != _approval_arguments_digest(wire_name, arguments):
+            raise ValueError("approval retry arguments changed")
+        expires_at = payload.get("expires_at")
+        if (
+            isinstance(expires_at, bool)
+            or not isinstance(expires_at, (int, float))
+            or float(expires_at) < time.time()
+        ):
+            raise ValueError("approval request state expired")
+        action_digest = payload.get("action_digest")
+        if not isinstance(action_digest, str) or len(action_digest) != 64:
+            raise ValueError("approval action digest is invalid")
+        return payload
+
+    def _consume_approval_state(request_state: str, payload: Mapping[str, Any]) -> None:
+        digest = hashlib.sha256(request_state.encode("utf-8")).hexdigest()
+        expires_at = float(payload["expires_at"])
+        now = time.time()
+        with approval_state_lock:
+            for key, expiry in tuple(approval_state_used.items()):
+                if expiry < now:
+                    approval_state_used.pop(key, None)
+            if digest in approval_state_used:
+                raise ValueError("approval request state was already used")
+            approval_state_used[digest] = expires_at
+
     def resolve_token() -> str:
         if bearer_token is None:
             raise ValueError("bridge static bearer token is not configured")
@@ -701,11 +813,79 @@ def build_proxy_asgi_app(
         # there is no second mutable global worker process to lose or orphan.
         "worker_pid": os.getpid(),
     }
+    # The durable owner can outlive many MCP children and therefore carries a
+    # point-in-time diagnostics JSON. A freshly respawned child may have a newer
+    # tool catalogue than that owner. Track the descriptors this child actually
+    # serves so diagnostics can self-heal instead of claiming a new guarded tool
+    # is unavailable until the whole owner/tunnel is restarted.
+    live_tool_names: list[str] = []
 
     def current_diagnostics() -> Optional[dict[str, Any]]:
         if diagnostics_payload is None:
             return None
         live = dict(diagnostics_payload)
+        # Catalog self-heal applies only to owner-manufactured snapshots: they
+        # always carry the tool_catalog structure this child refreshes. An
+        # explicitly injected minimal payload is documented as verbatim, so a
+        # test or operator passing one sees it unchanged apart from live
+        # transport counters.
+        if live_tool_names and isinstance(live.get("tool_catalog"), dict):
+            # The child is authoritative for what it actually serves. A durable
+            # owner may have generated diagnostics before this child learned a
+            # new backwards-compatible tool, so repair the catalog/counts here
+            # rather than requiring an owner/tunnel restart just to make status
+            # truthful.
+            actual_tools = list(live_tool_names)
+            live["available_tools"] = actual_tools
+            capabilities = live.get("client_capabilities")
+            if isinstance(capabilities, dict):
+                refreshed_capabilities = dict(capabilities)
+                refreshed_capabilities["available_tool_count"] = len(actual_tools)
+                refreshed_capabilities["available_tools_digest"] = hashlib.sha256(
+                    "\0".join(actual_tools).encode("utf-8")
+                ).hexdigest()
+                live["client_capabilities"] = refreshed_capabilities
+
+            catalog = live.get("tool_catalog")
+            if isinstance(catalog, dict):
+                refreshed_catalog = dict(catalog)
+                refreshed_catalog["advertised_tool_count"] = len(actual_tools)
+                raw_groups = refreshed_catalog.get("groups")
+                groups = (
+                    {key: list(value) for key, value in raw_groups.items() if isinstance(value, list)}
+                    if isinstance(raw_groups, dict)
+                    else {}
+                )
+                grouped = {item for values in groups.values() for item in values}
+                for tool_name in actual_tools:
+                    if tool_name in grouped:
+                        continue
+                    if tool_name.startswith("karox.browser."):
+                        group = "browser"
+                    elif tool_name.startswith("karox.dev_server."):
+                        group = "devserver"
+                    elif tool_name.startswith("karox.memory."):
+                        group = "memory"
+                    elif tool_name.startswith("karox.task."):
+                        group = "task"
+                    elif tool_name.startswith("karox.runtime."):
+                        group = "admin"
+                    else:
+                        group = "core"
+                    groups.setdefault(group, []).append(tool_name)
+                    grouped.add(tool_name)
+                refreshed_catalog["groups"] = groups
+                live["tool_catalog"] = refreshed_catalog
+
+            restrictions = live.get("mode_restrictions")
+            if isinstance(restrictions, dict):
+                refreshed_restrictions = dict(restrictions)
+                if "karox.git.push" in actual_tools:
+                    refreshed_restrictions["no_git_push"] = False
+                    refreshed_restrictions["git_push_approval"] = (
+                        "one_shot_mcp_user_confirmation"
+                    )
+                live["mode_restrictions"] = refreshed_restrictions
         live["transport_runtime"] = dict(transport_runtime)
         activity = transport_activity_snapshot()
         started_at = float(transport_runtime["started_at"])
@@ -901,7 +1081,7 @@ def build_proxy_asgi_app(
     descriptor_routes: Optional[tuple[dict[str, Any], dict[str, Any]]] = None
 
     def update_descriptor_routes(descriptors: Sequence[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        nonlocal descriptor_routes
+        nonlocal descriptor_routes, live_tool_names
         by_internal: dict[str, Any] = {}
         by_wire: dict[str, Any] = {}
         for item in descriptors:
@@ -913,6 +1093,7 @@ def build_proxy_asgi_app(
         _ROUTABLE_ALIAS_NAMES.update(
             name for name in by_internal if wire_tool_name(name) != name
         )
+        live_tool_names = list(by_internal)
         descriptor_routes = (by_internal, by_wire)
         return descriptor_routes
 
@@ -965,6 +1146,7 @@ def build_proxy_asgi_app(
         arguments: dict[str, object],
         *,
         meta_extra: Optional[Mapping[str, Any]] = None,
+        approved_action_digest: Optional[str] = None,
     ) -> dict[str, Any] | CallToolResult:
         transport_runtime["mcp_tool_calls_started"] += 1
         transport_runtime["last_mcp_tool_call_started_at"] = time.time()
@@ -1074,13 +1256,28 @@ def build_proxy_asgi_app(
                 if resolved_name in _LONG_RUNNING_TOOL_NAMES
                 else _TOOL_EXECUTION_THREAD_LIMITER
             )
-            result = await anyio.to_thread.run_sync(
-                lambda: proxy.execute(
+            if approved_action_digest is None:
+                invoke = lambda: proxy.execute(
                     resolved_name,
                     dict(arguments),
                     idempotency_key=idempotency_key,
                     deadline_seconds=deadline_seconds,
-                ),
+                )
+            else:
+                approved = getattr(proxy, "execute_approved", None)
+                if not callable(approved):
+                    raise HostedBridgeError(
+                        "protocol-level approval is unavailable for this tool runtime"
+                    )
+                invoke = lambda: approved(
+                    resolved_name,
+                    dict(arguments),
+                    expected_action_digest=approved_action_digest,
+                    idempotency_key=idempotency_key,
+                    deadline_seconds=deadline_seconds,
+                )
+            result = await anyio.to_thread.run_sync(
+                invoke,
                 limiter=execution_limiter,
             )
             result = compact_result(resolved_name, result)
@@ -1092,6 +1289,12 @@ def build_proxy_asgi_app(
             _maybe_record_client_evidence(resolved_name, success=True)
             finish_trace(span, result)
             return result
+        except HostedApprovalRequired:
+            # Modern MCP turns this typed stop into an input_required round.
+            # Do not collapse it into a generic denied result here, because the
+            # transport layer must keep the exact action digest out of model
+            # arguments while letting the client obtain real user input.
+            raise
         except KeyboardInterrupt:
             # A command/request interrupt belongs to this tool invocation. It is
             # never an operator instruction to stop uvicorn or the managed web
@@ -1134,7 +1337,16 @@ def build_proxy_asgi_app(
     ) -> dict[str, Any] | CallToolResult:
         meta = server.request_context.meta
         extra = getattr(meta, "model_extra", None) if meta is not None else None
-        return await execute_tool(name, arguments, meta_extra=extra)
+        try:
+            return await execute_tool(name, arguments, meta_extra=extra)
+        except HostedApprovalRequired:
+            # The native approval UX is carried by the stateless 2026-07-28
+            # input_required wire below. Older SDK/session clients must fail
+            # closed rather than receiving or inventing an approval token.
+            return bridge_error_result(
+                "denied",
+                detail="this action requires an MCP 2026-07-28 user approval round",
+            )
 
     def modern_result_meta() -> dict[str, Any]:
         try:
@@ -1332,7 +1544,127 @@ def build_proxy_asgi_app(
                     status_code=400,
                 )(scope, receive, send)
                 return
-            call_result = await execute_tool(name, arguments, meta_extra=meta_extra)
+
+            input_responses = params.get("inputResponses")
+            request_state = params.get("requestState")
+            continuation = input_responses is not None or request_state is not None
+            call_result: dict[str, Any] | CallToolResult
+            if continuation:
+                if not isinstance(input_responses, dict) or not isinstance(request_state, str):
+                    await JSONResponse(
+                        modern_error(request_id, -32602, "Invalid approval continuation"),
+                        status_code=400,
+                    )(scope, receive, send)
+                    return
+                try:
+                    approval_state = _open_approval_state(
+                        request_state,
+                        wire_name=name,
+                        arguments=arguments,
+                    )
+                except ValueError:
+                    await JSONResponse(
+                        modern_error(request_id, -32602, "Invalid or expired approval state"),
+                        status_code=400,
+                    )(scope, receive, send)
+                    return
+                try:
+                    _consume_approval_state(request_state, approval_state)
+                except ValueError:
+                    await JSONResponse(
+                        modern_error(request_id, -32602, "Approval state was already used"),
+                        status_code=400,
+                    )(scope, receive, send)
+                    return
+                response = input_responses.get("karox_approval")
+                action = response.get("action") if isinstance(response, dict) else None
+                content = response.get("content") if isinstance(response, dict) else None
+                approved = (
+                    action == "accept"
+                    and isinstance(content, dict)
+                    and content.get("approve") is True
+                )
+                if not approved:
+                    call_result = CallToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text="approval_declined: user did not approve this action",
+                            )
+                        ],
+                        structuredContent={
+                            "ok": False,
+                            "error_code": "approval_declined",
+                            "error": "the user did not approve this action",
+                        },
+                        isError=True,
+                    )
+                else:
+                    call_result = await execute_tool(
+                        name,
+                        arguments,
+                        meta_extra=meta_extra,
+                        approved_action_digest=str(approval_state["action_digest"]),
+                    )
+            else:
+                try:
+                    call_result = await execute_tool(name, arguments, meta_extra=meta_extra)
+                except HostedApprovalRequired as approval:
+                    capabilities = meta_extra.get(
+                        "io.modelcontextprotocol/clientCapabilities", {}
+                    )
+                    elicitation = (
+                        capabilities.get("elicitation")
+                        if isinstance(capabilities, dict)
+                        else None
+                    )
+                    if not isinstance(elicitation, dict):
+                        call_result = bridge_error_result(
+                            "denied",
+                            detail=(
+                                "this action needs an exact user approval and the client "
+                                "did not advertise MCP elicitation support"
+                            ),
+                        )
+                    else:
+                        input_required = {
+                            "resultType": "input_required",
+                            "inputRequests": {
+                                "karox_approval": {
+                                    "method": "elicitation/create",
+                                    "params": {
+                                        "mode": "form",
+                                        "message": approval.message,
+                                        "requestedSchema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "approve": {
+                                                    "type": "boolean",
+                                                    "title": "Approve this one action",
+                                                    "default": False,
+                                                }
+                                            },
+                                            "required": ["approve"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                }
+                            },
+                            "requestState": _seal_approval_state(
+                                wire_name=name,
+                                arguments=arguments,
+                                approval=approval,
+                            ),
+                            "_meta": modern_result_meta(),
+                        }
+                        await JSONResponse(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "result": input_required,
+                            }
+                        )(scope, receive, send)
+                        return
             await JSONResponse(
                 {
                     "jsonrpc": "2.0",

@@ -107,6 +107,40 @@ class DispatchTests(unittest.TestCase):
         self.assertTrue(result["shown"])
         self.assertEqual(manager.calls, [("show_window", {"left": 120, "top": 80}, 5.0)])
 
+    def test_show_window_refuses_malformed_coordinates_with_a_typed_error(self) -> None:
+        """Malformed coordinates are an invalid request, not an untyped crash.
+
+        ``int()`` on a string, list, bool, None, or NaN used to escape as a bare
+        ValueError/TypeError; every other browser action refuses with a typed
+        InvalidCommand, and the engine must never see the malformed call.
+        """
+        for payload in (
+            {"left": "120"},
+            {"top": None},
+            {"left": [120]},
+            {"left": True},
+            {"top": 12.5},
+            {"left": float("nan")},
+            {"left": 10_001},
+        ):
+            with self.subTest(payload=payload):
+                manager = _ExtensionRecordingManager()
+                with self.assertRaises(InvalidCommand):
+                    execute_browser_command(
+                        _runtime(manager),
+                        {"action": "show_window", "payload": payload},
+                        5.0,
+                    )
+                self.assertEqual(manager.calls, [])
+        # A whole-number float is a valid coordinate and reaches the engine as int.
+        manager = _ExtensionRecordingManager()
+        execute_browser_command(
+            _runtime(manager),
+            {"action": "show_window", "payload": {"left": 120.0, "top": 80}},
+            5.0,
+        )
+        self.assertEqual(manager.calls, [("show_window", {"left": 120, "top": 80}, 5.0)])
+
     def test_an_engine_without_the_action_refuses_honestly(self) -> None:
         for action in _EXTENDED_ACTIONS:
             with self.subTest(action=action):

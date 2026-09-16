@@ -32,6 +32,9 @@ cloudflared.log
 # Scratch and recovery (never published)
 scratch/
 .claude/
+# Left behind by `pytest --basetemp=.pytest-basetemp`, which exists to keep test
+# temporaries out of the shared Windows Temp. Never committed, never packaged.
+.pytest-basetemp/
 
 # Runtime transcript (process-local SQLite)
 *.db
@@ -79,3 +82,11 @@ OPUS5_*.md
 OUTREACH_*.md
 TARGET_MODEL_*.md
 PROJECT_CONTEXT.md
+
+# Root scratch sessions (Access-project tooling pipeline). Kept on disk on
+# purpose; never publish through a blanket `git add .`.
+/.karox_tmp_*
+/*.java
+/*.class
+/outputs/
+/.karox_fix_backup/

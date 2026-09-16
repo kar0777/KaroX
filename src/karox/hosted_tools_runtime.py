@@ -75,6 +75,7 @@ from .service_supervisor import (
 )
 from .sessions import SessionStore
 from .task_state import TaskStateStore
+from .verification import discover_verification_commands
 
 
 # ---------------------------------------------------------------------------
@@ -1252,10 +1253,11 @@ class HostedToolsRuntime:
             self._browser_policy,
         )
         self._process_store = ManagedProcessStore(session_id)
+        self._verification_commands = tuple(tuple(item) for item in verification_commands)
         self._check_jobs = CheckJobManager(
             self.repository,
             session_id,
-            verification_commands,
+            self._verification_commands,
         )
         # Full/elevated long commands use the same durable worker engine as
         # checks, but a separate state root and a developer-only argv mode. The
@@ -1332,6 +1334,135 @@ class HostedToolsRuntime:
             },
             "server_profiles": [p.to_public_dict() for p in self._server_profiles],
             "artifacts": [a.to_dict() for a in self._artifacts.list()],
+        }
+
+    def execute_check_run_compat(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+        deadline_seconds: float,
+    ) -> Optional[dict[str, Any]]:
+        """Detach long legacy tests.run/checks.run calls into the durable worker.
+
+        Hosted clients can outlive one HTTP request but a long synchronous check
+        used to hold the bridge request/mutation fence until the subprocess ended.
+        That made a client timeout look like a dead bridge and could postpone a
+        safe child recycle.  Preserve the old tool names while returning a durable
+        job receipt for work that is obviously longer than a normal MCP round.
+        """
+
+        self._assert_session_alive()
+        if tool_name not in {"karox.tests.run", "karox.checks.run"}:
+            return None
+        if not {CHECKS_START, CHECKS_STATUS, CHECKS_LOGS}.issubset(self._allowed):
+            return None
+        try:
+            self.policy.require(self.hosted_origin, Capability.CHECKS_RUN)
+        except PolicyDenied as exc:
+            raise HostedBridgeAccessDenied(str(exc)) from exc
+
+        raw_timeout = arguments.get("timeout_seconds")
+        requested_timeout: Optional[float] = None
+        if raw_timeout is not None:
+            if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+                return None
+            requested_timeout = float(raw_timeout)
+        suite = str(arguments.get("suite", "focused")) if tool_name == "karox.tests.run" else ""
+        should_detach = bool(
+            (requested_timeout is not None and requested_timeout >= 20.0)
+            or (tool_name == "karox.tests.run" and suite in {"full", "split"})
+        )
+        if not should_detach:
+            return None
+
+        workstream_raw = arguments.get("workstream_id", "default")
+        if not isinstance(workstream_raw, str) or not workstream_raw:
+            return None
+        project_id, project_path = self._project_for_workstream(workstream_raw)
+        try:
+            discovered = discover_verification_commands(project_path)
+        except (OSError, ValueError):
+            discovered = ()
+        verification_commands = tuple(
+            dict.fromkeys((*self._verification_commands, *discovered))
+        )
+        manager = CheckJobManager(
+            project_path,
+            self.session_id,
+            verification_commands,
+        )
+        payload: dict[str, Any]
+        if tool_name == "karox.tests.run":
+            payload = {"kind": "pytest", "suite": suite}
+            for key in ("targets", "split", "part"):
+                if key in arguments:
+                    payload[key] = arguments[key]
+        else:
+            argv = arguments.get("argv")
+            if not isinstance(argv, list):
+                return None
+            payload = {"kind": "check", "argv": list(argv)}
+        payload["timeout_seconds"] = (
+            requested_timeout
+            if requested_timeout is not None
+            else min(86400.0, max(20.0, float(deadline_seconds)))
+        )
+
+        compat_key = f"compat-check:{tool_name}:{idempotency_key}"
+        started = manager.start(
+            payload,
+            idempotency_key=compat_key,
+            bridge_pid=os.getpid(),
+        )
+        self._bind_job_scope(
+            manager,
+            started,
+            workstream_id=workstream_raw,
+            project_id=project_id,
+        )
+        job_id = str(started["job_id"])
+        grace = 0.0 if bool(started.get("idempotent_replay")) else min(
+            1.5, max(0.0, float(deadline_seconds) - 0.75)
+        )
+        poll_deadline = time.monotonic() + grace
+        final_statuses = {"passed", "failed", "cancelled", "timed_out"}
+        status = started
+        while str(status.get("status")) not in final_statuses:
+            if time.monotonic() >= poll_deadline:
+                return {
+                    "ok": True,
+                    "detached": True,
+                    "durable_job_id": job_id,
+                    "durable_status": status.get("status"),
+                    "workstream_id": workstream_raw,
+                    "project_id": project_id,
+                    "idempotent_replay": bool(started.get("idempotent_replay")),
+                    "detail": (
+                        "verification continues in a durable worker; use checks.status/logs "
+                        "with durable_job_id instead of holding this MCP request open"
+                    ),
+                }
+            time.sleep(0.1)
+            status = manager.status(job_id)
+
+        log_result = manager.logs(job_id, limit=1024 * 1024)
+        log = log_result.get("log") if isinstance(log_result, dict) else None
+        text = str((log or {}).get("text") or "") if isinstance(log, dict) else ""
+        return {
+            "ok": str(status.get("status")) == "passed",
+            "argv": list(status.get("argv") or []),
+            "exit_code": status.get("exit_code"),
+            "stdout": text,
+            "stderr": "",
+            "timed_out": str(status.get("status")) == "timed_out",
+            "detached": False,
+            "durable_job_id": job_id,
+            "durable_status": status.get("status"),
+            "workstream_id": workstream_raw,
+            "project_id": project_id,
+            "idempotent_replay": bool(started.get("idempotent_replay")),
         }
 
     def execute_command_run_compat(

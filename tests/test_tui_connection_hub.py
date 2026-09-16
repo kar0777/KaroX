@@ -458,7 +458,7 @@ class HubScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("glm-5-2", text)
             self.assertNotIn("  ClickUp · stopped", text)
             self.assertNotIn("  Custom MCP client · stopped", text)
-            self.assertIn("Saved connections (7)", text)
+            self.assertIn("All connections (7)", text)
 
     async def test_the_root_offers_explicit_management_entries(self) -> None:
         app = self.app()

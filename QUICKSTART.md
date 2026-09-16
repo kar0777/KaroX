@@ -1,26 +1,35 @@
 # KaroX 5 Preview — Quick start / Быстрый старт
 
-This guide covers the preview runtime `5.0.0.dev0`. The public bootstrap scripts
+This guide covers the release-candidate runtime `5.0.0rc1`. The public bootstrap scripts
 on `main` install the latest stable 4.x release. To test KaroX 5, use a checkout
 of the preview branch and its local installer.
 
-Эта инструкция относится к preview runtime `5.0.0.dev0`. Публичные bootstrap-
+Эта инструкция относится к release-candidate runtime `5.0.0rc1`. Публичные bootstrap-
 скрипты ветки `main` устанавливают последний стабильный релиз 4.x. Для проверки
 KaroX 5 используй checkout preview-ветки и локальный установщик из неё.
 
 ## 1. Install / Установка
 
-Windows:
-
-```powershell
-.\install.karox.ps1
-```
-
-macOS or Linux / macOS или Linux:
+Any OS / любая ОС:
 
 ```bash
-./install.karox.sh
+pipx install --pre karox-runtime
 ```
+
+or / или `uv tool install --prerelease=allow karox-runtime`.
+
+From a source checkout / из исходников: `.\install.karox.ps1` (Windows) or
+`./install.karox.sh` (macOS, Linux).
+
+Then / затем:
+
+```bash
+karox quickstart
+```
+
+It prints the detected repository, language, connected providers and bridges,
+and the one command to run next. / Команда покажет найденный репозиторий, язык,
+подключённые провайдеры и мосты и одну следующую команду.
 
 Open a new terminal inside a disposable Git repository for the first test.
 
@@ -54,9 +63,12 @@ The UI uses friendly names; the durable/CLI identifiers are shown in code.
   добавляет защищённый локальный commit и разрешённые policy browser,
   desktop-input и network capabilities.
 
-No stable profile grants Git push, package publishing, or authentication
-commands. Ни один стабильный профиль не выдаёт Git push, package publishing или
-authentication commands.
+No stable profile grants standing Git push, package publishing, or authentication
+authority. Advanced ChatGPT Web may expose a dedicated `karox.git.push`, but each
+push requires a one-shot exact-action user approval; developer commands cannot
+bypass it. Ни один стабильный профиль не выдаёт постоянное право на Git push,
+package publishing или authentication: отдельный push требует одноразового
+машинно-проверяемого подтверждения пользователя.
 
 Start with Observe. Use Build only in a repository where the intended change is
 understood. KaroX is not an operating-system sandbox; an approved process runs
@@ -145,8 +157,32 @@ Confirm that the completed mutation is not applied a second time and that Git
 state and evidence remain available.
 
 Останови KaroX, снова запусти его в том же репозитории и продолжи сохранённую
-сессию. Убедись, что выполненная мутация не применяется повторно, а Git state и
+сессию. Убеди, что выполненная мутация не применяется повторно, а Git state и
 evidence сохранились.
+
+## 6A. Saved bridge lifecycle / Жизненный цикл сохранённого bridge
+
+A saved bridge keeps its session id, public URL and OAuth grants across restarts.
+Prefer the detached lifecycle commands over keeping a console open:
+
+```bash
+karox bridge status --saved chatgpt-dev
+karox bridge start --saved chatgpt-dev    # detached relaunch via the supervisor
+karox bridge restart --saved chatgpt-dev  # waits for the old owner, returns a receipt
+karox bridge stop --saved chatgpt-dev     # disarms auto-recovery before stopping
+```
+
+`start` and `restart` ask the sibling supervisor to keep the bridge alive after
+the CLI exits; `restart` returns once the replacement owner answers. If the
+public route was lost, the durable owner reapplies the exact owned Funnel route
+by itself. Save the ChatGPT connector once on the stable URL; it reconnects on
+its own after a restart.
+
+Сохранённый bridge переживает перезапуск вместе с session id, публичным URL и
+OAuth-грантами. Предпочитай detached-команды открытой консоли: `start` поднимает
+bridge detached-владельцем под присмотром supervisor, `restart` ждёт выхода
+старого owner и возвращает квитанцию, а `stop` сначала снимает
+авто-восстановление, чтобы остановленный bridge не поднялся снова сам.
 
 ## 7. Diagnose / Диагностика
 

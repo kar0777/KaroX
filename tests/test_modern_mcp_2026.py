@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
 from typing import Any, Optional
 
 from _support import SRC  # noqa: F401
+from karox.hosted_bridge import HostedApprovalRequired
 from karox.proxy import ProxyToolDescriptor
 from karox.proxy_server import MODERN_MCP_PROTOCOL_VERSION, build_proxy_asgi_app
-from test_hosted_bridge import _asgi_request
+from test_hosted_bridge import _asgi_request, _memory_stream_pair, _wire_requests
 
 
 class _ModernRuntime:
@@ -37,6 +38,66 @@ class _ModernRuntime:
         return {"ok": True, "tool": tool_name, "path": arguments.get("path")}
 
 
+class _ApprovalRuntime:
+    def __init__(self) -> None:
+        self.approved_digests: list[str] = []
+
+    def descriptors(self) -> list[ProxyToolDescriptor]:
+        return [
+            ProxyToolDescriptor(
+                name="karox.git.push",
+                description="Synthetic approval-gated push",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "remote": {"type": "string"},
+                        "branch": {"type": "string"},
+                    },
+                    "required": ["remote", "branch"],
+                    "additionalProperties": False,
+                },
+                read_only=False,
+            )
+        ]
+
+    def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = 30.0,
+    ) -> dict[str, Any]:
+        del arguments, idempotency_key, deadline_seconds
+        raise HostedApprovalRequired(
+            tool_name=tool_name,
+            action_digest="a" * 64,
+            action_kind="git.push",
+            risk="high",
+            consequence="external",
+            preview={"remote": "origin", "branch": "main"},
+            message="Allow one synthetic push?",
+        )
+
+    def execute_approved(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        expected_action_digest: str,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = 30.0,
+    ) -> dict[str, Any]:
+        del idempotency_key, deadline_seconds
+        self.approved_digests.append(expected_action_digest)
+        return {
+            "ok": True,
+            "tool": tool_name,
+            "arguments": dict(arguments),
+            "approved": True,
+        }
+
+
 def _modern_request(method: str, params: dict[str, Any], *, name: str | None = None) -> dict[str, Any]:
     headers = [
         ("host", "127.0.0.1:8765"),
@@ -52,7 +113,7 @@ def _modern_request(method: str, params: dict[str, Any], *, name: str | None = N
     meta.update(
         {
             "io.modelcontextprotocol/protocolVersion": MODERN_MCP_PROTOCOL_VERSION,
-            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
             "io.modelcontextprotocol/clientInfo": {"name": "test-client", "version": "1"},
         }
     )
@@ -68,9 +129,36 @@ def _modern_request(method: str, params: dict[str, Any], *, name: str | None = N
     }
 
 
+def _run_with_lifespan(app: Any, scenario: Any) -> Any:
+    import anyio
+
+    async def run() -> Any:
+        to_app_send, to_app_receive = _memory_stream_pair()
+        from_app_send, from_app_receive = _memory_stream_pair()
+        async with (
+            to_app_send,
+            to_app_receive,
+            from_app_send,
+            from_app_receive,
+            anyio.create_task_group() as group,
+        ):
+            group.start_soon(
+                app, {"type": "lifespan"}, to_app_receive.receive, from_app_send.send
+            )
+            await to_app_send.send({"type": "lifespan.startup"})
+            await from_app_receive.receive()
+            try:
+                return await scenario()
+            finally:
+                await to_app_send.send({"type": "lifespan.shutdown"})
+                await from_app_receive.receive()
+
+    return anyio.run(run)
+
+
 def test_modern_discover_lists_2026_and_tools_capability() -> None:
     app = build_proxy_asgi_app(_ModernRuntime(), "modern-test-token")
-    response = asyncio.run(_asgi_request(app, _modern_request("server/discover", {})))
+    response = _wire_requests(app, [_modern_request("server/discover", {})])[0]
     assert response.status == 200
     result = response.json()["result"]
     assert result["supportedVersions"][0] == MODERN_MCP_PROTOCOL_VERSION
@@ -78,23 +166,74 @@ def test_modern_discover_lists_2026_and_tools_capability() -> None:
     assert result["resultType"] == "complete"
 
 
+def test_modern_diagnostics_refresh_stale_owner_catalog_from_live_child() -> None:
+    diagnostics = {
+        "schema_version": 1,
+        "available_tools": [],
+        "client_capabilities": {
+            "available_tool_count": 0,
+            "available_tools_digest": hashlib.sha256(b"").hexdigest(),
+        },
+        "tool_catalog": {
+            "advertised_tool_count": 0,
+            "groups": {"core": []},
+        },
+        "mode_restrictions": {
+            "read_only": False,
+            "no_git_push": True,
+            "no_publish": True,
+            "no_auth_commands": True,
+            "no_deploy_release": True,
+        },
+    }
+    app = build_proxy_asgi_app(
+        _ApprovalRuntime(),
+        "modern-test-token",
+        diagnostics=diagnostics,
+    )
+
+    response = _wire_requests(
+        app,
+        [
+            _modern_request(
+                "tools/call",
+                {"name": "karox_bridge_diagnostics", "arguments": {}},
+                name="karox_bridge_diagnostics",
+            )
+        ],
+    )[0]
+    assert response.status == 200
+    live = response.json()["result"]["structuredContent"]
+    assert live["available_tools"] == ["karox.git.push"]
+    assert live["client_capabilities"]["available_tool_count"] == 1
+    assert live["client_capabilities"]["available_tools_digest"] == hashlib.sha256(
+        b"karox.git.push"
+    ).hexdigest()
+    assert live["tool_catalog"]["advertised_tool_count"] == 1
+    assert "karox.git.push" in live["tool_catalog"]["groups"]["core"]
+    assert live["mode_restrictions"]["no_git_push"] is False
+    assert (
+        live["mode_restrictions"]["git_push_approval"]
+        == "one_shot_mcp_user_confirmation"
+    )
+
+
 def test_modern_tools_list_and_call_use_same_runtime() -> None:
     app = build_proxy_asgi_app(_ModernRuntime(), "modern-test-token")
-    listed = asyncio.run(_asgi_request(app, _modern_request("tools/list", {})))
-    assert listed.status == 200
-    tools = listed.json()["result"]["tools"]
-    assert [item["name"] for item in tools] == ["karox_repo_read_file"]
-
-    called = asyncio.run(
-        _asgi_request(
-            app,
+    listed, called = _wire_requests(
+        app,
+        [
+            _modern_request("tools/list", {}),
             _modern_request(
                 "tools/call",
                 {"name": "karox_repo_read_file", "arguments": {"path": "README.md"}},
                 name="karox_repo_read_file",
             ),
-        )
+        ],
     )
+    assert listed.status == 200
+    tools = listed.json()["result"]["tools"]
+    assert [item["name"] for item in tools] == ["karox_repo_read_file"]
     assert called.status == 200
     result = called.json()["result"]
     assert result["resultType"] == "complete"
@@ -106,6 +245,131 @@ def test_modern_tools_list_and_call_use_same_runtime() -> None:
     }
 
 
+def test_modern_approval_round_requires_real_elicitation_and_exact_retry() -> None:
+    runtime = _ApprovalRuntime()
+    app = build_proxy_asgi_app(runtime, "modern-test-token")
+    arguments = {"remote": "origin", "branch": "main"}
+
+    async def scenario() -> tuple[Any, Any, Any]:
+        first = await _asgi_request(
+            app,
+            _modern_request(
+                "tools/call",
+                {"name": "karox_git_push", "arguments": arguments},
+                name="karox_git_push",
+            ),
+        )
+        required = first.json()["result"]
+        retry = _modern_request(
+            "tools/call",
+            {
+                "name": "karox_git_push",
+                "arguments": arguments,
+                "requestState": required["requestState"],
+                "inputResponses": {
+                    "karox_approval": {
+                        "action": "accept",
+                        "content": {"approve": True},
+                    }
+                },
+            },
+            name="karox_git_push",
+        )
+        approved = await _asgi_request(app, retry)
+        replay = await _asgi_request(app, retry)
+        return first, approved, replay
+
+    first, approved, replay = _run_with_lifespan(app, scenario)
+    assert first.status == 200
+    required = first.json()["result"]
+    assert required["resultType"] == "input_required"
+    assert required["inputRequests"]["karox_approval"]["method"] == "elicitation/create"
+    assert "requestState" in required
+    assert approved.status == 200
+    result = approved.json()["result"]
+    assert result["resultType"] == "complete"
+    assert result["structuredContent"]["approved"] is True
+    assert runtime.approved_digests == ["a" * 64]
+    assert replay.status == 400
+    assert replay.json()["error"]["code"] == -32602
+
+
+def test_modern_approval_decline_and_tampered_state_never_execute() -> None:
+    runtime = _ApprovalRuntime()
+    app = build_proxy_asgi_app(runtime, "modern-test-token")
+    arguments = {"remote": "origin", "branch": "main"}
+
+    async def scenario() -> tuple[Any, Any, Any, Any]:
+        first = await _asgi_request(
+            app,
+            _modern_request(
+                "tools/call",
+                {"name": "karox_git_push", "arguments": arguments},
+                name="karox_git_push",
+            ),
+        )
+        state = first.json()["result"]["requestState"]
+        tampered = state[:-1] + ("A" if state[-1] != "A" else "B")
+        rejected = await _asgi_request(
+            app,
+            _modern_request(
+                "tools/call",
+                {
+                    "name": "karox_git_push",
+                    "arguments": arguments,
+                    "requestState": tampered,
+                    "inputResponses": {
+                        "karox_approval": {
+                            "action": "accept",
+                            "content": {"approve": True},
+                        }
+                    },
+                },
+                name="karox_git_push",
+            ),
+        )
+        declined_request = _modern_request(
+            "tools/call",
+            {
+                "name": "karox_git_push",
+                "arguments": arguments,
+                "requestState": state,
+                "inputResponses": {
+                    "karox_approval": {"action": "decline"}
+                },
+            },
+            name="karox_git_push",
+        )
+        declined = await _asgi_request(app, declined_request)
+        replay_after_decline = await _asgi_request(
+            app,
+            _modern_request(
+                "tools/call",
+                {
+                    "name": "karox_git_push",
+                    "arguments": arguments,
+                    "requestState": state,
+                    "inputResponses": {
+                        "karox_approval": {
+                            "action": "accept",
+                            "content": {"approve": True},
+                        }
+                    },
+                },
+                name="karox_git_push",
+            ),
+        )
+        return first, rejected, declined, replay_after_decline
+
+    _first, rejected, declined, replay_after_decline = _run_with_lifespan(app, scenario)
+    assert rejected.status == 400
+    assert rejected.json()["error"]["code"] == -32602
+    assert declined.status == 200
+    assert declined.json()["result"]["structuredContent"]["error_code"] == "approval_declined"
+    assert replay_after_decline.status == 400
+    assert runtime.approved_digests == []
+
+
 def test_modern_header_mismatch_fails_without_execution() -> None:
     app = build_proxy_asgi_app(_ModernRuntime(), "modern-test-token")
     request = _modern_request("tools/list", {})
@@ -113,6 +377,6 @@ def test_modern_header_mismatch_fails_without_execution() -> None:
         (header, "tools/call" if header == "mcp-method" else value)
         for header, value in request["headers"]
     ]
-    response = asyncio.run(_asgi_request(app, request))
+    response = _wire_requests(app, [request])[0]
     assert response.status == 400
     assert response.json()["error"]["code"] == -32600

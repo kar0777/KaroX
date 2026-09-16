@@ -12,7 +12,15 @@ from _support import initialize_git_repository
 
 from karox.check_jobs import CheckJobError
 from karox.hosted_bridge import CompositeHostedBridge, HostedBridgeAccessDenied
-from karox.hosted_tools_runtime import COMMAND_LOGS, COMMAND_START, COMMAND_STATUS, HostedToolsRuntime
+from karox.hosted_tools_runtime import (
+    CHECKS_LOGS,
+    CHECKS_START,
+    CHECKS_STATUS,
+    COMMAND_LOGS,
+    COMMAND_START,
+    COMMAND_STATUS,
+    HostedToolsRuntime,
+)
 from karox.models import AccessProfile, Origin, OriginKind
 from karox.proxy import ProxyToolDescriptor
 from karox.sessions import SessionStore
@@ -336,3 +344,132 @@ def test_composite_bridge_routes_legacy_command_run_to_durable_compat_surface() 
     assert durable.compat_calls == [
         ({"argv": ["tool"], "timeout_seconds": 30}, "stable-key", 45)
     ]
+
+
+class _CoreCheckRuntime:
+    def descriptors(self):
+        return [
+            ProxyToolDescriptor(
+                "karox.tests.run", "legacy tests", {"type": "object"}, False
+            )
+        ]
+
+    def execute(self, *args, **kwargs):
+        raise AssertionError("legacy synchronous tests owner should not be called")
+
+
+class _DurableCheckRuntime:
+    def __init__(self):
+        self.compat_calls = []
+
+    def descriptors(self):
+        return [
+            ProxyToolDescriptor(
+                "karox.checks.start", "durable checks", {"type": "object"}, False
+            )
+        ]
+
+    def execute(self, *args, **kwargs):
+        raise AssertionError("direct durable checks execute is not expected")
+
+    def execute_check_run_compat(
+        self, tool_name, arguments, *, idempotency_key, deadline_seconds
+    ):
+        self.compat_calls.append(
+            (tool_name, arguments, idempotency_key, deadline_seconds)
+        )
+        return {
+            "ok": True,
+            "detached": True,
+            "durable_job_id": "job-compat-check",
+            "durable_status": "running",
+        }
+
+
+def test_composite_bridge_routes_legacy_long_tests_to_durable_compat_surface() -> None:
+    durable = _DurableCheckRuntime()
+    bridge = CompositeHostedBridge((_CoreCheckRuntime(), durable))
+    result = bridge.execute(
+        "karox.tests.run",
+        {"suite": "full", "timeout_seconds": 120},
+        idempotency_key="stable-tests-key",
+        deadline_seconds=180,
+    )
+    assert result["detached"] is True
+    assert result["durable_job_id"] == "job-compat-check"
+    assert durable.compat_calls == [
+        (
+            "karox.tests.run",
+            {"suite": "full", "timeout_seconds": 120},
+            "stable-tests-key",
+            180,
+        )
+    ]
+
+
+def test_real_long_tests_compat_uses_one_durable_job_and_reconciles() -> None:
+    old = dict(os.environ)
+    temp = tempfile.TemporaryDirectory()
+    try:
+        root = Path(temp.name)
+        repository = root / "repo"
+        initialize_git_repository(repository)
+        tests_dir = repository / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_fast.py").write_text(
+            "def test_fast():\n    assert 2 + 2 == 4\n",
+            encoding="utf-8",
+        )
+        os.environ["KAROX_VNEXT_RUNTIME_DIR"] = str(root / "runtime")
+        os.environ.pop("KAROX_RUNTIME_DIR", None)
+        sessions = SessionStore(root / "sessions")
+        sessions.create(
+            repository,
+            "durable tests compat",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id="checks-compat-session",
+        )
+        runtime = HostedToolsRuntime(
+            repository,
+            sessions,
+            "checks-compat-session",
+            (CHECKS_START, CHECKS_STATUS, CHECKS_LOGS),
+            access_profile=AccessProfile.WORKSPACE_WRITE,
+            hosted_origin=Origin(OriginKind.HOSTED_CLIENT, "checks-compat-test"),
+        )
+        arguments = {"suite": "full", "timeout_seconds": 20}
+        first = runtime.execute_check_run_compat(
+            "karox.tests.run",
+            arguments,
+            idempotency_key="compat-tests-one-job",
+            deadline_seconds=30,
+        )
+        assert first is not None
+        job_id = first["durable_job_id"]
+        final = first
+        deadline = time.monotonic() + 10
+        while final.get("detached") and time.monotonic() < deadline:
+            time.sleep(0.1)
+            final = runtime.execute_check_run_compat(
+                "karox.tests.run",
+                arguments,
+                idempotency_key="compat-tests-one-job",
+                deadline_seconds=30,
+            )
+            assert final is not None
+        assert final["durable_job_id"] == job_id
+        assert final["durable_status"] == "passed"
+        assert final["exit_code"] == 0
+        replay = runtime.execute_check_run_compat(
+            "karox.tests.run",
+            arguments,
+            idempotency_key="compat-tests-one-job",
+            deadline_seconds=30,
+        )
+        assert replay is not None
+        assert replay["durable_job_id"] == job_id
+        assert replay["idempotent_replay"] is True
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+        temp.cleanup()

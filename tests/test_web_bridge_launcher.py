@@ -27,6 +27,7 @@ from karox.sessions import SessionStore
 from karox.web_bridge_launcher import (
     DEFAULT_WEB_TOOLS,
     WRITE_WEB_TOOLS,
+    TailscaleBackgroundFunnel,
     WebBridgeConnectConfig,
     WebBridgeLaunchError,
     _bridge_argv,
@@ -630,6 +631,79 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                     )
 
         self.assertEqual(code, 0)
+        credentials.delete.assert_not_called()
+        sessions.revoke.assert_not_called()
+
+    def test_requested_restart_preserves_daemon_funnel_route(self) -> None:
+        """Owner restart keeps the stable Tailscale route instead of tearing ingress down."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            tunnel = TailscaleBackgroundFunnel(
+                executable="tailscale",
+                public_url="https://stable.example.invalid",
+                port=8765,
+            )
+            bridge = MagicMock()
+            bridge.pid = 4302
+            bridge.poll.return_value = None
+            bridge.stdout = MagicMock()
+            mirrored = MagicMock()
+            mirrored.detail.return_value = ""
+            mirrored.reader = MagicMock()
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.start_tailscale_background_funnel",
+                    return_value=tunnel,
+                ),
+                patch.object(TailscaleBackgroundFunnel, "stop") as stop_funnel,
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch("karox.web_bridge_launcher.subprocess.Popen", return_value=bridge),
+                patch(
+                    "karox.web_bridge_launcher._mirror_child_output",
+                    return_value=mirrored,
+                ),
+                patch("karox.web_bridge_launcher._wait_for_bridge"),
+                patch("karox.web_bridge_launcher._wait_for_public_mcp_route"),
+                patch(
+                    "karox.web_bridge_launcher._consume_stop_request",
+                    return_value="restart",
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=7777,
+                ),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="chatgpt-web",
+                            repository=repository,
+                            saved_profile_name="chatgpt-durable",
+                            tunnel="tailscale",
+                        )
+                    )
+
+        self.assertEqual(code, 0)
+        stop_funnel.assert_not_called()
         credentials.delete.assert_not_called()
         sessions.revoke.assert_not_called()
 

@@ -62,13 +62,17 @@ class PublicRouteProbeTests(unittest.TestCase):
 
 class RouteHealthTrackerTests(unittest.TestCase):
     def test_three_consecutive_failures_request_one_recovery(self) -> None:
-        tracker = RouteHealthTracker(interval_seconds=5.0, failure_threshold=3)
+        tracker = RouteHealthTracker(
+            interval_seconds=5.0,
+            failure_probe_interval_seconds=1.0,
+            failure_threshold=3,
+        )
         self.assertTrue(tracker.due(0.0))
         self.assertFalse(tracker.observe(now=0.0, healthy=False))
-        self.assertFalse(tracker.due(4.99))
-        self.assertTrue(tracker.due(5.0))
-        self.assertFalse(tracker.observe(now=5.0, healthy=False))
-        self.assertTrue(tracker.observe(now=10.0, healthy=False))
+        self.assertFalse(tracker.due(0.99))
+        self.assertTrue(tracker.due(1.0))
+        self.assertFalse(tracker.observe(now=1.0, healthy=False))
+        self.assertTrue(tracker.observe(now=2.0, healthy=False))
         self.assertEqual(tracker.consecutive_failures, 3)
 
         tracker.recovered(now=10.0)

@@ -145,10 +145,10 @@ class CliSurfaceTests(unittest.TestCase):
         out = io.StringIO()
         with patch.object(tui, "run_tui", side_effect=AssertionError) as fake:
             with contextlib.redirect_stdout(out):
-                with self.assertRaises(SystemExit):
-                    entrypoint_main(["--help"])
+                rc = entrypoint_main(["--help"])
+        self.assertEqual(rc, 0)
         self.assertFalse(fake.called)
-        self.assertIn("usage:", out.getvalue())
+        self.assertIn("KaroX — guarded local AI coding workspace", out.getvalue())
 
     def test_version_does_not_launch_tui(self) -> None:
         out = io.StringIO()

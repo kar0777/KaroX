@@ -195,17 +195,25 @@ def test_unknown_future_tool_is_confirmable_not_blanket_denied() -> None:
         engine.authorize(pending)
 
 
-def test_browser_send_is_guarded_only_when_user_asked_to_send() -> None:
+def test_browser_send_keeps_exact_human_gate_even_when_user_asked_to_send() -> None:
     engine = ActionDecisionEngine()
     pending = action("browser.send_message")
     with pytest.raises(ActionConfirmationRequired):
         engine.authorize(pending, user_intent="draft a reply")
-    decision = engine.authorize(pending, user_intent="send the reply to Alex")
-    assert decision.disposition is ActionDisposition.GUARDED_AUTO
+    with pytest.raises(ActionConfirmationRequired) as stopped:
+        engine.authorize(pending, user_intent="send the reply to Alex")
+    assert stopped.value.decision.intent_authorized is True
+    grant = engine.risk.ledger.issue(stopped.value.decision.assessment)
+    decision = engine.authorize(
+        pending,
+        user_intent="send the reply to Alex",
+        confirmation_token=grant.token,
+    )
+    assert decision.disposition is ActionDisposition.CONFIRM
     assert decision.intent_authorized is True
 
 
-def test_explicit_push_publish_and_deploy_do_not_ask_twice() -> None:
+def test_explicit_push_publish_and_deploy_still_require_one_shot_human_gate() -> None:
     engine = ActionDecisionEngine()
     for kind, task in (
         ("git.push", "push the verified branch to origin"),
@@ -213,20 +221,37 @@ def test_explicit_push_publish_and_deploy_do_not_ask_twice() -> None:
         ("release.publish", "publish the release"),
         ("deploy", "deploy this to production"),
     ):
-        decision = engine.authorize(action(kind), user_intent=task)
-        assert decision.disposition is ActionDisposition.GUARDED_AUTO
+        with pytest.raises(ActionConfirmationRequired) as stopped:
+            engine.authorize(action(kind), user_intent=task)
+        assert stopped.value.decision.intent_authorized is True
+        grant = engine.risk.ledger.issue(stopped.value.decision.assessment)
+        decision = engine.authorize(
+            action(kind),
+            user_intent=task,
+            confirmation_token=grant.token,
+        )
+        assert decision.disposition is ActionDisposition.CONFIRM
         assert decision.intent_authorized is True
 
 
-def test_force_push_does_not_inherit_an_ordinary_push_request() -> None:
+def test_force_push_requires_exact_force_intent_and_a_one_shot_human_gate() -> None:
     engine = ActionDecisionEngine()
     pending = action("git.force_push")
-    with pytest.raises(ActionConfirmationRequired):
+    with pytest.raises(ActionConfirmationRequired) as ordinary:
         engine.authorize(pending, user_intent="push the branch to origin")
+    assert ordinary.value.decision.intent_authorized is False
+    with pytest.raises(ActionConfirmationRequired) as stopped:
+        engine.authorize(
+            pending, user_intent="force-push the rewritten branch to origin"
+        )
+    assert stopped.value.decision.intent_authorized is True
+    grant = engine.risk.ledger.issue(stopped.value.decision.assessment)
     decision = engine.authorize(
-        pending, user_intent="force-push the rewritten branch to origin"
+        pending,
+        user_intent="force-push the rewritten branch to origin",
+        confirmation_token=grant.token,
     )
-    assert decision.disposition is ActionDisposition.GUARDED_AUTO
+    assert decision.disposition is ActionDisposition.CONFIRM
     assert decision.intent_authorized is True
 
 

@@ -851,9 +851,11 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
             report["mode_restrictions"],
             {
                 "read_only": False,
-                "no_git_push": False,
-                "no_publish": False,
-                "no_auth_commands": False,
+                "no_git_push": True,
+                "git_push_approval": "unavailable",
+                "no_publish": True,
+                "no_auth_commands": True,
+                "no_deploy_release": True,
             },
         )
 

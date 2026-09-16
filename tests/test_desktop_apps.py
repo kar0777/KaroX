@@ -276,6 +276,47 @@ class DesktopAppTests(unittest.TestCase):
         self.assertTrue(result["non_intrusive"])
         self.assertTrue(result["control_contract"]["focus_steal_blocked"])
 
+    def test_png_quality_separates_blank_frames_from_real_ones(self) -> None:
+        from io import BytesIO
+
+        from PIL import Image
+
+        from karox.desktop_apps import _png_quality
+
+        def png(image: Image.Image) -> bytes:
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+
+        blank = _png_quality(png(Image.new("RGB", (32, 32), (17, 17, 17))))
+        self.assertFalse(blank["meaningful"])
+        self.assertEqual(blank["sample_unique_colors"], 1)
+        self.assertEqual(blank["channel_ranges"], [0, 0, 0])
+
+        gradient = Image.new("RGB", (32, 32))
+        gradient.putdata([(x * 8, y * 8, (x + y) * 4) for y in range(32) for x in range(32)])
+        real = _png_quality(png(gradient))
+        self.assertTrue(real["meaningful"])
+        self.assertEqual(len(real["channel_ranges"]), 3)
+        self.assertGreaterEqual(max(real["channel_ranges"]), 8)
+
+        # A one-band source is converted to RGB before measurement, so a real
+        # grayscale frame is still recognised as meaningful.
+        grey = Image.new("L", (32, 32))
+        grey.putdata([(x * 8) % 256 for _y in range(32) for x in range(32)])
+        self.assertTrue(_png_quality(png(grey))["meaningful"])
+
+        broken = _png_quality(b"not a png")
+        self.assertFalse(broken["meaningful"])
+        self.assertIn("error", broken)
+
+    def test_channel_ranges_accepts_both_getextrema_shapes(self) -> None:
+        from karox.desktop_apps import _channel_ranges
+
+        self.assertEqual(_channel_ranges(((0, 255), (10, 20), (7, 7))), [255.0, 10.0, 0.0])
+        self.assertEqual(_channel_ranges((3, 200)), [197.0])
+        self.assertEqual(_channel_ranges(()), [])
+
     def test_desktop_control_contains_no_global_input_primitives(self) -> None:
         import inspect
         import karox.desktop_apps as desktop_apps

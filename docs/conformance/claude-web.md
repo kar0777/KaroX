@@ -4,7 +4,7 @@ integration: claude-web
 status: pending
 release_blocker: true
 verified_at_utc: pending
-karox_version: 5.0.0.dev0
+karox_version: 5.0.0rc1
 karox_commit: pending
 platform: pending
 external_version: pending

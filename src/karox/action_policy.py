@@ -139,6 +139,17 @@ _HARD_BLOCK_KINDS = frozenset(
 
 _EXTERNAL_ALWAYS_CONFIRM = frozenset(
     {
+        # External effects are real commit points. Explicit task wording gives
+        # intent context, but a hosted agent must still cross a machine-verifiable
+        # one-shot user gate before the effect leaves the local workspace.
+        "git.push",
+        "git.force_push",
+        "package.publish",
+        "release.publish",
+        "deploy",
+        "browser.final_submit",
+        "browser.send_message",
+        "browser.upload",
         "account.delete",
         "account.security_change",
         "billing.change",
@@ -448,16 +459,20 @@ class ActionDecisionEngine:
             disposition = ActionDisposition.HARD_BLOCK
             reasons.append("hard_boundary")
         elif consequence is ConsequenceClass.EXTERNAL:
-            # The user's task is already an authorization source. Do not ask a
-            # second time for the same push/publish/deploy/send/upload class.
-            # Financial/account/security effects remain a separate human
-            # boundary, and force-push requires explicit *force* intent rather
-            # than inheriting an ordinary push request.
-            if action.kind not in _EXTERNAL_ALWAYS_CONFIRM and intent.authorizes_external(
-                action.kind
-            ):
+            # User wording is useful intent context but is not itself proof that
+            # a remote commit point was approved. Push/publish/deploy/send/upload
+            # therefore keep an exact one-shot human gate even when the task asks
+            # for them; the intent flag is retained for truthful UX/audit. Less
+            # consequential external effects added in the future may still use
+            # explicit task intent as their guarded authorization source.
+            intent_authorized = intent.authorizes_external(action.kind)
+            if action.kind in _EXTERNAL_ALWAYS_CONFIRM:
+                disposition = ActionDisposition.CONFIRM
+                if intent_authorized:
+                    reasons.append("explicit_external_intent_context")
+                reasons.append("external_side_effect")
+            elif intent_authorized:
                 disposition = ActionDisposition.GUARDED_AUTO
-                intent_authorized = True
                 reasons.append("explicit_external_intent")
             else:
                 disposition = ActionDisposition.CONFIRM

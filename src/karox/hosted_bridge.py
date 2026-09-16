@@ -13,18 +13,20 @@ import json
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequence
 
 from .action_execution import CapabilityCoreRuntime
-from .action_policy import ActionDecisionEngine
+from .action_policy import ActionConfirmationRequired, ActionDecisionEngine
 from .core import CoreRuntime, ToolDefinition
 from .disk_maintenance import is_drive_root
 from .event_bus import EventBus, event_bus
 from .risk_engine import RiskEngine, risk_engine
 from .models import Capability, CoreCommand, Origin, OriginKind
 from .paths import runtime_dir
-from .policy import CapabilityPolicy
+from .policy import CapabilityPolicy, capability_requires_explicit_approval
+from .risk_mapping import action_for_command
 from .route_health import (
     DEFAULT_ROUTE_FAILURE_PROBE_INTERVAL_SECONDS,
     DEFAULT_ROUTE_FAILURE_THRESHOLD,
@@ -47,6 +49,7 @@ from .sessions import (
     SessionRecord,
     SessionStore,
     current_mutation_lease,
+    mutation_lease_context,
 )
 from .task_state import TaskStateStore
 from .verification import discover_verification_commands
@@ -58,6 +61,41 @@ class HostedBridgeError(RuntimeError):
 
 class HostedBridgeAccessDenied(HostedBridgeError, PermissionError):
     pass
+
+
+class HostedApprovalRequired(HostedBridgeAccessDenied):
+    """Exact-action user confirmation required before a hosted call may run."""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        action_digest: str,
+        action_kind: str,
+        risk: str,
+        consequence: str,
+        preview: Optional[dict[str, Any]] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        super().__init__(message or f"KaroX requires user approval for {action_kind}")
+        self.tool_name = tool_name
+        self.action_digest = action_digest
+        self.action_kind = action_kind
+        self.risk = risk
+        self.consequence = consequence
+        self.preview = dict(preview or {})
+        self.message = message or f"KaroX requires user approval for {action_kind}."
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "action_digest": self.action_digest,
+            "action_kind": self.action_kind,
+            "risk": self.risk,
+            "consequence": self.consequence,
+            "preview": dict(self.preview),
+            "message": self.message,
+        }
 
 
 def _hosted_bridge_health(session_id: str) -> dict[str, Any]:
@@ -153,6 +191,7 @@ CORE_TOOL_NAMES: dict[str, str] = {
     "karox.git.diff": "git.diff",
     "karox.git.log": "git.log",
     "karox.git.commit": "git.commit",
+    "karox.git.push": "git.push",
 }
 
 # Tools that are NOT Core commands but are still part of a hosted bridge
@@ -381,6 +420,12 @@ class CoreToolBridge:
             grants.update(definition.additional_capabilities)
         self.policy.set_grants(self.hosted_origin, grants)
         for capability in grants:
+            if capability_requires_explicit_approval(capability):
+                # Explicit capabilities are intentionally absent from every
+                # standing profile. Their tool may still be advertised because
+                # the modern MCP approval round mints a one-shot token for the
+                # exact action; execution without that token remains denied.
+                continue
             if not self.policy.decide(self.hosted_origin, capability).allowed:
                 if advertise_unavailable:
                     # Stable-catalogue mode: descriptors remain visible so a
@@ -600,6 +645,102 @@ class CoreToolBridge:
             )
         )
 
+    def _approval_decision(self, command: CoreCommand, repository: Path):
+        action = action_for_command(
+            command,
+            repository=repository,
+            reversible_by_checkpoint=False,
+        )
+        return self._action_decisions.decide(action, user_intent=command.user_intent)
+
+    @staticmethod
+    def _approval_error(
+        tool_name: str, command: CoreCommand, decision: Any
+    ) -> HostedApprovalRequired:
+        preview = dict(decision.impact)
+        if command.name == "git.push":
+            preview.update(
+                {
+                    "remote": command.arguments.get("remote"),
+                    "branch": command.arguments.get("branch"),
+                }
+            )
+            message = (
+                "Allow one Git push of the current HEAD to "
+                f"{command.arguments.get('remote')}/{command.arguments.get('branch')}? "
+                "KaroX will not force-push, change remotes, or authenticate."
+            )
+        else:
+            message = (
+                f"Allow this one {decision.assessment.kind} action? "
+                "The approval is bound to the exact action digest and cannot be replayed."
+            )
+        return HostedApprovalRequired(
+            tool_name=tool_name,
+            action_digest=decision.action_digest,
+            action_kind=decision.assessment.kind,
+            risk=decision.assessment.level.value,
+            consequence=decision.consequence.value,
+            preview=preview,
+            message=message,
+        )
+
+    def execute_approved(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        expected_action_digest: str,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
+    ) -> dict[str, Any]:
+        """Execute one exact action after a trusted protocol-level user approval."""
+
+        if not isinstance(expected_action_digest, str) or not expected_action_digest:
+            raise HostedBridgeAccessDenied("approved action digest is missing")
+        return self.execute(
+            tool_name,
+            arguments,
+            idempotency_key=idempotency_key,
+            deadline_seconds=deadline_seconds,
+            _approved_action_digest=expected_action_digest,
+        )
+
+    @staticmethod
+    def _cached_catalog_push_compat(arguments: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+        """Translate one legacy ``command.run`` push into the guarded push tool.
+
+        Durable ChatGPT connections can cache a pre-upgrade tool catalogue. The
+        dedicated ``karox.git.push`` tool may therefore be implemented by the
+        freshly restarted child before the client knows its name. Preserve the
+        safety boundary by accepting only the unambiguous no-flag form
+        ``git push <remote> <branch>`` and routing it to the *same* dedicated
+        Core command/approval path. Every other Git mutation still reaches the
+        developer-command guard and is refused.
+        """
+
+        argv = arguments.get("argv")
+        if not isinstance(argv, list) or len(argv) != 4 or not all(
+            isinstance(item, str) for item in argv
+        ):
+            return None
+        executable = argv[0].strip().replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        for suffix in (".exe", ".cmd", ".bat", ".com"):
+            if executable.endswith(suffix):
+                executable = executable[: -len(suffix)]
+                break
+        if executable != "git" or argv[1].strip().casefold() != "push":
+            return None
+        remote = argv[2].strip()
+        branch = argv[3].strip()
+        if not remote or not branch:
+            return None
+        translated: dict[str, Any] = {"remote": remote, "branch": branch}
+        workstream = arguments.get("workstream_id")
+        if isinstance(workstream, str) and workstream:
+            translated["workstream_id"] = workstream
+        return translated
+
     def execute(
         self,
         tool_name: str,
@@ -607,7 +748,22 @@ class CoreToolBridge:
         *,
         idempotency_key: Optional[str] = None,
         deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
+        _approved_action_digest: Optional[str] = None,
     ) -> dict[str, Any]:
+        # A cached ChatGPT catalogue may not know the new guarded push tool name
+        # yet. Route exactly one safe compatibility spelling through that tool;
+        # never relax command_guard or let arbitrary Git argv through.
+        if tool_name == "karox.command.run" and "karox.git.push" in self._allowed:
+            translated_push = self._cached_catalog_push_compat(arguments)
+            if translated_push is not None:
+                return self.execute(
+                    "karox.git.push",
+                    translated_push,
+                    idempotency_key=idempotency_key,
+                    deadline_seconds=deadline_seconds,
+                    _approved_action_digest=_approved_action_digest,
+                )
+
         # CoreRuntime.execute() is the authoritative per-call session boundary:
         # it reloads the session, validates the repository binding, revocation,
         # and access profile before dispatching any handler. Repeating _record()
@@ -649,6 +805,35 @@ class CoreToolBridge:
             deadline_seconds=deadline_seconds,
             user_intent=user_intent,
         )
+        runtime = self._core(project_id)
+        approval_token: Optional[str] = None
+        explicit_capabilities = tuple(
+            capability
+            for capability in (definition.capability, *definition.additional_capabilities)
+            if capability_requires_explicit_approval(capability)
+        )
+        if _approved_action_digest is not None or explicit_capabilities:
+            decision = self._approval_decision(command, Path(project_entry.path))
+            if _approved_action_digest is None:
+                raise self._approval_error(tool_name, command, decision)
+            if decision.action_digest != _approved_action_digest:
+                raise HostedBridgeAccessDenied(
+                    "approved action no longer matches the current tool call"
+                )
+            if not decision.requires_confirmation and not explicit_capabilities:
+                raise HostedBridgeAccessDenied(
+                    "approval retry does not correspond to an approval-gated action"
+                )
+            grant = self._risk.ledger.issue(decision.assessment)
+            approval_token = grant.token
+            if explicit_capabilities:
+                self.policy.add_token(
+                    approval_token,
+                    self.hosted_origin,
+                    explicit_capabilities,
+                    ttl_seconds=300.0,
+                )
+            command = replace(command, confirmation_token=approval_token)
         lease = None
         owns_lease = False
         heartbeat_stop: Optional[threading.Event] = None
@@ -819,7 +1004,31 @@ class CoreToolBridge:
                 repository_heartbeat_thread.start()
         try:
             try:
-                result = self._core(project_id).execute(command, lease=lease).to_dict()
+                if lease is None:
+                    if approval_token is None:
+                        result = runtime.execute(command, lease=None).to_dict()
+                    else:
+                        result = runtime.execute(
+                            command,
+                            capability_token=approval_token,
+                            lease=None,
+                        ).to_dict()
+                else:
+                    # Expose exactly this already-owned mutation fence to nested
+                    # safety helpers (notably the on-demand rollback checkpoint).
+                    # ContextVar scoping prevents sibling hosted requests from
+                    # observing/reusing it, so concurrency fencing is unchanged.
+                    with mutation_lease_context(lease):
+                        if approval_token is None:
+                            result = runtime.execute(command, lease=lease).to_dict()
+                        else:
+                            result = runtime.execute(
+                                command,
+                                capability_token=approval_token,
+                                lease=lease,
+                            ).to_dict()
+            except ActionConfirmationRequired as stop:
+                raise self._approval_error(tool_name, command, stop.decision) from stop
             except SessionError as exc:
                 if "revoked" in str(exc).lower():
                     raise HostedBridgeAccessDenied("session access has been revoked") from exc
@@ -935,6 +1144,33 @@ class CompositeHostedBridge:
             deadline_seconds=deadline_seconds,
         )
 
+    def execute_approved(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        expected_action_digest: str,
+        idempotency_key: Optional[str] = None,
+        deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
+    ) -> dict[str, Any]:
+        """Run one exact action through an owner's trusted approval entrypoint."""
+
+        owner = self._owner(tool_name)
+        approved = getattr(owner, "execute_approved", None)
+        if not callable(approved):
+            raise HostedBridgeAccessDenied(
+                "this tool does not support protocol-level approval retries"
+            )
+        return dict(
+            approved(
+                tool_name,
+                arguments,
+                expected_action_digest=expected_action_digest,
+                idempotency_key=idempotency_key,
+                deadline_seconds=deadline_seconds,
+            )
+        )
+
     def execute(
         self,
         tool_name: str,
@@ -943,10 +1179,24 @@ class CompositeHostedBridge:
         idempotency_key: Optional[str] = None,
         deadline_seconds: float = DEFAULT_HOSTED_DEADLINE_SECONDS,
     ) -> dict[str, Any]:
-        # Compatibility bridge for hosted clients that cached command.run before
-        # durable command.start/status/logs were added to the catalogue. If the
-        # current server owns the durable surface, long elevated commands can use
-        # it internally without requiring the client to refresh tools/list first.
+        # Compatibility bridges keep old synchronous tool names safe on clients
+        # with cached catalogues. Long verification/command work is detached into
+        # the durable worker so an HTTP timeout or bridge recycle cannot strand a
+        # request or hold the mutation fence for minutes.
+        if tool_name in {"karox.tests.run", "karox.checks.run"} and isinstance(
+            idempotency_key, str
+        ) and idempotency_key:
+            durable_owner = self._owners.get("karox.checks.start")
+            compat = getattr(durable_owner, "execute_check_run_compat", None)
+            if callable(compat):
+                compat_result = compat(
+                    tool_name,
+                    dict(arguments),
+                    idempotency_key=idempotency_key,
+                    deadline_seconds=deadline_seconds,
+                )
+                if compat_result is not None:
+                    return compat_result
         if tool_name == "karox.command.run" and isinstance(idempotency_key, str) and idempotency_key:
             durable_owner = self._owners.get("karox.command.start")
             compat = getattr(durable_owner, "execute_command_run_compat", None)

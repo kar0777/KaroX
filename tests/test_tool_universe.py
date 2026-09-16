@@ -51,7 +51,7 @@ class SelectFamiliesTests(unittest.TestCase):
     def test_neutral_task_keeps_only_always_families(self) -> None:
         selection = select_families("what does sample.txt contain?")
         self.assertEqual(selection.families, ALWAYS_FAMILIES)
-        self.assertEqual(selection.omitted, ("browser", "process", "admin"))
+        self.assertEqual(selection.omitted, ("disk", "browser", "process", "admin"))
         self.assertEqual(selection.reasons, ())
 
     def test_selection_is_deterministic(self) -> None:
@@ -69,7 +69,7 @@ class SelectFamiliesTests(unittest.TestCase):
             selection.families,
             ("core", "task", "memory", "browser", "process", "admin"),
         )
-        self.assertEqual(selection.omitted, ())
+        self.assertEqual(selection.omitted, ("disk",))
 
     def test_english_browser_signal(self) -> None:
         selection = select_families("Take a screenshot of the page")

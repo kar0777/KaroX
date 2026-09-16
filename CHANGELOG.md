@@ -3,7 +3,39 @@
 All notable changes to KaroX 5 are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [5.0.0-dev] — Unreleased
+## [5.0.0rc1] — 2026-09-03
+
+First public release candidate. Full notes: `RELEASE_NOTES_v5.0.0rc1.md`.
+
+### Release candidate preparation
+- **Version**: runtime `5.0.0.dev0` → `5.0.0rc1` (`src/karox/__init__.py`,
+  `remote/src/karox_remote/__init__.py`); every document, conformance record
+  and template that quotes the runtime version updated with it.
+- **Distribution**: `pipx install --pre karox-runtime` / `uv tool install
+  --prerelease=allow karox-runtime` documented as the first install path;
+  `release.yml` publishes the wheel to PyPI through trusted publishing;
+  `bootstrap.sh` / `bootstrap.ps1` accept `--channel preview`.
+- **`karox quickstart`**: one-screen onboarding that reports the resolved
+  repository, language, connected providers and bridges, and the single next
+  command to run — no bridge vocabulary on the first screen.
+- **Repository hygiene**: 21 historical `RELEASE_NOTES_v3.*/v4.*` moved to
+  `docs/releases/`; eight superseded planning documents moved to
+  `docs/archive/` with an index that names what replaced each one; stray
+  benchmark artefacts moved out of the root.
+- **Documentation truth**: `docs/IMPLEMENTATION_STATUS.md` rewritten to the
+  current tree (memory, project map, orchestration, browser, multi-project
+  bridge were missing); published test counts republished from discovery
+  (3325 suite / 3330 root); `RELEASE_CHECKLIST.md` section 4 now names the test
+  module behind each security claim.
+- **Terminal client**: UX-010 closed — `test_a_narrow_window_gives_the_chat_a_usable_share`
+  holds the conversation at four rows in a 14-row window. UX-006 remains open:
+  no binding hands the mouse back to the terminal emulator, and no test asserts
+  one. Tracked in `docs/UX_BUG_INVENTORY.md`.
+- **Coverage**: measured 72.4% statement+branch. The gate stays at 70 in
+  `pyproject.toml`, deliberately, to leave room for platform-skipped branches on
+  the macOS and Linux runners.
+- **CI**: install → `karox --help` → `karox migrate --json` → uninstall
+  rehearsal job on Windows, macOS and Linux with logs kept as artefacts.
 
 ### Total product QA + UX hardening (2026-08-21)
 - **Shared bridge multi-project fix**: selecting another approved project no

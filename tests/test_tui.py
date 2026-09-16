@@ -1060,7 +1060,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
 
                 rendered = str(app.query_one("#activity", tui.Static).render())
 
-                self.assertEqual(rendered, "› Checking the result")
+                self.assertEqual(rendered, "› Running checks")
                 self.assertNotIn("repo.read_file", rendered)
                 self.assertNotIn("repo.write_file", rendered)
                 self.assertNotIn("checks.run", rendered)

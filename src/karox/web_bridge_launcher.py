@@ -26,6 +26,12 @@ from .bridge import (
     BridgeCredentialStore,
     known_bridge_profiles,
 )
+from .bridge_handoff import (
+    BridgeHandoffError,
+    clear_rolling_restart_request,
+    read_rolling_restart_request,
+    update_rolling_restart_request,
+)
 from .browser_access import BrowserAccessPolicy
 from .client_capabilities import negotiate_client_capabilities
 from .tool_catalog import catalog_groups
@@ -40,7 +46,11 @@ from .hosted_tools_runtime import (
 )
 from .models import AccessProfile, Capability
 from .process_launcher import resolve_executable as _resolve_executable
-from .route_health import RouteHealthTracker, public_mcp_route_healthy
+from .route_health import (
+    RouteHealthTracker,
+    public_mcp_route_failure_class,
+    public_mcp_route_healthy,
+)
 from .tailscale import (
     TailscaleError,
     classify_funnel_failure,
@@ -194,6 +204,7 @@ MUTATING_WEB_TOOLS: frozenset[str] = frozenset(
         "karox.command.start",
         "karox.command.cancel",
         "karox.git.commit",
+        "karox.git.push",
         "karox.runtime.restart",
     }
 )
@@ -319,6 +330,12 @@ def _include_stable_worker_commands(
             include("karox.command.logs")
             include("karox.command.cancel")
             include("karox.git.commit")
+            # Remote Git is intentionally narrower than ordinary elevated local
+            # development. Only a durable ChatGPT Web bridge advertises the
+            # protocol-level one-shot approval surface; other clients keep the
+            # historical no-push contract until they support the same round-trip.
+            if target_profile == "chatgpt-web" and saved_profile_name:
+                include("karox.git.push")
         # Supplying a verification allowlist is the explicit approval needed by
         # checks.run. Hiding the tool after accepting that allowlist produced a
         # contradictory bridge: diagnostics listed approved commands while the
@@ -380,6 +397,7 @@ _CORE_TOOL_CAPABILITIES: dict[str, frozenset[Capability]] = {
     "karox.repo.command": frozenset({Capability.REPO_WRITE}),
     "karox.command.run": frozenset({Capability.DEV_COMMAND, Capability.PROCESS_RUN}),
     "karox.git.commit": frozenset({Capability.GIT_COMMIT}),
+    "karox.git.push": frozenset({Capability.GIT_PUSH}),
     "karox.checks.run": frozenset(
         {Capability.CHECKS_RUN, Capability.PROCESS_RUN}
     ),
@@ -409,6 +427,14 @@ def profile_incompatible_tools(
     from .policy import _PROFILE_CAPABILITIES
 
     allowed = _PROFILE_CAPABILITIES.get(access_profile, frozenset())
+    # One-shot external capabilities are intentionally absent from standing
+    # profiles. An elevated saved bridge may still advertise their guarded tool:
+    # the runtime grants the capability only after a modern MCP user approval.
+    catalog_allowed = set(allowed)
+    if access_profile == AccessProfile.ELEVATED:
+        catalog_allowed.update(
+            {Capability.GIT_PUSH, Capability.PACKAGE_PUBLISH, Capability.AUTH_COMMAND}
+        )
     reason = f"not allowed by the {access_profile.value} access profile"
     denied: dict[str, str] = {}
     for name in dict.fromkeys(tools):
@@ -422,7 +448,7 @@ def profile_incompatible_tools(
             ) | frozenset(autonomy_meta.additional_capabilities)
         else:
             required = _CORE_TOOL_CAPABILITIES.get(name, frozenset())
-        if required - allowed:
+        if required - catalog_allowed:
             denied[name] = reason
     return denied
 
@@ -503,13 +529,29 @@ class WebBridgeConnectConfig:
     # tool a saved profile selected is not served, instead of the bridge
     # crashing at startup with no explanation at all.
     profile_denied_tools: dict[str, str] = field(default_factory=dict)
+    # Periodic dead-listener canary for tunnels without their own ingress
+    # supervision (Cloudflare/custom). Resolved in __post_init__: tunnel types
+    # that already probe public ingress every few seconds stay at 0 (no double
+    # probing), everything else gets the cheap local canary.
+    local_health_interval_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
+        if self.local_health_interval_seconds is None:
+            # Tailscale tunnels are supervised by the public-probe route health
+            # loop; Cloudflare/custom tunnels have no such supervision and pay
+            # for the cheap local dead-listener canary instead.
+            object.__setattr__(
+                self,
+                "local_health_interval_seconds",
+                0.0 if self.tunnel == "tailscale" else 10.0,
+            )
         if self.profile not in WEB_BRIDGE_PROFILES:
             raise ValueError(
                 "web bridge profile must be chatgpt-web, claude-web, notion, "
                 "hyperagent-web, or adapt"
             )
+        if not isinstance(self.access_profile, AccessProfile):
+            raise ValueError("web bridge access_profile must be a valid AccessProfile")
         repository_exists = self.repository.expanduser().exists()
         if self.projects or self.default_project_id is not None or repository_exists:
             try:
@@ -1787,6 +1829,32 @@ def _port_is_available(port: int) -> bool:
     return True
 
 
+def _rolling_restart_staging_port(*, exclude: frozenset[int] = frozenset()) -> int:
+    """Ask the OS for a temporary loopback port used only during child handoff.
+
+    The reservation socket is intentionally short-lived because the bridge child
+    cannot inherit it portably on Windows. A bind race is harmless: the caller
+    starts a child and :func:`_wait_for_bridge` proves the listener belongs to
+    that exact process tree before Funnel is ever retargeted. We retry with a new
+    OS-selected port if a race occurs.
+    """
+
+    for _ in range(16):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                if os.name == "nt":
+                    exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                    if exclusive is not None:
+                        probe.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+                probe.bind(("127.0.0.1", 0))
+                port = int(probe.getsockname()[1])
+        except OSError:
+            continue
+        if port not in exclude and 1 <= port <= 65535:
+            return port
+    raise WebBridgeLaunchError("could not allocate a staging port for rolling restart")
+
+
 @lru_cache(maxsize=256)
 def _windows_parent_pid(pid: int) -> Optional[int]:
     """Return a Windows process parent without requiring optional psutil.
@@ -1930,6 +1998,38 @@ def _wait_for_local_port_release(
 # budget, not a readiness claim: acceptance still requires the child's own
 # lifespan canary and a reachable listener.
 _BRIDGE_STARTUP_TIMEOUT_SECONDS = 45.0
+
+# A hung local child (alive PID, dead listener/service) must be confirmed more
+# than once before the durable owner recycles it: a single slow probe can be a
+# scheduling hiccup, two consecutive misses is a stopped bridge.
+LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS = 1.0
+LOCAL_HEALTH_CONFIRM_THRESHOLD = 2
+# After a canary recycle the replacement child gets this much time to bind
+# before the first post-recycle canary sample: a probe that fires inside the
+# startup budget would double-kill a healthy respawn.
+_LOCAL_HEALTH_RECYCLE_GRACE_SECONDS = 30.0
+
+
+def local_mcp_route_healthy(
+    port: int,
+    *,
+    path: str = "/mcp",
+    timeout_seconds: float = LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS,
+    get=None,
+) -> bool:
+    """Probe this bridge's own local MCP listener.
+
+    Same 401 contract as the public probe, but against loopback: a live PID
+    with a dead or hung listener answers False even though process liveness
+    checks pass. Kept as a separate seam from the public probe so tunnel
+    supervision and dead-listener detection observe independently.
+    """
+    return public_mcp_route_healthy(
+        f"http://127.0.0.1:{int(port)}",
+        path=path,
+        timeout_seconds=timeout_seconds,
+        get=get,
+    )
 
 
 def _wait_for_bridge(
@@ -3346,7 +3446,11 @@ def _bridge_argv(
     *,
     session_id: str,
     public_url: str,
+    port: Optional[int] = None,
 ) -> tuple[str, ...]:
+    target_port = config.port if port is None else int(port)
+    if not 1 <= target_port <= 65535:
+        raise WebBridgeLaunchError("bridge child port must be between 1 and 65535")
     values = [
         sys.executable,
         "-m",
@@ -3364,7 +3468,7 @@ def _bridge_argv(
         "--credential",
         session_id,
         "--port",
-        str(config.port),
+        str(target_port),
         "--deadline-seconds",
         str(config.deadline_seconds),
     ]
@@ -3787,11 +3891,20 @@ def web_bridge_diagnostics(
         "deadline_advisory": advisory,
         "mode_restrictions": {
             "read_only": config.access_profile == AccessProfile.READ_ONLY,
-            # These are product invariants, not permission-profile toggles.
-            # Elevated/Full broadens guarded *local* developer execution only;
-            # it never authorizes remote Git push, publishing, authentication,
-            # deployment or release actions.
-            "no_git_push": True,
+            # Push is available only as a dedicated elevated tool whose modern
+            # MCP call pauses for an exact-action one-shot user approval. Broad
+            # developer commands remain unable to push. Publish/auth/deploy stay
+            # unavailable until they receive equally narrow guarded surfaces.
+            "no_git_push": not (
+                config.access_profile == AccessProfile.ELEVATED
+                and "karox.git.push" in config.tools
+            ),
+            "git_push_approval": (
+                "one_shot_mcp_user_confirmation"
+                if config.access_profile == AccessProfile.ELEVATED
+                and "karox.git.push" in config.tools
+                else "unavailable"
+            ),
             "no_publish": True,
             "no_auth_commands": True,
             "no_deploy_release": True,
@@ -3838,6 +3951,11 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
     watchdog: Optional[Path] = None
     persistent_session = _persistent_session(config)
     session_id = _session_id(config)
+    # Usually this is the saved profile's canonical port. A rolling child
+    # restart may temporarily serve from a staging port while the original
+    # listener is replaced; keeping the active port explicit makes health and
+    # crash recovery truthful throughout that handoff.
+    active_bridge_port = config.port
     owner_lock: Optional[Any] = None
     if persistent_session and config.saved_profile_name:
         owner_lock = _try_acquire_saved_bridge_owner_lock(config.saved_profile_name)
@@ -3846,10 +3964,51 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 "another durable owner is already active for saved profile "
                 f"'{config.saved_profile_name}'"
             )
+        # This owner lock proves no predecessor can still coordinate a rolling
+        # child handoff. Clear a stale/terminal request left by a crashed owner so
+        # the next runtime.restart generation cannot be blocked forever.
+        stale_handoff = read_rolling_restart_request(session_id)
+        if stale_handoff and (
+            stale_handoff.get("owner_pid") != os.getpid()
+            or stale_handoff.get("status") in {"completed", "failed"}
+        ):
+            clear_rolling_restart_request(session_id)
     job: Optional[int] = None
     route_health = RouteHealthTracker() if config.tunnel == "tailscale" else None
+    # Keep one HTTP connection pool for steady public/local health probes. The
+    # previous top-level ``httpx.get`` path created and tore down a TLS client on
+    # every 2-second probe, producing large periodic CPU spikes while the bridge
+    # was otherwise idle. Pooling is owner-local, carries no credential, and is
+    # closed with the owner; security/response semantics stay unchanged.
+    route_probe_client: Any = None
+    if route_health is not None:
+        import httpx
+
+        route_probe_client = httpx.Client(follow_redirects=False)
     tunnel_recovery_failures = 0
     tunnel_retry_at = 0.0
+    # Back-to-back *successful* refreshes without a confirming public probe are
+    # a refresh storm, not recovery: after each successful reapply the next one
+    # must wait an exponentially growing cooldown. The streak resets as soon as
+    # the public probe proves the route healthy again.
+    tunnel_refresh_streak = 0
+    # Route ownership is security-relevant but enumerating it shells out to the
+    # Tailscale CLI. Doing that on every healthy 2-second public probe kept the
+    # durable owner noticeably busy while idle. Startup already validates the
+    # exact owned route, so re-inventory healthy state on a slow cadence and
+    # inventory immediately on any public failure before mutating Funnel state.
+    tailscale_route_inventory_interval_seconds = 30.0
+    next_tailscale_route_inventory_at = 0.0
+    # Cheap dead-listener canary for tunnels that have no public-probe
+    # supervision of their own (Cloudflare/custom/foreground-run commands):
+    # protects the case where the tunnel process is alive but the local bridge
+    # child stopped serving. Public probes for tunnels that have their own
+    # ingress supervision make this redundant, so it stays opt-in per profile.
+    local_health_interval_seconds = max(
+        0.0, float(getattr(config, "local_health_interval_seconds", 0.0) or 0.0)
+    )
+    next_local_health_check_at = 0.0
+    local_health_failures = 0
     # The record is written by the main loop *and* by the heartbeat thread below,
     # so every write is serialized and made from a snapshot: rendering the live
     # dict while the other writer mutates it would raise mid-serialization and
@@ -3905,7 +4064,7 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
             "repository": str(repository),
             "persistent_session": persistent_session,
             "stop_protocol": "request-v2",
-            "port": config.port,
+            "port": active_bridge_port,
             "public_url": public_url,
             "tunnel": config.tunnel,
             "url_stability": web_bridge_diagnostics(config)["url_stability"],
@@ -4029,17 +4188,41 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         environment["KAROX_BRIDGE_DIAGNOSTICS_JSON"] = json.dumps(
             diagnostics, ensure_ascii=False, sort_keys=True
         )
-        def spawn_bridge_child() -> tuple[subprocess.Popen[str], MirroredChildOutput]:
-            """Start one local MCP child while the durable owner keeps tunnel/session state."""
+
+        def spawn_bridge_child(
+            *,
+            port: Optional[int] = None,
+            label: str = "bridge",
+        ) -> tuple[subprocess.Popen[str], MirroredChildOutput]:
+            """Start one local MCP child while the durable owner keeps shared state."""
+
+            target_port = config.port if port is None else int(port)
+            child_environment = dict(environment)
+            if target_port != config.port:
+                # A rolling replacement temporarily listens on a staging port.
+                # Keep its diagnostics truthful without mutating the canonical
+                # saved profile or the parent owner's diagnostics snapshot.
+                child_diagnostics = json.loads(
+                    json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)
+                )
+                ports = child_diagnostics.get("ports")
+                if not isinstance(ports, dict):
+                    ports = {}
+                    child_diagnostics["ports"] = ports
+                ports["mcp_loopback"] = target_port
+                child_environment["KAROX_BRIDGE_DIAGNOSTICS_JSON"] = json.dumps(
+                    child_diagnostics, ensure_ascii=False, sort_keys=True
+                )
             try:
                 child = subprocess.Popen(
                     _bridge_argv(
                         config,
                         session_id=session_id,
                         public_url=public_url,
+                        port=target_port,
                     ),
                     cwd=repository,
-                    env=environment,
+                    env=child_environment,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -4052,7 +4235,51 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                     f"cannot start KaroX bridge: {type(exc).__name__}"
                 ) from exc
             _adopt_child(job, child)
-            return child, _mirror_child_output(child, name="bridge")
+            return child, _mirror_child_output(child, name=label)
+
+        def spawn_ready_staging_child() -> tuple[int, subprocess.Popen[str], MirroredChildOutput]:
+            """Warm one replacement child on a proven private loopback port."""
+
+            last_error: Optional[Exception] = None
+            for attempt in range(1, 5):
+                staging_port = _rolling_restart_staging_port(
+                    exclude=frozenset({config.port, active_bridge_port})
+                )
+                candidate: Optional[subprocess.Popen[str]] = None
+                candidate_output: Optional[MirroredChildOutput] = None
+                try:
+                    candidate, candidate_output = spawn_bridge_child(
+                        port=staging_port,
+                        label=f"bridge-rolling-{attempt}",
+                    )
+                    _wait_for_bridge(
+                        candidate,
+                        staging_port,
+                        output=candidate_output,
+                    )
+                    ownership = _listener_belongs_to_process_tree(
+                        staging_port, candidate.pid
+                    )
+                    if ownership is False:
+                        raise WebBridgeLaunchError(
+                            "rolling replacement did not own its staging listener"
+                        )
+                    return staging_port, candidate, candidate_output
+                except WebBridgeLaunchError as exc:
+                    last_error = exc
+                    if candidate is not None:
+                        _stop_process(candidate)
+                    if candidate_output is not None:
+                        candidate_output.reader.join(timeout=1.0)
+                    continue
+            raise WebBridgeLaunchError(
+                "rolling replacement child could not become ready"
+                + (
+                    f" ({type(last_error).__name__})"
+                    if last_error is not None
+                    else ""
+                )
+            )
 
         bridge_recovery_count = 0
         bridge, bridge_output = spawn_bridge_child()
@@ -4088,6 +4315,235 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         watchdog_record["readiness_state"] = "READY"
         publish()
         bridge_ready = True
+        rolling_restart_count = 0
+
+        def retire_owned_child(
+            process: subprocess.Popen[str],
+            output: MirroredChildOutput,
+            *,
+            terminate: bool,
+        ) -> None:
+            """Close one proven child without touching shared bridge identity."""
+            if terminate and process.poll() is None:
+                _stop_process(process)
+            output.reader.join(timeout=2.0)
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+
+        def perform_rolling_child_handoff(request: dict[str, Any]) -> bool:
+            """Warm-switch a durable Tailscale bridge without dropping ingress."""
+            nonlocal bridge, bridge_output, tunnel, active_bridge_port, rolling_restart_count
+            if not isinstance(tunnel, TailscaleBackgroundFunnel):
+                return False
+            request_key = request.get("request_key_sha256")
+            if not isinstance(request_key, str) or len(request_key) != 64:
+                clear_rolling_restart_request(session_id)
+                return False
+
+            old_bridge = bridge
+            old_output = bridge_output
+            old_port = active_bridge_port
+            old_tunnel = tunnel
+            staging_port: Optional[int] = None
+            staging_bridge: Optional[subprocess.Popen[str]] = None
+            staging_output: Optional[MirroredChildOutput] = None
+            moved_tunnel: Optional[TailscaleBackgroundFunnel] = None
+
+            try:
+                staging_port, staging_bridge, staging_output = spawn_ready_staging_child()
+                moved_tunnel = retarget_tailscale_background_funnel(
+                    old_tunnel,
+                    staging_port,
+                    timeout_seconds=config.tunnel_timeout_seconds,
+                )
+                _wait_for_public_mcp_route(
+                    staging_bridge,
+                    public_url,
+                    path=web_bridge_mcp_path(config.profile),
+                    timeout_seconds=min(15.0, float(config.tunnel_timeout_seconds)),
+                    output=staging_output,
+                )
+                update_rolling_restart_request(
+                    session_id,
+                    request_key,
+                    "route_switched",
+                    new_bridge_pid=_pid_of(staging_bridge),
+                    new_port=staging_port,
+                )
+            except (BridgeHandoffError, WebBridgeLaunchError, OSError) as exc:
+                # If the route moved before proof completed, restore the still-live
+                # old target first. A failed rolling update is allowed to become a
+                # no-op; it is never allowed to become an outage.
+                if moved_tunnel is not None and old_bridge.poll() is None:
+                    try:
+                        tunnel = retarget_tailscale_background_funnel(
+                            moved_tunnel,
+                            old_port,
+                            timeout_seconds=config.tunnel_timeout_seconds,
+                        )
+                    except WebBridgeLaunchError:
+                        tunnel = moved_tunnel
+                if staging_bridge is not None and staging_output is not None:
+                    retire_owned_child(staging_bridge, staging_output, terminate=True)
+                try:
+                    update_rolling_restart_request(
+                        session_id,
+                        request_key,
+                        "failed",
+                        failure_class=type(exc).__name__,
+                    )
+                except BridgeHandoffError:
+                    pass
+                watchdog_record["last_rolling_restart_error"] = type(exc).__name__
+                watchdog_record["last_rolling_restart_failure_at"] = time.time()
+                publish()
+                return True
+
+            assert staging_port is not None
+            assert staging_bridge is not None
+            assert staging_output is not None
+            assert moved_tunnel is not None
+
+            # Public traffic is now on the replacement. The old child observes
+            # route_switched and exits after its in-flight response drains.
+            try:
+                old_bridge.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                _stop_process(old_bridge)
+            retire_owned_child(old_bridge, old_output, terminate=False)
+
+            bridge = staging_bridge
+            bridge_output = staging_output
+            tunnel = moved_tunnel
+            active_bridge_port = staging_port
+            watchdog_record["bridge_pid"] = _pid_of(bridge)
+            watchdog_record["port"] = active_bridge_port
+            watchdog_record["bridge_ready"] = True
+            watchdog_record["readiness_state"] = "READY"
+            watchdog_record["rolling_restart_port"] = staging_port
+            publish()
+
+            # Durable saved profiles keep a canonical local port. While the
+            # staging child serves public traffic, warm a second replacement on
+            # that canonical port and move Funnel back only after it is ready.
+            canonical_bridge: Optional[subprocess.Popen[str]] = None
+            canonical_output: Optional[MirroredChildOutput] = None
+            canonical_tunnel: Optional[TailscaleBackgroundFunnel] = None
+            try:
+                _wait_for_local_port_release(config.port, timeout_seconds=5.0)
+                canonical_bridge, canonical_output = spawn_bridge_child(
+                    port=config.port,
+                    label="bridge-rolling-canonical",
+                )
+                _wait_for_bridge(canonical_bridge, config.port, output=canonical_output)
+                canonical_tunnel = retarget_tailscale_background_funnel(
+                    moved_tunnel,
+                    config.port,
+                    timeout_seconds=config.tunnel_timeout_seconds,
+                )
+                _wait_for_public_mcp_route(
+                    canonical_bridge,
+                    public_url,
+                    path=web_bridge_mcp_path(config.profile),
+                    timeout_seconds=min(15.0, float(config.tunnel_timeout_seconds)),
+                    output=canonical_output,
+                )
+            except WebBridgeLaunchError as exc:
+                rollback_ok = canonical_tunnel is None
+                if canonical_tunnel is not None:
+                    try:
+                        tunnel = retarget_tailscale_background_funnel(
+                            canonical_tunnel,
+                            staging_port,
+                            timeout_seconds=config.tunnel_timeout_seconds,
+                        )
+                        rollback_ok = True
+                    except WebBridgeLaunchError:
+                        # The retarget to the canonical child already succeeded,
+                        # but its public proof failed. If rollback also fails,
+                        # do not kill the backend Funnel most likely points at.
+                        rollback_ok = False
+                if rollback_ok:
+                    if canonical_bridge is not None and canonical_output is not None:
+                        retire_owned_child(canonical_bridge, canonical_output, terminate=True)
+                    bridge = staging_bridge
+                    bridge_output = staging_output
+                    tunnel = moved_tunnel
+                    active_bridge_port = staging_port
+                    degraded_pid = _pid_of(staging_bridge)
+                    degraded_port = staging_port
+                    degraded_state = "staging_port_active"
+                    failure_class = "CanonicalPortRestoreDeferred"
+                else:
+                    assert canonical_bridge is not None
+                    assert canonical_output is not None
+                    assert canonical_tunnel is not None
+                    bridge = canonical_bridge
+                    bridge_output = canonical_output
+                    tunnel = canonical_tunnel
+                    active_bridge_port = config.port
+                    degraded_pid = _pid_of(canonical_bridge)
+                    degraded_port = config.port
+                    degraded_state = "canonical_route_unverified"
+                    failure_class = "CanonicalPublicProofFailed"
+                    time.sleep(0.5)
+                    retire_owned_child(staging_bridge, staging_output, terminate=True)
+                rolling_restart_count += 1
+                watchdog_record["bridge_pid"] = degraded_pid
+                watchdog_record["port"] = degraded_port
+                watchdog_record["rolling_restarts"] = rolling_restart_count
+                watchdog_record["rolling_restart_degraded"] = degraded_state
+                watchdog_record["last_rolling_restart_error"] = type(exc).__name__
+                try:
+                    update_rolling_restart_request(
+                        session_id,
+                        request_key,
+                        "completed",
+                        new_bridge_pid=degraded_pid,
+                        new_port=degraded_port,
+                        failure_class=failure_class,
+                    )
+                except BridgeHandoffError:
+                    pass
+                clear_rolling_restart_request(session_id, request_key_sha256=request_key)
+                publish()
+                return True
+
+            assert canonical_bridge is not None
+            assert canonical_output is not None
+            assert canonical_tunnel is not None
+            bridge = canonical_bridge
+            bridge_output = canonical_output
+            tunnel = canonical_tunnel
+            active_bridge_port = config.port
+            rolling_restart_count += 1
+            watchdog_record["bridge_pid"] = _pid_of(bridge)
+            watchdog_record["port"] = active_bridge_port
+            watchdog_record["bridge_ready"] = True
+            watchdog_record["readiness_state"] = "READY"
+            watchdog_record["rolling_restarts"] = rolling_restart_count
+            watchdog_record["last_rolling_restart_at"] = time.time()
+            watchdog_record.pop("rolling_restart_port", None)
+            watchdog_record.pop("rolling_restart_degraded", None)
+            watchdog_record.pop("last_rolling_restart_error", None)
+            try:
+                update_rolling_restart_request(
+                    session_id,
+                    request_key,
+                    "completed",
+                    new_bridge_pid=_pid_of(canonical_bridge),
+                    new_port=config.port,
+                )
+            except BridgeHandoffError:
+                pass
+            publish()
+            time.sleep(0.5)
+            retire_owned_child(staging_bridge, staging_output, terminate=True)
+            clear_rolling_restart_request(session_id, request_key_sha256=request_key)
+            return True
 
         # Durable saved bridges get a credential-free sibling supervisor. The
         # owner already heals its local MCP child and Funnel; this sibling heals
@@ -4202,6 +4658,23 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 )
                 return 0
 
+            if (
+                persistent_session
+                and config.saved_profile_name
+                and isinstance(tunnel, TailscaleBackgroundFunnel)
+            ):
+                rolling_request = read_rolling_restart_request(
+                    session_id,
+                    owner_pid=os.getpid(),
+                    bridge_pid=_pid_of(bridge),
+                )
+                if rolling_request.get("status") == "requested":
+                    if perform_rolling_child_handoff(rolling_request):
+                        # Re-enter the loop with the newly promoted child and its
+                        # truthful active port. The durable owner/session/Funnel
+                        # identity never changed during the handoff.
+                        continue
+
             loop_now = time.monotonic()
             if (
                 persistent_session
@@ -4260,14 +4733,15 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                 # The child that just died may still be releasing the listener.
                 # Spawning into an occupied port makes the replacement fail to
                 # bind, which used to be fatal for the owner as well.
-                _wait_for_local_port_release(config.port)
+                _wait_for_local_port_release(active_bridge_port)
                 try:
-                    bridge, bridge_output = spawn_bridge_child()
+                    bridge, bridge_output = spawn_bridge_child(port=active_bridge_port)
                     watchdog_record["bridge_pid"] = _pid_of(bridge)
+                    watchdog_record["port"] = active_bridge_port
                     watchdog_record["bridge_ready"] = False
                     watchdog_record["readiness_state"] = "STARTING"
                     publish()
-                    _wait_for_bridge(bridge, config.port, output=bridge_output)
+                    _wait_for_bridge(bridge, active_bridge_port, output=bridge_output)
                     watchdog_record["bridge_ready"] = True
                     watchdog_record["readiness_state"] = "READY"
                     publish()
@@ -4325,6 +4799,62 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                     flush=True,
                 )
                 continue
+            if local_health_interval_seconds > 0.0:
+                # Dead-listener canary for tunnels without their own public
+                # probe supervision. Network supervision does not catch a hung
+                # listener: the tunnel process stays alive, the port stays
+                # bound, and no traffic is served. Confirm before recycling.
+                local_now = time.monotonic()
+                if (
+                    local_now >= next_local_health_check_at
+                    and bridge is not None
+                    and bridge.poll() is None
+                ):
+                    local_ok = local_mcp_route_healthy(
+                        active_bridge_port,
+                        path=web_bridge_mcp_path(config.profile),
+                    )
+                    if local_ok:
+                        local_health_failures = 0
+                        watchdog_record["local_bridge_healthy"] = True
+                        watchdog_record["local_bridge_checked_at"] = time.time()
+                        watchdog_record.pop("last_bridge_health_failure", None)
+                        next_local_health_check_at = (
+                            local_now + local_health_interval_seconds
+                        )
+                    else:
+                        local_health_failures += 1
+                        watchdog_record["local_bridge_healthy"] = False
+                        watchdog_record["local_bridge_checked_at"] = time.time()
+                        watchdog_record["last_bridge_health_failure_at"] = time.time()
+                        watchdog_record["last_bridge_health_failure"] = (
+                            "local MCP auth probe did not reach the bridge"
+                        )
+                        watchdog_record["local_health_failures"] = local_health_failures
+                        if local_health_failures >= LOCAL_HEALTH_CONFIRM_THRESHOLD:
+                            print(
+                                "[bridge] Local MCP listener stopped serving; recycling "
+                                "only the owned child while preserving OAuth/session "
+                                "identity and the public URL…",
+                                flush=True,
+                            )
+                            publish()
+                            bridge.terminate()
+                            try:
+                                bridge.wait(timeout=3.0)
+                            except subprocess.TimeoutExpired:
+                                bridge.kill()
+                                bridge.wait(timeout=3.0)
+                            if route_health is not None:
+                                route_health.observe(now=time.monotonic(), healthy=True)
+                            local_health_failures = 0
+                            # A replacement child needs its own startup budget
+                            # before its first canary sample is meaningful.
+                            next_local_health_check_at = time.monotonic() + max(
+                                local_health_interval_seconds,
+                                _LOCAL_HEALTH_RECYCLE_GRACE_SECONDS,
+                            )
+                            continue
             if tunnel is not None:
                 if isinstance(tunnel, TailscaleBackgroundFunnel):
                     now = time.monotonic()
@@ -4334,29 +4864,70 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                         and now >= tunnel_retry_at
                     ):
                         try:
-                            owned, foreign = _matching_background_funnel_routes(
-                                tunnel.executable,
-                                public_url=tunnel.public_url,
-                                port=tunnel.port,
-                                https_port=tunnel.https_port,
+                            public_healthy = public_mcp_route_healthy(
+                                public_url,
+                                path=web_bridge_mcp_path(config.profile),
+                                get=(
+                                    route_probe_client.get
+                                    if route_probe_client is not None
+                                    else None
+                                ),
                             )
+                            watchdog_record["public_route_healthy"] = public_healthy
+                            watchdog_record["public_route_checked_at"] = time.time()
+                            if public_healthy:
+                                watchdog_record["last_public_route_ok_at"] = time.time()
+                                watchdog_record.pop("last_public_probe_failure", None)
+                                tunnel_refresh_streak = 0
+                            else:
+                                watchdog_record["last_public_probe_failure"] = (
+                                    public_mcp_route_failure_class(
+                                        public_url,
+                                        path=web_bridge_mcp_path(config.profile),
+                                        get=(
+                                            route_probe_client.get
+                                            if route_probe_client is not None
+                                            else None
+                                        ),
+                                    )
+                                )
+
+                            # Route inventory shells out to `tailscale serve status`.
+                            # Startup already proved the owned route, so keep healthy
+                            # steady state cheap: audit ownership every 30s, but do it
+                            # immediately after any public failure before considering a
+                            # route mutation. A foreign route is always fail-closed.
+                            inventory_due = (
+                                not public_healthy
+                                or now >= next_tailscale_route_inventory_at
+                            )
+                            owned: list[Any] = []
+                            foreign: list[Any] = []
+                            if inventory_due:
+                                owned, foreign = _matching_background_funnel_routes(
+                                    tunnel.executable,
+                                    public_url=tunnel.public_url,
+                                    port=tunnel.port,
+                                    https_port=tunnel.https_port,
+                                )
+                                next_tailscale_route_inventory_at = (
+                                    now + tailscale_route_inventory_interval_seconds
+                                )
                             if foreign:
                                 # Fail closed: a route we do not own appeared on this
                                 # daemon. Never reapply or remove anything based on a
                                 # public-network probe when ownership is ambiguous.
                                 route_health.observe(now=now, healthy=True)
                                 watchdog_record["public_route_state"] = "ownership_ambiguous"
+                                watchdog_record["public_route_failures"] = 0
                                 publish()
                             else:
-                                public_healthy = public_mcp_route_healthy(
-                                    public_url,
-                                    path=web_bridge_mcp_path(config.profile),
-                                )
-                                route_present = bool(owned)
-                                watchdog_record["public_route_healthy"] = public_healthy
-                                watchdog_record["public_route_checked_at"] = time.time()
-                                if public_healthy:
-                                    watchdog_record["last_public_route_ok_at"] = time.time()
+                                watchdog_record.pop("public_route_state", None)
+                                # A successful end-to-end 401 proves the route is
+                                # serving this KaroX listener even if a concurrent
+                                # CLI inventory happened to return no parseable rows.
+                                # On failure, ownership is freshly inventoried above.
+                                route_present = public_healthy or bool(owned)
                                 recovery_due = route_health.observe(
                                     now=now,
                                     healthy=route_present and public_healthy,
@@ -4371,9 +4942,14 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                                     # a listener that still owns the port but no longer
                                     # reaches KaroX authentication.
                                     local_healthy = public_mcp_route_healthy(
-                                        f"http://127.0.0.1:{config.port}",
+                                        f"http://127.0.0.1:{active_bridge_port}",
                                         path=web_bridge_mcp_path(config.profile),
                                         timeout_seconds=1.0,
+                                        get=(
+                                            route_probe_client.get
+                                            if route_probe_client is not None
+                                            else None
+                                        ),
                                     )
                                     watchdog_record["local_bridge_healthy"] = local_healthy
                                     watchdog_record["local_bridge_checked_at"] = time.time()
@@ -4420,7 +4996,18 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                                     )
                                     route_health.recovered(now=time.monotonic())
                                     tunnel_recovery_failures = 0
-                                    tunnel_retry_at = 0.0
+                                    # Do not turn a persistently unreachable public
+                                    # ingress (e.g. one Tailscale POP) into a refresh
+                                    # storm: the next reapply waits a growing cooldown
+                                    # so the owned daemon route is probed between
+                                    # mutations instead of being refreshed 2-4 times
+                                    # per second.
+                                    tunnel_refresh_streak += 1
+                                    tunnel_retry_at = time.monotonic() + min(
+                                        60.0,
+                                        float(2 ** min(tunnel_refresh_streak, 5)),
+                                    )
+                                    watchdog_record["tunnel_refresh_streak"] = tunnel_refresh_streak
                                     watchdog_record["tunnel_pid"] = None
                                     watchdog_record["tunnel_recoveries"] = route_health.recovery_count
                                     watchdog_record["last_tunnel_recovery_at"] = time.time()
@@ -4452,8 +5039,29 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                         recovery_reason = f"foreground process exited with code {tunnel_code}"
                     elif route_health is not None and route_health.due(now):
                         healthy = public_mcp_route_healthy(
-                            public_url, path=web_bridge_mcp_path(config.profile)
+                            public_url,
+                            path=web_bridge_mcp_path(config.profile),
+                            get=(
+                                route_probe_client.get
+                                if route_probe_client is not None
+                                else None
+                            ),
                         )
+                        if healthy:
+                            watchdog_record.pop("last_public_probe_failure", None)
+                            tunnel_refresh_streak = 0
+                        else:
+                            watchdog_record["last_public_probe_failure"] = (
+                                public_mcp_route_failure_class(
+                                    public_url,
+                                    path=web_bridge_mcp_path(config.profile),
+                                    get=(
+                                        route_probe_client.get
+                                        if route_probe_client is not None
+                                        else None
+                                    ),
+                                )
+                            )
                         if route_health.observe(now=now, healthy=healthy):
                             recovery_reason = (
                                 f"public MCP ingress failed {route_health.failure_threshold} "
@@ -4478,7 +5086,16 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                             if route_health is not None:
                                 route_health.recovered(now=time.monotonic())
                             tunnel_recovery_failures = 0
-                            tunnel_retry_at = 0.0
+                            # Mirror the background-funnel storm guard: back to
+                            # back "successful" foreground recoveries without a
+                            # confirming public probe must cool down instead of
+                            # recycling tailscale tunnels in a tight loop.
+                            tunnel_refresh_streak += 1
+                            tunnel_retry_at = time.monotonic() + min(
+                                60.0,
+                                float(2 ** min(tunnel_refresh_streak, 5)),
+                            )
+                            watchdog_record["tunnel_refresh_streak"] = tunnel_refresh_streak
                             watchdog_record["tunnel_pid"] = _pid_of(tunnel.process)
                             watchdog_record["tunnel_recoveries"] = (
                                 route_health.recovery_count if route_health is not None else 1
@@ -4525,6 +5142,11 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=2.0)
+        if route_probe_client is not None:
+            try:
+                route_probe_client.close()
+            except Exception:
+                pass
         _record_owner_exit(
             session_id,
             saved_profile=config.saved_profile_name,
@@ -4539,7 +5161,21 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
         if bridge is not None and bridge.stdout is not None:
             bridge.stdout.close()
         if tunnel is not None:
-            tunnel.stop()
+            # A durable Tailscale background route is daemon-owned, not a child
+            # process of this owner. During a requested restart keep that exact
+            # already-proven route in place: the successor reuses the same local
+            # port/public hostname, so removing and re-adding Funnel only creates
+            # a needless public-ingress outage and propagation window. Explicit
+            # Stop still removes the route, and foreground/Cloudflare tunnels
+            # remain process-owned and therefore must be stopped here.
+            preserve_background_route = (
+                exit_reason == "restart_requested"
+                and isinstance(tunnel, TailscaleBackgroundFunnel)
+                and persistent_session
+                and bool(config.saved_profile_name)
+            )
+            if not preserve_background_route:
+                tunnel.stop()
         _close_job(job)
         if watchdog is not None:
             # Only ever remove a record that is still ours. A durable record can

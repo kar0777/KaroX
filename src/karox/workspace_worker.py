@@ -537,8 +537,15 @@ def execute_browser_command(
     if action == "show_window":
         if getattr(manager, "engine", "") != "chrome_extension_mv3" or not hasattr(manager, "_call"):
             raise InvalidCommand("browser.command show_window requires the extension browser backend")
-        left = int(payload.get("left", 100))
-        top = int(payload.get("top", 100))
+        # Typed refusal for malformed coordinates: ``int()`` on a string, list,
+        # or None used to escape as an untyped ValueError/TypeError instead of
+        # the invalid_request contract every other browser action honours.
+        left_value = _finite_number(payload.get("left", 100), "show_window left")
+        top_value = _finite_number(payload.get("top", 100), "show_window top")
+        if left_value != int(left_value) or top_value != int(top_value):
+            raise InvalidCommand("browser show_window coordinates must be whole numbers")
+        left = int(left_value)
+        top = int(top_value)
         if not 0 <= left <= 10_000 or not 0 <= top <= 10_000:
             raise InvalidCommand("browser show_window coordinates must be between 0 and 10000")
         return {"action": action, **manager._call("show_window", {"left": left, "top": top}, deadline_seconds)}

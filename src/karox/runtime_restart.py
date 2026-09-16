@@ -24,12 +24,18 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from .bridge_handoff import (
+    BridgeHandoffError,
+    read_rolling_restart_request,
+    request_rolling_restart,
+)
 from .paths import runtime_dir
 from .port_ownership import prove_bridge_process_identity, prove_saved_bridge_owner_identity
 from .process_identity import process_is_running
 
 SELF_RESTART_EXIT_CODE = 75
 RESTART_IDLE_TIMEOUT_SECONDS = 30.0
+RESTART_HANDOFF_TIMEOUT_SECONDS = 20.0
 RESTART_POLL_SECONDS = 0.05
 RESTART_MIN_GRACE_SECONDS = 0.10
 _MAX_REASON_LENGTH = 500
@@ -235,6 +241,109 @@ def _await_transport_idle_then_exit(
     _update_receipt_status(receipt_path, "transport_busy_timeout", timed_out_at=time.time())
 
 
+def _await_transport_idle_then_handoff(
+    receipt_path: Path,
+    *,
+    session_id: str,
+    owner_pid: int,
+    bridge_pid: int,
+    request_key_sha256: str,
+    baseline_completed: int,
+    activity_snapshot: Callable[[], Mapping[str, Any]],
+    exit_process: Callable[[int], Any],
+    timeout_seconds: float = RESTART_IDLE_TIMEOUT_SECONDS,
+    handoff_timeout_seconds: float = RESTART_HANDOFF_TIMEOUT_SECONDS,
+    poll_seconds: float = RESTART_POLL_SECONDS,
+    sleep: Callable[[float], Any] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Ask the owner for a rolling Tailscale handoff after the response is safe.
+
+    The current child stays alive while the owner warms another child and moves
+    the already-owned Funnel route. Once the owner reports ``route_switched`` no
+    new public request should enter this child; wait for any pre-switch request to
+    drain, then exit. If the owner cannot perform the handoff, fall back to the
+    historical owner-respawn exit so a restart request never becomes a no-op.
+    """
+
+    sleep(RESTART_MIN_GRACE_SECONDS)
+    idle_deadline = monotonic() + max(0.1, float(timeout_seconds))
+    while monotonic() < idle_deadline:
+        snapshot = dict(activity_snapshot())
+        completed = snapshot.get("responses_completed")
+        active = snapshot.get("active_requests")
+        if (
+            isinstance(completed, int)
+            and not isinstance(completed, bool)
+            and completed > baseline_completed
+            and active == 0
+        ):
+            try:
+                request_rolling_restart(
+                    session_id=session_id,
+                    owner_pid=owner_pid,
+                    bridge_pid=bridge_pid,
+                    request_key_sha256=request_key_sha256,
+                )
+            except BridgeHandoffError:
+                _update_receipt_status(
+                    receipt_path,
+                    "rolling_handoff_unavailable",
+                    fallback_at=time.time(),
+                )
+                exit_process(SELF_RESTART_EXIT_CODE)
+                return
+            _update_receipt_status(
+                receipt_path,
+                "handoff_requested",
+                handoff_requested_at=time.time(),
+            )
+            break
+        sleep(max(0.01, float(poll_seconds)))
+    else:
+        _update_receipt_status(receipt_path, "transport_busy_timeout", timed_out_at=time.time())
+        return
+
+    handoff_deadline = monotonic() + max(0.1, float(handoff_timeout_seconds))
+    route_switched = False
+    while monotonic() < handoff_deadline:
+        request = read_rolling_restart_request(
+            session_id,
+            owner_pid=owner_pid,
+            bridge_pid=bridge_pid,
+            request_key_sha256=request_key_sha256,
+        )
+        status = request.get("status") if request else None
+        if status in {"route_switched", "completed"}:
+            route_switched = True
+            snapshot = dict(activity_snapshot())
+            if snapshot.get("active_requests") == 0:
+                _update_receipt_status(
+                    receipt_path,
+                    "triggered",
+                    triggered_at=time.time(),
+                    exit_code=SELF_RESTART_EXIT_CODE,
+                    rolling_handoff=True,
+                )
+                exit_process(SELF_RESTART_EXIT_CODE)
+                return
+        elif status == "failed":
+            break
+        sleep(max(0.01, float(poll_seconds)))
+
+    # If the route already moved, exiting is safe even if one stale transport
+    # counter never drained; the public path is on the replacement child. If the
+    # owner failed before moving the route, the standard owner-respawn path is the
+    # conservative fallback and preserves the original restart semantics.
+    _update_receipt_status(
+        receipt_path,
+        "rolling_handoff_timeout" if route_switched else "rolling_handoff_failed",
+        fallback_at=time.time(),
+        exit_code=SELF_RESTART_EXIT_CODE,
+    )
+    exit_process(SELF_RESTART_EXIT_CODE)
+
+
 def schedule_saved_bridge_child_restart(
     *,
     session_id: str,
@@ -259,6 +368,19 @@ def schedule_saved_bridge_child_restart(
     watchdog = _validate_current_saved_child(session_id, saved_profile)
     receipt_path = _receipt_path(session_id, idempotency_key)
     digest = _request_digest(saved_profile, reason)
+    request_key_sha256 = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    owner_pid = watchdog.get("owner_pid")
+    recorded_bridge_pid = watchdog.get("bridge_pid")
+    rolling_supported = (
+        watchdog.get("tunnel") == "tailscale"
+        and isinstance(owner_pid, int)
+        and not isinstance(owner_pid, bool)
+        and owner_pid > 0
+        and isinstance(recorded_bridge_pid, int)
+        and not isinstance(recorded_bridge_pid, bool)
+        and recorded_bridge_pid > 0
+        and bool(watchdog.get("public_url"))
+    )
     public_result = {
         "ok": True,
         "status": "restart_scheduled",
@@ -270,6 +392,7 @@ def schedule_saved_bridge_child_restart(
         "owner_process_preserved": True,
         "browser_backend": browser_backend,
         "browser_process_preserved": browser_process_preserved,
+        "restart_mode": "rolling_tailscale" if rolling_supported else "owner_respawn",
         "exit_code": SELF_RESTART_EXIT_CODE,
     }
     receipt = {
@@ -277,9 +400,9 @@ def schedule_saved_bridge_child_restart(
         "session_id": session_id,
         "saved_profile": saved_profile,
         "request_digest": digest,
-        "request_key_sha256": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+        "request_key_sha256": request_key_sha256,
         "bridge_pid": os.getpid(),
-        "owner_pid": watchdog.get("owner_pid"),
+        "owner_pid": owner_pid,
         "requested_at": time.time(),
         "updated_at": time.time(),
         "attempt": 1,
@@ -340,14 +463,31 @@ def schedule_saved_bridge_child_restart(
     if not isinstance(completed, int) or isinstance(completed, bool) or completed < 0:
         completed = 0
     process_exit = exit_process or os._exit
-    worker = threading.Thread(
-        target=_await_transport_idle_then_exit,
-        kwargs={
+    if rolling_supported:
+        assert isinstance(owner_pid, int)
+        assert isinstance(recorded_bridge_pid, int)
+        worker_target: Callable[..., None] = _await_transport_idle_then_handoff
+        worker_kwargs: dict[str, Any] = {
+            "receipt_path": receipt_path,
+            "session_id": session_id,
+            "owner_pid": owner_pid,
+            "bridge_pid": recorded_bridge_pid,
+            "request_key_sha256": request_key_sha256,
+            "baseline_completed": completed,
+            "activity_snapshot": snapshot_reader,
+            "exit_process": process_exit,
+        }
+    else:
+        worker_target = _await_transport_idle_then_exit
+        worker_kwargs = {
             "receipt_path": receipt_path,
             "baseline_completed": completed,
             "activity_snapshot": snapshot_reader,
             "exit_process": process_exit,
-        },
+        }
+    worker = threading.Thread(
+        target=worker_target,
+        kwargs=worker_kwargs,
         name=f"karox-self-restart-{session_id[:24]}",
         daemon=True,
     )
@@ -365,5 +505,6 @@ __all__ = [
     "RuntimeRestartError",
     "SELF_RESTART_EXIT_CODE",
     "_await_transport_idle_then_exit",
+    "_await_transport_idle_then_handoff",
     "schedule_saved_bridge_child_restart",
 ]

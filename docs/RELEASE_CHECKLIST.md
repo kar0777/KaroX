@@ -1,8 +1,8 @@
 # KaroX 5 release checklist
 
-Target: `5.0.0`  
-Current runtime: `5.0.0.dev0`  
-Release decision: **NOT READY — preview evidence gates remain open.**
+Target: `5.0.0`
+Current runtime: `5.0.0rc1`
+Release decision: **RELEASE CANDIDATE HARDENING — deterministic gates must be green before promotion.**
 
 This is an execution record, not a marketing plan. A checked P0 item must point
 to reproducible evidence. Code presence is not evidence that a command, platform,
@@ -89,11 +89,30 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [x] Complete 3317-test suite passes on the current local acceptance tree.
+- [ ] Complete 3356-test suite passes. **Final detached full-suite verification is running for the current working tree.**
+  `python -m unittest discover -s tests -p "test_*.py"` over the 21 modules
+  that pytest flagged: `Ran 532 tests`, `FAILED (failures=21, errors=3, skipped=1)`. A full `python -m pytest -q --tb=no -rf` run on the same tree:
+  29 failed, 0 errors, 17 minutes. The last green record
+  (`docs/evidence/local-autonomy-acceptance-2026-08-07.md`) predates the
+  2026-09-01 release-candidate snapshot and the current uncommitted work, so
+  it is not evidence for this tree. Failing areas: CLI surface
+  (`test_default_dispatch`, `test_command_catalog`, `test_migration_cli`),
+  developer runtime (`test_developer_runtime`, 3 errors), desktop capture
+  contract (`test_desktop_noninvasive_contract`), TUI (`test_tui`,
+  `test_tui_layout`, `test_tui_connection_hub`, `test_tui_session_view`,
+  `test_tui_session_detail`, `test_tui_connect_surface`,
+  `test_tui_command_ux_v5`), agent verification
+  (`test_agent::test_unapproved_noop_check_cannot_verify`), and the release
+  gates themselves (`test_release_gates::CheckTestCountTests`, both cases,
+  which means the published 3325/3330 counts are stale).
+
 - [x] `python scripts/check_wheel_contents.py` passes on the built wheel, after
-      deleting `build/` so no removed module can ship from a stale copy.
-- [x] Ruff passes without suppressing new defects.
-- [x] Mypy passes.
+  deleting `build/` so no removed module can ship from a stale copy.
+
+- [x] Ruff passes without suppressing new defects. Re-verified 2026-09-03 on the
+  working tree: exit 0.
+
+- [x] Mypy passes. Re-verified 2026-09-03: 189 source files, no issues.
 - [x] Coverage passes without lowering the configured threshold (72.4195% vs 70%).
 - [ ] KB-HYBRID-01..10 pass and regenerate valid records.
 - [ ] Traversal tests pass.
@@ -108,13 +127,16 @@ git diff --check
 - [ ] Failed or timed-out verification cannot produce verified success.
 - [ ] Build cannot create a local commit.
 - [ ] Advanced can create only a guarded local commit.
-- [ ] Git push remains blocked through every shipping profile.
+- [ ] No shipping profile grants standing Git-push authority; the dedicated
+  hosted `karox.git.push` path requires a fresh exact-action MCP user approval,
+  and force-push cannot be expressed through the shipping tool surface.
 - [ ] Package publishing remains blocked through every shipping profile.
 - [x] Support bundle contains no source or credential in the adversarial local gate.
 
 Evidence:
 
 - Local Windows acceptance: `docs/evidence/local-autonomy-acceptance-2026-08-07.md`
+- Working-tree run 2026-09-03: pytest job-9f6da366d647e49f45a9 (29 failed), unittest job-ed48491da2aa278edfc6 (21 failures, 3 errors)
 - CI run URL: pending
 - benchmark record: pending
 - security review commit: pending

@@ -183,6 +183,70 @@ class OAuthBridgeWireTests(unittest.TestCase):
         self.assertNotEqual(authorize.status_code, 404)
         self.assertNotEqual(token.status_code, 404)
 
+    def test_discovery_aliases_cover_path_inserted_and_mcp_wrapped_forms(self) -> None:
+        # Live connector platforms probe more discovery spellings than one
+        # RFC quote suggests (ChatGPT's validation hit both base and /mcp
+        # path-inserted variants; a single 404 there reads to them as
+        # "does not implement OAuth").
+        auth_aliases = (
+            "/.well-known/oauth-authorization-server/mcp",
+            "/mcp/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration/mcp",
+            "/mcp/.well-known/openid-configuration",
+        )
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            reference = client.get("/.well-known/oauth-authorization-server")
+            self.assertEqual(reference.status_code, 200, reference.text)
+            for alias in auth_aliases:
+                with self.subTest(alias=alias):
+                    response = client.get(alias)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json(), reference.json())
+            wrapped_protected = client.get("/mcp/.well-known/oauth-protected-resource")
+            suffixed_protected = client.get(
+                "/.well-known/oauth-protected-resource/mcp"
+            )
+        self.assertEqual(wrapped_protected.status_code, 200, wrapped_protected.text)
+        self.assertEqual(
+            wrapped_protected.json(),
+            suffixed_protected.json(),
+            suffixed_protected.text,
+        )
+
+    def test_registration_accepts_an_authorization_code_only_client(self) -> None:
+        payload = {
+            "client_name": "ChatGPT connector",
+            "redirect_uris": ["https://chatgpt.com/connector/oauth/ab12cd34"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }
+        with httpx.Client(base_url=self.base, timeout=15.0) as client:
+            response = client.post("/oauth/register", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(
+            response.json()["grant_types"],
+            ["authorization_code", "refresh_token"],
+        )
+        self.assertEqual(response.json()["client_name"], "ChatGPT connector")
+
+    def test_registration_still_rejects_codeless_or_unknown_grants(self) -> None:
+        redirect = "https://chatgpt.com/connector/oauth/ab12cd34"
+        bad_grant_cases = (
+            {"grant_types": ["implicit", "authorization_code"]},
+            {"grant_types": ["refresh_token"]},
+            {"grant_types": []},
+            {"grant_types": "authorization_code"},
+        )
+        for case in bad_grant_cases:
+            payload = {"client_name": "Probe", "redirect_uris": [redirect]}
+            payload.update(case)
+            with httpx.Client(base_url=self.base, timeout=15.0) as client:
+                response = client.post("/oauth/register", json=payload)
+            with self.subTest(case=case):
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIn("grant", response.json()["error_description"])
+
     def _pending_request(
         self, client: httpx.Client, *, state: str = "state-123"
     ) -> tuple[str, str]:

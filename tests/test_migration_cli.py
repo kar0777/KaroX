@@ -174,6 +174,10 @@ class CliSmokeTests(unittest.TestCase):
                 "bridge_credentials",
                 "sessions",
                 "packs",
+                "tailscale",
+                "saved_bridges",
+                "repository_leases",
+                "saved_bridge_runtime",
             },
         )
 

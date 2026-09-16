@@ -183,5 +183,140 @@ class TailscaleRouteSupervisorTests(unittest.TestCase):
             self.assertGreaterEqual(result["public_probe"].call_count, 4)  # type: ignore[union-attr]
 
 
+    def test_persistent_public_failure_backs_off_between_successful_refreshes(
+        self,
+    ) -> None:
+        """A persistently unreachable public ingress must not become a refresh storm.
+
+        Each successful reapply of the owned daemon route grows an exponential
+        cooldown before the next reapply: a broken cloud POP can no longer be
+        hammered with ``tailscale funnel`` mutations every couple hundred
+        milliseconds while the local bridge keeps running.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "repo"
+            repository.mkdir()
+
+            sessions = MagicMock()
+            sessions.state_path.return_value.exists.return_value = False
+            credentials = MagicMock()
+            credentials.resolve.return_value = "approval-secret"
+            credentials.set.return_value = {"secret": "approval-secret"}
+            tunnel = TailscaleBackgroundFunnel(
+                executable="tailscale",
+                public_url="https://monster.example.ts.net",
+                port=8765,
+            )
+
+            bridge = MagicMock()
+            bridge.poll.return_value = None
+            bridge.pid = 5301
+            bridge.stdout = MagicMock()
+            mirrored = MagicMock()
+            mirrored.detail.return_value = ""
+            mirrored.reader = MagicMock()
+
+            sleeps = {"count": 0}
+
+            def sleep(_: float) -> None:
+                sleeps["count"] += 1
+                if sleeps["count"] >= 8:
+                    raise KeyboardInterrupt
+
+            clock = {"value": -1.0}
+            refresh_timestamps: list[float] = []
+
+            def monotonic() -> float:
+                clock["value"] += 1.0
+                return clock["value"]
+
+            def refresh_recorder(*_args: object, **_kwargs: object):
+                refresh_timestamps.append(clock["value"])
+                return tunnel
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "KAROX_RUNTIME_DIR": str(root),
+                        "KAROX_VNEXT_RUNTIME_DIR": str(root),
+                    },
+                ),
+                patch("karox.web_bridge_launcher._port_is_available", return_value=True),
+                patch(
+                    "karox.web_bridge_launcher.RouteHealthTracker",
+                    side_effect=lambda: RouteHealthTracker(
+                        interval_seconds=0.1,
+                        failure_threshold=1,
+                    ),
+                ),
+                patch(
+                    "karox.web_bridge_launcher.start_tailscale_background_funnel",
+                    return_value=tunnel,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.refresh_tailscale_background_funnel",
+                    side_effect=refresh_recorder,
+                ),
+                patch(
+                    "karox.web_bridge_launcher._matching_background_funnel_routes",
+                    return_value=([object()], []),
+                ),
+                patch.object(TailscaleBackgroundFunnel, "stop"),
+                patch("karox.web_bridge_launcher.SessionStore", return_value=sessions),
+                patch(
+                    "karox.web_bridge_launcher.BridgeCredentialStore",
+                    return_value=credentials,
+                ),
+                patch(
+                    "karox.saved_bridge_supervisor.ensure_saved_bridge_supervisor",
+                    return_value=6301,
+                ),
+                patch(
+                    "karox.web_bridge_launcher.subprocess.Popen",
+                    return_value=bridge,
+                ),
+                patch(
+                    "karox.web_bridge_launcher._mirror_child_output",
+                    return_value=mirrored,
+                ),
+                patch("karox.web_bridge_launcher._wait_for_bridge"),
+                patch(
+                    "karox.web_bridge_launcher._wait_for_public_mcp_route",
+                ),
+                patch(
+                    "karox.web_bridge_launcher.public_mcp_route_healthy",
+                    # Public ingress stays broken while the local child answers:
+                    # the classifier must therefore take the funnel-refresh path
+                    # (the storm the cooldown guards), never the child recycle.
+                    side_effect=lambda url, **_kwargs: "127.0.0.1" in url,
+                ),
+                patch("karox.web_bridge_launcher.time.monotonic", side_effect=monotonic),
+                patch("karox.web_bridge_launcher.time.sleep", side_effect=sleep),
+            ):
+                with redirect_stdout(io.StringIO()):
+                    code = run_web_bridge(
+                        WebBridgeConnectConfig(
+                            profile="chatgpt-web",
+                            repository=repository,
+                            access_profile=AccessProfile.WORKSPACE_WRITE,
+                            tunnel="tailscale",
+                            saved_profile_name="hyperagent-auto",
+                        )
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertGreaterEqual(len(refresh_timestamps), 2)
+            self.assertLessEqual(len(refresh_timestamps), 4)
+            gaps = [
+                after - before
+                for before, after in zip(refresh_timestamps, refresh_timestamps[1:])
+            ]
+            # Every cooldown is at least 2 monotonic seconds even at the first
+            # streak step, and later steps only grow.
+            self.assertGreaterEqual(min(gaps), 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

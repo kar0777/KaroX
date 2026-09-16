@@ -361,8 +361,8 @@ _HUB_STATUS_WORDS: Dict[str, Tuple[str, str]] = {
 _HUB_ADD_WORDS: Dict[str, Tuple[str, str]] = {
     HUB_ADD_MODEL: ("AI-модель", "AI model"),
     HUB_ADD_SERVICE: (
-        "Приложение или сервис — ChatGPT, Claude, Notion…",
-        "App or service — ChatGPT, Claude, Notion…",
+        "Приложение или сервис — ChatGPT, Claude, ClickUp, Notion…",
+        "App or service — ChatGPT, Claude, ClickUp, Notion…",
     ),
     # Protocol choice belongs to the next screen. The root should ask what the
     # person wants to connect, not whether they know what MCP/OpenAPI means.

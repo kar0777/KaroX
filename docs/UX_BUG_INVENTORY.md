@@ -30,13 +30,12 @@ python -m unittest discover -s tests -p "test_tui_layout.py" -v
 ## Open
 
 | ID | P | Area | Symptom |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | [UX-006](#ux-006) | P1 | copy | No way to hand the mouse back to the terminal's own selection |
-| [UX-010](#ux-010) | P1 | layout | A 14-row window leaves the conversation three rows |
 
 ## Closed
 
-Thirteen of the fifteen. Eight went with one change -- the transcript is now a
+Fourteen of the fifteen. Eight went with one change -- the transcript is now a
 scroll container of one widget per message instead of a `RichLog` with selection
 written by hand, and deleting the hand-written layer closed them together rather
 than as eight repairs. One was never a defect.
@@ -56,6 +55,7 @@ than as eight repairs. One was never a defect.
 | UX-011 | P1 | the sponsor line yields a row when short | `test_the_welcome_is_fully_visible_when_it_first_appears` |
 | UX-012 | P1 | `padding-right: 1` on each status field | `test_status_columns_do_not_run_into_each_other` |
 | UX-013 | P1 | `text-overflow: ellipsis` on each field | `test_a_truncated_status_value_says_it_was_truncated` |
+| UX-010 | P1 | one header line replaced the fixed chrome | test_a_narrow_window_gives_the_chat_a_usable_share |
 
 **UX-009 was my misreading, not a bug.** The sponsor line is a marquee: it scrolls
 by one cell every 0.18s, so at any moment after the first tick it is showing the
@@ -258,18 +258,13 @@ Expected: the ticker begins at a word boundary.
 ### UX-010
 **P1 · layout · a 14-row window leaves the conversation three rows**
 
-Partly fixed. Originally two rows of fourteen — 14% of the window — because brand,
+Fixed. Originally two rows of fourteen — 14% of the window — because brand,
 ticker, status bar, two separators and the composer take a fixed twelve rows no
 matter how few there are to divide.
 
 The sponsor line is now hidden below twenty rows, which recovered one row: the
 conversation gets three, measured, which is enough for the three-line welcome to be
 readable (that was UX-011, now closed) but not a share anyone would call usable.
-
-What remains is in the status bar, which is three rows for two rows of content, and
-the composer, which is four rows for one line of input. Reclaiming those is a layout
-change rather than a visibility one — collapsing the status bar to a single row at
-small heights, and dropping the composer's hint line with it.
 
 Expected: the conversation keeps a usable share at any size the application agrees
 to run at, or says the window is too small.

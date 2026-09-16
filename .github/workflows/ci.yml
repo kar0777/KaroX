@@ -22,41 +22,50 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -p "test_[a-h]*.py"
+      # Let pytest do the glob filtering itself: GitHub's Windows runner uses
+      # PowerShell, which does not expand native-command globs the same way Bash
+      # does. This keeps the shard definition identical on all three OSes and
+      # avoids running every unittest twice under both pytest and unittest.
+      - run: python -m pytest -q tests --ignore-glob="tests/test_[i-z]*.py"
         timeout-minutes: 10
 
   test-shard-b:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -p "test_[i-z]*.py"
+      - run: python -m pytest -q tests --ignore-glob="tests/test_[a-h]*.py"
         timeout-minutes: 15
 
   wheel:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install build
-      - run: rm -rf build dist && python -m build --wheel
+      - run: python -m pip install --upgrade pip build
+      - run: python -c "import shutil; shutil.rmtree('build', ignore_errors=True); shutil.rmtree('dist', ignore_errors=True)"
+      - run: python -m build --wheel
       - run: python scripts/check_wheel_contents.py
-      - run: python -m unittest discover -s tests -p "test_wheel_contents.py"
+      - run: python scripts/smoke_installed_wheel.py
+      - run: python -m pytest -q tests/test_wheel_contents.py
 
   release-gates:
     runs-on: ubuntu-latest

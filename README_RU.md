@@ -14,7 +14,7 @@ KaroX не является моделью, IDE или полноценной с
 ограничивает полномочия через `repoRoot`, capabilities, allowlist, leases,
 idempotency и жёсткие запреты, но не виртуализирует операционную систему.
 
-> **Статус релиза:** packaged runtime имеет версию `5.0.0.dev0`. Локальные
+> **Статус релиза:** packaged runtime имеет версию `5.0.0rc1`. Локальные
 > контракты и transport-paths покрыты тестами, но реальные live-проверки ChatGPT
 > Web, Claude Web и обязательных API-провайдеров ещё не завершены. Смотри
 > [scope KaroX 5.0](docs/V5_RELEASE_SCOPE.md),
@@ -39,29 +39,29 @@ idempotency и жёсткие запреты, но не виртуализиру
 Функции, которые не нужны для этого пути, остаются Preview, Experimental или
 Legacy до появления собственных доказательств.
 
-## Установка preview-версии
+## Установка
 
-Публичные bootstrap-команды ветки `main` устанавливают последний стабильный
-релиз 4.x. Для проверки KaroX 5 переключись на preview-ветку и запусти локальный
-установщик из checkout.
-
-Windows:
-
-```powershell
-.\install.karox.ps1
-```
-
-macOS или Linux:
+KaroX 5 опубликован на PyPI как pre-release. Одна команда на любой ОС:
 
 ```bash
-./install.karox.sh
+pipx install --pre karox-runtime
+# или
+uv tool install --prerelease=allow karox-runtime
 ```
 
-После установки открой новый терминал внутри нужного репозитория и запусти:
+После установки открой терминал внутри нужного Git-репозитория и запусти:
 
 ```bash
 karox
 ```
+
+`karox quickstart` покажет, что уже подключено, и одну следующую команду —
+первая минута не требует документации.
+
+Публичные bootstrap-команды ветки `main` по-прежнему устанавливают последний
+стабильный релиз 4.x. `bootstrap.sh --channel preview` /
+`bootstrap.ps1 -Channel preview` ставят кандидат 5.x через pipx. Для проверки из
+исходников запусти `./install.karox.sh` или `.\install.karox.ps1` в репозитории.
 
 На Windows терминал, открытый до установки, сохраняет старый `PATH`. Открой
 новое окно, используй ярлык KaroX или проверь `Get-Command karox -All`.
@@ -208,10 +208,13 @@ karox orchestrate run --objective "Исправить retry semantics" --recipe 
 - **Advanced** (`elevated`) — явно добавляет защищённый локальный commit, а также
   browser, desktop-input и network capabilities elevated policy.
 
-Ни один стабильный профиль не выдаёт Git push, package publishing или
-authentication commands. Продолжение работы — действие над существующей durable
-session, а не отдельный уровень прав. Во время миграции старый UI может ещё
-показывать профиль Resume.
+Ни один стабильный профиль не выдаёт постоянное право на Git push,
+package publishing или authentication commands. В Advanced durable ChatGPT Web
+bridge может быть доступен отдельный `karox.git.push`, но каждый push требует
+машинно-проверяемого одноразового подтверждения пользователя, привязанного к
+точным remote/branch; `command.run` не может обойти этот gate. Продолжение работы
+— действие над существующей durable session, а не отдельный уровень прав. Во
+время миграции старый UI может ещё показывать профиль Resume.
 
 ## CLI для автоматизации
 
@@ -266,8 +269,9 @@ karox migrate --apply --json
 idempotency key.
 
 Дополнительно применяются redaction, path/link confinement, allowlist hosted
-tools, отдельные keyring namespaces и жёсткие запреты на Git push и package
-publishing. Неудачный check нельзя превратить в подтверждённый успех одним
+tools, отдельные keyring namespaces, жёсткий запрет произвольного Git push/package
+publishing через developer commands и точный одноразовый user gate для отдельной
+push-поверхности. Неудачный check нельзя превратить в подтверждённый успех одним
 текстом модели.
 
 Полные правила: [SECURITY.md](SECURITY.md). Диагностика:
@@ -281,7 +285,7 @@ publishing. Неудачный check нельзя превратить в под
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3317 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3356 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

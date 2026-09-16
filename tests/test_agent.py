@@ -802,7 +802,9 @@ class AgentKernelTests(_AgentKernelFixture):
             for item in self.sessions.load("session").provider_history
             if item.get("tool_call_id") == "noop"
         )
-        self.assertEqual(failure["error"]["type"], "InvalidCommand")
+        self.assertEqual(
+            failure["error"]["type"], "VerificationCommandNotApproved"
+        )
 
     def test_message_normalization_keeps_tool_results_adjacent(self) -> None:
         history = [

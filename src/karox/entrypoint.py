@@ -19,6 +19,24 @@ _ELLIPSIS_AGENT_SUBCOMMANDS = {
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["--version"]:
+        # First thing anyone types to learn what they installed. It must not pay
+        # for the whole CLI import surface (proxy/MCP/provider stack) just to
+        # print one line; the argparse path keeps exact parity for callers that
+        # go through karox.cli directly.
+        from . import __version__
+
+        print(f"karox {__version__}")
+        # Parity with the argparse ``action="version"`` path: it raises instead
+        # of returning, and callers (and its tests) rely on exactly that.
+        raise SystemExit(0)
+    if arguments and arguments[0] == "quickstart":
+        # Keep the first-run path cheap: importing the full legacy CLI pulls the
+        # provider/MCP/browser stack even though quickstart only reads local
+        # configuration and repository metadata.
+        from .quickstart import cli_main as quickstart_main
+
+        return int(quickstart_main(arguments[1:]))
     if arguments and arguments[0] == "agent":
         # `karox agent run` existed before this integration and keeps its legacy
         # meaning. Bare `karox agent`, options directly after it, and the new

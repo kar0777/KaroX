@@ -1413,6 +1413,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_status.add_argument("--saved", required=True, help="saved profile name")
     bridge_status.add_argument("--json", action="store_true")
+    bridge_start = bridge_commands.add_parser(
+        "start",
+        help="launch a saved bridge detached through the canonical start service",
+    )
+    bridge_start.add_argument("--saved", required=True, help="saved profile name")
+    bridge_start.add_argument("--json", action="store_true")
     bridge_stop = bridge_commands.add_parser(
         "stop", help="stop a saved bridge that this KaroX owns"
     )
@@ -1942,6 +1948,17 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--json", action="store_true")
     doctor = commands.add_parser("doctor", help="run aggregate KaroX diagnostics")
     doctor.add_argument("--json", action="store_true")
+    quickstart = commands.add_parser(
+        "quickstart",
+        help="show what is connected and the one command to run next",
+    )
+    quickstart.add_argument(
+        "--repository",
+        type=Path,
+        default=Path("."),
+        help="directory to inspect; defaults to the current directory",
+    )
+    quickstart.add_argument("--json", action="store_true")
     return parser
 
 
@@ -3579,6 +3596,32 @@ def _handle_bridge_lifecycle(args: argparse.Namespace) -> int:
     if command == "status":
         _emit(verdict.to_dict(), json_output=args.json)
         return 0
+    if command == "start":
+        # The canonical detached start: disarms nothing, arms the sibling
+        # supervisor, reclaims this profile's own orphaned listener, spawns the
+        # durable owner and verifies the endpoint. The CLI returns after the
+        # bridge answers; it never becomes a bridge owner itself.
+        from .web_bridge_launcher import start_saved_bridge
+
+        outcome = start_saved_bridge(profile_name)
+        detail = dict(outcome) if isinstance(outcome, dict) else {}
+        if detail.get("action") == "error":
+            _emit(
+                {
+                    "state": "failed",
+                    "profile": profile_name,
+                    "verdict": detail.get("verdict") or verdict.verdict,
+                    "reason": detail.get("error") or detail.get("reason") or "",
+                    "detail": {k: v for k, v in detail.items() if k != "error"},
+                },
+                json_output=args.json,
+            )
+            return 1
+        _emit(
+            {"state": "ok", "profile": profile_name, "detail": detail},
+            json_output=args.json,
+        )
+        return 0
     if command == "attach":
         # Attach is the read-only "reuse" signal: it reports the live bridge's
         # metadata so a caller can point a client at it. It never starts or
@@ -3589,57 +3632,55 @@ def _handle_bridge_lifecycle(args: argparse.Namespace) -> int:
         _emit(verdict.to_dict(), json_output=args.json)
         return 1
     if command == "stop":
-        # Only a proven, owned bridge may be stopped. An unrelated process or a
-        # stale PID is left alone: the verdict explains why.
-        if verdict.verdict != "reuse_same_profile":
-            _emit(verdict.to_dict(), json_output=args.json)
-            return 1 if verdict.verdict != "free" else 0
-        # Controlled stop of the proven owner. The watchdog record's owner_pid
-        # is the KaroX process that launched the bridge; terminating it lets
-        # its finally-block clean up the tunnel and the watchdog file.
-        metadata = verdict.metadata
-        pid = metadata.pid
-        if pid is None or not metadata.pid_proven:
-            _emit(verdict.to_dict(), json_output=args.json)
-            return 1
-        import os
-        import signal
+        # Only a proven, owned bridge may be stopped. The canonical service adds
+        # the durable-intent rule the old inline kill lacked: the profile's
+        # desired_running is disarmed BEFORE the owner is touched, so an armed
+        # sibling supervisor can never resurrect a bridge the user just chose
+        # to retire. Stale/foreign owners are left alone with the verdict.
+        from .web_bridge_launcher import stop_saved_bridge
 
-        if os.name == "nt":
-            # Windows has no SIGTERM equivalent for arbitrary PIDs; use the
-            # same taskkill the launcher's own shutdown would, targeting only
-            # this proven PID.
-            import subprocess
-
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                timeout=10,
+        outcome = stop_saved_bridge(profile_name)
+        detail = dict(outcome) if isinstance(outcome, dict) else {}
+        if detail.get("action") == "error":
+            _emit(
+                {
+                    "state": "failed",
+                    "profile": profile_name,
+                    "verdict": detail.get("verdict") or verdict.verdict,
+                    "reason": detail.get("error") or detail.get("reason") or "",
+                    "detail": {k: v for k, v in detail.items() if k != "error"},
+                },
+                json_output=args.json,
             )
-        else:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError as exc:
-                result = {"state": "failed", "reason": str(exc), **verdict.to_dict()}
-                _emit(result, json_output=args.json)
+            return 1
+        if detail.get("action") in {"no_action", "stopped"}:
+            _emit(
+                {
+                    "state": "ok",
+                    "action": detail.get("action"),
+                    "profile": profile_name,
+                    "pid": detail.get("pid"),
+                    "verdict": detail.get("verdict") or verdict.verdict,
+                    "reason": detail.get("reason") or "",
+                },
+                json_output=args.json,
+            )
+            # "free" really has nothing to stop; other no_action verdicts
+            # (stale/foreign) mean the user asked to stop something KaroX
+            # cannot prove ownership for.
+            if detail.get("action") == "no_action" and detail.get("verdict") != "free":
                 return 1
-        result = {
-            "state": "ok",
-            "action": "stopped",
-            "profile": profile_name,
-            "pid": pid,
-        }
-        _emit(result, json_output=args.json)
-        return 0
+            return 0
+        _emit(
+            {"state": "failed", "profile": profile_name, "detail": detail},
+            json_output=args.json,
+        )
+        return 1
     if command == "restart":
         # A controlled restart stops the proven owned bridge, then relaunches
         # the saved profile. It does not rotate the credential (Phase 0 rule).
         if verdict.verdict == "reuse_same_profile":
-            stop_args = argparse.Namespace(**vars(args))
-            stop_args.bridge_command = "stop"
-            stop_code = _handle_bridge_lifecycle(stop_args)
-            if stop_code != 0:
-                return stop_code
+            pass  # live owner: the service below stops it as part of restart.
         elif verdict.verdict not in {"free", "stale_owned_process"}:
             _emit(verdict.to_dict(), json_output=args.json)
             return 1
@@ -3666,36 +3707,33 @@ def _handle_bridge_lifecycle(args: argparse.Namespace) -> int:
                 }
                 _emit(failure, json_output=args.json)
                 return 1
-        # Relaunch: delegate to the existing connect --saved path.
-        connect_args = argparse.Namespace(**vars(args))
-        connect_args.bridge_command = "connect"
-        connect_args.profile = None
-        connect_args.diagnostics_only = False
-        connect_args.repository = None
-        connect_args.session_id = None
-        connect_args.tool = None
-        connect_args.write = False
-        connect_args.access_profile = None
-        connect_args.tunnel = None
-        connect_args.public_url = None
-        connect_args.cloudflared = None
-        connect_args.tailscale = None
-        connect_args.port = None
-        connect_args.verification_command = None
-        connect_args.server_profile = None
-        connect_args.deadline_seconds = None
-        connect_args.deadline_preset = None
-        connect_args.tunnel_timeout_seconds = None
-        connect_args.language = None
-        connect_args.browser_external_https = False
-        connect_args.browser_domain = None
-        connect_args.browser_deny_domain = None
-        connect_args.browser_headed = False
-        connect_args.browser_user_takeover = False
-        connect_args.browser_network_inspection = False
-        connect_args.browser_payment_confirmation = False
-        connect_args.browser_allowed_email = None
-        return _handle_bridge(connect_args)
+        # Relaunch through the canonical detached restart service. The old CLI
+        # path rebuilt the connect namespace and relaunched the bridge IN this
+        # foreground process, so a "restart" never returned to the shell; the
+        # service arms the sibling supervisor first, waits for the old owner,
+        # then spawns a new detached owner and returns a redacted receipt.
+        from .web_bridge_launcher import restart_saved_bridge
+
+        outcome = restart_saved_bridge(profile_name, timeout_seconds=120.0)
+        detail = dict(outcome) if isinstance(outcome, dict) else {}
+        if detail.get("action") == "error":
+            _emit(
+                {
+                    "state": "failed",
+                    "profile": profile_name,
+                    "phase": detail.get("phase"),
+                    "reason": detail.get("error") or detail.get("reason") or "",
+                    "recovery_armed": detail.get("recovery_armed"),
+                    "detail": {k: v for k, v in detail.items() if k != "error"},
+                },
+                json_output=args.json,
+            )
+            return 1
+        _emit(
+            {"state": "ok", "action": "restarted", "profile": profile_name, "detail": detail},
+            json_output=args.json,
+        )
+        return 0
     _emit(verdict.to_dict(), json_output=args.json)
     return 1
 
@@ -4319,7 +4357,7 @@ def _handle_connect(args: argparse.Namespace) -> int:
 def _handle_bridge(args: argparse.Namespace) -> int:
     if args.bridge_command == "saved":
         return _handle_bridge_saved(args)
-    if args.bridge_command in {"status", "stop", "restart", "attach"}:
+    if args.bridge_command in {"status", "start", "stop", "restart", "attach"}:
         return _handle_bridge_lifecycle(args)
     if args.bridge_command == "oauth":
         return _handle_bridge_oauth(args)
@@ -6564,6 +6602,7 @@ def _human_root_help() -> str:
 
 Start with:
   karox                         open the interactive client
+  karox quickstart              what is connected and the one command to run next
   karox models                  list available models
   karox effort [LEVEL]          show or set work depth (auto → ultra)
   karox mode [MODE]             choose Build, Plan, or Ideate
@@ -6663,6 +6702,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "doctor":
             return _handle_doctor(args)
+
+        if args.command == "quickstart":
+            from .quickstart import collect_report, render_report
+
+            report = collect_report(args.repository.expanduser())
+            if args.json:
+                _json(report.to_dict())
+            else:
+                _write_line(render_report(report, report.language).rstrip("\n"))
+            return 0
 
         if args.command == "pack":
             return _handle_pack(args)

@@ -187,6 +187,9 @@ class OpenFromBrowserTests(_DetailCase):
             self.assertEqual(screen.session_id, "s-open")
 
     async def test_resume_opens_the_detail_and_starts_no_agent(self) -> None:
+        # Resume is an action on a durable session, not on an event-only row.
+        # Seed the same record the real Session Browser would be resuming.
+        self.harness.create_session("s-resume")
         self.harness.state(
             "s-resume",
             tui.SUMMARY_RUN_STOPPED,

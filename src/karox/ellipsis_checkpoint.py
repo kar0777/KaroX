@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from .models import repository_fingerprint
 from .paths import runtime_dir
-from .sessions import SessionStore
+from .sessions import SessionStore, current_mutation_lease
 
 
 class CheckpointError(RuntimeError):
@@ -161,12 +161,31 @@ class WorkspaceCheckpointStore:
                 raise CheckpointError(
                     "pre-existing untracked files exceed the checkpoint size limit"
                 )
-        worktree_source = _git(
-            repository, ["stash", "create", f"karox-{session_id}"]
-        )
-        if not worktree_source:
-            worktree_source = _git(repository, ["rev-parse", "HEAD"])
         index_tree = _git(repository, ["write-tree"])
+        try:
+            worktree_source = _git(
+                repository, ["stash", "create", f"karox-{session_id}"]
+            )
+        except CheckpointError:
+            # ``git stash create`` requires HEAD. Fresh repositories used by
+            # coding agents often have no first commit yet, but an unborn repo
+            # is still checkpointable when its tracked worktree matches the
+            # index; untracked files are backed up separately below. A Git tree
+            # is a valid ``git restore --source`` object, so the index tree is a
+            # lossless worktree source in exactly that case.
+            worktree_source = ""
+        if not worktree_source:
+            try:
+                worktree_source = _git(repository, ["rev-parse", "HEAD"])
+            except CheckpointError:
+                try:
+                    _git(repository, ["diff", "--quiet", "--"])
+                except CheckpointError as exc:
+                    raise CheckpointError(
+                        "cannot safely checkpoint an unborn repository with "
+                        "tracked worktree changes"
+                    ) from exc
+                worktree_source = index_tree
         checkpoint_id = f"cp-{int(time.time())}-{uuid.uuid4().hex[:10]}"
         directory = self.directory(checkpoint_id)
         backup_root = directory / "untracked"
@@ -195,11 +214,26 @@ class WorkspaceCheckpointStore:
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        with sessions.mutate(
-            session_id, f"checkpoint-{os.getpid()}", ttl_seconds=60.0
-        ) as session:
+        inherited = current_mutation_lease(session_id)
+        if inherited is not None:
+            # Hosted Core already owns the session mutation fence while Smart
+            # Stop asks for this on-demand checkpoint. Re-acquiring the same
+            # non-reentrant lease would make the safety adapter fail and prompt
+            # the user for a deletion that is actually reversible. Reuse only
+            # the ContextVar-scoped inherited lease; unrelated requests cannot
+            # observe it and remain fenced by SessionStore.acquire().
+            sessions.validate_lease(inherited)
+            session = sessions.load(session_id)
             sessions.validate_repository(session, repository)
+            revision = session.revision
             session.checkpoints.append(record.public_dict())
+            sessions.save(session, revision, inherited)
+        else:
+            with sessions.mutate(
+                session_id, f"checkpoint-{os.getpid()}", ttl_seconds=60.0
+            ) as session:
+                sessions.validate_repository(session, repository)
+                session.checkpoints.append(record.public_dict())
         return record
 
     @staticmethod

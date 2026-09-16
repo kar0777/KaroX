@@ -36,7 +36,11 @@ SUPERVISOR_PROTOCOL_VERSION = 4
 RESTART_MIGRATION_SCHEMA_VERSION = 1
 RESTART_MIGRATION_TTL_SECONDS = 90.0
 RESTART_RECOVERY_SCHEMA_VERSION = 1
-SUPERVISOR_POLL_SECONDS = 2.0
+# The owner itself probes/recycles its MCP child and public route. The sibling
+# supervisor only has to notice an owner-process loss, so a 5s healthy cadence
+# keeps crash recovery in single-digit seconds without burning CPU on process/
+# port ownership scans every 2s while everything is healthy.
+SUPERVISOR_POLL_SECONDS = 5.0
 SUPERVISOR_MIN_BACKOFF_SECONDS = 2.0
 SUPERVISOR_MAX_BACKOFF_SECONDS = 60.0
 SUPERVISOR_HEARTBEAT_INTERVAL_SECONDS = 2.0

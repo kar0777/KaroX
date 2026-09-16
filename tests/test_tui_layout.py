@@ -89,7 +89,6 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
                 f"the chat has {log.size.height} of {STANDARD[1]} rows",
             )
 
-    @unittest.skipUnless(True, "UX-010 fixed: one header line replaced the fixed chrome")
     async def test_a_narrow_window_gives_the_chat_a_usable_share(self) -> None:
         # UX-010: at 46x14 with the product's default settings the conversation
         # area is two rows tall -- 14% of the window -- because the brand, ticker,
