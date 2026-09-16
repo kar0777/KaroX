@@ -2622,8 +2622,9 @@ class HostedToolsRuntime:
                 "exit_confirmed": True,
             }
 
-        proven, state, reason, _live = self._prove_live_record(record)
+        proven, state, reason, live = self._prove_live_record(record)
         if not proven:
+            stored = self._load_process_identity(record)
             return {
                 "ok": False,
                 "error_code": state,
@@ -2633,6 +2634,17 @@ class HostedToolsRuntime:
                 "was_running": True,
                 "running": True,
                 "exit_confirmed": False,
+                # Differing platform probes (psutil across macOS/Linux) need
+                # the stored vs live facts next to the refusal or the report
+                # cannot distinguish a reused PID from a naming alias.
+                "stored_identity": {
+                    "created_at": stored.created_at,
+                    "executable": stored.executable,
+                },
+                "live_identity": {
+                    "created_at": live.created_at,
+                    "executable": live.executable,
+                },
             }
 
         _kill_pid_tree(record.pid)

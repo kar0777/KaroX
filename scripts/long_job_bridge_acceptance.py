@@ -699,6 +699,15 @@ def _orchestrate(result_path: Path, duration: float, probe_after: float) -> int:
     except BaseException as exc:
         evidence["status"] = "failed"
         evidence["error"] = f"{type(exc).__name__}: {exc}"
+        # A failed acceptance has to carry the failing frame, not just the
+        # exception name: the difference between a spawn EINVAL and a port
+        # race is invisible one line after the fact.
+        try:
+            import traceback
+
+            evidence["error_traceback"] = traceback.format_exc(limit=12)
+        except Exception:
+            pass
         evidence["bridge_pid_after"] = server.pid
         evidence["bridge_alive_after_error"] = server.poll() is None
         evidence["finished_at"] = time.time()
