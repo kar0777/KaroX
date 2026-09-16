@@ -38,12 +38,13 @@ _ORDER_DEPENDENT = {
 
 # TEMPORARY CI diagnostic, gated by KAROX_CI_SIGINT_TRACE in the shard steps:
 # hosted runners deliver an unexplained console control mid-shard. Record the
-# frame, live threads, and raw event at delivery, and on Windows register a
-# console ctrl handler whose verdict is "handled" so the shard keeps running.
+# frame, live threads, and raw event at delivery. No ctypes callbacks are
+# registered: a Win32 console handler whose Python wrapper can be collected
+# would crash the interpreter with an access violation instead of reading one.
 # Nothing here runs unless the CI environment arms the trace.
 
 
-def _report_delivery(prefix: str, frame: Any) -> None:
+def _report_delivery(frame: Any) -> None:
     import sys
     import time
     from traceback import print_stack
@@ -62,41 +63,8 @@ def _report_delivery(prefix: str, frame: Any) -> None:
 
 
 def _diagnostic_sigint(signum: int, frame: Any) -> None:
-    import sys
-
     _report_delivery(frame)
     raise KeyboardInterrupt
-
-
-def _ci_console_ctrl_handler(ctrl_type: int) -> int:
-    import sys
-    import time
-
-    stream = getattr(sys, "__stdout__", None) or getattr(sys, "stdout", None)
-    if stream is None:
-        return 1
-    stream.write(
-        f"[CTRL] event={ctrl_type} pid={os.getpid()} at={time.strftime('%H:%M:%S')} "
-        "threads=" + ",".join(t.name for t in threading.enumerate()) + "\n"
-    )
-    stream.flush()
-    # Handled: keep the shard running instead of defaulting to death.
-    return 1
-
-
-_HANDLER_ROUTINE = None
-
-
-def _register_console_handler() -> None:
-    global _HANDLER_ROUTINE
-
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _HANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
-    wrapper = _HANDLER_ROUTINE(_ci_console_ctrl_handler)
-    kernel32.SetConsoleCtrlHandler(wrapper, True)
 
 
 def _running_distributed() -> bool:
@@ -108,10 +76,7 @@ def _running_distributed() -> bool:
 def pytest_configure(config: Any) -> None:
     if os.environ.get("KAROX_CI_SIGINT_TRACE", "").strip() != "1":
         return
-    signal.signal(signal.SIGINT, _diagnostic_sigint)
-    if os.name == "nt":
-        _register_console_handler()
-    if os.environ.get("KAROX_CI_SIGSWALLOW", "").strip() == "1" and os.name == "nt":
+    if os.environ.get("KAROX_CI_SIGSWALLOW", "").strip() == "1":
         # Swallow SIGINT on the runner: the interrupt arrives from console
         # plumbing rather than the user, and stopping the shard mid-run is
         # worse than losing the synthetic Ctrl-C.
@@ -119,6 +84,8 @@ def pytest_configure(config: Any) -> None:
             return None
 
         signal.signal(signal.SIGINT, _swallow)
+        return
+    signal.signal(signal.SIGINT, _diagnostic_sigint)
 
 
 def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:

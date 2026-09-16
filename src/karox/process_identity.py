@@ -177,6 +177,17 @@ def _linux_create_time_ns(pid: int) -> Optional[int]:
     return int(ticks * (1_000_000_000 // int(hz)))
 
 
+def _mac_create_time_ns(pid: int) -> Optional[int]:
+    """macOS has no /proc and KaroX loads no extra native crate for this;
+    psutil ships with the runtime already, so read creation time from it."""
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        return int(round(float(psutil.Process(int(pid)).create_time()) * 1_000_000_000))
+    except Exception:
+        return None
+
+
 def read_process_create_time_ns(pid: int) -> Optional[int]:
     """Return the OS creation time of ``pid`` in nanoseconds, or ``None``.
 
@@ -191,9 +202,11 @@ def read_process_create_time_ns(pid: int) -> Optional[int]:
             return _windows_create_time_ns(pid)
         if sys.platform.startswith("linux"):
             return _linux_create_time_ns(pid)
+        if sys.platform == "darwin":
+            return _mac_create_time_ns(pid)
     except Exception:
         return None
-    # macOS and other platforms need a native call KaroX does not make yet.
+    # Other platforms need a native call KaroX does not make yet.
     return None
 
 
