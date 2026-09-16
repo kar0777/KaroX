@@ -2532,6 +2532,7 @@ class TunnelHelperTests(unittest.TestCase):
         payload = {"Self": {}}
         self.assertTrue(tui._tailscale_funnel_available(payload))
 
+    @unittest.skipUnless(os.name == "nt", "Windows GUI-app layout contract")
     def test_tailscale_gui_app_located_next_to_cli(self) -> None:
         # The GUI app (tailscale-ipn.exe) ships next to the CLI binary; we look
         # it up by replacing the CLI's extension.
@@ -2628,6 +2629,7 @@ class TunnelHelperTests(unittest.TestCase):
         with patch.object(tui.subprocess, "run", side_effect=OSError("no netstat")):
             self.assertEqual(tui._pids_listening_on("127.0.0.1", 8765), [])
 
+    @unittest.skipUnless(os.name == "nt", "Windows netstat/taskkill contract")
     def test_free_port_on_address_stops_proven_karox_orphans_only(self) -> None:
         # Mandate: a foreign port owner is NEVER killed. Of four listeners --
         # us, an explicitly skipped bridge, a proven KaroX orphan, and a

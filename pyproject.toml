@@ -121,6 +121,12 @@ dev = [
 # to contributors who installed pytest-xdist (`pytest -n 6`), but the canonical
 # verification command must not fail at argument parsing on a clean runtime.
 addopts = "-q -p no:cacheprovider"
+# strict keeps pytest-asyncio out of `unittest.IsolatedAsyncioTestCase`:
+# in auto mode the plugin and unittest's own Runner both tried to drive the
+# same coroutine methods, which failed every Textual run_test case with
+# "Runner.run() cannot be called from a running event loop" on the hosted
+# runners. Only explicitly marked tests go through pytest-asyncio.
+asyncio_mode = "strict"
 # Always test the current checkout. Without this, the first test importing karox
 # directly can load an older installed wheel and poison sys.modules for the rest
 # of a full run, while focused tests that import tests/_support still pass.
