@@ -22,6 +22,7 @@ from karox.hosted_tools_runtime import (
     HostedToolsRuntime,
 )
 from karox.models import AccessProfile, Origin, OriginKind
+from karox.process_identity import process_is_running
 from karox.proxy import ProxyToolDescriptor
 from karox.sessions import SessionStore
 
@@ -259,6 +260,14 @@ def test_legacy_command_run_request_id_controls_rerun_generation() -> None:
                     break
                 time.sleep(0.1)
             assert status["status"] in {"passed", "failed", "cancelled", "timed_out"}
+            # The real child holds its job directory while it lives; wait for
+            # the actual exit before TemporaryDirectory cleanup removes the
+            # runtime tree under a 12-worker load.
+            child_pid = status.get("child_pid")
+            if isinstance(child_pid, int) and child_pid > 0:
+                gone_by = time.monotonic() + 8
+                while process_is_running(child_pid) and time.monotonic() < gone_by:
+                    time.sleep(0.05)
     finally:
         os.environ.clear()
         os.environ.update(old)
