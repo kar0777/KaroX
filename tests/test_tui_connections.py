@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -224,6 +225,14 @@ class ConnectionsTuiTests(unittest.IsolatedAsyncioTestCase):
             screen.action_stop()
             await pilot.pause(0.2)
             self.assertEqual(stopped, ["yes"])
+            # Stop bookkeeping lands asynchronously on a loaded runner; pump
+            # the view until the saved row reflects the stopped state.
+            deadline = time.monotonic() + 10
+            while (
+                "[stopped]" not in str(options.get_option_at_index(0).prompt)
+                and time.monotonic() < deadline
+            ):
+                await pilot.pause()
             self.assertIn("[stopped]", str(options.get_option_at_index(0).prompt))
             await pilot.press("escape")
             await pilot.pause(0.2)

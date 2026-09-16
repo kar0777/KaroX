@@ -892,6 +892,12 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             # the SESSION_STATE payload dropped it silently.
             detail = app._view_store.detail(session_id)
             assert detail is not None
+            # The usage fold arrives with the terminal AGENT_ACTION publication;
+            # pump the app bounded periods before treating it as missing.
+            deadline = time.monotonic() + 10
+            while not detail.usage and time.monotonic() < deadline:
+                await pilot.pause()
+                detail = app._view_store.detail(session_id)
             self.assertEqual(detail.usage["total_tokens"], 150)
             self.assertEqual(detail.usage["input_tokens"], 120)
             self.assertEqual(detail.usage["output_tokens"], 30)

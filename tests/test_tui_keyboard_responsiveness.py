@@ -47,17 +47,20 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 screen.query_one("#svc-primary", tui.Button).focus()
                 self.assertEqual(getattr(app.focused, "id", None), "svc-primary")
                 # The approval-password copy button is a visible tab stop for
-                # OAuth profiles -- a hidden P key was the old contract.
-                await pilot.press("tab")
-                # Focus delivery is asynchronous on slower hosted runners; pump
-                # the app before pinning the tab-stop order.
-                await pilot.pause(0.25)
+                # OAuth profiles -- a hidden P key was the old contract. Focus
+                # delivery is asynchronous under a loaded runner, so pump the
+                # app until each expected stop is reached.
+                async def _press_until_focus(key: str, expected: str) -> None:
+                    deadline = time.monotonic() + 10
+                    while getattr(app.focused, "id", None) != expected and time.monotonic() < deadline:
+                        await pilot.press(key)
+                        await pilot.pause(0.1)
+
+                await _press_until_focus("tab", "svc-auth")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
-                await pilot.press("tab")
-                await pilot.pause(0.25)
+                await _press_until_focus("tab", "svc-more")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-more")
-                await pilot.press("shift+tab")
-                await pilot.pause(0.25)
+                await _press_until_focus("shift+tab", "svc-auth")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
 
     async def test_service_enter_activates_the_contextual_verify_button(self) -> None:
