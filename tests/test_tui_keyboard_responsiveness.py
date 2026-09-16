@@ -49,10 +49,15 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 # The approval-password copy button is a visible tab stop for
                 # OAuth profiles -- a hidden P key was the old contract.
                 await pilot.press("tab")
+                # Focus delivery is asynchronous on slower hosted runners; pump
+                # the app before pinning the tab-stop order.
+                await pilot.pause(0.25)
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
                 await pilot.press("tab")
+                await pilot.pause(0.25)
                 self.assertEqual(getattr(app.focused, "id", None), "svc-more")
                 await pilot.press("shift+tab")
+                await pilot.pause(0.25)
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
 
     async def test_service_enter_activates_the_contextual_verify_button(self) -> None:
