@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -905,6 +906,16 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             session_id = await self._run_task(
                 app, pilot, (0, ""), stop_during_run=True
             )
+            # Stop delivery is asynchronous: on a heavily loaded runner the
+            # terminal status can still be in flight when run_task returns.
+            # Pump the app until the cancellation is visible, then assert the
+            # product guarantee.
+            deadline = time.monotonic() + 10
+            while (
+                self._states(session_id)[-1]["status"] != tui.STATUS_CANCELLED
+                and time.monotonic() < deadline
+            ):
+                await pilot.pause()
             self.assertEqual(
                 self._states(session_id)[-1]["status"], tui.STATUS_CANCELLED
             )

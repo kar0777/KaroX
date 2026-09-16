@@ -8,10 +8,40 @@ CI's gate both run ``python -m unittest discover -s tests``, which never imports
 from __future__ import annotations
 
 import os
+import signal
+import threading
+import traceback
 from typing import Any
 
 import _path_setup
 import pytest
+
+
+# TEMPORARY CI diagnostic: the windows shard runs receive a KeyboardInterrupt
+# mid-suite. Print the caller frame and live threads at delivery, then keep
+# pytest's default handling.
+def _diagnostic_sigint(signum: int, frame: Any) -> None:
+    import sys
+    import time
+
+    print(
+        f"\n[SIGINT] received={signum} pid={os.getpid()} "
+        f"ppid={os.getppid()} at={time.strftime('%H:%M:%S')}\n",
+        file=sys.__stderr__,
+        flush=True,
+    )
+    for thread in threading.enumerate():
+        print(f"[SIGINT] thread alive: {thread.name} daemon={thread.daemon}", file=sys.__stderr__, flush=True)
+    traceback.print_stack(frame, file=sys.__stderr__)
+    sys.__stderr__.flush()
+    import signal as _signal  # noqa: F401  (default_int for symporarity)
+    raise KeyboardInterrupt
+
+
+def pytest_configure(config: Any) -> None:
+    if "KAROX_CI_SIGINT_TRACE" not in os.environ:
+        return
+    signal.signal(signal.SIGINT, _diagnostic_sigint)
 
 
 # ``tests/test_benchmark.py`` accumulates one run record per KB-HYBRID gate in
