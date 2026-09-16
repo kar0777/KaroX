@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
