@@ -43,13 +43,14 @@ class StableDeveloperCommandTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _bridge(self, *tools: str) -> CoreToolBridge:
+    def _bridge(self, *tools: str, bypass_mode: bool = False) -> CoreToolBridge:
         return CoreToolBridge(
             self.repository,
             self.sessions,
             "developer-runtime",
             list(tools),
             audit_path=self.root / "audit.jsonl",
+            bypass_mode=bypass_mode,
         )
 
     def test_apply_patch_changes_multiple_files_atomically(self) -> None:
@@ -346,7 +347,7 @@ class StableDeveloperCommandTests(unittest.TestCase):
 
     def test_batch_supports_write_move_delete_and_mkdir(self) -> None:
         (self.repository / "delete-me.txt").write_text("gone\n", encoding="utf-8")
-        bridge = self._bridge("karox.repo.command")
+        bridge = self._bridge("karox.repo.command", bypass_mode=True)
         result = bridge.execute(
             "karox.repo.command",
             {
@@ -495,7 +496,7 @@ class StableDeveloperCommandTests(unittest.TestCase):
     def test_patch_preserves_crlf_and_supports_delete(self) -> None:
         crlf = self.repository / "crlf.txt"
         crlf.write_bytes(b"one\r\ntwo\r\n")
-        bridge = self._bridge("karox.repo.command")
+        bridge = self._bridge("karox.repo.command", bypass_mode=True)
         update = """--- a/crlf.txt
 +++ b/crlf.txt
 @@ -1,2 +1,2 @@

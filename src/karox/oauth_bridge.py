@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
+from .browser_approval import set_trusted_approval_cookie
 from .hosted_bridge import DEFAULT_HOSTED_DEADLINE_SECONDS, HostedToolRuntime
 from .proxy_server import (
     build_proxy_asgi_app,
@@ -1447,6 +1448,7 @@ def build_oauth_proxy_asgi_app(
                         "X-Frame-Options": "DENY",
                     },
                 )
+                set_trusted_approval_cookie(response, approval_secret)
             elif request_path in {"/token", "/oauth/token"} and method == "POST":
                 response = JSONResponse(
                     service.token(await _form(request)),

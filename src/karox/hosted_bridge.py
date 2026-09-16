@@ -23,7 +23,7 @@ from .core import CoreRuntime, ToolDefinition
 from .disk_maintenance import is_drive_root
 from .event_bus import EventBus, event_bus
 from .risk_engine import RiskEngine, risk_engine
-from .models import Capability, CoreCommand, Origin, OriginKind
+from .models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from .paths import runtime_dir
 from .policy import CapabilityPolicy, capability_requires_explicit_approval
 from .risk_mapping import action_for_command
@@ -95,6 +95,8 @@ class HostedApprovalRequired(HostedBridgeAccessDenied):
             "consequence": self.consequence,
             "preview": dict(self.preview),
             "message": self.message,
+            "continue_independent_work": True,
+            "defer_until_blocked": True,
         }
 
 
@@ -333,6 +335,7 @@ class CoreToolBridge:
         advertise_unavailable: bool = False,
         project_registry: Optional[ProjectRegistry] = None,
         project_registry_loader: Optional[Callable[[], ProjectRegistry]] = None,
+        bypass_mode: bool = False,
     ) -> None:
         if hosted_origin is None:
             hosted_origin = Origin(OriginKind.HOSTED_CLIENT, f"core-bridge-{session_id}")
@@ -390,8 +393,9 @@ class CoreToolBridge:
         sessions.validate_repository(record, self.repository)
         if record.revoked:
             raise HostedBridgeAccessDenied("session access has been revoked")
-        from .models import AccessProfile
-
+        # Advanced/elevated capability is not destructive autonomy. Only the
+        # explicit saved-profile Bypass switch reaches this flag.
+        self._bypass_mode = bool(bypass_mode)
         self.policy = CapabilityPolicy(AccessProfile(record.access_profile))
         # Core tool definitions and handlers are immutable for the lifetime of a
         # hosted bridge session. Keep one capability runtime per approved project
@@ -406,6 +410,7 @@ class CoreToolBridge:
             verification_commands=self._verification_commands_for(self.repository),
             risk=self._risk,
             action_decisions=self._action_decisions,
+            bypass_mode=self._bypass_mode,
             checkpoint_factory=self._checkpoint_factory_for(self.repository),
             events=self._events,
             session_repository_validator=self._validate_project_session,
@@ -530,6 +535,7 @@ class CoreToolBridge:
                 verification_commands=self._verification_commands_for(Path(entry.path)),
                 risk=self._risk,
                 action_decisions=self._action_decisions,
+                bypass_mode=self._bypass_mode,
                 checkpoint_factory=self._checkpoint_factory_for(Path(entry.path)),
                 events=self._events,
                 session_repository_validator=self._validate_project_session,
@@ -651,7 +657,11 @@ class CoreToolBridge:
             repository=repository,
             reversible_by_checkpoint=False,
         )
-        return self._action_decisions.decide(action, user_intent=command.user_intent)
+        return self._action_decisions.decide(
+            action,
+            user_intent=command.user_intent,
+            bypass_mode=self._bypass_mode,
+        )
 
     @staticmethod
     def _approval_error(

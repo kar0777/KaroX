@@ -19,7 +19,7 @@ from karox.sessions import SessionStore
 
 
 class Harness:
-    def __init__(self, task: str) -> None:
+    def __init__(self, task: str, *, bypass_mode: bool = False) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
@@ -54,6 +54,7 @@ class Harness:
             self.root / "audit.jsonl",
             risk=risk,
             action_decisions=self.decisions,
+            bypass_mode=bypass_mode,
         )
 
     def enable_checkpoint(self) -> None:
@@ -180,28 +181,28 @@ def test_mixed_batch_judges_only_the_actual_delete_targets() -> None:
         h.close()
 
 
-def test_source_delete_uses_authority_already_present_in_user_task() -> None:
+def test_source_delete_still_stops_when_task_explicitly_mentions_it() -> None:
     h = Harness("удали устаревший src/legacy.py и обнови тесты")
     try:
         target = h.repo / "src" / "legacy.py"
         target.parent.mkdir()
         target.write_text("OLD = True\n", encoding="utf-8")
-        result = h.mutate(
-            h.command(
-                "repo.command",
-                {
-                    "action": "batch",
-                    "payload": {
-                        "operations": [
-                            {"op": "delete", "path": "src/legacy.py"}
-                        ]
+        with pytest.raises(ActionConfirmationRequired):
+            h.mutate(
+                h.command(
+                    "repo.command",
+                    {
+                        "action": "batch",
+                        "payload": {
+                            "operations": [
+                                {"op": "delete", "path": "src/legacy.py"}
+                            ]
+                        },
                     },
-                },
-                key="delete-legacy",
+                    key="delete-legacy",
+                )
             )
-        )
-        assert result.ok
-        assert not target.exists()
+        assert target.exists()
     finally:
         h.close()
 
@@ -232,13 +233,39 @@ def test_unrequested_source_delete_still_stops_without_checkpoint() -> None:
         h.close()
 
 
-def test_pre_turn_checkpoint_allows_recoverable_source_delete() -> None:
+def test_pre_turn_checkpoint_does_not_silently_approve_source_delete() -> None:
     h = Harness("refactor the parser without changing public behavior")
     try:
         target = h.repo / "src" / "legacy.py"
         target.parent.mkdir()
         target.write_text("OLD = True\n", encoding="utf-8")
         h.enable_checkpoint()
+        with pytest.raises(ActionConfirmationRequired):
+            h.mutate(
+                h.command(
+                    "repo.command",
+                    {
+                        "action": "batch",
+                        "payload": {
+                            "operations": [
+                                {"op": "delete", "path": "src/legacy.py"}
+                            ]
+                        },
+                    },
+                    key="checkpoint-delete",
+                )
+            )
+        assert target.exists()
+    finally:
+        h.close()
+
+
+def test_bypass_mode_allows_repository_source_delete_without_prompt() -> None:
+    h = Harness("refactor the parser without changing public behavior", bypass_mode=True)
+    try:
+        target = h.repo / "src" / "legacy.py"
+        target.parent.mkdir()
+        target.write_text("OLD = True\n", encoding="utf-8")
         result = h.mutate(
             h.command(
                 "repo.command",
@@ -250,13 +277,13 @@ def test_pre_turn_checkpoint_allows_recoverable_source_delete() -> None:
                         ]
                     },
                 },
-                key="checkpoint-delete",
+                key="bypass-delete",
             )
         )
         assert result.ok
         assert not target.exists()
         audit = (h.root / "audit.jsonl").read_text(encoding="utf-8")
-        assert "rollback_checkpoint_available" in audit
+        assert "bypass_workspace_delete" in audit
     finally:
         h.close()
 

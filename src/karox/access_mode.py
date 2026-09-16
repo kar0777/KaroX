@@ -60,25 +60,17 @@ BYPASS_TOOL_NAMES: tuple[str, ...] = (
 
 
 def saved_profile_bypass_enabled(profile: Any) -> bool:
-    """Whether a saved web-bridge profile is in Bypass mode.
+    """Whether a saved web-bridge profile explicitly enables Bypass.
 
-    The saved ``access_profile`` is the single source of truth, so legacy
-    records read as OFF unless they already carry the elevated contract.
-    Hyperagent keeps its stricter historical predicate: full developer
-    access has always also meant the headed external browser contract.
+    New profiles persist a dedicated ``bypass`` bit so Advanced/elevated access
+    can exist without silently authorizing destructive deletion. ``from_dict``
+    preserves legacy elevated profiles as Bypass during migration.
     """
 
     try:
+        if hasattr(profile, "bypass"):
+            return bool(getattr(profile, "bypass"))
         from .models import AccessProfile
-
-        if getattr(profile, "target_profile", "") == "hyperagent-web":
-            return bool(
-                getattr(profile, "access_profile", None) == AccessProfile.ELEVATED
-                and getattr(profile, "browser_external_https", False)
-                and getattr(profile, "browser_headed", False)
-                and getattr(profile, "browser_user_takeover", False)
-                and getattr(profile, "browser_network_inspection", False)
-            )
         return getattr(profile, "access_profile", None) == AccessProfile.ELEVATED
     except Exception:
         return False
@@ -104,6 +96,7 @@ def build_saved_profile_bypass(profile: Any, enabled: bool) -> Any:
         "access_profile": (
             AccessProfile.ELEVATED if enabled else AccessProfile.WORKSPACE_WRITE
         ),
+        "bypass": bool(enabled),
     }
     if enabled:
         tools = list(getattr(profile, "tools", ()) or ())
@@ -181,6 +174,7 @@ def _build_hyperagent_bypass(profile: Any, enabled: bool) -> Any:
         access_profile=(
             AccessProfile.ELEVATED if enabled else AccessProfile.WORKSPACE_WRITE
         ),
+        bypass=bool(enabled),
         browser_external_https=bool(enabled),
         # Empty allowlist + external_https=True means any public HTTPS host
         # that passes KaroX DNS/private-network checks: the intended normal

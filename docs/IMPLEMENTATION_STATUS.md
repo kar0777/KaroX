@@ -1,8 +1,8 @@
 # KaroX 5 implementation status
 
-Last updated: 2026-09-14
+Last updated: 2026-09-16
 Branch under review: `feat/karox-v5-competitive-upgrade`
-Runtime version: `5.0.0rc1`
+Runtime version: `5.0.0rc1` (public beta)
 Stable shipping line: `4.1.4`
 
 This is the canonical current-status page for KaroX 5. Detailed phase records
@@ -19,10 +19,10 @@ intelligence-orchestration and economy layer, localhost and external-HTTPS
 browser automation, a 35-screen bilingual terminal client, Skills, Packs,
 structured handoff, migration tooling, and release gates.
 
-`5.0.0rc1` is the **release candidate**. Stable `5.0.0` is **not ready**: the
-remaining work is live third-party conformance, the external beta, and platform
-install/upgrade rehearsals -- evidence, not another architecture phase. See
-`docs/RELEASE_CHECKLIST.md` for the exact open items.
+`5.0.0rc1` is the **public beta / release candidate**. Stable `5.0.0` is
+**not ready**: the remaining work is live third-party conformance, external-beta
+feedback, and platform install/upgrade rehearsals — evidence, not another
+architecture phase. See `docs/RELEASE_CHECKLIST.md` for the exact open items.
 
 ## Implemented release-critical runtime
 

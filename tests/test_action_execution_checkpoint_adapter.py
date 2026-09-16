@@ -61,7 +61,7 @@ def _runtime(
     )
 
 
-def test_checkpoint_factory_dissolves_delete_confirmation() -> None:
+def test_checkpoint_factory_does_not_silently_dissolve_delete_confirmation() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         repository, sessions = _workspace(temporary)
         calls: list[str] = []
@@ -71,9 +71,10 @@ def test_checkpoint_factory_dissolves_delete_confirmation() -> None:
             return "cp-on-demand"
 
         runtime = _runtime(repository, sessions, checkpoint_factory=factory)
-        runtime._apply_smart_stop(_delete_command("session"))
-        assert calls == ["created"]
-        assert runtime._rollback_checkpoint_id == "cp-on-demand"
+        with pytest.raises(ActionConfirmationRequired):
+            runtime._apply_smart_stop(_delete_command("session"))
+        assert calls == []
+        assert runtime._rollback_checkpoint_id is None
 
 
 def test_factory_failure_keeps_the_confirmation_boundary() -> None:

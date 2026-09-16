@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -65,6 +66,7 @@ class DirectBridgeToolNormalizationTests(unittest.TestCase):
             with (
                 patch("karox.cli.session_dir", return_value=sessions_path),
                 patch("karox.cli.runtime_dir", return_value=root / "runtime"),
+                patch.dict(os.environ, {"KAROX_BROWSER_BACKEND": "playwright"}),
                 patch("karox.cli.CoreToolBridge", side_effect=core_runtime),
                 patch("karox.cli.HostedToolsRuntime", side_effect=hosted_runtime),
                 patch("karox.cli.CompositeHostedBridge", return_value=composite),

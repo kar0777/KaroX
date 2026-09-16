@@ -1626,7 +1626,41 @@ def build_proxy_asgi_app(
                         if isinstance(capabilities, dict)
                         else None
                     )
-                    if not isinstance(elicitation, dict):
+                    if (
+                        not isinstance(elicitation, dict)
+                        and approval.consequence != "external"
+                    ):
+                        # Non-external Smart Stops are not allowed to hijack the
+                        # whole agent turn just because this hosted client lacks
+                        # protocol elicitation. Defer this one action, let the
+                        # agent finish every independent step, and surface the
+                        # unresolved gate at the end. Bypass mode is the explicit
+                        # opt-in that removes repository-deletion gates.
+                        call_result = CallToolResult(
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=(
+                                        "approval_deferred: skip this blocked action for now, "
+                                        "continue independent work, and ask the user only when "
+                                        "the remaining work depends on this approval"
+                                    ),
+                                )
+                            ],
+                            structuredContent={
+                                "ok": False,
+                                "error_code": "approval_deferred",
+                                "error": approval.message,
+                                "action_kind": approval.action_kind,
+                                "risk": approval.risk,
+                                "consequence": approval.consequence,
+                                "preview": dict(approval.preview),
+                                "continue_independent_work": True,
+                                "defer_until_blocked": True,
+                            },
+                            isError=True,
+                        )
+                    elif not isinstance(elicitation, dict):
                         arguments_sha256 = _approval_arguments_digest(name, arguments)
                         if browser_approval.available and browser_approval.take_if_approved(
                             wire_name=name,
@@ -1888,11 +1922,27 @@ def build_proxy_asgi_app(
         if scope_type != "http":
             await Response("not found", status_code=404)(scope, receive, send)
             return
-        rejection = rebinding_rejection(scope, allowed)
+        request_path = scope.get("path")
+        rejection_scope = scope
+        if (
+            request_path == browser_approval.approval_path
+            and str(scope.get("method") or "GET").upper() == "GET"
+        ):
+            # A top-level approval link may legitimately be opened from ChatGPT,
+            # email, or another origin. The request carries an integrity-protected
+            # short-lived state token, so keep the Host/rebinding check but ignore
+            # Origin only for this read-only navigation. The POST that records a
+            # human decision still goes through the full same-origin check.
+            rejection_scope = dict(scope)
+            rejection_scope["headers"] = [
+                (name, value)
+                for name, value in scope.get("headers", ())
+                if name.lower() != b"origin"
+            ]
+        rejection = rebinding_rejection(rejection_scope, allowed)
         if rejection is not None:
             await rejection(scope, receive, send)
             return
-        request_path = scope.get("path")
         if request_path == browser_approval.approval_path:
             await browser_approval.handle(scope, receive, send)
             return

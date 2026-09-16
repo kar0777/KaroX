@@ -259,7 +259,7 @@ class HyperagentMigrationTests(unittest.TestCase):
     def test_legacy_full_access_record_reads_as_bypass_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repository = Path(tmp).resolve()
-            legacy = saved(
+            current_shape = saved(
                 "hyperagent-web",
                 "legacy-full",
                 repository=repository,
@@ -269,6 +269,9 @@ class HyperagentMigrationTests(unittest.TestCase):
                 browser_user_takeover=True,
                 browser_network_inspection=True,
             )
+            payload = current_shape.to_dict()
+            payload.pop("bypass", None)  # simulate a store written before the explicit bit
+            legacy = SavedWebBridgeProfile.from_dict(payload)
             self.assertTrue(saved_profile_bypass_enabled(legacy))
             self.assertTrue(hub.saved_profile_full_access_enabled(legacy))
 

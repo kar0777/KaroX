@@ -2421,6 +2421,32 @@ def _emit(value: Any, *, json_output: bool) -> None:
         _write_line(str(value))
 
 
+def _agent_bypass_enabled(args: argparse.Namespace) -> bool:
+    """Whether the routed native agent explicitly opted into Bypass.
+
+    Keep this separate from AccessProfile.ELEVATED so future Advanced profiles
+    can have broad developer capability without destructive autonomy.
+    """
+    from .access_mode import provider_bypass_enabled
+
+    if args.model is not None or args.base_url is not None or args.api_key_env:
+        return False
+    registry = _registry()
+    routes = tuple(_route(value) for value in args.route)
+    if not routes:
+        selected = registry.selected_model()
+        if selected is None:
+            return False
+        routes = (RouteTarget(selected.provider_id, selected.model_id),)
+    records = []
+    for target in routes:
+        try:
+            records.append(registry.provider(target.provider_id))
+        except Exception:
+            return False
+    return bool(records) and all(provider_bypass_enabled(item) for item in records)
+
+
 def _test_registered_model(
     registry: ProviderRegistry, provider_id: str, model_or_alias: str
 ) -> dict[str, Any]:
@@ -4485,6 +4511,12 @@ def _handle_bridge(args: argparse.Namespace) -> int:
         # along that boundary: CoreToolBridge would reject an extra name as
         # unknown, and HostedToolsRuntime would reject a Core name.
         access_profile = AccessProfile(record.access_profile)
+        bridge_bypass_mode = False
+        if args.saved_profile_name is not None:
+            from .access_mode import saved_profile_bypass_enabled
+            bridge_bypass_mode = saved_profile_bypass_enabled(
+                WebBridgeProfileStore().get(args.saved_profile_name)
+            )
         parsed_verification_commands = tuple(
             _verification_command(value) for value in args.verification_command
         )
@@ -4523,6 +4555,7 @@ def _handle_bridge(args: argparse.Namespace) -> int:
                     advertise_unavailable=(args.profile == "hyperagent-web"),
                     project_registry=project_registry,
                     project_registry_loader=project_registry_loader,
+                    bypass_mode=bridge_bypass_mode,
                 )
             )
         elif args.verification_command:
@@ -5811,6 +5844,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         verification_commands=verification_commands,
         risk=action_risk,
         action_decisions=action_decisions,
+        bypass_mode=_agent_bypass_enabled(args),
         rollback_checkpoint_id=rollback_checkpoint_id,
         mutation_reviewer=_native_mutation_reviewer if maintenance_mode else None,
         maintenance_protected_paths=tuple(

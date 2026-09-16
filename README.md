@@ -1,7 +1,21 @@
-# KaroX 5 Preview
+# KaroX 5
 
-**Run AI coding agents on local Git repositories without giving one provider
-control of your permissions, sessions, or evidence.**
+<div align="center">
+
+**A local control plane for autonomous AI coding — one runtime, many agents, your repository.**
+
+![Status](https://img.shields.io/badge/status-beta-f59e0b)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
+![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
+![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
+
+Run AI coding agents on local Git repositories without giving one provider
+control of your permissions, sessions, or evidence.
+
+**Beta channel · `5.0.0rc1`**
+
+</div>
 
 KaroX is a local control plane for ChatGPT, Claude, API models, and compatible
 MCP clients. Every local action goes through one repository-scoped runtime with
@@ -21,6 +35,16 @@ machine.
 > [4.x migration contract](docs/MIGRATION_V4_TO_V5.md), and
 > [live conformance records](docs/conformance/README.md).
 
+## Why KaroX
+
+| What you want | What KaroX does |
+| --- | --- |
+| **Autonomous coding without prompt spam** | Normal reads, edits, tests, checks, dev commands, and local commits run without nuisance approval loops. |
+| **One safety boundary for every agent** | ChatGPT, Claude, API models, MCP clients, and local workers reach the machine through the same repository-scoped Core policy. |
+| **Rare, meaningful approvals** | Protected mode stops destructive source deletion and real external commit points; Bypass can opt into autonomous deletion *inside the repository* without weakening credential/system boundaries. |
+| **Work continues while a gate is pending** | A blocked dangerous action is deferred so the agent can finish independent work and ask only when the gate actually becomes necessary. |
+| **Portable release evidence** | Windows, macOS, and Linux CI exercise the same wheel, tests, release checks, Git contracts, and secret-scan rules. |
+
 ## The primary flow
 
 A stable KaroX 5 release is defined by one complete workflow:
@@ -38,13 +62,15 @@ until their own evidence gates pass.
 
 ## Install
 
-KaroX 5 is published on PyPI as a pre-release. One command on any OS:
+The public beta lives on the `beta/v5.0.0rc1` branch. Install that exact tree on Windows, macOS, or Linux:
 
 ```bash
-pipx install --pre karox-runtime
+pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 # or
-uv tool install --prerelease=allow karox-runtime
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 ```
+
+When the matching tagged pre-release is published to PyPI, `pipx install --pre karox-runtime` and `uv tool install --prerelease=allow karox-runtime` resolve the same candidate.
 
 Then open a terminal inside the Git repository you want to work with and run:
 
@@ -91,11 +117,13 @@ karox bridge connect claude-web --repository . --write
 karox bridge connect hyperagent-web --repository . --write
 ```
 
-Omit `--write` for the read-only tool set. KaroX prints the MCP URL, approval
-password, and connection instructions. Keep the process open while using the
-connector. For HyperAgent, leave "Bring my own OAuth app" off — KaroX advertises
-OAuth discovery and Dynamic Client Registration, so no Client ID or Client Secret
-is entered by hand. See `docs/CONNECTIVITY.md` for the full HyperAgent steps.
+Omit `--write` for the read-only tool set. KaroX prints the MCP URL and connection
+instructions; approval credentials remain in the OS keyring instead of being
+printed into logs or chat. When a client needs an OAuth approval password, copy
+the current value locally with `karox bridge oauth approval-password --saved NAME --copy`.
+For HyperAgent, leave "Bring my own OAuth app" off — KaroX advertises OAuth
+discovery and Dynamic Client Registration, so no Client ID or Client Secret is
+entered by hand. See `docs/CONNECTIVITY.md` for the full HyperAgent steps.
 
 A Cloudflare Quick Tunnel URL changes after restart. For repeatable setup, save
 only the non-secret launch policy and reconnect with a short command:

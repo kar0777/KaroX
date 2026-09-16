@@ -58,10 +58,10 @@ def test_source_delete_needs_confirmation_without_delete_intent() -> None:
     with pytest.raises(ActionConfirmationRequired) as stopped:
         engine.authorize(pending, user_intent="refactor the parser")
     assert stopped.value.decision.consequence is ConsequenceClass.WORKSPACE
-    assert "delete_not_scoped_by_user" in stopped.value.decision.reasons
+    assert "destructive_delete_requires_user" in stopped.value.decision.reasons
 
 
-def test_explicit_user_delete_intent_scopes_workspace_deletion() -> None:
+def test_explicit_user_delete_intent_still_needs_confirmation_outside_bypass() -> None:
     engine = ActionDecisionEngine()
     pending = action(
         "repo.delete",
@@ -72,12 +72,13 @@ def test_explicit_user_delete_intent_scopes_workspace_deletion() -> None:
         "delete the obsolete legacy implementation",
         "удали старую реализацию, она больше не нужна",
     ):
-        decision = engine.authorize(pending, user_intent=task)
-        assert decision.disposition is ActionDisposition.GUARDED_AUTO
-        assert decision.intent_authorized is True
+        with pytest.raises(ActionConfirmationRequired) as stopped:
+            engine.authorize(pending, user_intent=task)
+        assert stopped.value.decision.intent_authorized is True
+        assert "destructive_delete_requires_user" in stopped.value.decision.reasons
 
 
-def test_checkpoint_turns_unrequested_workspace_delete_into_guarded_auto() -> None:
+def test_checkpoint_does_not_silently_approve_source_deletion() -> None:
     engine = ActionDecisionEngine()
     pending = action(
         "repo.delete",
@@ -85,10 +86,27 @@ def test_checkpoint_turns_unrequested_workspace_delete_into_guarded_auto() -> No
         delete_count=1,
         reversible_by_checkpoint=True,
     )
-    decision = engine.authorize(pending, user_intent="refactor the parser")
+    with pytest.raises(ActionConfirmationRequired) as stopped:
+        engine.authorize(pending, user_intent="refactor the parser")
+    assert stopped.value.decision.impact["rollback_available"] is True
+    assert "destructive_delete_requires_user" in stopped.value.decision.reasons
+
+
+def test_bypass_allows_autonomous_workspace_deletion_only() -> None:
+    engine = ActionDecisionEngine()
+    pending = action(
+        "repo.delete",
+        paths=("src/legacy.py",),
+        delete_count=1,
+    )
+    decision = engine.authorize(
+        pending,
+        user_intent="refactor the parser",
+        bypass_mode=True,
+    )
     assert decision.disposition is ActionDisposition.GUARDED_AUTO
-    assert "rollback_checkpoint_available" in decision.reasons
-    assert decision.impact["rollback_available"] is True
+    assert decision.consequence is ConsequenceClass.WORKSPACE
+    assert "bypass_workspace_delete" in decision.reasons
 
 
 def test_checkpoint_never_scopes_personal_data_outside_repository() -> None:
@@ -163,12 +181,13 @@ def test_named_personal_target_can_be_scoped_by_explicit_delete_request() -> Non
         delete_count=1,
         outside_repository=True,
     )
-    decision = engine.authorize(
-        pending,
-        user_intent="удали old-installer.exe из Downloads",
-    )
-    assert decision.disposition is ActionDisposition.GUARDED_AUTO
-    assert decision.intent_authorized is True
+    with pytest.raises(ActionConfirmationRequired) as stopped:
+        engine.authorize(
+            pending,
+            user_intent="удали old-installer.exe из Downloads",
+        )
+    assert stopped.value.decision.intent_authorized is True
+    assert stopped.value.decision.consequence is ConsequenceClass.USER_DATA
 
 
 def test_system_path_is_a_hard_boundary_even_when_user_says_delete() -> None:

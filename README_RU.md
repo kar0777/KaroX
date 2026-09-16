@@ -1,7 +1,21 @@
-# KaroX 5 Preview
+# KaroX 5
 
-**Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
-провайдеру контроль над разрешениями, сессиями и доказательствами работы.**
+<div align="center">
+
+**Локальный control plane для автономной AI-разработки — один runtime, много агентов, ваш репозиторий.**
+
+![Status](https://img.shields.io/badge/status-beta-f59e0b)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
+![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
+![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
+
+Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
+провайдеру контроль над разрешениями, сессиями и доказательствами работы.
+
+**Beta channel · `5.0.0rc1`**
+
+</div>
 
 KaroX — локальный контрольный слой для ChatGPT, Claude, API-моделей и
 совместимых MCP-клиентов. Каждое локальное действие проходит через один runtime,
@@ -23,6 +37,16 @@ idempotency и жёсткие запреты, но не виртуализиру
 > [миграцию 4.x → 5](docs/MIGRATION_V4_TO_V5.md) и
 > [live conformance records](docs/conformance/README.md).
 
+## Почему KaroX
+
+| Что нужно | Как ведёт себя KaroX |
+| --- | --- |
+| **Автономная разработка без спама подтверждениями** | Чтение, обычные правки, тесты, проверки, dev-команды и локальные коммиты выполняются без лишних approval-циклов. |
+| **Одна граница безопасности для всех агентов** | ChatGPT, Claude, API-модели, MCP-клиенты и локальные workers работают через один repository-scoped Core. |
+| **Редкие и осмысленные подтверждения** | В Protected-режиме подтверждение нужно для разрушительного удаления исходников и реальных внешних commit points; Bypass разрешает автономное удаление только внутри репозитория. |
+| **Один gate не останавливает всю работу** | Опасное действие откладывается, а агент продолжает независимые шаги и спрашивает пользователя только когда без решения дальше нельзя. |
+| **Кроссплатформенная проверка** | Windows, macOS и Linux CI проверяют одинаковый wheel, тесты, release gates, Git-контракты и secret scan. |
+
 ## Главный сценарий KaroX 5
 
 Стабильный релиз определяется одним законченным путём:
@@ -41,13 +65,15 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-KaroX 5 опубликован на PyPI как pre-release. Одна команда на любой ОС:
+Публичная бета находится в ветке `beta/v5.0.0rc1`. Установить именно это дерево на Windows, macOS или Linux можно так:
 
 ```bash
-pipx install --pre karox-runtime
+pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 # или
-uv tool install --prerelease=allow karox-runtime
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 ```
+
+После публикации соответствующего pre-release тега в PyPI команды `pipx install --pre karox-runtime` и `uv tool install --prerelease=allow karox-runtime` будут устанавливать тот же кандидат.
 
 После установки открой терминал внутри нужного Git-репозитория и запусти:
 
@@ -91,9 +117,10 @@ karox bridge connect hyperagent-web --repository . --write
 ```
 
 Без `--write` используется read-only набор инструментов. KaroX создаёт
-привязанную к репозиторию сессию, временный approval credential, локальный MCP
-endpoint и HTTPS tunnel, затем выводит MCP URL, пароль подтверждения и
-инструкции.
+привязанную к репозиторию сессию, локальный MCP endpoint и HTTPS tunnel. В консоль
+выводятся MCP URL и инструкции, а approval credential остаётся в системном keyring.
+Если клиенту нужен OAuth approval password, текущий пароль можно безопасно
+скопировать локально командой `karox bridge oauth approval-password --saved NAME --copy`.
 
 Для HyperAgent оставь «Bring my own OAuth app» выключенным: KaroX публикует OAuth
 discovery и поддерживает Dynamic Client Registration, поэтому Client ID и Client

@@ -299,6 +299,9 @@ class OAuthBridgeWireTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertIn("__Secure-karox-approval=", approved.headers.get("set-cookie", ""))
+        self.assertIn("HttpOnly", approved.headers.get("set-cookie", ""))
+        self.assertIn("Secure", approved.headers.get("set-cookie", ""))
         self.assertNotIn("form-action", approved.headers["content-security-policy"])
         refresh = approved.headers["refresh"]
         self.assertTrue(refresh.startswith("0; url="), refresh)

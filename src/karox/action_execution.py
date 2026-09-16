@@ -25,6 +25,7 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
         action_decisions: ActionDecisionEngine | None = None,
         rollback_checkpoint_id: str | None = None,
         checkpoint_factory: Callable[[], Optional[str]] | None = None,
+        bypass_mode: bool = False,
         **kwargs: Any,
     ) -> None:
         risk = kwargs.get("risk")
@@ -38,6 +39,7 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
         self._action_decisions = action_decisions
         self._rollback_checkpoint_id = rollback_checkpoint_id
         self._checkpoint_factory = checkpoint_factory
+        self._bypass_mode = bool(bypass_mode)
         super().__init__(*args, **kwargs)
 
     def _apply_smart_stop(self, command: CoreCommand) -> None:
@@ -54,6 +56,7 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
                 # preview free is what makes consequence-based decisions cheap.
                 return
 
+        bypass_mode = self._bypass_mode
         try:
             record = self.sessions.load(command.session_id)
             # Hosted callers carry the active workstream objective out-of-band
@@ -61,9 +64,8 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
             # inherit the durable session task. This keeps scoped authority
             # current without putting user intent into a tool payload.
             user_intent = command.user_intent or record.task
-            # Only the checkpoint created for *this* build turn counts as a
-            # rollback guarantee. A stale checkpoint somewhere in session
-            # history must never make today's deletion look reversible.
+            # Checkpoints remain useful evidence/rollback support, but they no
+            # longer silently convert source deletion into ordinary autonomy.
             reversible_by_checkpoint = bool(self._rollback_checkpoint_id)
         except Exception:
             user_intent = ""
@@ -79,19 +81,12 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
                 action,
                 user_intent=user_intent,
                 confirmation_token=command.confirmation_token,
+                bypass_mode=bypass_mode,
             )
         except ActionConfirmationRequired as stop:
-            recovered = self._auto_guard_with_checkpoint(command, stop, user_intent)
-            if recovered is not None:
-                # Reversibility adapter: the runtime created a rollback
-                # checkpoint on demand, so this stop dissolves locally and the
-                # engine's own audit trail already recorded the guarded grant.
-                self._publish_risk(
-                    recovered.assessment,
-                    allowed=True,
-                    reason=recovered.disposition.value,
-                )
-                return
+            # Confirmation-worthy operations stay pending. Do not mutate state
+            # merely to try to dissolve the prompt: the agent can continue
+            # independent work and surface the deferred gate only when needed.
             decision = stop.decision
             self._publish_risk(
                 decision.assessment, allowed=False, reason="confirmation_required"
@@ -128,7 +123,11 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
             )
             raise
         except ConfirmationRejected as rejected:
-            decision = engine.decide(action, user_intent=user_intent)
+            decision = engine.decide(
+                action,
+                user_intent=user_intent,
+                bypass_mode=bypass_mode,
+            )
             self._publish_risk(
                 decision.assessment, allowed=False, reason=rejected.reason
             )

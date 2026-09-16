@@ -182,6 +182,9 @@ class SavedWebBridgeProfile:
     public_url: Optional[str] = None
     language: str = "en"
     access_profile: AccessProfile = AccessProfile.READ_ONLY
+    # Explicit autonomy switch. Elevated/Advanced capability alone is not Bypass;
+    # only this flag authorizes autonomous destructive workspace deletion.
+    bypass: bool = False
     port: int = 8765
     tunnel_timeout_seconds: float = 30.0
 
@@ -352,6 +355,7 @@ class SavedWebBridgeProfile:
             "public_url",
             "language",
             "access_profile",
+            "bypass",
             "port",
             "tunnel_timeout_seconds",
         }
@@ -377,6 +381,10 @@ class SavedWebBridgeProfile:
             access_profile = AccessProfile(
                 value.get("access_profile", AccessProfile.READ_ONLY.value)
             )
+            # Legacy stores had no explicit bypass bit. Their elevated profile
+            # was historically the Bypass toggle, so preserve that meaning on load.
+            legacy_bypass = "bypass" not in value and access_profile == AccessProfile.ELEVATED
+            bypass = _json_boolean(value, "bypass") if "bypass" in value else legacy_bypass
             return cls(
                 name=value["name"],
                 target_profile=value["target_profile"],
@@ -415,6 +423,7 @@ class SavedWebBridgeProfile:
                 public_url=value.get("public_url"),
                 language=value.get("language", "en"),
                 access_profile=access_profile,
+                bypass=bypass,
                 port=int(value.get("port", 8765)),
                 tunnel_timeout_seconds=float(value.get("tunnel_timeout_seconds", 30.0)),
             )

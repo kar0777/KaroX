@@ -1,28 +1,29 @@
-# KaroX 5.0.0rc1 — release candidate / кандидат в релиз
+# KaroX 5.0.0rc1 — public beta / публичная бета
 
 **One local runtime for every AI coding agent. Your models can change. KaroX remembers.**
 
-This is the first public release candidate of KaroX 5. It is a **pre-release**:
-the runtime, its guarantees and its documentation are complete, and the
-remaining distance to stable `5.0.0` is recorded evidence — live conformance
-runs against ChatGPT Web, Claude Web and the four provider families, an
-external beta, and install/upgrade rehearsals on all three OS families. See
+`5.0.0rc1` is the public **KaroX 5 beta channel**. It is intentionally a
+pre-release: the local runtime and deterministic release gates are ready for
+real use, while stable `5.0.0` still waits for the remaining live conformance,
+external-beta, and install/upgrade evidence recorded in
 `docs/RELEASE_CHECKLIST.md`.
 
-Это первый публичный кандидат в релиз KaroX 5. Это **pre-release**: runtime,
-его гарантии и документация завершены; до стабильного `5.0.0` остаются
-записанные доказательства — live-прогоны ChatGPT Web, Claude Web и четырёх
-семейств провайдеров, внешняя бета и репетиции установки/обновления на трёх
-ОС.
+`5.0.0rc1` — публичный **beta-канал KaroX 5**. Это намеренно pre-release:
+локальный runtime и детерминированные release-gates уже предназначены для
+реального тестирования, а стабильный `5.0.0` появится только после оставшихся
+live-conformance, внешней беты и подтверждённых install/upgrade прогонов из
+`docs/RELEASE_CHECKLIST.md`.
 
 ## Install / Установка
 
 ```bash
-pipx install --pre karox-runtime
+pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 # or / или
-uv tool install --prerelease=allow karox-runtime
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
 karox
 ```
+
+After the matching tag reaches PyPI, the shorter `pipx install --pre karox-runtime` path installs the same candidate.
 
 Stable 4.1.4 users keep their installation: the bootstrap scripts on `main`
 still install 4.x. KaroX 5 uses a separate configuration layout and imports 4.x
@@ -62,10 +63,15 @@ replaceable worker.
   output that never hides failures.
 
 ### Permissions as architecture
-- Observe / Build / Advanced access profiles; no profile grants Git push,
-  package publishing or authentication commands.
-- Universal Smart Stop (RiskEngine): four risk levels, single-use confirmation
-  tokens, and no way to configure auto-approval above medium.
+- Observe / Build / Advanced capabilities plus an explicit **Bypass** autonomy
+  switch. Advanced capability alone does not authorize destructive deletion.
+- Normal reads, edits, tests, checks, dev commands and local commits do not stop
+  for nuisance confirmations. Protected mode gates destructive source deletion;
+  Bypass may automate deletion **inside the selected repository only**.
+- Unknown or destructive local gates are deferred so the agent can keep doing
+  independent work and ask the user only when the pending action becomes necessary.
+- Real external commit points such as `git push`, publish and deploy keep an
+  exact-action one-shot human boundary; force-push never inherits normal push authority.
 - Cross-process mutation leases with heartbeat, idempotency for every mutating
   operation, transactional workspace changes with checkpoints and undo.
 

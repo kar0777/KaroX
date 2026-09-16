@@ -54,7 +54,16 @@ to durable policy identifiers:
   `browser.input` for driving the localhost UI. Build does **not** grant
   `git.commit`.
 - **Advanced** -> `elevated`: Build capabilities plus guarded local commit,
-  `desktop.input`, and `network` for explicitly elevated work.
+  `desktop.input`, and `network` for explicitly elevated work. The product's
+  explicit Bypass mode uses this elevated capability contract for autonomous
+  repository-scoped destructive work; it still does not waive external/system
+  boundaries.
+
+Routine edits are deliberately approval-free. In protected mode, destructive
+source deletion is deferred for user review instead of being inferred from a
+checkpoint or broad cleanup wording; Bypass may perform repository-scoped
+deletions autonomously. A stopped action is per-action, not a mission stop: the
+agent should continue independent work and collect unresolved gates for the end.
 
 Even Advanced does not grant standing `git push`, package publishing, or
 authentication authority. Those effects remain outside every stable access
@@ -63,9 +72,11 @@ profile. A durable Advanced ChatGPT Web bridge may expose the dedicated
 approval bound to the exact action; ordinary developer commands remain unable to
 push. Modern MCP clients use the native elicitation round. If a client does not
 advertise elicitation, KaroX falls back to a short-lived browser approval page
-bound to that same exact action. The user enters the OAuth approval password
-there; the password is never returned to the MCP client or model, and the
-approval is consumed by the first matching retry.
+bound to that same exact action. A browser that already passed a KaroX OAuth
+approval holds an HttpOnly, Secure, SameSite trusted-device cookie and only needs
+one explicit button click; an untrusted browser still requires the OAuth approval
+password. The cookie never reaches the model and rotates out with the bridge
+approval secret.
 
 ## What KaroX Does Not Do
 

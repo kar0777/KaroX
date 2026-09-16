@@ -12,18 +12,124 @@ arguments digest and action digest, and consumed on the first matching retry.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
 import json
+import secrets
 import threading
 import time
+from http.cookies import SimpleCookie
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qs, quote
 
 from starlette.responses import HTMLResponse, Response
 
 SecretResolver = str | Callable[[], str]
+TRUST_COOKIE_NAME = "__Secure-karox-approval"
+TRUST_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+
+
+def _resolve_secret(secret_resolver: Optional[SecretResolver]) -> str:
+    if secret_resolver is None:
+        raise ValueError("human approval secret is not configured")
+    value = secret_resolver() if callable(secret_resolver) else secret_resolver
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 65_536
+        or any(char in value for char in ("\x00", "\r", "\n"))
+    ):
+        raise ValueError("human approval secret is invalid")
+    return value
+
+
+def _b64_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64_decode(value: str) -> bytes:
+    if not isinstance(value, str) or not value or len(value) > 4096:
+        raise ValueError("trusted approval cookie is invalid")
+    padding = "=" * (-len(value) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("trusted approval cookie is invalid") from exc
+    if _b64_encode(decoded) != value:
+        raise ValueError("trusted approval cookie is not canonical base64url")
+    return decoded
+
+
+def issue_trusted_approval_cookie(
+    secret_resolver: SecretResolver,
+    *,
+    now: Optional[float] = None,
+    max_age_seconds: int = TRUST_COOKIE_MAX_AGE_SECONDS,
+) -> str:
+    moment = time.time() if now is None else float(now)
+    ttl = max(60, min(int(max_age_seconds), TRUST_COOKIE_MAX_AGE_SECONDS))
+    payload = {
+        "v": 1,
+        "exp": int(moment + ttl),
+        "nonce": secrets.token_urlsafe(18),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(
+        _resolve_secret(secret_resolver).encode("utf-8"), raw, hashlib.sha256
+    ).digest()
+    return f"v1.{_b64_encode(raw)}.{_b64_encode(signature)}"
+
+
+def validate_trusted_approval_cookie(
+    value: str,
+    secret_resolver: SecretResolver,
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    try:
+        parts = value.split(".")
+        if len(parts) != 3 or parts[0] != "v1":
+            return False
+        raw = _b64_decode(parts[1])
+        signature = _b64_decode(parts[2])
+        expected = hmac.new(
+            _resolve_secret(secret_resolver).encode("utf-8"), raw, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            return False
+        expires_at = payload.get("exp")
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int):
+            return False
+        moment = time.time() if now is None else float(now)
+        if expires_at < moment:
+            return False
+        nonce = payload.get("nonce")
+        return isinstance(nonce, str) and 8 <= len(nonce) <= 128
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def set_trusted_approval_cookie(
+    response: Response,
+    secret_resolver: SecretResolver,
+) -> None:
+    response.set_cookie(
+        TRUST_COOKIE_NAME,
+        issue_trusted_approval_cookie(secret_resolver),
+        max_age=TRUST_COOKIE_MAX_AGE_SECONDS,
+        path="/",
+        secure=True,
+        httponly=True,
+        # Lax is required for a trusted browser to carry the cookie when the
+        # user opens an approval link from ChatGPT/Claude. Cross-site POSTs are
+        # still excluded, while the approval form's own POST is same-site.
+        samesite="lax",
+    )
 
 
 class BrowserApprovalBroker:
@@ -65,18 +171,23 @@ class BrowserApprovalBroker:
         return result
 
     def _secret(self) -> str:
-        resolver = self.secret_resolver
-        if resolver is None:
-            raise ValueError("human approval secret is not configured")
-        value = resolver() if callable(resolver) else resolver
-        if (
-            not isinstance(value, str)
-            or not value
-            or len(value) > 65_536
-            or any(char in value for char in ("\x00", "\r", "\n"))
-        ):
-            raise ValueError("human approval secret is invalid")
-        return value
+        return _resolve_secret(self.secret_resolver)
+
+    def _trusted_browser(self, scope: Mapping[str, Any]) -> bool:
+        if self.secret_resolver is None:
+            return False
+        raw_cookie = self._headers(scope).get("cookie", "")
+        if not raw_cookie:
+            return False
+        jar = SimpleCookie()
+        try:
+            jar.load(raw_cookie)
+        except Exception:
+            return False
+        morsel = jar.get(TRUST_COOKIE_NAME)
+        if morsel is None:
+            return False
+        return validate_trusted_approval_cookie(morsel.value, self.secret_resolver)
 
     @staticmethod
     def _fingerprint(wire_name: str, arguments_sha256: str, action_digest: str) -> str:
@@ -160,13 +271,36 @@ class BrowserApprovalBroker:
                     return fingerprint, dict(record)
         raise ValueError("approval request state expired or is invalid")
 
-    def _page(self, record: Mapping[str, Any], request_state: str) -> str:
+    def _page(
+        self,
+        record: Mapping[str, Any],
+        request_state: str,
+        *,
+        trusted: bool,
+    ) -> str:
         message = html.escape(str(record.get("message") or "Approve this one action?"))
         preview = html.escape(
             json.dumps(record.get("preview") or {}, ensure_ascii=False, sort_keys=True)
         )
         state = html.escape(request_state, quote=True)
         action = html.escape(self.approval_path, quote=True)
+        verification = (
+            "This browser is already trusted from a previous KaroX OAuth approval. "
+            "Confirm this exact action with one click."
+            if trusted
+            else (
+                "Enter the same KaroX approval password used for OAuth. "
+                "It is never returned to the MCP client or model."
+            )
+        )
+        password_field = (
+            ""
+            if trusted
+            else (
+                '<label>Approval password<input type="password" name="password" required '
+                'autocomplete="current-password"></label>'
+            )
+        )
         return (
             '<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width">'
@@ -177,12 +311,10 @@ class BrowserApprovalBroker:
             'code{overflow-wrap:anywhere;color:#d9bd7b}small{color:#aaa}</style></head>'
             f'<body><main><h1>Approve one KaroX action</h1><p>{message}</p>'
             f'<p><small>Exact action preview:</small><br><code>{preview}</code></p>'
-            '<p>Enter the same KaroX approval password used for OAuth. '
-            'It is never returned to the MCP client or model.</p>'
+            f'<p>{verification}</p>'
             f'<form method="post" action="{action}">'
             f'<input type="hidden" name="state" value="{state}">'
-            '<label>Approval password<input type="password" name="password" required '
-            'autocomplete="current-password"></label>'
+            f'{password_field}'
             '<button type="submit">Approve this one action</button></form>'
             '</main></body></html>'
         )
@@ -205,7 +337,11 @@ class BrowserApprovalBroker:
                 await Response("approval request expired or invalid", status_code=400)(scope, receive, send)
                 return
             await HTMLResponse(
-                self._page(record, request_state),
+                self._page(
+                    record,
+                    request_state,
+                    trusted=self._trusted_browser(scope),
+                ),
                 headers={
                     "Cache-Control": "no-store",
                     "Content-Security-Policy": (
@@ -255,20 +391,23 @@ class BrowserApprovalBroker:
         except ValueError:
             await Response("approval request expired or invalid", status_code=400)(scope, receive, send)
             return
-        try:
-            expected = self._secret()
-        except Exception:
-            await Response("approval secret is unavailable", status_code=503)(scope, receive, send)
-            return
-        if not hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
-            with self._lock:
-                current = self._records.get(fingerprint)
-                if isinstance(current, dict):
-                    current["attempts"] = int(current.get("attempts") or 0) + 1
-                    if int(current["attempts"]) >= 5:
-                        self._records.pop(fingerprint, None)
-            await Response("approval password is incorrect", status_code=403)(scope, receive, send)
-            return
+
+        trusted_browser = self._trusted_browser(scope)
+        if not trusted_browser:
+            try:
+                expected = self._secret()
+            except Exception:
+                await Response("approval secret is unavailable", status_code=503)(scope, receive, send)
+                return
+            if not hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
+                with self._lock:
+                    current = self._records.get(fingerprint)
+                    if isinstance(current, dict):
+                        current["attempts"] = int(current.get("attempts") or 0) + 1
+                        if int(current["attempts"]) >= 5:
+                            self._records.pop(fingerprint, None)
+                await Response("approval password is incorrect", status_code=403)(scope, receive, send)
+                return
 
         with self._lock:
             current = self._records.get(fingerprint)
@@ -278,7 +417,7 @@ class BrowserApprovalBroker:
             current["approved"] = True
             current["approved_at"] = time.time()
 
-        await HTMLResponse(
+        response = HTMLResponse(
             '<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width"><title>KaroX action approved</title>'
             '<style>body{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:0 1rem;'
@@ -295,7 +434,18 @@ class BrowserApprovalBroker:
                 "Referrer-Policy": "no-referrer",
                 "X-Frame-Options": "DENY",
             },
-        )(scope, receive, send)
+        )
+        if self.secret_resolver is not None:
+            set_trusted_approval_cookie(response, self.secret_resolver)
+        await response(scope, receive, send)
 
 
-__all__ = ["BrowserApprovalBroker", "SecretResolver"]
+__all__ = [
+    "BrowserApprovalBroker",
+    "SecretResolver",
+    "TRUST_COOKIE_MAX_AGE_SECONDS",
+    "TRUST_COOKIE_NAME",
+    "issue_trusted_approval_cookie",
+    "set_trusted_approval_cookie",
+    "validate_trusted_approval_cookie",
+]

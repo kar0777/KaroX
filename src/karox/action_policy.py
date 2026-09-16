@@ -445,7 +445,13 @@ class ActionDecisionEngine:
     def __init__(self, risk: Optional[RiskEngine] = None) -> None:
         self.risk = risk or RiskEngine()
 
-    def decide(self, action: RiskAction, *, user_intent: str = "") -> ActionDecision:
+    def decide(
+        self,
+        action: RiskAction,
+        *,
+        user_intent: str = "",
+        bypass_mode: bool = False,
+    ) -> ActionDecision:
         assessment = self.risk.assess(action)
         intent = IntentScope.compile(user_intent)
         consequence = consequence_for(action)
@@ -489,30 +495,23 @@ class ActionDecisionEngine:
             disposition = ActionDisposition.GUARDED_AUTO
             intent_authorized = intent.authorizes_delete(action, consequence)
             reasons.append("rebuildable_effect")
-        elif (
-            consequence is ConsequenceClass.WORKSPACE
-            and action.reversible_by_checkpoint
-            and (
-                action.kind == "repo.delete"
-                or action.delete_count
-                or action.details.get("deletion_requested")
-            )
-        ):
-            # A real pre-turn checkpoint converts an otherwise irreversible
-            # repository deletion into a locally recoverable operation. This is
-            # exactly where safety should increase autonomy rather than prompt.
-            disposition = ActionDisposition.GUARDED_AUTO
-            reasons.append("rollback_checkpoint_available")
         elif action.kind == "repo.delete" or action.delete_count or action.details.get(
             "deletion_requested"
         ):
             intent_authorized = intent.authorizes_delete(action, consequence)
-            if intent_authorized:
+            if bypass_mode and consequence is ConsequenceClass.WORKSPACE:
+                # Bypass is the explicit opt-in for autonomous destructive work
+                # inside the selected repository. Outside-repository/user-data,
+                # system and external effects retain their normal boundaries.
                 disposition = ActionDisposition.GUARDED_AUTO
-                reasons.append("explicit_delete_intent")
+                reasons.append("bypass_workspace_delete")
             else:
+                # Ordinary coding mode should not turn every edit into a prompt,
+                # but source deletion is intentionally the exception. A rollback
+                # checkpoint or a vague cleanup request does not silently widen
+                # this boundary; the user can approve it or opt into Bypass.
                 disposition = ActionDisposition.CONFIRM
-                reasons.append("delete_not_scoped_by_user")
+                reasons.append("destructive_delete_requires_user")
         elif action.kind == "git.commit":
             # A local commit is a rollback/checkpoint primitive, not an external
             # side effect.  File count alone must not turn it into a user prompt.
@@ -579,8 +578,13 @@ class ActionDecisionEngine:
         *,
         user_intent: str = "",
         confirmation_token: Optional[str] = None,
+        bypass_mode: bool = False,
     ) -> ActionDecision:
-        decision = self.decide(action, user_intent=user_intent)
+        decision = self.decide(
+            action,
+            user_intent=user_intent,
+            bypass_mode=bypass_mode,
+        )
         if decision.hard_blocked:
             raise ActionHardBlocked(decision)
         if not decision.requires_confirmation:

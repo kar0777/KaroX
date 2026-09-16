@@ -64,7 +64,7 @@ def test_stale_session_checkpoint_does_not_authorize_current_delete() -> None:
             _runtime(repository, sessions)._apply_smart_stop(_delete_command("session"))
 
 
-def test_current_turn_checkpoint_makes_workspace_delete_guarded_auto() -> None:
+def test_current_turn_checkpoint_does_not_silently_authorize_workspace_delete() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         repository = Path(temporary) / "repo"
         initialize_git_repository(repository)
@@ -83,4 +83,5 @@ def test_current_turn_checkpoint_makes_workspace_delete_guarded_auto() -> None:
             sessions,
             rollback_checkpoint_id="cp-current-turn",
         )
-        runtime._apply_smart_stop(_delete_command("session"))
+        with pytest.raises(ActionConfirmationRequired):
+            runtime._apply_smart_stop(_delete_command("session"))
