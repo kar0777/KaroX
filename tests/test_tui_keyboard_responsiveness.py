@@ -36,7 +36,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             screen = screen_cls("en", preset_id="chatgpt-web")
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
-                await pilot.pause(0.05)
+                await pilot.pause(0.25)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -44,7 +44,13 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                     public_url="https://example.invalid/mcp",
                 )
                 screen._write()
-                screen.query_one("#svc-primary", tui.Button).focus()
+                # Focus mount is asynchronous under a loaded runner; pump
+                # until the primary button actually holds focus so the tab
+                # contract is measured from a real starting state.
+                deadline = time.monotonic() + 10
+                while getattr(app.focused, "id", None) != "svc-primary" and time.monotonic() < deadline:
+                    screen.query_one("#svc-primary", tui.Button).focus()
+                    await pilot.pause(0.1)
                 self.assertEqual(getattr(app.focused, "id", None), "svc-primary")
                 # The approval-password copy button is a visible tab stop for
                 # OAuth profiles -- a hidden P key was the old contract. Focus
@@ -73,7 +79,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             # state needed for the keyboard assertion.
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
-                await pilot.pause(0.05)
+                await pilot.pause(0.25)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -101,7 +107,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             screen = screen_cls("en", preset_id="chatgpt-web")
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
-                await pilot.pause(0.05)
+                await pilot.pause(0.25)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -123,7 +129,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             screen = screen_cls("en", preset_id="notion")
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
-                await pilot.pause(0.05)
+                await pilot.pause(0.25)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
