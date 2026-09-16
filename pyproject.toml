@@ -147,6 +147,12 @@ select = ["E9", "F"]
 
 [tool.mypy]
 python_version = "3.10"
+# Static analysis targets the primary shipping host: several runtime modules
+# branch on `os.name == "nt"` and call `msvcrt` / `ctypes.WinDLL` / `windll`,
+# which typeshed exposes only under the win32 platform view. Without this pin
+# the same clean tree FAILS mypy on a Linux/macOS host (CI lint) because those
+# guarded symbols are absent there. Runtime paths stay platform-independent.
+platform = "win32"
 files = ["src/karox"]
 # Deliberately the level the code passes today, in the same spirit as the ruff
 # selection above: mypy's defaults over the whole package, plus the extra

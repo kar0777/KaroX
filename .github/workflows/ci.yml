@@ -28,7 +28,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      # The test group declares pytest/pytest-xdist; requirements.txt alone is
+      # the runtime dependency set and has no pytest.
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test
       # Let pytest do the glob filtering itself: GitHub's Windows runner uses
       # PowerShell, which does not expand native-command globs the same way Bash
       # does. This keeps the shard definition identical on all three OSes and
@@ -46,7 +48,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test
       - run: python -m pytest -q tests --ignore-glob="tests/test_[a-h]*.py"
         timeout-minutes: 15
 
@@ -60,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip build
+      - run: python -m pip install --upgrade pip build --group test
       - run: python -c "import shutil; shutil.rmtree('build', ignore_errors=True); shutil.rmtree('dist', ignore_errors=True)"
       - run: python -m build --wheel
       - run: python scripts/check_wheel_contents.py
