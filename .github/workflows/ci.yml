@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.11"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -m pip install --group lint && python -m pip install --group typing
       - run: python -m ruff check src tests scripts
       - run: python -m mypy src/karox
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.11"
       # The test group declares pytest/pytest-xdist; requirements.txt alone is
       # the runtime dependency set and has no pytest. The checkout is then
       # installed editable without dependencies because the CLI-provider tests
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.11"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test && python -m pip install --no-deps -e .
       - env:
           KAROX_CI_SIGINT_TRACE: "1"
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.11"
       - run: python -m pip install --upgrade pip build --group test
       - run: python -c "import shutil; shutil.rmtree('build', ignore_errors=True); shutil.rmtree('dist', ignore_errors=True)"
       - run: python -m build --wheel
@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.11"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
       - run: python scripts/check_test_count.py
       - run: python -m unittest discover -s tests -p "test_release_gates.py"

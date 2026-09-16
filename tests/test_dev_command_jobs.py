@@ -18,12 +18,14 @@ class _DummyWorker:
         return None
 
 
-def _await_child_exit(status: dict, deadline_seconds: float = 5.0) -> None:
+def _await_child_exit(status: dict, deadline_seconds: float = 10.0) -> None:
     """Await the child's real exit before TemporaryDirectory cleanup.
 
-    Windows keeps the child's current-directory handles alive until the process
-    is gone; a parallel worker can reach rmtree a few milliseconds before the
-    detached developer worker finishes exiting.
+    Windows keeps a process's current-directory handles alive until the
+    process tree is gone, and TemporaryDirectory cleanup races it: a parallel
+    worker or the serial tail of the suite can reach rmtree a few milliseconds
+    before the detached developer worker finishes exiting. Track the worker
+    and any descendant it spawned, then let handle teardown settle.
     """
     child_pid = status.get("child_pid") if isinstance(status, dict) else None
     if not isinstance(child_pid, int) or child_pid <= 0:
@@ -31,6 +33,19 @@ def _await_child_exit(status: dict, deadline_seconds: float = 5.0) -> None:
     gone_by = time.monotonic() + deadline_seconds
     while process_is_running(child_pid) and time.monotonic() < gone_by:
         time.sleep(0.02)
+    try:
+        import psutil
+
+        descendants = psutil.Process(child_pid).children(recursive=True)
+    except Exception:
+        descendants = []
+    for process in descendants:
+        try:
+            process.wait(timeout=deadline_seconds)
+        except Exception:
+            continue
+    # The last handle release lands a little after the final exit status.
+    time.sleep(0.25)
 
 
 class DeveloperCommandJobTests(unittest.TestCase):
