@@ -636,10 +636,38 @@ def _worker_creationflags(breakaway: bool = True) -> int:
     return flags
 
 
-def _child_spawn_kwargs() -> dict[str, Any]:
+def _child_spawn_kwargs(breakaway: bool = True) -> dict[str, Any]:
     if os.name == "nt":
-        return {"creationflags": _worker_creationflags()}
+        return {"creationflags": _worker_creationflags(breakaway=breakaway)}
     return {"start_new_session": True}
+
+
+def _popen_job_object_tolerant(**popen_kwargs: Any) -> subprocess.Popen[Any]:
+    """Spawn a child, falling back without breakaway on restrictive job objects.
+
+    Hosted runners refuse ``CREATE_BREAKAWAY_FROM_JOB`` at spawn time with
+    ``PermissionError [WinError 5]``. The bit only changes process-tree teardown,
+    which the worker tree caller owns, so a refused breakaway transparently
+    retries the launch with the bit removed instead of failing the job.
+    """
+    try:
+        return subprocess.Popen(**popen_kwargs)
+    except PermissionError as exc:
+        flags = popen_kwargs.get("creationflags")
+        if (
+            os.name != "nt"
+            or not isinstance(flags, int)
+            or not flags & 0x01000000
+        ):
+            raise
+        # A job object can also add the bit itself; removing just our flag keeps
+        # the rest of the spawn contract (new group, no console window).
+        retry_kwargs = dict(popen_kwargs)
+        retry_kwargs["creationflags"] = flags & ~0x01000000
+        try:
+            return subprocess.Popen(**retry_kwargs)
+        except OSError:
+            raise exc
 
 
 def _worker_environment() -> dict[str, str]:
@@ -1331,8 +1359,8 @@ def run_worker(state_path: Path) -> int:
         )
         child_environment["PYTHONIOENCODING"] = "utf-8"
         child_environment["PYTHONUTF8"] = "1"
-        process = subprocess.Popen(
-            resolved_argv,
+        process = _popen_job_object_tolerant(
+            args=resolved_argv,
             cwd=state.repository,
             env=child_environment,
             stdin=subprocess.DEVNULL,

@@ -149,6 +149,7 @@ class ConnectionsTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await pilot.pause(0.2)
 
+    @unittest.skipUnless(os.name == "nt", "Windows worker/textual lifecycle contract")
     async def test_connection_test_does_not_block_the_tui(self) -> None:
         # A test against an unreachable endpoint must return (on a worker thread)
         # without freezing the UI. We patch the test to a fast-failing stub so
