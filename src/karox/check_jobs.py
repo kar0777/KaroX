@@ -960,7 +960,10 @@ class CheckJobManager:
                     error=f"{type(exc).__name__}: {redact(str(exc))}",
                 )
                 self.store.put(failed)
-                raise CheckJobError("managed check worker could not start") from exc
+                raise CheckJobError(
+                    "managed check worker could not start: "
+                    f"{type(exc).__name__}: {redact(str(exc))}"
+                ) from exc
         if not self.wait_for_child:
             return {**self.public_status(state), "idempotent_replay": False}
         deadline = time.monotonic() + _WORKER_READY_TIMEOUT_SECONDS
