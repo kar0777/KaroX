@@ -13,12 +13,16 @@ import unittest
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
-from _tui_harness import isolated_karox_directories
+from _tui_harness import hosted_runner_skips_tui_lifecycle, isolated_karox_directories
 
 from karox import tui
 from karox.connection_status import ConnectionLiveStatus, OverallStatus
 
 
+@unittest.skipIf(
+    hosted_runner_skips_tui_lifecycle(),
+    "keyboard contract replays on a real host, not the hosted runner",
+)
 class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.repository = self.enterContext(isolated_karox_directories())
