@@ -123,4 +123,24 @@ def initialize_git_repository(path: Path) -> None:
             "filesystem watcher daemon kept the output pipes open; rerun "
             "after closing other git tooling."
         ) from exc
+    # A fresh hosted runner has no global git identity, and the test contract
+    # above pins GIT_CONFIG_GLOBAL/SYSTEM to the null device on purpose. Write
+    # the identity into the repository so runtime `git commit` surfaces work
+    # the same way on every host (the local machine's global config trick
+    # previously made this invisible).
+    for config_argv in (
+        ["git", "config", "user.name", "KaroX Test"],
+        ["git", "config", "user.email", "karox@example.invalid"],
+    ):
+        subprocess.run(
+            config_argv,
+            cwd=path,
+            env=env,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
 

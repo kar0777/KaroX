@@ -59,7 +59,17 @@ def _has_playwright() -> bool:
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
 
-        return True
+    except Exception:
+        return False
+    # The package being importable is not enough: the launchable browser
+    # binary must be present too (a fresh CI runner installs the wheel but
+    # not playwright's cached browsers).
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            exe = p.chromium.executable_path
+        return bool(exe) and Path(exe).exists()
     except Exception:
         return False
 

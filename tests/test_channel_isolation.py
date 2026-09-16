@@ -50,6 +50,9 @@ class NamespaceIsolationTests(unittest.TestCase):
     """
 
     def _channel_env(self, channel: str, base: Path) -> dict[str, str]:
+        # HOME must move with the temporary base as well: macOS resolves user
+        # state through ~/Library/Application Support and ignores XDG_* on that
+        # view, so a rebase without HOME leaves the real macOS user tree.
         return {
             "KAROX_CHANNEL": channel,
             "KAROX_VNEXT_CONFIG_DIR": "",
@@ -60,6 +63,7 @@ class NamespaceIsolationTests(unittest.TestCase):
             "LOCALAPPDATA": str(base / "local"),
             "XDG_CONFIG_HOME": str(base / "xdg-config"),
             "XDG_DATA_HOME": str(base / "xdg-data"),
+            "HOME": str(base / "home"),
         }
 
     def test_channel_app_name_maps_every_channel(self) -> None:

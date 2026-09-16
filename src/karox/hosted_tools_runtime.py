@@ -64,6 +64,7 @@ from .remote_tools import (
     _kill_pid_tree,
     _pid_alive,
     _read_log,
+    _reap_expired_process,
 )
 from .security import child_process_environment, redact
 from .service_supervisor import (
@@ -2637,6 +2638,9 @@ class HostedToolsRuntime:
         _kill_pid_tree(record.pid)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and _pid_alive(record.pid):
+            # POSIX: a SIGKILLed child remains a zombie until its parent
+            # collects it, and _pid_alive keeps reporting zombies as alive.
+            _reap_expired_process(record.pid)
             time.sleep(0.05)
         running = _pid_alive(record.pid)
         return {

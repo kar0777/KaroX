@@ -194,11 +194,11 @@ def _kill_pid_tree(pid: int) -> None:
     try:
         group = os.getpgid(pid)  # type: ignore[attr-defined,unused-ignore]
     except OSError:
-        return
-    if group == os.getpgid(0):  # type: ignore[attr-defined,unused-ignore]
-        # The target shares OUR foreground process group. Signalling the whole
-        # group here takes down the runtime that called this function (on CI
-        # that is the runner). Escalate to the single PID instead.
+        group = None
+    if group is None or group != pid:
+        # start_new_session did not take effect; the process group belongs to
+        # the caller (on CI, the runner). Signal the single PID instead of a
+        # group we cannot prove to be ours.
         try:
             os.kill(pid, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
         except OSError:
@@ -209,14 +209,32 @@ def _kill_pid_tree(pid: int) -> None:
         except OSError:
             pass
         return
-    os.killpg(group, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
+    # The child is its own group leader, so killpg cannot reach the caller.
+    os.killpg(pid, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
     time.sleep(0.2)
     try:
         os.killpg(  # type: ignore[attr-defined,unused-ignore]
-            group,  # type: ignore[attr-defined,unused-ignore]
+            pid,  # type: ignore[attr-defined,unused-ignore]
             signal.SIGKILL,  # type: ignore[attr-defined,unused-ignore]
         )
     except OSError:
+        pass
+
+
+def _reap_expired_process(pid: int) -> None:
+    """Collect a stopped child we own so a POSIX zombie stops looking alive.
+
+    ``os.waitpid`` is parent-only: a foreign 或 unknown PID raises instead of
+    blocking, and on this platform the caller is always the original parent
+    (the runtime spawned it), which is exactly the reaper the contract needs.
+    """
+    waitpid = getattr(os, "waitpid", None)
+    WNOHANG = getattr(os, "WNOHANG", 1)
+    if waitpid is None:
+        return
+    try:
+        waitpid(pid, WNOHANG)
+    except (OSError, ValueError, subprocess.SubprocessError):
         pass
 
 

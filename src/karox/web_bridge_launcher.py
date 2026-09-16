@@ -1144,10 +1144,28 @@ def _signal_process_group(process: Optional[object], *, hard: bool) -> None:
     if pid is None or os.name == "nt":
         return
     try:
-        os.killpg(
-            os.getpgid(pid),
-            signal.SIGKILL if hard else signal.SIGTERM,
-        )
+        group = os.getpgid(pid)  # type: ignore[attr-defined,unused-ignore]
+    except (OSError, AttributeError):
+        pass
+    else:
+        # Mirror core._kill_posix_process_group: signal the group only when the
+        # child is its own group leader (`start_new_session` took effect).
+        # Otherwise the group is the caller's, and killpg would signal the
+        # runtime (on CI, the whole runner) along with the child.
+        if group != pid:
+            try:
+                os.kill(pid, signal.SIGKILL if hard else signal.SIGTERM)
+            except (OSError, AttributeError):
+                pass
+            return
+        try:
+            os.killpg(pid, signal.SIGKILL if hard else signal.SIGTERM)
+        except (OSError, AttributeError):
+            pass
+        return
+    # getpgid unusable on this platform: fall back to the single process.
+    try:
+        os.kill(pid, signal.SIGKILL if hard else signal.SIGTERM)
     except (OSError, AttributeError):
         pass
 
@@ -2942,7 +2960,18 @@ def reap_orphaned_web_bridges() -> tuple[str, ...]:
                 pid = record.get(key) if isinstance(record, dict) else None
                 if isinstance(pid, int) and _process_is_alive(pid):
                     try:
-                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                        group = os.getpgid(pid)  # type: ignore[attr-defined,unused-ignore]
+                    except (OSError, AttributeError):
+                        group = None
+                    try:
+                        if group == pid:
+                            # The process owns its group (start_new_session
+                            # took effect); signalling the group is scoped to
+                            # it. Signalling a shared group could take the
+                            # caller down with it.
+                            os.killpg(pid, signal.SIGTERM)
+                        else:
+                            os.kill(pid, signal.SIGTERM)
                     except (OSError, AttributeError):
                         pass
         session_id = record.get("session_id") if isinstance(record, dict) else None

@@ -24,6 +24,17 @@ from unittest.mock import Mock, patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
+
+def _secure_credential_backend_unavailable() -> str:
+    """Reason the real OS keyring cannot be exercised on this host, or ""."""
+    try:
+        from karox.credentials import KeyringBackend
+
+        KeyringBackend._module()
+        return ""
+    except Exception as exc:  # pragma: no cover - depends on the host
+        return f"no secure OS credential backend: {type(exc).__name__}: {exc}"
+
 from karox.connections import (
     ConnectionConfigurationError,
     ClickupDefaults,
@@ -1127,6 +1138,10 @@ class ClickupServerLauncherTests(unittest.TestCase):
                 default_server_launcher(port, "secret", repository=Path(os.getcwd()))
         self.assertIn(str(port), str(caught.exception))
 
+    @unittest.skipUnless(
+        _secure_credential_backend_unavailable() == "",
+        _secure_credential_backend_unavailable(),
+    )
     def test_child_is_spawned_with_forced_utf8_and_a_drained_pipe(self) -> None:
         # The repository path can contain non-ASCII characters (this project
         # lives in a Cyrillic path), and ``bridge serve`` prints it on startup.
@@ -1222,6 +1237,10 @@ class ClickupRealBridgeE2ETests(unittest.TestCase):
     wire, and a future drop of the ``--tool`` flag fails here, not in the TUI.
     """
 
+    @unittest.skipUnless(
+        _secure_credential_backend_unavailable() == "",
+        _secure_credential_backend_unavailable(),
+    )
     def test_real_bridge_serves_tools_and_handshake_passes(self) -> None:
         import secrets
         import socket
