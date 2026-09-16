@@ -192,13 +192,28 @@ def _kill_pid_tree(pid: int) -> None:
     # ignores are per-line and per-symbol so a genuine error on this path is not
     # also silenced.
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
+        group = os.getpgid(pid)  # type: ignore[attr-defined,unused-ignore]
     except OSError:
         return
+    if group == os.getpgid(0):  # type: ignore[attr-defined,unused-ignore]
+        # The target shares OUR foreground process group. Signalling the whole
+        # group here takes down the runtime that called this function (on CI
+        # that is the runner). Escalate to the single PID instead.
+        try:
+            os.kill(pid, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
+        except OSError:
+            return
+        time.sleep(0.2)
+        try:
+            os.kill(pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+        except OSError:
+            pass
+        return
+    os.killpg(group, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
     time.sleep(0.2)
     try:
         os.killpg(  # type: ignore[attr-defined,unused-ignore]
-            os.getpgid(pid),  # type: ignore[attr-defined,unused-ignore]
+            group,  # type: ignore[attr-defined,unused-ignore]
             signal.SIGKILL,  # type: ignore[attr-defined,unused-ignore]
         )
     except OSError:

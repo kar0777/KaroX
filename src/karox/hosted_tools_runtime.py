@@ -1960,6 +1960,10 @@ class HostedToolsRuntime:
             else:
                 import subprocess
 
+                # On POSIX the managed service must own its process group:
+                # without a detached session `_kill_pid_tree` would resolve to
+                # the caller's own process group and signal the harness with
+                # the service.
                 process = subprocess.Popen(
                     launch_argv,
                     cwd=working_directory,
@@ -1967,6 +1971,7 @@ class HostedToolsRuntime:
                     stdout=stdout_handle,
                     stderr=stderr_handle,
                     shell=False,
+                    start_new_session=os.name != "nt",
                 )
         except Exception as exc:
             return {
