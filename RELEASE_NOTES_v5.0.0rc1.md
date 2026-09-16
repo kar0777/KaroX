@@ -17,9 +17,9 @@ live-conformance, внешней беты и подтверждённых instal
 ## Install / Установка
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 # or / или
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 karox
 ```
 
@@ -131,7 +131,7 @@ replaceable worker.
 
 ## Verification
 
-3325 tests under `tests/`; Ruff, Mypy and a 70% branch-coverage gate in CI;
+3356 tests under `tests/`; Ruff, Mypy and a 70% branch-coverage gate in CI;
 wheel built, installed and smoke-tested outside the source tree on Windows,
 macOS and Linux for Python 3.10–3.14.
 

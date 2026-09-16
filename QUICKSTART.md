@@ -10,13 +10,20 @@ KaroX 5 используй checkout preview-ветки и локальный у�
 
 ## 1. Install / Установка
 
-Any OS / любая ОС:
+The 5.x candidate is not published to PyPI yet, so install from the beta branch
+or a source checkout / Кандидат 5.x ещё не опубликован в PyPI — ставь из
+beta-ветки или исходников:
 
 ```bash
-pipx install --pre karox-runtime
+pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+# or / или
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 ```
 
-or / или `uv tool install --prerelease=allow karox-runtime`.
+After the candidate reaches PyPI, `pipx install --pre karox-runtime` and
+`uv tool install --prerelease=allow karox-runtime` install the same package /
+после публикации кандидата в PyPI эти же команды будут устанавливать тот же
+пакет.
 
 From a source checkout / из исходников: `.\install.karox.ps1` (Windows) or
 `./install.karox.sh` (macOS, Linux).

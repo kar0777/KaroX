@@ -65,12 +65,12 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Публичная бета находится в ветке `beta/v5.0.0rc1`. Установить именно это дерево на Windows, macOS или Linux можно так:
+Публичная бета находится в ветке `feat/karox-v5-competitive-upgrade`. Установить именно это дерево на Windows, macOS или Linux можно так:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 # или
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 ```
 
 После публикации соответствующего pre-release тега в PyPI команды `pipx install --pre karox-runtime` и `uv tool install --prerelease=allow karox-runtime` будут устанавливать тот же кандидат.

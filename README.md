@@ -62,12 +62,13 @@ until their own evidence gates pass.
 
 ## Install
 
-The public beta lives on the `beta/v5.0.0rc1` branch. Install that exact tree on Windows, macOS, or Linux:
+The public beta lives on the `feat/karox-v5-competitive-upgrade` branch. Install
+that exact tree on Windows, macOS, or Linux:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 # or
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@beta/v5.0.0rc1"
+uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 ```
 
 When the matching tagged pre-release is published to PyPI, `pipx install --pre karox-runtime` and `uv tool install --prerelease=allow karox-runtime` resolve the same candidate.
@@ -319,11 +320,8 @@ The suite is 3356 tests. CI runs:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3356 tests`.
-
-2420 is the number collected under `tests` by the documented runner. The
-repository root collects 3361 because a bare pytest collection also finds five
-legacy KaroX 4 checks under `scripts/`.
+A clean run reports `Ran 3356 tests`. The repository root collects 3361 because
+a bare pytest collection also finds five legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other
 release checks include:

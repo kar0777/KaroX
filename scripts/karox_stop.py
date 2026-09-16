@@ -46,6 +46,7 @@ def process_alive(pid: Any) -> bool:
                 ["tasklist", "/FI", f"PID eq {number}", "/NH"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=3,
                 check=False,
             )
@@ -61,6 +62,7 @@ def process_alive(pid: Any) -> bool:
                 ["ps", "-p", str(number), "-o", "stat="],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=3,
                 check=False,
             ).stdout.strip()
@@ -85,6 +87,7 @@ def process_command_line(pid: Any) -> str:
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -96,6 +99,7 @@ def process_command_line(pid: Any) -> str:
             ["ps", "-p", str(number), "-o", "command="],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=3,
             check=False,
         ).stdout.strip()
@@ -151,6 +155,7 @@ def terminate_process(pid: Any, grace_seconds: float = 5.0) -> dict[str, Any]:
                 ["taskkill", "/PID", str(number), "/T", "/F"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=15,
                 check=False,
             )

@@ -9,12 +9,28 @@ from pathlib import Path
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
 from karox.check_jobs import CheckJobError, CheckJobManager, developer_worker_launcher
+from karox.process_identity import process_is_running
 from karox.repository_lease import RepositoryLeaseStore
 
 
 class _DummyWorker:
     def poll(self):
         return None
+
+
+def _await_child_exit(status: dict, deadline_seconds: float = 5.0) -> None:
+    """Await the child's real exit before TemporaryDirectory cleanup.
+
+    Windows keeps the child's current-directory handles alive until the process
+    is gone; a parallel worker can reach rmtree a few milliseconds before the
+    detached developer worker finishes exiting.
+    """
+    child_pid = status.get("child_pid") if isinstance(status, dict) else None
+    if not isinstance(child_pid, int) or child_pid <= 0:
+        return
+    gone_by = time.monotonic() + deadline_seconds
+    while process_is_running(child_pid) and time.monotonic() < gone_by:
+        time.sleep(0.02)
 
 
 class DeveloperCommandJobTests(unittest.TestCase):
@@ -119,6 +135,7 @@ class DeveloperCommandJobTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(status["status"], "passed", status)
             self.assertEqual(status["exit_code"], 0)
+            _await_child_exit(status)
             log = manager.logs(job_id)["log"]["text"]
             self.assertIn("DURABLE_DEV_JOB_OK", log)
 
@@ -174,6 +191,7 @@ class DeveloperCommandJobTests(unittest.TestCase):
             while time.monotonic() < release_deadline and leases.load(root) is not None:
                 time.sleep(0.05)
             self.assertIsNone(leases.load(root))
+            _await_child_exit(manager.status(job_id))
 
     def test_real_developer_worker_launcher_is_exported(self) -> None:
         self.assertTrue(callable(developer_worker_launcher))

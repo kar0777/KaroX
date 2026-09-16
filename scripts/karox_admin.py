@@ -121,6 +121,7 @@ def process_alive(pid: Any) -> bool:
                 ["tasklist", "/FI", f"PID eq {number}", "/NH"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=3,
                 check=False,
             )
