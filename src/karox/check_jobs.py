@@ -624,14 +624,16 @@ class CheckJobStore:
 WorkerLauncher = Callable[[Path], subprocess.Popen[Any]]
 
 
-def _worker_creationflags() -> int:
+def _worker_creationflags(breakaway: bool = True) -> int:
     if os.name != "nt":
         return 0
-    return int(
+    flags = int(
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     )
+    if breakaway:
+        flags |= int(getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000))
+    return flags
 
 
 def _child_spawn_kwargs() -> dict[str, Any]:
@@ -688,17 +690,34 @@ def developer_worker_launcher(state_path: Path) -> subprocess.Popen[Any]:
         environment["PYTHONPATH"] = str(package_parent) + (
             os.pathsep + existing if existing else ""
         )
-    return subprocess.Popen(
-        argv,
-        cwd=state_path.parent,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        creationflags=_worker_creationflags(),
-        start_new_session=(os.name != "nt"),
-    )
+    try:
+        return subprocess.Popen(
+            argv,
+            cwd=state_path.parent,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=_worker_creationflags(),
+            start_new_session=(os.name != "nt"),
+        )
+    except OSError:
+        # Hosts that run the runtime inside a restrictive job object (the
+        # hosted runner among them) refuse CREATE_BREAKAWAY_FROM_JOB at spawn
+        # time. The breakaway only changes the process-tree teardown; retry
+        # without it so a durable worker can start on those hosts too.
+        return subprocess.Popen(
+            argv,
+            cwd=state_path.parent,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=_worker_creationflags(breakaway=False),
+            start_new_session=(os.name != "nt"),
+        )
 
 
 def _test_files(repository: Path) -> list[str]:
