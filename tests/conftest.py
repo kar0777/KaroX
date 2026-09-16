@@ -77,13 +77,18 @@ def pytest_configure(config: Any) -> None:
     if os.environ.get("KAROX_CI_SIGINT_TRACE", "").strip() != "1":
         return
     if os.environ.get("KAROX_CI_SIGSWALLOW", "").strip() == "1":
-        # Swallow SIGINT on the runner: the interrupt arrives from console
-        # plumbing rather than the user, and stopping the shard mid-run is
-        # worse than losing the synthetic Ctrl-C.
+
         def _swallow(signum: int, frame: Any) -> None:
             return None
 
+        # Swallow console-controlled interrupts on the runner: the shard step
+        # receives a console Ctrl-C/Ctrl-Break mid-run while every test has
+        # passed, and stopping the shard mid-run is worse than losing the
+        # synthetic Ctrl-C.
         signal.signal(signal.SIGINT, _swallow)
+        breakflag = getattr(signal, "SIGBREAK", None)
+        if breakflag is not None:
+            signal.signal(breakflag, _swallow)
         return
     signal.signal(signal.SIGINT, _diagnostic_sigint)
 
