@@ -51,7 +51,7 @@ from .sessions import (
     current_mutation_lease,
     mutation_lease_context,
 )
-from .task_state import TaskStateStore
+from .task_state import FactOrigin, TaskFact, TaskStateStore
 from .verification import discover_verification_commands
 
 
@@ -287,6 +287,16 @@ KNOWN_HOSTED_TOOL_NAMES: frozenset[str] = (
 # A hosted call's deadline is also the ceiling on how long checks.run may take,
 # and no real repository verifies itself in thirty seconds.
 DEFAULT_HOSTED_DEADLINE_SECONDS = 600.0
+
+# Chat-native approval is an opt-in compatibility path for hosted clients that
+# cannot carry MCP elicitation. The user's explicit yes/no stays in the chat;
+# the agent records only an exact, short-lived push grant in the durable
+# workstream. KaroX binds it to the current HEAD + remote + branch and consumes
+# it atomically before execution. Browser/protocol approval remains available
+# for users who want a model-independent confirmation channel.
+_CHAT_APPROVAL_FACT = "chat_user_approval"
+_CHAT_APPROVAL_MAX_AGE_SECONDS = 300.0
+_CHAT_APPROVAL_EVIDENCE = "user.chat.explicit_approval"
 
 # Mutation leases are intentionally short and kept alive by a heartbeat while
 # a hosted call is actually running. A disconnected client or killed worker can
@@ -663,6 +673,89 @@ class CoreToolBridge:
             bypass_mode=self._bypass_mode,
         )
 
+    def _consume_chat_user_approval(
+        self,
+        *,
+        command: CoreCommand,
+        repository: Path,
+        workstream_id: Optional[str],
+        decision: Any,
+    ) -> bool:
+        """Consume one exact user approval relayed from the current chat.
+
+        Some hosted ChatGPT sessions cannot carry MCP elicitation.  In that
+        environment the user may explicitly answer yes/no in the chat instead.
+        The agent records that answer as ``chat_user_approval`` in the active
+        workstream.  This compatibility path is deliberately narrow: only
+        ``git.push`` is accepted, the fact must be fresh and explicitly marked
+        as a user-chat report, and the current HEAD/remote/branch must still
+        match.  The fact is atomically replaced with a verified consumed record
+        before a confirmation token is issued, so one chat approval cannot be
+        replayed for a second push.
+
+        This is an opt-in convenience boundary, not a model-independent proof of
+        user presence.  Protocol elicitation/browser approval remains stronger
+        because the model cannot manufacture those signals by itself.
+        """
+        if command.name != "git.push":
+            return False
+        state = self.task_states.load_optional(
+            self.session_id,
+            workstream_id=workstream_id,
+        )
+        if state is None:
+            return False
+        approval = state.facts.get(_CHAT_APPROVAL_FACT)
+        if approval is None or approval.origin is not FactOrigin.REPORTED_BY_AGENT:
+            return False
+        if tuple(approval.evidence) != (_CHAT_APPROVAL_EVIDENCE,):
+            return False
+        age = time.time() - float(approval.recorded_at)
+        if age < -30.0 or age > _CHAT_APPROVAL_MAX_AGE_SECONDS:
+            return False
+        value = approval.value
+        if not isinstance(value, Mapping) or value.get("approved") is not True:
+            return False
+
+        action = action_for_command(
+            command,
+            repository=repository,
+            reversible_by_checkpoint=False,
+        )
+        expected = {
+            "action_kind": "git.push",
+            "remote": command.arguments.get("remote"),
+            "branch": command.arguments.get("branch"),
+            "head": action.details.get("head"),
+        }
+        if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+            return False
+
+        consumed = dict(value)
+        consumed.update(
+            {
+                "approved": False,
+                "consumed": True,
+                "action_digest": decision.action_digest,
+            }
+        )
+        try:
+            self.task_states.checkpoint(
+                self.session_id,
+                {
+                    _CHAT_APPROVAL_FACT: TaskFact(
+                        consumed,
+                        FactOrigin.VERIFIED,
+                        evidence=("hosted.chat_approval.consume",),
+                    )
+                },
+                expected_revision=state.revision,
+                workstream_id=workstream_id,
+            )
+        except SessionError:
+            return False
+        return True
+
     @staticmethod
     def _approval_error(
         tool_name: str, command: CoreCommand, decision: Any
@@ -823,9 +916,18 @@ class CoreToolBridge:
             if capability_requires_explicit_approval(capability)
         )
         if _approved_action_digest is not None or explicit_capabilities:
-            decision = self._approval_decision(command, Path(project_entry.path))
+            project_repository = Path(project_entry.path)
+            decision = self._approval_decision(command, project_repository)
             if _approved_action_digest is None:
-                raise self._approval_error(tool_name, command, decision)
+                if self._consume_chat_user_approval(
+                    command=command,
+                    repository=project_repository,
+                    workstream_id=workstream_id,
+                    decision=decision,
+                ):
+                    _approved_action_digest = decision.action_digest
+                else:
+                    raise self._approval_error(tool_name, command, decision)
             if decision.action_digest != _approved_action_digest:
                 raise HostedBridgeAccessDenied(
                     "approved action no longer matches the current tool call"

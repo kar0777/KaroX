@@ -235,6 +235,117 @@ class HostedSmartStopTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
         self.assertEqual(remote_head, result["data"]["commit_sha"])
+        self._exercise_chat_user_approval(bridge, branch)
+
+    def _exercise_chat_user_approval(self, bridge: CoreToolBridge, branch: str) -> None:
+        """A user yes/no in chat becomes one exact, fresh push grant."""
+        remote = self.root / "chat-approved-remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "chat-origin", str(remote)],
+            cwd=self.repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        states = TaskStateStore(self.sessions)
+        states.bootstrap(
+            "hosted-session",
+            {
+                "objective": TaskFact(
+                    "prepare the beta and push it after I confirm in chat",
+                    FactOrigin.REPORTED_BY_AGENT,
+                )
+            },
+            workstream_id="ship-chat",
+        )
+        state = states.load("hosted-session", workstream_id="ship-chat")
+        states.checkpoint(
+            "hosted-session",
+            {
+                "chat_user_approval": TaskFact(
+                    {
+                        "approved": True,
+                        "action_kind": "git.push",
+                        "remote": "chat-origin",
+                        "branch": branch,
+                        "head": head,
+                    },
+                    FactOrigin.REPORTED_BY_AGENT,
+                    evidence=("user.chat.explicit_approval",),
+                )
+            },
+            expected_revision=state.revision,
+            workstream_id="ship-chat",
+        )
+        arguments = {
+            "remote": "chat-origin",
+            "branch": branch,
+            "workstream_id": "ship-chat",
+        }
+        chat_result = bridge.execute(
+            "karox.git.push",
+            arguments,
+            idempotency_key="chat-approved-push-1",
+        )
+        self.assertTrue(chat_result["ok"], chat_result)
+        self.assertTrue(chat_result["data"]["pushed"])
+        consumed = states.load("hosted-session", workstream_id="ship-chat").facts[
+            "chat_user_approval"
+        ]
+        self.assertIs(consumed.origin, FactOrigin.VERIFIED)
+        self.assertTrue(consumed.value["consumed"])
+        self.assertFalse(consumed.value["approved"])
+
+        with self.assertRaises(HostedApprovalRequired):
+            bridge.execute(
+                "karox.git.push",
+                arguments,
+                idempotency_key="chat-approved-push-2",
+            )
+
+        # A fresh reported approval for another HEAD is still exact-bound. A
+        # mismatched commit cannot consume it and falls back to the normal gate.
+        latest = states.load("hosted-session", workstream_id="ship-chat")
+        states.checkpoint(
+            "hosted-session",
+            {
+                "chat_user_approval": TaskFact(
+                    {
+                        "approved": True,
+                        "action_kind": "git.push",
+                        "remote": "chat-origin",
+                        "branch": branch,
+                        "head": "0" * 40,
+                    },
+                    FactOrigin.REPORTED_BY_AGENT,
+                    evidence=("user.chat.explicit_approval",),
+                )
+            },
+            expected_revision=latest.revision,
+            workstream_id="ship-chat",
+        )
+        with self.assertRaises(HostedApprovalRequired):
+            bridge.execute(
+                "karox.git.push",
+                arguments,
+                idempotency_key="stale-chat-approval",
+            )
 
     def test_cached_command_run_push_routes_to_the_same_guarded_approval(self) -> None:
         bridge = self.bridge()

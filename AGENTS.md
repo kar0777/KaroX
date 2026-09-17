@@ -29,7 +29,7 @@ KaroX should be highly autonomous for local, reversible engineering work and str
 - A blocked action is not a blocked mission. Continue every independent read/edit/check that can still make progress, collect unresolved approval gates, and ask the user only when the remaining work actually depends on them (normally at the end of the response).
 - Unknown/opaque high-consequence commands stay reviewable instead of being handed unrestricted authority, but one such command must not stop unrelated work.
 - Local `git.commit` is a guarded reversible checkpoint. It never implies permission to push.
-- Remote Git push is available only through the dedicated `karox.git.push` path and a machine-verifiable one-shot user approval for the exact action. Never smuggle push through `command.run`, shell wrappers, Python/Node eval, or another tool.
+- Remote Git push is available only through the dedicated `karox.git.push` path and an exact one-shot user approval for the current HEAD + remote + branch. Native MCP elicitation is preferred; a hosted ChatGPT user may explicitly opt into chat-native confirmation, which is relayed into the active workstream and consumed once. Never smuggle push through `command.run`, shell wrappers, Python/Node eval, or another tool.
 - Force-push, publish, deploy/release, auth/account mutations, payments, and other irreversible/external effects must stay behind their explicit guarded surfaces. Do not weaken these boundaries to make a test pass.
 - Approval material/tokens must never be exposed to the model. Protocol `requestState` must be integrity-protected, short-lived, exact-action-bound, and one-shot.
 - Never print/store raw credentials. Use opaque OS-keyring references or user takeover for login/CAPTCHA/2FA/consent/payment review.
