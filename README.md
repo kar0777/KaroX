@@ -5,6 +5,8 @@
 **A local control plane for autonomous AI coding — one runtime, many agents, your repository.**
 
 ![Status](https://img.shields.io/badge/status-beta-f59e0b)
+![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
+![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
 ![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
@@ -13,7 +15,7 @@
 Run AI coding agents on local Git repositories without giving one provider
 control of your permissions, sessions, or evidence.
 
-**Beta channel · `5.0.0rc1`**
+**Beta channel · `5.0.0rc1`** · **[Supporters & acknowledgements](SUPPORTERS.md)**
 
 </div>
 
@@ -62,16 +64,21 @@ until their own evidence gates pass.
 
 ## Install
 
-The public beta lives on the `feat/karox-v5-competitive-upgrade` branch. Install
-that exact tree on Windows, macOS, or Linux:
+The public beta is **`v5.0.0rc1`**. Install the published pre-release on
+Windows, macOS, or Linux:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+pipx install --pre karox-runtime
 # or
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+uv tool install --prerelease=allow karox-runtime
 ```
 
-When the matching tagged pre-release is published to PyPI, `pipx install --pre karox-runtime` and `uv tool install --prerelease=allow karox-runtime` resolve the same candidate.
+For source-level testing of the exact release candidate, install the matching
+Git tag instead of a moving branch:
+
+```bash
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc1"
+```
 
 Then open a terminal inside the Git repository you want to work with and run:
 
@@ -312,15 +319,21 @@ unsupported data instead of dropping it.
 
 See [Migrating from KaroX 4.x to KaroX 5](docs/MIGRATION_V4_TO_V5.md).
 
+## Sponsors & supporters
+
+KaroX is grateful to every team that has provided model/API access, compute, browser capacity, research tooling, observability, search, or other concrete development support: **routing.run, Vivgrid, Puter, OmniaKey, Browser Use, Verda, Tinfoil, fal, Tavily, Cohere, Chutes, EmpirioLabs, Langfuse, AIReiter, Scout APM, APIMaster, Merge Gateway, OpenRouter, and Weights & Biases (W&B)**.
+
+The same 19 names are carried by the KaroX 5 sponsor registry used by `/sponsors`. See [SUPPORTERS.md](SUPPORTERS.md) for links, support categories, and individual acknowledgements. A listing is a thank-you, not an endorsement of a provider's security, privacy, pricing, or model claims.
+
 ## Verification
 
-The suite is 3356 tests. CI runs:
+The suite is 3362 tests. CI runs:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3356 tests`. The repository root collects 3361 because
+A clean run reports `Ran 3362 tests`. The repository root collects 3367 because
 a bare pytest collection also finds five legacy KaroX 4 checks under `scripts/`.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

@@ -1,90 +1,93 @@
-# Security Policy
+# KaroX Security Policy
 
-## Supported Versions
+KaroX exposes a selected local Git repository to compatible AI clients through guarded local tools, MCP, and provider integrations. It reduces authority with repository confinement, explicit capabilities, secret handling, leases, idempotency, and evidence. It is not an operating-system sandbox: an approved local process still runs with the OS rights of the KaroX user.
 
-KaroX 5.x is in active development. Security fixes are applied to the latest
-release on the `main` branch.
+## Supported versions
 
-## Reporting a Vulnerability
+KaroX 5 is currently a public pre-release (`5.0.0rc1`). Security fixes for KaroX 5 are developed and validated on the current release tree and then promoted to `main`. The stable 4.x channel remains separate until the 5.0 stable evidence gates are complete.
 
-Email security@karoX.dev (replace with your contact). Do **not** open a public
-issue for security vulnerabilities.
+## Reporting a vulnerability
 
-- We acknowledge within 48 hours.
-- We provide an estimated timeline within 5 business days.
-- We credit reporters in release notes unless they prefer to remain anonymous.
+Do **not** publish credentials, exploitable details, or private-repository data in a public issue. Contact the repository maintainer privately through the repository owner's GitHub contact channel and include only the minimum sanitized reproduction needed to understand the issue.
 
-## Credential Handling
+Useful details are: KaroX version, operating system, access profile, affected tool/endpoint, expected result, actual result, and a reproduction using synthetic data. Never include live bridge credentials, provider keys, tunnel credentials, cookies, passwords, or private source.
 
-KaroX stores all credentials in the operating-system keyring
-(`keyring` library on Windows/macOS, Secret Service on Linux). Credentials are
-**never** written to:
+## Credential handling
 
-- stdout, stderr, or log files
-- JSON configuration files
-- SQLite databases (typed transcript payloads are redacted)
-- Git-tracked files
-- Wheel packages
+KaroX stores provider and bridge credentials in the operating-system keyring where the supported flow provides one. Credentials are filtered/redacted at hosted process and tool boundaries and are not intended to be persisted in normal JSON configuration, task state, Git-tracked files, wheel contents, or public logs.
 
-The `karox bridge credential rotate-key` command and the `/connect` Detail
-"Copy authorization key" action deliver secrets only via the clipboard with
-a 120-second auto-clear. The `--reveal-secret` flag requires explicit `--yes`
-confirmation.
+The bridge authorization-key copy flow uses short-lived clipboard delivery rather than returning the secret in ordinary model-visible output. Any explicit secret-reveal path remains separately confirmed.
 
-## Threat Model
+## Local security boundary
 
-| Asset | Threat | Mitigation |
-|-------|--------|------------|
-| Bridge credential | Leak via stdout/log | Keyring-only storage; redaction at every process boundary |
-| OAuth approval password | Stale after rotation | Resolved at copy-time from keyring; no plaintext in logs |
-| Public tunnel URL | Unauthorized access | Bearer token required; 401 on unauthenticated requests |
-| Provider API key | Exposure in transit | Keyring-backed; never passed as CLI argument in production paths |
-| Workspace files | Accidental deletion | Transaction model with checkpoints; no `git reset` in undo path |
+KaroX is designed around these controls:
 
-## Access Profiles
+- repository reads and writes are confined to the selected repository root;
+- path traversal and common credential/secret paths are blocked;
+- high-risk mutations are separated from ordinary development work;
+- retries of mutating operations use idempotency and durable task state;
+- cross-process repository mutation uses leases/fencing;
+- verification results, Git status, Git diff, and artifacts provide evidence instead of relying on model narration;
+- browser and desktop automation are bounded by explicit capabilities and user takeover for login/CAPTCHA/2FA-sensitive interactions;
+- support/evidence surfaces redact sensitive-looking values.
 
-KaroX exposes three stable access profiles. The friendly names used in the UI map
-to durable policy identifiers:
+Filtering reduces risk but cannot recognize every application-specific secret. Do not use real production/customer secrets in repositories prepared for agent experiments.
 
-- **Observe** -> `read_only`: repository and Git inspection plus `browser.read`
-  for non-mutating observation of the localhost UI. It does not grant
-  `browser.input` or repository mutation.
-- **Build** -> `workspace_write`: repository mutation, approved process/check
-  execution, Git status/diff, selected MCP calls, `browser.read`, and
-  `browser.input` for driving the localhost UI. Build does **not** grant
-  `git.commit`.
-- **Advanced** -> `elevated`: Build capabilities plus guarded local commit,
-  `desktop.input`, and `network` for explicitly elevated work. The product's
-  explicit Bypass mode uses this elevated capability contract for autonomous
-  repository-scoped destructive work; it still does not waive external/system
-  boundaries.
+## Access profiles and external effects
 
-Routine edits are deliberately approval-free. In protected mode, destructive
-source deletion is deferred for user review instead of being inferred from a
-checkpoint or broad cleanup wording; Bypass may perform repository-scoped
-deletions autonomously. A stopped action is per-action, not a mission stop: the
-agent should continue independent work and collect unresolved gates for the end.
+KaroX exposes three stable access profiles:
 
-Even Advanced does not grant standing `git push`, package publishing, or
-authentication authority. Those effects remain outside every stable access
-profile. A durable Advanced ChatGPT Web bridge may expose the dedicated
-`karox.git.push` operation, but each invocation crosses a separate one-shot user
-approval bound to the exact action; ordinary developer commands remain unable to
-push. Modern MCP clients use the native elicitation round. For ChatGPT sessions
-where the user explicitly chooses chat-native confirmation, KaroX may consume a
-fresh `yes` relayed into the active workstream, but only for the exact current
-HEAD + remote + branch and only once. This convenience mode trusts the hosted
-agent to relay the user's chat answer faithfully; protocol elicitation remains
-the stronger model-independent confirmation channel. The browser approval page
-remains an optional fallback for users who prefer that stronger separation.
+- **Observe** (`read_only`) — repository/Git inspection plus `browser.read` for non-mutating browser observation; it does not grant `browser.input`.
+- **Build** (`workspace_write`) — repository mutation, approved checks/processes, selected MCP actions, `browser.read`, and bounded `browser.input`. Build does not grant `git.commit`.
+- **Advanced** (`elevated`) — Build capabilities plus guarded local `git.commit`, desktop input, network access, and other explicitly elevated local developer actions.
 
-## What KaroX Does Not Do
+Normal reads, edits, checks, local development commands, and permitted local commits should not require nuisance confirmation loops. Protected destructive work can still stop at a meaningful boundary.
 
-- KaroX does not bypass CAPTCHA, 2FA, or login flows. User takeover is
-  requested when these are encountered.
-- KaroX does not auto-install system software without explicit consent.
-- KaroX does not disable TLS verification.
-- KaroX does not perform `git push` or `git reset` autonomously. A guarded local
-  commit is available in Advanced/`elevated`; remote push requires the dedicated
-  exact-action one-shot user approval and never authorizes force-push.
-- KaroX does not read passwords or paste secrets into external forms.
+`git push`, force-push, package publishing, deployment, authentication changes, and release publication are **not standing capabilities of any stable access profile**. They require dedicated guarded surfaces. Normal push is exact-action and one-shot; force-push never inherits that approval. The KaroX 5 pre-release publisher likewise validates the exact tag, commit, successful CI evidence, configured GitHub remote, and a fresh exact user approval before creating the remote pre-release tag.
+
+For MCP clients with native elicitation, that protocol is the strongest model-independent confirmation path. ChatGPT sessions may also use KaroX's explicit chat-native confirmation compatibility path: a fresh `yes` is bound to one exact action in the active workstream, consumed once, and cannot be replayed for a second push or publication.
+
+## Command and build risk
+
+A repository may contain executable scripts in package manifests, Makefiles, shell scripts, test hooks, build systems, or generated tooling. Running an approved build/test command can execute those scripts with the KaroX user's OS privileges.
+
+Before granting Build or Advanced access to an unfamiliar repository:
+
+1. inspect it in Observe mode;
+2. review build, test, install, and hook scripts;
+3. use a disposable branch/environment where practical;
+4. keep personal/production/customer data out of the workspace;
+5. review the final diff and verification evidence before accepting a commit or external effect.
+
+## Model-provider boundary
+
+KaroX controls the local bridge; it does **not** by itself prove that a connected model provider offers confidential inference, zero retention, trusted execution, or protection from provider operators.
+
+When approved repository context is sent to an external model endpoint, evaluate separately:
+
+- exactly what data leaves the local machine;
+- prompt/output logging and retention;
+- who can access plaintext;
+- whether confidential-computing or attestation claims are independently verifiable;
+- authentication, retry, and failure behavior;
+- provider terms and account-owner requirements.
+
+See [the private-inference use case](docs/private-inference-use-case.md) and [research overview](RESEARCH.md) for the evidence standard KaroX uses before making provider-side privacy claims.
+
+## Threat model summary
+
+| Asset | Example threat | KaroX mitigation |
+| --- | --- | --- |
+| Bridge credential | Leak in normal output/logs | keyring-backed flows, secret filtering, redaction |
+| Provider API key | Exposure through config or argv | guarded credential storage/injection and output filtering |
+| Public bridge URL | Unauthorized tool calls | authenticated bridge/session boundary |
+| Workspace files | Accidental/destructive mutation | repository confinement, access profiles, transactions/checkpoints, evidence |
+| Remote Git | Unintended push/rewrite | dedicated exact-action push; force-push never implied |
+| Pre-release publication | Wrong commit/tag published | exact tag/version/CI validation plus one-shot approval and remote reconciliation |
+| Browser session | Login/payment/2FA action without user | bounded input policy and explicit user takeover |
+
+## What KaroX cannot guarantee
+
+KaroX cannot fully protect against a compromised local machine/user account, malicious code already present in an approved repository, a user intentionally granting excessive authority, unknown secret formats, provider-side behavior outside the local KaroX boundary, or logic errors in agent-generated code.
+
+KaroX also does not bypass CAPTCHA or 2FA, disable TLS verification, silently authenticate to external services, or turn a failed verification step into success.

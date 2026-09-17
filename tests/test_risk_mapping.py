@@ -66,6 +66,9 @@ class BrowserMappingTests(unittest.TestCase):
             ("click", "browser.input"),
             ("upload", "browser.upload"),
             ("screenshot", "browser.screenshot"),
+            ("release.integrate_main_lineage", "git.commit"),
+            ("release.check_prerelease", "git.read"),
+            ("release.publish_prerelease", "browser.input"),
         ):
             with self.subTest(action=action):
                 self.assertEqual(

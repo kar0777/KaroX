@@ -501,6 +501,18 @@ def execute_browser_command(
             "action": action,
             **handler(runtime, action, payload, deadline_seconds),
         }
+    if action.startswith("release."):
+        # Release publication is also kept behind the stable hot command surface,
+        # but the hot action itself must consume one exact fresh chat approval
+        # before it can push the matching pre-release tag.
+        from importlib import reload
+        from . import release_hot_actions
+
+        handler = reload(release_hot_actions).execute_release_action
+        return {
+            "action": action,
+            **handler(runtime, action, payload, deadline_seconds),
+        }
     if action.startswith("app."):
         from .desktop_apps import execute_desktop_app_action
 

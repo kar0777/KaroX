@@ -95,6 +95,12 @@ BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "request_user_takeover": "browser.read",
     "resume_after_user_takeover": "browser.read",
     "close": "browser.input",
+    # Stable hot release actions. The publish action carries its own exact,
+    # one-shot chat approval and remote reconciliation; mapping it explicitly
+    # prevents a future unknown-action fallback from silently changing risk.
+    "release.integrate_main_lineage": "git.commit",
+    "release.check_prerelease": "git.read",
+    "release.publish_prerelease": "browser.input",
 }
 
 # Git subcommands that are never allowed to happen on a model's say-so. The

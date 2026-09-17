@@ -1,0 +1,169 @@
+name: RMCode Review
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      diff_url:
+        required: true
+        type: string
+      pr_title:
+        required: false
+        type: string
+        default: ""
+      callback_url:
+        required: true
+        type: string
+      auth_token:
+        required: true
+        type: string
+      version:
+        required: false
+        type: string
+        default: 'v1.1.1'
+      extractor_sha256:
+        required: true
+        type: string
+      source_repository:
+        required: false
+        type: string
+      source_base_sha:
+        required: false
+        type: string
+        default: ""
+      review_tier:
+        required: false
+        type: string
+        default: 'free'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  extract-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.auth_token }}"
+          echo "::add-mask::${{ inputs.callback_url }}"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Install extractor runtime dependencies
+        run: |
+          # Install the extractor's own deps in an isolated dir so npm never
+          # parses the customer's package.json. Customer monorepos commonly use
+          # the pnpm/yarn "workspace:" protocol or conflicting peer deps, which
+          # break a plain "npm install" run in the repo root. Symlink the result
+          # into the workspace so the extractor resolves them at repo root.
+          DEPS_DIR="${RUNNER_TEMP}/rmcode-extractor-deps"
+          mkdir -p "${DEPS_DIR}"
+          (cd "${DEPS_DIR}" && npm init -y >/dev/null 2>&1 && npm install --no-save --legacy-peer-deps web-tree-sitter@0.20.8 tree-sitter-wasms@0.1.13)
+          ln -sfn "${DEPS_DIR}/node_modules" "${GITHUB_WORKSPACE}/node_modules"
+          ln -sfn "${DEPS_DIR}/node_modules" "${RUNNER_TEMP}/node_modules"
+
+      - name: Download extractor
+        run: |
+          if [ "${{ inputs.review_tier }}" = "max" ]; then
+            extractor_path="${RUNNER_TEMP}/rmcode-extractor.mjs"
+            checksum_path="${RUNNER_TEMP}/rmcode-extractor.mjs.sha256"
+          else
+            extractor_path="extractor.mjs"
+            checksum_path="extractor.mjs.sha256"
+          fi
+          curl --fail --location --show-error --silent \
+            "https://storage.googleapis.com/rmcode-releases/extractor/${{ inputs.version }}/extractor.mjs" \
+            --output "$extractor_path"
+          printf '%s  %s\n' '${{ inputs.extractor_sha256 }}' "$extractor_path" > "$checksum_path"
+          sha256sum -c "$checksum_path"
+          echo "RMCODE_EXTRACTOR_PATH=$extractor_path" >> "$GITHUB_ENV"
+
+      - name: Prepare benchmark-compatible diff
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          base_sha="${{ inputs.base_sha }}"
+          context_base_sha="$base_sha"
+          diff_file="$RUNNER_TEMP/rmcode-pr.diff"
+          if git fetch --no-tags --depth=1 origin "$base_sha" \
+            && git fetch --no-tags --depth=1 origin "${{ inputs.head_sha }}" \
+            && git checkout --force "$base_sha" \
+            && git diff --no-ext-diff --abbrev=14 "$base_sha" "${{ inputs.head_sha }}" > "$diff_file"; then
+            echo "Generated diff from git objects."
+          else
+            echo "Git object diff unavailable; falling back to GitHub diff API..."
+            curl --fail --location --show-error --silent \
+              "${{ inputs.diff_url }}" \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3.diff" \
+              --output "$diff_file"
+          fi
+          if [ -n "${{ inputs.source_repository }}" ] && [ "${{ inputs.source_repository }}" != "${{ github.repository }}" ]; then
+            if [ "${{ inputs.review_tier }}" = "max" ] && [ -f .github/workflows/rmcode-review.yml ]; then
+              echo "RMCODE_WORKFLOW_SHA256=$(sha256sum .github/workflows/rmcode-review.yml | awk '{print $1}')" >> "$GITHUB_ENV"
+            fi
+            source_pr="$(python3 -c 'import os, re; repo = os.environ.get("GITHUB_REPOSITORY", ""); match = re.search(r"__PR(\d+)__", repo); print(match.group(1) if match else "")')"
+            if [ -n "$source_pr" ]; then
+              source_base_sha="${{ inputs.source_base_sha }}"
+              if [ -z "$source_base_sha" ]; then
+                source_base_sha="$(git log -1 --format=%B "$base_sha" | sed -n 's/^RMCode-Source-Base-SHA: //p' | head -n 1)"
+              fi
+              if [ -n "$source_base_sha" ]; then
+                echo "Using pinned source benchmark checkout for ${{ inputs.source_repository }}#$source_pr at $source_base_sha"
+              else
+                echo "Resolving source benchmark checkout for ${{ inputs.source_repository }}#$source_pr"
+                source_base_sha="$(curl --fail --location --show-error --silent \
+                    "https://api.github.com/repos/${{ inputs.source_repository }}/pulls/$source_pr" \
+                    -H "Authorization: token $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["base"]["sha"])')" || source_base_sha=""
+              fi
+              source_remote_url="https://github.com/${{ inputs.source_repository }}.git"
+              if [ -n "$source_base_sha" ] \
+                && git fetch --no-tags --depth=1 "$source_remote_url" "$source_base_sha" \
+                && git checkout --force "$source_base_sha"; then
+                context_base_sha="$source_base_sha"
+                echo "Checked out source benchmark base for context extraction."
+              else
+                echo "Could not prepare source benchmark checkout; using dispatched base checkout."
+              fi
+            fi
+          fi
+          echo "Diff size: $(wc -c < "$diff_file") bytes"
+          echo "RMCODE_CONTEXT_BASE_SHA=$context_base_sha" >> "$GITHUB_ENV"
+
+      - name: Extract context and send to API
+        env:
+          REPOMAP_MAX_CHARS: "80000"
+          RMCODE_EXTRACTOR_VERSION: "${{ inputs.version }}"
+          RMCODE_EXTRACTOR_SHA256: "${{ inputs.extractor_sha256 }}"
+          PR_TITLE: "${{ inputs.pr_title }}"
+        run: |
+          if [ -z "${RMCODE_WORKFLOW_SHA256:-}" ] && [ -f .github/workflows/rmcode-review.yml ]; then
+            export RMCODE_WORKFLOW_SHA256="$(sha256sum .github/workflows/rmcode-review.yml | awk '{print $1}')"
+          fi
+          node "$RMCODE_EXTRACTOR_PATH" \
+            --pr="${{ inputs.pr_number }}" \
+            --diff-file="$RUNNER_TEMP/rmcode-pr.diff" \
+            --base-sha="$RMCODE_CONTEXT_BASE_SHA" \
+            --pr-title="$PR_TITLE" \
+            --callback="${{ inputs.callback_url }}" \
+            --token="${{ inputs.auth_token }}" \
+            --source-repo="${{ inputs.source_repository || github.repository }}" \
+            --tier="${{ inputs.review_tier }}"

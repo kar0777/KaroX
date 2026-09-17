@@ -5,6 +5,8 @@
 **Локальный control plane для автономной AI-разработки — один runtime, много агентов, ваш репозиторий.**
 
 ![Status](https://img.shields.io/badge/status-beta-f59e0b)
+![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
+![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
 ![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
@@ -13,7 +15,7 @@
 Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
 провайдеру контроль над разрешениями, сессиями и доказательствами работы.
 
-**Beta channel · `5.0.0rc1`**
+**Beta channel · `5.0.0rc1`** · **[Спонсоры и благодарности](SUPPORTERS_RU.md)**
 
 </div>
 
@@ -65,15 +67,19 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Публичная бета находится в ветке `feat/karox-v5-competitive-upgrade`. Установить именно это дерево на Windows, macOS или Linux можно так:
+Публичная бета — **`v5.0.0rc1`**. Установить опубликованный pre-release на Windows, macOS или Linux можно так:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+pipx install --pre karox-runtime
 # или
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+uv tool install --prerelease=allow karox-runtime
 ```
 
-После публикации соответствующего pre-release тега в PyPI команды `pipx install --pre karox-runtime` и `uv tool install --prerelease=allow karox-runtime` будут устанавливать тот же кандидат.
+Для проверки исходников именно этого кандидата используй фиксированный Git-тег, а не движущуюся ветку:
+
+```bash
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc1"
+```
 
 После установки открой терминал внутри нужного Git-репозитория и запусти:
 
@@ -304,6 +310,12 @@ push-поверхности. Неудачный check нельзя превра�
 Полные правила: [SECURITY.md](SECURITY.md). Диагностика:
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
+## Спонсоры и поддержавшие проект
+
+KaroX благодарит все команды, которые дали проекту model/API access, compute, browser capacity, research tooling, observability, search или другую реальную поддержку разработки: **routing.run, Vivgrid, Puter, OmniaKey, Browser Use, Verda, Tinfoil, fal, Tavily, Cohere, Chutes, EmpirioLabs, Langfuse, AIReiter, Scout APM, APIMaster, Merge Gateway, OpenRouter и Weights & Biases (W&B)**.
+
+Те же 19 имён входят в sponsor registry KaroX 5, который использует команда `/sponsors`. Ссылки, категории поддержки и отдельные благодарности собраны в [SUPPORTERS_RU.md](SUPPORTERS_RU.md). Упоминание — это благодарность, а не утверждение KaroX о безопасности, приватности, ценах или моделях сервиса.
+
 ## Проверка качества
 
 Основной runner:
@@ -312,7 +324,7 @@ push-поверхности. Неудачный check нельзя превра�
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3356 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3362 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

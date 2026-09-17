@@ -17,13 +17,17 @@ live-conformance, внешней беты и подтверждённых instal
 ## Install / Установка
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+pipx install --pre karox-runtime
 # or / или
-uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
+uv tool install --prerelease=allow karox-runtime
 karox
 ```
 
-After the matching tag reaches PyPI, the shorter `pipx install --pre karox-runtime` path installs the same candidate.
+To test the exact source tree directly, install the immutable tag / Для проверки именно исходников установи фиксированный тег:
+
+```bash
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc1"
+```
 
 Stable 4.1.4 users keep their installation: the bootstrap scripts on `main`
 still install 4.x. KaroX 5 uses a separate configuration layout and imports 4.x
@@ -132,13 +136,16 @@ replaceable worker.
 ## Verification
 
 The beta gate covers the canonical test suite, Ruff, Mypy and the configured
-70% branch-coverage floor. On the 2026-09-17 pre-push tree, canonical `unittest`
-completed `OK (skipped=6)` and full xdist completed 4007 passed, 9 skipped and
-2082 subtests; KB-HYBRID-01..10 passed 10/10. The release wheel is built, its
-contents are checked, and it is installed and smoke-tested outside the source
-tree. CI exercises Ubuntu, Windows and macOS; the broader Python
-3.10/3.12/3.14 installation matrix remains an explicit prerequisite for stable
-`5.0.0` until the exact release tree is green in GitHub Actions.
+70% branch-coverage floor. On the 2026-09-17 release-preparation tree, the
+published suite count is 3362 tests (`3367` from repository-root collection with
+five legacy script checks), the final six-worker xdist run completed successfully,
+and the focused guarded-release/risk tests passed. Earlier in the same release
+mission, canonical `unittest` completed `OK (skipped=6)` and KB-HYBRID-01..10
+passed 10/10. The release wheel is built, its contents are checked, and it is
+installed and smoke-tested outside the source tree. CI exercises Ubuntu, Windows
+and macOS; the broader Python 3.10/3.12/3.14 installation matrix remains an
+explicit prerequisite for stable `5.0.0` until the exact release tree is green
+in GitHub Actions.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
