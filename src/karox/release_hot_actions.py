@@ -37,6 +37,11 @@ class ReleaseActionError(InvalidCommand):
     """A guarded pre-release action could not prove its safety contract."""
 
 
+def _evidence(**kwargs: Any) -> dict[str, Any]:
+    """Return JSON-safe evidence for the hosted hot-command result envelope."""
+    return EvidenceRecord(**kwargs).to_dict()
+
+
 def _creationflags() -> int:
     if os.name != "nt":
         return 0
@@ -403,8 +408,8 @@ def execute_release_action(
                 "integrated": True,
                 "merge_created": False,
                 "reconciled": True,
-                "_evidence": [
-                    EvidenceRecord(
+                "evidence": [
+                    _evidence(
                         kind="release_lineage",
                         summary=f"Main lineage {source_sha[:12]} already integrated",
                         artifact_sha256=lineage["head"],
@@ -445,8 +450,8 @@ def execute_release_action(
             "integrated": True,
             "merge_created": True,
             "reconciled": False,
-            "_evidence": [
-                EvidenceRecord(
+            "evidence": [
+                _evidence(
                     kind="release_lineage",
                     summary=f"Integrated {remote}/{source_branch} lineage at {source_sha[:12]}",
                     command=["git", "merge", "--no-ff", "-s", "ours", source_sha],
@@ -482,8 +487,8 @@ def execute_release_action(
             "published": reconciled,
             "tag_pushed": False,
             "reconciled": reconciled,
-            "_evidence": [
-                EvidenceRecord(
+            "evidence": [
+                _evidence(
                     kind="release_check",
                     summary=f"Validated prerelease candidate {tag}",
                     artifact_sha256=candidate["head"],
@@ -505,8 +510,8 @@ def execute_release_action(
             "tag_pushed": False,
             "reconciled": True,
             "workflow_expected": "prerelease.yml",
-            "_evidence": [
-                EvidenceRecord(
+            "evidence": [
+                _evidence(
                     kind="release_publish",
                     summary=f"Reconciled existing prerelease tag {tag}",
                     artifact_sha256=candidate["head"],
@@ -553,8 +558,8 @@ def execute_release_action(
         "tag_pushed": pushed.returncode == 0,
         "reconciled": pushed.returncode != 0,
         "workflow_expected": "prerelease.yml",
-        "_evidence": [
-            EvidenceRecord(
+        "evidence": [
+            _evidence(
                 kind="release_publish",
                 summary=f"Published prerelease tag {tag}",
                 command=["git", "push", "--porcelain", remote, f"HEAD:refs/tags/{tag}"],
