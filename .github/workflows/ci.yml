@@ -24,11 +24,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    # The hosted Windows runner's console teardown exits the shell with 1
-    # after every test has passed (1477/1479 passed, 6 skipped); the same
-    # command exits 0 on a real Windows host. Continue so the matrix records
-    # the Windows outcome and release-gates still verify the green set.
-    continue-on-error: ${{ contains(matrix.os, 'windows') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -43,10 +38,7 @@ jobs:
       # PowerShell, which does not expand native-command globs the same way Bash
       # does. This keeps the shard definition identical on all three OSes and
       # avoids running every unittest twice under both pytest and unittest.
-      - env:
-          KAROX_CI_SIGINT_TRACE: "1"
-          KAROX_CI_SIGSWALLOW: "1"
-        run: python -m pytest tests --ignore-glob="tests/test_[i-z]*.py"
+      - run: python -m pytest tests --ignore-glob="tests/test_[i-z]*.py"
         timeout-minutes: 40
 
   test-shard-b:
@@ -55,17 +47,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    continue-on-error: ${{ contains(matrix.os, 'windows') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test && python -m pip install --no-deps -e .
-      - env:
-          KAROX_CI_SIGINT_TRACE: "1"
-          KAROX_CI_SIGSWALLOW: "1"
-        run: python -m pytest tests --ignore-glob="tests/test_[a-h]*.py"
+      - run: python -m pytest tests --ignore-glob="tests/test_[a-h]*.py"
         timeout-minutes: 45
 
   wheel:

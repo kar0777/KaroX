@@ -49,6 +49,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install candidate verification dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test && python -m pip install --no-deps -e .
+
       - name: Validate the candidate tree
         shell: bash
         run: |
@@ -136,6 +139,13 @@ jobs:
         with:
           name: karox-prerelease-dist
           path: dist/
+
+      - name: Keep only Python distributions for PyPI
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
+          test -n "$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1

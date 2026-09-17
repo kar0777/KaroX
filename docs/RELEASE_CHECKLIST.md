@@ -92,25 +92,22 @@ git diff --check
 - [x] Complete 3356-test suite passes on the beta release HEAD. The stale
   2026-09-03 failing-run narration above has been superseded: the CLI surface,
   developer runtime, desktop capture, TUI, agent verification, and release-gate
-  findings were repaired across subsequent commits, and the following
-  verification of the 2026-09-16 beta HEAD is green: full `pytest` run
-  (serial, exit 0), full 12-worker xdist run (4006 passed, 9 skipped,
-  2082 subtests), Ruff, Mypy, wheel build + contents + installed-wheel smoke,
-  static preflight 12/12, `git diff --check`, and the CI equivalent of the
-  secret scan. `scripts/test_admin_cli.py` (run by the CI cross-platform job)
-  passes after repairing stale bundle expectations that predated the structured
-  log allowlist and a Windows-localized `tasklist` decode crash that made
-  `process_alive` misreport a live process as stopped.
+  findings were repaired across subsequent commits. Re-verified 2026-09-17 on
+  Windows: canonical `unittest` completed `OK (skipped=6)` and a full xdist run
+  completed with 4007 passed, 9 skipped, and 2082 subtests. Ruff, Mypy, wheel
+  build + contents + installed-wheel smoke, the non-strict v5 beta gate, access
+  profile gate, release hygiene, and `git diff --check` are also green.
 
 - [x] `python scripts/check_wheel_contents.py` passes on the built wheel, after
   deleting `build/` so no removed module can ship from a stale copy.
 
-- [x] Ruff passes without suppressing new defects. Re-verified 2026-09-03 on the
+- [x] Ruff passes without suppressing new defects. Re-verified 2026-09-17 on the
   working tree: exit 0.
 
-- [x] Mypy passes. Re-verified 2026-09-03: 189 source files, no issues.
+- [x] Mypy passes. Re-verified 2026-09-17: 191 source files, no issues.
 - [x] Coverage passes without lowering the configured threshold (72.4195% vs 70%).
-- [ ] KB-HYBRID-01..10 pass and regenerate valid records.
+- [x] KB-HYBRID-01..10 pass; the 2026-09-17 canonical run regenerated all ten
+  successful gate records.
 - [ ] Traversal tests pass.
 - [ ] Symlink and Windows reparse-point escape tests pass.
 - [ ] Sensitive-path and secret-reflection tests pass.
@@ -132,10 +129,11 @@ git diff --check
 Evidence:
 
 - Local Windows acceptance: `docs/evidence/local-autonomy-acceptance-2026-08-07.md`
-- Beta HEAD verification 2026-09-16: full serial `python -m pytest` run exit 0
-  plus a full 12-worker xdist run (4007 passed, 9 skipped, 2082 subtests),
-  Ruff/Mypy clean, wheel build + contents + installed-wheel smoke passed,
-  static preflight 12/12, `git diff --check` clean.
+- Beta HEAD verification 2026-09-17: canonical `python -m unittest discover -s tests -p "test_*.py"`
+  completed `OK (skipped=6)`; full xdist completed 4007 passed, 9 skipped and
+  2082 subtests; KB-HYBRID-01..10 passed 10/10; Ruff/Mypy clean; wheel build +
+  contents + installed-wheel smoke passed; beta release/access/hygiene gates and
+  `git diff --check` clean.
 - Working-tree run 2026-09-03: pytest job-9f6da366d647e49f45a9 (29 failed), unittest job-ed48491da2aa278edfc6 (21 failures, 3 errors)
 - CI run URL: pending
 - benchmark record: pending

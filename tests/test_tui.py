@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from _tui_harness import hosted_runner_skips_tui_lifecycle
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 from karox import tailscale as tailscale_module
 from karox import tui
@@ -1326,13 +1325,13 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(composer.value, "fix the parser")
 
     async def test_slash_selection_opens_connect_screen(self) -> None:
-        if hosted_runner_skips_tui_lifecycle():
-            self.skipTest("screen-tab contracts replay on a real host, not the hosted runner")
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
-                await pilot.press("/", "c", "o", "n", "enter")
-                await pilot.pause()
+                await pilot.press("/", "c", "o", "n")
+                await pilot.pause(0.1)
+                await pilot.press("enter")
+                await pilot.pause(0.3)
                 # ``/connect`` is the single connection entry point and opens the
                 # universal hub. The legacy api/web/both wizard asked the user to
                 # classify a connection before showing them what already exists,

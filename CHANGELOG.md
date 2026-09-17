@@ -3,7 +3,7 @@
 All notable changes to KaroX 5 are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [5.0.0rc1] — 2026-09-03
+## [5.0.0rc1] — 2026-09-17
 
 First public release candidate. Full notes: `RELEASE_NOTES_v5.0.0rc1.md`.
 
@@ -11,10 +11,12 @@ First public release candidate. Full notes: `RELEASE_NOTES_v5.0.0rc1.md`.
 - **Version**: runtime `5.0.0.dev0` → `5.0.0rc1` (`src/karox/__init__.py`,
   `remote/src/karox_remote/__init__.py`); every document, conformance record
   and template that quotes the runtime version updated with it.
-- **Distribution**: `pipx install --pre karox-runtime` / `uv tool install
-  --prerelease=allow karox-runtime` documented as the first install path;
-  `release.yml` publishes the wheel to PyPI through trusted publishing;
-  `bootstrap.sh` / `bootstrap.ps1` accept `--channel preview`.
+- **Distribution**: the live beta remains installable directly from the preview
+  branch; `.github/workflows/prerelease.yml` validates the exact candidate,
+  smoke-tests the built wheel, then publishes matching pre-release tags to PyPI
+  through trusted publishing and creates a GitHub pre-release. The stable
+  `release.yml` path remains separate; `bootstrap.sh` / `bootstrap.ps1` accept
+  `--channel preview`.
 - **`karox quickstart`**: one-screen onboarding that reports the resolved
   repository, language, connected providers and bridges, and the single next
   command to run — no bridge vocabulary on the first screen.

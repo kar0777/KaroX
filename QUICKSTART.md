@@ -10,9 +10,10 @@ KaroX 5 используй checkout preview-ветки и локальный у�
 
 ## 1. Install / Установка
 
-The 5.x candidate is not published to PyPI yet, so install from the beta branch
-or a source checkout / Кандидат 5.x ещё не опубликован в PyPI — ставь из
-beta-ветки или исходников:
+For the live beta branch, install directly from Git or a source checkout. After
+the matching pre-release tag is published, PyPI installs the same candidate. /
+Для живой beta-ветки ставь пакет напрямую из Git или исходников. После
+публикации соответствующего pre-release тега тот же кандидат доступен через PyPI:
 
 ```bash
 pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"

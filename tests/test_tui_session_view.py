@@ -23,7 +23,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from _tui_harness import hosted_runner_skips_tui_lifecycle
 from _support import SRC  # noqa: F401 - inserts src on sys.path
 
 from karox import tui
@@ -606,10 +605,6 @@ class SessionViewLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self._delivered(app, "s-replace"), 1)
 
 
-@unittest.skipIf(
-    hosted_runner_skips_tui_lifecycle(),
-    "lifecycle and focus contracts replay on a real host, not the hosted runner",
-)
 class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
     """The real agent lifecycle publishes the typed status projection itself.
 
@@ -983,10 +978,6 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(FAKE_APPROVAL_TOKEN, published)
 
 
-@unittest.skipIf(
-    hosted_runner_skips_tui_lifecycle(),
-    "lifecycle and focus contracts replay on a real host, not the hosted runner",
-)
 class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
     """A late callback belongs to its own run, never to whatever runs now.
 

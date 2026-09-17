@@ -82,11 +82,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies and coverage
+      - name: Install dependencies, test support, and coverage
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install --group coverage
+          python -m pip install --group test --group coverage
 
       # Runs here rather than in the lint job because it imports the test
       # modules, so it needs the runtime's dependencies. Cheap, and it fails on a
@@ -144,6 +144,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip wheel . --no-deps --wheel-dir dist
           python -m pip install --force-reinstall dist/karox_runtime-*.whl
+          python -m pip install --group test
           python -m pip check
 
       # The expected version is read from the source of truth rather than

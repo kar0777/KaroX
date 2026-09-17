@@ -8,8 +8,6 @@ CI's gate both run ``python -m unittest discover -s tests``, which never imports
 from __future__ import annotations
 
 import os
-import signal
-import threading
 from typing import Any
 
 import _path_setup
@@ -36,62 +34,10 @@ _ORDER_DEPENDENT = {
     "test_benchmark.py": {"test_zz_aggregation_all_gates_passed"},
 }
 
-# TEMPORARY CI diagnostic, gated by KAROX_CI_SIGINT_TRACE in the shard steps:
-# hosted runners deliver an unexplained console control mid-shard. Record the
-# frame, live threads, and raw event at delivery. No ctypes callbacks are
-# registered: a Win32 console handler whose Python wrapper can be collected
-# would crash the interpreter with an access violation instead of reading one.
-# Nothing here runs unless the CI environment arms the trace.
-
-
-def _report_delivery(frame: Any) -> None:
-    import sys
-    import time
-    from traceback import print_stack
-
-    stream = getattr(sys, "__stdout__", None) or getattr(sys, "stdout", None)
-    if stream is None:
-        return
-    stream.write(
-        f"[SIGINT] received pid={os.getpid()} ppid={os.getppid()} "
-        f"at={time.strftime('%H:%M:%S')}\n"
-    )
-    for thread in threading.enumerate():
-        stream.write(f"[SIGINT] thread alive: {thread.name} daemon={thread.daemon}\n")
-    print_stack(frame, file=stream)
-    stream.flush()
-
-
-def _diagnostic_sigint(signum: int, frame: Any) -> None:
-    _report_delivery(frame)
-    raise KeyboardInterrupt
-
-
 def _running_distributed() -> bool:
     # Set by pytest-xdist in every worker process; absent for `-n 0` and for a
     # plain serial run, which is exactly when the aggregator is meaningful.
     return bool(os.environ.get("PYTEST_XDIST_WORKER"))
-
-
-def pytest_configure(config: Any) -> None:
-    if os.environ.get("KAROX_CI_SIGINT_TRACE", "").strip() != "1":
-        return
-    if os.environ.get("KAROX_CI_SIGSWALLOW", "").strip() == "1":
-
-        def _swallow(signum: int, frame: Any) -> None:
-            return None
-
-        # Swallow console-controlled interrupts on the runner: the shard step
-        # receives a console Ctrl-C/Ctrl-Break mid-run while every test has
-        # passed, and stopping the shard mid-run is worse than losing the
-        # synthetic Ctrl-C.
-        signal.signal(signal.SIGINT, _swallow)
-        breakflag = getattr(signal, "SIGBREAK", None)
-        if breakflag is not None:
-            signal.signal(breakflag, _swallow)
-        return
-    signal.signal(signal.SIGINT, _diagnostic_sigint)
-
 
 def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
     if not _running_distributed():

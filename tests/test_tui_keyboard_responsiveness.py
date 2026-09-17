@@ -13,16 +13,12 @@ import unittest
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
-from _tui_harness import hosted_runner_skips_tui_lifecycle, isolated_karox_directories
+from _tui_harness import isolated_karox_directories
 
 from karox import tui
 from karox.connection_status import ConnectionLiveStatus, OverallStatus
 
 
-@unittest.skipIf(
-    hosted_runner_skips_tui_lifecycle(),
-    "keyboard contract replays on a real host, not the hosted runner",
-)
 class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.repository = self.enterContext(isolated_karox_directories())
@@ -60,17 +56,24 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 # OAuth profiles -- a hidden P key was the old contract. Focus
                 # delivery is asynchronous under a loaded runner, so pump the
                 # app until each expected stop is reached.
-                async def _press_until_focus(key: str, expected: str) -> None:
+                async def _press_and_wait_focus(key: str, expected: str) -> None:
+                    # Send the navigation key exactly once. Repeating Tab while
+                    # waiting for the UI thread can skip straight past the
+                    # expected control under xdist load and turns a timing wait
+                    # into a different user action.
+                    await pilot.press(key)
                     deadline = time.monotonic() + 10
-                    while getattr(app.focused, "id", None) != expected and time.monotonic() < deadline:
-                        await pilot.press(key)
+                    while (
+                        getattr(app.focused, "id", None) != expected
+                        and time.monotonic() < deadline
+                    ):
                         await pilot.pause(0.1)
 
-                await _press_until_focus("tab", "svc-auth")
+                await _press_and_wait_focus("tab", "svc-auth")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
-                await _press_until_focus("tab", "svc-more")
+                await _press_and_wait_focus("tab", "svc-more")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-more")
-                await _press_until_focus("shift+tab", "svc-auth")
+                await _press_and_wait_focus("shift+tab", "svc-auth")
                 self.assertEqual(getattr(app.focused, "id", None), "svc-auth")
 
     async def test_service_enter_activates_the_contextual_verify_button(self) -> None:

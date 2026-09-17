@@ -131,9 +131,14 @@ replaceable worker.
 
 ## Verification
 
-3356 tests under `tests/`; Ruff, Mypy and a 70% branch-coverage gate in CI;
-wheel built, installed and smoke-tested outside the source tree on Windows,
-macOS and Linux for Python 3.10–3.14.
+The beta gate covers the canonical test suite, Ruff, Mypy and the configured
+70% branch-coverage floor. On the 2026-09-17 pre-push tree, canonical `unittest`
+completed `OK (skipped=6)` and full xdist completed 4007 passed, 9 skipped and
+2082 subtests; KB-HYBRID-01..10 passed 10/10. The release wheel is built, its
+contents are checked, and it is installed and smoke-tested outside the source
+tree. CI exercises Ubuntu, Windows and macOS; the broader Python
+3.10/3.12/3.14 installation matrix remains an explicit prerequisite for stable
+`5.0.0` until the exact release tree is green in GitHub Actions.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
