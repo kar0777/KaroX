@@ -169,7 +169,17 @@ jobs:
           cd "${{ runner.temp }}"
           python -c "import karox.cli, karox.tui, karox.packs; print('installed artifact imports')"
 
+      # A few lifecycle tests intentionally exercise Ctrl-Break cleanup. On a
+      # hosted Windows console that event can otherwise hit the test runner
+      # itself. The wrapper changes only process-group isolation and propagates
+      # unittest's exact exit code; it never swallows signals or failures.
+      - name: Run the complete vNext suite (Windows isolated)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/run_ci_test_command.py -m unittest discover -s tests -p "test_*.py" -v
+
       - name: Run the complete vNext suite
+        if: runner.os != 'Windows'
         shell: bash
         run: python -m unittest discover -s tests -p "test_*.py" -v
 

@@ -40,6 +40,7 @@ import contextlib
 import os
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Sequence
@@ -137,6 +138,30 @@ def region_lines(app: Any, widget: Any) -> list[str]:
 def visible_text(app: Any) -> str:
     """The whole screen as one string, for a substring assertion."""
     return "\n".join(screen_lines(app))
+
+
+async def settle_service_screen(screen: Any, pilot: Any, *, timeout: float = 10.0) -> None:
+    """Freeze a mounted service screen after its first async state refresh.
+
+    ``ServiceConnectScreen`` discovers saved bridge state on a worker thread and
+    polls again every two seconds. Tests that inject a synthetic visible state
+    must first let that initial worker finish; otherwise a slow runner can apply
+    its older snapshot *after* the fixture state and hide/reorder contextual
+    buttons. Stop future polling, then wait for the in-flight worker to publish
+    its result. This changes no production timing and turns the tests into a
+    deterministic measurement of one settled screen.
+    """
+
+    timer = getattr(screen, "_poll_timer", None)
+    if timer is not None:
+        with contextlib.suppress(Exception):
+            timer.stop()
+        screen._poll_timer = None
+    deadline = time.monotonic() + timeout
+    while bool(getattr(screen, "_refreshing", False)) and time.monotonic() < deadline:
+        await pilot.pause(0.05)
+    if bool(getattr(screen, "_refreshing", False)):
+        raise AssertionError("service screen did not finish its initial async refresh")
 
 
 @contextlib.contextmanager
@@ -250,6 +275,7 @@ __all__ = [
     "normalise",
     "region_lines",
     "screen_lines",
+    "settle_service_screen",
     "visible_text",
     "widget_lines",
 ]

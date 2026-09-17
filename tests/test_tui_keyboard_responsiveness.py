@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
-from _tui_harness import isolated_karox_directories
+from _tui_harness import isolated_karox_directories, settle_service_screen
 
 from karox import tui
 from karox.connection_status import ConnectionLiveStatus, OverallStatus
@@ -37,6 +37,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
                 await pilot.pause(0.25)
+                await settle_service_screen(screen, pilot)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -87,6 +88,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
                 await pilot.pause(0.25)
+                await settle_service_screen(screen, pilot)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -115,6 +117,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
                 await pilot.pause(0.25)
+                await settle_service_screen(screen, pilot)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(
@@ -137,6 +140,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(screen, "_state", return_value=None):
                 app.push_screen(screen)
                 await pilot.pause(0.25)
+                await settle_service_screen(screen, pilot)
                 screen._has_snapshot = True
                 screen._endpoint = "https://example.invalid/mcp"
                 screen._typed_status = ConnectionLiveStatus(

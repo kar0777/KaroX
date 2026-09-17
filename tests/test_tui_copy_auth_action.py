@@ -23,7 +23,7 @@ from karox.tui_connections import (
 )
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
-from _tui_harness import isolated_karox_directories
+from _tui_harness import isolated_karox_directories, settle_service_screen
 
 from karox import tui
 from karox import tui_connections as hub
@@ -210,6 +210,7 @@ class ServiceConnectAuthButtonTests(unittest.IsolatedAsyncioTestCase):
                 screen = screens["ServiceConnectScreen"]("ru", preset_id="chatgpt-web")
                 app.push_screen(screen)
                 await pilot.pause()
+                await settle_service_screen(screen, pilot)
                 self._seed_screen(screen, "https://bridge.example.com/mcp")
                 await pilot.pause()
                 auth = screen.query_one("#svc-auth", Button)
@@ -227,6 +228,7 @@ class ServiceConnectAuthButtonTests(unittest.IsolatedAsyncioTestCase):
                 screen = screens["ServiceConnectScreen"]("ru", preset_id="clickup")
                 app.push_screen(screen)
                 await pilot.pause()
+                await settle_service_screen(screen, pilot)
                 self._seed_screen(screen, "https://bridge.example.com/mcp")
                 await pilot.pause()
                 auth = screen.query_one("#svc-auth", Button)
