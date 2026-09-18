@@ -276,19 +276,35 @@ class ConnectionsTuiTests(unittest.IsolatedAsyncioTestCase):
             # Start/Restart is owned by ConnectionController now. Patch its
             # launcher and credential seam rather than a presentation-level
             # ClickUp function, which the TUI no longer calls directly.
+            options = screen.query_one("#mcp-connections", tui.OptionList)
             with patch.object(screen._controller, "_launcher", fake_start), patch.object(
                 screen._controller,
                 "_secret_resolver",
                 lambda _target: "sek-1234567890",
             ):
                 await pilot.press("r")
-                await pilot.pause(0.8)
+                # Starting and repainting the saved row happen on separate
+                # worker/event-loop turns. Under Python 3.14 on a loaded Windows
+                # runner those turns can exceed a fixed sub-second sleep, so
+                # wait for the observable product state instead of the clock.
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    state = connection_runtime_manager().status(
+                        target.connection_id
+                    )["state"]
+                    prompt = str(options.get_option_at_index(0).prompt)
+                    if (
+                        called == [target.connection_id]
+                        and state == "running"
+                        and "[running]" in prompt
+                    ):
+                        break
+                    await pilot.pause(0.05)
             self.assertEqual(called, [target.connection_id])
             self.assertEqual(
                 connection_runtime_manager().status(target.connection_id)["state"],
                 "running",
             )
-            options = screen.query_one("#mcp-connections", tui.OptionList)
             self.assertIn("[running]", str(options.get_option_at_index(0).prompt))
             # A result card may be mounted depending on Textual callback timing;
             # the contract is the managed runtime and refreshed saved row.
