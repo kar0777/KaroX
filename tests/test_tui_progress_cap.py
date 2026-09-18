@@ -1,13 +1,34 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from _support import SRC  # noqa: F401
-from _tui_harness import isolated_karox_directories
+from _tui_harness import _temporary_directory_with_retry, isolated_karox_directories
 
 from karox import tui
+
+
+def test_temp_directory_cleanup_retries_transient_permission_error() -> None:
+    import _tui_harness
+
+    real_rmtree = _tui_harness.shutil.rmtree
+    calls = 0
+
+    def flaky_rmtree(path: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("transient Windows handle")
+        real_rmtree(path)
+
+    with patch.object(_tui_harness.shutil, "rmtree", side_effect=flaky_rmtree):
+        with _temporary_directory_with_retry(timeout=1.0) as raw:
+            Path(raw, "probe.txt").write_text("ok", encoding="utf-8")
+
+    assert calls == 2
 
 
 @pytest.mark.asyncio

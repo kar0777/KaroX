@@ -7064,6 +7064,15 @@ if _HAS_TEXTUAL:
             """Redraw the header and every section from the current snapshot."""
 
             self.redraws += 1
+            body: Optional[Any] = None
+            preserved_scroll_y: Optional[float] = None
+            try:
+                body = self._body()
+                preserved_scroll_y = float(body.scroll_offset.y)
+            except Exception:
+                body = None
+                preserved_scroll_y = None
+
             detail = self._detail()
             english = self.english
             self._empty = set()
@@ -7100,12 +7109,35 @@ if _HAS_TEXTUAL:
             # rather than its presence is what stops a live run dragging the
             # viewport back to the top on every tick.
             pending = self._confirmation_key()
-            if pending is not None and pending != self._focused_confirmation:
+            focused_new_confirmation = (
+                pending is not None and pending != self._focused_confirmation
+            )
+            if focused_new_confirmation:
                 self._focused_confirmation = pending
                 with contextlib.suppress(Exception):
                     self.scroll_to_section("attention")
             elif pending is None:
                 self._focused_confirmation = None
+
+            if (
+                not focused_new_confirmation
+                and body is not None
+                and preserved_scroll_y is not None
+            ):
+                # Updating section contents can increase the scrollable height.
+                # Textual may then keep a previously bottom-aligned viewport at
+                # the new bottom, which makes a reader jump on every live tick.
+                # Restore the exact viewport after the layout pass unless a new
+                # confirmation intentionally moved focus.
+                def restore_viewport() -> None:
+                    with contextlib.suppress(Exception):
+                        body.scroll_to(
+                            y=preserved_scroll_y,
+                            animate=False,
+                            force=True,
+                        )
+
+                self.call_after_refresh(restore_viewport)
             return
 
         def _write_widgets(self, header: str) -> None:

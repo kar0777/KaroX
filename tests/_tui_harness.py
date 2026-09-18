@@ -39,6 +39,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 import tempfile
 import time
 import unittest
@@ -174,14 +175,16 @@ def _temporary_directory_with_retry(timeout: float = 2.0) -> Iterator[str]:
     fails the test instead of being hidden.
     """
 
-    temporary = tempfile.TemporaryDirectory()
+    raw = tempfile.mkdtemp()
     try:
-        yield temporary.name
+        yield raw
     finally:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                temporary.cleanup()
+                shutil.rmtree(raw)
+                break
+            except FileNotFoundError:
                 break
             except PermissionError:
                 if time.monotonic() >= deadline:
