@@ -59,18 +59,16 @@ def main() -> int:
 
     installer = (repo_root / "install.karox.ps1").read_text(encoding="utf-8-sig")
     assert "function Set-KaroXPath" in installer
-    assert "function Write-LegacyForwarder" in installer
     assert "function Move-OutOf-AppDirectory" in installer
+    assert "function Promote-StagedApp" in installer
     promote_start = installer.index("function Promote-StagedApp")
-    promote_end = installer.index("function Schedule-LegacyCleanup", promote_start)
-    promote_body = installer[promote_start:promote_end]
+    promote_body = installer[promote_start:]
     move_out = promote_body.index("Move-OutOf-AppDirectory")
     activate = promote_body.index("if (Test-Path -LiteralPath $AppDir)")
     assert move_out < activate
     assert "@($BinDir) + $userItems" in installer
-    assert "KaroX\\bin\\karox.ps1" in installer
-    assert "Where-Object { `$_.Name -ne 'bin' }" in installer
-    assert "$legacyInCurrentPath" in installer
+    assert "Where-Object { $_.Name -notin @(" in installer
+    assert "$legacyNormalized" in installer
     assert installer.count("Set-Location -LiteralPath $Root") == 2
 
     ps_launcher = (repo_root / "start.ps1").read_text(encoding="utf-8-sig")

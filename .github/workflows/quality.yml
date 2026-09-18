@@ -89,7 +89,11 @@ jobs:
           python -m pip install --group test --group coverage
           # The coverage suite exercises the real console entry point and imports
           # karox directly, so install the checkout itself after dependencies.
-          python -m pip install --no-deps -e .
+          # Editable installs break coverage accounting (source=src/karox would
+          # double-count every module through both the checkout and the editable
+          # path), so install the package normally: the console script lands on
+          # PATH while coverage keeps measuring only the repository source.
+          python -m pip install --no-deps .
 
       # Runs here rather than in the lint job because it imports the test
       # modules, so it needs the runtime's dependencies. Cheap, and it fails on a

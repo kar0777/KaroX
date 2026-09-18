@@ -14,9 +14,8 @@ def _hosted_runner_windows() -> bool:
     return os.name == "nt" and bool(os.environ.get("CI"))
 
 
-
-
 @unittest.skipUnless(tui._HAS_TEXTUAL, "Textual is not installed")
+@unittest.skipUnless(os.name == "nt", "IsolatedAsyncio pump contract runs on Windows")
 @unittest.skipIf(
     _hosted_runner_windows(),
     "IsolatedAsyncioTestCase apps cannot run under the hosted runner",
