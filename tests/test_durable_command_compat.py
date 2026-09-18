@@ -39,8 +39,22 @@ def _await_job_processes_exit(status: dict | None, deadline_seconds: float = 10.
             continue
         while process_is_running(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-    # Win32 can release the final directory handle just after process exit.
-    time.sleep(0.2)
+
+
+def _cleanup_tempdir_with_retry(
+    temporary: tempfile.TemporaryDirectory[str], timeout: float = 2.0
+) -> None:
+    """Bridge transient Win32 handle release without hiding a real leak."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            temporary.cleanup()
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def test_legacy_long_command_run_uses_durable_worker_and_replays_same_job() -> None:
@@ -91,7 +105,7 @@ def test_legacy_long_command_run_uses_durable_worker_and_replays_same_job() -> N
         _await_job_processes_exit(second or first)
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)
 
 
 def test_durable_developer_path_keeps_global_remote_side_effect_blocks() -> None:
@@ -131,7 +145,7 @@ def test_durable_developer_path_keeps_global_remote_side_effect_blocks() -> None
     finally:
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)
 
 
 def test_legacy_long_command_run_detaches_quickly_and_replay_is_instant() -> None:
@@ -212,7 +226,7 @@ def test_legacy_long_command_run_detaches_quickly_and_replay_is_instant() -> Non
         _await_job_processes_exit(final)
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)
 
 
 def test_legacy_command_run_request_id_controls_rerun_generation() -> None:
@@ -292,7 +306,7 @@ def test_legacy_command_run_request_id_controls_rerun_generation() -> None:
     finally:
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)
 
 
 def test_legacy_command_run_rejects_malformed_request_id() -> None:
@@ -335,7 +349,7 @@ def test_legacy_command_run_rejects_malformed_request_id() -> None:
     finally:
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)
 
 
 class _CoreRuntime:
@@ -525,4 +539,4 @@ def test_real_long_tests_compat_uses_one_durable_job_and_reconciles() -> None:
     finally:
         os.environ.clear()
         os.environ.update(old)
-        temp.cleanup()
+        _cleanup_tempdir_with_retry(temp)

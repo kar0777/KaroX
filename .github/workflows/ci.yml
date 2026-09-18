@@ -46,8 +46,15 @@ jobs:
       # pytest itself as KeyboardInterrupt. The wrapper propagates pytest's real
       # exit code and treats a genuine runner interrupt as failure.
       - if: runner.os == 'Windows'
-        run: python scripts/run_ci_test_command.py -m pytest tests -n 4 --dist=loadfile --ignore-glob="tests/test_[i-z]*.py"
+        # Keep the deterministic benchmark's 30-second agent budget meaningful:
+        # run it without CPU/process-startup contention from three sibling xdist
+        # workers. The rest of shard A stays parallel and no benchmark assertion
+        # or platform coverage is removed.
+        run: python scripts/run_ci_test_command.py -m pytest tests -n 4 --dist=loadfile --ignore-glob="tests/test_[i-z]*.py" --ignore=tests/test_benchmark.py
         timeout-minutes: 40
+      - if: runner.os == 'Windows'
+        run: python scripts/run_ci_test_command.py -m pytest -q tests/test_benchmark.py
+        timeout-minutes: 10
       - if: runner.os != 'Windows'
         run: python -m pytest tests -n 4 --dist=loadfile --ignore-glob="tests/test_[i-z]*.py"
         timeout-minutes: 40
