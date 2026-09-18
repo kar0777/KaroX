@@ -105,13 +105,52 @@ jobs:
             "$GITHUB_WORKSPACE/.smoke/bin/karox" paths --json >/dev/null
           )
           rm -rf "$SMOKE_ROOT" .smoke
-          (
-            cd dist
-            find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
-            sha256sum --check SHA256SUMS.txt
-          )
           echo "version=$RUNTIME" >> "$GITHUB_OUTPUT"
           echo "wheel=$(basename "$WHEEL")" >> "$GITHUB_OUTPUT"
+
+      - name: Build portable no-system-Python bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME="$(python scripts/check_versions.py --print runtime)"
+          TAG="v$RUNTIME"
+          WHEEL="$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
+          test -n "$WHEEL"
+          PORTABLE_ROOT="$(mktemp -d)"
+          cleanup() { rm -rf "$PORTABLE_ROOT"; }
+          trap cleanup EXIT
+          while IFS=$'\t' read -r PLATFORM _ARCHIVE _URL _SHA _BINARY; do
+            PREP_DIR="$PORTABLE_ROOT/$PLATFORM"
+            PREP_LINE="$(
+              python scripts/prepare_portable_uv.py \
+                --platform "$PLATFORM" \
+                --pins scripts/portable_uv_pins.json \
+                --output-dir "$PREP_DIR" \
+                --format tsv
+            )"
+            IFS=$'\t' read -r PREP_PLATFORM UV_VERSION UV_ARCHIVE UV_BINARY \
+              UV_BINARY_SHA UV_LICENSE_MIT UV_LICENSE_APACHE <<< "$PREP_LINE"
+            test "$PREP_PLATFORM" = "$PLATFORM"
+            gh attestation verify "$UV_ARCHIVE" --repo astral-sh/uv
+            python scripts/build_portable_bundle.py \
+              --wheel "$WHEEL" \
+              --uv "$UV_BINARY" \
+              --uv-sha256 "$UV_BINARY_SHA" \
+              --uv-version "$UV_VERSION" \
+              --uv-license-mit "$UV_LICENSE_MIT" \
+              --uv-license-apache "$UV_LICENSE_APACHE" \
+              --platform "$PLATFORM" \
+              --output-dir dist
+          done < <(python scripts/portable_uv_pins.py --pins scripts/portable_uv_pins.json --tsv)
+          (
+            cd dist
+            CHECKSUMS="KaroX-${TAG}-SHA256SUMS.txt"
+            find . -maxdepth 1 -type f ! -name '*-SHA256SUMS.txt' -printf '%f\n' \
+              | sort | xargs sha256sum > "$CHECKSUMS"
+            sha256sum --check "$CHECKSUMS"
+          )
 
       - name: Keep the artifacts for the publish jobs
         uses: actions/upload-artifact@v7
@@ -120,9 +159,59 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  portable-macos-smoke:
+    name: Portable macOS install without system Python
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download the candidate artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: karox-prerelease-dist
+          path: dist/
+
+      - name: Prove bundled uv provisions Python and launches KaroX
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64|aarch64) PLATFORM="macos-arm64" ;;
+            x86_64|amd64) PLATFORM="macos-x64" ;;
+            *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          ARCHIVE="dist/KaroX-v${VERSION}-${PLATFORM}-portable.tar.gz"
+          test -s "$ARCHIVE"
+          ROOT="$(mktemp -d)"
+          trap 'rm -rf "$ROOT"' EXIT
+          mkdir -p "$ROOT/bundle" "$ROOT/home" "$ROOT/config" "$ROOT/runtime" "$ROOT/fail-bin"
+          tar -xzf "$ARCHIVE" -C "$ROOT/bundle" --strip-components=1
+          cat > "$ROOT/fail-bin/python" <<'EOF'
+          #!/usr/bin/env sh
+          echo "system Python must not be used by the portable launcher" >&2
+          exit 97
+          EOF
+          cp "$ROOT/fail-bin/python" "$ROOT/fail-bin/python3"
+          chmod +x "$ROOT/fail-bin/python" "$ROOT/fail-bin/python3"
+          HOME="$ROOT/home" \
+          KAROX_CONFIG_DIR="$ROOT/config" \
+          KAROX_RUNTIME_DIR="$ROOT/runtime" \
+          PATH="$ROOT/fail-bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            "$ROOT/bundle/karox" --version
+          test -x "$ROOT/runtime/.venv/bin/python"
+          INSTALLED="$("$ROOT/runtime/.venv/bin/python" -c 'import karox; print(karox.__version__)')"
+          test "$INSTALLED" = "$VERSION"
+          HOME="$ROOT/home" \
+          KAROX_CONFIG_DIR="$ROOT/config" \
+          KAROX_RUNTIME_DIR="$ROOT/runtime" \
+          PATH="$ROOT/fail-bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            "$ROOT/bundle/karox" quickstart --json >/dev/null
+
   publish-pypi:
     name: Publish to PyPI (trusted publishing)
-    needs: build
+    needs: [build, portable-macos-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Trusted publishing: PyPI accepts the GitHub OIDC token for this repository,
@@ -144,8 +233,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          find dist -maxdepth 1 -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
+          find dist -maxdepth 1 -type f \
+            ! -name 'karox_runtime-*.whl' \
+            ! -name 'karox_runtime-*.tar.gz' \
+            -delete
           test -n "$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.whl' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -type f -name 'karox_runtime-*.tar.gz' -print -quit)"
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -188,6 +281,36 @@ jobs:
             gh release create "$TAG" --verify-tag --prerelease --title "$TITLE" --notes-file "$NOTES"
           fi
           gh release upload "$TAG" dist/* --clobber
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          version = os.environ["VERSION"]
+          tag = f"v{version}"
+          release = json.loads(
+              subprocess.check_output(
+                  ["gh", "release", "view", tag, "--json", "assets,isPrerelease,tagName"],
+                  text=True,
+                  encoding="utf-8",
+              )
+          )
+          expected = {
+              f"KaroX-{tag}-windows-x64-portable.zip",
+              f"KaroX-{tag}-windows-arm64-portable.zip",
+              f"KaroX-{tag}-linux-x64-portable.tar.gz",
+              f"KaroX-{tag}-linux-arm64-portable.tar.gz",
+              f"KaroX-{tag}-macos-x64-portable.tar.gz",
+              f"KaroX-{tag}-macos-arm64-portable.tar.gz",
+              f"KaroX-{tag}-SHA256SUMS.txt",
+          }
+          assets = {item["name"] for item in release.get("assets", [])}
+          missing = expected - assets
+          if release.get("tagName") != tag or release.get("isPrerelease") is not True:
+              raise SystemExit("GitHub release identity/prerelease flag mismatch")
+          if missing:
+              raise SystemExit(f"GitHub prerelease is missing portable assets: {sorted(missing)}")
+          PY
           {
             echo "## $TITLE"
             echo
@@ -195,5 +318,10 @@ jobs:
             echo
             echo '```bash'
             echo "pipx install \"karox-runtime==${VERSION}\""
+            echo '```'
+            echo
+            echo "macOS/Linux one-command preview install (no system Python required):"
+            echo '```bash'
+            echo 'curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

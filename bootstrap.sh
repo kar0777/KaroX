@@ -5,10 +5,25 @@ REPO_OWNER="kar0777"
 REPO_NAME="KaroX"
 REF="${KAROX_BOOTSTRAP_REF:-}"
 RESOLVE_ONLY=0
-if [ "${1:-}" = "--resolve-only" ]; then RESOLVE_ONLY=1; fi
+CHANNEL="${KAROX_BOOTSTRAP_CHANNEL:-stable}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --resolve-only) RESOLVE_ONLY=1 ;;
+    --channel)
+      shift
+      CHANNEL="${1:-}"
+      ;;
+    --channel=*) CHANNEL="${1#--channel=}" ;;
+    *) echo "Unknown bootstrap argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$CHANNEL" in stable|preview) ;; *) echo "Channel must be stable or preview." >&2; exit 2 ;; esac
 
 if [ -z "$REF" ] && command -v curl >/dev/null 2>&1; then
-  release_json="$(curl -fsSL --max-time 15 "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/RELEASE.json" 2>/dev/null || true)"
+  manifest="RELEASE.json"
+  [ "$CHANNEL" != "preview" ] || manifest="PREVIEW.json"
+  release_json="$(curl -fsSL --max-time 15 "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/$manifest" 2>/dev/null || true)"
   REF="$(printf '%s' "$release_json" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   if [ -z "$REF" ]; then
     version="$(printf '%s' "$release_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
@@ -26,7 +41,7 @@ INSTALL_ROOT="${KAROX_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/KaroX}"
 SOURCE_DIR="$INSTALL_ROOT/source"
 case "$REF" in v[0-9]*.[0-9]*.[0-9]*) REF_KIND="tags" ;; *) REF_KIND="heads" ;; esac
 
-printf '\nKaroX stable installer\n----------------------------------------\n'
+printf '\nKaroX %s installer\n----------------------------------------\n' "$CHANNEL"
 printf 'Repository : https://github.com/%s/%s\nRelease/ref: %s\n\n' "$REPO_OWNER" "$REPO_NAME" "$REF"
 command -v curl >/dev/null 2>&1 || { echo 'curl is required.' >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo 'tar is required.' >&2; exit 1; }
@@ -47,7 +62,7 @@ sha256_file() {
   fi
 }
 
-if printf '%s' "$REF" | grep -Eq '^v5\.[0-9]+\.[0-9]+$' && [ -n "$portable_platform" ]; then
+if printf '%s' "$REF" | grep -Eq '^v5\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$' && [ -n "$portable_platform" ]; then
   portable_asset="KaroX-${REF}-${portable_platform}-portable.tar.gz"
   checksum_asset="KaroX-${REF}-SHA256SUMS.txt"
   release_base="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$REF"

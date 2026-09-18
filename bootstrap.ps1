@@ -1,6 +1,8 @@
 param(
     [string]$Repository = "kar0777/KaroX",
     [string]$Branch = "",
+    [ValidateSet("stable", "preview")]
+    [string]$Channel = "stable",
     [switch]$Clean,
     [switch]$ResolveOnly
 )
@@ -11,7 +13,8 @@ try { chcp.com 65001 > $null; [Console]::InputEncoding = [Text.Encoding]::UTF8; 
 if (-not $Branch -and $env:KAROX_BOOTSTRAP_REF) { $Branch = $env:KAROX_BOOTSTRAP_REF }
 if (-not $Branch) {
     try {
-        $releaseStatus = Invoke-RestMethod -UseBasicParsing -Uri "https://raw.githubusercontent.com/$Repository/main/RELEASE.json" -TimeoutSec 15
+        $manifest = if ($Channel -eq "preview") { "PREVIEW.json" } else { "RELEASE.json" }
+        $releaseStatus = Invoke-RestMethod -UseBasicParsing -Uri "https://raw.githubusercontent.com/$Repository/main/$manifest" -TimeoutSec 15
         if ($releaseStatus.tag) { $Branch = [string]$releaseStatus.tag }
         elseif ($releaseStatus.version) { $Branch = "v" + [string]$releaseStatus.version }
     } catch {
@@ -38,7 +41,7 @@ function Remove-PathIfExists($path) {
 }
 
 function Install-PortableIfAvailable {
-    if ($Branch -notmatch '^v5\.\d+\.\d+$') { return $false }
+    if ($Branch -notmatch '^v5\.\d+\.\d+(?:(?:a|b|rc)\d+)?$') { return $false }
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     if ($arch -eq "X64") { $platform = "windows-x64" }
     elseif ($arch -eq "Arm64") { $platform = "windows-arm64" }
@@ -112,7 +115,7 @@ function Install-PortableIfAvailable {
 }
 
 Write-Host ""
-Write-Host "KaroX stable installer" -ForegroundColor Cyan
+Write-Host "KaroX $Channel installer" -ForegroundColor Cyan
 Write-Host "----------------------------------------" -ForegroundColor DarkCyan
 Write-Host "Repository : https://github.com/$Repository"
 Write-Host "Release/ref: $Branch"
@@ -130,7 +133,7 @@ if (Install-PortableIfAvailable) {
     & $launcher
     exit $LASTEXITCODE
 }
-if ($Branch -match '^v5\.\d+\.\d+$') {
+if ($Branch -match '^v5\.\d+\.\d+(?:(?:a|b|rc)\d+)?$') {
     Write-Warning "Portable asset was not available; falling back to the source installer."
 }
 

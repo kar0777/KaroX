@@ -36,7 +36,7 @@ def _working_bash() -> str | None:
     return bash if probe.returncode == 0 else None
 
 
-def test_posix_bootstrap_prefers_stable_v5_portable_bundle_before_source_fallback() -> None:
+def test_posix_bootstrap_prefers_v5_portable_bundle_before_source_fallback() -> None:
     text = SH.read_text(encoding="utf-8-sig")
     assert text.index("portable_asset=") < text.index("SCRIPT_DIR=")
     assert "KaroX-${REF}-${portable_platform}-portable.tar.gz" in text
@@ -45,6 +45,9 @@ def test_posix_bootstrap_prefers_stable_v5_portable_bundle_before_source_fallbac
     assert "checksum mismatch; refusing to install" in text
     assert "falling back to the source installer" in text
     assert "portable_stage" in text and "portable_backup" in text
+    assert "PREVIEW.json" in text
+    assert "--channel" in text
+    assert "(a|b|rc)" in text
 
 
 def test_windows_bootstrap_prefers_portable_bundle_and_rolls_back_activation() -> None:
@@ -56,6 +59,9 @@ def test_windows_bootstrap_prefers_portable_bundle_and_rolls_back_activation() -
     assert "checksum mismatch; refusing to install" in text
     assert "$backupDir" in text
     assert "falling back to the source installer" in text
+    assert "PREVIEW.json" in text
+    assert "preview" in text
+    assert "(?:a|b|rc)" in text
 
 
 def test_portable_bootstraps_keep_source_fallback_for_nonstable_refs() -> None:

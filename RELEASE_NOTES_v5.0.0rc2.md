@@ -97,6 +97,15 @@ uv tool install --prerelease=allow karox-runtime
 karox
 ```
 
+Clean macOS/Linux machines do not need a preinstalled Python. The portable preview
+bootstrap carries a pinned `uv`, provisions managed Python 3.12, installs this
+exact wheel, and starts KaroX / На чистом macOS/Linux заранее ставить Python не
+нужно — portable preview-bootstrap сам подготовит managed Python 3.12:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
+```
+
 To test the exact source tree directly, install the immutable tag / Для проверки именно исходников установи фиксированный тег:
 
 ```bash

@@ -111,6 +111,31 @@ def _check_release_records(problems: list[str], release: str) -> None:
             )
 
 
+def _check_preview_record(problems: list[str], runtime: str) -> None:
+    path = ROOT / "PREVIEW.json"
+    if not path.is_file():
+        return
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"PREVIEW.json is unreadable: {type(exc).__name__}")
+        return
+    if marker.get("schema_version") != 1 or marker.get("channel") != "preview":
+        problems.append("PREVIEW.json must declare schema_version 1 and channel 'preview'")
+    if marker.get("version") != runtime:
+        problems.append(
+            f"PREVIEW.json version {marker.get('version')!r} does not match runtime {runtime!r}"
+        )
+    expected_tag = f"v{runtime}"
+    if marker.get("tag") != expected_tag:
+        problems.append(
+            f"PREVIEW.json tag {marker.get('tag')!r} does not match {expected_tag!r}"
+        )
+    notes = ROOT / f"RELEASE_NOTES_{expected_tag}.md"
+    if not notes.is_file():
+        problems.append(f"PREVIEW.json points at {expected_tag!r} but {notes.name} is missing")
+
+
 def _version_key(text: str) -> tuple[int, ...]:
     """Order release lines by their leading numeric components."""
     components: list[int] = []
@@ -228,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_pyproject(problems, runtime)
     _check_workflows(problems, runtime, release)
     _check_release_records(problems, release)
+    _check_preview_record(problems, runtime)
     _check_repository_contracts(problems)
 
     if problems:

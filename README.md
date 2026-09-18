@@ -100,6 +100,14 @@ pipx install "karox-runtime==5.0.0rc2"
 uv tool install --prerelease=allow karox-runtime
 ```
 
+On a clean macOS or Linux machine, including one with **no Python installed**,
+the preview bootstrap downloads the checksummed portable bundle, uses its
+bundled `uv` to provision a managed Python runtime, installs KaroX, and starts it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
+```
+
 For source-level testing of the exact release candidate, install the matching
 Git tag instead of a moving branch:
 
