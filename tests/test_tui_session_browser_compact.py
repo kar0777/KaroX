@@ -19,6 +19,8 @@ at runtime, are not credentials, and exist to be searched for in rendered text.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import dataclasses
 import tempfile
 import unittest
@@ -62,19 +64,19 @@ class _Harness:
     def __init__(self, stack: unittest.TestCase) -> None:
         self.bus = EventBus()
         self.root = Path(
-            stack.enterContext(tempfile.TemporaryDirectory())  # type: ignore[attr-defined]
+            enter_context(stack, tempfile.TemporaryDirectory())  # type: ignore[attr-defined]
         )
         self.sessions = SessionStore(self.root)
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "event_bus", lambda: self.bus)
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "session_dir", lambda: self.root)
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "_load_language", return_value="en")
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "_selected_model", return_value=None)
         )
 

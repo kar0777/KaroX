@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from unittest.mock import patch
 
@@ -32,7 +34,7 @@ def visible(widget) -> bool:
 
 class ProviderKeyUxTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
+        self.repository = enter_context(self, isolated_karox_directories())
         self.registry = ProviderRegistry(
             self.repository.parent / "config" / "vnext" / "providers.json"
         )

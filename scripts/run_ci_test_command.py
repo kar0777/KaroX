@@ -1,28 +1,15 @@
-"""Run one Python test command in an isolated Windows console process group.
+"""Run a Python test command without inheriting the Windows runner console.
 
-KaroX has tests that intentionally exercise Windows process-group and Ctrl-Break
-cleanup. A test runner attached to the GitHub Actions PowerShell console can
-therefore receive a console-control event meant for a test child and abort with
-``KeyboardInterrupt`` even though no test failed. Keep the runner out of that
-console while preserving normal stdout/stderr and its exact exit code.
-
-Usage examples::
-
-    python scripts/run_ci_test_command.py -m pytest tests
-    python scripts/run_ci_test_command.py -m unittest discover -s tests -p test_*.py -v
-
-This is isolation, not suppression: the wrapper never installs a signal handler,
-never converts a test failure to success, and an interrupt of the wrapper still
-fails the CI step.
+Explicitly pipe and relay output: CREATE_NO_WINDOW with inherited console
+handles can otherwise lose all diagnostics. Isolation never changes the child's
+exit code or converts an interrupt/failure to success.
 """
-
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,16 +28,32 @@ def main(argv: list[str] | None = None) -> int:
     if not python_args:
         print("usage: run_ci_test_command.py PYTHON_ARGS...", file=sys.stderr)
         return 2
+    environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    # The child must have real pipe handles, not inherited console handles that
+    # become invalid when Windows creates it without a console.
     process = subprocess.Popen(
         [sys.executable, *python_args],
         cwd=ROOT,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         creationflags=_windows_creationflags(),
     )
     try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            # A redirected Windows parent may itself use cp1252. Preserve the
+            # diagnostic in escaped form instead of crashing on Unicode.
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            sys.stdout.write(line.encode(encoding, errors="backslashreplace").decode(encoding))
+            sys.stdout.flush()
         return int(process.wait())
     except KeyboardInterrupt:
-        # A real cancellation of the CI wrapper remains a failed run. Do not
-        # translate it to green; just bound the child lifetime before exiting.
         if process.poll() is None:
             process.terminate()
             try:
@@ -59,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
                 process.kill()
                 process.wait(timeout=5)
         return 130
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 if __name__ == "__main__":

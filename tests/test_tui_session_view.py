@@ -15,6 +15,8 @@ reach a widget. It is not a credential.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import json
 import tempfile
 import threading
@@ -55,19 +57,19 @@ class _Harness:
     def __init__(self, stack: unittest.TestCase) -> None:
         self.bus = EventBus()
         self.root = Path(
-            stack.enterContext(tempfile.TemporaryDirectory())  # type: ignore[attr-defined]
+            enter_context(stack, tempfile.TemporaryDirectory())  # type: ignore[attr-defined]
         )
         self.sessions = SessionStore(self.root)
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "event_bus", lambda: self.bus)
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "session_dir", lambda: self.root)
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "_load_language", return_value="en")
         )
-        stack.enterContext(  # type: ignore[attr-defined]
+        enter_context(stack,   # type: ignore[attr-defined]
             patch.object(tui, "_selected_model", return_value=None)
         )
 
@@ -622,7 +624,7 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.harness = _Harness(self)
         self.model = ModelRecord("openai", "model-a", tools="true")
-        self.enterContext(patch.object(tui, "_selected_model", return_value=self.model))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=self.model))
 
     def _states(self, session_id: str) -> list[dict[str, object]]:
         """SESSION_STATE payloads the production path published, in order."""
@@ -992,7 +994,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.harness = _Harness(self)
         self.model = ModelRecord("openai", "model-a", tools="true")
-        self.enterContext(patch.object(tui, "_selected_model", return_value=self.model))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=self.model))
 
     def _states(self, session_id: str) -> list[dict[str, object]]:
         return [

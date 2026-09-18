@@ -72,9 +72,9 @@ karox-agent-mcp = "karox.agent_mcp:main"
 [dependency-groups]
 lint = ["ruff>=0.14,<1.0"]
 typing = ["mypy>=1.13,<2.0", "types-PyYAML>=6.0,<7.0"]
-coverage = ["coverage>=7.6,<9.0"]
+coverage = ["coverage>=7.10.6,<9.0", "pytest-cov>=7.0,<8.0"]
 # pytest is how a contributor actually runs the suite while working, even though
-# the published count and CI's gate use `unittest discover`. It was undeclared,
+# the historical published baseline uses `unittest discover`. It was undeclared,
 # so the parallel runner below depended on whatever happened to be installed.
 # pytest-asyncio is likewise undeclared-but-imported: tests use
 # `@pytest.mark.asyncio`, and without the plugin CI's pytest fails them with
@@ -92,34 +92,10 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# `-n auto` is the whole point of this section: the suite is dominated by tests
-# that boot a real Textual application or spawn a real interpreter, which are
-# latency-bound rather than CPU-bound. Serially the suite takes 202s; across
-# workers it takes 45s for the same 705 passed / 4 skipped. A contributor who
-# runs `pytest` with no arguments should get the fast path by default, because a
-# check nobody is willing to wait for is a check nobody runs.
-#
-# Tests must therefore stay independent: anything that writes to a shared path
-# has to redirect KAROX_RUNTIME_DIR/KAROX_CONFIG_DIR (both spellings) to a
-# temporary directory, exactly as tests/test_web_bridge_launcher.py now does.
-# `-p no:cacheprovider` keeps a parallel run from racing on .pytest_cache.
-#
-# One test cannot run this way at all -- it accumulates state across the tests
-# before it -- so tests/conftest.py skips that single aggregator while pytest is
-# distributing, and says where it is still enforced. Everything else is
-# independent, which is the property to preserve when adding tests: redirect
-# KAROX_RUNTIME_DIR/KAROX_CONFIG_DIR (both spellings) at a temporary directory
-# instead of touching a shared one.
-# `-n 6` rather than `-n auto`: on a 12-thread Windows machine `auto` oversubscribes
-# the box, and tests that create a temporary Git repository start losing the race
-# to delete it -- `PermissionError [WinError 32] file already in use` out of
-# shutil.rmtree, in a different test on each run. Six workers reproduced no such
-# failure across repeated runs and still cut the suite from 202s to under 45s;
-# most of the remaining time is booting real Textual apps and child interpreters,
-# so the extra workers were buying very little anyway.
-# Keep the default runner self-contained. Parallel execution remains available
-# to contributors who installed pytest-xdist (`pytest -n 6`), but the canonical
-# verification command must not fail at argument parsing on a clean runtime.
+# Explicit parallel command: pytest -n 6 --dist=loadfile. Whole-file scheduling
+# preserves benchmark aggregation and class fixtures without skipping checks.
+# CI uses two workers per hosted runner to avoid oversubscribing subprocess/TUI
+# tests. The default remains usable without pytest-xdist installed.
 addopts = "-q -p no:cacheprovider"
 # strict keeps pytest-asyncio out of `unittest.IsolatedAsyncioTestCase`:
 # in auto mode the plugin and unittest's own Runner both tried to drive the
@@ -229,20 +205,16 @@ ignore_errors = true
 [tool.coverage.run]
 source = ["src/karox"]
 branch = true
-# The suite runs threads and multiprocessing workers, so both are declared and
-# the data is written per process and combined afterwards. What this does NOT
-# measure is the plain `subprocess` CLI end-to-end runs: those would need
-# COVERAGE_PROCESS_START and a sitecustomize hook in the child. The reported
-# figure therefore understates the code those tests really execute -- which is
-# the safe direction for a gate, but worth knowing before reading it as truth.
+# Measure real subprocess CLI paths as well as the parent test process.
+# Coverage 7.10+ instruments child interpreters; pytest-cov combines the data
+# from all xdist workers before applying the unchanged branch-coverage gate.
+patch = ["subprocess"]
 parallel = true
 concurrency = ["thread", "multiprocessing"]
 
 [tool.coverage.report]
-# The suite measures 75% statement+branch coverage of src/karox today. The gate
-# sits at 70 to leave room for platform-skipped branches on the other CI runners
-# rather than to flatter the number. Treat it as a ratchet: raise it when new
-# tests earn it, and never lower it to make a red run go green.
+# Keep the established statement+branch coverage gate as a ratchet: raise it
+# when tests earn it, never lower it to make a failing run green.
 fail_under = 70
 skip_covered = false
 show_missing = true

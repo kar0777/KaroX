@@ -21,6 +21,8 @@ routing, focus, Esc -- drive the real app through its production callbacks.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -312,11 +314,11 @@ class HubScreenTests(unittest.IsolatedAsyncioTestCase):
         # happens to have connected -- which made them non-deterministic and,
         # worse, let a machine-specific connection name decide whether an
         # assertion about KaroX's own vocabulary passed.
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
-        self.enterContext(patch.object(tui, "session_dir", lambda: self.root))
+        self.repository = enter_context(self, isolated_karox_directories())
+        self.root = Path(enter_context(self, tempfile.TemporaryDirectory()))
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
+        enter_context(self, patch.object(tui, "session_dir", lambda: self.root))
 
     def app(self) -> tui.KaroXApp:
         return tui.KaroXApp(self.repository, language="en")

@@ -6,6 +6,7 @@
 
 ![Status](https://img.shields.io/badge/status-beta-f59e0b)
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
+![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
 ![Runtime](https://img.shields.io/badge/runtime-5.0.0rc2-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
@@ -38,6 +39,8 @@ control of your permissions, sessions, or evidence.
 <td align="center"><a href="https://www.blockrun.ai"><img src="https://www.google.com/s2/favicons?domain=blockrun.ai&sz=128" width="38" height="38" alt="BlockRun"><br><sub><b>BlockRun</b></sub></a></td>
 </tr>
 </table>
+
+**All 33 acknowledged supporters:** [routing.run](https://routing.run) · [Vivgrid](https://vivgrid.com) · [Puter](https://puter.com) · [OmniaKey](https://omniakey.com) · [Browser Use](https://browser-use.com) · [Verda](https://www.verda.com) · [Tinfoil](https://tinfoil.sh) · [fal](https://fal.ai) · [Tavily](https://tavily.com) · [Cohere](https://cohere.com) · [Chutes](https://chutes.ai) · [EmpirioLabs](https://empiriolabs.ai) · [Langfuse](https://langfuse.com) · [AIReiter](https://aireiter.com) · [Scout APM](https://scoutapm.com) · [APIMaster](https://apimaster.ai) · [Merge Gateway](https://gateway.merge.dev) · [OpenRouter](https://openrouter.ai) · [Weights & Biases (W&B)](https://wandb.ai) · [BlockRun](https://www.blockrun.ai) · [UnifyLLM](https://www.unifyllm.com) · [Novita AI](https://novita.ai) · [BazaarLink](https://bazaarlink.ai) · [CostRouter](https://www.costrouter.ai) · [Ellipsis](https://www.ellipsis.dev) · [Advanced Installer](https://www.advancedinstaller.com) · [Bump.sh](https://bump.sh) · [Sentry](https://sentry.io) · [Socket](https://socket.dev) · [RouterPlex](https://routerplex.com) · [LangWatch](https://langwatch.ai) · [LLMTR / Knowhy](https://www.knowhy.ai) · [StepFun](https://www.stepfun.com)
 
 **[Meet all 33 supporters — full logo wall & acknowledgements →](SUPPORTERS.md)**
 
@@ -88,11 +91,11 @@ until their own evidence gates pass.
 
 ## Install
 
-The public beta is **`v5.0.0rc2`**. Install the published pre-release on
-Windows, macOS, or Linux:
+The beta candidate is **`v5.0.0rc2`**. After its PyPI publication completes,
+install this exact version on Windows, macOS, or Linux:
 
 ```bash
-pipx install --pre karox-runtime
+pipx install "karox-runtime==5.0.0rc2"
 # or
 uv tool install --prerelease=allow karox-runtime
 ```
@@ -351,14 +354,27 @@ The same 33 names are carried by the KaroX 5 sponsor registry used by `/sponsors
 
 ## Verification
 
-The suite is 3362 tests. CI runs:
+CI runs the complete pytest collection, including standalone and parameterized
+tests. For a parallel local run after installing the test dependency group:
+
+```bash
+python -m pip install --group test
+python -m pytest tests -n 6 --dist=loadfile
+```
+
+Whole-file scheduling keeps benchmark aggregation and class fixtures together;
+no benchmark assertion is skipped to enable parallelism.
+
+For comparison with historical records, the deterministic **unittest-only**
+count is maintained separately. The suite is 3375 tests.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3362 tests`. The repository root collects 3367 because
-a bare pytest collection also finds five legacy KaroX 4 checks under `scripts/`.
+A clean run reports `Ran 3375 tests`. Class-level environment skips can reduce
+the executed count. The unittest-plus-legacy subtotal is 3380 (the baseline
+plus five KaroX 4 script checks); it is **not** the full pytest collection size.
 
 `python scripts/check_test_count.py` verifies the published counts. Other
 release checks include:

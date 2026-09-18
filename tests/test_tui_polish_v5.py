@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -13,7 +15,7 @@ from karox import tui
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
 class TuiPolishV5Tests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
+        self.repository = enter_context(self, isolated_karox_directories())
 
     async def test_short_repository_question_is_local_and_spends_no_model_call(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):

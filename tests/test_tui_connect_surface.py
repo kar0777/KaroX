@@ -14,6 +14,8 @@ still opens the old wizard.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,10 +100,10 @@ class SlashMenuTests(unittest.IsolatedAsyncioTestCase):
     """The suggestion list a person actually sees while typing."""
 
     def setUp(self) -> None:
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
-        self.enterContext(patch.object(tui, "session_dir", lambda: self.root))
+        self.root = Path(enter_context(self, tempfile.TemporaryDirectory()))
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
+        enter_context(self, patch.object(tui, "session_dir", lambda: self.root))
 
     def app(self) -> tui.KaroXApp:
         return tui.KaroXApp(Path.cwd(), language="en")
@@ -158,10 +160,10 @@ class ConnectRoutingTests(unittest.IsolatedAsyncioTestCase):
     """Every path arrives at the same Connections screen."""
 
     def setUp(self) -> None:
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
-        self.enterContext(patch.object(tui, "session_dir", lambda: self.root))
+        self.root = Path(enter_context(self, tempfile.TemporaryDirectory()))
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
+        enter_context(self, patch.object(tui, "session_dir", lambda: self.root))
 
     def app(self) -> tui.KaroXApp:
         return tui.KaroXApp(Path.cwd(), language="en")

@@ -21,6 +21,8 @@ nothing on a machine that has none.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -51,9 +53,9 @@ def _visible(screen, selector: str) -> bool:
 
 class ProviderFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def app(self) -> tui.KaroXApp:
         return tui.KaroXApp(self.repository, language="en")
@@ -274,8 +276,8 @@ class ProviderFlowLanguageTests(unittest.IsolatedAsyncioTestCase):
     """RU/EN parity for the one label B2 introduced."""
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     async def test_the_advanced_button_is_labelled_in_both_languages(self) -> None:
         seen = []

@@ -12,6 +12,8 @@ one no single-flow test can see.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from unittest.mock import patch
 
@@ -230,9 +232,9 @@ class KeyboardContractTests(unittest.TestCase):
     """The same key does the same thing on every connection screen."""
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
         self.screens = hub.build_connections_screens(_Host())
 
     def _keys(self, screen_cls) -> set:
@@ -355,9 +357,9 @@ class HubResponsiveTests(unittest.IsolatedAsyncioTestCase):
     WIDE = (120, 30)
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def app(self, language: str = "en"):
         return tui.KaroXApp(self.repository, language=language)
@@ -475,9 +477,9 @@ class VerifyGuardTests(unittest.IsolatedAsyncioTestCase):
     """A second F5 must not race the first."""
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     async def test_a_second_verify_while_one_is_running_starts_nothing(self) -> None:
         """Two probes racing to write one status is how a failure gets

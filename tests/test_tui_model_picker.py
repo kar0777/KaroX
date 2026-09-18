@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -19,8 +21,8 @@ from karox.tui_dashboard import (
 
 class ModelPickerUiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     async def test_model_picker_mounts_with_current_model_and_no_effort_rows(self) -> None:
         registry = Mock()

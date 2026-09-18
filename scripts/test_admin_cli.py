@@ -43,7 +43,10 @@ def load_modules(root: Path, temp: Path):
 def test_support_bundle_confidentiality() -> None:
     root = Path(__file__).resolve().parents[1]
     env_name = "KAROX_SYNTHETIC_API_TOKEN"
-    previous_env = os.environ.get(env_name)
+    previous_environment = dict(os.environ)
+    previous_path = list(sys.path)
+    missing_module = object()
+    previous_admin = sys.modules.get("karox_admin", missing_module)
     env_secret = "EnvSynthetic_Q7mZ9pL2vN8xR4cT6kW1sD5hF3jB0aY"
     known_secret = "SessionSynthetic_A9vK3mQ7xL2pR8tN5dW1zC6hF4jB0sY"
     generic_entropy = "LooseSynthetic_Q9mV2xR7kP4tN8dL5sW1cF6hJ3bZ0aY"
@@ -242,10 +245,16 @@ def test_support_bundle_confidentiality() -> None:
             assert nested["stderr"] == "[REDACTED_PRIVATE_CONTENT]"
             assert nested["evidence_id"] == evidence_id
     finally:
-        if previous_env is None:
-            os.environ.pop(env_name, None)
+        # load_modules redirects HOME/APPDATA/XDG/runtime paths for this fixture.
+        # Restore all of them, not only the synthetic token: otherwise the next
+        # browser test searches a deleted temporary HOME for its Chromium cache.
+        os.environ.clear()
+        os.environ.update(previous_environment)
+        sys.path[:] = previous_path
+        if previous_admin is missing_module:
+            sys.modules.pop("karox_admin", None)
         else:
-            os.environ[env_name] = previous_env
+            sys.modules["karox_admin"] = previous_admin
 
 
 def main() -> int:

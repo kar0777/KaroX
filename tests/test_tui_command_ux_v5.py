@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,9 +19,9 @@ from karox.sessions import SessionStore
 
 class CommandUxV5Tests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "session_dir", lambda: self.root))
+        self.root = Path(enter_context(self, tempfile.TemporaryDirectory()))
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "session_dir", lambda: self.root))
 
     async def test_provider_model_picker_has_visible_apply_and_final_save_buttons(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):

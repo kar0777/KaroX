@@ -6,6 +6,7 @@
 
 ![Status](https://img.shields.io/badge/status-beta-f59e0b)
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
+![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
 ![Runtime](https://img.shields.io/badge/runtime-5.0.0rc2-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
@@ -38,6 +39,8 @@
 <td align="center"><a href="https://www.blockrun.ai"><img src="https://www.google.com/s2/favicons?domain=blockrun.ai&sz=128" width="38" height="38" alt="BlockRun"><br><sub><b>BlockRun</b></sub></a></td>
 </tr>
 </table>
+
+**Все 33 поддержавшие проект организации:** [routing.run](https://routing.run) · [Vivgrid](https://vivgrid.com) · [Puter](https://puter.com) · [OmniaKey](https://omniakey.com) · [Browser Use](https://browser-use.com) · [Verda](https://www.verda.com) · [Tinfoil](https://tinfoil.sh) · [fal](https://fal.ai) · [Tavily](https://tavily.com) · [Cohere](https://cohere.com) · [Chutes](https://chutes.ai) · [EmpirioLabs](https://empiriolabs.ai) · [Langfuse](https://langfuse.com) · [AIReiter](https://aireiter.com) · [Scout APM](https://scoutapm.com) · [APIMaster](https://apimaster.ai) · [Merge Gateway](https://gateway.merge.dev) · [OpenRouter](https://openrouter.ai) · [Weights & Biases (W&B)](https://wandb.ai) · [BlockRun](https://www.blockrun.ai) · [UnifyLLM](https://www.unifyllm.com) · [Novita AI](https://novita.ai) · [BazaarLink](https://bazaarlink.ai) · [CostRouter](https://www.costrouter.ai) · [Ellipsis](https://www.ellipsis.dev) · [Advanced Installer](https://www.advancedinstaller.com) · [Bump.sh](https://bump.sh) · [Sentry](https://sentry.io) · [Socket](https://socket.dev) · [RouterPlex](https://routerplex.com) · [LangWatch](https://langwatch.ai) · [LLMTR / Knowhy](https://www.knowhy.ai) · [StepFun](https://www.stepfun.com)
 
 **[Все 33 благодарности — полная стена логотипов и подробности →](SUPPORTERS_RU.md)**
 
@@ -91,10 +94,10 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Публичная бета — **`v5.0.0rc2`**. Установить опубликованный pre-release на Windows, macOS или Linux можно так:
+Кандидат публичной беты — **`v5.0.0rc2`**. После завершения публикации в PyPI установить эту точную версию на Windows, macOS или Linux можно так:
 
 ```bash
-pipx install --pre karox-runtime
+pipx install "karox-runtime==5.0.0rc2"
 # или
 uv tool install --prerelease=allow karox-runtime
 ```
@@ -342,13 +345,25 @@ KaroX теперь публично благодарит **33 уникальны
 
 ## Проверка качества
 
-Основной runner:
+CI запускает полный набор pytest, включая отдельные функции и параметризованные
+сценарии. Быстрый локальный запуск без пропуска benchmark-проверок:
+
+```bash
+python -m pip install --group test
+python -m pytest tests -n 6 --dist=loadfile
+```
+
+Распределение целых файлов сохраняет порядок тестов и итоговую проверку benchmark.
+Число unittest-методов ниже отслеживается отдельно для сравнения с историческими
+отчётами; это не количество всех сценариев pytest.
+
+Исторический unittest runner:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3362 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3375 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

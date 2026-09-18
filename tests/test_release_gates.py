@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import textwrap
@@ -265,7 +266,36 @@ class SupportBundleConfidentialityTests(unittest.TestCase):
 
     def test_adversarial_support_bundle_is_fail_closed(self) -> None:
         support_gate = _load_gate("test_admin_cli")
+        before_environment = dict(os.environ)
+        before_path = list(sys.path)
         support_gate.test_support_bundle_confidentiality()
+        self.assertFalse(
+            sorted(key for key in set(os.environ) | set(before_environment)
+                   if os.environ.get(key) != before_environment.get(key)),
+            "fixture changed environment keys (values intentionally omitted)",
+        )
+        self.assertEqual(sys.path, before_path)
+
+    def test_failed_support_fixture_restores_process_environment(self) -> None:
+        support_gate = _load_gate("test_admin_cli")
+        before_environment = dict(os.environ)
+        before_path = list(sys.path)
+
+        def broken_loader(*args):
+            os.environ["HOME"] = "synthetic-failed-home"
+            os.environ["APPDATA"] = "synthetic-failed-appdata"
+            sys.path.insert(0, "synthetic-test-import-path")
+            raise ValueError("fixture failure sentinel")
+
+        with patch.object(support_gate, "load_modules", side_effect=broken_loader):
+            with self.assertRaisesRegex(ValueError, "fixture failure sentinel"):
+                support_gate.test_support_bundle_confidentiality()
+        self.assertFalse(
+            sorted(key for key in set(os.environ) | set(before_environment)
+                   if os.environ.get(key) != before_environment.get(key)),
+            "fixture changed environment keys (values intentionally omitted)",
+        )
+        self.assertEqual(sys.path, before_path)
 
 
 if __name__ == "__main__":  # pragma: no cover

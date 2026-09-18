@@ -12,6 +12,8 @@ repositories never collapse into one ambiguous service row.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -36,8 +38,8 @@ class _HostAppStub:
 
 class SharedBridgeProjectSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        base = Path(self.enterContext(TemporaryDirectory()))
+        self.repository = enter_context(self, isolated_karox_directories())
+        base = Path(enter_context(self, TemporaryDirectory()))
         # Unicode + space in the second project path on purpose: the live
         # defect was found with D:\проекты\faceboooook selected.
         self.project_a = base / "project-a"
@@ -119,9 +121,9 @@ class ServiceScreenSmallTerminalScrollTests(unittest.IsolatedAsyncioTestCase):
 
         from karox import tui
 
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     async def test_small_terminal_keeps_every_control_reachable(self) -> None:
         from textual.containers import VerticalScroll

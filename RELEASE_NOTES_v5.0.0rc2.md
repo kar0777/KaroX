@@ -21,7 +21,7 @@ architecture are ready for real beta use. Stable `5.0.0` still waits for the
 remaining live conformance, external-beta, and install/upgrade evidence recorded
 in `docs/RELEASE_CHECKLIST.md`.
 
-`5.0.0rc2` — первый публичный **release candidate KaroX 5**. Основная ветка
+`5.0.0rc2` — второй публичный **release candidate KaroX 5**. Основная ветка
 `main` теперь содержит KaroX 5 beta. Стабильный `5.0.0` появится после
 оставшихся live-conformance, внешней беты и подтверждённых install/upgrade
 прогонов из `docs/RELEASE_CHECKLIST.md`.
@@ -40,6 +40,25 @@ complete the public publication pipeline end to end.
 gate **до публикации в PyPI и до создания GitHub Release**. `rc2` исправляет
 найденные именно release-pipeline проблемы и является первым кандидатом, который
 должен пройти публичную публикацию полностью от тега до устанавливаемого пакета.
+
+## Verification pipeline improvements / Проверки и совместимость
+
+- Python 3.10 test fixtures use portable context cleanup, with regression tests
+  for successful entry, failed entry, cleanup ordering, and cleanup failures.
+- Isolated Windows test processes relay both output streams and preserve real
+  failure exit codes, including when the parent console uses a legacy encoding.
+- CI distributes complete test files across workers. The benchmark aggregation
+  assertion runs in parallel builds instead of being skipped.
+- Coverage runs the full pytest suite against checkout source, including CLI
+  subprocesses. The required branch-coverage threshold remains **70%**.
+- Browser probes always release the Playwright driver on failure; support-bundle
+  fixtures restore HOME, runtime directories, import paths, and their module state.
+  Python 3.12 matrix jobs require real Chromium acceptance on all three OSes.
+- Pip dependency caches are enabled for the ordinary CI jobs. The platform and
+  Python-version matrices and release/security gates remain in place.
+
+These changes do not replace the pending live-provider and external-beta
+conformance records needed for stable 5.0.0.
 
 ## ✨ What makes this release different
 
@@ -72,7 +91,7 @@ categories and acknowledgements.
 ## Install / Установка
 
 ```bash
-pipx install --pre karox-runtime
+pipx install "karox-runtime==5.0.0rc2"
 # or / или
 uv tool install --prerelease=allow karox-runtime
 karox
@@ -190,20 +209,18 @@ replaceable worker.
 
 ## Verification
 
-The beta gate covers the canonical test suite, Ruff, Mypy and the configured
-70% branch-coverage floor. On the 2026-09-17 release-preparation tree, the
-published suite count is 3362 tests (`3367` from repository-root collection with
-five legacy script checks), the final six-worker xdist run completed successfully,
-and the focused guarded-release/risk tests passed. Earlier in the same release
-mission, canonical `unittest` completed `OK (skipped=6)` and KB-HYBRID-01..10
-passed 10/10. The release wheel is built, its contents are checked, and it is
-installed and smoke-tested outside the source tree. CI exercises Ubuntu, Windows
-and macOS; the broader Python 3.10/3.12/3.14 installation matrix remains an
-explicit prerequisite for stable `5.0.0` until the exact release tree is green
-in GitHub Actions.
+The beta gate covers the full pytest suite, Ruff, Mypy, artifact installation,
+and the unchanged **70% statement-and-branch coverage floor**. CI retains Ubuntu,
+Windows, and macOS with Python 3.10 / 3.12 / 3.13 / 3.14 in the artifact matrix.
+Real Chromium acceptance is required in the three Python 3.12 matrix jobs.
+
+The deterministic unittest count is tracked separately by
+`scripts/check_test_count.py`; it excludes pytest-only and parameterized cases.
+A local pass is not a substitute for green GitHub Actions on the exact tagged
+commit, successful publication, and a fresh install of the published package.
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -m pytest tests -n 6 --dist=loadfile
 python scripts/check_v5_release.py --json
 ```
 

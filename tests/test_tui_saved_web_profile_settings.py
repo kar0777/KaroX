@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -291,9 +293,9 @@ def test_detach_keeps_keyring_entry_when_another_profile_uses_same_ref() -> None
 
 class SavedWebProfileTextualTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
         from karox.web_bridge_profiles import WebBridgeProfileStore
 
         WebBridgeProfileStore().put(

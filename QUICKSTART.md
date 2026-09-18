@@ -21,7 +21,7 @@ pipx install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-com
 uv tool install --force "git+https://github.com/kar0777/KaroX.git@feat/karox-v5-competitive-upgrade"
 ```
 
-After the candidate reaches PyPI, `pipx install --pre karox-runtime` and
+After the candidate reaches PyPI, `pipx install "karox-runtime==5.0.0rc2"` and
 `uv tool install --prerelease=allow karox-runtime` install the same package /
 после публикации кандидата в PyPI эти же команды будут устанавливать тот же
 пакет.

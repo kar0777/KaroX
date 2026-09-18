@@ -9,6 +9,8 @@ mounted ``ConnectionDetailScreen``.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from unittest import mock
 
@@ -89,10 +91,10 @@ class CopyAuthActionMountedTests(unittest.IsolatedAsyncioTestCase):
     """Drive the real mounted screen and assert the secret never renders."""
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(mock.patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(mock.patch.object(tui, "_selected_model", return_value=None))
-        self.enterContext(
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, mock.patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, mock.patch.object(tui, "_selected_model", return_value=None))
+        enter_context(self,
             mock.patch(
                 "karox.connections.resolve_connection_secret",
                 return_value=_FIXTURE_SECRET,

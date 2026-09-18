@@ -158,7 +158,7 @@ class UnicodeRepoPathTests(unittest.TestCase):
         rt = Path(tmp) / "runtime"; rt.mkdir()
         env = {k: str(cfg) for k in _CONFIG_OVERRIDES}
         env.update({k: str(rt) for k in _RUNTIME_OVERRIDES})
-        stack.enter_context(contextlib.chdir(Path.cwd()))
+        stack.callback(os.chdir, Path.cwd())  # contextlib.chdir requires Python 3.11
         real = os.environ.copy()
         real.update(env)
         stack.enter_context(_patch.dict(os.environ, real, clear=False))
@@ -169,9 +169,10 @@ class UnicodeRepoPathTests(unittest.TestCase):
 
         from karox.security import child_process_environment
 
-        with self._isolated_env():
-            # Build a temporary Cyrillic repo path that is NOT the project dir.
-            base = Path(tempfile.gettempdir()) / "проекты" / "тестовый-проект"
+        with self._isolated_env() as stack:
+            # Keep each Unicode-path run isolated from other workers and retries.
+            temporary = stack.enter_context(tempfile.TemporaryDirectory())
+            base = Path(temporary) / "проекты" / "тестовый-проект"
             base.mkdir(parents=True, exist_ok=True)
             (base / "package.json").write_text(
                 '{"name":"x","scripts":{"test":"node -e \\"1\\""}}',
@@ -420,16 +421,21 @@ class BrowserRuntimeFixtureTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         try:
             from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise unittest.SkipTest("playwright not installed")
-        # Confirm headless chromium can actually launch before running.
+        except ImportError as exc:
+            if os.environ.get("KAROX_REQUIRE_BROWSER_TESTS") == "1":
+                raise RuntimeError("required Playwright dependency is missing") from exc
+            raise unittest.SkipTest("playwright not installed") from exc
+        # The context manager must stop the sync driver even when launch fails.
+        # A leaked driver leaves a running loop on this thread and poisons later
+        # IsolatedAsyncioTestCase setup (especially on Python 3.10).
         try:
-            ctx = sync_playwright().start()
-            b = ctx.chromium.launch(headless=True)
-            b.close()
-            ctx.stop()
+            with sync_playwright() as ctx:
+                browser = ctx.chromium.launch(headless=True)
+                browser.close()
         except Exception as exc:  # pragma: no cover - environment-dependent
-            raise unittest.SkipTest(f"chromium unavailable: {exc}")
+            if os.environ.get("KAROX_REQUIRE_BROWSER_TESTS") == "1":
+                raise RuntimeError(f"required Chromium fixture unavailable: {exc}") from exc
+            raise unittest.SkipTest(f"chromium unavailable: {exc}") from exc
 
     def _isolated_env(self):
         stack = contextlib.ExitStack()

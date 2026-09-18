@@ -15,6 +15,8 @@ asked to make, so the absence is provable rather than assumed.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
@@ -1181,9 +1183,9 @@ class SecretSafetyTests(unittest.IsolatedAsyncioTestCase):
         from _tui_harness import isolated_karox_directories
         from karox import tui
 
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def app(self):
         from karox import tui
@@ -1468,9 +1470,9 @@ class ResponsiveManagementTests(unittest.IsolatedAsyncioTestCase):
         from _tui_harness import isolated_karox_directories
         from karox import tui
 
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def app(self, language: str = "en"):
         from karox import tui

@@ -60,15 +60,14 @@ class Claim:
 # These are current product claims. Archived phase records are not rewritten
 # whenever the live suite grows; treating them as current would destroy useful
 # historical evidence.
-# Split by which number they quote. The root-collection claims describe the bare
-# pytest collection at the repository root, which is the suite plus the legacy
-# checks; everything else quotes the suite under `tests` alone. Keeping them in
-# separate tables means a test can substitute one kind without silently changing
-# the meaning of the other.
+# Keep the deterministic unittest baseline separate from five legacy checks.
+# The historical internal "root" key is retained for consumers, but this sum
+# is NOT a pytest collection count: pytest also finds standalone/parameterized
+# tests that unittest discovery cannot see.
 SUITE_COUNT_CLAIMS = (
     Claim("README.md", r"The suite is ([0-9]+) tests\."),
     Claim("README.md", r"A clean run reports `Ran ([0-9]+) tests`\."),
-    Claim("docs/vNext/README.md", r"reported `Ran ([0-9]+) tests`\."),
+    Claim("docs/vNext/README.md", r"unittest baseline contains ([0-9]+) cases"),
     Claim("README_RU.md", r"Полный suite содержит ([0-9]+) тестов\."),
     Claim(
         "docs/IMPLEMENTATION_STATUS.md",
@@ -90,12 +89,12 @@ SUITE_COUNT_CLAIMS = (
 ROOT_COUNT_CLAIMS = (
     Claim(
         "README.md",
-        r"repository root collects ([0-9]+) because",
+        r"unittest-plus-legacy subtotal is ([0-9]+)",
         "root",
     ),
     Claim(
         "docs/vNext/README.md",
-        r"repository root collects ([0-9]+) because",
+        r"unittest-plus-legacy subtotal is ([0-9]+)",
         "root",
     ),
 )
@@ -303,7 +302,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         print(
             f"suite tests: {suite_count}; legacy script checks: {legacy_count}; "
-            f"root collection: {root_count}"
+            f"unittest-plus-legacy subtotal: {root_count}"
         )
         for update in updates:
             print(f"+ {update}")

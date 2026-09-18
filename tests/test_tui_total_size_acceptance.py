@@ -9,6 +9,8 @@ every size — RU labels are wider and clip first; English is sampled.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from unittest.mock import patch
 
@@ -33,9 +35,9 @@ class TotalSizeAcceptanceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         from karox import tui
 
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="ru"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="ru"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def _screens_for(self, app, language: str):
         from karox.project_registry import ProjectRegistry

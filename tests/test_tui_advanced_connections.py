@@ -21,6 +21,8 @@ behaviour drives the real application through production callbacks.
 
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import unittest
 from unittest.mock import patch
 
@@ -305,9 +307,9 @@ class AdvancedScreenTests(unittest.IsolatedAsyncioTestCase):
     """The running screen: disclosure, apply-once, restart confirmation, Esc."""
 
     def setUp(self) -> None:
-        self.repository = self.enterContext(isolated_karox_directories())
-        self.enterContext(patch.object(tui, "_load_language", return_value="en"))
-        self.enterContext(patch.object(tui, "_selected_model", return_value=None))
+        self.repository = enter_context(self, isolated_karox_directories())
+        enter_context(self, patch.object(tui, "_load_language", return_value="en"))
+        enter_context(self, patch.object(tui, "_selected_model", return_value=None))
 
     def app(self) -> tui.KaroXApp:
         return tui.KaroXApp(self.repository, language="en")

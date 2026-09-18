@@ -89,10 +89,8 @@ jobs:
           python -m pip install --group test --group coverage
           # The coverage suite exercises the real console entry point and imports
           # karox directly, so install the checkout itself after dependencies.
-          # Editable installs break coverage accounting (source=src/karox would
-          # double-count every module through both the checkout and the editable
-          # path), so install the package normally: the console script lands on
-          # PATH while coverage keeps measuring only the repository source.
+          # PYTHONPATH in the source-test step pins measurement to this checkout;
+          # installing the package here supplies the real console entry points.
           python -m pip install --no-deps .
 
       # Runs here rather than in the lint job because it imports the test
@@ -101,18 +99,15 @@ jobs:
       - name: Check the published test counts
         run: python scripts/check_test_count.py
 
-      # unittest, not pytest: pytest counts subtests separately, so its pass
-      # tally moves between runs and cannot be used as a gate. The threshold is
-      # the level the suite actually reaches today -- raise it with the coverage
-      # it earns, never lower it to make a run go green.
+      # The deterministic published count above remains a unittest count. Run
+      # pytest here as well so standalone and async pytest tests are measured,
+      # rather than silently leaving them out of the coverage gate.
       - name: Measure coverage
-        run: |
-          python -m coverage run -m unittest discover -s tests -p "test_*.py"
-          # Parallel mode is on so subprocess children report too, which means
-          # the per-process data files have to be combined before reporting.
-          python -m coverage combine
-          python -m coverage report
-          python -m coverage xml
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: >-
+          python -m pytest tests -n 2 --dist=loadfile
+          --cov=src/karox --cov-branch --cov-report=term --cov-report=xml
 
       - name: Upload coverage report
         if: always()
@@ -154,6 +149,12 @@ jobs:
           python -m pip install --group test
           python -m pip check
 
+      # Exercise actual Chromium on all three platforms once per matrix, rather
+      # than installing it twelve times. A launch failure cannot become a skip.
+      - name: Install Chromium for browser acceptance
+        if: matrix.python == '3.12'
+        run: python -m playwright install --with-deps chromium
+
       # The expected version is read from the source of truth rather than
       # repeated here. A literal in this file was one of three disagreeing
       # copies, and it is the copy nobody remembers to update.
@@ -179,16 +180,20 @@ jobs:
       # A few lifecycle tests intentionally exercise Ctrl-Break cleanup. On a
       # hosted Windows console that event can otherwise hit the test runner
       # itself. The wrapper changes only process-group isolation and propagates
-      # unittest's exact exit code; it never swallows signals or failures.
+      # pytest's exact exit code; it never swallows signals or failures.
       - name: Run the complete vNext suite (Windows isolated)
         if: runner.os == 'Windows'
+        env:
+          KAROX_REQUIRE_BROWSER_TESTS: ${{ matrix.python == '3.12' && '1' || '0' }}
         shell: bash
-        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python scripts/run_ci_test_command.py -m unittest discover -s tests -p "test_*.py" -v
+        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python scripts/run_ci_test_command.py -m pytest tests -n 2 --dist=loadfile
 
       - name: Run the complete vNext suite
         if: runner.os != 'Windows'
+        env:
+          KAROX_REQUIRE_BROWSER_TESTS: ${{ matrix.python == '3.12' && '1' || '0' }}
         shell: bash
-        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python -m unittest discover -s tests -p "test_*.py" -v
+        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python -m pytest tests -n 2 --dist=loadfile
 
   cross-platform:
     name: ${{ matrix.os }} · Python ${{ matrix.python }}

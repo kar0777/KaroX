@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _unittest_compat import enter_context
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,7 +114,7 @@ class HumanFirstHeaderTests(unittest.TestCase):
 
 class HumanFirstCommandPaletteTests(unittest.IsolatedAsyncioTestCase):
     async def test_palette_uses_human_language_and_localizes_russian_copy(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="ru")
         async with app.run_test(size=(100, 34)) as pilot:
             await pilot.pause(0.05)
@@ -132,7 +134,7 @@ class HumanFirstCommandPaletteTests(unittest.IsolatedAsyncioTestCase):
 
 class HumanFirstModePickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_mode_picker_explains_behavior_in_plain_language(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="en")
         async with app.run_test(size=(100, 34)) as pilot:
             screen = ModePickerScreen("en", mode="build")
@@ -156,7 +158,7 @@ class HumanFirstModePickerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("without changing code", plan)
 
     async def test_bare_mode_command_opens_picker_instead_of_printing_syntax(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="en")
         async with app.run_test(size=(100, 34)) as pilot:
             await pilot.pause(0.05)
@@ -167,7 +169,7 @@ class HumanFirstModePickerTests(unittest.IsolatedAsyncioTestCase):
 
 class HumanFirstEffortPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_picker_defaults_to_plain_language_and_d_toggles_exact_budget(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="en")
         async with app.run_test(size=(100, 34)) as pilot:
             screen = EffortPickerScreen("en", effort="ultra")
@@ -197,7 +199,7 @@ class HumanFirstEffortPickerTests(unittest.IsolatedAsyncioTestCase):
 
 class HumanFirstModelPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_picker_is_simple_until_details_are_requested(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         registry = Mock()
         registry.selected_model.return_value = ModelRecord(
             "openrouter",
@@ -268,7 +270,7 @@ class HumanFirstOrchestrationTuiTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_tui_plan_output_is_team_first(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="en")
         async with app.run_test(size=(110, 36)) as pilot:
             await pilot.pause(0.05)
@@ -287,7 +289,7 @@ class HumanFirstOrchestrationTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Run ID", text)
 
     async def test_tui_run_output_hides_raw_telemetry_but_links_mission(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         app = tui.KaroXApp(root, language="en")
         async with app.run_test(size=(110, 36)) as pilot:
             await pilot.pause(0.05)
@@ -322,7 +324,7 @@ class HumanFirstOrchestrationTuiTests(unittest.IsolatedAsyncioTestCase):
 
 class HumanFirstAgentsTuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_agents_default_hides_internal_endpoint_ids(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         endpoint = IntelligenceEndpoint(
             endpoint_id="sub:codex",
             display_name="Codex",
@@ -351,7 +353,7 @@ class HumanFirstAgentsTuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("/agents details", text)
 
     async def test_agents_details_preserve_exact_connection_identity(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         endpoint = IntelligenceEndpoint(
             endpoint_id="sub:codex",
             display_name="Codex",
@@ -424,7 +426,7 @@ class HumanFirstMissionTuiTests(unittest.IsolatedAsyncioTestCase):
         return pool
 
     async def test_mission_default_is_task_first_and_hides_raw_telemetry(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         store = Mock()
         store.snapshot.return_value = self._snapshot()
         with (
@@ -449,7 +451,7 @@ class HumanFirstMissionTuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("sub:orch", text)
 
     async def test_mission_details_restore_exact_runtime_identity(self) -> None:
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root = Path(enter_context(self, tempfile.TemporaryDirectory()))
         store = Mock()
         store.snapshot.return_value = self._snapshot()
         with (

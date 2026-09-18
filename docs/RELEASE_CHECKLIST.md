@@ -89,7 +89,7 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [x] Complete 3362-test suite passes on the beta release HEAD. The stale
+- [x] Complete 3375-test suite passes on the beta release HEAD. The stale
   2026-09-03 failing-run narration above has been superseded: the CLI surface,
   developer runtime, desktop capture, TUI, agent verification, and release-gate
   findings were repaired across subsequent commits. Re-verified 2026-09-17 on

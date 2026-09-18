@@ -14,6 +14,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
+          cache: pip
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -m pip install --group lint && python -m pip install --group typing
       - run: python -m ruff check src tests scripts
       - run: python -m mypy src/karox
@@ -29,6 +30,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
+          cache: pip
       # The test group declares pytest/pytest-xdist; requirements.txt alone is
       # the runtime dependency set and has no pytest. The checkout is then
       # installed editable without dependencies because the CLI-provider tests
@@ -44,10 +46,10 @@ jobs:
       # pytest itself as KeyboardInterrupt. The wrapper propagates pytest's real
       # exit code and treats a genuine runner interrupt as failure.
       - if: runner.os == 'Windows'
-        run: python scripts/run_ci_test_command.py -m pytest tests --ignore-glob="tests/test_[i-z]*.py"
+        run: python scripts/run_ci_test_command.py -m pytest tests -n 2 --dist=loadfile --ignore-glob="tests/test_[i-z]*.py"
         timeout-minutes: 40
       - if: runner.os != 'Windows'
-        run: python -m pytest tests --ignore-glob="tests/test_[i-z]*.py"
+        run: python -m pytest tests -n 2 --dist=loadfile --ignore-glob="tests/test_[i-z]*.py"
         timeout-minutes: 40
 
   test-shard-b:
@@ -61,12 +63,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
+          cache: pip
       - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt --group test && python -m pip install --no-deps -e .
       - if: runner.os == 'Windows'
-        run: python scripts/run_ci_test_command.py -m pytest tests --ignore-glob="tests/test_[a-h]*.py"
+        run: python scripts/run_ci_test_command.py -m pytest tests -n 2 --dist=loadfile --ignore-glob="tests/test_[a-h]*.py"
         timeout-minutes: 45
       - if: runner.os != 'Windows'
-        run: python -m pytest tests --ignore-glob="tests/test_[a-h]*.py"
+        run: python -m pytest tests -n 2 --dist=loadfile --ignore-glob="tests/test_[a-h]*.py"
         timeout-minutes: 45
 
   wheel:
@@ -80,6 +83,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
+          cache: pip
       - run: python -m pip install --upgrade pip build --group test
       - run: python -c "import shutil; shutil.rmtree('build', ignore_errors=True); shutil.rmtree('dist', ignore_errors=True)"
       - run: python -m build --wheel
@@ -95,6 +99,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13.11"
+          cache: pip
       # check_test_count imports the entire test suite. Several test modules use
       # pytest helpers/marks even though this gate itself is driven by unittest,
       # so the declared test group is required on a clean hosted runner.

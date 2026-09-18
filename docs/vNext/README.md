@@ -22,16 +22,14 @@ fact is repeated in the canonical current documents above.
 
 ## Historical test-count evidence
 
-The development record reached a suite where the documented `unittest` runner
-reported `Ran 3362 tests`.
+For comparison with archived phase reports, the current unittest baseline contains 3375 cases. This is a discovery count, not a historical run result.
 
-3360 is also what the corresponding test collection under `tests` reports. The
-repository root collects 3367 because it additionally finds five legacy KaroX 4
-checks under `scripts/`.
+The unittest-plus-legacy subtotal is 3380: that baseline plus five legacy KaroX 4
+checks under `scripts/`. It is not the full pytest count, which also includes
+standalone functions and parameterized cases.
 
-These figures remain checked by `scripts/check_test_count.py`; they describe the
-same current suite size, but this archived page is no longer the place where new
-product claims should be added.
+These current reference counts remain checked by `scripts/check_test_count.py`.
+Individual archived phase documents retain their original historical counts.
 
 ## Historical document map
 
