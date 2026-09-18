@@ -1478,14 +1478,12 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(model_input.styles.display, "none")
                 app.screen.query_one("#provider-manual", tui.Button).focus()
                 await pilot.press("enter")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.ManualModelScreen)
+                await self.screen(pilot, app, tui.ManualModelScreen)
                 await self.focus(pilot, app, "manual-model-id")
                 app.screen.query_one("#manual-model-id", tui.Input).value = "model-manual"
                 app.screen.query_one("#manual-model-save", tui.Button).focus()
                 await pilot.press("enter")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
+                await self.screen(pilot, app, tui.ProviderSetupScreen)
                 summary = str(
                     app.screen.query_one("#provider-summary", tui.Static).render()
                 )
