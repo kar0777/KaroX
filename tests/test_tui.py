@@ -880,7 +880,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             app = tui.KaroXApp(Path.cwd())
             async with app.run_test(size=(120, 42)) as pilot:
-                await pilot.pause()
+                await self.screen(pilot, app, tui.LanguageScreen)
                 await pilot.press("down", "enter")
                 await self.language(pilot, app, "en")
                 save_language.assert_called_once_with("en")

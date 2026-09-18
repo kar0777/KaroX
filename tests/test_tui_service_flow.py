@@ -692,7 +692,14 @@ class ServiceScreenTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"action": "restarted", "error": None},
             ) as restart:
                 switch.value = False
-                await pilot.pause(0.7)
+                # The switch persists in a worker. Hosted Windows runners can
+                # take longer than a fixed sleep when the full suite is running
+                # in parallel, so wait for the observable side effect instead
+                # of guessing a wall-clock duration.
+                for _ in range(100):
+                    if restart.call_count:
+                        break
+                    await pilot.pause(0.05)
 
             restart.assert_called_once_with(
                 base.name,

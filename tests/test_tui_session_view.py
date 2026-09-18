@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from _unittest_compat import enter_context
 
+import contextlib
 import json
 import tempfile
 import threading
@@ -686,7 +687,11 @@ class ProductionAgentLifecycleTests(unittest.IsolatedAsyncioTestCase):
             composer = app.query_one("#composer", tui.Input)
             composer.value = "fix the tests"
             await pilot.press("enter")  # type: ignore[attr-defined]
-            await pilot.pause(0.3)  # type: ignore[attr-defined]
+            deadline = time.monotonic() + 10
+            while app.agent_busy and time.monotonic() < deadline:
+                await pilot.pause(0.02)  # type: ignore[attr-defined]
+            self.assertFalse(app.agent_busy, "agent worker did not settle")
+            await pilot.pause()  # type: ignore[attr-defined]
         session_id = app.active_session
         assert session_id
         return session_id
@@ -998,6 +1003,24 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         self._runner_apps: list[tui.KaroXApp] = []
         enter_context(self, patch.object(tui, "_selected_model", return_value=self.model))
 
+    @contextlib.asynccontextmanager
+    async def _run_app(self, app: tui.KaroXApp):
+        """Release fake child threads while Textual still has an active app.
+
+        run_test cancels workers while it tears the app down. A threaded
+        worker cannot be pre-empted by that cancellation, so releasing the fake
+        child only in asyncTearDown is too late on Windows: the thread can
+        still touch the session directory while TemporaryDirectory removes it.
+        """
+        async with app.run_test(size=(120, 42)) as pilot:
+            try:
+                yield pilot
+            finally:
+                for release in self._runner_releases:
+                    release.set()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+
     async def asyncTearDown(self) -> None:
         # run_worker(thread=True) cannot pre-empt a blocking Python thread.
         # Release the fake child and wait for Textual's worker before the
@@ -1064,7 +1087,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run_a = await self._start_run(app, pilot)
             report = json.dumps({"verified": True, "status": "verified"})
@@ -1093,7 +1116,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run_a = await self._start_run(app, pilot)
             report = json.dumps({"verified": True, "status": "verified"})
@@ -1106,7 +1129,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_current_run_still_finishes_after_a_stale_callback(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run_a = await self._start_run(app, pilot)
             report = json.dumps({"verified": True, "status": "verified"})
@@ -1124,7 +1147,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_duplicate_callback_of_the_current_run_publishes_once(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run = await self._start_run(app, pilot)
             report = json.dumps({"verified": True, "status": "verified"})
@@ -1136,7 +1159,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_late_success_cannot_overwrite_a_cancelled_outcome(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run = await self._start_run(app, pilot)
             app.action_stop_agent()
@@ -1154,7 +1177,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelling_does_not_reach_the_run_that_replaced_it(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run_a = await self._start_run(app, pilot)
             app.action_stop_agent()
@@ -1173,7 +1196,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_submission_takes_a_new_generation(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             seen: list[int] = []
             for _ in range(3):
@@ -1190,7 +1213,7 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_rejected_submission_does_not_consume_a_generation(self) -> None:
         app = self.harness.app()
-        async with app.run_test(size=(120, 42)) as pilot:
+        async with self._run_app(app) as pilot:
             await pilot.pause()
             run = await self._start_run(app, pilot)
             # The agent is busy, so this submission is refused before dispatch.

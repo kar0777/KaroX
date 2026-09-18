@@ -494,11 +494,19 @@ class HubToDetailRoutingTests(_DetailLifecycleBase):
             self.assertIsNotNone(target_index, "selected provider row must be in the hub")
             options.highlighted = target_index
             base = len(app.screen_stack)
-            await pilot.press("enter")
-            # Second Enter before the deferred push necessarily lands.
-            await pilot.press("enter")
-            await pilot.pause()
-            await pilot.pause()
+            # Depending on scheduling, the second Enter can reach the newly
+            # mounted detail screen and trigger Verify. Keep that real routing,
+            # but make the provider probe deterministic and drain its worker
+            # before the app context exits.
+            with patch(
+                "karox.tui_connections.ProviderController.test_provider",
+                return_value={"state": "failed", "detail": "fixture"},
+            ):
+                await pilot.press("enter")
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                await app.workers.wait_for_complete()
             details = [
                 s for s in app.screen_stack
                 if type(s).__name__ == "ConnectionDetailScreen"
