@@ -861,8 +861,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             app = tui.KaroXApp(Path.cwd())
             async with app.run_test(size=(120, 42)) as pilot:
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.LanguageScreen)
+                await self.screen(pilot, app, tui.LanguageScreen)
                 await pilot.press("1")
                 await self.language(pilot, app, "ru")
                 self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)

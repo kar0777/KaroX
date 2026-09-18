@@ -69,10 +69,25 @@ class CliProviderE2ETests(unittest.TestCase):
     def run_cli(self, *args: str) -> object:
         env = dict(os.environ)
         env["KAROX_PROVIDER_E2E_API_KEY"] = SECRET
+        # The CLI emits UTF-8 JSON. Windows hosted runners otherwise decode
+        # captured output with the legacy ANSI code page (cp1252), which can
+        # turn a valid response into stdout=None when the reader hits a byte
+        # that code page cannot represent.
+        env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         launcher = shutil.which("karox")
         self.assertIsNotNone(launcher, "the karox console script is not installed on PATH")
-        result = subprocess.run([str(launcher), *args], cwd=SRC.parent, env=env, capture_output=True, text=True, timeout=30, check=False)
+        result = subprocess.run(
+            [str(launcher), *args],
+            cwd=SRC.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
         self.assertNotIn(SECRET, result.stdout)
         self.assertNotIn(SECRET, result.stderr)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)

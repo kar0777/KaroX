@@ -31,6 +31,12 @@ from karox.transcript_shadow import close_transcript_store, get_transcript_store
 @contextlib.contextmanager
 def _resource_warnings_are_failures():
     """Record ResourceWarnings for the block, including a forced GC pass."""
+    # Flush garbage left by earlier tests before recording. Python 3.13+
+    # reports ResourceWarning for third-party sqlite connections when they are
+    # eventually collected; without this pre-pass, an unrelated object created
+    # by a previous test can make this block fail. The post-block collection
+    # still turns resources leaked by this block into a deterministic failure.
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         yield caught

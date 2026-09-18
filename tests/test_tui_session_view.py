@@ -994,7 +994,19 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.harness = _Harness(self)
         self.model = ModelRecord("openai", "model-a", tools="true")
+        self._runner_releases: list[threading.Event] = []
+        self._runner_apps: list[tui.KaroXApp] = []
         enter_context(self, patch.object(tui, "_selected_model", return_value=self.model))
+
+    async def asyncTearDown(self) -> None:
+        # run_worker(thread=True) cannot pre-empt a blocking Python thread.
+        # Release the fake child and wait for Textual's worker before the
+        # TemporaryDirectory cleanup starts; otherwise Windows can race rmtree
+        # with a late callback that is still touching the session directory.
+        for release in self._runner_releases:
+            release.set()
+        for app in self._runner_apps:
+            await app.workers.wait_for_complete()
 
     def _states(self, session_id: str) -> list[dict[str, object]]:
         return [
@@ -1014,7 +1026,9 @@ class RunGenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         """
 
         release = threading.Event()
-        self.addCleanup(release.set)
+        self._runner_releases.append(release)
+        if app not in self._runner_apps:
+            self._runner_apps.append(app)
 
         def runner(argv: object, on_process: object) -> tuple[int, str]:
             command = list(argv) if isinstance(argv, (list, tuple)) else []
