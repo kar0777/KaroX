@@ -4,7 +4,7 @@ KaroX exposes a selected local Git repository to compatible AI clients through g
 
 ## Supported versions
 
-KaroX 5 is currently a public pre-release (`5.0.0rc1`). Security fixes for KaroX 5 are developed and validated on the current release tree and then promoted to `main`. The stable 4.x channel remains separate until the 5.0 stable evidence gates are complete.
+KaroX 5 is currently a public pre-release (`5.0.0rc2`). Security fixes for KaroX 5 are developed and validated on the current release tree and then promoted to `main`. The stable 4.x channel remains separate until the 5.0 stable evidence gates are complete.
 
 ## Reporting a vulnerability
 

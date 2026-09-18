@@ -6638,7 +6638,7 @@ Start with:
   karox                         open the interactive client
   karox quickstart              what is connected and the one command to run next
   karox models                  list available models
-  karox effort [LEVEL]          show or set work depth (auto → ultra)
+  karox effort [LEVEL]          show or set work depth (auto -> ultra)
   karox mode [MODE]             choose Build, Plan, or Ideate
   karox sessions                show previous tasks
   karox status                  show project/model/task/bridge state

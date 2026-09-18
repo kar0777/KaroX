@@ -43,11 +43,11 @@ class TailscaleRouteSupervisorTests(unittest.TestCase):
 
             bridge = MagicMock()
             bridge.poll.return_value = None
-            bridge.pid = 5101
+            bridge.pid = 9_999_001
             bridge.stdout = MagicMock()
             recovered_bridge = MagicMock()
             recovered_bridge.poll.return_value = None
-            recovered_bridge.pid = 5102
+            recovered_bridge.pid = 9_999_002
             recovered_bridge.stdout = MagicMock()
 
             def terminate_bridge() -> None:
@@ -211,7 +211,7 @@ class TailscaleRouteSupervisorTests(unittest.TestCase):
 
             bridge = MagicMock()
             bridge.poll.return_value = None
-            bridge.pid = 5301
+            bridge.pid = 9_999_003
             bridge.stdout = MagicMock()
             mirrored = MagicMock()
             mirrored.detail.return_value = ""

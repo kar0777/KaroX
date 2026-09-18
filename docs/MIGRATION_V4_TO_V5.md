@@ -1,6 +1,6 @@
 # Migrating from KaroX 4.x to KaroX 5
 
-Status: release-candidate migration contract for `5.0.0rc1`.
+Status: release-candidate migration contract for `5.0.0rc2`.
 
 KaroX 5 introduces the packaged hybrid runtime under `src/karox`. The stable
 4.x product and its legacy bridge remain present while the 5.0 migration is

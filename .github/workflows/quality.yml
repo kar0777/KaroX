@@ -87,6 +87,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install --group test --group coverage
+          # The coverage suite exercises the real console entry point and imports
+          # karox directly, so install the checkout itself after dependencies.
+          python -m pip install --no-deps -e .
 
       # Runs here rather than in the lint job because it imports the test
       # modules, so it needs the runtime's dependencies. Cheap, and it fails on a
@@ -176,12 +179,12 @@ jobs:
       - name: Run the complete vNext suite (Windows isolated)
         if: runner.os == 'Windows'
         shell: bash
-        run: python scripts/run_ci_test_command.py -m unittest discover -s tests -p "test_*.py" -v
+        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python scripts/run_ci_test_command.py -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Run the complete vNext suite
         if: runner.os != 'Windows'
         shell: bash
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: PYTHONPATH="$GITHUB_WORKSPACE/src" python -m unittest discover -s tests -p "test_*.py" -v
 
   cross-platform:
     name: ${{ matrix.os }} · Python ${{ matrix.python }}

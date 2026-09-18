@@ -1,7 +1,7 @@
 # KaroX 5.0 release scope
 
 - Status: **frozen preview scope, amended once — see Scope amendment 1**
-- Runtime version: `5.0.0rc1`
+- Runtime version: `5.0.0rc2`
 
 This is the product and release contract for KaroX 5.0. Code is not part of the
 stable product promise merely because it exists. It is part of 5.0 only when it

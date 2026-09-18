@@ -342,6 +342,20 @@ SPONSORS = (
     Sponsor("Merge Gateway"),
     Sponsor("OpenRouter"),
     Sponsor("Weights & Biases (W&B)"),
+    Sponsor("BlockRun"),
+    Sponsor("UnifyLLM"),
+    Sponsor("Novita AI"),
+    Sponsor("BazaarLink"),
+    Sponsor("CostRouter"),
+    Sponsor("Ellipsis"),
+    Sponsor("Advanced Installer"),
+    Sponsor("Bump.sh"),
+    Sponsor("Sentry"),
+    Sponsor("Socket"),
+    Sponsor("RouterPlex"),
+    Sponsor("LangWatch"),
+    Sponsor("LLMTR / Knowhy"),
+    Sponsor("StepFun"),
 )
 
 

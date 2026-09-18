@@ -27,12 +27,14 @@ assert 'Promote-StagedApp' in activation_flow
 # The guard must stop the real v4 runtime, including app_entry and watchdog.
 assert 'app_entry:app' in guard
 assert 'karox_supervisor\\.py' in guard
-assert 'pip install --upgrade --no-deps $Root' in installer
+assert 'pip install --upgrade $Root' in installer
+assert 'pip install --upgrade --no-deps $Root' not in installer
 assert 'karox-vnext.ps1' in installer
 assert '& (Join-Path $AppRoot ".venv\\Scripts\\python.exe") -m karox.cli @args' in installer
 assert '& (Join-Path $PSScriptRoot "karox.ps1") @args' in installer
 assert 'powershell -NoProfile -ExecutionPolicy Bypass -File $KaroXPs1' in installer
-assert 'pip install --upgrade --no-deps "$ROOT"' in posix_installer
+assert 'pip install --upgrade "$ROOT"' in posix_installer
+assert 'pip install --upgrade --no-deps "$ROOT"' not in posix_installer
 assert 'KAROX_VNEXT_SHIM' in posix_installer
 assert 'exec "$KAROX_PYTHON" -m karox.cli "$@"' in posix_installer
 assert 'exec "$(dirname "$0")/karox" "$@"' in posix_installer

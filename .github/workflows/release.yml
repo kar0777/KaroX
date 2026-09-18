@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - main
+    # Stable publication is keyed by VERSION. Pre-release notes are committed
+    # on main too, so matching RELEASE_NOTES_v*.md here would accidentally run
+    # the stable 4.x release pipeline for every rc/beta candidate.
     paths:
+      # A real stable publication always advances VERSION. Workflow and
+      # pre-release-note edits must never republish the previous stable tag.
       - VERSION
-      - "RELEASE_NOTES_v*.md"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:

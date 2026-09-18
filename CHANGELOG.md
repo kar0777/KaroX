@@ -3,6 +3,18 @@
 All notable changes to KaroX 5 are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [5.0.0rc2] — 2026-09-18
+
+Release-gate correction candidate. Full notes: `RELEASE_NOTES_v5.0.0rc2.md`.
+
+### Release pipeline hardening
+- Fixed the stale installer/update contract so CI validates the current package-metadata dependency path instead of the removed requirements/no-deps path.
+- Coverage CI now installs the checkout itself, so direct imports and the real `karox` console entry point are available under coverage.
+- Installed-wheel matrix tests explicitly switch back to repository `src` for the source-suite phase after independently proving the installed wheel.
+- Windows root help is cp1252-safe, avoiding a Unicode-arrow crash before argument parsing.
+- Tailscale supervisor tests use impossible synthetic child PIDs so a hosted POSIX runner can never mistake a fake PID for a live process group.
+- `v5.0.0rc1` reached the Git tag gate but stopped before PyPI/GitHub Release publication; `rc2` supersedes it for public beta distribution.
+
 ## [5.0.0rc1] — 2026-09-17
 
 First public release candidate. Full notes: `RELEASE_NOTES_v5.0.0rc1.md`.

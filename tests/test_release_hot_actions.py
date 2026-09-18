@@ -11,7 +11,7 @@ from unittest.mock import patch
 from _support import SRC, initialize_git_repository  # noqa: F401
 
 from karox.models import AccessProfile
-from karox.release_hot_actions import ReleaseActionError, execute_release_action
+from karox.release_hot_actions import RUNTIME_VERSION, ReleaseActionError, execute_release_action
 from karox.sessions import SessionStore
 from karox.task_state import FactOrigin, TaskFact, TaskStateStore, fact
 from karox.workspace_worker import execute_browser_command
@@ -21,7 +21,7 @@ class GuardedPrereleaseHotActionTests(unittest.TestCase):
     HEAD = "a" * 40
     MAIN_SHA = "b" * 40
     MERGED_HEAD = "c" * 40
-    TAG = "v5.0.0rc1"
+    TAG = f"v{RUNTIME_VERSION}"
     RUN_ID = 35258998564
     WORKSTREAM = "release-test"
 
@@ -178,7 +178,7 @@ class GuardedPrereleaseHotActionTests(unittest.TestCase):
                 "ours",
                 self.MAIN_SHA,
                 "-m",
-                "release: integrate origin/main lineage for KaroX 5.0.0rc1",
+                f"release: integrate origin/main lineage for KaroX {RUNTIME_VERSION}",
             ],
             self.calls,
         )
@@ -240,7 +240,7 @@ class GuardedPrereleaseHotActionTests(unittest.TestCase):
         self.assertEqual(pushes_after_replay, pushes_before_replay)
 
     def test_mismatched_chat_approval_never_pushes(self) -> None:
-        self._approve(tag="v5.0.0rc2")
+        self._approve(tag="v5.0.0rc999")
         with patch("karox.release_hot_actions._run", side_effect=self._fake_run):
             with self.assertRaises(ReleaseActionError):
                 execute_release_action(

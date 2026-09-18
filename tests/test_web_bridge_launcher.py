@@ -584,7 +584,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel.public_url = "https://stable.example.invalid"
             tunnel.process.poll.return_value = None
             bridge = MagicMock()
-            bridge.pid = 4301
+            bridge.pid = 9_999_101
             bridge.poll.return_value = None
 
             with (
@@ -650,7 +650,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                 port=8765,
             )
             bridge = MagicMock()
-            bridge.pid = 4302
+            bridge.pid = 9_999_102
             bridge.poll.return_value = None
             bridge.stdout = MagicMock()
             mirrored = MagicMock()
@@ -720,10 +720,10 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel.public_url = "https://stable.example.invalid"
 
             crashed = MagicMock()
-            crashed.pid = 4101
+            crashed.pid = 9_999_103
             crashed.poll.return_value = 9
             healthy = MagicMock()
-            healthy.pid = 4102
+            healthy.pid = 9_999_104
             healthy.poll.return_value = None
 
             with (
@@ -803,7 +803,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                 child.poll.return_value = 9
                 crashed_children.append(child)
             healthy = MagicMock()
-            healthy.pid = 4207
+            healthy.pid = 9_999_105
             healthy.poll.return_value = None
 
             with (
@@ -876,13 +876,13 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel.public_url = "https://stable.example.invalid"
 
             crashed = MagicMock()
-            crashed.pid = 4301
+            crashed.pid = 9_999_106
             crashed.poll.return_value = 9
             unbindable = MagicMock()
-            unbindable.pid = 4302
+            unbindable.pid = 9_999_107
             unbindable.poll.return_value = 1
             healthy = MagicMock()
-            healthy.pid = 4303
+            healthy.pid = 9_999_108
             healthy.poll.return_value = None
 
             with (
@@ -971,7 +971,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel = MagicMock()
             tunnel.public_url = "https://stable.example.invalid"
             child = MagicMock()
-            child.pid = 4401
+            child.pid = 9_999_109
             child.poll.return_value = None
 
             def blocking_wait(*_args: Any, **_kwargs: Any) -> None:
@@ -1050,7 +1050,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             tunnel = MagicMock()
             tunnel.public_url = "https://stable.example.invalid"
             child = MagicMock()
-            child.pid = 4501
+            child.pid = 9_999_110
             child.poll.return_value = None
 
             with (
@@ -1113,7 +1113,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             repository.mkdir()
             tunnel = MagicMock()
             tunnel.public_url = "https://small-tree.trycloudflare.com"
-            tunnel.process.pid = 4242
+            tunnel.process.pid = 9_999_111
             credentials = MagicMock()
             # Absence, not an unreadable backend: the launcher may mint a first
             # token here, whereas a plain CredentialError must fail closed.
@@ -1170,7 +1170,7 @@ class WebBridgeSupervisorTests(unittest.TestCase):
                         )
         self.assertEqual(len(seen["records"]), 1)
         record = seen["records"][0]
-        self.assertEqual(record["tunnel_pid"], 4242)
+        self.assertEqual(record["tunnel_pid"], 9_999_111)
         self.assertIsNone(record["bridge_pid"])
         self.assertEqual(record["public_url"], "https://small-tree.trycloudflare.com")
         self.assertTrue(record["persistent_session"])
@@ -1335,7 +1335,7 @@ class BridgeDiagnosticsTests(unittest.TestCase):
 
     def test_existing_listener_is_not_accepted_as_the_new_child(self) -> None:
         process = MagicMock()
-        process.pid = 4242
+        process.pid = 9_999_112
         process.poll.side_effect = [None, 3]
         connection = MagicMock()
         connection.__enter__.return_value = connection

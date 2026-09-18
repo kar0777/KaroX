@@ -17,7 +17,7 @@ body:
     attributes:
       label: KaroX version and commit
       description: Output of `karox --version` plus the tested commit when using a checkout.
-      placeholder: 5.0.0rc1 / abcdef123456
+      placeholder: 5.0.0rc2 / abcdef123456
     validations:
       required: true
 

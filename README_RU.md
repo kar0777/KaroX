@@ -7,23 +7,39 @@
 ![Status](https://img.shields.io/badge/status-beta-f59e0b)
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
-![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc2-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
-[![Supporters](https://img.shields.io/badge/поддержавшие_проект-19-ec4899)](SUPPORTERS_RU.md)
+[![Supporters](https://img.shields.io/badge/поддержавшие_проект-33-ec4899)](SUPPORTERS_RU.md)
 
 Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
 провайдеру контроль над разрешениями, сессиями и доказательствами работы.
 
-**KaroX 5 beta теперь основная линия `main` · `5.0.0rc1`**
+**KaroX 5 beta теперь основная линия `main` · `5.0.0rc2`**
 
 ### 🤝 Проект поддержали
 
-[routing.run](https://routing.run) · [Vivgrid](https://vivgrid.com) · [Puter](https://puter.com) · [OmniaKey](https://omniakey.com) · [Browser Use](https://browser-use.com) · [Verda](https://www.verda.com) · [Tinfoil](https://tinfoil.sh) · [fal](https://fal.ai) · [Tavily](https://tavily.com) · [Cohere](https://cohere.com)<br>
-[Chutes](https://chutes.ai) · [EmpirioLabs](https://empiriolabs.ai) · [Langfuse](https://langfuse.com) · [AIReiter](https://aireiter.com) · [Scout APM](https://scoutapm.com) · **APIMaster** · **Merge Gateway** · [OpenRouter](https://openrouter.ai) · [Weights & Biases](https://wandb.ai)
+<table>
+<tr>
+<td align="center"><a href="https://routing.run"><img src="https://www.google.com/s2/favicons?domain=routing.run&sz=128" width="38" height="38" alt="routing.run"><br><sub><b>routing.run</b></sub></a></td>
+<td align="center"><a href="https://vivgrid.com"><img src="https://www.google.com/s2/favicons?domain=vivgrid.com&sz=128" width="38" height="38" alt="Vivgrid"><br><sub><b>Vivgrid</b></sub></a></td>
+<td align="center"><a href="https://puter.com"><img src="https://www.google.com/s2/favicons?domain=puter.com&sz=128" width="38" height="38" alt="Puter"><br><sub><b>Puter</b></sub></a></td>
+<td align="center"><a href="https://www.verda.com"><img src="https://www.google.com/s2/favicons?domain=verda.com&sz=128" width="38" height="38" alt="Verda"><br><sub><b>Verda</b></sub></a></td>
+<td align="center"><a href="https://tinfoil.sh"><img src="https://www.google.com/s2/favicons?domain=tinfoil.sh&sz=128" width="38" height="38" alt="Tinfoil"><br><sub><b>Tinfoil</b></sub></a></td>
+<td align="center"><a href="https://www.stepfun.com"><img src="https://www.google.com/s2/favicons?domain=stepfun.com&sz=128" width="38" height="38" alt="StepFun"><br><sub><b>StepFun</b></sub></a></td>
+</tr>
+<tr>
+<td align="center"><a href="https://browser-use.com"><img src="https://www.google.com/s2/favicons?domain=browser-use.com&sz=128" width="38" height="38" alt="Browser Use"><br><sub><b>Browser Use</b></sub></a></td>
+<td align="center"><a href="https://tavily.com"><img src="https://www.google.com/s2/favicons?domain=tavily.com&sz=128" width="38" height="38" alt="Tavily"><br><sub><b>Tavily</b></sub></a></td>
+<td align="center"><a href="https://sentry.io"><img src="https://www.google.com/s2/favicons?domain=sentry.io&sz=128" width="38" height="38" alt="Sentry"><br><sub><b>Sentry</b></sub></a></td>
+<td align="center"><a href="https://wandb.ai"><img src="https://www.google.com/s2/favicons?domain=wandb.ai&sz=128" width="38" height="38" alt="W&B"><br><sub><b>W&amp;B</b></sub></a></td>
+<td align="center"><a href="https://openrouter.ai"><img src="https://www.google.com/s2/favicons?domain=openrouter.ai&sz=128" width="38" height="38" alt="OpenRouter"><br><sub><b>OpenRouter</b></sub></a></td>
+<td align="center"><a href="https://www.blockrun.ai"><img src="https://www.google.com/s2/favicons?domain=blockrun.ai&sz=128" width="38" height="38" alt="BlockRun"><br><sub><b>BlockRun</b></sub></a></td>
+</tr>
+</table>
 
-**[Все 19 благодарностей и подробности поддержки →](SUPPORTERS_RU.md)**
+**[Все 33 благодарности — полная стена логотипов и подробности →](SUPPORTERS_RU.md)**
 
 </div>
 
@@ -38,7 +54,7 @@ KaroX не является моделью, IDE или полноценной с
 ограничивает полномочия через `repoRoot`, capabilities, allowlist, leases,
 idempotency и жёсткие запреты, но не виртуализирует операционную систему.
 
-> **Статус релиза:** packaged runtime имеет версию `5.0.0rc1`. Локальные
+> **Статус релиза:** packaged runtime имеет версию `5.0.0rc2`. Локальные
 > контракты и transport-paths покрыты тестами, но реальные live-проверки ChatGPT
 > Web, Claude Web и обязательных API-провайдеров ещё не завершены. Смотри
 > [scope KaroX 5.0](docs/V5_RELEASE_SCOPE.md),
@@ -75,7 +91,7 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Публичная бета — **`v5.0.0rc1`**. Установить опубликованный pre-release на Windows, macOS или Linux можно так:
+Публичная бета — **`v5.0.0rc2`**. Установить опубликованный pre-release на Windows, macOS или Linux можно так:
 
 ```bash
 pipx install --pre karox-runtime
@@ -86,7 +102,7 @@ uv tool install --prerelease=allow karox-runtime
 Для проверки исходников именно этого кандидата используй фиксированный Git-тег, а не движущуюся ветку:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc1"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc2"
 ```
 
 После установки открой терминал внутри нужного Git-репозитория и запусти:
@@ -320,9 +336,9 @@ push-поверхности. Неудачный check нельзя превра�
 
 ## Спонсоры и поддержавшие проект
 
-KaroX благодарит все команды, которые дали проекту model/API access, compute, browser capacity, research tooling, observability, search или другую реальную поддержку разработки: **routing.run, Vivgrid, Puter, OmniaKey, Browser Use, Verda, Tinfoil, fal, Tavily, Cohere, Chutes, EmpirioLabs, Langfuse, AIReiter, Scout APM, APIMaster, Merge Gateway, OpenRouter и Weights & Biases (W&B)**.
+KaroX теперь публично благодарит **33 уникальных поддержавших проекта** за реальную помощь: model/API access, compute, browser capacity, search, observability, security tooling, developer infrastructure, лицензии и research tooling. В расширенный список добавлен StepFun и подтверждённая поддержка из восстановленной outreach/Gmail истории проекта; дубли объединены.
 
-Те же 19 имён входят в sponsor registry KaroX 5, который использует команда `/sponsors`. Ссылки, категории поддержки и отдельные благодарности собраны в [SUPPORTERS_RU.md](SUPPORTERS_RU.md). Упоминание — это благодарность, а не утверждение KaroX о безопасности, приватности, ценах или моделях сервиса.
+Те же 33 имени входят в sponsor registry KaroX 5, который использует команда `/sponsors`. Полная [стена поддержки](SUPPORTERS_RU.md) содержит логотипы, ссылки, категории поддержки и благодарности. Упоминание — это благодарность, а не утверждение KaroX о безопасности, приватности, ценах или моделях сервиса.
 
 ## Проверка качества
 

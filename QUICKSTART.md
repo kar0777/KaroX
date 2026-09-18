@@ -1,10 +1,10 @@
 # KaroX 5 Preview — Quick start / Быстрый старт
 
-This guide covers the release-candidate runtime `5.0.0rc1`. The public bootstrap scripts
+This guide covers the release-candidate runtime `5.0.0rc2`. The public bootstrap scripts
 on `main` install the latest stable 4.x release. To test KaroX 5, use a checkout
 of the preview branch and its local installer.
 
-Эта инструкция относится к release-candidate runtime `5.0.0rc1`. Публичные bootstrap-
+Эта инструкция относится к release-candidate runtime `5.0.0rc2`. Публичные bootstrap-
 скрипты ветки `main` устанавливают последний стабильный релиз 4.x. Для проверки
 KaroX 5 используй checkout preview-ветки и локальный установщик из неё.
 

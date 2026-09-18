@@ -316,7 +316,7 @@ Updater должен использовать staged install и rollback. Не �
 
 ## Release gate показывает pending records
 
-Для `5.0.0rc1` это ожидаемо:
+Для `5.0.0rc2` это ожидаемо:
 
 ```bash
 python scripts/check_v5_release.py --json

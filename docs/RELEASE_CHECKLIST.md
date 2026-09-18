@@ -1,7 +1,7 @@
 # KaroX 5 release checklist
 
 Target: `5.0.0`
-Current runtime: `5.0.0rc1`
+Current runtime: `5.0.0rc2`
 Release decision: **RELEASE CANDIDATE HARDENING — deterministic gates must be green before promotion.**
 
 This is an execution record, not a marketing plan. A checked P0 item must point

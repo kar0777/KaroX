@@ -16,4 +16,4 @@ the same change.
 | 4.0 - 4.1.3 | `RELEASE_NOTES_v4.0.0.md` ... `RELEASE_NOTES_v4.1.3.md` |
 
 Current stable notes: `../../RELEASE_NOTES_v4.1.4.md`.
-KaroX 5 release candidate notes: `../../RELEASE_NOTES_v5.0.0rc1.md`.
+Current KaroX 5 release candidate notes: `../../RELEASE_NOTES_v5.0.0rc2.md`. The failed pre-publication `rc1` candidate notes remain at `../../RELEASE_NOTES_v5.0.0rc1.md` for traceability.

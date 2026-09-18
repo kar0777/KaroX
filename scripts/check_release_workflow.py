@@ -58,6 +58,16 @@ def collect_problems(root: Path = ROOT) -> list[str]:
     text = path.read_text(encoding="utf-8")
     problems: list[str] = []
 
+    # Stable publication is version-driven. Pre-release notes live on main too;
+    # matching them here would run (and potentially refresh) the previous stable
+    # release whenever an rc/beta note is added.
+    if '"RELEASE_NOTES_v*.md"' in text:
+        problems.append(
+            "stable release workflow must not trigger on generic release-note changes"
+        )
+    if "- VERSION" not in text:
+        problems.append("stable release workflow must trigger from VERSION changes")
+
     positions = {
         snippet: _first_position(text, snippet, problems)
         for snippet in REQUIRED_SNIPPETS
