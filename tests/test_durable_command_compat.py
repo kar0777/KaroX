@@ -27,6 +27,22 @@ from karox.proxy import ProxyToolDescriptor
 from karox.sessions import SessionStore
 
 
+def _await_job_processes_exit(status: dict | None, deadline_seconds: float = 10.0) -> None:
+    """Wait for the detached worker tree before deleting its Windows cwd."""
+
+    if not isinstance(status, dict):
+        return
+    deadline = time.monotonic() + deadline_seconds
+    for key in ("child_pid", "worker_pid"):
+        pid = status.get(key)
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        while process_is_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+    # Win32 can release the final directory handle just after process exit.
+    time.sleep(0.2)
+
+
 def test_legacy_long_command_run_uses_durable_worker_and_replays_same_job() -> None:
     old = dict(os.environ)
     temp = tempfile.TemporaryDirectory()
@@ -118,6 +134,7 @@ def test_durable_developer_path_keeps_global_remote_side_effect_blocks() -> None
 def test_legacy_long_command_run_detaches_quickly_and_replay_is_instant() -> None:
     old = dict(os.environ)
     temp = tempfile.TemporaryDirectory()
+    final: dict | None = None
     try:
         root = Path(temp.name)
         repository = root / "repo"
@@ -189,6 +206,7 @@ def test_legacy_long_command_run_detaches_quickly_and_replay_is_instant() -> Non
         assert "DURABLE_STARTED" in final["stdout"]
         assert "DURABLE_DONE" in final["stdout"]
     finally:
+        _await_job_processes_exit(final)
         os.environ.clear()
         os.environ.update(old)
         temp.cleanup()

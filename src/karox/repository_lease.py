@@ -24,6 +24,8 @@ from .sessions import _atomic_json, _exclusive_file_lock
 
 LEASE_SCHEMA_VERSION = 1
 DEFAULT_REPOSITORY_LEASE_TTL_SECONDS = 90.0
+_REPOSITORY_LEASE_READ_RETRY_SECONDS = 1.0
+_REPOSITORY_LEASE_READ_RETRY_DELAY = 0.02
 
 
 class RepositoryLeaseError(RuntimeError):
@@ -234,12 +236,24 @@ class RepositoryLeaseStore:
         return self.root / f"{identity}.json", self.root / f"{identity}.lock"
 
     def _load_path(self, path: Path) -> Optional[RepositoryLease]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RepositoryLeaseError("repository lease is unreadable") from exc
+        # A writer replaces the JSON atomically, but on Windows antivirus,
+        # indexing, or the replace itself can transiently deny a concurrent
+        # reader access to the destination. A short bounded retry keeps lease
+        # observation reliable without ever treating a persistent ACL problem
+        # as success.
+        deadline = time.monotonic() + _REPOSITORY_LEASE_READ_RETRY_SECONDS
+        while True:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                return None
+            except PermissionError as exc:
+                if time.monotonic() >= deadline:
+                    raise RepositoryLeaseError("repository lease is unreadable") from exc
+                time.sleep(_REPOSITORY_LEASE_READ_RETRY_DELAY)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RepositoryLeaseError("repository lease is unreadable") from exc
         if not isinstance(payload, dict):
             raise RepositoryLeaseError("repository lease is malformed")
         return RepositoryLease.from_dict(payload)

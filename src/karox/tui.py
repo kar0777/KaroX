@@ -4413,6 +4413,14 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
+            # On a heavily loaded Textual loop (notably hosted Windows), the
+            # screen Mount event can be observed before its composed children
+            # have completed their own mount bookkeeping. Rendering immediately
+            # then races query_one("#model-options"). Run after the first refresh,
+            # when the composed widget tree is guaranteed to be queryable.
+            self.call_after_refresh(self._finish_mount)
+
+        def _finish_mount(self) -> None:
             self._render_models()
             self.query_one("#model-search", Input).focus()
 

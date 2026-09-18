@@ -191,6 +191,27 @@ class RepositoryLeaseTests(unittest.TestCase):
         self.assertTrue(recovered)
         self.assertEqual(replacement.session_id, "session-b")
 
+    def test_transient_permission_error_while_loading_is_retried(self) -> None:
+        lease, _ = self._acquire("session-a", "task-a", "chat-a")
+        path, _lock = self.store._paths(self.repo)
+        real_read_text = Path.read_text
+        calls = 0
+
+        def flaky_read_text(target: Path, *args: object, **kwargs: object) -> str:
+            nonlocal calls
+            if target == path and calls == 0:
+                calls += 1
+                raise PermissionError("transient Windows file lock")
+            return real_read_text(target, *args, **kwargs)
+
+        with patch.object(Path, "read_text", new=flaky_read_text):
+            loaded = self.store.load(self.repo)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.lease_id, lease.lease_id)
+        self.assertEqual(calls, 1)
+
     def test_release_refuses_another_lease_id(self) -> None:
         lease, _ = self._acquire("session-a", "task-a", "chat-a")
         impostor = RepositoryLease(**{**lease.to_dict(), "lease_id": "different"})

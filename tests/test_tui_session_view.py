@@ -420,9 +420,13 @@ class SessionViewWiringTests(unittest.IsolatedAsyncioTestCase):
             app.language = "ru"
             app._show_activity()
             await pilot.pause()
-            self.assertEqual(
-                str(app.query_one("#activity", tui.Static).render()),
-                "› Просматриваю код",
+            russian_activity = str(app.query_one("#activity", tui.Static).render())
+            # The activity widget may append its live elapsed-time suffix once a
+            # loaded hosted runner crosses the one-second boundary. The semantic
+            # action text must remain the same.
+            self.assertTrue(
+                russian_activity.startswith("› Просматриваю код"),
+                russian_activity,
             )
             app.language = "en"
 
