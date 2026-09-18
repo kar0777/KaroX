@@ -4382,6 +4382,7 @@ if _HAS_TEXTUAL:
             self.language = language
             self._models = list(models)
             self._visible = list(models)
+            self._picker_ready = False
 
         def _label(self, russian: str, english: str) -> str:
             return english if self.language == "en" else russian
@@ -4423,6 +4424,7 @@ if _HAS_TEXTUAL:
         def _finish_mount(self) -> None:
             self._render_models()
             self.query_one("#model-search", Input).focus()
+            self._picker_ready = True
 
         def _render_models(self) -> None:
             options = self.query_one("#model-options", OptionList)
@@ -4498,6 +4500,13 @@ if _HAS_TEXTUAL:
             self._move(1)
 
         def action_choose(self) -> None:
+            if not self._picker_ready:
+                # A fast Enter can arrive in the same event-loop turn that made
+                # the modal the active screen, before call_after_refresh finished
+                # composing its OptionList. Preserve that user's Enter instead
+                # of dropping it or querying a not-yet-mounted child.
+                self.call_after_refresh(self.action_choose)
+                return
             model = self._highlighted_model()
             if model is None:
                 self.dismiss(DiscoveredModel(""))

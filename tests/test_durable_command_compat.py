@@ -46,6 +46,8 @@ def _await_job_processes_exit(status: dict | None, deadline_seconds: float = 10.
 def test_legacy_long_command_run_uses_durable_worker_and_replays_same_job() -> None:
     old = dict(os.environ)
     temp = tempfile.TemporaryDirectory()
+    first: dict | None = None
+    second: dict | None = None
     try:
         root = Path(temp.name)
         repository = root / "repo"
@@ -86,6 +88,7 @@ def test_legacy_long_command_run_uses_durable_worker_and_replays_same_job() -> N
         assert second["exit_code"] == 0
         assert "DURABLE_COMPAT_OK" in second["stdout"]
     finally:
+        _await_job_processes_exit(second or first)
         os.environ.clear()
         os.environ.update(old)
         temp.cleanup()
