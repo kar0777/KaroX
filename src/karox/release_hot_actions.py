@@ -325,7 +325,8 @@ def _consume_chat_approval(
     if (
         repository_fact is None
         or not isinstance(repository_fact.value, str)
-        or Path(repository_fact.value).expanduser().resolve() != runtime.repository
+        or Path(repository_fact.value).expanduser().resolve()
+        != Path(runtime.repository).expanduser().resolve()
     ):
         raise ReleaseActionError("release approval workstream belongs to a different repository")
     revision_fact = state.facts.get("repository_revision")

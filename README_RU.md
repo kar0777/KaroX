@@ -11,11 +11,19 @@
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
+[![Supporters](https://img.shields.io/badge/поддержавшие_проект-19-ec4899)](SUPPORTERS_RU.md)
 
 Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
 провайдеру контроль над разрешениями, сессиями и доказательствами работы.
 
-**Beta channel · `5.0.0rc1`** · **[Спонсоры и благодарности](SUPPORTERS_RU.md)**
+**KaroX 5 beta теперь основная линия `main` · `5.0.0rc1`**
+
+### 🤝 Проект поддержали
+
+[routing.run](https://routing.run) · [Vivgrid](https://vivgrid.com) · [Puter](https://puter.com) · [OmniaKey](https://omniakey.com) · [Browser Use](https://browser-use.com) · [Verda](https://www.verda.com) · [Tinfoil](https://tinfoil.sh) · [fal](https://fal.ai) · [Tavily](https://tavily.com) · [Cohere](https://cohere.com)<br>
+[Chutes](https://chutes.ai) · [EmpirioLabs](https://empiriolabs.ai) · [Langfuse](https://langfuse.com) · [AIReiter](https://aireiter.com) · [Scout APM](https://scoutapm.com) · **APIMaster** · **Merge Gateway** · [OpenRouter](https://openrouter.ai) · [Weights & Biases](https://wandb.ai)
+
+**[Все 19 благодарностей и подробности поддержки →](SUPPORTERS_RU.md)**
 
 </div>
 

@@ -1,18 +1,53 @@
-# KaroX 5.0.0rc1 — public beta / публичная бета
+# 🚀 KaroX 5.0.0rc1 — Public Beta / Публичная бета
+
+<div align="center">
 
 **One local runtime for every AI coding agent. Your models can change. KaroX remembers.**
 
-`5.0.0rc1` is the public **KaroX 5 beta channel**. It is intentionally a
-pre-release: the local runtime and deterministic release gates are ready for
-real use, while stable `5.0.0` still waits for the remaining live conformance,
-external-beta, and install/upgrade evidence recorded in
-`docs/RELEASE_CHECKLIST.md`.
+![Channel](https://img.shields.io/badge/channel-public_beta-f59e0b)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc1-2563eb)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
+![Supporters](https://img.shields.io/badge/supporters-19-ec4899)
 
-`5.0.0rc1` — публичный **beta-канал KaroX 5**. Это намеренно pre-release:
-локальный runtime и детерминированные release-gates уже предназначены для
-реального тестирования, а стабильный `5.0.0` появится только после оставшихся
-live-conformance, внешней беты и подтверждённых install/upgrade прогонов из
-`docs/RELEASE_CHECKLIST.md`.
+**KaroX 5 is now the primary `main` line.** Stable 4.1.4 remains available as
+the previous stable fallback while this release candidate completes live beta evidence.
+
+</div>
+
+`5.0.0rc1` is the first public **KaroX 5 beta release candidate**: the local
+runtime, packaging, deterministic release gates, Windows/macOS/Linux CI path,
+guarded Git workflow, durable sessions, evidence model, and multi-client
+architecture are ready for real beta use. Stable `5.0.0` still waits for the
+remaining live conformance, external-beta, and install/upgrade evidence recorded
+in `docs/RELEASE_CHECKLIST.md`.
+
+`5.0.0rc1` — первый публичный **release candidate KaroX 5**. Основная ветка
+`main` теперь содержит KaroX 5 beta. Стабильный `5.0.0` появится после
+оставшихся live-conformance, внешней беты и подтверждённых install/upgrade
+прогонов из `docs/RELEASE_CHECKLIST.md`.
+
+## ✨ What makes this release different
+
+- **One runtime, many agents:** ChatGPT Web, Claude Web, API models, MCP clients,
+  Codex/Claude Code orchestration and local workers use one repository-scoped
+  permission and evidence boundary.
+- **Durable autonomy:** sessions, retries, mutation leases, checkpoints and
+  idempotency survive reconnects without replaying completed work.
+- **Evidence before claims:** checks, Git status/diff and typed evidence packets
+  back completion reports instead of trusting narration.
+- **Meaningful approvals only:** routine development remains low-friction;
+  remote push and release publication keep exact one-shot user confirmation.
+- **A real public beta:** installable wheel, cross-platform CI, release notes,
+  migration path, security model, benchmarks and public supporter acknowledgements.
+
+## 🤝 Supported by
+
+KaroX 5 ships with public thanks to **19 supporters**: routing.run, Vivgrid,
+Puter, OmniaKey, Browser Use, Verda, Tinfoil, fal, Tavily, Cohere, Chutes,
+EmpirioLabs, Langfuse, AIReiter, Scout APM, APIMaster, Merge Gateway, OpenRouter,
+and Weights & Biases (W&B).
+
+See [SUPPORTERS.md](SUPPORTERS.md) for links and individual acknowledgements.
 
 ## Install / Установка
 

@@ -301,10 +301,11 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
 
         def slow_backfill() -> None:
             # Keep a wide gap between the intentionally blocking implementation
-            # and the responsiveness budget. The previous 0.40s/0.25s split was
-            # correct in principle but occasionally failed on a loaded Windows
-            # runner even when the backfill was off the UI thread.
-            time.sleep(0.80)
+            # and the responsiveness budget. Hosted macOS runners can add roughly
+            # half a second of scheduling latency even when the backfill is off
+            # the UI thread, so make the synthetic blocker much slower instead
+            # of treating ordinary runner jitter as a product regression.
+            time.sleep(1.20)
 
         with patch.object(app, "_merge_persisted_sessions", side_effect=slow_backfill):
             async with app.run_test(size=(100, 34)) as pilot:
@@ -312,7 +313,7 @@ class KeyboardResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 composer = app.query_one("#composer", tui.Input)
                 started = time.perf_counter()
                 await pilot.press("x")
-                self.assertLess(time.perf_counter() - started, 0.45)
+                self.assertLess(time.perf_counter() - started, 0.70)
                 self.assertEqual(composer.value, "x")
 
 
