@@ -165,6 +165,31 @@ async def settle_service_screen(screen: Any, pilot: Any, *, timeout: float = 10.
 
 
 @contextlib.contextmanager
+def _temporary_directory_with_retry(timeout: float = 2.0) -> Iterator[str]:
+    """Remove a test temp tree after transient Win32 handle release.
+
+    A Textual/background worker can exit successfully while Windows still holds
+    its final directory handle for a few milliseconds. Retry only
+    PermissionError for a bounded interval; a persistent resource leak still
+    fails the test instead of being hidden.
+    """
+
+    temporary = tempfile.TemporaryDirectory()
+    try:
+        yield temporary.name
+    finally:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                temporary.cleanup()
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+
+@contextlib.contextmanager
 def isolated_karox_directories() -> Iterator[Path]:
     """Point every spelling of the config and runtime overrides at a temp tree.
 
@@ -172,7 +197,7 @@ def isolated_karox_directories() -> Iterator[Path]:
     so setting one spelling and leaving another inherited redirects the app to
     whatever the developer has exported -- including their real configuration.
     """
-    with tempfile.TemporaryDirectory() as raw:
+    with _temporary_directory_with_retry() as raw:
         root = Path(raw)
         config = root / "config"
         runtime = root / "runtime"

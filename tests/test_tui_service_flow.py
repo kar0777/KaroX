@@ -748,7 +748,12 @@ class ServiceScreenTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
             screen = await self._screen(pilot, app, "adapt")
-            await pilot.pause(0.4)
+            # Discovery runs in a worker. Wait for the state we actually need
+            # instead of assuming a loaded CI runner finishes within 400 ms.
+            for _ in range(100):
+                if screen._last_state is not None:
+                    break
+                await pilot.pause(0.02)
             self.assertIsNotNone(screen._last_state)
             self.assertEqual(screen._last_state.target.name, profile.name)
             self.assertEqual(
