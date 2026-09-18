@@ -194,6 +194,6 @@ jobs:
             echo "Pre-release published to PyPI and GitHub."
             echo
             echo '```bash'
-            echo "pipx install --pre karox-runtime==${VERSION}"
+            echo "pipx install \"karox-runtime==${VERSION}\""
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
