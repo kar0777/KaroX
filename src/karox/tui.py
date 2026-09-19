@@ -3871,8 +3871,15 @@ if _HAS_TEXTUAL:
         _MOUNT_QUERY_RETRY_LIMIT = 50
 
         def retry_mount(self, step: Callable[[], None], attempt: int = 0) -> None:
-            """Run one mount-time step, retrying it while composition lags."""
+            """Run one mount-time step, retrying it while composition lags.
 
+            The first attempt notes the currently focused widget. A deferred
+            rerun may move focus only while that note still holds, so a focus
+            the user (or a fast test) has placed since mounting always wins
+            over the mount default.
+            """
+            if attempt == 0:
+                self._mount_focus_note = getattr(self, "focused", None)
             try:
                 step()
             except NoMatches:
@@ -3880,14 +3887,22 @@ if _HAS_TEXTUAL:
                     raise
                 self.call_after_refresh(self.retry_mount, step, attempt + 1)
 
-        def mount_focus(
-            self, selector: str, expect_type: type
-        ) -> None:
+        def mount_focus(self, selector: str, expect_type: type) -> None:
             """Focus a composed child even when its mount lags the screen's."""
 
             self.retry_mount(
-                lambda: self.query_one(selector, expect_type).focus()
+                lambda: self.mount_default_focus(
+                    self.query_one(selector, expect_type)
+                )
             )
+
+        def mount_default_focus(self, widget: Any) -> None:
+            """Focus the mount default unless focus moved since mount began."""
+
+            note = getattr(self, "_mount_focus_note", None)
+            current = getattr(self, "focused", None)
+            if current is None or current is note:
+                widget.focus()
 
     class LanguageScreen(
         _MountComposeMixin, ModalScreen[Optional[str]]
@@ -4242,7 +4257,7 @@ if _HAS_TEXTUAL:
 
         def _finish_mount(self) -> None:
             self._render_presets()
-            self.query_one("#preset-search", Input).focus()
+            self.mount_default_focus(self.query_one("#preset-search", Input))
             self._update_note()
 
         def _selected(self) -> Optional[ProviderPreset]:
@@ -5189,10 +5204,10 @@ if _HAS_TEXTUAL:
                 )
                 if self.existing.model_id:
                     self._update_summary()
-                self.query_one("#provider-url", Input).focus()
+                self.mount_default_focus(self.query_one("#provider-url", Input))
                 return
             target = "#provider-key" if self.preset is not None else "#provider-adapter"
-            self.query_one(target).focus()
+            self.mount_default_focus(self.query_one(target))
 
         @on(Input.Submitted, "#provider-key")
         def provider_key_submitted(self, _event: Input.Submitted) -> None:
@@ -5864,9 +5879,11 @@ if _HAS_TEXTUAL:
 
         def _finish_mount(self) -> None:
             if self._locked_profile is None:
-                self.query_one("#bridge-profile", RadioSet).focus()
+                self.mount_default_focus(self.query_one("#bridge-profile", RadioSet))
             else:
-                self.query_one("#bridge-tunnel-kind", RadioSet).focus()
+                self.mount_default_focus(
+                    self.query_one("#bridge-tunnel-kind", RadioSet)
+                )
             # Defaults are service-specific: Notion uses the durable parallel
             # Tailscale listener, while ClickUp keeps its Cloudflare quick tunnel.
             self._apply_default_tunnel_for_profile()

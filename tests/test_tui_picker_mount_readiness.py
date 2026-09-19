@@ -109,6 +109,38 @@ class PickerMountReadinessTests(unittest.IsolatedAsyncioTestCase):
 
 
 @pytest.mark.asyncio
+async def test_deferred_mount_focus_never_steals_the_user_focus() -> None:
+    """A deferred mount retry must not redirect the key the user just aimed.
+
+    On a loaded runner the mount render can fail once and retry a moment
+    later. If that deferred focus then overwrote the focus the user had
+    already placed, their next key went to a different widget entirely —
+    observed as Enter opening the wrong screen.
+    """
+    with isolated_karox_directories() as repository:
+        app = tui.KaroXApp(Path(repository), language="en")
+        async with app.run_test(size=(110, 34)) as pilot:
+            screen = tui.LanguageScreen()
+            real_query = screen.query_one.__func__
+            attempts = {"n": 0}
+
+            def lagging_query_one(self_screen, selector: str, expect_type: object = None):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise tui.NoMatches(f"simulated compose race: {selector}")
+                return real_query(self_screen, selector, expect_type)
+
+            with patch.object(tui.LanguageScreen, "query_one", lagging_query_one):
+                app.push_screen(screen)
+                await pilot.pause(0.05)
+                other = screen.query_one("#language-en", tui.Button)
+                other.focus()
+                await pilot.pause(0.05)
+            # The deferred retry has now run; the user's focus must stand.
+            assert app.focused is other
+
+
+@pytest.mark.asyncio
 async def test_never_ready_picker_fails_loudly_in_bounded_time() -> None:
     """A picker whose mount never completes raises instead of spinning forever.
 

@@ -57,14 +57,29 @@ class _MountComposeMixin:
     call_after_refresh: Callable[..., bool]
 
     def retry_mount(self, step: "Callable[[], None]", attempt: int = 0) -> None:
-        """Run one mount-time step, retrying it while composition lags."""
+        """Run one mount-time step, retrying it while composition lags.
 
+        The first attempt notes the currently focused widget. A deferred
+        rerun may move focus only while that note still holds, so a focus
+        the user (or a fast test) has placed since mounting always wins
+        over the mount default.
+        """
+        if attempt == 0:
+            self._mount_focus_note = getattr(self, "focused", None)
         try:
             step()
         except NoMatches:
             if attempt >= self._MOUNT_QUERY_RETRY_LIMIT:
                 raise
             self.call_after_refresh(self.retry_mount, step, attempt + 1)
+
+    def mount_default_focus(self, widget: Any) -> None:
+        """Focus the mount default unless focus moved since mount began."""
+
+        note = getattr(self, "_mount_focus_note", None)
+        current = getattr(self, "focused", None)
+        if current is None or current is note:
+            widget.focus()
 
 
 def _label(language: str, ru: str, en: str) -> str:
@@ -592,7 +607,7 @@ class ModelPickerScreen(
                 break
         else:
             options.highlighted = 0 if options.option_count else None
-        options.focus()
+        self.mount_default_focus(options)
 
     def _rebuild(self) -> None:
         options = self.query_one("#model-picker-list", OptionList)
@@ -906,7 +921,7 @@ class ModePickerScreen(
             ),
             0,
         )
-        options.focus()
+        self.mount_default_focus(options)
         self._render_details()
 
     def on_option_list_option_highlighted(self, _event: Any) -> None:
@@ -996,7 +1011,7 @@ class EffortPickerScreen(
             (index for index, option in enumerate(options.options) if getattr(option, "id", None) == self.effort),
             0,
         )
-        options.focus()
+        self.mount_default_focus(options)
         self._render_details()
 
     def on_option_list_option_highlighted(self, _event: Any) -> None:
