@@ -515,6 +515,10 @@ class RedrawDisciplineTests(_OverviewCase):
             body = screen.query_one("#session-detail-body", tui.VerticalScroll)
             await pilot.press("pagedown")
             await pilot.pause()
+            # `pagedown` scrolls smoothly: settle the animator before reading
+            # the resting position, or `moved` is a transient frame and the
+            # assertion races the reader's own gesture on a loaded runner.
+            await pilot.wait_for_scheduled_animations()
             moved = body.scroll_offset.y
             self.harness.state(
                 "s-long", status=tui.STATUS_RUNNING, current_step="step-40"
@@ -522,6 +526,57 @@ class RedrawDisciplineTests(_OverviewCase):
             self._drain(app)
             await pilot.pause()
             self.assertEqual(body.scroll_offset.y, moved)
+
+    async def test_an_update_during_a_live_scroll_preserves_the_scroll_destination(
+        self,
+    ) -> None:
+        """A refresh mid-gesture restores where the scroll is going, not a frame.
+
+        A smooth scroll is a real reader gesture: an ordinary update arriving
+        while it is still flying must not snapshot the transient frame and
+        snap the viewport backwards. The duration is stretched so the update
+        provably lands mid-flight on any runner.
+        """
+
+        self.harness.state("s-long", status=tui.STATUS_RUNNING, task="long one")
+        for index in range(40):
+            self.harness.state(
+                "s-long", status=tui.STATUS_RUNNING, current_step=f"step-{index}"
+            )
+        app = self.harness.app()
+        async with app.run_test(size=STANDARD) as pilot:
+            await pilot.pause()
+            screen = await self._open(app, pilot, "s-long")
+            body = screen.query_one("#session-detail-body", tui.VerticalScroll)
+            destination = float(body.max_scroll_y)
+            self.assertGreater(destination, 0.0)
+            body.scroll_to(
+                y=destination, animate=True, duration=0.5, immediate=True
+            )
+            self.assertEqual(float(body.scroll_target_y), destination)
+            transient = float(body.scroll_offset.y)
+            # The gesture is provably still in flight: the animator has not
+            # reached its destination when the ordinary update lands.
+            self.assertLess(transient, destination)
+            with patch.object(
+                tui.VerticalScroll, "scroll_to", wraps=body.scroll_to
+            ) as scroll_to:
+                self.harness.state(
+                    "s-long",
+                    status=tui.STATUS_RUNNING,
+                    current_step="step-40",
+                )
+                self._drain(app)
+                await pilot.pause()
+                await pilot.wait_for_scheduled_animations()
+            restore_calls = [
+                call
+                for call in scroll_to.call_args_list
+                if call.kwargs.get("animate") is False
+                and call.kwargs.get("force") is True
+            ]
+            self.assertTrue(restore_calls, scroll_to.call_args_list)
+            self.assertEqual(restore_calls[-1].kwargs.get("y"), destination)
 
     async def test_focus_risk_does_not_repeat_on_every_tick(self) -> None:
         """One scroll on arrival, one when a *new* decision appears, no more.

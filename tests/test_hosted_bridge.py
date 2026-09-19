@@ -387,22 +387,32 @@ class HostedCoreBridgeTests(unittest.TestCase):
             bridge.execute("karox.repo.write_file", arguments)
         real_core = bridge._core()
 
-        class _SlowCore:
-            def tools(self):
-                return real_core.tools()
-
-            def execute(self, command, lease=None):
-                time.sleep(0.05)
-                return real_core.execute(command, lease=lease)
-
-        with patch.object(bridge, "_core", return_value=_SlowCore()), patch(
-            "karox.hosted_bridge._MUTATION_LEASE_HEARTBEAT_SECONDS", 0.01
-        ), patch.object(
+        with patch.object(
             self.sessions, "heartbeat", wraps=self.sessions.heartbeat
         ) as heartbeat:
-            first = bridge.execute(
-                "karox.repo.write_file", arguments, idempotency_key="hosted-write-1"
-            )
+
+            class _SlowCore:
+                # The mutation stays in flight until the lease heartbeat has
+                # demonstrably fired. A "the write was heartbeated" assertion
+                # must not race the mutation's own completion on a loaded
+                # hosted runner, where the fresh heartbeat thread can lose its
+                # first timeslice until after the command has already returned.
+                def tools(self):
+                    return real_core.tools()
+
+                def execute(self, command, lease=None):
+                    deadline = time.monotonic() + 5.0
+                    while time.monotonic() < deadline and heartbeat.call_count < 1:
+                        time.sleep(0.005)
+                    time.sleep(0.05)
+                    return real_core.execute(command, lease=lease)
+
+            with patch.object(bridge, "_core", return_value=_SlowCore()), patch(
+                "karox.hosted_bridge._MUTATION_LEASE_HEARTBEAT_SECONDS", 0.01
+            ):
+                first = bridge.execute(
+                    "karox.repo.write_file", arguments, idempotency_key="hosted-write-1"
+                )
         self.assertGreaterEqual(heartbeat.call_count, 1)
         self.assertFalse(self.sessions.lease_path("hosted").exists())
         second = bridge.execute(

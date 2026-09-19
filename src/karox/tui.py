@@ -7174,7 +7174,16 @@ if _HAS_TEXTUAL:
             preserved_scroll_y: Optional[float] = None
             try:
                 body = self._body()
-                preserved_scroll_y = float(body.scroll_offset.y)
+                scroll_y = float(body.scroll_offset.y)
+                target_y = getattr(body, "scroll_target_y", None)
+                preserved_scroll_y = scroll_y
+                if target_y is not None and float(target_y) != scroll_y:
+                    # A smooth user scroll is still in flight. The reader's
+                    # intent is the destination, not the transient frame:
+                    # preserving the frame would snap the viewport backwards
+                    # in the middle of their own gesture, and the still-running
+                    # animation would then drag it forward again.
+                    preserved_scroll_y = float(target_y)
             except Exception:
                 body = None
                 preserved_scroll_y = None
