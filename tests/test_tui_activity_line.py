@@ -19,6 +19,7 @@ terminal keeping one row -- is driven through the real app.
 
 from __future__ import annotations
 
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -425,6 +426,11 @@ class ActivityWidgetTests(unittest.IsolatedAsyncioTestCase):
                 app.agent_busy = True
                 app._begin_step("call-1", "checks.run")
                 await pilot.pause()
+                # Pin the elapsed clock to this instant: a wall-clock second
+                # boundary between the step's paint and these ticks makes the
+                # seconds advance, which is correct product behavior and not
+                # what this no-op-cost assertion is about.
+                app._activity_started = time.monotonic()
                 with patch.object(app, "_set_activity") as write:
                     app._tick_activity()
                     app._tick_activity()
