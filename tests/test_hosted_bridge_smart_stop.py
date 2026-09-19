@@ -8,10 +8,12 @@ its own action.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from _support import initialize_git_repository
@@ -31,6 +33,25 @@ TOOLS = (
     "karox.git.push",
     "karox.command.run",
 )
+
+_ISOLATED_SPAWN: dict[str, Any] = {}
+if os.name == "nt":
+    # Fixture children get what the runtime gives every command it runs
+    # (core._new_process_group_kwargs): their own hidden console and process
+    # group. The hosted runner broadcasts console control events to processes
+    # that share a step's console, and an ordinary child git died with
+    # STATUS_CONTROL_C_EXIT when one landed while it ran.
+    _ISOLATED_SPAWN["creationflags"] = int(
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    )
+
+
+def run_isolated(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    """Run a fixture child no suite-internal console event can reach."""
+
+    return subprocess.run(argv, **{**kwargs, **_ISOLATED_SPAWN})
+
 
 
 class HostedSmartStopTests(unittest.TestCase):
@@ -134,14 +155,14 @@ class HostedSmartStopTests(unittest.TestCase):
 
     def test_git_push_requires_protocol_approval_and_executes_only_exact_retry(self) -> None:
         remote = self.root / "remote.git"
-        subprocess.run(
+        run_isolated(
             ["git", "init", "--bare", str(remote)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        subprocess.run(
+        run_isolated(
             ["git", "remote", "add", "origin", str(remote)],
             cwd=self.repository,
             check=True,
@@ -149,7 +170,7 @@ class HostedSmartStopTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
-        branch = subprocess.run(
+        branch = run_isolated(
             ["git", "branch", "--show-current"],
             cwd=self.repository,
             check=True,
@@ -197,7 +218,7 @@ class HostedSmartStopTests(unittest.TestCase):
         # Approval is for the exact commit that was reviewed, not merely for a
         # remote/branch pair. Advancing HEAD invalidates the first approval even
         # though the visible tool arguments are unchanged.
-        subprocess.run(
+        run_isolated(
             ["git", "commit", "--allow-empty", "-m", "advance after approval"],
             cwd=self.repository,
             check=True,
@@ -227,7 +248,7 @@ class HostedSmartStopTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["data"]["pushed"])
-        remote_head = subprocess.run(
+        remote_head = run_isolated(
             ["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}"],
             check=True,
             stdout=subprocess.PIPE,
@@ -240,14 +261,14 @@ class HostedSmartStopTests(unittest.TestCase):
     def _exercise_chat_user_approval(self, bridge: CoreToolBridge, branch: str) -> None:
         """A user yes/no in chat becomes one exact, fresh push grant."""
         remote = self.root / "chat-approved-remote.git"
-        subprocess.run(
+        run_isolated(
             ["git", "init", "--bare", str(remote)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        subprocess.run(
+        run_isolated(
             ["git", "remote", "add", "chat-origin", str(remote)],
             cwd=self.repository,
             check=True,
@@ -255,7 +276,7 @@ class HostedSmartStopTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
-        head = subprocess.run(
+        head = run_isolated(
             ["git", "rev-parse", "HEAD"],
             cwd=self.repository,
             check=True,

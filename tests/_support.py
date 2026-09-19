@@ -114,7 +114,14 @@ def initialize_git_repository(path: Path) -> None:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=120,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            # CREATE_NO_WINDOW gives the child its own hidden console, so a
+            # console control event delivered anywhere else in the suite cannot
+            # reach it; CREATE_NEW_PROCESS_GROUP matches the runtime's own
+            # spawn isolation (core._new_process_group_kwargs).
+            creationflags=int(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            ),
         )
     except subprocess.TimeoutExpired as exc:  # pragma: no cover - diagnostic path
         raise RuntimeError(
@@ -140,7 +147,10 @@ def initialize_git_repository(path: Path) -> None:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=int(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            ),
         )
 
 
