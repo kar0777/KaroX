@@ -13,7 +13,7 @@ no price is inferred from a model name or from the internet.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Collection, Iterable, Optional
+from typing import Any, Callable, Collection, Iterable, Optional
 
 from .agent_modes import DEFAULT_MODE, MODES, mode_display_name, mode_summary
 from .effort import (
@@ -32,11 +32,39 @@ try:  # pragma: no cover - mirrors the guarded TUI import style
     from textual.app import ComposeResult
     from textual.binding import Binding
     from textual.containers import Vertical
+    from textual.css.query import NoMatches
     from textual.screen import ModalScreen
     from textual.widgets import Input, OptionList, Static
     from textual.widgets.option_list import Option
 except Exception:  # pragma: no cover
     pass
+
+
+class _MountComposeMixin:
+    """A mount-time query that outlives the compose race.
+
+    On a loaded Textual loop (notably the hosted Windows runner) the screen's
+    Mount event can be observed before its composed children have finished
+    their own mount bookkeeping, so a direct ``on_mount`` ``query_one``
+    raises NoMatches. Retry a bounded number of times; exhausting the bound
+    keeps the loud failure instead of hiding it, and no path spins forever.
+    """
+
+    _MOUNT_QUERY_RETRY_LIMIT = 50
+
+    # Screens mix this into their ModalScreen bases, which provide the
+    # scheduler used for the bounded retries.
+    call_after_refresh: Callable[..., bool]
+
+    def retry_mount(self, step: "Callable[[], None]", attempt: int = 0) -> None:
+        """Run one mount-time step, retrying it while composition lags."""
+
+        try:
+            step()
+        except NoMatches:
+            if attempt >= self._MOUNT_QUERY_RETRY_LIMIT:
+                raise
+            self.call_after_refresh(self.retry_mount, step, attempt + 1)
 
 
 def _label(language: str, ru: str, en: str) -> str:
@@ -438,7 +466,9 @@ def model_detail_lines(record: Any, language: str) -> list[str]:
     ]
 
 
-class ModelPickerScreen(ModalScreen[Optional[str]]):
+class ModelPickerScreen(
+    _MountComposeMixin, ModalScreen[Optional[str]]
+):
     """One focused model browser: search, metadata, refresh, and selection.
 
     Model choice and Effort are deliberately separate product actions. A model
@@ -546,6 +576,9 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
             )
 
     def on_mount(self) -> None:
+        self.retry_mount(self._finish_mount)
+
+    def _finish_mount(self) -> None:
         self._rebuild()
         options = self.query_one("#model-picker-list", OptionList)
         # Start on the currently selected model rather than the first row, so a
@@ -806,7 +839,9 @@ class ModelPickerScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class ModePickerScreen(ModalScreen[Optional[str]]):
+class ModePickerScreen(
+    _MountComposeMixin, ModalScreen[Optional[str]]
+):
     """Human-first Build/Plan/Ideate picker used by ``/mode``."""
 
     BINDINGS = [Binding("escape", "back", "Back", show=False)]
@@ -851,6 +886,9 @@ class ModePickerScreen(ModalScreen[Optional[str]]):
             )
 
     def on_mount(self) -> None:
+        self.retry_mount(self._finish_mount)
+
+    def _finish_mount(self) -> None:
         options = self.query_one("#mode-picker-list", OptionList)
         for value in MODES:
             options.add_option(
@@ -894,7 +932,9 @@ class ModePickerScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class EffortPickerScreen(ModalScreen[Optional[str]]):
+class EffortPickerScreen(
+    _MountComposeMixin, ModalScreen[Optional[str]]
+):
     """Small dedicated Effort picker; model selection lives in /models."""
 
     BINDINGS = [
@@ -940,6 +980,9 @@ class EffortPickerScreen(ModalScreen[Optional[str]]):
             )
 
     def on_mount(self) -> None:
+        self.retry_mount(self._finish_mount)
+
+    def _finish_mount(self) -> None:
         options = self.query_one("#effort-picker-list", OptionList)
         for value in (AUTO_EFFORT, *EFFORT_LEVELS):
             options.add_option(

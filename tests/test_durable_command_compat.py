@@ -62,17 +62,27 @@ def _await_job_processes_exit(
 
 
 def _cleanup_tempdir_with_retry(
-    temporary: tempfile.TemporaryDirectory[str], timeout: float = 2.0
+    temporary: tempfile.TemporaryDirectory[str], timeout: float = 5.0
 ) -> None:
-    """Bridge transient Win32 handle release without hiding a real leak."""
+    """Bridge transient Win32 handle release without hiding a real leak.
+
+    WinError 145 ("directory is not empty") belongs to the same race as the
+    sharing violation: the tree was enumerated, a late handle recreated or
+    released an entry, and the parent removal lost it.
+    """
 
     deadline = time.monotonic() + timeout
     while True:
         try:
             temporary.cleanup()
             return
-        except PermissionError:
-            if time.monotonic() >= deadline:
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or (
+                getattr(exc, "winerror", None) in (5, 32, 145)
+            )
+            if not transient or time.monotonic() >= deadline:
                 raise
             time.sleep(0.05)
 

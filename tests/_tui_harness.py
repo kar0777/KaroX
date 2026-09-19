@@ -166,13 +166,15 @@ async def settle_service_screen(screen: Any, pilot: Any, *, timeout: float = 10.
 
 
 @contextlib.contextmanager
-def _temporary_directory_with_retry(timeout: float = 2.0) -> Iterator[str]:
+def _temporary_directory_with_retry(timeout: float = 5.0) -> Iterator[str]:
     """Remove a test temp tree after transient Win32 handle release.
 
     A Textual/background worker can exit successfully while Windows still holds
-    its final directory handle for a few milliseconds. Retry only
-    PermissionError for a bounded interval; a persistent resource leak still
-    fails the test instead of being hidden.
+    its final directory handle for a few milliseconds. Retry only the transient
+    codes for a bounded interval; a persistent resource leak still fails the
+    test instead of being hidden. WinError 145 ("directory is not empty")
+    belongs to the same race: the tree was enumerated, a late handle released
+    or recreated an entry, and the parent removal lost it.
     """
 
     raw = tempfile.mkdtemp()
@@ -186,8 +188,11 @@ def _temporary_directory_with_retry(timeout: float = 2.0) -> Iterator[str]:
                 break
             except FileNotFoundError:
                 break
-            except PermissionError:
-                if time.monotonic() >= deadline:
+            except OSError as exc:
+                transient = isinstance(exc, PermissionError) or (
+                    getattr(exc, "winerror", None) in (5, 32, 145)
+                )
+                if not transient or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.05)
 

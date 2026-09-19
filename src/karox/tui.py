@@ -112,6 +112,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.content import Content
+    from textual.css.query import NoMatches
     from textual.screen import ModalScreen
     from textual.selection import Selection
     from textual.theme import Theme
@@ -3855,7 +3856,42 @@ def _persist_tui_saved_bridge_profile(
 
 if _HAS_TEXTUAL:
 
-    class LanguageScreen(ModalScreen[Optional[str]]):
+    class _MountComposeMixin:
+        """A mount-time query that outlives the compose race.
+
+        On a loaded Textual loop (notably the hosted Windows runner) the
+        screen's Mount event can be observed before its composed children have
+        finished their own mount bookkeeping, so a direct ``on_mount``
+        ``query_one`` raises NoMatches. One deferred try is not a guarantee
+        either: it is exactly the fire-once callback Textual may silently
+        drop. Retry a bounded number of times; exhausting the bound keeps the
+        loud failure instead of hiding it, and no path here can spin forever.
+        """
+
+        _MOUNT_QUERY_RETRY_LIMIT = 50
+
+        def retry_mount(self, step: Callable[[], None], attempt: int = 0) -> None:
+            """Run one mount-time step, retrying it while composition lags."""
+
+            try:
+                step()
+            except NoMatches:
+                if attempt >= self._MOUNT_QUERY_RETRY_LIMIT:
+                    raise
+                self.call_after_refresh(self.retry_mount, step, attempt + 1)
+
+        def mount_focus(
+            self, selector: str, expect_type: type
+        ) -> None:
+            """Focus a composed child even when its mount lags the screen's."""
+
+            self.retry_mount(
+                lambda: self.query_one(selector, expect_type).focus()
+            )
+
+    class LanguageScreen(
+        _MountComposeMixin, ModalScreen[Optional[str]]
+    ):
         """Small first-run language choice with complete keyboard support."""
 
         BINDINGS = [
@@ -3892,7 +3928,7 @@ if _HAS_TEXTUAL:
                     yield Button("Esc  Cancel / Отмена", id="language-cancel")
 
         def on_mount(self) -> None:
-            self.query_one("#language-ru", Button).focus()
+            self.mount_focus("#language-ru", Button)
 
         def action_choose_ru(self) -> None:
             self.dismiss("ru")
@@ -4039,7 +4075,9 @@ if _HAS_TEXTUAL:
         def action_dismiss_commands(self) -> None:
             self._app_action("_dismiss_command_menu")
 
-    class ConnectionChoiceScreen(ModalScreen[Optional[str]]):
+    class ConnectionChoiceScreen(
+        _MountComposeMixin, ModalScreen[Optional[str]]
+    ):
         """Keyboard-first connection choice: API, hosted client, or both."""
 
         BINDINGS = [
@@ -4105,7 +4143,7 @@ if _HAS_TEXTUAL:
                 )
 
         def on_mount(self) -> None:
-            self.query_one("#choice-api", Button).focus()
+            self.mount_focus("#choice-api", Button)
 
         def action_choose_api(self) -> None:
             self.dismiss("api")
@@ -4136,7 +4174,9 @@ if _HAS_TEXTUAL:
             if event.button.id in choices:
                 self.dismiss(choices[event.button.id])
 
-    class ProviderPresetScreen(ModalScreen[Optional[str]]):
+    class ProviderPresetScreen(
+        _MountComposeMixin, ModalScreen[Optional[str]]
+    ):
         """Searchable, keyboard-first provider picker."""
 
         BINDINGS = [
@@ -4198,6 +4238,9 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
+            self.retry_mount(self._finish_mount)
+
+        def _finish_mount(self) -> None:
             self._render_presets()
             self.query_one("#preset-search", Input).focus()
             self._update_note()
@@ -4291,7 +4334,9 @@ if _HAS_TEXTUAL:
             elif event.button.id == "preset-continue":
                 self.action_choose()
 
-    class PuterInfoScreen(ModalScreen[None]):
+    class PuterInfoScreen(
+        _MountComposeMixin, ModalScreen[None]
+    ):
         """Explain Puter's verified browser contract instead of skipping it."""
 
         BINDINGS = [
@@ -4343,7 +4388,7 @@ if _HAS_TEXTUAL:
                 )
 
         def on_mount(self) -> None:
-            self.query_one("#puter-close", Button).focus()
+            self.mount_focus("#puter-close", Button)
 
         def action_close(self) -> None:
             self.dismiss(None)
@@ -4551,7 +4596,9 @@ if _HAS_TEXTUAL:
             elif event.button.id == "model-picker-cancel":
                 self.action_cancel()
 
-    class ProviderLimitsScreen(ModalScreen[Optional[tuple[str, str]]]):
+    class ProviderLimitsScreen(
+        _MountComposeMixin, ModalScreen[Optional[tuple[str, str]]]
+    ):
         """Optional model limits live on their own small screen."""
 
         BINDINGS = [
@@ -4609,7 +4656,7 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
-            self.query_one("#limits-context", Input).focus()
+            self.mount_focus("#limits-context", Input)
 
         def action_save(self) -> None:
             values = (
@@ -4641,7 +4688,9 @@ if _HAS_TEXTUAL:
             elif event.button.id == "limits-cancel":
                 self.action_cancel()
 
-    class ManualModelScreen(ModalScreen[Optional[tuple[str, str, str]]]):
+    class ManualModelScreen(
+        _MountComposeMixin, ModalScreen[Optional[tuple[str, str, str]]]
+    ):
         """Manual model entry is a separate step, not an expanding form."""
 
         BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
@@ -4705,7 +4754,7 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
-            self.query_one("#manual-model-id", Input).focus()
+            self.mount_focus("#manual-model-id", Input)
 
         def action_save(self) -> None:
             values = (
@@ -4741,7 +4790,9 @@ if _HAS_TEXTUAL:
             elif event.button.id == "manual-model-cancel":
                 self.action_cancel()
 
-    class ProviderSetupScreen(ModalScreen[Optional[ProviderSetup]]):
+    class ProviderSetupScreen(
+        _MountComposeMixin, ModalScreen[Optional[ProviderSetup]]
+    ):
         """Compact provider wizard; technical fields stay out of the main flow."""
 
         BINDINGS = [
@@ -5114,6 +5165,9 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
+            self.retry_mount(self._finish_mount)
+
+        def _finish_mount(self) -> None:
             if self.existing is not None:
                 # The model and its limits live on a different record than the
                 # provider, so they are filled here rather than in `compose`.
@@ -5568,7 +5622,9 @@ if _HAS_TEXTUAL:
             elif event.button.id == "provider-save":
                 self.action_save()
 
-    class BridgeSetupScreen(ModalScreen[Optional[BridgeSetup]]):
+    class BridgeSetupScreen(
+        _MountComposeMixin, ModalScreen[Optional[BridgeSetup]]
+    ):
         BINDINGS = [
             Binding("f10", "start", "Запустить", priority=True),
             Binding("escape", "cancel", "Отмена", priority=True),
@@ -5804,6 +5860,9 @@ if _HAS_TEXTUAL:
                     )
 
         def on_mount(self) -> None:
+            self.retry_mount(self._finish_mount)
+
+        def _finish_mount(self) -> None:
             if self._locked_profile is None:
                 self.query_one("#bridge-profile", RadioSet).focus()
             else:
@@ -6059,7 +6118,9 @@ if _HAS_TEXTUAL:
                 )
             return values[pressed.id]
 
-    class ConfirmScreen(ModalScreen[Optional[bool]]):
+    class ConfirmScreen(
+        _MountComposeMixin, ModalScreen[Optional[bool]]
+    ):
         """Small Yes/No modal used to ask the user's permission before
         side-effecting actions like installing or launching Tailscale."""
 
@@ -6103,7 +6164,7 @@ if _HAS_TEXTUAL:
                     yield Button(self._yes, id="confirm-yes")
 
         def on_mount(self) -> None:
-            self.query_one("#confirm-yes", Button).focus()
+            self.mount_focus("#confirm-yes", Button)
 
         def action_yes(self) -> None:
             self.dismiss(True)
