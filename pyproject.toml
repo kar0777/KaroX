@@ -97,6 +97,11 @@ dev = [
 # CI uses two workers per hosted runner to avoid oversubscribing subprocess/TUI
 # tests. The default remains usable without pytest-xdist installed.
 addopts = "-q -p no:cacheprovider"
+# Diagnostics-only watchdog (pytest's built-in faulthandler): if a single test
+# runs longer than this, every thread stack of that worker is dumped into the
+# CI log. The run still reports normally afterwards; this never skips or
+# shortens a test. It exists so a hosted-runner hang names itself.
+faulthandler_timeout = 180
 # strict keeps pytest-asyncio out of `unittest.IsolatedAsyncioTestCase`:
 # in auto mode the plugin and unittest's own Runner both tried to drive the
 # same coroutine methods, which failed every Textual run_test case with
