@@ -4383,6 +4383,14 @@ if _HAS_TEXTUAL:
             self._models = list(models)
             self._visible = list(models)
             self._picker_ready = False
+            self._mount_retries = 0
+            self._choose_retries = 0
+
+        # A picker whose children are still mounting on a loaded event loop is
+        # retried, never spun forever: both limits together stay well under a
+        # second of real frames, and exhausting either one fails loudly.
+        MOUNT_RETRY_LIMIT = 50
+        CHOOSE_RETRY_LIMIT = 50
 
         def _label(self, russian: str, english: str) -> str:
             return english if self.language == "en" else russian
@@ -4417,14 +4425,25 @@ if _HAS_TEXTUAL:
             # On a heavily loaded Textual loop (notably hosted Windows), the
             # screen Mount event can be observed before its composed children
             # have completed their own mount bookkeeping. Rendering immediately
-            # then races query_one("#model-options"). Run after the first refresh,
-            # when the composed widget tree is guaranteed to be queryable.
-            self.call_after_refresh(self._finish_mount)
+            # then races query_one("#model-options"). Try now, and when that
+            # race fires retry a bounded number of times instead of depending
+            # on one fire-once callback that Textual may silently drop.
+            self._mount_retries = 0
+            self._finish_mount()
 
         def _finish_mount(self) -> None:
-            self._render_models()
-            self.query_one("#model-search", Input).focus()
+            try:
+                self._render_models()
+                self.query_one("#model-search", Input).focus()
+            except Exception:
+                retries = self._mount_retries + 1
+                self._mount_retries = retries
+                if retries <= self.MOUNT_RETRY_LIMIT:
+                    self.call_after_refresh(self._finish_mount)
+                    return
+                raise
             self._picker_ready = True
+            self._choose_retries = 0
 
         def _render_models(self) -> None:
             options = self.query_one("#model-options", OptionList)
@@ -4502,11 +4521,20 @@ if _HAS_TEXTUAL:
         def action_choose(self) -> None:
             if not self._picker_ready:
                 # A fast Enter can arrive in the same event-loop turn that made
-                # the modal the active screen, before call_after_refresh finished
+                # the modal the active screen, before the mount finished
                 # composing its OptionList. Preserve that user's Enter instead
-                # of dropping it or querying a not-yet-mounted child.
-                self.call_after_refresh(self.action_choose)
-                return
+                # of dropping it or querying a not-yet-mounted child. The retry
+                # is bounded: a picker whose mount never completes must fail
+                # loudly, because an unbounded reschedule here was observed to
+                # spin forever on a loaded hosted runner and hang the worker.
+                self._choose_retries = getattr(self, "_choose_retries", 0) + 1
+                if self._choose_retries <= self.CHOOSE_RETRY_LIMIT:
+                    self.call_after_refresh(self.action_choose)
+                    return
+                raise RuntimeError(
+                    "the model picker did not finish mounting; "
+                    f"{self.CHOOSE_RETRY_LIMIT} deferred retries exhausted"
+                )
             model = self._highlighted_model()
             if model is None:
                 self.dismiss(DiscoveredModel(""))

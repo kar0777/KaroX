@@ -56,6 +56,16 @@ gate **до публикации в PyPI и до создания GitHub Release
   Python 3.12 matrix jobs require real Chromium acceptance on all three OSes.
 - Pip dependency caches are enabled for the ordinary CI jobs. The platform and
   Python-version matrices and release/security gates remain in place.
+- The hosted-runner hang that repeatedly stalled the Windows (and once the
+  Linux) shard-b job for 45 silent minutes is fixed at the source: the model
+  picker mount now retries a bounded number of times, and a key pressed before
+  the mount finishes is deferred with a bound instead of being rescheduled
+  forever. A picker whose mount never completes now fails loudly with a
+  diagnostic instead of spinning. Regression tests pin the compose race, the
+  preserved fast Enter, and the loud failure; a pytest faulthandler watchdog
+  dumps hung worker stacks into the CI log.
+- The Windows-only deterministic benchmark runs in its own step, keeping its
+  30-second agent budget meaningful under parallel workers.
 
 These changes do not replace the pending live-provider and external-beta
 conformance records needed for stable 5.0.0.
