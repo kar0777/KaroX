@@ -30,6 +30,7 @@ from __future__ import annotations
 from _unittest_compat import enter_context
 
 import ast
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -190,11 +191,27 @@ class _DetailLifecycleBase(unittest.IsolatedAsyncioTestCase):
             )
             with patch.object(screen._controller, "get", return_value=state):
                 app.push_screen(screen)
-                await pilot.pause()
+                await self._wait_loaded(pilot, screen)
             return screen
         app.push_screen(screen)
-        await pilot.pause()
+        await self._wait_loaded(pilot, screen)
         return screen
+
+    @staticmethod
+    async def _wait_loaded(pilot, screen) -> None:
+        """Wait for the screen's initial off-thread detail load.
+
+        ``ConnectionDetailScreen`` reads its record in a thread worker after
+        mount; one ``pilot.pause()`` yields the event loop, not that thread.
+        A loaded hosted runner used to reach the status assertion while the
+        initial ``attention`` placeholder was still on screen.
+        """
+
+        deadline = time.monotonic() + 5.0
+        while not bool(getattr(screen, "_loaded", False)):
+            if time.monotonic() >= deadline:
+                raise AssertionError("connection detail did not finish its initial load")
+            await pilot.pause(0.02)
 
 
 class DetailMountsForEveryRecordTests(_DetailLifecycleBase):

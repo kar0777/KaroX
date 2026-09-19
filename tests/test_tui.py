@@ -1570,8 +1570,9 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 app.action_provider_preset()
                 await pilot.pause()
                 await pilot.press("down", "down", "down", "enter")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
+                # The setup screen is pushed after a refresh cycle, so one
+                # pause does not make it current on a loaded runner.
+                await self.screen(pilot, app, tui.ProviderSetupScreen)
                 app.screen.query_one(
                     "#provider-model", tui.Input
                 ).value = "model-manual"
@@ -1609,8 +1610,10 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(options.option_count, 1)
                 await pilot.press("enter")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.PuterInfoScreen)
+                # A non-installable preset explains itself on a screen pushed
+                # after a refresh cycle; one pause does not make it current on
+                # a loaded runner.
+                await self.screen(pilot, app, tui.PuterInfoScreen)
                 contract = str(
                     app.screen.query_one("#puter-contract", tui.Static).render()
                 )
