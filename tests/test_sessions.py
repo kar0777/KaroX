@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,6 +21,8 @@ from karox.sessions import (
     SessionError,
     SessionStore,
     StaleSessionRevision,
+    _exclusive_file_lock,
+    _lease_owner_is_provably_dead,
     current_mutation_lease,
     mutation_lease_context,
 )
@@ -48,6 +52,115 @@ class SessionStoreTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(SessionError, "checksum mismatch"):
             self.store.load("sample")
+
+    def test_same_process_threads_serialize_on_the_state_lock(self) -> None:
+        """Two threads of one process must wait, not die with EDEADLK.
+
+        On Windows, a byte range already locked by this process fails a
+        locking attempt immediately with EDEADLK: the CRT cannot wait on a
+        lock its own process holds. The lease heartbeat thread and a
+        mutating thread legitimately serialize on the same state lock, so
+        the helper must wait out the sibling's critical section.
+        """
+
+        lock_path = self.store.lock_path("sample")
+        holder_entered = threading.Event()
+        release = threading.Event()
+        order: list[str] = []
+        errors: list[Exception] = []
+
+        def holder() -> None:
+            try:
+                with _exclusive_file_lock(lock_path):
+                    order.append("holder")
+                    holder_entered.set()
+                    release.wait(10)
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+                holder_entered.set()
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.assertTrue(holder_entered.wait(10))
+
+        def contender() -> None:
+            try:
+                with _exclusive_file_lock(lock_path):
+                    order.append("contender")
+            except Exception as exc:
+                errors.append(exc)
+
+        second = threading.Thread(target=contender)
+        second.start()
+        # Give the contender a real chance to hit the held lock before it is
+        # released, so the test proves waiting rather than lucky ordering.
+        time.sleep(0.2)
+        release.set()
+        second.join(15)
+        thread.join(15)
+        self.assertEqual(errors, [])
+        self.assertEqual(order, ["holder", "contender"])
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "the immediate EDEADLK lock conflict only exists on Windows",
+    )
+    def test_the_state_lock_waits_out_a_same_process_deadlock_error(self) -> None:
+        """An EDEADLK locking attempt is retried, not raised.
+
+        On some Windows/CRT builds a byte range already locked by this
+        process fails a blocking attempt immediately with EDEADLK (observed
+        on a hosted runner, not on every machine). The helper must wait out
+        the sibling's critical section and retry, bounded like LK_LOCK's
+        own ten-second budget for cross-process waits.
+        """
+
+        import msvcrt
+
+        real_locking = msvcrt.locking
+        attempts: list[int] = []
+
+        def flaky_locking(fd: int, mode: int, size: int) -> None:
+            attempts.append(mode)
+            if len(attempts) <= 2:
+                raise OSError(36, "Resource deadlock avoided")
+            real_locking(fd, mode, size)
+
+        lock_path = self.store.lock_path("sample")
+        with patch("msvcrt.locking", flaky_locking):
+            with _exclusive_file_lock(lock_path):
+                pass
+        lock_attempts = [mode for mode in attempts if mode == msvcrt.LK_LOCK]
+        self.assertEqual(len(lock_attempts), 3, attempts)
+        self.assertEqual(attempts[-1], msvcrt.LK_UNLCK, attempts)
+
+    def test_an_unexpected_probe_error_keeps_the_owner_alive(self) -> None:
+        """A spurious existence-probe error must not declare the owner dead.
+
+        The recovery path steals a lease only when the OS proves the owner
+        is gone (observed once as a spurious WinError 87 from the probe).
+        An unexpected OS error must keep the lease and let normal expiry
+        recover it: stealing would fail the live owner's in-flight
+        mutation.
+        """
+
+        self.store.acquire("sample", "owner", ttl_seconds=30)
+        payload = json.loads(
+            self.store.lease_path("sample").read_text(encoding="utf-8")
+        )
+        self.assertEqual(payload.get("hostname"), socket.gethostname())
+
+        def spurious_probe_error(pid: int, sig: int) -> None:
+            raise OSError(87, "The parameter is incorrect")
+
+        with patch("os.kill", spurious_probe_error):
+            self.assertFalse(_lease_owner_is_provably_dead(payload))
+
+    def test_a_malformed_lease_owner_is_never_recovered_early(self) -> None:
+        payload: dict[str, Any] = {"hostname": "elsewhere", "pid": 1}
+        self.assertFalse(_lease_owner_is_provably_dead(payload))
+        payload = {"hostname": socket.gethostname(), "pid": "1"}
+        self.assertFalse(_lease_owner_is_provably_dead(payload))
 
     def test_lease_fences_expired_owner(self) -> None:
         first = self.store.acquire("sample", "first", ttl_seconds=5)

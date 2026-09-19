@@ -93,7 +93,11 @@ def _process_is_running(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        return False
+        # An unexpected OS error (observed once as a spurious WinError 87
+        # from the existence probe) must not declare a live owner dead:
+        # stealing its lease would fail the owner's in-flight mutation.
+        # Keep the lease and let normal expiry recover it instead.
+        return True
     return True
 
 
@@ -307,7 +311,21 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            # A byte range already locked by THIS process fails immediately
+            # with EDEADLK instead of waiting: the CRT cannot wait on a lock
+            # its own process holds. The lease heartbeat thread and the
+            # calling thread legitimately serialize on the same state lock,
+            # so wait out the sibling's critical section and retry, bounded
+            # like LK_LOCK's own ten-second budget for cross-process waits.
+            deadline = time.monotonic() + 10.0
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != 36 or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
             try:
                 yield
             finally:

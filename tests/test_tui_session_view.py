@@ -436,6 +436,42 @@ class SessionViewWiringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row.status, "running")
             self.assertIn("running", app._session_status_text())
 
+    async def test_an_activity_tick_while_the_widget_is_absent_costs_nothing(self) -> None:
+        """A timer tick cannot explode while ``#activity`` does not exist.
+
+        The interval timers live on the app, so a tick can fire while the
+        app's compose has not mounted ``#activity`` yet -- observed on a
+        hosted runner as NoMatches raised from ``_tick_activity`` and
+        re-raised by ``run_test``. The tick must cost nothing, and the next
+        tick must still paint: the dropped tick resets the render cache
+        instead of leaving a stale one that would suppress the repaint.
+        The widget's absence is reproduced by removing it, which is exactly
+        the state the compose race leaves behind.
+        """
+
+        self.harness.create_session("s-tick")
+        app = self.harness.app("s-tick")
+        async with app.run_test(size=(120, 42)) as pilot:
+            await pilot.pause()
+            await app.query_one("#activity", tui.Static).remove()
+            await pilot.pause()
+            app.agent_busy = True
+            app._activity_started = time.monotonic()
+            app._activity_kind = "reading"
+            app._tick_activity()
+            await pilot.pause()
+            # The tick was dropped: nothing painted, nothing cached.
+            self.assertEqual(app._activity_rendered, "")
+
+            await app.screen.mount(tui.Static("", id="activity"))
+            await pilot.pause()
+            app._tick_activity()
+            await pilot.pause()
+            # The next tick repaints from the same state.
+            self.assertTrue(app._activity_rendered)
+            activity = str(app.query_one("#activity", tui.Static).render())
+            self.assertTrue(activity.strip(), activity)
+
 
 class SessionViewBoundaryTests(unittest.IsolatedAsyncioTestCase):
     """The TUI displays view models and implements no reducer of its own."""

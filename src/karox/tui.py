@@ -8540,7 +8540,18 @@ if _HAS_TEXTUAL:
             self._transcript().add_notice(message, kind)
 
         def _set_activity(self, message: str, kind: str = "working") -> None:
-            activity = self.query_one("#activity", Static)
+            try:
+                activity = self.query_one("#activity", Static)
+                busy = self.query_one("#busy", LoadingIndicator)
+            except NoMatches:
+                # The interval timers live on the app, so a tick (or a drained
+                # event) can fire while the default screen is still current,
+                # before the hub's compose has mounted #activity. Paint
+                # nothing -- the widget genuinely does not exist yet -- and
+                # reset the cache so the next tick repaints the line instead
+                # of suppressing it as "already rendered".
+                self._activity_rendered = ""
+                return
             # "idle" hides the activity line entirely (no text, no frame) so
             # only the animated dots indicator speaks while the agent works.
             if kind == "idle":
@@ -8553,7 +8564,7 @@ if _HAS_TEXTUAL:
                 return
             # Dots are only a placeholder until the typed event stream can name
             # a truthful action. Once it can, one progress indicator is enough.
-            self.query_one("#busy", LoadingIndicator).styles.display = "none"
+            busy.styles.display = "none"
             activity.styles.display = "block"
             activity.set_class(kind == "success", "activity-success")
             activity.set_class(kind == "error", "activity-error")

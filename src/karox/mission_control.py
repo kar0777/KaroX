@@ -38,7 +38,21 @@ def _exclusive_lock(path: Path):
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            # A byte range already locked by THIS process fails immediately
+            # with EDEADLK instead of waiting: the CRT cannot wait on a lock
+            # its own process holds. Two threads of one process legitimately
+            # serialize here, so wait out the sibling's critical section and
+            # retry, bounded like LK_LOCK's own ten-second budget for
+            # cross-process waits.
+            deadline = time.monotonic() + 10.0
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != 36 or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
             try:
                 yield
             finally:
