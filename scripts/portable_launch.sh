@@ -7,9 +7,17 @@ BUNDLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 UV="$BUNDLE_DIR/uv"
 [ -x "$UV" ] || { echo "KaroX portable runtime is incomplete: bundled uv is missing." >&2; exit 1; }
 
-set -- "$BUNDLE_DIR"/karox_runtime-*.whl
-[ "$#" -eq 1 ] && [ -f "$1" ] || { echo "KaroX portable runtime must contain exactly one wheel." >&2; exit 1; }
-WHEEL=$1
+# Locate the wheel WITHOUT clobbering the caller's arguments: `set --` would
+# replace "$@", and the exec below must forward the user's own arguments to
+# the karox CLI.
+WHEEL=""
+wheel_count=0
+for candidate in "$BUNDLE_DIR"/karox_runtime-*.whl; do
+  [ -f "$candidate" ] || continue
+  WHEEL=$candidate
+  wheel_count=$((wheel_count + 1))
+done
+[ "$wheel_count" -eq 1 ] && [ -n "$WHEEL" ] || { echo "KaroX portable runtime must contain exactly one wheel." >&2; exit 1; }
 WHEEL_NAME=$(basename -- "$WHEEL")
 
 case "$(uname -s 2>/dev/null || true)" in
