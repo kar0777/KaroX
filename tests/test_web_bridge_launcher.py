@@ -1126,10 +1126,22 @@ class WebBridgeSupervisorTests(unittest.TestCase):
             def popen(*args: object, **kwargs: object) -> None:
                 # A kill landing here is the window the watchdog has to cover:
                 # the tunnel is already public but the bridge does not exist yet.
-                seen["records"] = [
-                    json.loads(entry.read_text(encoding="utf-8"))
-                    for entry in sorted((root / "web-bridge").glob("*.json"))
-                ]
+                # The owner also republishes the record about once a second with
+                # an atomic os.replace, so a file can vanish between the glob and
+                # its open; rereading keeps the snapshot honest instead of
+                # turning a publisher heartbeat into a launch failure.
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        seen["records"] = [
+                            json.loads(entry.read_text(encoding="utf-8"))
+                            for entry in sorted((root / "web-bridge").glob("*.json"))
+                        ]
+                    except FileNotFoundError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        continue
+                    break
                 raise OSError("cannot spawn")
 
             with (
