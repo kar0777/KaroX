@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import __version__
+from .core import _new_process_group_kwargs
 from .remote_tools import _kill_pid_tree
 from .tailscale import TailscaleError, prepare_tailscale_funnel
 from .web_bridge_launcher import (
@@ -53,12 +54,7 @@ class QuietTunnel:
 
 
 def detachable_child_options() -> dict[str, Any]:
-    if os.name == "nt":
-        return {
-            "creationflags": int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        }
-    return {"start_new_session": True}
+    return _new_process_group_kwargs()
 
 
 def port_available(port: int) -> bool:
@@ -204,6 +200,7 @@ def git_text(repository: Path, argv: Sequence[str]) -> str:
             errors="replace",
             timeout=30.0,
             check=False,
+            **detachable_child_options(),
         )
     except (OSError, subprocess.SubprocessError):
         raise EllipsisHelperError("local Git preflight failed") from None

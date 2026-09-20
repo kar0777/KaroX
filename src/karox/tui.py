@@ -51,6 +51,7 @@ from .disk_maintenance import (
 from .event_bus import EventBus, EventKind, EventLevel, event_bus
 from .models import AccessProfile
 from .paths import config_dir, session_dir
+from .onboarding import OnboardingProgress, load_progress, save_progress, safe_setup_error
 from .port_allocation import karox_owned_process as _karox_owned_process
 from .provider_controller import ProviderController
 from .provider_factory import ProviderFactory
@@ -3918,7 +3919,7 @@ if _HAS_TEXTUAL:
         ]
         DEFAULT_CSS = """
         LanguageScreen { align: center middle; background: #0e0c08 92%; }
-        #language-dialog { width: 64; height: auto; background: #1a1712;
+        #language-dialog { width: 64; max-width: 100%; height: auto; max-height: 100%; background: #1a1712;
           border: round #c6a56b; padding: 1 2; }
         #language-dialog .title { text-style: bold; color: #e5e5e5;
           margin-bottom: 1; }
@@ -3931,7 +3932,7 @@ if _HAS_TEXTUAL:
             self.allow_cancel = allow_cancel
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="language-dialog"):
+            with VerticalScroll(id="language-dialog"):
                 yield Static("Выберите язык / Choose language", classes="title")
                 yield Static(
                     "1 / 2 — выбрать / choose\n↑↓ / Tab — navigation • Enter — confirm",
@@ -4201,7 +4202,7 @@ if _HAS_TEXTUAL:
         ]
         DEFAULT_CSS = """
         ProviderPresetScreen { align: center middle; background: #0e0c08 92%; }
-        #preset-dialog { width: 86; height: 90%; background: #1a1712;
+        #preset-dialog { width: 86; max-width: 100%; height: 90%; background: #1a1712;
           border: round #c6a56b; padding: 1 2; }
         #preset-dialog .title { text-style: bold; color: #e5e5e5; }
         #preset-dialog .hint { color: #8a7e6a; margin-bottom: 1; }
@@ -5642,6 +5643,8 @@ if _HAS_TEXTUAL:
     ):
         BINDINGS = [
             Binding("f10", "start", "Запустить", priority=True),
+            Binding("f6", "tailscale_help", "Tailscale", priority=True),
+            Binding("f1", "navigation_help", "Help", priority=True),
             Binding("escape", "cancel", "Отмена", priority=True),
         ]
         DEFAULT_CSS = """
@@ -5666,10 +5669,12 @@ if _HAS_TEXTUAL:
             default_tunnel: str = "cloudflare",
             default_profile: str = "promptql",
             locked_profile: Optional[str] = None,
+            preserve_tunnel: bool = False,
         ) -> None:
             super().__init__()
             self.language = language
             self._default_tunnel = default_tunnel
+            self._preserve_tunnel = preserve_tunnel
             self._locked_profile = locked_profile
             self._default_profile = locked_profile or default_profile
 
@@ -5863,6 +5868,8 @@ if _HAS_TEXTUAL:
                         value=self._default_tunnel == "tailscale",
                         id="tunnel-tailscale",
                     )
+                yield Button(self._label("F6  Настройка Tailscale", "F6  Tailscale setup"), id="bridge-tailscale-help")
+                yield Static(self._label("F1 — помощь по клавишам", "F1 — keyboard help"), classes="hint")
                 yield Label("", id="bridge-error")
                 with Horizontal(id="bridge-buttons"):
                     yield Button(
@@ -5873,6 +5880,22 @@ if _HAS_TEXTUAL:
                         self._label("F10  Запустить мост", "F10  Start bridge"),
                         id="bridge-start",
                     )
+
+        def action_navigation_help(self) -> None:
+            from .tui_onboarding import NavigationHelpScreen
+            self.app.push_screen(NavigationHelpScreen(self.language))
+
+        def action_tailscale_help(self) -> None:
+            from .tui_onboarding import TailscaleSetupScreen
+            self.app.push_screen(TailscaleSetupScreen(self.language), self._tunnel_help_done)
+
+        def _tunnel_help_done(self, choice: Optional[str]) -> None:
+            if choice not in {"tailscale", "cloudflare"}:
+                return
+            for name in ("none", "cloudflare", "tailscale"):
+                self.query_one(f"#tunnel-{name}", RadioButton).value = name == choice
+            self._default_tunnel = choice
+            self.query_one("#bridge-tunnel-kind", RadioSet).focus()
 
         def on_mount(self) -> None:
             self.retry_mount(self._finish_mount)
@@ -5901,6 +5924,8 @@ if _HAS_TEXTUAL:
             # concurrently useful service on its own supported Funnel HTTPS port:
             # ChatGPT/Claude use 443, Notion uses 8443, Hyperagent uses 10000.
             target = "tailscale" if profile in {"notion", "hyperagent-web", "adapt"} else "cloudflare"
+            if self._preserve_tunnel:
+                target = self._default_tunnel
             self._default_tunnel = target
             self.query_one("#bridge-port", Input).value = (
                 "8766"
@@ -5977,6 +6002,9 @@ if _HAS_TEXTUAL:
 
         @on(Button.Pressed)
         def button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "bridge-tailscale-help":
+                self.action_tailscale_help()
+                return
             if event.button.id == "bridge-cancel":
                 self.action_cancel()
                 return
@@ -6148,7 +6176,7 @@ if _HAS_TEXTUAL:
         ]
         DEFAULT_CSS = """
         ConfirmScreen { align: center middle; background: #0e0c08 92%; }
-        #confirm-dialog { width: 70; height: auto; max-height: 80%;
+        #confirm-dialog { width: 70; max-width: 100%; height: auto; max-height: 96%;
           background: #1a1712; border: round #c6a56b; padding: 1 2; }
         #confirm-dialog .title { text-style: bold; color: #e5e5e5; margin-bottom: 1; }
         #confirm-dialog .body { color: #dcdcdc; margin-bottom: 1; }
@@ -6173,7 +6201,7 @@ if _HAS_TEXTUAL:
             self.language = language
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="confirm-dialog"):
+            with VerticalScroll(id="confirm-dialog"):
                 yield Static(self._title, classes="title")
                 yield Static(self._body, classes="body")
                 with Horizontal(id="confirm-buttons"):
@@ -7417,6 +7445,7 @@ if _HAS_TEXTUAL:
             # while the user is *not* typing is a trap. Usage & Cost stays on
             # /usage and in the command palette.
             Binding("ctrl+s", "onboarding", "Подключения", show=False),
+            Binding("f4", "first_run", "Setup guide", show=False),
             Binding("ctrl+o", "session_browser", "Сессии", show=False),
             Binding("ctrl+w", "workspace", "Папка", show=False, priority=True),
             Binding("ctrl+l", "clear_log", "Очистить", show=False),
@@ -7537,12 +7566,14 @@ if _HAS_TEXTUAL:
             requested_language = language if language in {"ru", "en"} else None
             stored_language = _load_language() if requested_language is None else None
             self.language = requested_language or stored_language or "en"
+            self._first_run_offer_enabled = requested_language is None
             self._needs_language = (
                 requested_language is None and stored_language is None
             )
             self.active_session = session_id
             self.verification = _default_verification(self.repository)
             self.pending_task: Optional[str] = None
+            self._first_run_provider = False
             self._setup_both = False
             # B1. Whether the provider wizard was entered from the Connection
             # Hub, and should therefore hand the user back to it. The wizard is
@@ -7751,6 +7782,8 @@ if _HAS_TEXTUAL:
                 # key away (Ctrl+H / /home), but an automatic dashboard stole
                 # focus from the composer and made the first command feel broken.
                 self._show_welcome()
+                if self._first_run_offer_enabled:
+                    self._offer_first_run()
             reason = _unsafe_workspace_reason(self.repository, self.language)
             if reason:
                 self._write_notice(reason, "error")
@@ -8588,11 +8621,133 @@ if _HAS_TEXTUAL:
             self._set_language(language)
             self._needs_language = False
             self._show_welcome()
-            # First-run language selection must land in the same chat-first shell
-            # as every later launch. Home is explicit (Ctrl+H / /home); pushing it
-            # here steals focus from the composer just after the user chose a
-            # language and recreates the old two-root onboarding confusion.
+            # Preserve chat-first startup; F4 continues the connected journey.
+            # Language persistence is NOT completion of the guide. Existing users
+            # with a language but no progress file are never migrated or nagged.
+            if load_progress() is None:
+                self._save_first_run(OnboardingProgress())
+            self._offer_first_run()
             self.query_one("#composer", Input).focus()
+
+        def _save_first_run(self, progress: OnboardingProgress) -> bool:
+            try:
+                save_progress(progress)
+                return True
+            except OSError:
+                self._write_notice(self._label(
+                    "Не удалось сохранить шаг настройки. Проверьте доступ к папке конфигурации.",
+                    "Could not save setup progress. Check access to the configuration folder.",
+                ), "error")
+                return False
+
+        def _offer_first_run(self) -> None:
+            progress = load_progress()
+            if progress is not None and not progress.completed and not progress.guide_dismissed:
+                self._write_notice(self._label(
+                    "Настройка не завершена · F4 — продолжить: API → веб-клиент → туннель. Ctrl+S — подключения.",
+                    "Setup pending · F4 — continue: API → web client → tunnel. Ctrl+S — connections.",
+                ), "info")
+
+        def action_first_run(self) -> None:
+            # An app binding must not stack a second guide over a password form.
+            if len(self.screen_stack) != 1:
+                return
+            from .tui_onboarding import FirstRunScreen
+
+            progress = load_progress() or OnboardingProgress()
+            if not self._save_first_run(progress):
+                return
+            self.push_screen(FirstRunScreen(self.language, progress), self._first_run_choice)
+
+        def _first_run_choice(self, choice: Optional[str]) -> None:
+            progress = load_progress() or OnboardingProgress()
+            if choice in {None, "setup-later"}:
+                self.query_one("#composer", Input).focus()
+                return
+            if choice == "setup-provider":
+                self._first_run_provider = True
+                self.call_after_refresh(self.action_provider_preset)
+                return
+            if choice == "setup-finish":
+                # A requested bridge must be proven working, not merely launched.
+                if progress.bridge_outcome not in {"skipped", "configured"}:
+                    self.call_after_refresh(self.action_first_run)
+                    return
+                configured = "configured" in {progress.provider_outcome, progress.bridge_outcome}
+                self._save_first_run(replace(progress, step="review", completed=configured, guide_dismissed=True))
+                self.query_one("#composer", Input).focus()
+                return
+            if choice == "setup-back":
+                previous = {"bridge": "provider", "tunnel": "bridge", "review": "bridge"}
+                progress = replace(progress, step=previous.get(progress.step, "provider"), completed=False, guide_dismissed=False)
+            elif choice == "setup-skip-provider":
+                progress = replace(progress, step="bridge", completed=False, provider_outcome="skipped", guide_dismissed=False)
+            elif choice == "setup-skip-bridge":
+                progress = replace(progress, step="review", completed=False, bridge_outcome="skipped", guide_dismissed=False)
+            elif choice in {"setup-chatgpt-web", "setup-claude-web"}:
+                progress = replace(progress, step="tunnel", service=choice.removeprefix("setup-"), completed=False, bridge_outcome="requested", guide_dismissed=False)
+            elif choice == "setup-tailscale":
+                from .tui_onboarding import TailscaleSetupScreen
+                self.push_screen(TailscaleSetupScreen(self.language), self._first_run_tunnel)
+                return
+            elif choice == "setup-cloudflare":
+                self._first_run_tunnel("cloudflare")
+                return
+            if self._save_first_run(progress):
+                self.call_after_refresh(self.action_first_run)
+
+        def _first_run_tunnel(self, tunnel: Optional[str]) -> None:
+            if tunnel not in {"cloudflare", "tailscale"}:
+                self.call_after_refresh(self.action_first_run)
+                return
+            progress = load_progress() or OnboardingProgress()
+            self._first_run_tailscale_allowed = tunnel == "tailscale"
+            if not self._save_first_run(replace(progress, step="tunnel", tunnel=tunnel, completed=False, bridge_outcome="requested", guide_dismissed=False)):
+                return
+            # Reuse the real bridge capability/port controls and the existing
+            # saved-profile launcher; no parallel mock implementation.
+            self.push_screen(BridgeSetupScreen(
+                self.language, default_tunnel=tunnel,
+                locked_profile=progress.service, preserve_tunnel=True,
+            ), self._first_run_bridge_done)
+
+        def _first_run_bridge_done(self, setup: Optional[BridgeSetup]) -> None:
+            if setup is None:
+                self.call_after_refresh(self.action_first_run)
+                return
+            if setup.tunnel_provider == "tailscale" and not self._first_run_tailscale_allowed:
+                # A user may change the radio choice in the real bridge form.
+                # That must not bypass the explicit setup/takeover boundary.
+                from .tui_onboarding import TailscaleSetupScreen
+                self.push_screen(TailscaleSetupScreen(self.language), self._first_run_tunnel)
+                return
+            progress = load_progress() or OnboardingProgress()
+            if not self._save_first_run(replace(progress, completed=False, guide_dismissed=False, bridge_outcome="requested")):
+                return
+            self._first_run_bridge_launch_service = setup.profile
+            self._first_run_bridge_launch_profile = None
+            self._first_run_bridge_launch_succeeded = False
+            self._bridge_setup_done(setup)
+            # ServiceConnectScreen reads real state and supplies verify/client
+            # instructions. Launch acceptance alone is NOT onboarding completion.
+            screens = self._connections_screens_cached()
+            service_screen = screens["ServiceConnectScreen"](self.language, preset_id=setup.profile)
+            self.call_after_refresh(lambda: self.push_screen(
+                service_screen,
+                lambda result: self._first_run_service_closed(result, service_screen=service_screen),
+            ))
+
+        def _first_run_service_closed(self, _result: Optional[Any], *, service_screen: Optional[Any] = None) -> None:
+            from .tui_connections import SERVICE_WORKING
+
+            progress = load_progress() or OnboardingProgress()
+            # Ready/configured/PID presence is not a successful service check.
+            succeeded = (getattr(self, "_first_run_bridge_launch_succeeded", False)
+                         and getattr(service_screen, "_status", None) == SERVICE_WORKING)
+            if self._save_first_run(replace(progress, step="review", completed=False,
+                                           bridge_outcome="configured" if succeeded else "requested",
+                                           guide_dismissed=False)):
+                self.call_after_refresh(self.action_first_run)
 
         def _set_language(self, language: str) -> None:
             _save_language(language)
@@ -12962,6 +13117,10 @@ if _HAS_TEXTUAL:
             that ends early cannot leave it armed for the next unrelated wizard.
             """
 
+            if self._first_run_provider:
+                self._first_run_provider = False
+                self.call_after_refresh(self.action_first_run)
+                return
             if self._connect_return_to_hub:
                 self._connect_return_to_hub = False
                 self.call_after_refresh(lambda: self._open_connections(None))
@@ -13022,6 +13181,11 @@ if _HAS_TEXTUAL:
                 f"{escape(selected.model_id)}"
             )
             self._refresh_status()
+            if self._first_run_provider:
+                progress = load_progress() or OnboardingProgress()
+                self._save_first_run(replace(progress, step="bridge", completed=False, provider_outcome="configured", guide_dismissed=False))
+                self._leave_provider_flow()
+                return
             # B1. A saved provider goes back to the hub it was started from, and
             # nowhere else. Two things used to follow a successful save and both
             # were wrong for this journey: the composer took focus, so adding two
@@ -13129,10 +13293,13 @@ if _HAS_TEXTUAL:
                         "Не удалось сохранить профиль подключения: ",
                         "Could not save the connection profile: ",
                     )
-                    + str(redact(str(exc)))[:200],
+                    + safe_setup_error(exc),
                     "error",
                 )
                 return
+
+            if getattr(self, "_first_run_bridge_launch_service", None) == setup.profile:
+                self._first_run_bridge_launch_profile = profile_name
 
             self._write_notice(
                 self._label(
@@ -13148,13 +13315,13 @@ if _HAS_TEXTUAL:
 
                     result = dict(start_saved_bridge(profile_name))
                     error = (
-                        str(result.get("error") or "bridge start failed")[:200]
+                        safe_setup_error(result.get("error") or "bridge start failed")
                         if result.get("action") == "error"
                         else None
                     )
                 except Exception as exc:
                     result = {}
-                    error = str(redact(str(exc)))[:200]
+                    error = safe_setup_error(exc)
                 with contextlib.suppress(Exception):
                     self.call_from_thread(
                         self._saved_bridge_from_tui_done,
@@ -13176,6 +13343,8 @@ if _HAS_TEXTUAL:
             result: Mapping[str, Any],
             error: Optional[str],
         ) -> None:
+            if getattr(self, "_first_run_bridge_launch_profile", None) == profile_name:
+                self._first_run_bridge_launch_succeeded = not error and result.get("action") != "error"
             if error:
                 self._write_notice(
                     self._label(
@@ -13498,7 +13667,7 @@ if _HAS_TEXTUAL:
                 )
             except (OSError, subprocess.SubprocessError, TailscaleError) as exc:
                 self._write(
-                    f"[#e0a3a3]Tailscale Funnel не запущен:[/] {escape(str(exc))}"
+                    f"[#e0a3a3]Tailscale Funnel не запущен:[/] {escape(safe_setup_error(exc))}"
                 )
                 return
             self.tunnel_process = process

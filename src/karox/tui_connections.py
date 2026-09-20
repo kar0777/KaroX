@@ -5170,7 +5170,7 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             self.language = language
 
         def compose(self) -> ComposeResult:
-            with Vertical(id="cc-confirm-dialog"):
+            with VerticalScroll(id="cc-confirm-dialog"):
                 yield Static(self._title, classes="title")
                 yield Static(self._body, classes="body")
                 with Horizontal(id="cc-confirm-buttons"):
@@ -5299,6 +5299,8 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             # different action (Verify). Space mirrors ordinary button keyboard
             # behaviour on this button-only surface without stealing text input.
             Binding("space", "activate_focused", show=False, priority=True),
+            Binding("b", "focus_bypass", "Bypass", priority=True),
+            Binding("f1", "navigation_help", "Help", priority=True),
             Binding("f5", "verify", "Verify", priority=True),
             # B4. The same key as the provider form. One advanced contract means
             # one way in, so a person who learned F2 on a provider does not have
@@ -5809,8 +5811,8 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             # but the normal screen no longer teaches a seven-key control panel.
             return _label(
                 self.language,
-                "Ctrl+W — проект · Tab — действие · Enter — выполнить · Esc — назад",
-                "Ctrl+W — project · Tab — action · Enter — run · Esc — back",
+                "Tab · Enter/Space · B — Bypass · F1 — помощь · Esc — назад",
+                "Tab · Enter/Space · B — Bypass · F1 — help · Esc — back",
             )
 
         def on_mount(self) -> None:
@@ -6282,9 +6284,24 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             if callable(switcher):
                 switcher()
 
+        def action_navigation_help(self) -> None:
+            from .tui_onboarding import NavigationHelpScreen
+            self.app.push_screen(NavigationHelpScreen(self.language))
+
+        def action_focus_bypass(self) -> None:
+            if bypass_supported(self.preset_id):
+                with contextlib.suppress(Exception):
+                    self.query_one("#svc-full-access", Switch).focus()
+
         def action_activate_focused(self) -> None:
             """Activate exactly the focused service button with Space."""
             focused = self.app.focused
+            # The screen's priority Space binding also intercepts Switch's
+            # native key. Dispatch it back rather than swallowing Bypass toggles.
+            if isinstance(focused, Switch):
+                if not focused.disabled:
+                    focused.toggle()
+                return
             button_id = getattr(focused, "id", "")
             if button_id == "svc-primary":
                 if self._primary_starts_bridge():

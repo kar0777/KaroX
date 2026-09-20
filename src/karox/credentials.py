@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
@@ -100,10 +101,14 @@ class CredentialBackend(Protocol):
 class KeyringBackend:
     """Thin lazy wrapper around the platform ``keyring`` backend."""
 
-    _UNSAFE_BACKEND_MARKERS = ("fail", "null", "plaintext")
+    # No chaining backend may silently delegate writes to keyrings.alt/plaintext.
+    _OS_BACKENDS = {
+        "keyring.backends.Windows.WinVaultKeyring",
+        "keyring.backends.macOS.Keyring",
+    }
 
     @classmethod
-    def _module(cls):
+    def _check_test_isolation(cls) -> None:
         if (
             os.environ.get("KAROX_TEST_ISOLATION", "").strip() == "1"
             and os.environ.get("KAROX_TEST_ALLOW_REAL_KEYRING", "").strip() != "1"
@@ -117,6 +122,11 @@ class KeyringBackend:
                 "tests. Inject a fake CredentialBackend, or set "
                 "KAROX_TEST_ALLOW_REAL_KEYRING=1 to opt in explicitly."
             )
+
+    @classmethod
+    def _module(cls):
+        """Select and check an OS backend; retained name for existing doctors."""
+        cls._check_test_isolation()
         try:
             import keyring  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -127,38 +137,66 @@ class KeyringBackend:
             raise CredentialError(
                 "OS credential support is unavailable. Install it with "
                 "'python -m pip install keyring', or reference the key from the "
-                "environment instead: env:KAROX_PROVIDER_<NAME>_API_KEY"
+                "environment instead: env:KAROX_PROVIDER_<NAME>_API_KEY. "
+                "For secure headless bridge storage, run 'karox credential setup'."
             ) from exc
+        if sys.platform.startswith("linux"):
+            from .credential_session import secure_linux_backend
+
+            try:
+                return secure_linux_backend()
+            except CredentialError:
+                raise
+            except Exception as exc:
+                raise CredentialError(
+                    "cannot initialize Secret Service: "
+                    + type(exc).__name__
+                    + ". Run 'karox credential setup' for recovery."
+                ) from None
         try:
             backend = keyring.get_keyring()
-            identity = (
-                f"{backend.__class__.__module__}.{backend.__class__.__name__}"
-            ).lower()
+            identity = f"{backend.__class__.__module__}.{backend.__class__.__name__}"
             priority = float(getattr(backend, "priority", 0))
         except Exception as exc:
             raise CredentialError(
                 f"cannot initialize the OS credential backend: {type(exc).__name__}"
             ) from exc
-        if priority <= 0 or any(item in identity for item in cls._UNSAFE_BACKEND_MARKERS):
+        if priority <= 0 or identity not in cls._OS_BACKENDS:
             raise CredentialError(
                 "no secure OS credential backend is available; plaintext fallback "
                 "is disabled. On a host without a Secret Service, reference the "
                 "key from the environment: env:KAROX_PROVIDER_<NAME>_API_KEY"
             )
-        return keyring
+        return backend
 
     def set(self, service: str, account: str, secret: str) -> None:
-        self._module().set_password(service, account, secret)
+        try:
+            self._module().set_password(service, account, secret)
+        except CredentialError:
+            raise
+        except Exception as exc:
+            raise CredentialError("cannot write OS credential: " + type(exc).__name__) from None
 
     def get(self, service: str, account: str) -> Optional[str]:
-        return self._module().get_password(service, account)
+        try:
+            return self._module().get_password(service, account)
+        except CredentialError:
+            raise
+        except Exception as exc:
+            raise CredentialError("cannot read OS credential: " + type(exc).__name__) from None
 
     def delete(self, service: str, account: str) -> None:
-        keyring = self._module()
+        backend = self._module()
+        from keyring.errors import PasswordDeleteError
+
         try:
-            keyring.delete_password(service, account)
-        except keyring.errors.PasswordDeleteError as exc:
-            raise CredentialError("credential does not exist") from exc
+            backend.delete_password(service, account)
+        except PasswordDeleteError:
+            raise CredentialError("credential does not exist") from None
+        except CredentialError:
+            raise
+        except Exception as exc:
+            raise CredentialError("cannot delete OS credential: " + type(exc).__name__) from None
 
 
 class CredentialStore:
@@ -270,4 +308,9 @@ class CredentialStore:
             }
         if isinstance(self._backend, KeyringBackend):
             self._backend._module()
+            if sys.platform.startswith("linux"):
+                return {
+                    "status": "ok", "backend": "os-keyring", "protection": "os-protected",
+                    "verification": "unlocked-collection-metadata-only",
+                }
         return {"status": "ok", "backend": "os-keyring", "protection": "os-protected"}

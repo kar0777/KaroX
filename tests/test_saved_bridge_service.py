@@ -38,6 +38,7 @@ from karox.port_ownership import (
     OwnershipMetadata,
     OwnershipVerdict,
 )
+from karox.process_identity import ProcessIdentity, argv_digest
 from karox.connection_status import CredentialStatus
 from karox.models import AccessProfile
 from karox.sessions import SessionStore
@@ -161,6 +162,7 @@ def _verdict(
         metadata=metadata,
         unrelated_pid=unrelated_pid,
         owned_orphan_pid=owned_orphan_pid,
+        owned_orphan_identity=(ProcessIdentity(owned_orphan_pid, 1234567890, argv_sha256=argv_digest(["karox", "bridge", "serve", "--session-id", "web-saved-abc", "--port", "8765"])) if owned_orphan_pid else None),
         live_unrecorded_owner_pid=live_unrecorded_owner_pid,
     )
 
@@ -330,7 +332,7 @@ class StartSavedBridgeOrphanedListenerTests(unittest.TestCase):
     """
 
     @patch("karox.web_bridge_launcher._saved_bridge_repository", return_value=_existing_repo())
-    @patch("karox.web_bridge_launcher._reclaim_orphaned_bridge_listener")
+    @patch("karox.saved_bridge_recovery.reclaim_saved_bridge_orphan")
     @patch("karox.connection_status._check_bridge_credential")
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
@@ -356,12 +358,12 @@ class StartSavedBridgeOrphanedListenerTests(unittest.TestCase):
             mock_popen.return_value.poll.return_value = None
             start_saved_bridge("chatgpt-pc", timeout_seconds=0.1)
 
-        self.assertEqual(mock_reclaim.call_args.args[0], 4242)
+        mock_reclaim.assert_called_once_with("chatgpt-pc", port=8765, ownership=mock_ownership.return_value)
         self.assertEqual(mock_reclaim.call_args.kwargs.get("port"), 8765)
         mock_popen.assert_called_once()
 
     @patch("karox.web_bridge_launcher._saved_bridge_repository", return_value=_existing_repo())
-    @patch("karox.web_bridge_launcher._reclaim_orphaned_bridge_listener")
+    @patch("karox.saved_bridge_recovery.reclaim_saved_bridge_orphan")
     @patch("karox.connection_status._check_bridge_credential")
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
@@ -390,7 +392,7 @@ class StartSavedBridgeOrphanedListenerTests(unittest.TestCase):
         _assert_no_secrets(self, result)
 
     @patch("karox.web_bridge_launcher._saved_bridge_repository", return_value=_existing_repo())
-    @patch("karox.web_bridge_launcher._reclaim_orphaned_bridge_listener")
+    @patch("karox.saved_bridge_recovery.reclaim_saved_bridge_orphan")
     @patch("karox.connection_status._check_bridge_credential")
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
@@ -417,20 +419,15 @@ class StartSavedBridgeOrphanedListenerTests(unittest.TestCase):
 
 
 class StartSavedBridgeLiveUnrecordedOwnerTests(unittest.TestCase):
-    """A live owner that lost its watchdog record must be recycled, not fought.
-
-    Reclaiming only its listener is futile: the live owner respawns the child and
-    every freshly spawned owner then dies binding the port, which is exactly the
-    "detached bridge process exited before becoming ready" loop users hit.
-    """
+    """Implicit start leaves a live owner and its listener untouched."""
 
     @patch("karox.web_bridge_launcher._saved_bridge_repository", return_value=_existing_repo())
     @patch("karox.web_bridge_launcher._recycle_unrecorded_saved_bridge_owner")
-    @patch("karox.web_bridge_launcher._reclaim_orphaned_bridge_listener")
+    @patch("karox.saved_bridge_recovery.reclaim_saved_bridge_orphan")
     @patch("karox.connection_status._check_bridge_credential")
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
-    def test_the_proven_live_owner_is_recycled_instead_of_its_child(
+    def test_the_proven_live_owner_is_not_recycled_or_relaunched(
         self,
         mock_store_cls: MagicMock,
         mock_ownership: MagicMock,
@@ -447,6 +444,7 @@ class StartSavedBridgeLiveUnrecordedOwnerTests(unittest.TestCase):
             live_unrecorded_owner_pid=909,
         )
         mock_recycle.return_value = True
+        mock_reclaim.return_value = False
 
         with patch("karox.web_bridge_launcher.subprocess.Popen") as mock_popen, \
              patch("karox.saved_bridge_supervisor.set_saved_bridge_desired_running"):
@@ -454,17 +452,16 @@ class StartSavedBridgeLiveUnrecordedOwnerTests(unittest.TestCase):
             mock_popen.return_value.poll.return_value = None
             start_saved_bridge("chatgpt-pc", timeout_seconds=0.1)
 
-        self.assertEqual(mock_recycle.call_args.args[0], 909)
-        self.assertEqual(mock_recycle.call_args.kwargs.get("profile_name"), "chatgpt-pc")
-        mock_reclaim.assert_not_called()
-        mock_popen.assert_called_once()
+        mock_recycle.assert_not_called()
+        mock_reclaim.assert_called_once_with("chatgpt-pc", port=8765, ownership=mock_ownership.return_value)
+        mock_popen.assert_not_called()
 
     @patch("karox.web_bridge_launcher._saved_bridge_repository", return_value=_existing_repo())
     @patch("karox.web_bridge_launcher._recycle_unrecorded_saved_bridge_owner")
     @patch("karox.connection_status._check_bridge_credential")
     @patch("karox.port_ownership.check_port_ownership")
     @patch("karox.web_bridge_profiles.WebBridgeProfileStore")
-    def test_a_launch_is_refused_when_that_owner_cannot_be_recycled(
+    def test_real_recovery_refuses_live_owner_without_touching_processes(
         self,
         mock_store_cls: MagicMock,
         mock_ownership: MagicMock,
@@ -481,10 +478,21 @@ class StartSavedBridgeLiveUnrecordedOwnerTests(unittest.TestCase):
         )
         mock_recycle.return_value = False
 
-        with patch("karox.web_bridge_launcher.subprocess.Popen") as mock_popen:
+        with (
+            patch("karox.web_bridge_launcher.subprocess.Popen") as mock_popen,
+            patch("karox.saved_bridge_recovery.psutil.Process") as process,
+            patch("karox.web_bridge_launcher.os.kill") as kill,
+            patch("karox.web_bridge_launcher.subprocess.run") as run,
+            patch("karox.saved_bridge_supervisor.set_saved_bridge_desired_running") as intent,
+        ):
             result = start_saved_bridge("chatgpt-pc", timeout_seconds=0.1)
 
         mock_popen.assert_not_called()
+        mock_recycle.assert_not_called()
+        process.assert_not_called()
+        kill.assert_not_called()
+        run.assert_not_called()
+        intent.assert_not_called()
         self.assertEqual(result["action"], "error")
         self.assertIn("watchdog record", result["error"])
         _assert_no_secrets(self, result)
@@ -701,7 +709,8 @@ class StartSavedBridgeDetachedLaunchTests(unittest.TestCase):
         self.assertIn("chatgpt-pc", launch_argv)
         if os.name == "nt":
             flags = mock_popen.call_args.kwargs["creationflags"]
-            self.assertTrue(flags & subprocess.DETACHED_PROCESS)
+            self.assertFalse(flags & subprocess.DETACHED_PROCESS)
+            self.assertFalse(flags & subprocess.CREATE_NEW_CONSOLE)
             self.assertTrue(flags & subprocess.CREATE_NO_WINDOW)
             self.assertTrue(flags & subprocess.CREATE_BREAKAWAY_FROM_JOB)
 

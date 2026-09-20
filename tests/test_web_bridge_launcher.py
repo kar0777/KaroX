@@ -1228,17 +1228,11 @@ class OrphanedListenerReclaimTests(unittest.TestCase):
             )
         return result, run, kill
 
-    def test_proven_orphan_is_stopped_and_the_port_is_reported_free(self) -> None:
+    def test_argv_only_proof_never_authorizes_a_stop(self) -> None:
         result, run, kill = self._run()
-        self.assertTrue(result)
-        stopped = run.call_count + kill.call_count
-        self.assertEqual(stopped, 1, "exactly one targeted stop is expected")
-        if run.call_count:
-            argv = [str(token) for token in run.call_args.args[0]]
-            self.assertIn("4242", argv)
-            self.assertNotIn("/T", argv, "a descendant tree kill is never used")
-        else:
-            self.assertEqual(kill.call_args.args[0], 4242)
+        self.assertFalse(result)
+        run.assert_not_called()
+        kill.assert_not_called()
 
     def test_a_holder_that_cannot_be_proven_is_never_stopped(self) -> None:
         result, run, kill = self._run(proven=None)
@@ -1261,7 +1255,7 @@ class OrphanedListenerReclaimTests(unittest.TestCase):
         ), patch(
             "karox.web_bridge_launcher._port_is_available", return_value=False
         ), patch(
-            "karox.web_bridge_launcher._ORPHAN_RECLAIM_TIMEOUT_SECONDS", 0.05
+            "karox.saved_bridge_recovery.ORPHAN_RECLAIM_TIMEOUT_SECONDS", 0.05
         ), patch(
             "karox.web_bridge_launcher.subprocess.run"
         ), patch(
@@ -1272,6 +1266,71 @@ class OrphanedListenerReclaimTests(unittest.TestCase):
                     4242, port=8765, session_id="web-saved-test"
                 )
             )
+
+
+class IdentitySafeOrphanReclaimTests(unittest.TestCase):
+    """Full identity snapshots, not argv-only proof, authorize a narrow stop."""
+
+    def _run(self, *, created=101, live_owner=None, port_free=True):
+        from types import SimpleNamespace
+        from karox import saved_bridge_recovery as recovery
+        from karox.process_identity import ProcessIdentity, argv_digest
+
+        argv = [sys.executable, "-m", "karox.cli", "bridge", "serve",
+                "--session-id", "web-saved-test", "--port", "8765"]
+        ownership = SimpleNamespace(
+            verdict="stale_owned_process", owned_orphan_pid=4242,
+            live_unrecorded_owner_pid=live_owner,
+            owned_orphan_identity=ProcessIdentity(4242, 101, argv_sha256=argv_digest(argv)),
+        )
+        process = MagicMock(pid=4242)
+        process.cmdline.return_value = argv
+        process.exe.return_value = sys.executable
+        process.username.return_value = "same-account"
+        process.parents.return_value = []
+        process.is_running.return_value = True
+        caller = MagicMock()
+        caller.username.return_value = "same-account"
+        with (
+            patch.object(recovery.psutil, "Process", side_effect=lambda pid: caller if pid == os.getpid() else process),
+            patch.object(recovery, "read_process_create_time_ns", return_value=created),
+            patch.object(recovery, "saved_web_bridge_session_candidates", return_value=("web-saved-test",)),
+            patch.object(recovery, "check_port_ownership", return_value=ownership),
+            patch.object(recovery, "_port_owning_pid", return_value=4242),
+            patch.object(recovery, "_port_available", return_value=port_free),
+            patch.object(recovery, "ORPHAN_RECLAIM_TIMEOUT_SECONDS", 0),
+            patch("os.kill") as kill,
+            patch("subprocess.run") as run,
+        ):
+            result = recovery.reclaim_saved_bridge_orphan("test", port=8765, ownership=ownership)
+        kill.assert_not_called()
+        run.assert_not_called()
+        process.kill.assert_not_called()
+        process.children.assert_not_called()
+        return result, process
+
+    def test_proven_orphan_terminates_only_captured_instance(self):
+        result, process = self._run()
+        self.assertTrue(result)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=0)
+
+    def test_identical_argv_does_not_authorize_reused_pid(self):
+        result, process = self._run(created=102)
+        self.assertFalse(result)
+        process.terminate.assert_not_called()
+        process.wait.assert_not_called()
+
+    def test_live_unrecorded_owner_leaves_child_untouched(self):
+        result, process = self._run(live_owner=909)
+        self.assertFalse(result)
+        process.terminate.assert_not_called()
+        process.wait.assert_not_called()
+
+    def test_busy_port_after_exit_is_not_success(self):
+        result, process = self._run(port_free=False)
+        self.assertFalse(result)
+        process.terminate.assert_called_once_with()
 
 
 class CloudflaredLookupTests(unittest.TestCase):

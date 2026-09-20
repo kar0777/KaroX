@@ -39,6 +39,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from .artifacts import ArtifactStore
+from .core import _new_process_group_kwargs
 from .check_jobs import CheckJobError, CheckJobManager, developer_worker_launcher
 from .browser_access import BrowserAccessPolicy, SecureBrowserSessionManager
 from .extension_browser import ChromeExtensionBrowserSessionManager
@@ -1972,7 +1973,7 @@ class HostedToolsRuntime:
                     stdout=stdout_handle,
                     stderr=stderr_handle,
                     shell=False,
-                    start_new_session=os.name != "nt",
+                    **_new_process_group_kwargs(),
                 )
         except Exception as exc:
             return {

@@ -574,6 +574,19 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     credential_doctor.add_argument("--json", action="store_true")
+    credential_setup = credentials.add_parser(
+        "setup", help="show secure OS credential recovery; changes require explicit consent"
+    )
+    setup_action = credential_setup.add_mutually_exclusive_group()
+    setup_action.add_argument("--activate", action="store_true",
+                              help="activate Secret Service on an existing Linux user bus")
+    setup_action.add_argument("--unlock", action="store_true",
+                              help="locally unlock/create GNOME login keyring (hidden prompt)")
+    setup_action.add_argument("--verify", action="store_true",
+                              help="write a disposable secret, read in a child, then delete")
+    credential_setup.add_argument("--consent", action="store_true",
+                                  help="approve only the selected OS credential action")
+    credential_setup.add_argument("--json", action="store_true")
 
     browser_credential = commands.add_parser(
         "browser-credential",
@@ -1199,8 +1212,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_saved_create.add_argument(
         "--tunnel",
-        choices=("cloudflare", "tailscale", "custom"),
-        default="cloudflare",
+        choices=("auto", "cloudflare", "tailscale", "custom"),
+        default="auto",
     )
     bridge_saved_create.add_argument("--public-url")
     bridge_saved_create.add_argument("--language", choices=("en", "ru"), default="en")
@@ -1250,7 +1263,7 @@ def _parser() -> argparse.ArgumentParser:
         "--access-profile", choices=[item.value for item in AccessProfile]
     )
     bridge_saved_edit.add_argument(
-        "--tunnel", choices=("cloudflare", "tailscale", "custom")
+        "--tunnel", choices=("auto", "cloudflare", "tailscale", "custom")
     )
     bridge_saved_edit.add_argument("--public-url")
     bridge_saved_edit.add_argument("--clear-public-url", action="store_true")
@@ -1350,7 +1363,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     bridge_connect.add_argument(
         "--tunnel",
-        choices=("cloudflare", "tailscale", "custom"),
+        choices=("auto", "cloudflare", "tailscale", "custom"),
     )
     bridge_connect.add_argument(
         "--public-url",
@@ -1645,10 +1658,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     connect.add_argument(
         "--tunnel",
-        choices=("cloudflare", "tailscale", "custom"),
+        choices=("auto", "cloudflare", "tailscale", "custom"),
         default=None,
         help=(
-            "defaults to tailscale for web OAuth clients and cloudflare for ClickUp"
+            "auto: use installed Tailscale, otherwise verified Cloudflare; ClickUp uses Cloudflare"
         ),
     )
     connect.add_argument(
@@ -3418,7 +3431,7 @@ def _direct_connect_config(args: argparse.Namespace) -> WebBridgeConnectConfig:
         tools=tools,
         session_id=args.session_id,
         access_profile=access,
-        tunnel=args.tunnel or "cloudflare",
+        tunnel=args.tunnel or "auto",
         public_url=args.public_url,
         cloudflared=args.cloudflared,
         tailscale=args.tailscale,
@@ -3715,13 +3728,10 @@ def _handle_bridge_lifecycle(args: argparse.Namespace) -> int:
         # a holder that cannot prove it is ours is never touched.
         orphan_pid = getattr(verdict, "owned_orphan_pid", None)
         if isinstance(orphan_pid, int) and orphan_pid > 0:
-            from .web_bridge_launcher import _reclaim_orphaned_bridge_listener
+            from .saved_bridge_recovery import reclaim_saved_bridge_orphan
 
-            orphan_session = verdict.metadata.session_id or saved_web_bridge_session_id(
-                profile_name
-            )
-            if not _reclaim_orphaned_bridge_listener(
-                orphan_pid, port=port, session_id=orphan_session
+            if not reclaim_saved_bridge_orphan(
+                profile_name, port=port, ownership=verdict
             ):
                 failure = {
                     "state": "failed",
@@ -3846,6 +3856,8 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             ("python", "-m", "mypy", "src/karox"),
             ("python", "-m", "build", "--wheel"),
         )
+        from .tunnel_bootstrap import select_tunnel
+
         profile = SavedWebBridgeProfile(
             name=args.name,
             target_profile=args.target_profile,
@@ -3856,7 +3868,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
                 item.to_public_dict() for item in default_server_profiles()
             ),
             deadline_seconds=_WEB_BRIDGE_DEADLINE_PRESETS["full-suite"],
-            tunnel=args.tunnel,
+            tunnel=select_tunnel(args.tunnel),
             public_url=args.public_url,
             language=args.language,
             access_profile=AccessProfile.WORKSPACE_WRITE,
@@ -3902,6 +3914,8 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             "connector_reconfigure_reasons": reasons,
         }
     elif command == "create":
+        from .tunnel_bootstrap import select_tunnel
+
         commands = tuple(
             _verification_command(value) for value in args.verification_command
         )
@@ -3934,7 +3948,7 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             deadline_seconds=_web_bridge_deadline(
                 args.deadline_seconds, args.deadline_preset
             ),
-            tunnel=args.tunnel,
+            tunnel=select_tunnel(args.tunnel),
             public_url=args.public_url,
             language=args.language,
             access_profile=access,
@@ -4014,7 +4028,9 @@ def _handle_bridge_saved(args: argparse.Namespace) -> int:
             mcp_servers = ()
         elif args.mcp_server is not None:
             mcp_servers = tuple(args.mcp_server)
-        effective_tunnel = args.tunnel or current.tunnel
+        from .tunnel_bootstrap import select_tunnel
+
+        effective_tunnel = select_tunnel(args.tunnel) if args.tunnel else current.tunnel
         public_url = current.public_url
         if args.clear_public_url or effective_tunnel != "custom":
             public_url = None
@@ -4140,7 +4156,7 @@ def _handle_clickup_connect(args: argparse.Namespace) -> int:
         resolve_connection_secret,
     )
 
-    tunnel = args.tunnel or "cloudflare"
+    tunnel = "cloudflare" if args.tunnel in (None, "auto") else args.tunnel
     if tunnel != "cloudflare":
         raise ValueError("karox connect clickup currently requires --tunnel cloudflare")
     if args.public_url:
@@ -4353,7 +4369,7 @@ def _handle_connect(args: argparse.Namespace) -> int:
         tools=tools,
         session_id=args.session_id,
         access_profile=access,
-        tunnel=args.tunnel or "tailscale",
+        tunnel=args.tunnel or "auto",
         public_url=args.public_url,
         cloudflared=args.cloudflared,
         tailscale=args.tailscale,
@@ -6094,6 +6110,26 @@ def _load_pricing_registry() -> Optional[PricingRegistry]:
 
 
 def _handle_credential(args: argparse.Namespace) -> int:
+    if args.credential_command == "setup":
+        from .credential_session import (
+            activate_secret_service,
+            setup_plan,
+            unlock_secret_service,
+            verify_child_storage,
+        )
+
+        action = (
+            activate_secret_service if args.activate
+            else unlock_secret_service if args.unlock
+            else verify_child_storage if args.verify
+            else None
+        )
+        try:
+            payload = action(consent=args.consent) if action else setup_plan()
+        except CredentialError as exc:
+            payload = {"status": "unavailable", "error": str(exc)}
+        _emit(payload, json_output=args.json)
+        return 0 if payload.get("status") == "ok" else 1
     store = CredentialStore()
     if args.credential_command == "set":
         secret = (
@@ -6112,9 +6148,13 @@ def _handle_credential(args: argparse.Namespace) -> int:
     elif args.credential_command == "delete":
         payload = store.delete(args.name)
     else:
-        payload = store.doctor(getattr(args, "reference", None))
+        try:
+            payload = store.doctor(getattr(args, "reference", None))
+        except CredentialError as exc:
+            payload = {"status": "unavailable", "error": str(exc),
+                       "recovery": "Run 'karox credential setup'."}
     _emit(payload, json_output=args.json)
-    return 0
+    return 0 if payload.get("status") not in {"unavailable", "missing"} else 1
 
 
 def _handle_browser_credential(args: argparse.Namespace) -> int:

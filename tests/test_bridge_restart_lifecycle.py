@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from karox import cli
+from karox.process_identity import ProcessIdentity, argv_digest
 
 
 def test_saved_bridge_restart_reclaims_its_own_orphaned_listener() -> None:
@@ -20,6 +21,8 @@ def test_saved_bridge_restart_reclaims_its_own_orphaned_listener() -> None:
         reason="our own bridge child outlived its owner",
         metadata=SimpleNamespace(session_id="web-saved-abc"),
         owned_orphan_pid=4242,
+        live_unrecorded_owner_pid=None,
+        owned_orphan_identity=ProcessIdentity(4242, 101, argv_sha256=argv_digest(["karox", "bridge", "serve", "--session-id", "web-saved-abc", "--port", "8765"])),
         to_dict=lambda: {"verdict": "stale_owned_process", "owned_orphan_pid": 4242},
     )
 
@@ -30,7 +33,7 @@ def test_saved_bridge_restart_reclaims_its_own_orphaned_listener() -> None:
             return_value=ownership,
         ),
         patch(
-            "karox.web_bridge_launcher._reclaim_orphaned_bridge_listener",
+            "karox.saved_bridge_recovery.reclaim_saved_bridge_orphan",
             return_value=True,
         ) as reclaim,
         patch(
@@ -43,8 +46,7 @@ def test_saved_bridge_restart_reclaims_its_own_orphaned_listener() -> None:
         result = cli._handle_bridge_lifecycle(args)
 
     assert result == 0
-    assert reclaim.call_args.args[0] == 4242
-    assert reclaim.call_args.kwargs == {"port": 8765, "session_id": "web-saved-abc"}
+    reclaim.assert_called_once_with("clickup-opus", port=8765, ownership=ownership)
     assert restart.call_args.args == ("clickup-opus",)
     run_bridge.assert_not_called()
 
@@ -60,6 +62,8 @@ def test_saved_bridge_restart_stops_when_the_orphan_cannot_be_reclaimed() -> Non
         reason="our own bridge child outlived its owner",
         metadata=SimpleNamespace(session_id="web-saved-abc"),
         owned_orphan_pid=4242,
+        live_unrecorded_owner_pid=None,
+        owned_orphan_identity=ProcessIdentity(4242, 101, argv_sha256=argv_digest(["karox", "bridge", "serve", "--session-id", "web-saved-abc", "--port", "8765"])),
         to_dict=lambda: {"verdict": "stale_owned_process", "owned_orphan_pid": 4242},
     )
 
@@ -70,7 +74,7 @@ def test_saved_bridge_restart_stops_when_the_orphan_cannot_be_reclaimed() -> Non
             return_value=ownership,
         ),
         patch(
-            "karox.web_bridge_launcher._reclaim_orphaned_bridge_listener",
+            "karox.saved_bridge_recovery.reclaim_saved_bridge_orphan",
             return_value=False,
         ),
         patch.object(cli, "run_web_bridge") as run_bridge,

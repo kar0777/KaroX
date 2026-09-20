@@ -704,8 +704,8 @@ def _worker_environment() -> dict[str, str]:
 
 def _default_worker_launcher(state_path: Path) -> subprocess.Popen[Any]:
     argv = [sys.executable, "-m", "karox.check_jobs", "--worker", str(state_path)]
-    return subprocess.Popen(
-        argv,
+    return _popen_job_object_tolerant(
+        args=argv,
         cwd=state_path.parent,
         env=_worker_environment(),
         stdin=subprocess.DEVNULL,
@@ -729,43 +729,20 @@ def developer_worker_launcher(state_path: Path) -> subprocess.Popen[Any]:
         environment["PYTHONPATH"] = str(package_parent) + (
             os.pathsep + existing if existing else ""
         )
-    try:
-        return subprocess.Popen(
-            argv,
-            cwd=state_path.parent,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            creationflags=_worker_creationflags(),
-            start_new_session=(os.name != "nt"),
-        )
-    except OSError:
-        # Hosts that run the runtime inside a restrictive job object (the
-        # hosted runner among them) refuse spawn-time extensions one bit at a
-        # time. Escalate: drop the breakaway, then the no-window/group extras,
-        # and finally launch bare so a durable worker can start anywhere.
-        for creationflags in (
-            _worker_creationflags(breakaway=False),
-            int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)),
-            0,
-        ):
-            try:
-                return subprocess.Popen(
-                    argv,
-                    cwd=state_path.parent,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    creationflags=creationflags,
-                    start_new_session=(os.name != "nt"),
-                )
-            except OSError:
-                continue
-        raise
+    # Both durable worker paths use the same restrictive-job fallback as their
+    # guarded children: only optional breakaway may be dropped, never the
+    # process-group or no-window contract.
+    return _popen_job_object_tolerant(
+        args=argv,
+        cwd=state_path.parent,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        creationflags=_worker_creationflags(),
+        start_new_session=(os.name != "nt"),
+    )
 
 
 def _test_files(repository: Path) -> list[str]:

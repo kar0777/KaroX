@@ -35,6 +35,7 @@ from .bridge_handoff import (
 from .browser_access import BrowserAccessPolicy
 from .client_capabilities import negotiate_client_capabilities
 from .tool_catalog import catalog_groups
+from .tunnel_bootstrap import TunnelBootstrapError, ensure_cloudflared, select_tunnel
 from .credentials import CredentialError
 from .detached_process import spawn_detached
 from .hosted_bridge import (
@@ -500,7 +501,7 @@ class WebBridgeConnectConfig:
     # publishes a repository to a third-party agent, so the omission defaults to
     # the profile that cannot write.
     access_profile: AccessProfile = AccessProfile.READ_ONLY
-    tunnel: str = "tailscale"
+    tunnel: str = "auto"
     public_url: Optional[str] = None
     cloudflared: Optional[str] = None
     tailscale: Optional[str] = None
@@ -536,6 +537,7 @@ class WebBridgeConnectConfig:
     local_health_interval_seconds: Optional[float] = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "tunnel", select_tunnel(self.tunnel, tailscale=self.tailscale))
         if self.local_health_interval_seconds is None:
             # Tailscale tunnels are supervised by the public-probe route health
             # loop; Cloudflare/custom tunnels have no such supervision and pay
@@ -1295,7 +1297,14 @@ def start_cloudflare_quick_tunnel(
     """Start cloudflared, parse its assigned HTTPS origin, and keep draining logs."""
     resolved = find_cloudflared(executable)
     if resolved is None:
-        raise WebBridgeLaunchError(cloudflared_not_found_message(executable))
+        if executable:
+            # A bad explicit path is an error, not permission to substitute it.
+            raise WebBridgeLaunchError(cloudflared_not_found_message(executable))
+        print("Preparing checksum-verified cloudflared for this platform...", flush=True)
+        try:
+            resolved = ensure_cloudflared()
+        except TunnelBootstrapError as exc:
+            raise WebBridgeLaunchError(str(exc)) from exc
     try:
         process = popen(
             [
@@ -2342,55 +2351,20 @@ def _watchdog_supports_stop_request(path_value: Optional[str]) -> bool:
     return _watchdog_stop_protocol(path_value) is not None
 
 
-# How long the port may take to come back after the orphaned listener exits.
-_ORPHAN_RECLAIM_TIMEOUT_SECONDS = 10.0
-
 # How long a proven live owner is given to honour a cooperative stop request
 # before its proven tree is force-stopped. Short on purpose: this path only runs
 # for an owner that has already lost the record that made it manageable.
 _UNRECORDED_OWNER_GRACEFUL_SECONDS = 6.0
+_UNRECORDED_OWNER_RELEASE_TIMEOUT_SECONDS = 10.0
 
 
 def _reclaim_orphaned_bridge_listener(pid: int, *, port: int, session_id: str) -> bool:
-    """Free ``port`` from this profile's own orphaned ``bridge serve`` child.
+    """Reject legacy PID-only recovery; callers must retain identity evidence.
 
-    An owner that dies can leave its local MCP child listening. The child is
-    ours, so the port may be reclaimed -- but only after the process proves, from
-    its own command line, that it is still that child. Re-proving here (rather
-    than trusting the earlier verdict) closes the PID-reuse window between the
-    ownership check and this call, and a foreign holder can never reach the
-    terminate step. Only the proven PID is stopped: no descendant tree kill.
-
-    Returns True only when the port is actually free again.
+    Use reclaim_saved_bridge_orphan(profile_name, port=port, ownership=verdict)
+    instead. A session string and PID do not prove the observed process instance
+    or the absence of a live owner. Kept only so older callers fail closed.
     """
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if pid == os.getpid():
-        # Never terminate the caller; a bridge asked to reclaim itself is a bug.
-        return False
-    from .port_ownership import prove_bridge_process_identity
-
-    if prove_bridge_process_identity(pid, (session_id,)) is None:
-        return False
-    if not _process_is_alive(pid):
-        return _port_is_available(port)
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                capture_output=True,
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    deadline = time.monotonic() + _ORPHAN_RECLAIM_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not _process_is_alive(pid) and _port_is_available(port):
-            return True
-        time.sleep(0.2)
     return False
 
 
@@ -2463,7 +2437,7 @@ def _recycle_unrecorded_saved_bridge_owner(
             os.kill(owner_pid, signal.SIGTERM)
     except (OSError, subprocess.SubprocessError):
         return False
-    deadline = time.monotonic() + _ORPHAN_RECLAIM_TIMEOUT_SECONDS
+    deadline = time.monotonic() + _UNRECORDED_OWNER_RELEASE_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if not _process_is_alive(owner_pid) and _port_is_available(port):
             return True
@@ -5542,42 +5516,21 @@ def start_saved_bridge(
             unrelated_pid=verdict.unrelated_pid,
         )
 
-    # 4b. A dead owner can leave its own bridge child holding the port. That
-    # child is provably ours, so reclaim the port instead of failing forever.
+    from .saved_bridge_recovery import reclaim_saved_bridge_orphan
+
+    # 4b. Only a proven orphan may be reclaimed. A live owner whose watchdog
+    # disappeared is NOT an orphan, and implicit start must never recycle it.
     orphan_pid = getattr(verdict, "owned_orphan_pid", None)
     if isinstance(orphan_pid, int) and orphan_pid > 0:
-        orphan_session = verdict.metadata.session_id or session_id
-        # An owner whose watchdog record vanished is invisible to the ownership
-        # check, so its still-serving child looks orphaned while the owner is
-        # alive. Reclaiming only that child cannot work: the live owner respawns
-        # it and every fresh owner then dies on the bind. Recycle the proven
-        # owner tree first; saved-profile session, credential and public
-        # hostname are all derived from the profile name, so none of them move.
-        live_owner_pid = getattr(verdict, "live_unrecorded_owner_pid", None)
-        if isinstance(live_owner_pid, int) and live_owner_pid > 0:
-            if not _recycle_unrecorded_saved_bridge_owner(
-                live_owner_pid, profile_name=profile_name, port=port
-            ):
-                return _error(
-                    f"port {port} is held by this profile's own bridge whose "
-                    "owner is running without a watchdog record, and that "
-                    "proven owner could not be recycled",
-                    session_id=session_id,
-                    port=port,
-                    verdict=verdict.verdict,
-                    owned_orphan_pid=orphan_pid,
-                    live_unrecorded_owner_pid=live_owner_pid,
-                )
-        elif not _reclaim_orphaned_bridge_listener(
-            orphan_pid, port=port, session_id=orphan_session
-        ):
+        if not reclaim_saved_bridge_orphan(profile_name, port=port, ownership=verdict):
             return _error(
-                f"could not reclaim port {port} from this profile's orphaned "
-                "bridge process",
+                f"could not reclaim port {port}: orphan identity was not proven "
+                "or its owner is still running without a watchdog record",
                 session_id=session_id,
                 port=port,
                 verdict=verdict.verdict,
                 owned_orphan_pid=orphan_pid,
+                live_unrecorded_owner_pid=getattr(verdict, "live_unrecorded_owner_pid", None),
             )
 
     # 5. Persist running intent before launching. A preceding canonical Stop

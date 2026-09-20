@@ -40,7 +40,10 @@ def detached_flags(*, breakaway: bool = True) -> int:
     """Creation flags for a windowless child with no console of its own."""
     if os.name != "nt":
         return 0
-    flags = DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    # Windows ignores CREATE_NO_WINDOW when DETACHED_PROCESS is also set.
+    # NO_WINDOW already detaches console applications from the parent's console;
+    # group isolation and the optional job breakaway are independent concerns.
+    flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     return flags | CREATE_BREAKAWAY_FROM_JOB if breakaway else flags
 
 

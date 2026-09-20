@@ -1040,52 +1040,60 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         popen.assert_called_once()
         self.assertFalse(any(argv[1:] == ["up"] for argv in calls))
 
-    def test_connect_command_defaults_to_chatgpt_and_tailscale(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repository = Path(tmp)
-            output = io.StringIO()
-            with redirect_stdout(output):
-                code = main(
-                    (
-                        "connect",
-                        "--repository",
-                        str(repository),
-                        "--diagnostics-only",
+    def test_connect_command_defaults_to_chatgpt_and_available_tunnel(self) -> None:
+        for installed, expected in ((None, "cloudflare"), ("/fixture/tailscale", "tailscale")):
+            with self.subTest(installed=installed), tempfile.TemporaryDirectory() as tmp:
+                repository = Path(tmp)
+                output = io.StringIO()
+                with (
+                    redirect_stdout(output),
+                    patch("karox.tunnel_bootstrap.find_tailscale", return_value=installed),
+                ):
+                    code = main(
+                        (
+                            "connect",
+                            "--repository",
+                            str(repository),
+                            "--diagnostics-only",
+                        )
                     )
-                )
-            self.assertEqual(code, 0)
-            report = json.loads(output.getvalue())
-            self.assertEqual(report["target_profile"], "chatgpt-web")
-            self.assertEqual(report["tunnel"], "tailscale")
-            self.assertEqual(report["url_stability"], "stable_device_hostname")
-            self.assertEqual(report["access_profile"], "read_only")
+                self.assertEqual(code, 0)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["target_profile"], "chatgpt-web")
+                self.assertEqual(report["tunnel"], expected)
 
-            # The short alias must be as complete as `bridge connect`, but a
-            # repository with no approved local server recipe must not inherit
-            # another project's start:safe profile. Write/check capabilities stay
-            # enabled; managed server mutation is simply not advertised.
-            output = io.StringIO()
-            with redirect_stdout(output):
-                code = main(
-                    (
-                        "connect",
-                        "chatgpt",
-                        "--repository",
-                        str(repository),
-                        "--write",
-                        "--verification-command",
-                        '["python","-m","ruff","check","src","tests","scripts"]',
-                        "--diagnostics-only",
-                    )
+                self.assertEqual(
+                    report["url_stability"],
+                    "stable_device_hostname" if expected == "tailscale" else "ephemeral",
                 )
-            self.assertEqual(code, 0)
-            writable = json.loads(output.getvalue())
-            self.assertEqual(writable["access_profile"], "workspace_write")
-            self.assertTrue(writable["write_permission"])
-            self.assertNotIn("karox.dev_server.start", writable["available_tools"])
-            self.assertIn("karox.checks.run", writable["available_tools"])
-            self.assertIn("karox.tests.run", writable["available_tools"])
-            self.assertEqual(writable["server_profiles"], [])
+                self.assertEqual(report["access_profile"], "read_only")
+
+                # The short alias must be as complete as `bridge connect`, but a
+                # repository with no approved local server recipe must not inherit
+                # another project's start:safe profile. Write/check capabilities stay
+                # enabled; managed server mutation is simply not advertised.
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = main(
+                        (
+                            "connect",
+                            "chatgpt",
+                            "--repository",
+                            str(repository),
+                            "--write",
+                            "--verification-command",
+                            '["python","-m","ruff","check","src","tests","scripts"]',
+                            "--diagnostics-only",
+                        )
+                    )
+                self.assertEqual(code, 0)
+                writable = json.loads(output.getvalue())
+                self.assertEqual(writable["access_profile"], "workspace_write")
+                self.assertTrue(writable["write_permission"])
+                self.assertNotIn("karox.dev_server.start", writable["available_tools"])
+                self.assertIn("karox.checks.run", writable["available_tools"])
+                self.assertIn("karox.tests.run", writable["available_tools"])
+                self.assertEqual(writable["server_profiles"], [])
 
     def test_connect_command_maps_short_connector_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

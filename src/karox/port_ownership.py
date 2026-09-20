@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import ntpath
+import re
 import socket
 import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .process_identity import read_process_create_time_ns
+from .process_identity import ProcessIdentity, argv_digest, read_process_create_time_ns
 from .web_bridge_launcher import (
     _process_is_alive,
     saved_web_bridge_session_candidates,
@@ -104,8 +106,11 @@ class OwnershipVerdict:
     # Set when that listener's parent proves, from its own argv, that it is a
     # live ``bridge connect --saved <profile>`` owner whose watchdog record is
     # missing. Reclaiming only the child cannot work in that state: the live
-    # owner respawns it. Recovery must recycle this proven owner instead.
+    # owner respawns it. Orphan recovery must leave this live owner alone.
     live_unrecorded_owner_pid: Optional[int] = None
+    # Snapshot of the listener instance, not the dead owner in metadata. A PID
+    # without this evidence is diagnostic only and cannot authorize recovery.
+    owned_orphan_identity: Optional[ProcessIdentity] = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -119,6 +124,8 @@ class OwnershipVerdict:
             result["owned_orphan_pid"] = self.owned_orphan_pid
         if self.live_unrecorded_owner_pid is not None:
             result["live_unrecorded_owner_pid"] = self.live_unrecorded_owner_pid
+        if self.owned_orphan_identity is not None:
+            result["owned_orphan_identity"] = self.owned_orphan_identity.to_dict()
         return result
 
 
@@ -281,9 +288,17 @@ def _port_owning_pid(port: int) -> Optional[int]:
     except ImportError:
         return None
     try:
-        for connection in psutil.net_connections(kind="tcp"):
-            if connection.laddr and connection.laddr.port == port:
-                return connection.pid
+        owners = {
+            connection.pid
+            for connection in psutil.net_connections(kind="tcp")
+            if connection.status == psutil.CONN_LISTEN
+            and connection.laddr
+            and connection.laddr.port == port
+        }
+        # Several interfaces/families can bind the same numeric port. Never
+        # choose whichever table entry happens to come first as kill evidence.
+        if len(owners) == 1:
+            return owners.pop()
     except Exception:
         return None
     return None
@@ -310,6 +325,42 @@ def _process_command_line(pid: int) -> Optional[list[str]]:
     return [str(token) for token in argv]
 
 
+def _bridge_command_arguments(argv: list[str], command: str) -> Optional[list[str]]:
+    """Recognize a real CLI invocation, never incidental words in an argv.
+
+    Session ids are identifiers, not secrets or authentication. Ownership also
+    requires OS-account and creation-time checks at the termination boundary.
+    """
+    if not argv:
+        return None
+    executable = ntpath.basename(argv[0]).lower()
+    if executable in {"karox", "karox.exe", "karox-vnext", "karox-vnext.exe"}:
+        arguments = argv[1:]
+    elif re.fullmatch(r"python(?:w|[0-9]+(?:\.[0-9]+)*)?(?:\.exe)?", executable):
+        # Python flags emitted by launchers must not hide a live parent owner.
+        offset = 1
+        while offset < len(argv) and argv[offset] in {"-u", "-B", "-E", "-I", "-s", "-S", "-O", "-OO", "-q"}:
+            offset += 1
+        if argv[offset:offset + 2] not in (["-m", "karox.cli"], ["-m", "karox"]):
+            return None
+        arguments = argv[offset + 2:]
+    else:
+        return None
+    if arguments[:2] != ["bridge", command]:
+        return None
+    return arguments[2:]
+
+
+def _unique_option(arguments: list[str], option: str) -> Optional[str]:
+    values: list[str] = []
+    for index, token in enumerate(arguments):
+        if token == option and index + 1 < len(arguments):
+            values.append(arguments[index + 1])
+        elif token.startswith(option + "="):
+            values.append(token.split("=", 1)[1])
+    return values[0] if len(values) == 1 and values[0] else None
+
+
 def prove_bridge_process_identity(
     pid: int,
     session_ids: Iterable[str],
@@ -320,30 +371,18 @@ def prove_bridge_process_identity(
 
     Proof is the process's own command line: it must be a KaroX ``bridge serve``
     invocation carrying one of this profile's session ids. A session id is a
-    private, profile-derived digest, so a foreign program cannot present one, and
+    profile-derived identifier (not an authentication secret), and
     an incidental mention (``bridge status --saved <id>``) is not accepted --
     only the serving subcommand counts.
     """
     argv = command_line if command_line is not None else _process_command_line(pid)
     if not argv:
         return None
-    tokens = [str(token) for token in argv]
-    if "karox" not in " ".join(tokens).lower():
+    arguments = _bridge_command_arguments([str(token) for token in argv], "serve")
+    if arguments is None:
         return None
-    if "bridge" not in tokens or "serve" not in tokens:
-        return None
-    wanted = {value for value in session_ids if isinstance(value, str) and value}
-    if not wanted:
-        return None
-    for index, token in enumerate(tokens):
-        if token == "--session-id" and index + 1 < len(tokens):
-            if tokens[index + 1] in wanted:
-                return tokens[index + 1]
-        elif token.startswith("--session-id="):
-            value = token.split("=", 1)[1]
-            if value in wanted:
-                return value
-    return None
+    value = _unique_option(arguments, "--session-id")
+    return value if value in set(session_ids) else None
 
 
 def extract_bridge_process_info(
@@ -392,19 +431,8 @@ def prove_saved_bridge_owner_identity(pid: Optional[int], profile_name: str) -> 
     argv = _process_command_line(pid)
     if not argv:
         return False
-    tokens = [str(token) for token in argv]
-    if "karox" not in " ".join(tokens).lower():
-        return False
-    if "bridge" not in tokens or "connect" not in tokens:
-        return False
-    for index, token in enumerate(tokens):
-        if token == "--saved" and index + 1 < len(tokens):
-            if tokens[index + 1] == profile_name:
-                return True
-        elif token.startswith("--saved="):
-            if token.split("=", 1)[1] == profile_name:
-                return True
-    return False
+    arguments = _bridge_command_arguments([str(token) for token in argv], "connect")
+    return arguments is not None and _unique_option(arguments, "--saved") == profile_name
 
 
 def _live_owner_of_listener(pid: int, profile_name: str) -> Optional[int]:
@@ -413,8 +441,8 @@ def _live_owner_of_listener(pid: int, profile_name: str) -> Optional[int]:
     An owner whose watchdog record is missing is invisible to
     ``_find_active_watchdog``, so its still-serving child looks orphaned. Killing
     only that child is futile: the live owner immediately respawns one and the
-    port never becomes free. Naming the owner lets the caller recycle the proven
-    owner instead of fighting its child.
+    port never becomes free. Naming the owner prevents orphan recovery from
+    recycling a live bridge merely because its watchdog record disappeared.
     """
     if not isinstance(pid, int) or pid <= 0:
         return None
@@ -516,6 +544,9 @@ def check_port_ownership(profile_name: str, *, port: int) -> OwnershipVerdict:
     # owner can die and leave its local MCP listener running. Calling that child
     # "unrelated" deadlocks recovery on a port KaroX itself occupies.
     unrelated_pid = _port_owning_pid(port)
+    orphan_created = (
+        read_process_create_time_ns(unrelated_pid) if unrelated_pid is not None else None
+    )
     orphan_pid, orphan_session = _owned_orphan_listener(profile_name, unrelated_pid)
     if orphan_pid is not None and orphan_session is not None:
         record_path = watchdog_dir() / f"{orphan_session}.json"
@@ -525,6 +556,17 @@ def check_port_ownership(profile_name: str, *, port: int) -> OwnershipVerdict:
             if orphan_record is not None
             else _empty_metadata()
         )
+        orphan_identity = None
+        argv = _process_command_line(orphan_pid)
+        if (
+            orphan_created is not None
+            and argv
+            and prove_bridge_process_identity(orphan_pid, (orphan_session,), command_line=argv)
+            and read_process_create_time_ns(orphan_pid) == orphan_created
+        ):
+            orphan_identity = ProcessIdentity(
+                pid=orphan_pid, create_time_ns=orphan_created, argv_sha256=argv_digest(argv)
+            )
         live_owner_pid = _live_owner_of_listener(orphan_pid, profile_name)
         if live_owner_pid is not None:
             return OwnershipVerdict(
@@ -532,10 +574,11 @@ def check_port_ownership(profile_name: str, *, port: int) -> OwnershipVerdict:
                 f"port {port} is held by this profile's own bridge process "
                 f"(PID {orphan_pid}, session {orphan_session}) whose owner "
                 f"(PID {live_owner_pid}) is still running without a watchdog "
-                "record; recovery must recycle that proven owner",
+                "record; orphan recovery must leave the live owner alone",
                 metadata,
                 owned_orphan_pid=orphan_pid,
                 live_unrecorded_owner_pid=live_owner_pid,
+                owned_orphan_identity=orphan_identity,
             )
         return OwnershipVerdict(
             OWNERSHIP_STALE_OWNED,
@@ -544,6 +587,7 @@ def check_port_ownership(profile_name: str, *, port: int) -> OwnershipVerdict:
             "recovery may reclaim it",
             metadata,
             owned_orphan_pid=orphan_pid,
+            owned_orphan_identity=orphan_identity,
         )
     # Not provably ours. Check if it is a KaroX bridge for another profile or session:
     foreign_info = extract_bridge_process_info(unrelated_pid)

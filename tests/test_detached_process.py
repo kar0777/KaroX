@@ -35,7 +35,7 @@ class DetachedFlagTests(unittest.TestCase):
     def test_windows_asks_for_a_windowless_child_of_its_own_group(self) -> None:
         with patch.object(dp.os, "name", "nt"):
             flags = dp.detached_flags()
-        self.assertTrue(flags & dp.DETACHED_PROCESS)
+        self.assertFalse(flags & dp.DETACHED_PROCESS)
         self.assertTrue(flags & dp.CREATE_NO_WINDOW)
         self.assertTrue(flags & dp.CREATE_NEW_PROCESS_GROUP)
         self.assertTrue(flags & dp.CREATE_BREAKAWAY_FROM_JOB)
@@ -84,7 +84,9 @@ class SpawnDetachedTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 2)
         second = popen.call_args_list[1].kwargs["creationflags"]
         self.assertFalse(second & dp.CREATE_BREAKAWAY_FROM_JOB)
-        self.assertTrue(second & dp.DETACHED_PROCESS)
+        self.assertFalse(second & dp.DETACHED_PROCESS)
+        self.assertTrue(second & dp.CREATE_NO_WINDOW)
+        self.assertTrue(second & dp.CREATE_NEW_PROCESS_GROUP)
 
     def test_the_refused_attempt_is_named_so_a_state_file_can_record_it(self) -> None:
         popen = MagicMock(side_effect=[_job_denied(), "child"])

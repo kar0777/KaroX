@@ -105,7 +105,7 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
                     "karox.saved_bridge_supervisor.process_is_running",
                     return_value=True,
                 ),
-                patch("karox.saved_bridge_supervisor.subprocess.Popen") as popen,
+                patch("karox.detached_process.subprocess.Popen") as popen,
                 patch(
                     "karox.saved_bridge_supervisor._force_stop_proven_supervisor",
                     return_value=True,
@@ -194,7 +194,7 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
                     "karox.saved_bridge_supervisor.read_process_create_time_ns",
                     return_value=999,
                 ),
-                patch("karox.saved_bridge_supervisor.subprocess.Popen") as popen,
+                patch("karox.detached_process.subprocess.Popen") as popen,
             ):
                 process = MagicMock()
                 process.pid = 321
@@ -213,7 +213,8 @@ class SavedBridgeSupervisorStateTests(unittest.TestCase):
                 self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
                 if os.name == "nt":
                     flags = popen.call_args.kwargs["creationflags"]
-                    self.assertTrue(flags & subprocess.DETACHED_PROCESS)
+                    self.assertFalse(flags & subprocess.DETACHED_PROCESS)
+                    self.assertFalse(flags & subprocess.CREATE_NEW_CONSOLE)
                     self.assertTrue(flags & subprocess.CREATE_NO_WINDOW)
                     self.assertTrue(flags & subprocess.CREATE_NEW_PROCESS_GROUP)
                     self.assertTrue(flags & subprocess.CREATE_BREAKAWAY_FROM_JOB)
@@ -391,6 +392,7 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
                 metadata=SimpleNamespace(
                     pid=4001,
                     pid_proven=True,
+                    process_start_time_ns=1234,
                     watchdog_path=str(watchdog),
                 ),
             )
@@ -412,6 +414,8 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
                 ) as force_stop,
                 patch("karox.web_bridge_launcher.start_saved_bridge") as start,
                 patch("karox.saved_bridge_supervisor.time.time", return_value=100.0),
+                patch("karox.port_ownership.prove_saved_bridge_owner_identity", return_value=True) as proof,
+                patch("karox.saved_bridge_supervisor.read_process_create_time_ns", return_value=1234),
             ):
                 set_saved_bridge_desired_running("hyperagent-auto", True)
                 profile_store.return_value.get.return_value = SimpleNamespace(port=8768)
@@ -425,7 +429,8 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "recovered")
             self.assertEqual(result["owner_pid"], 5001)
-            force_stop.assert_called_once_with(4001)
+            proof.assert_called_once_with(4001, "hyperagent-auto")
+            force_stop.assert_called_once_with(4001, 1234)
             start.assert_called_once_with("hyperagent-auto", timeout_seconds=120.0)
 
     def test_supervisor_preserves_last_failure_after_owner_recovers(self) -> None:
@@ -483,14 +488,15 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
 
     def test_tick_recovers_when_a_dead_owner_left_its_own_listener_behind(self) -> None:
         # The port holder proves it is this profile's own bridge child, so the
-        # supervisor must recover through the canonical start path (which
-        # reclaims the port) instead of reporting a foreign holder forever.
+        # supervisor must safely release it before canonical start, rather than
+        # reporting a foreign holder or relying on a PID-only launcher kill.
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch("karox.saved_bridge_supervisor.runtime_dir", return_value=Path(tmp)),
                 patch("karox.web_bridge_profiles.WebBridgeProfileStore") as profile_store,
                 patch("karox.port_ownership.check_port_ownership") as ownership,
                 patch("karox.web_bridge_launcher.start_saved_bridge") as start,
+                patch("karox.saved_bridge_recovery.reclaim_saved_bridge_orphan", return_value=True) as reclaim,
             ):
                 set_saved_bridge_desired_running("hyperagent-auto", True)
                 profile_store.return_value.get.return_value = SimpleNamespace(port=8768)
@@ -509,6 +515,9 @@ class SavedBridgeSupervisorRecoveryTests(unittest.TestCase):
                 result = supervisor_tick("hyperagent-auto")
 
                 self.assertEqual(result["status"], "recovered")
+                reclaim.assert_called_once_with(
+                    "hyperagent-auto", port=8768, ownership=ownership.return_value
+                )
                 start.assert_called_once_with("hyperagent-auto", timeout_seconds=120.0)
 
     def test_explicit_stop_disables_auto_restart_even_when_already_stopped(self) -> None:

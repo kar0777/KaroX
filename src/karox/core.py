@@ -261,6 +261,7 @@ def _kill_windows_process_tree(pid: int) -> None:
             stderr=subprocess.DEVNULL,
             timeout=10.0,
             check=False,
+            **_new_process_group_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         pass
@@ -320,14 +321,22 @@ class ProcessTree:
             kernel32.CloseHandle(job)
 
     def terminate(self) -> None:
+        tree_terminated = False
         if self._job is not None:
             api = _windows_job_api()
             if api is not None:
-                api[0].TerminateJobObject(self._job, 1)
-        elif os.name == "nt":
-            _kill_windows_process_tree(self._process.pid)
-        else:
-            _kill_posix_process_group(self._process.pid)
+                try:
+                    tree_terminated = bool(api[0].TerminateJobObject(self._job, 1))
+                except OSError:
+                    pass
+        # A handle alone does not prove that job termination worked. If the
+        # API disappears or fails, sweep the owned child tree without sending
+        # console-control signals that could interrupt the bridge itself.
+        if not tree_terminated:
+            if os.name == "nt":
+                _kill_windows_process_tree(self._process.pid)
+            else:
+                _kill_posix_process_group(self._process.pid)
         try:
             self._process.kill()
         except OSError:

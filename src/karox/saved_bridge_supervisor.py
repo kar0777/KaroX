@@ -19,8 +19,6 @@ import argparse
 import hashlib
 import json
 import os
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -30,7 +28,6 @@ from typing import Any, Optional
 from .detached_process import detached_flags, spawn_detached
 from .paths import runtime_dir
 from .process_identity import process_is_running, read_process_create_time_ns
-from .remote_tools import _reap_expired_process
 
 SUPERVISOR_SCHEMA_VERSION = 1
 SUPERVISOR_PROTOCOL_VERSION = 4
@@ -543,119 +540,91 @@ def _last_owner_exit(profile_name: str) -> Optional[dict[str, Any]]:
     }
 
 
-def _force_stop_proven_owner(pid: int) -> bool:
-    """Terminate only an ownership-proven saved-bridge process tree."""
-    if os.name == "nt":
+def _force_stop_proven_owner(pid: int, expected_create_time_ns: Optional[int] = None) -> bool:
+    """Stop a snapshot of an owned tree, never an unchecked PID/group later.
+
+    Each psutil Process retains its instance identity for terminate/kill. Do not
+    use taskkill /T or a delayed killpg: the original owner can exit and its PID
+    (or process group) can be reused while we wait for shutdown.
+    """
+    import psutil  # type: ignore[import-untyped]
+
+    if pid == os.getpid():
+        return False
+    if os.name != "nt":
         try:
-            completed = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=OWNER_FORCE_STOP_TIMEOUT_SECONDS,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.SubprocessError):
+            if getattr(os, "getpgid")(pid) != pid:
+                return False
+        except ProcessLookupError:
+            return True
+        except OSError:
             return False
-        return completed.returncode in {0, 128}
-
-    getpgid = getattr(os, "getpgid", None)
-    killpg = getattr(os, "killpg", None)
-    if getpgid is None or killpg is None:
-        return False
     try:
-        pgid = getpgid(pid)
-    except (OSError, ProcessLookupError):
-        return True
-    try:
-        killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    except OSError:
+        owner = psutil.Process(pid)
+        created = read_process_create_time_ns(pid)
+        if created is None or (
+            expected_create_time_ns is not None and created != expected_create_time_ns
+        ):
+            return False
+        account = psutil.Process(os.getpid()).username()
+        if owner.username() != account:
+            return False
+        # Snapshot before terminating the owner; afterwards descendants may be
+        # reparented. A reused PID must never become a newly discovered child.
+        children = owner.children(recursive=True)
+        if any(child.username() != account for child in children):
+            return False
+        if not owner.is_running() or read_process_create_time_ns(pid) != created:
+            return False
+        processes = [owner, *children]
+        for process in processes:
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(processes, timeout=OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0)
+        # Orphan zombies are already dead, even if init has not reaped them.
+        return all(not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+                   for process in alive)
+    except (psutil.Error, OSError, ValueError):
         return False
-
-    deadline = time.monotonic() + OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0
-    while time.monotonic() < deadline:
-        # POSIX: a killed child remains a zombie until somebody waits for it;
-        # its /proc entry (and the creation-time proof) stays until then.
-        _reap_expired_process(pid)
-        if read_process_create_time_ns(pid) is None:
-            return True
-        time.sleep(0.1)
-    try:
-        killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    deadline = time.monotonic() + OWNER_FORCE_STOP_TIMEOUT_SECONDS / 2.0
-    while time.monotonic() < deadline:
-        _reap_expired_process(pid)
-        if read_process_create_time_ns(pid) is None:
-            return True
-        time.sleep(0.1)
-    return False
 
 
 def _force_stop_proven_supervisor(pid: int, expected_create_time_ns: int) -> bool:
     """Stop only the exact stale supervisor process, never its process tree."""
+    import psutil  # type: ignore[import-untyped]
+
+    if pid == os.getpid():
+        return False
     if not process_is_running(pid):
         return True
-    observed = read_process_create_time_ns(pid)
-    if observed is None:
-        # A running PID without creation-time proof is never safe to terminate.
+    try:
+        process = psutil.Process(pid)
+        if (
+            read_process_create_time_ns(pid) != expected_create_time_ns
+            or process.username() != psutil.Process(os.getpid()).username()
+            or not process.is_running()
+        ):
+            return False
+        process.terminate()
+        try:
+            process.wait(timeout=SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS)
+        except psutil.TimeoutExpired:
+            # Retain the instance through escalation; a delayed PID-only kill
+            # could stop a different process after this supervisor has exited.
+            process.kill()
+            process.wait(timeout=SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS)
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError, ValueError):
         return False
-    if int(observed) != int(expected_create_time_ns):
-        return False
-
-    if os.name == "nt":
-        try:
-            completed = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        if completed.returncode not in {0, 128}:
-            return False
-    else:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-
-    deadline = time.monotonic() + SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        _reap_expired_process(pid)
-        if not process_is_running(pid):
-            return True
-        current = read_process_create_time_ns(pid)
-        if current is not None and int(current) != int(expected_create_time_ns):
-            return True
-        time.sleep(0.05)
-    if os.name != "nt":
-        try:
-            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-        deadline = time.monotonic() + SUPERVISOR_FORCE_STOP_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            _reap_expired_process(pid)
-            if not process_is_running(pid):
-                return True
-            current = read_process_create_time_ns(pid)
-            if current is not None and int(current) != int(expected_create_time_ns):
-                return True
-            time.sleep(0.05)
-    return False
 
 
 def _detached_flags() -> int:
@@ -920,7 +889,22 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
                 "status": "recovery_failed",
                 "error": "saved bridge owner heartbeat is stale but its PID is unavailable",
             }
-        if not _force_stop_proven_owner(owner_pid):
+        # A stale heartbeat is not ownership proof. In particular, old watchdog
+        # files can name a PID that now belongs to an unrelated program.
+        from .port_ownership import prove_saved_bridge_owner_identity
+
+        created = getattr(ownership.metadata, "process_start_time_ns", None)
+        if (
+            not isinstance(created, int)
+            or created <= 0
+            or not prove_saved_bridge_owner_identity(owner_pid, profile_name)
+            or read_process_create_time_ns(owner_pid) != created
+        ):
+            return {
+                "status": "recovery_failed",
+                "error": "stale saved bridge owner identity could not be revalidated",
+            }
+        if not _force_stop_proven_owner(owner_pid, created):
             return {
                 "status": "recovery_failed",
                 "error": (
@@ -960,6 +944,17 @@ def supervisor_tick(profile_name: str) -> dict[str, Any]:
             "status": "blocked_foreign_process",
             "error": ownership.reason[:200],
         }
+
+    # A dead owner can leave an owned listener behind. Recover through the same
+    # creation-time/argv-checked boundary as saved start, not a PID-only tree kill.
+    if getattr(ownership, "owned_orphan_pid", None) is not None:
+        from .saved_bridge_recovery import reclaim_saved_bridge_orphan
+
+        if not reclaim_saved_bridge_orphan(profile_name, port=profile.port, ownership=ownership):
+            return {
+                "status": "recovery_failed",
+                "error": "orphan listener ownership could not be safely revalidated or released",
+            }
 
     from .web_bridge_launcher import start_saved_bridge
 
