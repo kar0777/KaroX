@@ -352,7 +352,7 @@ class OnboardingFlowTests(HeadlessCase):
 
 class TailscaleAndBypassTests(HeadlessCase):
     # Separate methods below share the headless helpers, not external services.
-    async def test_tailscale_is_read_only_no_install_or_auth_and_no_status_leaks(self) -> None:
+    async def test_tailscale_check_is_read_only_probes_once_and_no_status_leaks(self) -> None:
         app = self.app()
         result = {"ready": False, "code": "login_required", "auth_url": "https://login.tailscale.com/a/fixture-secret", "detail": "fixture-secret"}
         with patch.object(guide, "query_tailscale_status", return_value=result) as probe:
@@ -367,7 +367,7 @@ class TailscaleAndBypassTests(HeadlessCase):
                     if not screen._checking:
                         break
                     await pilot.pause(0.02)
-                probe.assert_called_once_with()
+                probe.assert_called_once_with(executable=None)
                 self.assertNotIn("fixture-secret", app.export_screenshot())
                 self.assertIn("Sign in", str(screen.query_one("#tailscale-status", tui.Static).render()))
                 self.assertTrue(screen.query_one("#tailscale-use", tui.Button).disabled)
@@ -389,6 +389,48 @@ class TailscaleAndBypassTests(HeadlessCase):
                 form = await self.wait_screen(pilot, app, tui.BridgeSetupScreen)
                 self.assertEqual(form._tunnel_value(), "tailscale")
                 self.assertEqual(form._profile_value(), "claude-web")
+
+    async def test_tailscale_install_offer_needs_double_consent_and_downloads_once(self) -> None:
+        from karox.tailscale_bootstrap import TailscaleAsset
+
+        state.save_progress(state.OnboardingProgress(step="tunnel", service="chatgpt-web"))
+        app = self.app()
+        asset = TailscaleAsset("tailscale_1.102.4_amd64.tgz", "a" * 64, "tgz")
+        downloads = []
+        with (
+            patch.object(guide, "tailscale_asset", return_value=asset),
+            patch.object(
+                guide,
+                "ensure_tailscale_downloads",
+                side_effect=lambda **kwargs: downloads.append(kwargs)
+                or {"tailscale": "/fixture/ts", "tailscaled": "/fixture/tsd"},
+            ),
+            patch.object(guide.subprocess, "Popen") as popen,
+        ):
+            async with app.run_test(size=(60, 20)) as pilot:
+                screen = guide.TailscaleSetupScreen("en")
+                app.push_screen(screen)
+                await pilot.pause()
+                # First press: consent details only; nothing downloads or runs.
+                screen.query_one("#tailscale-install", tui.Button).press()
+                await pilot.pause()
+                popen.assert_not_called()
+                self.assertEqual(downloads, [])
+                status = str(screen.query_one("#tailscale-status", tui.Static).render())
+                self.assertIn("SHA-256", status)
+                # Second press: the verified download runs; Linux unpacks
+                # user-owned binaries and prints the official repo commands.
+                screen.query_one("#tailscale-install", tui.Button).press()
+                for _ in range(100):
+                    if not screen._installing:
+                        break
+                    await pilot.pause(0.02)
+                await pilot.pause()
+                popen.assert_not_called()
+                self.assertEqual(len(downloads), 1)
+                status = str(screen.query_one("#tailscale-status", tui.Static).render())
+                self.assertIn("/fixture/ts", status)
+                self.assertIn("sudo apt-get install -y tailscale", status)
 
     async def test_tailscale_cloudflare_fallback_needs_no_status_check(self) -> None:
         app = self.app()

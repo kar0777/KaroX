@@ -1,12 +1,17 @@
 """Keyboard-first guide around existing provider and bridge workflows.
 
-No installer, login, credential storage, or bridge launcher lives on these screens.
 Tailscale diagnostics are read-only and rendered from allowlisted status codes,
 never from raw subprocess output (which can contain one-time login URLs).
+The optional Tailscale installer offer is consent-gated twice and only ever
+uses the checksum-pinned official pkgs.tailscale.com asset; guided login and
+OS elevation stay with the user.
 """
 from __future__ import annotations
 
 import contextlib
+import subprocess
+from pathlib import Path
+from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
@@ -17,6 +22,13 @@ from textual.widgets import Button, Static
 
 from .onboarding import OnboardingProgress
 from .tailscale import query_tailscale_status
+from .tailscale_bootstrap import (
+    TailscaleBootstrapError,
+    ensure_tailscale_downloads,
+    installer_launch_command,
+    linux_system_install_hint,
+    tailscale_asset,
+)
 
 
 def label(language: str, ru: str, en: str) -> str:
@@ -76,9 +88,17 @@ class GuideScreen(ModalScreen[str | None]):
     def action_help(self) -> None:
         self.app.push_screen(NavigationHelpScreen(self.language))
 
+    # Subclasses that handle their own Button.Pressed events declare which
+    # button ids the base dismiss-all handler may still close the screen for.
+    # None (the default) keeps the historical "any button dismisses" contract.
+    dismiss_button_ids: ClassVar[set[str] | None] = None
+
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
         event.stop()
+        if self.dismiss_button_ids is not None and event.button.id not in self.dismiss_button_ids:
+            # A dedicated subclass handler owns this button; never dismiss.
+            return
         self.dismiss(event.button.id)
 
 
@@ -178,52 +198,177 @@ class FirstRunScreen(GuideScreen):
 
 
 class TailscaleSetupScreen(GuideScreen):
-    """Manual install/login takeover; F5 is the only automatic operation (a read)."""
+    """Tailscale readiness guide with an optional consent-gated installer offer.
+
+    Every button here is handled by this screen's own handler: the base
+    dismiss-all must never close the screen (an install press is not a choice).
+    """
+    dismiss_button_ids: ClassVar[set[str]] = set()
     BINDINGS = [Binding("f5", "check", "Check", priority=True)]
 
     def __init__(self, language: str = "en") -> None:
         super().__init__(language)
         self._checking = False
         self._ready = False
+        self._installing = False
+        self._install_consented = False
+        self._tailscale_path: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="guide-dialog"):
             yield Static("Tailscale Funnel", classes="guide-title")
             with VerticalScroll(classes="guide-body"):
                 yield Static(self.text(
-                    "KaroX здесь ничего не устанавливает и не авторизует.\n"
-                    "1. При согласии установите Tailscale: https://tailscale.com/download\n"
-                    "2. Откройте приложение Tailscale и войдите сами (или выполните tailscale up в своём терминале). "
-                    "Не вставляйте ключи и ссылки входа в чат.\n"
-                    "3. Разрешите Funnel в политике tailnet, если это требуется: https://tailscale.com/kb/1223/funnel\n"
-                    "4. F5 — проверить. Это не проверка разрешения Funnel.\n"
-                    "Использование Tailscale разрешает KaroX запустить публичный Funnel и подключить уже установленный Tailscale. "
-                    "Установка и вход остаются за вами.",
-                    "KaroX does not install or authenticate anything here.\n"
-                    "1. If you agree, install Tailscale: https://tailscale.com/download\n"
-                    "2. Open the Tailscale app and sign in yourself (or run tailscale up in your own terminal). "
-                    "Do not paste keys or login links into chat.\n"
-                    "3. Allow Funnel in your tailnet policy if required: https://tailscale.com/kb/1223/funnel\n"
-                    "4. F5 — check. This does not verify Funnel permission.\n"
-                    "Using Tailscale authorizes KaroX to start public Funnel and bring the installed Tailscale online. "
-                    "Installation and sign-in stay with you.",
+                    "Вариант 1 — KaroX предложит установить официальный пакет Tailscale "
+                    "(двойное подтверждение, SHA-256, источник pkgs.tailscale.com). "
+                    "Вход в Tailscale и подтверждение UAC/GUI всегда остаются за вами.\n"
+                    "Вариант 2 — установить и войти вручную: https://tailscale.com/download\n"
+                    "3. Разрешите Funnel в политике tailnet, если это требуется: "
+                    "https://tailscale.com/kb/1223/funnel\n"
+                    "F5 — проверить (только чтение).",
+                    "Option 1 — KaroX offers the official Tailscale package (double "
+                    "consent, SHA-256, source pkgs.tailscale.com). Tailscale sign-in "
+                    "and OS elevation stay with you.\n"
+                    "Option 2 — install and sign in manually: https://tailscale.com/download\n"
+                    "3. Allow Funnel in your tailnet policy if required: "
+                    "https://tailscale.com/kb/1223/funnel\n"
+                    "F5 — check (read-only).",
                 ), markup=False)
                 yield Static(self.text("Не проверено", "Not checked"), id="tailscale-status", markup=False)
                 yield Button(self.text("F5  Проверить (только чтение)", "F5  Check (read-only)"), id="tailscale-check")
                 yield Button(self.text("Разрешить Tailscale", "Allow Tailscale"), id="tailscale-use", disabled=True)
                 yield Button(self.text("Выбрать Cloudflare", "Use Cloudflare instead"), id="tailscale-cloudflare")
+                yield Button(
+                    self.text("Установить сейчас (официальный пакет)", "Install now (official package)"),
+                    id="tailscale-install",
+                )
             yield self.footer()
 
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
         event.stop()
-        if event.button.id == "tailscale-check":
+        if event.button.id == "tailscale-install":
+            self._begin_install()
+        elif event.button.id == "tailscale-check":
             self.action_check()
         elif event.button.id == "tailscale-use":
             if self._ready:
                 self.dismiss("tailscale")
         elif event.button.id == "tailscale-cloudflare":
             self.dismiss("cloudflare")
+
+    # -- consent-gated official installer offer ------------------------------
+
+    def _begin_install(self) -> None:
+        if self._installing or self._checking:
+            return
+        install_button = self.query_one("#tailscale-install", Button)
+        try:
+            asset = tailscale_asset()
+        except TailscaleBootstrapError as exc:
+            self.query_one("#tailscale-status", Static).update(self.text(str(exc), str(exc)))
+            return
+        if not self._install_consented:
+            self._install_consented = True
+            self.query_one("#tailscale-status", Static).update(self.text(
+                "Будет скачан и запущен официальный пакет:\n"
+                f"{asset.name}\nисточник: https://pkgs.tailscale.com/stable/{asset.name}\n"
+                f"SHA-256: {asset.sha256}\n"
+                "Нажмите кнопку ещё раз для подтверждения.",
+                "The official package will be downloaded and launched:\n"
+                f"{asset.name}\nsource: https://pkgs.tailscale.com/stable/{asset.name}\n"
+                f"SHA-256: {asset.sha256}\n"
+                "Press the button again to confirm.",
+            ))
+            install_button.label = self.text("Подтверждаю — скачать и запустить", "Confirm — download and run")
+            return
+        self._installing = True
+        install_button.disabled = True
+        self.query_one("#tailscale-status", Static).update(self.text(
+            f"Загрузка {asset.name} с pkgs.tailscale.com (проверка SHA-256)…",
+            f"Downloading {asset.name} from pkgs.tailscale.com (SHA-256 check)…",
+        ))
+        self.run_worker(self._install_worker, thread=True, group="tailscale-install", exclusive=True)
+
+    def _install_worker(self) -> None:
+        try:
+            result = ensure_tailscale_downloads()
+            kind = tailscale_asset().kind
+        except TailscaleBootstrapError as exc:
+            with contextlib.suppress(Exception):
+                self.app.call_from_thread(self._install_done, None, str(exc))
+            return
+        if kind in {"exe", "pkg"}:
+            try:
+                command = installer_launch_command(Path(result["installer"]))
+                if command[0] == "open":
+                    subprocess.run(command, check=False, timeout=30)
+                else:
+                    subprocess.Popen(command)
+            except OSError as exc:
+                with contextlib.suppress(Exception):
+                    self.app.call_from_thread(
+                        self._install_done, None,
+                        "Не удалось запустить установщик: " + type(exc).__name__,
+                    )
+                return
+            with contextlib.suppress(Exception):
+                self.app.call_from_thread(self._install_done, "installer", None)
+            return
+        # Linux: user-owned binaries are unpacked; the system daemon needs the
+        # official distro commands, printed for one-copy-paste.
+        codename = "trixie"
+        with contextlib.suppress(OSError):
+            for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VERSION_CODENAME="):
+                    codename = line.split("=", 1)[1].strip().strip('"') or codename
+                    break
+        with contextlib.suppress(Exception):
+            self.app.call_from_thread(
+                self._install_done,
+                {
+                    "tailscale": result.get("tailscale", ""),
+                    "tailscaled": result.get("tailscaled", ""),
+                    "hint": linux_system_install_hint(codename),
+                },
+                None,
+            )
+
+    def _install_done(self, result: object, error: str | None) -> None:
+        self._installing = False
+        install_button = self.query_one("#tailscale-install", Button)
+        install_button.disabled = False
+        install_button.label = self.text(
+            "Установить сейчас (официальный пакет)", "Install now (official package)"
+        )
+        self._install_consented = False
+        status = self.query_one("#tailscale-status", Static)
+        if error:
+            status.update(self.text("Ошибка установки: " + error, "Install error: " + error))
+            return
+        if isinstance(result, dict) and "tailscale" in result:
+            self._tailscale_path = result["tailscale"]
+            status.update(self.text(
+                "Бинарники Tailscale распакованы (без root):\n"
+                f"tailscale: {result['tailscale']}\n"
+                f"tailscaled: {result['tailscaled']}\n\n"
+                "Для системного демона выполните в терминале (официальный способ):\n"
+                + result["hint"]
+                + "\n\nЗатем F5 — проверка.",
+                "Tailscale binaries unpacked (no root):\n"
+                f"tailscale: {result['tailscale']}\n"
+                f"tailscaled: {result['tailscaled']}\n\n"
+                "For the system daemon run in a terminal (official path):\n"
+                + result["hint"]
+                + "\n\nThen F5 — check.",
+            ))
+            return
+        status.update(self.text(
+            "Установщик запущен. Завершите установку (UAC/GUI) и при необходимости "
+            "войдите в приложении Tailscale, затем F5 — проверка.",
+            "Installer launched. Finish the install (UAC/GUI) and sign in through "
+            "the Tailscale app if needed, then F5 — check.",
+        ))
 
     def action_check(self) -> None:
         if self._checking:
@@ -236,7 +381,7 @@ class TailscaleSetupScreen(GuideScreen):
 
     def _probe(self) -> None:
         try:
-            status = query_tailscale_status()
+            status = query_tailscale_status(executable=self._tailscale_path)
             ready = status.get("ready") is True
             code = str(status.get("code", "unknown"))
         except Exception:
