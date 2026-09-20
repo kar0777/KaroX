@@ -8,7 +8,7 @@
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
-![Runtime](https://img.shields.io/badge/runtime-5.0.0rc3-2563eb)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc4-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
@@ -17,7 +17,7 @@
 Run AI coding agents on local Git repositories without giving one provider
 control of your permissions, sessions, or evidence.
 
-**KaroX 5 beta is now the primary `main` line · `5.0.0rc3`**
+**KaroX 5 beta is now the primary `main` line · `5.0.0rc4`**
 
 ### 🤝 Supported by
 
@@ -57,7 +57,7 @@ The runtime reduces authority through repository confinement, capabilities,
 allowlists, leases, idempotency, and hard blocks; it does not virtualize the
 machine.
 
-> **Release status:** the packaged runtime is `5.0.0rc3`. Deterministic local
+> **Release status:** the packaged runtime is `5.0.0rc4`. Deterministic local
 > contracts are extensively tested, but live ChatGPT Web, Claude Web, and paid
 > provider conformance records are still pending. See the
 > [5.0 release scope](docs/V5_RELEASE_SCOPE.md),
@@ -91,7 +91,7 @@ until their own evidence gates pass.
 
 ## Install
 
-The beta candidate is **`v5.0.0rc3`**. The recommended first install is the
+The beta candidate is **`v5.0.0rc4`**. The recommended first install is the
 **preview portable bootstrap**: no preinstalled Python, pipx, uv, or administrator
 rights are needed. It verifies the release bundle's SHA-256, installs it in your
 user directory, and uses bundled `uv` to obtain managed Python and start KaroX.
@@ -152,16 +152,16 @@ there is no plaintext fallback.
 published to PyPI:
 
 ```bash
-pipx install "karox-runtime==5.0.0rc3"
+pipx install "karox-runtime==5.0.0rc4"
 # or
-uv tool install "karox-runtime==5.0.0rc3" --prerelease=allow
+uv tool install "karox-runtime==5.0.0rc4" --prerelease=allow
 ```
 
 **Source/developer installs:** use a reviewed checkout of the exact tag and run
 `./install.karox.sh` or `.\install.karox.ps1`, or:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc4"
 ```
 
 A missing portable asset (HTTP 404) or a non-release `KAROX_BOOTSTRAP_REF` can

@@ -1,7 +1,7 @@
 # KaroX 5 external beta summary
 
 status: pending
-runtime_version: 5.0.0rc3
+runtime_version: 5.0.0rc4
 last_updated_utc: 2026-07-29T06:30:00Z
 candidates_recruited: 0
 unaided_installation_attempts: 0

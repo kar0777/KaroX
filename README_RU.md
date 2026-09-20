@@ -8,7 +8,7 @@
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
-![Runtime](https://img.shields.io/badge/runtime-5.0.0rc3-2563eb)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc4-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
@@ -17,7 +17,7 @@
 Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
 провайдеру контроль над разрешениями, сессиями и доказательствами работы.
 
-**KaroX 5 beta теперь основная линия `main` · `5.0.0rc3`**
+**KaroX 5 beta теперь основная линия `main` · `5.0.0rc4`**
 
 ### 🤝 Проект поддержали
 
@@ -57,7 +57,7 @@ KaroX не является моделью, IDE или полноценной с
 ограничивает полномочия через `repoRoot`, capabilities, allowlist, leases,
 idempotency и жёсткие запреты, но не виртуализирует операционную систему.
 
-> **Статус релиза:** packaged runtime имеет версию `5.0.0rc3`. Локальные
+> **Статус релиза:** packaged runtime имеет версию `5.0.0rc4`. Локальные
 > контракты и transport-paths покрыты тестами, но реальные live-проверки ChatGPT
 > Web, Claude Web и обязательных API-провайдеров ещё не завершены. Смотри
 > [scope KaroX 5.0](docs/V5_RELEASE_SCOPE.md),
@@ -94,7 +94,7 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Кандидат публичной беты — **`v5.0.0rc3`**. Для первой установки рекомендуется
+Кандидат публичной беты — **`v5.0.0rc4`**. Для первой установки рекомендуется
 **preview portable bootstrap**: заранее устанавливать Python, pipx или uv не
 нужно; права администратора не требуются. Bootstrap проверяет SHA-256 release-
 архива, устанавливает его в каталог пользователя и через встроенный `uv`
@@ -155,16 +155,16 @@ fallback отсутствует.
 **Альтернатива: готовое Python-окружение.** После публикации версии в PyPI:
 
 ```bash
-pipx install "karox-runtime==5.0.0rc3"
+pipx install "karox-runtime==5.0.0rc4"
 # или
-uv tool install "karox-runtime==5.0.0rc3" --prerelease=allow
+uv tool install "karox-runtime==5.0.0rc4" --prerelease=allow
 ```
 
 **Исходники / разработка:** используй проверенный checkout точного тега и запусти
 `./install.karox.sh` или `.\install.karox.ps1`, либо:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc4"
 ```
 
 Если portable-архива нет (HTTP 404) или `KAROX_BOOTSTRAP_REF` указывает не на
