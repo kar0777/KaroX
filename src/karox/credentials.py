@@ -164,8 +164,10 @@ class KeyringBackend:
         if priority <= 0 or identity not in cls._OS_BACKENDS:
             raise CredentialError(
                 "no secure OS credential backend is available; plaintext fallback "
-                "is disabled. On a host without a Secret Service, reference the "
-                "key from the environment: env:KAROX_PROVIDER_<NAME>_API_KEY"
+                "is disabled. Install a Secret Service (Debian/Ubuntu: "
+                "sudo apt install gnome-keyring dbus-user-session) or reference the "
+                "key from the environment: env:KAROX_PROVIDER_<NAME>_API_KEY. "
+                "For the guided headless flow, run 'karox credential setup'."
             )
         return backend
 
