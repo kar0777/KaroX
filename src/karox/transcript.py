@@ -190,7 +190,10 @@ CREATE TABLE IF NOT EXISTS events (
     schema_version  INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_session_seq ON events (session_id, sequence);
-CREATE INDEX IF NOT EXISTS idx_session_kind ON events (session_id, kind);
+-- This also serves sparse kind-filtered tail reads without scanning unrelated
+-- events. Use a new name so existing v1 databases receive the replacement.
+CREATE INDEX IF NOT EXISTS idx_session_kind_seq ON events (session_id, kind, sequence);
+DROP INDEX IF EXISTS idx_session_kind;
 """
 
 
@@ -199,7 +202,7 @@ class TranscriptStore:
 
     One store per KaroX runtime (not per session): the ``session_id`` column
     partitions events, and a single WAL writer keeps ordering simple. Thread-safe
-    via a write lock; reads are concurrent (SQLite WAL allows this).
+    via a shared-connection lock; separate connections read concurrently via WAL.
     """
 
     def __init__(
@@ -258,50 +261,62 @@ class TranscriptStore:
         eid = event_id or str(uuid.uuid4())
         ts = timestamp if timestamp is not None else time.time()
         with self._lock:
-            # Idempotent: check first.
-            existing = self._conn.execute(
-                "SELECT * FROM events WHERE event_id = ?", (eid,)
-            ).fetchone()
-            if existing is not None:
-                return TypedEvent.from_row(existing)
+            with self._conn:
+                # Serialize the read/allocate/insert across store instances too.
+                # A Python lock alone cannot protect another SQLite connection.
+                self._conn.execute("BEGIN IMMEDIATE")
+                # Idempotent: check first.
+                existing = self._conn.execute(
+                    "SELECT * FROM events WHERE event_id = ?", (eid,)
+                ).fetchone()
+                if existing is not None:
+                    return TypedEvent.from_row(existing)
 
-            seq = self._next_sequence(session_id)
-            event = TypedEvent(
-                event_id=eid,
-                session_id=session_id,
-                sequence=seq,
-                timestamp=ts,
-                source_process=source_process or f"pid:{os.getpid()}",
-                kind=kind,
-                payload=payload,
-                correlation_id=correlation_id,
-                parent_id=parent_id,
-            )
-            self._conn.execute(
-                """INSERT INTO events
-                   (event_id, session_id, sequence, timestamp, source_process,
-                    kind, payload, correlation_id, parent_id, schema_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    event.event_id,
-                    event.session_id,
-                    event.sequence,
-                    event.timestamp,
-                    event.source_process,
-                    event.kind,
-                    json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
-                    event.correlation_id,
-                    event.parent_id,
-                    event.schema_version,
-                ),
-            )
+                seq = self._next_sequence(session_id)
+                event = TypedEvent(
+                    event_id=eid,
+                    session_id=session_id,
+                    sequence=seq,
+                    timestamp=ts,
+                    source_process=source_process or f"pid:{os.getpid()}",
+                    kind=kind,
+                    payload=payload,
+                    correlation_id=correlation_id,
+                    parent_id=parent_id,
+                )
+                self._conn.execute(
+                    """INSERT INTO events
+                       (event_id, session_id, sequence, timestamp, source_process,
+                        kind, payload, correlation_id, parent_id, schema_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event.event_id,
+                        event.session_id,
+                        event.sequence,
+                        event.timestamp,
+                        event.source_process,
+                        event.kind,
+                        json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
+                        event.correlation_id,
+                        event.parent_id,
+                        event.schema_version,
+                    ),
+                )
+                # Use the durable per-session sequence, not a global counter:
+                # interleaved sessions and restarts must not starve pruning.
+                if (seq + 1) % self._retention == 0:
+                    self._prune_session(session_id)
             self._write_count += 1
             if self._write_count % _CHECKPOINT_INTERVAL == 0:
-                self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            if self._write_count % self._retention == 0:
-                self._prune_session(session_id)
+                try:
+                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except sqlite3.OperationalError:
+                    # A live replay cursor can prevent a checkpoint on this
+                    # connection. Maintenance must not fail a committed append.
+                    pass
+            listeners = tuple(self._listeners)
         # Notify listeners outside the lock.
-        for listener in self._listeners:
+        for listener in listeners:
             try:
                 listener(event)
             except Exception:
@@ -337,40 +352,51 @@ class TranscriptStore:
         kind: Optional[str] = None,
     ) -> Iterator[TypedEvent]:
         """Yield events for ``session_id`` in order, optionally filtered by kind."""
-        if kind is not None:
-            cursor = self._conn.execute(
-                """SELECT * FROM events
-                   WHERE session_id = ? AND sequence >= ? AND kind = ?
-                   ORDER BY sequence""",
-                (session_id, from_sequence, kind),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT * FROM events
-                   WHERE session_id = ? AND sequence >= ?
-                   ORDER BY sequence""",
-                (session_id, from_sequence),
-            )
-        for row in cursor:
+        # This connection is also the writer. WAL isolates *other* connections,
+        # not concurrent callers sharing this one; never expose an uncommitted
+        # append/prune transaction. Materialize the bounded session snapshot
+        # while locked, then yield without holding the writer lock or a cursor.
+        with self._lock:
+            if kind is not None:
+                cursor = self._conn.execute(
+                    """SELECT * FROM events
+                       WHERE session_id = ? AND sequence >= ? AND kind = ?
+                       ORDER BY sequence""",
+                    (session_id, from_sequence, kind),
+                )
+            else:
+                cursor = self._conn.execute(
+                    """SELECT * FROM events
+                       WHERE session_id = ? AND sequence >= ?
+                       ORDER BY sequence""",
+                    (session_id, from_sequence),
+                )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        for row in rows:
             yield TypedEvent.from_row(row)
 
     def latest_sequence(self, session_id: str) -> int:
-        row = self._conn.execute(
-            "SELECT MAX(sequence) AS max_seq FROM events WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(sequence) AS max_seq FROM events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
         if row and row["max_seq"] is not None:
             return int(row["max_seq"])
         return -1
 
     def count(self, session_id: Optional[str] = None) -> int:
-        if session_id is not None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM events WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-        else:
-            row = self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
+        with self._lock:
+            if session_id is not None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM events WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+            else:
+                row = self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
         return int(row["n"]) if row else 0
 
     # ------------------------------------------------------------------ #
@@ -379,13 +405,15 @@ class TranscriptStore:
 
     def subscribe(self, listener: Callable[[TypedEvent], None]) -> Callable[[], None]:
         """Register a live-event listener. Returns an unsubscribe callable."""
-        self._listeners.append(listener)
+        with self._lock:
+            self._listeners.append(listener)
 
         def unsubscribe() -> None:
-            try:
-                self._listeners.remove(listener)
-            except ValueError:
-                pass
+            with self._lock:
+                try:
+                    self._listeners.remove(listener)
+                except ValueError:
+                    pass
 
         return unsubscribe
 

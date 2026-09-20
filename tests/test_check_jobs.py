@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -142,6 +143,109 @@ class CheckJobStoreTests(unittest.TestCase):
         )
         self.assertEqual(status, "failed")
         self.assertEqual(error_code, "worker_exited_without_final_state")
+
+    def test_public_status_uses_one_worker_liveness_snapshot(self) -> None:
+        manager = CheckJobManager(self.repository, "session-a", root=self.root / "jobs")
+        identity = capture_process_identity(os.getpid())
+        state = replace(
+            self._state(), status="running", worker_identity=identity, child_identity=identity
+        )
+        alive = mock.Mock(alive=True)
+        alive.to_dict.return_value = {"alive": True}
+        dead = mock.Mock(alive=False)
+        dead.to_dict.return_value = {"alive": False}
+        with mock.patch.object(
+            check_jobs, "verify_process_identity", side_effect=[alive, alive, dead]
+        ) as verify:
+            result = manager.public_status(state)
+        self.assertEqual(result["status"], "running")
+        self.assertTrue(result["ownership"]["worker"]["alive"])
+        self.assertEqual(verify.call_count, 2, "probe each identity once, not the worker twice")
+
+    def test_logs_read_once_and_reconcile_dead_worker_without_status_packet(self) -> None:
+        manager = CheckJobManager(self.repository, "session-a", root=self.root / "jobs")
+        state = replace(
+            self._state(),
+            status="running",
+            worker_identity=capture_process_identity(os.getpid()),
+        )
+        self.store.put(state)
+        Path(state.log_path).write_bytes(b"earlier\nlast line\n")
+        with (
+            mock.patch.object(check_jobs, "read_job_log", wraps=check_jobs.read_job_log) as read,
+            mock.patch.object(
+                check_jobs, "verify_process_identity", return_value=mock.Mock(alive=False)
+            ) as verify,
+            mock.patch.object(manager, "public_status", side_effect=AssertionError("unused")),
+        ):
+            result = manager.logs(state.job_id, limit=10)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["log"]["text"], "last line\n")
+        read.assert_called_once_with(Path(state.log_path), limit=10)
+        verify.assert_called_once()
+
+    def test_logs_terminal_status_does_not_probe_processes(self) -> None:
+        manager = CheckJobManager(self.repository, "session-a", root=self.root / "jobs")
+        state = replace(self._state(), status="passed", exit_code=0)
+        self.store.put(state)
+        with (
+            mock.patch.object(check_jobs, "verify_process_identity") as verify,
+            mock.patch.object(manager, "public_status", side_effect=AssertionError("unused")),
+        ):
+            result = manager.logs(state.job_id)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["log"]["bytes"], 0)
+        verify.assert_not_called()
+
+    def test_log_tail_measures_opened_file_after_concurrent_trim(self) -> None:
+        path = self.root / "trimmed.log"
+        path.write_bytes(b"old log\n" * 100)
+        actual_open = Path.open
+
+        def trim_then_open(target: Path, *args: Any, **kwargs: Any) -> Any:
+            if target == path:
+                # Use builtin open to avoid re-entering the patched Path.open.
+                with open(path, "wb") as writer:
+                    writer.write(b"new log\n")
+            return actual_open(target, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=trim_then_open):
+            result = check_jobs.read_job_log(path, limit=16)
+        self.assertEqual(result["text"], "new log\n")
+        self.assertEqual(result["bytes"], 8)
+        self.assertFalse(result["truncated"])
+
+    def test_log_reader_batches_writes_without_changing_redaction_boundaries(self) -> None:
+        path = self.root / "batched.log"
+        text = "SENSITIVE line\n" * 200 + "unfinished tail"
+        with (
+            mock.patch.object(
+                check_jobs, "redact", side_effect=lambda line: line.replace("SENSITIVE", "[redacted]")
+            ) as redact_line,
+            mock.patch.object(
+                check_jobs, "_write_capped_log", wraps=check_jobs._write_capped_log
+            ) as write,
+        ):
+            check_jobs._append_redacted(io.StringIO(text), path, threading.Event(), [False])
+        self.assertEqual(path.read_text(encoding="utf-8"), text.replace("SENSITIVE", "[redacted]"))
+        self.assertEqual(
+            redact_line.call_args_list,
+            [mock.call("SENSITIVE line\n")] * 200 + [mock.call("unfinished tail")],
+        )
+        self.assertEqual(write.call_count, 2, "one chunk append plus the EOF partial line")
+
+    def test_batched_log_reader_remains_capped_and_keeps_final_summary(self) -> None:
+        path = self.root / "capped.log"
+        text = "a complete line\n" * 1000 + "1 passed in 0.01s\n"
+        truncated = [False]
+        with (
+            mock.patch.object(check_jobs, "_MAX_LOG_BYTES", 128),
+            mock.patch.object(check_jobs, "_LOG_TRIM_TO_BYTES", 64),
+        ):
+            check_jobs._append_redacted(io.StringIO(text), path, threading.Event(), truncated)
+        self.assertTrue(truncated[0])
+        self.assertLessEqual(path.stat().st_size, 128)
+        self.assertTrue(path.read_bytes().endswith(b"1 passed in 0.01s\n"))
 
     def test_checksum_mismatch_is_fail_safe(self) -> None:
         state = self._state()
@@ -344,6 +448,37 @@ class CheckJobManagerTests(unittest.TestCase):
         self.assertTrue(fresh_retry["idempotent_replay"])
         self.assertEqual(launcher.call_count, 2)
 
+    def test_revisited_workspace_does_not_overwrite_an_earlier_job(self) -> None:
+        launcher = mock.Mock(return_value=mock.Mock(pid=os.getpid()))
+        manager = CheckJobManager(
+            self.repository,
+            "session-a",
+            (self.allowed,),
+            root=self.jobs_root,
+            worker_launcher=launcher,
+            wait_for_child=False,
+        )
+        arguments = {"kind": "check", "argv": list(self.allowed)}
+        with mock.patch.object(
+            check_jobs, "_workspace_state_fingerprint", side_effect=["a" * 64, "b" * 64, "a" * 64, "a" * 64]
+        ):
+            first = manager.start(arguments, idempotency_key="revisited-workspace")
+            original = manager.store.get(first["job_id"])
+            manager.store.request_cancel(original.job_id)
+            Path(original.log_path).write_text("earlier worker output\n", encoding="utf-8")
+            original_bytes = manager.store.state_path(original.job_id).read_bytes()
+            second = manager.start(arguments, idempotency_key="revisited-workspace")
+            third = manager.start(arguments, idempotency_key="revisited-workspace")
+            replay = manager.start(arguments, idempotency_key="revisited-workspace")
+        self.assertEqual(len({first["job_id"], second["job_id"], third["job_id"]}), 3)
+        self.assertEqual(manager.store.state_path(original.job_id).read_bytes(), original_bytes)
+        self.assertEqual(Path(original.log_path).read_text(encoding="utf-8"), "earlier worker output\n")
+        self.assertTrue(manager.store.cancel_path(original.job_id).exists())
+        self.assertFalse(manager.store.cancel_path(third["job_id"]).exists())
+        self.assertEqual(replay["job_id"], third["job_id"])
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(launcher.call_count, 3)
+
     def test_idempotency_key_cannot_change_command(self) -> None:
         manager = CheckJobManager(
             self.repository,
@@ -416,10 +551,11 @@ class CheckJobManagerTests(unittest.TestCase):
             root=self.jobs_root,
             worker_launcher=lambda _path: ExitedWorker(),
         )
-        result = manager.start(
-            {"kind": "check", "argv": list(self.allowed)},
-            idempotency_key="worker-exit",
-        )
+        with mock.patch.object(check_jobs, "_WORKER_EXIT_STATE_GRACE_SECONDS", 0.0):
+            result = manager.start(
+                {"kind": "check", "argv": list(self.allowed)},
+                idempotency_key="worker-exit",
+            )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(
             result["diagnostics"]["error_code"],

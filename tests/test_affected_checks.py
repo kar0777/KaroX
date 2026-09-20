@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import io
 import os
+import sys
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Optional
+from unittest.mock import Mock, patch
 
 from mcp.types import CallToolResult
 
 from _support import SRC, initialize_git_repository  # noqa: F401
 from karox.affected_checks import AffectedChecksEngine, AffectedChecksError
 from karox.artifacts import ArtifactStore
+from karox.hot_worker import HotWorkerSupervisor
 from karox.models import AccessProfile
 from karox.repo_context import RepositoryContextEngine
 from karox.repository_lease import RepositoryLeaseStore
@@ -481,6 +485,257 @@ class AffectedChecksTests(unittest.TestCase):
             item for item in result["results"] if item["tool"] == "karox.tests.run"
         )
         self.assertEqual(test_result["compact"]["error_code"], "check_execution_failed")
+
+
+class AffectedSelectionSafetyTests(unittest.TestCase):
+    """Selection-only regressions, without a session/runtime fixture."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name)
+        (self.repo / "tests").mkdir()
+        self.engine = AffectedChecksEngine.__new__(AffectedChecksEngine)
+        self.engine.repository = self.repo
+        self.engine.verification_commands = ()
+        self.engine.delegate = SimpleNamespace(
+            descriptors=lambda: [SimpleNamespace(name="karox.tests.run")]
+        )
+        self.engine._historical_tests = Mock(return_value={})
+
+    def write_test(self, name: str, content: str = "# widget\n") -> str:
+        relative = f"tests/{name}"
+        (self.repo / relative).write_text(content, encoding="utf-8")
+        return relative
+
+    def assert_full(self, changed: list[str]) -> None:
+        selected = self.engine.select(changed)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["arguments"], {"suite": "full"})
+
+    def test_target_overflow_keeps_the_last_failing_test(self) -> None:
+        for index in range(201):
+            self.write_test(f"test_{index:03}.py")
+            self.addCleanup(sys.modules.pop, f"test_{index:03}", None)
+        failing = self.repo / "tests/test_200.py"
+        failing.write_text(
+            "# widget\nimport unittest\n"
+            "class Regression(unittest.TestCase):\n"
+            "    def test_failure(self):\n"
+            "        self.fail('trailing failing test must run')\n",
+            encoding="utf-8",
+        )
+        selected = self.engine.select(["src/widget.py"])
+        arguments = selected[0]["arguments"]
+        if arguments["suite"] == "full":
+            suite = unittest.TestLoader().discover(str(self.repo / "tests"))
+        else:
+            suite = unittest.TestSuite()
+            for target in arguments["targets"]:
+                suite.addTests(unittest.TestLoader().discover(
+                    str(self.repo / "tests"), pattern=Path(target).name
+                ))
+        result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+        self.assertFalse(result.wasSuccessful(), "the selected checks hid a failing test")
+        self.assertEqual(arguments, {"suite": "full"})
+
+    def test_project_config_requires_full_collection(self) -> None:
+        self.write_test("test_widget.py")
+        for config in ("pyproject.toml", "pytest.ini", "conftest.py", "tests/conftest.py"):
+            with self.subTest(config=config):
+                self.assert_full([config])
+
+    def test_unmapped_source_not_masked_by_mapped_source_or_history(self) -> None:
+        test = self.write_test("test_widget.py")
+        self.engine._historical_tests.return_value = {test: 1}
+        self.assert_full(["src/widget.py", "src/unmapped.py"])
+
+    def test_shared_test_support_requires_full_collection(self) -> None:
+        self.write_test("test_widget.py")
+        self.assert_full(["tests/_support.py"])
+
+    def test_suffix_named_test_is_discovered(self) -> None:
+        target = self.write_test("widget_test.py")
+        selected = self.engine.select([target])
+        self.assertEqual(selected[0]["arguments"]["targets"], [target])
+
+    def test_deleted_test_requires_full_collection(self) -> None:
+        self.write_test("test_widget.py")
+        self.assert_full(["tests/test_removed.py"])
+
+    def test_external_test_requires_full_collection_even_without_tests_directory(self) -> None:
+        (self.repo / "tests").rmdir()
+        self.assert_full(["test_root.py"])
+
+    def test_missing_test_capability_is_not_a_passing_lint_only_plan(self) -> None:
+        self.write_test("test_widget.py")
+        self.engine.verification_commands = (("python", "-m", "ruff", "check", "."),)
+        self.engine.delegate.descriptors = lambda: [SimpleNamespace(name="karox.checks.run")]
+        with self.assertRaises(AffectedChecksError) as raised:
+            self.engine.select(["src/widget.py"])
+        self.assertEqual(raised.exception.code, "capability_unavailable")
+
+    def test_test_contents_are_read_once_per_selection_and_refreshed(self) -> None:
+        target = self.write_test("test_behavior.py", "# first second third\n")
+        original = Path.read_text
+        reads: list[Path] = []
+
+        def read(path: Path, *args: Any, **kwargs: Any) -> str:
+            reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read):
+            selected = self.engine.select(["src/first.py", "src/second.py", "src/third.py"])
+        self.assertEqual(selected[0]["arguments"]["targets"], [target])
+        self.assertEqual(reads.count(self.repo / target), 1)
+        (self.repo / target).write_text("# no dependency\n", encoding="utf-8")
+        self.assert_full(["src/first.py"])
+
+    def test_unreadable_test_is_not_silently_ignored(self) -> None:
+        self.write_test("test_behavior.py")
+        with patch.object(Path, "read_text", side_effect=OSError("denied")):
+            with self.assertRaises(AffectedChecksError) as raised:
+                self.engine.select(["src/widget.py"])
+        self.assertEqual(raised.exception.code, "test_inspection_failed")
+
+    def test_nul_rename_retains_old_and_new_paths(self) -> None:
+        self.engine._git = Mock(return_value=(
+            "R  src/new.py\0src/old.py\0 M tests/test_widget.py\0"
+        ))
+        self.assertEqual(self.engine._changed_files(None), [
+            "src/new.py", "src/old.py", "tests/test_widget.py"
+        ])
+
+    def test_literal_arrow_in_nul_path_is_not_a_rename(self) -> None:
+        self.engine._git = Mock(return_value="?? tests/test_left -> right.py\0")
+        self.assertEqual(self.engine._changed_files(None), ["tests/test_left -> right.py"])
+
+
+class HotWorkerAuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.package_name = "_karox_audit_worker"
+        package = ModuleType(self.package_name)
+        package.__path__ = [str(self.root)]
+        self.package = package
+        self.modules_patch = patch.dict(sys.modules, {self.package_name: package})
+        self.modules_patch.start()
+        self.addCleanup(self.modules_patch.stop)
+        self.supervisor = HotWorkerSupervisor()
+        self.supervisor.MODULE_NAME = f"{self.package_name}.worker"
+        self.supervisor.MODULE_GROUP = (
+            f"{self.package_name}.dependency", self.supervisor.MODULE_NAME,
+        )
+        (self.root / "dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self.worker_path = self.root / "worker.py"
+        self.worker_source = (
+            f"from {self.package_name} import dependency\n"
+            "VALUE = dependency.VALUE\n"
+            "def validate_repo_command(*args): pass\n"
+            "def execute_repo_command(*args): return {'value': VALUE}\n"
+            "def execute_tests(*args): return {'value': VALUE}\n"
+            "def execute_browser_command(*args): return {'value': VALUE}\n"
+        )
+        self.worker_path.write_text(self.worker_source, encoding="utf-8")
+        self.original = self.supervisor.module()
+
+    def test_unchanged_status_does_not_recompile_sources(self) -> None:
+        with patch.object(self.supervisor, "_load_generation", side_effect=AssertionError("recompile")):
+            for _ in range(3):
+                self.assertEqual(self.supervisor.status()["generation"], 1)
+
+    def test_timestamp_only_touch_does_not_reload(self) -> None:
+        stat = self.worker_path.stat()
+        os.utime(self.worker_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        self.assertIs(self.supervisor.module(), self.original)
+        self.assertEqual(self.supervisor.status()["reload_count"], 0)
+
+    def test_same_size_edit_with_restored_mtime_is_detected(self) -> None:
+        path = self.root / "dependency.py"
+        stat = path.stat()
+        path.write_text("VALUE = 2\n", encoding="utf-8")
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(self.supervisor.module().VALUE, 2)
+
+    def test_parent_package_and_worker_use_new_dependency(self) -> None:
+        (self.root / "dependency.py").write_text("VALUE = 123\n", encoding="utf-8")
+        candidate = self.supervisor.module()
+        self.assertEqual(candidate.VALUE, 123)
+        self.assertIs(self.package.worker, candidate)
+        self.assertIs(self.package.dependency, sys.modules[f"{self.package_name}.dependency"])
+
+    def test_failed_generation_is_not_recompiled_until_change_or_force(self) -> None:
+        self.worker_path.write_text("def broken(:\n", encoding="utf-8")
+        with patch.object(self.supervisor, "_load_generation", wraps=self.supervisor._load_generation) as load:
+            self.assertIs(self.supervisor.module(), self.original)
+            self.assertIs(self.supervisor.module(), self.original)
+            self.assertIsNotNone(self.supervisor.status()["last_reload_error"])
+            self.assertEqual(load.call_count, 1)
+            with self.assertRaises(RuntimeError):
+                self.supervisor.module(force=True)
+            self.assertEqual(load.call_count, 2)
+        self.worker_path.write_text(self.worker_source + "# repaired\n", encoding="utf-8")
+        self.assertIsNot(self.supervisor.module(), self.original)
+        self.assertIsNone(self.supervisor.status()["last_reload_error"])
+
+    def test_failed_generation_restores_sys_modules_and_package_attributes(self) -> None:
+        old_dependency = self.package.dependency
+        (self.root / "dependency.py").write_text("VALUE = 123\n", encoding="utf-8")
+        self.worker_path.write_text(self.worker_source + "raise ValueError('broken')\n", encoding="utf-8")
+        self.assertIs(self.supervisor.module(), self.original)
+        self.assertIs(sys.modules[self.supervisor.MODULE_NAME], self.original)
+        self.assertIs(self.package.worker, self.original)
+        self.assertIs(self.package.dependency, old_dependency)
+
+    def test_missing_source_preserves_last_known_good_and_reports_error(self) -> None:
+        self.worker_path.unlink()
+        self.assertIs(self.supervisor.module(), self.original)
+        self.assertIn("missing", self.supervisor.status()["last_reload_error"])
+        with self.assertRaisesRegex(RuntimeError, "last known-good"):
+            self.supervisor.module(force=True)
+        self.worker_path.write_text(self.worker_source, encoding="utf-8")
+        self.assertIsNone(self.supervisor.status()["last_reload_error"])
+
+    def test_force_reload_reexecutes_unchanged_sources(self) -> None:
+        self.assertIsNot(self.supervisor.module(force=True), self.original)
+        self.assertEqual(self.supervisor.status()["reload_count"], 1)
+
+    def test_source_change_between_signature_and_compile_is_not_published(self) -> None:
+        self.worker_path.write_text(self.worker_source + "# first edit\n", encoding="utf-8")
+        load = self.supervisor._load_generation
+
+        def racing_load(*args: Any) -> Any:
+            self.worker_path.write_text(self.worker_source + "# second edit\n", encoding="utf-8")
+            return load(*args)
+
+        with patch.object(self.supervisor, "_load_generation", side_effect=racing_load):
+            self.assertIs(self.supervisor.module(), self.original)
+        self.assertIs(sys.modules[self.supervisor.MODULE_NAME], self.original)
+        self.assertIsNotNone(self.supervisor._last_reload_error)
+        self.assertIsNot(self.supervisor.module(), self.original)
+        self.assertIsNone(self.supervisor.status()["last_reload_error"])
+
+    def test_interrupted_reload_restores_module_and_package_views(self) -> None:
+        old_dependency = self.package.dependency
+        self.worker_path.write_text(self.worker_source + "raise SystemExit('interrupted')\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            self.supervisor.module()
+        self.assertIs(sys.modules[self.supervisor.MODULE_NAME], self.original)
+        self.assertIs(self.package.worker, self.original)
+        self.assertIs(sys.modules[f"{self.package_name}.dependency"], old_dependency)
+        self.assertIs(self.package.dependency, old_dependency)
+
+    def test_supervisor_edit_requires_restart_even_with_restored_mtime(self) -> None:
+        path = self.root / "supervisor.py"
+        path.write_text("before\n", encoding="utf-8")
+        self.supervisor._supervisor_source_path = path
+        self.supervisor._supervisor_source_sha256 = self.supervisor._digest(path)
+        stat = path.stat()
+        path.write_text("after!\n", encoding="utf-8")
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertTrue(self.supervisor.status()["bridge_restart_required"])
 
 
 if __name__ == "__main__":

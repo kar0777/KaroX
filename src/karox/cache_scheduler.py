@@ -102,10 +102,16 @@ class CacheAwareScheduler:
         self._invalidations = 0
         self._cache_read_tokens = 0
         self._cache_write_tokens = 0
+        self._reuse_saving_usd = 0.0
+        self._reuse_saving_available = True
 
     # -- pricing ---------------------------------------------------------
     def set_pricing(self, pricing: Optional[ModelPricing]) -> None:
-        """Follow a routed model switch; ``None`` returns to UNAVAILABLE."""
+        """Set rates for future usage/decisions, not previously measured reads.
+
+        ``None`` makes future estimates UNAVAILABLE. Historical savings retain
+        the rates in effect when the provider reported each usage payload.
+        """
 
         self._pricing = pricing
 
@@ -126,19 +132,32 @@ class CacheAwareScheduler:
 
         read = max(0, int(cache_read_tokens))
         write = max(0, int(cache_write_tokens))
+        self._cache_read_tokens += read
+        self._cache_write_tokens += write
         if read > 0:
-            self._cache_read_tokens += read
+            pricing = self._pricing
+            if (
+                pricing is None
+                or pricing.input_per_mtok is None
+                or pricing.cached_input_per_mtok is None
+            ):
+                # Never present a partial sum as savings for all measured reads.
+                self._reuse_saving_available = False
+            else:
+                delta = pricing.input_per_mtok - pricing.cached_input_per_mtok
+                self._reuse_saving_usd += (read / _MTOK) * delta
+        capability = self._capability
+        if (
+            (read > 0 and not capability.reports_cache_reads)
+            or (write > 0 and not capability.reports_cache_writes)
+        ):
+            # Capability is monotonic evidence: allocate only on an upgrade,
+            # and combine a read/write upgrade into one immutable snapshot.
             self._capability = dataclasses.replace(
-                self._capability,
+                capability,
                 supports_prompt_caching=True,
-                reports_cache_reads=True,
-            )
-        if write > 0:
-            self._cache_write_tokens += write
-            self._capability = dataclasses.replace(
-                self._capability,
-                supports_prompt_caching=True,
-                reports_cache_writes=True,
+                reports_cache_reads=True if read > 0 else capability.reports_cache_reads,
+                reports_cache_writes=True if write > 0 else capability.reports_cache_writes,
             )
 
     @property
@@ -219,22 +238,24 @@ class CacheAwareScheduler:
         """Estimated saving from provider-reported cached reads so far.
 
         Cached-read token counts are MEASURED (provider usage payloads).
-        The rates are registry values, so the product is ESTIMATED. When
-        either rate is missing, or nothing was ever served from cache,
-        there is no number to show and the answer is ``None``.
+        The rates are registry values captured when each usage payload is
+        observed, so the sum is ESTIMATED. If any observed read lacked either
+        rate, or nothing was ever served from cache, the answer is ``None``.
+        Switching prices must not retroactively reprice historical reads.
+        Missing current rates still make estimates unavailable, preserving the
+        public availability contract until a complete pricing record returns.
         """
 
-        if self._cache_read_tokens <= 0:
-            return None
         pricing = self._pricing
         if (
-            pricing is None
+            self._cache_read_tokens <= 0
+            or not self._reuse_saving_available
+            or pricing is None
             or pricing.input_per_mtok is None
             or pricing.cached_input_per_mtok is None
         ):
             return None
-        delta = pricing.input_per_mtok - pricing.cached_input_per_mtok
-        return (self._cache_read_tokens / _MTOK) * delta
+        return self._reuse_saving_usd
 
     def _estimate_write_usd(self, prefix_key: CacheKey) -> Optional[float]:
         pricing = self._pricing

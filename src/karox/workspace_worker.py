@@ -257,8 +257,9 @@ def _test_files(repository: Path) -> list[str]:
         raise InvalidCommand("repository has no tests directory")
     return sorted(
         path.relative_to(repository).as_posix()
-        for path in root.rglob("test_*.py")
-        if path.is_file()
+        for path in root.rglob("*.py")
+        if (path.name.startswith("test_") or path.name.endswith("_test.py"))
+        and path.is_file()
     )
 
 
@@ -353,7 +354,7 @@ def execute_tests(
     )
 
     test_root = runtime.repository / "tests"
-    has_python_tests = test_root.is_dir() and any(test_root.rglob("test_*.py"))
+    has_python_tests = test_root.is_dir() and bool(_test_files(runtime.repository))
     node_test = _node_test_command(runtime.repository)
     if node_test is not None and not has_python_tests:
         if suite == "split":

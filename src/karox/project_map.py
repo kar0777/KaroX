@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import re
@@ -94,12 +95,27 @@ _SKIP_DIRS = frozenset(
 _MAX_FILES_SCANNED = 20000
 
 
+# These files affect config-derived facts even though they are not parsed.
+_CONFIG_DEPENDENCIES = frozenset({"uv.lock", "poetry.lock", "pnpm-lock.yaml", "yarn.lock"})
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_source(path: Path) -> tuple[str, str]:
+    """Hash and decode the same read, keeping evidence and facts consistent."""
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    # Match read_text's universal-newline and replacement-decoding behavior,
+    # but decode the bytes already hashed instead of reopening the source.
+    with io.TextIOWrapper(io.BytesIO(content), encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    return digest, text
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,7 +204,11 @@ class ProjectFactMap:
             return self.build()
         changed = {str(item).replace("\\", "/") for item in changed_files}
         sources = stored.get("sources", {})
-        affected = changed.intersection(sources)
+        # Include absent sources: a newly-created instruction or lockfile is
+        # not in the previous map's evidence, but still invalidates its facts.
+        affected = changed.intersection(
+            set(sources) | set(_CONFIG_FILES) | set(INSTRUCTION_FILES) | _CONFIG_DEPENDENCIES
+        )
         code_changed = any(
             Path(item).suffix.lower() in _LANGUAGE_EXTENSIONS for item in changed
         )
@@ -210,6 +230,8 @@ class ProjectFactMap:
         try:
             payload = json.loads(self.storage.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
             return None
         if payload.get("schema_version") != FACT_MAP_SCHEMA_VERSION:
             return None
@@ -250,26 +272,34 @@ class ProjectFactMap:
         facts.setdefault("sources", {})[relative] = digest
 
     def _apply_config_facts(self, facts: dict[str, Any]) -> None:
-        project: dict[str, Any] = facts.setdefault("project", {})
+        # Re-extract this small section from scratch so deleted fields and
+        # setdefault-based precedence cannot retain facts from an older source.
+        project: dict[str, Any] = {}
+        facts["project"] = project
         for name in _CONFIG_FILES:
+            facts.setdefault("sources", {}).pop(name, None)
             path = self.repository / name
             if not path.is_file():
                 continue
-            digest = _sha256_file(path)
+            # Hash-only sources stay streamed; parsed sources share one read
+            # between their digest and extracted facts.
+            if name in {"pyproject.toml", "package.json"}:
+                digest, text = _read_source(path)
+            else:
+                digest, text = _sha256_file(path), ""
             self._record_source(facts, name, digest)
             if name == "pyproject.toml":
-                self._facts_from_pyproject(project, path, digest)
+                self._facts_from_pyproject(project, path, digest, text)
             elif name == "package.json":
-                self._facts_from_package_json(project, path, digest)
+                self._facts_from_package_json(project, path, digest, text)
             elif name == "go.mod":
                 project["project_type"] = SourceFact("go", name, digest).to_dict()
             elif name == "Cargo.toml":
                 project["project_type"] = SourceFact("rust", name, digest).to_dict()
 
     def _facts_from_pyproject(
-        self, project: dict[str, Any], path: Path, digest: str
+        self, project: dict[str, Any], path: Path, digest: str, text: str
     ) -> None:
-        text = path.read_text(encoding="utf-8", errors="replace")
         relative = path.name
         project["project_type"] = SourceFact("python", relative, digest).to_dict()
         name_match = re.search(r'(?m)^name\s*=\s*"([^"]+)"', text)
@@ -300,11 +330,11 @@ class ProjectFactMap:
                 ).to_dict()
 
     def _facts_from_package_json(
-        self, project: dict[str, Any], path: Path, digest: str
+        self, project: dict[str, Any], path: Path, digest: str, text: str
     ) -> None:
         relative = path.name
         try:
-            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            payload = json.loads(text)
         except ValueError:
             return
         project.setdefault(
@@ -331,13 +361,13 @@ class ProjectFactMap:
     def _apply_instruction_facts(self, facts: dict[str, Any]) -> None:
         instructions: dict[str, Any] = facts.setdefault("instructions", {})
         for name in INSTRUCTION_FILES:
+            facts.setdefault("sources", {}).pop(name, None)
             path = self.repository / name
             if not path.is_file():
                 instructions[name] = {"present": False}
                 continue
-            digest = _sha256_file(path)
+            digest, text = _read_source(path)
             self._record_source(facts, name, digest)
-            text = path.read_text(encoding="utf-8", errors="replace")
             instructions[name] = {
                 "present": True,
                 "bytes": len(text.encode("utf-8")),

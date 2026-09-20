@@ -42,6 +42,7 @@ _FAILURE_PATTERN = re.compile(
 _PYTHON_CONFIG = frozenset(
     {
         "pyproject.toml",
+        "pytest.ini",
         "setup.cfg",
         "setup.py",
         "tox.ini",
@@ -280,13 +281,20 @@ class AffectedChecksEngine:
                 preserve_whitespace=True,
             )
             candidates: list[str] = []
-            for entry in raw.split("\0"):
+            entries = iter(raw.split("\0"))
+            for entry in entries:
                 if len(entry) < 4:
                     continue
-                path = entry[3:]
-                if " -> " in path:
-                    path = path.split(" -> ", 1)[1]
-                candidates.append(path)
+                candidates.append(entry[3:])
+                # Porcelain -z emits destination NUL source for renames/copies;
+                # the source is not another status record. Both paths matter.
+                if "R" in entry[:2] or "C" in entry[:2]:
+                    source = next(entries, "")
+                    if not source:
+                        raise AffectedChecksError(
+                            "git_inspection_failed", "incomplete Git rename/copy record"
+                        )
+                    candidates.append(source)
         else:
             if not isinstance(supplied, list) or not all(isinstance(item, str) for item in supplied):
                 raise AffectedChecksError("invalid_request", "changed_files must be a string array")
@@ -314,8 +322,9 @@ class AffectedChecksEngine:
             return []
         return sorted(
             path.relative_to(self.repository).as_posix()
-            for path in root.rglob("test_*.py")
-            if path.is_file()
+            for path in root.rglob("*.py")
+            if (path.name.startswith("test_") or path.name.endswith("_test.py"))
+            and path.is_file()
         )
 
     def _historical_tests(self, changed_files: Sequence[str], test_files: set[str]) -> dict[str, int]:
@@ -356,6 +365,8 @@ class AffectedChecksEngine:
         test_set = set(tests)
         reasons: dict[str, list[str]] = {}
         selected: set[str] = set()
+        # Per-selection only: avoid C x T reads without stale cross-run contents.
+        contents: dict[str, str] = {}
         broad_python_config = any(Path(path).name in _PYTHON_CONFIG for path in changed_files)
         for changed in changed_files:
             if changed in test_set:
@@ -379,9 +390,13 @@ class AffectedChecksEngine:
                     reasons.setdefault(test, []).append(f"name_match:{changed}")
                     continue
                 try:
-                    content = test_path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
+                    if test not in contents:
+                        contents[test] = test_path.read_text(encoding="utf-8", errors="replace")
+                    content = contents[test]
+                except OSError as exc:
+                    raise AffectedChecksError(
+                        "test_inspection_failed", f"cannot inspect test: {test}"
+                    ) from exc
                 if stem in content or dotted in content:
                     selected.add(test)
                     reasons.setdefault(test, []).append(f"import_or_symbol_match:{changed}")
@@ -389,13 +404,11 @@ class AffectedChecksEngine:
         for test, score in sorted(historical.items(), key=lambda item: (-item[1], item[0])):
             selected.add(test)
             reasons.setdefault(test, []).append(f"historical_cochange:{score}")
-            if len(selected) >= _MAX_TEST_TARGETS:
-                break
         if broad_python_config:
-            for test in tests[:_MAX_TEST_TARGETS]:
+            for test in tests:
                 selected.add(test)
                 reasons.setdefault(test, []).append("python_project_config_changed")
-        ordered = sorted(selected)[:_MAX_TEST_TARGETS]
+        ordered = sorted(selected)
         return ordered, reasons
 
     @staticmethod
@@ -441,37 +454,45 @@ class AffectedChecksEngine:
         names = self._delegate_names()
         tests, reasons = self._select_tests(changed_files)
         selected: list[dict[str, Any]] = []
-        if tests and "karox.tests.run" in names:
+        full_reasons: set[str] = set()
+        if any(Path(path).name in _PYTHON_CONFIG for path in changed_files):
+            full_reasons.add("python_project_config_changed")
+        if len(tests) > _MAX_TEST_TARGETS:
+            # The target bound is a transport budget, not permission to drop
+            # checks. Full collection also covers configured tests outside tests/.
+            full_reasons.add("affected_test_target_budget_exceeded")
+        mapped_reasons = {reason for values in reasons.values() for reason in values}
+        # Preserve checks-only projects without inventing a test capability;
+        # discovered tests still require the test delegate (never lint-only).
+        has_test_surface = "karox.tests.run" in names or bool(self._test_files())
+        for path in changed_files:
+            if Path(path).name in {"conftest.py", "__init__.py"} or (
+                path.startswith("tests/") and "changed_test" not in reasons.get(path, [])
+            ):
+                full_reasons.add("shared_test_support_or_collection_changed")
+            if Path(path).suffix.lower() not in {".py", ".pyi"} or path in tests:
+                continue
+            # History is additive evidence, never proof that an individual
+            # changed source is covered by another source's mapped tests.
+            if has_test_surface and not any(
+                f"{prefix}:{path}" in mapped_reasons
+                for prefix in ("name_match", "import_or_symbol_match")
+            ):
+                full_reasons.add("python_source_changed_without_deterministic_test_mapping")
+        if tests or full_reasons:
+            if "karox.tests.run" not in names:
+                raise AffectedChecksError(
+                    "capability_unavailable", "affected tests require karox.tests.run"
+                )
             selected.append(
                 {
                     "tool": "karox.tests.run",
-                    "arguments": {
-                        "suite": "focused",
-                        "targets": tests,
-                    },
-                    "reasons": sorted(
-                        {
-                            reason
-                            for test in tests
-                            for reason in reasons.get(test, [])
-                        }
+                    "arguments": (
+                        {"suite": "full"} if full_reasons
+                        else {"suite": "focused", "targets": tests}
                     ),
-                    "kind": "affected_tests",
-                }
-            )
-        python_sources = [
-            path
-            for path in changed_files
-            if Path(path).suffix.lower() in {".py", ".pyi"}
-            and not path.startswith("tests/")
-        ]
-        if python_sources and not tests and "karox.tests.run" in names and self._test_files():
-            selected.append(
-                {
-                    "tool": "karox.tests.run",
-                    "arguments": {"suite": "full"},
-                    "reasons": ["python_source_changed_without_deterministic_test_mapping"],
-                    "kind": "fallback_full_tests",
+                    "reasons": sorted(full_reasons or mapped_reasons),
+                    "kind": "fallback_full_tests" if full_reasons else "affected_tests",
                 }
             )
         if "karox.checks.run" in names:

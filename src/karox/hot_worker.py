@@ -8,13 +8,15 @@ never replaces the last known-good modules.
 
 from __future__ import annotations
 
-import _imp
 import hashlib
 import importlib
+import importlib.util
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
+from importlib import _bootstrap
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Optional
@@ -78,6 +80,7 @@ class HotWorkerSupervisor:
         self._module: Optional[ModuleType] = None
         self._modules: dict[str, ModuleType] = {}
         self._signature: Optional[tuple[tuple[str, int, int, str], ...]] = None
+        self._failed_signature: Optional[tuple[tuple[str, int, int, str], ...]] = None
         self._generation = 0
         self._reload_count = 0
         self._loaded_at = 0.0
@@ -117,6 +120,8 @@ class HotWorkerSupervisor:
 
     @staticmethod
     def _digest(path: Path) -> str:
+        # Metadata-only caches miss same-size edits with restored mtime, even
+        # with ctime on filesystems whose clock has not advanced between writes.
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _sources(
@@ -174,6 +179,7 @@ class HotWorkerSupervisor:
         self._source_sha256 = self._combined_digest(signature)
         self._watched_sources = tuple(str(sources[name]) for name in self._module_names())
         self._last_reload_error = None
+        self._failed_signature = None
 
     @staticmethod
     def _validate_worker(module: ModuleType) -> None:
@@ -198,68 +204,118 @@ class HotWorkerSupervisor:
         return modules[self.MODULE_NAME]
 
     @staticmethod
-    def _candidate(name: str, previous: ModuleType, path: Path) -> ModuleType:
-        candidate = ModuleType(name)
-        candidate.__file__ = str(path)
-        candidate.__package__ = name.rpartition(".")[0]
-        candidate.__loader__ = getattr(previous, "__loader__", None)
-        candidate.__spec__ = getattr(previous, "__spec__", None)
-        return candidate
+    def _candidate(name: str, path: Path) -> ModuleType:
+        # A fresh spec is essential: changing _initializing on the old module's
+        # spec would make known-good imports wait on the candidate too.
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None:
+            raise RuntimeError(f"cannot create reloadable module spec: {name}")
+        return importlib.util.module_from_spec(spec)
 
     def _load_generation(
         self,
         sources: dict[str, Path],
+        signature: tuple[tuple[str, int, int, str], ...],
     ) -> dict[str, ModuleType]:
         names = self._module_names()
+        contents = {name: sources[name].read_bytes() for name in names}
+        expected = {name: digest for name, _mtime, _size, digest in signature}
+        if any(hashlib.sha256(contents[name]).hexdigest() != expected[name] for name in names):
+            raise RuntimeError("reloadable source changed while preparing generation")
         compiled = {
-            name: compile(
-                sources[name].read_text(encoding="utf-8"),
-                str(sources[name]),
-                "exec",
-            )
-            for name in names
+            name: compile(contents[name], str(sources[name]), "exec") for name in names
         }
-        previous = {name: sys.modules.get(name) for name in names}
-        if any(module is None for module in previous.values()):
-            raise RuntimeError("reloadable module group is incomplete in sys.modules")
-        candidates = {
-            name: self._candidate(name, previous[name], sources[name])  # type: ignore[arg-type]
-            for name in names
-        }
-
-        # Relative imports inside unified_patch/workspace_worker must see the
-        # candidate dependency generation, not the old one.  The import lock
-        # prevents another importer from observing a half-executed module.
-        _imp.acquire_lock()
-        try:
+        # Use the *same* per-module locks as ordinary imports. The global
+        # _imp lock neither protects cached imports nor may be held over exec:
+        # a dependency being imported in another thread can need it to finish.
+        # importlib has no public API for these reentrant, deadlock-aware locks.
+        with ExitStack() as locks:
+            for name in names:
+                locks.enter_context(_bootstrap._ModuleLockManager(name))  # type: ignore[attr-defined]
+            previous = {name: sys.modules.get(name) for name in names}
+            if any(module is None for module in previous.values()):
+                raise RuntimeError("reloadable module group is incomplete in sys.modules")
+            candidates = {
+                name: self._candidate(name, sources[name]) for name in names
+            }
+            missing = object()
+            parents = {
+                name: sys.modules.get(name.rpartition(".")[0]) for name in names
+            }
+            attributes = {
+                name: getattr(parents[name], name.rpartition(".")[2], missing) for name in names
+            }
             try:
                 for name in names:
-                    sys.modules[name] = candidates[name]
-                    exec(compiled[name], candidates[name].__dict__)
+                    candidate = candidates[name]
+                    # Set this BEFORE inserting into sys.modules, just as
+                    # importlib does. Cached import_module calls then wait and
+                    # re-read sys.modules after success OR rollback. Keep it set
+                    # until the entire generation has passed validation.
+                    setattr(candidate.__spec__, "_initializing", True)
+                    sys.modules[name] = candidate
+                    exec(compiled[name], candidate.__dict__)
+                    # `from package import dependency` bypasses module locks
+                    # when this attribute exists. Keep the old, complete module
+                    # there until exec finishes. Publish completed dependencies
+                    # in order so later candidates also see their new versions.
+                    parent = parents[name]
+                    if parent is not None:
+                        setattr(parent, name.rpartition(".")[2], candidate)
                 self._validate_worker(candidates[self.MODULE_NAME])
-            except Exception:
+            except BaseException:
                 for name, module in previous.items():
                     if module is None:
                         sys.modules.pop(name, None)
                     else:
                         sys.modules[name] = module
+                    parent = parents[name]
+                    if parent is not None:
+                        attribute = name.rpartition(".")[2]
+                        if attributes[name] is missing:
+                            if hasattr(parent, attribute):
+                                delattr(parent, attribute)
+                        else:
+                            setattr(parent, attribute, attributes[name])
                 raise
-        finally:
-            _imp.release_lock()
+            finally:
+                # Restore sys.modules first on failure, and only then unblock
+                # importers. Never leave a candidate marked as initializing.
+                for candidate in candidates.values():
+                    setattr(candidate.__spec__, "_initializing", False)
         return candidates
 
     def module(self, *, force: bool = False) -> ModuleType:
         with self._lock:
             if self._module is None:
                 return self._import_initial()
-            sources = self._sources(self._modules)
-            signature = self._signature_for(sources)
-            if not force and signature == self._signature:
-                return self._module
+            signature = None
+            sources: dict[str, Path] = {}
             try:
+                sources = self._sources(self._modules)
+                signature = self._signature_for(sources)
+                if not force:
+                    if self._combined_digest(signature) == self._source_sha256:
+                        # A touch (or recovery to known-good bytes) is not a new
+                        # implementation generation.
+                        self._signature = signature
+                        self._source_mtime_ns = max(row[1] for row in signature)
+                        self._last_reload_error = None
+                        self._failed_signature = None
+                        return self._module
+                    if signature == self._failed_signature:
+                        return self._module
                 importlib.invalidate_caches()
-                candidates = self._load_generation(sources)
+                candidates = self._load_generation(sources, signature)
             except Exception as exc:
+                # Only cache compile failures backed by watched source bytes.
+                # Imports/I/O can recover without changing this module group.
+                self._failed_signature = (
+                    signature
+                    if isinstance(exc, SyntaxError)
+                    and exc.filename in {str(path) for path in sources.values()}
+                    else None
+                )
                 self._last_reload_error = f"{type(exc).__name__}: {exc}"
                 if force:
                     raise RuntimeError(

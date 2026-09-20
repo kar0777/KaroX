@@ -375,8 +375,19 @@ def effective_job_status(
 
     if state.status in {"queued", "running"} and state.worker_identity is not None:
         worker = verify_process_identity(state.worker_identity, pid_alive=pid_alive)
-        if not worker.alive:
-            return "failed", "worker_exited_without_final_state"
+        return _status_from_worker(state, worker)
+    return state.status, state.error_code
+
+
+def _status_from_worker(
+    state: CheckJobState, worker: ProcessIdentityVerdict
+) -> tuple[str, Optional[str]]:
+    if (
+        state.status in {"queued", "running"}
+        and state.worker_identity is not None
+        and not worker.alive
+    ):
+        return "failed", "worker_exited_without_final_state"
     return state.status, state.error_code
 
 
@@ -923,6 +934,12 @@ class CheckJobManager:
                         "idempotent_replay": True,
                     }
             job_id = f"job-{hashlib.sha256((idempotency_key + command_sha256 + workspace_sha256).encode('utf-8')).hexdigest()[:20]}"
+            # A workspace can return to an earlier fingerprint (A -> B -> A).
+            # The index points only to B; reusing A's deterministic id would
+            # overwrite its durable state/log and share its cancellation marker
+            # with a second worker. Allocate a new generation under the lock.
+            while self.store.state_path(job_id).exists():
+                job_id = f"job-{os.urandom(10).hex()}"
             log_path = self.store.root / f"{job_id}.log"
             state = CheckJobState(
                 schema_version=_SCHEMA_VERSION,
@@ -1037,10 +1054,9 @@ class CheckJobManager:
         now = time.time()
         worker = self._identity_verdict(state.worker_identity)
         child = self._identity_verdict(state.child_identity)
-        effective_status, diagnostic = effective_job_status(
-            state,
-            pid_alive=self.pid_alive,
-        )
+        # Reuse this poll's verdict: a second probe can observe worker exit and
+        # contradict the ownership details returned in the same response.
+        effective_status, diagnostic = _status_from_worker(state, worker)
         log = read_job_log(Path(state.log_path), limit=_DEFAULT_LOG_TAIL)
         summary = summarize_log(log["text"])
         duration_seconds = round(
@@ -1108,7 +1124,7 @@ class CheckJobManager:
         log = read_job_log(Path(state.log_path), limit=bounded)
         return {
             "job_id": job_id,
-            "status": self.public_status(state)["status"],
+            "status": effective_job_status(state, pid_alive=self.pid_alive)[0],
             "log": log,
             "artifact_id": state.artifact_id,
         }
@@ -1153,8 +1169,10 @@ class CheckJobManager:
 
 def read_job_log(path: Path, *, limit: int) -> dict[str, Any]:
     try:
-        total = path.stat().st_size
         with path.open("rb") as handle:
+            # Measure the opened file, not a path that may have been replaced
+            # or trimmed between stat and open.
+            total = os.fstat(handle.fileno()).st_size
             if total > limit:
                 handle.seek(total - limit)
             raw = handle.read(limit)
@@ -1241,15 +1259,21 @@ def _append_redacted(
                 pending = lines.pop()
             else:
                 pending = ""
-            for line in lines:
-                truncated[0] |= _write_capped_log(
-                    handle, str(redact(line)).encode("utf-8", errors="replace")
-                )
+            # Keep the redaction boundaries unchanged. Only batch writes that
+            # fit without eviction: trimming depends on each individual write's
+            # size, so a chunk that could cross the cap must use the old order.
+            redacted = [str(redact(line)).encode("utf-8", errors="replace") for line in lines]
             if len(pending) > 8192:
                 flush, pending = pending[:-512], pending[-512:]
-                truncated[0] |= _write_capped_log(
-                    handle, str(redact(flush)).encode("utf-8", errors="replace")
-                )
+                redacted.append(str(redact(flush)).encode("utf-8", errors="replace"))
+            if redacted:
+                data = b"".join(redacted)
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() + len(data) <= _MAX_LOG_BYTES:
+                    truncated[0] |= _write_capped_log(handle, data)
+                else:
+                    for part in redacted:
+                        truncated[0] |= _write_capped_log(handle, part)
         if pending:
             truncated[0] |= _write_capped_log(
                 handle, str(redact(pending)).encode("utf-8", errors="replace")

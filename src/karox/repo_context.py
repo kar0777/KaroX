@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -347,6 +348,25 @@ def _safe_relative(repository: Path, value: str) -> Optional[str]:
     return relative
 
 
+def _status_entries(status: str) -> Iterable[tuple[str, str]]:
+    """Decode porcelain v1 -z; rename/copy sources are a second NUL field.
+
+    With -z, the destination comes first and literal " -> " is part of the
+    filename, not the human-readable rename separator. Keep the origin in the
+    identity too: changing which source was renamed/copied must invalidate it.
+    """
+    entries = iter(status.split("\0"))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        code = entry[:2]
+        yield code, entry[3:]
+        if "R" in code or "C" in code:
+            source = next(entries, "")
+            if source:
+                yield code, source
+
+
 def _read_lines(path: Path, max_bytes: int) -> list[str]:
     try:
         if path.stat().st_size > max_bytes:
@@ -635,7 +655,9 @@ class RepositoryContextEngine:
             except OSError:
                 ordered.append(("marker", f"{status_code}\0{current_relative}\0missing"))
                 return
-            if current.is_symlink():
+            # Reuse the lstat above: Path.is_symlink()/is_dir() each issue
+            # another metadata query for every dirty or untracked entry.
+            if stat.S_ISLNK(metadata.st_mode):
                 try:
                     target = os.readlink(current)
                 except OSError:
@@ -644,7 +666,7 @@ class RepositoryContextEngine:
                     ("marker", f"{status_code}\0{current_relative}\0symlink\0{target}")
                 )
                 return
-            if not current.is_dir():
+            if not stat.S_ISDIR(metadata.st_mode):
                 file_index = len(files)
                 files.append(current)
                 ordered.append(
@@ -763,12 +785,7 @@ class RepositoryContextEngine:
             return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="all")
         dirty: list[dict[str, str]] = []
-        for entry in status.split("\0"):
-            if len(entry) < 4:
-                continue
-            raw_path = entry[3:]
-            if " -> " in raw_path:
-                raw_path = raw_path.split(" -> ", 1)[1]
+        for _status_code, raw_path in _status_entries(status):
             relative = _safe_relative(self.repository, raw_path)
             if relative is None:
                 continue
@@ -797,13 +814,7 @@ class RepositoryContextEngine:
             return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="normal")
         dirty: list[dict[str, str]] = []
-        for entry in status.split("\0"):
-            if len(entry) < 4:
-                continue
-            status_code = entry[:2]
-            raw_path = entry[3:]
-            if " -> " in raw_path:
-                raw_path = raw_path.split(" -> ", 1)[1]
+        for status_code, raw_path in _status_entries(status):
             relative = _safe_relative(self.repository, raw_path)
             if relative is None:
                 continue
@@ -905,13 +916,7 @@ class RepositoryContextEngine:
             return self._non_git_identity()
         revision, status = self._status_snapshot(untracked_files="normal")
         work: list[tuple[str, str, Path]] = []
-        for entry in status.split("\0"):
-            if len(entry) < 4:
-                continue
-            status_code = entry[:2]
-            raw_path = entry[3:]
-            if " -> " in raw_path:
-                raw_path = raw_path.split(" -> ", 1)[1]
+        for status_code, raw_path in _status_entries(status):
             relative = _safe_relative(self.repository, raw_path)
             if relative is None:
                 continue
@@ -972,10 +977,10 @@ class RepositoryContextEngine:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
+        if not isinstance(payload, dict):
+            return None
         artifact_id = payload.get("artifact_id")
         if not isinstance(artifact_id, str) or not self.artifacts.exists(artifact_id):
-            return None
-        if not isinstance(payload, dict):
             return None
         payload["cache_hit"] = True
         return payload
