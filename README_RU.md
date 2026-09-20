@@ -94,44 +94,83 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Кандидат публичной беты — **`v5.0.0rc3`**. После завершения публикации в PyPI установить эту точную версию на Windows, macOS или Linux можно так:
+Кандидат публичной беты — **`v5.0.0rc3`**. Для первой установки рекомендуется
+**preview portable bootstrap**: заранее устанавливать Python, pipx или uv не
+нужно; права администратора не требуются. Bootstrap проверяет SHA-256 release-
+архива, устанавливает его в каталог пользователя и через встроенный `uv`
+загружает managed Python и запускает KaroX. Нужен доступ в интернет для архива,
+Python и Python-пакетов.
+
+**Windows — вставь в PowerShell:**
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.ps1' -TimeoutSec 30))) -Channel preview
+```
+
+**macOS / Linux — терминал с Bash и curl:**
+
+```bash
+curl --proto '=https' -fsSL --max-time 30 https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
+```
+
+Portable-архивы предназначены для Windows, macOS и Linux x64/ARM64. По умолчанию
+KaroX сразу запускается; `KAROX_NO_START=1` отключает автозапуск. Предыдущая
+portable-установка сохраняется до готовности проверенной замены. Ошибка TLS,
+таймаут, несовпадение checksum или небезопасный архив **останавливают установку**,
+а не запускают непроверенные исходники. Исправь указанную причину и повтори.
+Артефакты выбранного релиза должны быть опубликованы. Канал по умолчанию читает
+`RELEASE.json`, канал `preview` — `PREVIEW.json`.
+
+**Windows PATH — без ожидания нового окна:** bootstrap обновляет PATH своего
+процесса PowerShell и сохраняет пользовательский PATH. Если установка запущена
+дочерним процессом, вставь в **исходное** окно (для стандартного каталога):
+
+```powershell
+$env:Path = "$env:LOCALAPPDATA\KaroX;$env:Path"
+karox
+# Прямой запуск работает и без обновления PATH:
+& "$env:LOCALAPPDATA\KaroX\KaroX.cmd"
+```
+
+При `KAROX_INSTALL_ROOT` используй точную команду PATH из вывода установщика.
+На macOS/Linux, если команда не найдена, выполни
+`export PATH="$HOME/.local/bin:$PATH"` или запусти `~/.local/bin/karox` напрямую.
+Затем запускай `karox` внутри нужного Git-репозитория;
+`karox quickstart` покажет следующий шаг настройки.
+
+При автоматическом выборе туннеля используется установленный Tailscale,
+иначе — Cloudflare. Ошибки входа/Funnel в Tailscale не переключают провайдера
+незаметно. Явные `--tunnel tailscale`, `--tunnel cloudflare`, `--tunnel custom`
+и `--cloudflared PATH` сохраняют свой смысл. Для Cloudflare используется уже
+установленный cloudflared либо лениво загружается закреплённая версия с проверкой
+checksum в локальный runtime-кеш пользователя. Автозагрузка поддерживает Windows
+x64 и macOS/Linux x64/ARM64; в закреплённом upstream-релизе нет Windows ARM64
+исполняемого файла. На неподдерживаемой платформе или без сети укажи
+`--cloudflared PATH` либо используй Tailscale. Лимит загрузки — 96 MiB, бюджет
+передачи — 120 секунд, таймаут отдельного I/O — 15 секунд. На macOS из проверенного
+архива копируется только один обычный исполняемый файл. Системные службы туннеля
+не устанавливаются. Учётные данные по-прежнему требуют OS keyring; plaintext-
+fallback отсутствует.
+
+**Альтернатива: готовое Python-окружение.** После публикации версии в PyPI:
 
 ```bash
 pipx install "karox-runtime==5.0.0rc3"
 # или
-uv tool install --prerelease=allow karox-runtime
+uv tool install "karox-runtime==5.0.0rc3" --prerelease=allow
 ```
 
-На чистом macOS или Linux, даже если **Python вообще не установлен**, preview-
-bootstrap скачивает проверенный portable bundle, использует встроенный `uv`,
-сам ставит managed Python и KaroX, а затем запускает его:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
-```
-
-Для проверки исходников именно этого кандидата используй фиксированный Git-тег, а не движущуюся ветку:
+**Исходники / разработка:** используй проверенный checkout точного тега и запусти
+`./install.karox.sh` или `.\install.karox.ps1`, либо:
 
 ```bash
 pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
 ```
 
-После установки открой терминал внутри нужного Git-репозитория и запусти:
-
-```bash
-karox
-```
-
-`karox quickstart` покажет, что уже подключено, и одну следующую команду —
-первая минута не требует документации.
-
-Публичные bootstrap-команды ветки `main` по-прежнему устанавливают последний
-стабильный релиз 4.x. `bootstrap.sh --channel preview` /
-`bootstrap.ps1 -Channel preview` ставят кандидат 5.x через pipx. Для проверки из
-исходников запусти `./install.karox.sh` или `.\install.karox.ps1` в репозитории.
-
-На Windows терминал, открытый до установки, сохраняет старый `PATH`. Открой
-новое окно, используй ярлык KaroX или проверь `Get-Command karox -All`.
+Если portable-архива нет (HTTP 404) или `KAROX_BOOTSTRAP_REF` указывает не на
+релиз, source-fallback bootstrap разрешён только с независимо доверенным
+`KAROX_SOURCE_SHA256` исходного архива. На POSIX этот путь требует Python 3.
+Не подставляй checksum непроверенной загрузки только для обхода ошибки проверки.
 
 ## Терминальный клиент
 
@@ -371,7 +410,7 @@ python -m pytest tests -n 6 --dist=loadfile
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3445 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3506 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 

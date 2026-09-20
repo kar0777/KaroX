@@ -91,47 +91,84 @@ until their own evidence gates pass.
 
 ## Install
 
-The beta candidate is **`v5.0.0rc3`**. After its PyPI publication completes,
-install this exact version on Windows, macOS, or Linux:
+The beta candidate is **`v5.0.0rc3`**. The recommended first install is the
+**preview portable bootstrap**: no preinstalled Python, pipx, uv, or administrator
+rights are needed. It verifies the release bundle's SHA-256, installs it in your
+user directory, and uses bundled `uv` to obtain managed Python and start KaroX.
+Internet access is needed for the bundle, Python, and Python packages.
+
+**Windows — paste into PowerShell:**
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.ps1' -TimeoutSec 30))) -Channel preview
+```
+
+**macOS / Linux — paste into a terminal with Bash and curl:**
+
+```bash
+curl --proto '=https' -fsSL --max-time 30 https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
+```
+
+Portable bundles target Windows, macOS, and Linux x64/ARM64. Installation starts
+KaroX by default; set `KAROX_NO_START=1` to install without starting it. The
+bootstrap keeps the previous portable installation until the verified replacement
+is ready. A TLS, timeout, checksum, or extraction error **stops installation**;
+it does not silently execute an unchecked source fallback. Retry after fixing the
+reported error. Release assets must have been published for the selected channel.
+The default channel follows `RELEASE.json`; `preview` follows `PREVIEW.json`.
+
+**Windows PATH — usable immediately:** the bootstrap updates PATH in its own
+PowerShell process and persists the user PATH. If you launched it from another
+process, paste this into the **original** window (default install location):
+
+```powershell
+$env:Path = "$env:LOCALAPPDATA\KaroX;$env:Path"
+karox
+# Direct launch works even before PATH is refreshed:
+& "$env:LOCALAPPDATA\KaroX\KaroX.cmd"
+```
+
+With `KAROX_INSTALL_ROOT`, use the exact PATH command printed by the installer.
+On macOS/Linux, if `karox` is not found, run
+`export PATH="$HOME/.local/bin:$PATH"` or `~/.local/bin/karox` directly.
+Then run `karox` inside the Git repository you want to work with;
+`karox quickstart` prints the next setup step.
+
+When a web bridge requests automatic tunnel selection, KaroX uses an installed
+Tailscale, otherwise Cloudflare. A Tailscale login/Funnel error is reported, not
+silently replaced with Cloudflare. Explicit `--tunnel tailscale`,
+`--tunnel cloudflare`, `--tunnel custom`, and `--cloudflared PATH` remain explicit.
+Cloudflare setup reuses an installed cloudflared or lazily downloads a pinned,
+checksum-verified executable to the user-local runtime cache. Automatic downloads
+support Windows x64 and macOS/Linux x64/ARM64; the pinned upstream release has no
+Windows ARM64 executable. Unsupported platforms/offline machines must supply
+`--cloudflared PATH` or use Tailscale. Managed cloudflared downloads are limited
+to 96 MiB, with a 120-second transfer budget and 15-second individual I/O timeout;
+macOS archives are verified and only the single regular executable is copied.
+No tunnel OS service is installed. Credentials still require the OS keyring;
+there is no plaintext fallback.
+
+**Alternative: existing Python tool environment.** After this version is
+published to PyPI:
 
 ```bash
 pipx install "karox-runtime==5.0.0rc3"
 # or
-uv tool install --prerelease=allow karox-runtime
+uv tool install "karox-runtime==5.0.0rc3" --prerelease=allow
 ```
 
-On a clean macOS or Linux machine, including one with **no Python installed**,
-the preview bootstrap downloads the checksummed portable bundle, uses its
-bundled `uv` to provision a managed Python runtime, installs KaroX, and starts it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | bash -s -- --channel preview
-```
-
-For source-level testing of the exact release candidate, install the matching
-Git tag instead of a moving branch:
+**Source/developer installs:** use a reviewed checkout of the exact tag and run
+`./install.karox.sh` or `.\install.karox.ps1`, or:
 
 ```bash
 pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
 ```
 
-Then open a terminal inside the Git repository you want to work with and run:
-
-```bash
-karox
-```
-
-`karox quickstart` prints what is already connected and the single next command
-to run, so the first minute needs no documentation.
-
-The public bootstrap commands on `main` still install the latest stable 4.x
-release. `bootstrap.sh --channel preview` / `bootstrap.ps1 -Channel preview`
-install the 5.x release candidate through pipx instead. To test from a source
-checkout, run `./install.karox.sh` or `.\install.karox.ps1` in the repository.
-
-On Windows, a terminal opened before installation keeps its old `PATH`. Open a
-new terminal, use the Desktop shortcut, or refresh the environment before
-reporting that the launcher is missing.
+A missing portable asset (HTTP 404) or a non-release `KAROX_BOOTSTRAP_REF` can
+use the bootstrap's source fallback only with an independently trusted
+`KAROX_SOURCE_SHA256` for that source archive. The POSIX source fallback requires
+Python 3. Do not set a checksum from an untrusted download just to bypass a
+verification error.
 
 ## Terminal client
 
@@ -374,14 +411,14 @@ Whole-file scheduling keeps benchmark aggregation and class fixtures together;
 no benchmark assertion is skipped to enable parallelism.
 
 For comparison with historical records, the deterministic **unittest-only**
-count is maintained separately. The suite is 3445 tests.
+count is maintained separately. The suite is 3506 tests.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3445 tests`. Class-level environment skips can reduce
-the executed count. The unittest-plus-legacy subtotal is 3450 (the baseline
+A clean run reports `Ran 3506 tests`. Class-level environment skips can reduce
+the executed count. The unittest-plus-legacy subtotal is 3511 (the baseline
 plus five KaroX 4 script checks); it is **not** the full pytest collection size.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

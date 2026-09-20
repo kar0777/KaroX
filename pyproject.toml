@@ -26,6 +26,9 @@ dependencies = [
   "httpx>=0.27,<1.0",
   "httpx-sse>=0.4,<1.0",
   "keyring>=25,<27",
+  # Direct Linux Secret Service probes must not activate/unlock on doctor reads.
+  "SecretStorage>=3.3,<4; sys_platform == 'linux'",
+  "jeepney>=0.8,<1; sys_platform == 'linux'",
   # Browser automation is a first-class KaroX v5 feature. The Python package is
   # installed with the normal wheel; Chromium itself is provisioned lazily by
   # karox.browser_bootstrap on first browser use so installation stays fast.

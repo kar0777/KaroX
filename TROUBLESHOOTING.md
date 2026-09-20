@@ -344,3 +344,10 @@ Claude и обязательные provider records не имеют статус
 - сначала отзови credential, который мог быть раскрыт.
 
 Правила disclosure: [SECURITY.md](SECURITY.md).
+
+## Secure credentials on headless Linux
+
+See [the headless credential recovery guide](docs/TROUBLESHOOTING.md) for
+read-only diagnosis, explicit activation/unlock consent, background-process
+verification, and logout/reboot limitations. Missing or locked secure storage
+must remain unavailable; installing the Python keyring package alone is not enough.
