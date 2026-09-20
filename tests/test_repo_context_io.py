@@ -94,6 +94,10 @@ class RepositoryContextIOTests(unittest.TestCase):
             mock.patch.object(self.engine, "_status_snapshot", return_value=("rev", f" M {name}\0")),
             mock.patch("karox.repo_context._safe_relative", side_effect=lambda _root, value: value),
             mock.patch.object(Path, "stat", return_value=metadata),
+            # Python 3.14 rewrote pathlib: is_file() calls os.stat directly and
+            # no longer routes through the overridden Path.stat above, so pin
+            # the in-memory file's existence explicitly.
+            mock.patch.object(Path, "is_file", lambda self: True),
             mock.patch.object(Path, "read_bytes", read),
             mock.patch.object(Path, "open", lambda path, *_args, **_kwargs: io.BytesIO(read(path))),
         ):
