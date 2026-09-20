@@ -19,7 +19,10 @@ class ProjectFactMapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
-        self.repo = root / "repo"
+        # Resolve before use: ProjectFactMap resolves its repository root, so
+        # on macOS (/var -> /private/var) and Windows CI (8.3 TEMP names) the
+        # raw temp path would not match the paths the map opens.
+        self.repo = (root / "repo").resolve()
         initialize_git_repository(self.repo)
         (self.repo / "pyproject.toml").write_text(
             '[build-system]\nrequires = ["setuptools"]\n\n'

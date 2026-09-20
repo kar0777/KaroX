@@ -102,12 +102,16 @@ def _safe_relative(repository: Path, value: str) -> Path:
     raw = Path(value)
     if raw.is_absolute() or raw.drive or ".." in raw.parts or "\0" in value:
         raise CheckpointError("checkpoint path is not repository-relative")
-    candidate = (repository / raw).resolve(strict=False)
+    # Resolve the base first: CI temp roots carry 8.3 short names (Windows
+    # runners) or symlinked prefixes (/var on macOS), so joining against the
+    # unresolved path would reject every repository-relative path.
+    base = repository.expanduser().resolve()
+    candidate = (base / raw).resolve(strict=False)
     try:
-        candidate.relative_to(repository)
+        candidate.relative_to(base)
     except ValueError as exc:
         raise CheckpointError("checkpoint path escapes the repository") from exc
-    cursor = repository
+    cursor = base
     for part in raw.parts:
         cursor = cursor / part
         if cursor.exists() and cursor.is_symlink():

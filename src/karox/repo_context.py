@@ -340,9 +340,13 @@ def _safe_relative(repository: Path, value: str) -> Optional[str]:
         raw = raw[2:]
     if not raw or raw.startswith("/") or raw.startswith("../") or "/../" in raw:
         return None
-    path = (repository / raw).resolve()
+    # Compare against the resolved base: CI temp roots carry 8.3 short names
+    # (Windows runners) or symlinked prefixes (/var on macOS), so joining
+    # against the unresolved path would reject every repository-relative path.
+    base = repository.expanduser().resolve()
+    path = (base / raw).resolve()
     try:
-        relative = path.relative_to(repository).as_posix()
+        relative = path.relative_to(base).as_posix()
     except ValueError:
         return None
     return relative
