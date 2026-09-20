@@ -8,7 +8,7 @@
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
-![Runtime](https://img.shields.io/badge/runtime-5.0.0rc2-2563eb)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc3-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
@@ -17,7 +17,7 @@
 Run AI coding agents on local Git repositories without giving one provider
 control of your permissions, sessions, or evidence.
 
-**KaroX 5 beta is now the primary `main` line · `5.0.0rc2`**
+**KaroX 5 beta is now the primary `main` line · `5.0.0rc3`**
 
 ### 🤝 Supported by
 
@@ -57,7 +57,7 @@ The runtime reduces authority through repository confinement, capabilities,
 allowlists, leases, idempotency, and hard blocks; it does not virtualize the
 machine.
 
-> **Release status:** the packaged runtime is `5.0.0rc2`. Deterministic local
+> **Release status:** the packaged runtime is `5.0.0rc3`. Deterministic local
 > contracts are extensively tested, but live ChatGPT Web, Claude Web, and paid
 > provider conformance records are still pending. See the
 > [5.0 release scope](docs/V5_RELEASE_SCOPE.md),
@@ -91,11 +91,11 @@ until their own evidence gates pass.
 
 ## Install
 
-The beta candidate is **`v5.0.0rc2`**. After its PyPI publication completes,
+The beta candidate is **`v5.0.0rc3`**. After its PyPI publication completes,
 install this exact version on Windows, macOS, or Linux:
 
 ```bash
-pipx install "karox-runtime==5.0.0rc2"
+pipx install "karox-runtime==5.0.0rc3"
 # or
 uv tool install --prerelease=allow karox-runtime
 ```
@@ -112,7 +112,7 @@ For source-level testing of the exact release candidate, install the matching
 Git tag instead of a moving branch:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc2"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
 ```
 
 Then open a terminal inside the Git repository you want to work with and run:

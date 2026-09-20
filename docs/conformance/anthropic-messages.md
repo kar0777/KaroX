@@ -4,7 +4,7 @@ integration: anthropic-messages
 status: pending
 release_blocker: true
 verified_at_utc: pending
-karox_version: 5.0.0rc2
+karox_version: 5.0.0rc3
 karox_commit: pending
 platform: pending
 external_version: pending

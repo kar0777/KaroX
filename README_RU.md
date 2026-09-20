@@ -8,7 +8,7 @@
 ![CI](https://github.com/kar0777/KaroX/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Product quality](https://github.com/kar0777/KaroX/actions/workflows/quality.yml/badge.svg?branch=main)
 ![Release](https://img.shields.io/github/v/release/kar0777/KaroX?include_prereleases&label=release)
-![Runtime](https://img.shields.io/badge/runtime-5.0.0rc2-2563eb)
+![Runtime](https://img.shields.io/badge/runtime-5.0.0rc3-2563eb)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-64748b)
 ![Protocol](https://img.shields.io/badge/protocol-MCP-7c3aed)
@@ -17,7 +17,7 @@
 Запускайте AI-агентов на локальных Git-репозиториях, не отдавая одному
 провайдеру контроль над разрешениями, сессиями и доказательствами работы.
 
-**KaroX 5 beta теперь основная линия `main` · `5.0.0rc2`**
+**KaroX 5 beta теперь основная линия `main` · `5.0.0rc3`**
 
 ### 🤝 Проект поддержали
 
@@ -57,7 +57,7 @@ KaroX не является моделью, IDE или полноценной с
 ограничивает полномочия через `repoRoot`, capabilities, allowlist, leases,
 idempotency и жёсткие запреты, но не виртуализирует операционную систему.
 
-> **Статус релиза:** packaged runtime имеет версию `5.0.0rc2`. Локальные
+> **Статус релиза:** packaged runtime имеет версию `5.0.0rc3`. Локальные
 > контракты и transport-paths покрыты тестами, но реальные live-проверки ChatGPT
 > Web, Claude Web и обязательных API-провайдеров ещё не завершены. Смотри
 > [scope KaroX 5.0](docs/V5_RELEASE_SCOPE.md),
@@ -94,10 +94,10 @@ Legacy до появления собственных доказательств
 
 ## Установка
 
-Кандидат публичной беты — **`v5.0.0rc2`**. После завершения публикации в PyPI установить эту точную версию на Windows, macOS или Linux можно так:
+Кандидат публичной беты — **`v5.0.0rc3`**. После завершения публикации в PyPI установить эту точную версию на Windows, macOS или Linux можно так:
 
 ```bash
-pipx install "karox-runtime==5.0.0rc2"
+pipx install "karox-runtime==5.0.0rc3"
 # или
 uv tool install --prerelease=allow karox-runtime
 ```
@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/main/bootstrap.sh | b
 Для проверки исходников именно этого кандидата используй фиксированный Git-тег, а не движущуюся ветку:
 
 ```bash
-pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc2"
+pipx install --force "git+https://github.com/kar0777/KaroX.git@v5.0.0rc3"
 ```
 
 После установки открой терминал внутри нужного Git-репозитория и запусти:

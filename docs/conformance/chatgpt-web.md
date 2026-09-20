@@ -4,7 +4,7 @@ integration: chatgpt-web
 status: pending
 release_blocker: true
 verified_at_utc: pending
-karox_version: 5.0.0rc2
+karox_version: 5.0.0rc3
 karox_commit: dbd3539fb552434c1370b8c0e67ea6475262670e (release work on top is uncommitted)
 platform: windows-11-x64 (Tailscale Funnel HTTPS ingress)
 external_version: ChatGPT web connector platform (SaaS, uncontrolled)
