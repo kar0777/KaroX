@@ -1347,13 +1347,69 @@ def build_proxy_asgi_app(
         extra = getattr(meta, "model_extra", None) if meta is not None else None
         try:
             return await execute_tool(name, arguments, meta_extra=extra)
-        except HostedApprovalRequired:
-            # The native approval UX is carried by the stateless 2026-07-28
-            # input_required wire below. Older SDK/session clients must fail
-            # closed rather than receiving or inventing an approval token.
-            return bridge_error_result(
-                "denied",
-                detail="this action requires an MCP 2026-07-28 user approval round",
+        except HostedApprovalRequired as approval:
+            # Legacy clients cannot carry the modern input_required round. Use
+            # the existing human-authenticated browser surface, never a claim
+            # of approval in model arguments or metadata. Without an explicitly
+            # configured HTTPS origin, retain the historical fail-closed path.
+            base = urlsplit(browser_approval.base_url or "")
+            if (
+                approval.consequence != "external"
+                or not browser_approval.available
+                or base.scheme != "https"
+                or not base.hostname
+                or base.username is not None
+                or base.password is not None
+                or base.query
+                or base.fragment
+            ):
+                return bridge_error_result(
+                    "denied",
+                    detail=(
+                        "this action requires exact human approval; legacy clients "
+                        "need a configured HTTPS browser approval page"
+                    ),
+                )
+            arguments_sha256 = _approval_arguments_digest(name, arguments)
+            if browser_approval.take_if_approved(
+                wire_name=name,
+                arguments_sha256=arguments_sha256,
+                action_digest=approval.action_digest,
+            ):
+                # The runtime revalidates HEAD and the action digest. Consuming
+                # first means an uncertain execution cannot reuse this approval.
+                return await execute_tool(
+                    name,
+                    arguments,
+                    meta_extra=extra,
+                    approved_action_digest=approval.action_digest,
+                )
+            record = browser_approval.ensure_pending(
+                wire_name=name,
+                arguments_sha256=arguments_sha256,
+                action_digest=approval.action_digest,
+                request_state=secrets.token_urlsafe(32),
+                message=approval.message,
+                preview=approval.preview,
+            )
+            approval_url = browser_approval.approval_url({}, str(record["request_state"]))
+            return CallToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=(
+                        "approval_browser_required: approve this exact action "
+                        "in the KaroX approval page, then retry the same tool call"
+                    ),
+                )],
+                structuredContent={
+                    "ok": False,
+                    "error_code": "approval_browser_required",
+                    "error": "human browser approval is required before an exact retry",
+                    "approval_url": approval_url,
+                    "approval_message": approval.message,
+                    "approval_expires_in_seconds": browser_approval.ttl_seconds,
+                },
+                isError=True,
             )
 
     def modern_result_meta() -> dict[str, Any]:
