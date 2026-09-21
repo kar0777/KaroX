@@ -166,7 +166,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download the candidate artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: karox-prerelease-dist
           path: dist/
@@ -224,7 +224,7 @@ jobs:
       contents: read
     steps:
       - name: Download the smoke-tested artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: karox-prerelease-dist
           path: dist/
@@ -260,7 +260,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download the smoke-tested artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: karox-prerelease-dist
           path: dist/
