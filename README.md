@@ -411,14 +411,14 @@ Whole-file scheduling keeps benchmark aggregation and class fixtures together;
 no benchmark assertion is skipped to enable parallelism.
 
 For comparison with historical records, the deterministic **unittest-only**
-count is maintained separately. The suite is 3506 tests.
+count is maintained separately. The suite is 3513 tests.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-A clean run reports `Ran 3506 tests`. Class-level environment skips can reduce
-the executed count. The unittest-plus-legacy subtotal is 3511 (the baseline
+A clean run reports `Ran 3513 tests`. Class-level environment skips can reduce
+the executed count. The unittest-plus-legacy subtotal is 3518 (the baseline
 plus five KaroX 4 script checks); it is **not** the full pytest collection size.
 
 `python scripts/check_test_count.py` verifies the published counts. Other

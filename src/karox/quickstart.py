@@ -130,6 +130,10 @@ def git_toplevel(path: Path, *, run: Callable[..., Any] = subprocess.run) -> Opt
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
             timeout=10,
             check=False,
         )

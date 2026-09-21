@@ -97,7 +97,12 @@ from .session_view import (
 )
 from .security import redact
 from .sessions import SessionStore
-from .tailscale import TailscaleError, find_tailscale, prepare_tailscale_funnel
+from .tailscale import (
+    TailscaleError,
+    find_tailscale,
+    launch_tailscale_gui,
+    prepare_tailscale_funnel,
+)
 from .verification import discover_verification_commands
 from .web_bridge_launcher import (
     MUTATING_WEB_TOOLS,
@@ -13974,11 +13979,12 @@ if _HAS_TEXTUAL:
                 )
                 self.call_from_thread(self._set_activity, "", "idle")
                 return
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
-                subprocess, "DETACHED_PROCESS", 0
-            )
             try:
-                subprocess.Popen([gui_app], creationflags=flags, close_fds=True)
+                # Keep the TUI flow on the same single, windowless GUI-launch
+                # contract as the shared Tailscale recovery path.
+                launched = launch_tailscale_gui(executable, popen=subprocess.Popen)
+                if launched is None:
+                    raise OSError("Tailscale GUI launch was not confirmed")
             except (OSError, subprocess.SubprocessError) as exc:
                 self.call_from_thread(
                     self._write,

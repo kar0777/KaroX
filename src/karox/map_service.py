@@ -240,6 +240,10 @@ class MapService:
                 ["git", "-C", str(self.repository), *arguments],
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                ),
                 timeout=20,
                 check=False,
             )

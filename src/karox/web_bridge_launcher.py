@@ -1589,6 +1589,7 @@ def _apply_tailscale_background_funnel(
         "encoding": "utf-8",
         "errors": "replace",
         "timeout": max(1.0, float(timeout_seconds)),
+        "stdin": subprocess.DEVNULL,
     }
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1812,6 +1813,7 @@ def stop_tailscale_background_funnel(
         "encoding": "utf-8",
         "errors": "replace",
         "timeout": 15,
+        "stdin": subprocess.DEVNULL,
     }
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -4834,6 +4836,11 @@ def run_web_bridge(config: WebBridgeConnectConfig) -> int:
                             "local MCP auth probe did not reach the bridge"
                         )
                         watchdog_record["local_health_failures"] = local_health_failures
+                        # A second confirmation must be a separate scheduled sample,
+                        # not the owner loop's immediately adjacent iteration.
+                        next_local_health_check_at = (
+                            local_now + local_health_interval_seconds
+                        )
                         if local_health_failures >= LOCAL_HEALTH_CONFIRM_THRESHOLD:
                             print(
                                 "[bridge] Local MCP listener stopped serving; recycling "

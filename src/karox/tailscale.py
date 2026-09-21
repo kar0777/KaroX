@@ -453,13 +453,21 @@ def launch_tailscale_gui(
     gui_app = find_tailscale_gui(executable)
     if gui_app is None:
         return None
-    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(
-        getattr(subprocess, "DETACHED_PROCESS", 0)
-    )
+    # Disconnect standard streams from KaroX and do not request a detached
+    # console. CREATE_NO_WINDOW applies to console executables, not GUI windows
+    # or their descendants; preserve the application's intentional login UI.
+    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if emit is not None:
         emit("Starting the Tailscale app so its backend can come online…")
     try:
-        popen([gui_app], creationflags=flags, close_fds=True)
+        popen(
+            [gui_app],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+            close_fds=True,
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     return gui_app
@@ -497,6 +505,7 @@ def _bring_tailscale_up(
             encoding="utf-8",
             errors="replace",
             timeout=timeout_seconds,
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
@@ -593,6 +602,8 @@ def restart_tailscale_service(
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout_seconds,
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             if emit is not None:

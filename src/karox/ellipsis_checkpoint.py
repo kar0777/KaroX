@@ -63,6 +63,10 @@ def _git(repository: Path, argv: list[str], timeout: float = 60.0) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
+            stdin=subprocess.DEVNULL,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
             timeout=timeout,
             check=False,
         )
@@ -82,6 +86,10 @@ def _git_z(repository: Path, argv: list[str]) -> tuple[str, ...]:
             cwd=repository,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
             timeout=60.0,
             check=False,
         )

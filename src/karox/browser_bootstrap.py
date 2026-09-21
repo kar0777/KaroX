@@ -153,6 +153,9 @@ def install_playwright_chromium(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             shell=False,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
             timeout=float(timeout_seconds),
             check=False,
             env=_installer_environment(environment),

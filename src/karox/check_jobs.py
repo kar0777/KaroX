@@ -240,6 +240,10 @@ def _workspace_state_fingerprint(repository: Path) -> str:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                stdin=subprocess.DEVNULL,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                ),
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
