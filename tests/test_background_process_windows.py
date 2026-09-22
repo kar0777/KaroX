@@ -77,7 +77,10 @@ class TestHostedBackgroundLaunch(_Base):
         popen.assert_called_once()
         assert_hidden_group(popen.call_args.kwargs["creationflags"])
         assert popen.call_args.kwargs["shell"] is False
-        assert Path(popen.call_args.kwargs["cwd"]) == self.repository
+        # The production seam hands over a canonicalized path: macOS temp dirs
+        # live under /private/var while the fixture holds /var, and a Windows
+        # runner's temp path carries an 8.3 alias. Compare canonical forms.
+        assert Path(popen.call_args.kwargs["cwd"]).resolve() == self.repository.resolve()
         assert "start_new_session" not in popen.call_args.kwargs
 
 

@@ -341,9 +341,15 @@ class ManagedServerWindowsTests(unittest.TestCase):
                     idempotency_key="stop-1",
                 ).structuredContent
                 self.assertTrue(stop.get("ok"))
-                # wait briefly for the OS to reap the pid
-                time.sleep(1.0)
+                # The OS reaps the pid asynchronously. A fixed one-second wait
+                # reported an orphan on a loaded runner for a process that was
+                # already gone, so poll the property instead of the clock: the
+                # assertion still fails if the process really survives the stop.
                 from karox.remote_tools import _pid_alive
+
+                deadline = time.monotonic() + 15.0
+                while _pid_alive(pid) and time.monotonic() < deadline:
+                    time.sleep(0.2)
                 self.assertFalse(_pid_alive(pid), "orphaned server process after stop")
             finally:
                 try:

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -281,13 +282,27 @@ def test_powershell_safe_zip_refuses_unsafe_members(tmp_path, member, symlink):
     assert not output.exists()
 
 
+def _portable_platform() -> str:
+    """The Windows platform token ``bootstrap.ps1`` derives from this CPU."""
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "windows-arm64"
+    return "windows-x64"
+
+
 @pytest.mark.parametrize("scenario", ["success", "checksum-mismatch", "offline", "404", "missing-uv"])
+
+
 def test_powershell_portable_activation_with_mock_downloads(tmp_path, scenario):
     import zipfile
 
     executable = powershell_executable()
     fixture = tmp_path / "fixture.zip"
-    root = f"KaroX-{TAG}-windows-x64-portable"
+    # bootstrap.ps1 installs the *Windows* portable, but which asset it asks
+    # for follows the host CPU: an arm64 macOS runner makes it request
+    # ``windows-arm64``, so a fixture pinned to windows-x64 would report a
+    # missing checksum entry on that leg. Name the fixture for this host.
+    root = f"KaroX-{TAG}-{_portable_platform()}-portable"
     with zipfile.ZipFile(fixture, "w") as archive:
         archive.writestr(f"{root}/karox.cmd", "@exit /b 99")
         if scenario != "missing-uv":

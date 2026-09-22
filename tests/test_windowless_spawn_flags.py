@@ -91,6 +91,13 @@ class SpawnSiteTests(unittest.TestCase):
 
         with mock.patch.object(
             system_chrome, "windowless_flags", return_value=_NO_WINDOW
+        ), mock.patch.object(
+            # The taskkill fallback is the Windows branch of this function, so
+            # the test must run it on every host instead of only where it is
+            # reached naturally (the suite runs on Linux and macOS too).
+            system_chrome,
+            "os",
+            SimpleNamespace(name="nt", environ={}),
         ), mock.patch.object(system_chrome.subprocess, "run", side_effect=fake_run):
             system_chrome.terminate_chrome_process(StubbornProcess())
 

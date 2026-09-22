@@ -78,8 +78,14 @@ class BackgroundProbeFlagTests(TestCase):
             with self._windows_module(orchestration_native), self._no_window(
                 orchestration_native
             ), mock.patch.object(orchestration_native.subprocess, "run", side_effect=fake_orchestration_run):
+                # The helper canonicalizes what Git printed; the fixture's root
+                # may still carry a short alias (/private/var on macOS,
+                # RUNNER~1 on a Windows runner), so compare canonical forms.
                 self.assertEqual(
-                    orchestration_native.NativeApiWorkerFactory._git_common_dir(root), common_dir
+                    Path(
+                        orchestration_native.NativeApiWorkerFactory._git_common_dir(root)
+                    ).resolve(),
+                    common_dir.resolve(),
                 )
             self._assert_background_launch(captured, orchestration_native)
 
