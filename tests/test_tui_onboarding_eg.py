@@ -421,8 +421,13 @@ class TailscaleAndBypassTests(HeadlessCase):
                 # Second press: the verified download runs; Linux unpacks
                 # user-owned binaries and prints the official repo commands.
                 screen.query_one("#tailscale-install", tui.Button).press()
-                for _ in range(100):
-                    if not screen._installing:
+                # The worker sets `_installing` and then downloads on its own
+                # thread, so the flag alone can still read False before the
+                # worker started — that returned immediately and reported
+                # "0 downloads" on a loaded runner. Wait for the download the
+                # assertion is about, bounded, and still fail if it never comes.
+                for _ in range(150):
+                    if downloads and not screen._installing:
                         break
                     await pilot.pause(0.02)
                 await pilot.pause()
