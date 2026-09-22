@@ -438,21 +438,83 @@ def find_tailscale_gui(executable: Optional[str] = None) -> Optional[str]:
     return str(gui) if gui.is_file() else None
 
 
+def tailscale_gui_pids(gui_name: str = "tailscale-ipn.exe") -> tuple[int, ...]:
+    """PIDs of the Tailscale GUI app running in this user session, if any.
+
+    Read straight from the OS process list, so the check itself cannot open a
+    console or a window. Returns an empty tuple on any platform where the
+    enumeration is unavailable rather than raising into a recovery path.
+    """
+    if os.name != "nt":
+        return ()
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:  # pragma: no cover - ctypes ships with CPython
+        return ()
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == -1:
+        return ()
+    wanted = gui_name.lower()
+    found: list[int] = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return ()
+        while True:
+            if entry.szExeFile.lower() == wanted:
+                found.append(int(entry.th32ProcessID))
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    except OSError:  # pragma: no cover - enumeration refused
+        return ()
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return tuple(found)
+
+
 def launch_tailscale_gui(
     executable: Optional[str] = None,
     *,
     popen: Callable[..., Any] = subprocess.Popen,
     emit: Optional[Callable[[str], None]] = None,
+    running_pids: Optional[Callable[[], tuple[int, ...]]] = None,
 ) -> Optional[str]:
     """Start the Tailscale GUI app in the user session; return its path or None.
 
     The GUI runs in the user session and drives the backend without a UAC prompt,
     so it is tried before the service restart. ``popen`` is injectable so the
     launch can be verified without actually starting a tray app.
+
+    An already-running tray app is left alone. The GUI is a single-instance
+    application: starting it again hands the request to the instance that
+    already owns the backend, which activates its window on every reconnect.
+    The return value still names the app, because the backend driver is present
+    -- which is all the caller asked about.
     """
     gui_app = find_tailscale_gui(executable)
     if gui_app is None:
         return None
+    probe = tailscale_gui_pids if running_pids is None else running_pids
+    if probe():
+        return gui_app
     # Disconnect standard streams from KaroX and do not request a detached
     # console. CREATE_NO_WINDOW applies to console executables, not GUI windows
     # or their descendants; preserve the application's intentional login UI.

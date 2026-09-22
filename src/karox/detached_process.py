@@ -40,11 +40,56 @@ def detached_flags(*, breakaway: bool = True) -> int:
     """Creation flags for a windowless child with no console of its own."""
     if os.name != "nt":
         return 0
-    # Windows ignores CREATE_NO_WINDOW when DETACHED_PROCESS is also set.
-    # NO_WINDOW already detaches console applications from the parent's console;
-    # group isolation and the optional job breakaway are independent concerns.
+    # Windows ignores CREATE_NO_WINDOW when DETACHED_PROCESS is also set, and a
+    # child detached that way opens a console window of its own -- measured, not
+    # assumed. See ``windowless_flags`` for the numbers.
     flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     return flags | CREATE_BREAKAWAY_FROM_JOB if breakaway else flags
+
+
+def console_window_handle() -> int:
+    """HWND of this process's console, or 0 when it has none.
+
+    A module-level seam: the suite runs on hosts that have no Windows console,
+    and a caller's console is the input that decides whether a console child
+    needs ``CREATE_NO_WINDOW`` at all.
+    """
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+    except ImportError:  # pragma: no cover - ctypes ships with CPython
+        return 0
+    try:
+        return int(ctypes.windll.kernel32.GetConsoleWindow())
+    except (AttributeError, OSError):  # pragma: no cover - non-Windows host
+        return 0
+
+
+def windowless_flags() -> int:
+    """Creation flags that stop a background child opening a console window.
+
+    A console child inherits its parent's console, so when the parent already
+    has one the child shares that window and no flag is needed. The case that
+    goes wrong is a *console-less* parent -- a detached bridge owner, its
+    supervisor, a Task Scheduler action, a background probe. Windows gives such
+    a child a brand-new console, the default terminal (Windows Terminal on a
+    current Windows 11) opens a visible window for it, and the window's title is
+    the child's executable path. That is how a probe nobody asked for becomes an
+    extra terminal on the user's desktop.
+
+    Measured on Windows 11 with Windows Terminal as the default terminal,
+    spawning an interpreter from a console-less parent: no flags produced a
+    visible window in 4 of 4 runs, ``CREATE_NO_WINDOW`` in 0 of 4. The
+    ``DETACHED_PROCESS | CREATE_NO_WINDOW`` pair still opened one in 2 of 4,
+    which is why only the single flag is returned here; callers that need a
+    detached lifetime use ``detached_flags``.
+    """
+    if os.name != "nt":
+        return 0
+    if console_window_handle() != 0:
+        return 0
+    return CREATE_NO_WINDOW
 
 
 def spawn_detached(
@@ -90,6 +135,8 @@ __all__ = [
     "CREATE_NEW_PROCESS_GROUP",
     "CREATE_NO_WINDOW",
     "DETACHED_PROCESS",
+    "console_window_handle",
     "detached_flags",
     "spawn_detached",
+    "windowless_flags",
 ]

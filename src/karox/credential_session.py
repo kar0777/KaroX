@@ -22,6 +22,7 @@ from contextlib import closing
 from typing import Any
 
 from .credentials import CredentialError, KeyringBackend
+from .detached_process import windowless_flags
 
 _SERVICE = "org.freedesktop.secrets"
 _BUS = "org.freedesktop.DBus"
@@ -303,6 +304,7 @@ def verify_child_storage(*, consent: bool = False) -> dict[str, str]:
             timeout=20,
             check=False,
             env=dict(os.environ),
+            creationflags=windowless_flags(),
         )
         expected = hashlib.sha256(value.encode()).hexdigest().encode()
         if child.returncode or not hmac.compare_digest(child.stdout.strip(), expected):

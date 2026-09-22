@@ -976,7 +976,7 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         # Pretend we are on Windows so the GUI launch path is exercised.
         with patch("karox.tailscale.os.name", "nt"), patch(
             "karox.tailscale.find_tailscale_gui", return_value="C:/Program Files/Tailscale/tailscale-ipn.exe"
-        ):
+        ), patch("karox.tailscale.tailscale_gui_pids", return_value=()):
             status = ensure_tailscale_ready(
                 executable="tailscale",
                 run=run,
@@ -1027,7 +1027,7 @@ class TailscaleAndDiagnosticsTests(unittest.TestCase):
         with patch("karox.tailscale.os.name", "nt"), patch(
             "karox.tailscale.find_tailscale_gui",
             return_value="C:/Program Files/Tailscale/tailscale-ipn.exe",
-        ):
+        ), patch("karox.tailscale.tailscale_gui_pids", return_value=()):
             status = ensure_tailscale_ready(
                 executable="tailscale",
                 run=run,

@@ -151,7 +151,12 @@ class BackgroundProbeFlagTests(TestCase):
         with mock.patch.object(tailscale, "find_tailscale_gui", return_value=gui), mock.patch.object(
             tailscale.subprocess, "CREATE_NO_WINDOW", _NO_WINDOW, create=True
         ), mock.patch.object(tailscale.subprocess, "DETACHED_PROCESS", 0x00000008, create=True):
-            self.assertEqual(tailscale.launch_tailscale_gui(popen=fake_popen), gui)
+            # No tray app running: this covers the launch itself, which a real
+            # Windows host that already runs the Tailscale GUI would skip.
+            self.assertEqual(
+                tailscale.launch_tailscale_gui(popen=fake_popen, running_pids=lambda: ()),
+                gui,
+            )
 
         self.assertEqual(captured["creationflags"], _NO_WINDOW)
         self.assertIs(captured["stdin"], subprocess.DEVNULL)

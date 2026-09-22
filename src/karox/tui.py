@@ -95,6 +95,7 @@ from .session_view import (
     TimelineEntry,
     ToolCallView,
 )
+from .detached_process import windowless_flags
 from .security import redact
 from .sessions import SessionStore
 from .tailscale import (
@@ -3401,6 +3402,9 @@ def _run_agent_cli(
             encoding="utf-8",
             errors="replace",
             env=env,
+            # Only bites when the TUI itself has no console; a console child of a
+            # console-less parent would otherwise open a terminal window of its own.
+            creationflags=windowless_flags(),
         )
     except OSError:
         on_process(_NullProcess())

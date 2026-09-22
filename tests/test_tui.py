@@ -2252,6 +2252,9 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             patch.object(tui, "_find_tailscale", return_value="/usr/bin/tailscale"),
             patch.object(tui, "_tailscale_gui_app", return_value="/usr/bin/tailscale-ipn"),
             patch("karox.tailscale.find_tailscale_gui", return_value="/usr/bin/tailscale-ipn"),
+            # No tray app is running in this scenario; a real Windows host that
+            # already runs one reuses it instead of starting a second instance.
+            patch("karox.tailscale.tailscale_gui_pids", return_value=()),
             patch.object(tui.subprocess, "Popen", side_effect=fake_popen),
             patch.object(tui, "_tailscale_logged_in", side_effect=[False, False, True]),
             patch.object(tui, "_tailscale_backend_state", return_value="NeedsLogin"),
@@ -2317,6 +2320,9 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             patch.object(tui, "_find_tailscale", return_value="/usr/bin/tailscale"),
             patch.object(tui, "_tailscale_gui_app", return_value="/usr/bin/tailscale-ipn"),
             patch("karox.tailscale.find_tailscale_gui", return_value="/usr/bin/tailscale-ipn"),
+            # No tray app is running in this scenario; a real Windows host that
+            # already runs one reuses it instead of starting a second instance.
+            patch("karox.tailscale.tailscale_gui_pids", return_value=()),
             patch.object(tui.subprocess, "Popen", side_effect=fake_popen),
             patch.object(tui, "_tailscale_logged_in", return_value=False),
             patch.object(tui, "_tailscale_backend_state", return_value="NoState"),

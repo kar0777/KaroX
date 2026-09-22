@@ -29,6 +29,7 @@ from mcp.types import CallToolResult
 
 from .affected_checks import AffectedChecksEngine
 from .artifacts import ArtifactStore
+from .detached_process import windowless_flags
 from .models import AccessProfile
 from .plan_executor import PlanExecutor
 from .repo_context import RepositoryContextEngine
@@ -70,6 +71,7 @@ def _git(repository: Path, *arguments: str) -> None:
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        creationflags=windowless_flags(),
     )
     if completed.returncode != 0:
         raise RuntimeError(f"benchmark Git command failed: {' '.join(arguments)}")

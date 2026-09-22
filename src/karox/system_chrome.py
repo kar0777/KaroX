@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .detached_process import windowless_flags
 from .paths import runtime_dir
 
 
@@ -198,6 +199,7 @@ def terminate_chrome_process(process: Optional[subprocess.Popen[Any]]) -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=10.0,
                 check=False,
+                creationflags=windowless_flags(),
             )
             return
         except Exception:
