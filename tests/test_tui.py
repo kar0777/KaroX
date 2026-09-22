@@ -1468,10 +1468,14 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
                 # The wizard entry point, not a digit position: this test is about
                 # progressive fields inside the setup form.
                 app.action_provider_preset()
-                await pilot.pause()
+                # Wait for the transition instead of guessing one event-loop
+                # turn: on a loaded runner the assertion ran while the previous
+                # screen was still current (this test failed exactly that way on
+                # the Windows Python 3.10 leg). The helper also lets compose()
+                # finish, so the widget lookups below are safe.
+                await self.screen(pilot, app, tui.ProviderPresetScreen)
                 await pilot.press("enter")
-                await pilot.pause()
-                self.assertIsInstance(app.screen, tui.ProviderSetupScreen)
+                await self.screen(pilot, app, tui.ProviderSetupScreen)
                 dialog = app.screen.query_one("#provider-dialog")
                 self.assertLess(dialog.size.height, 38)
                 model_input = app.screen.query_one("#provider-model", tui.Input)

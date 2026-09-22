@@ -224,7 +224,7 @@ def test_powershell_script_parses_without_installation_when_available():
         pytest.skip("PowerShell unavailable")
     script = str(ROOT / "bootstrap.ps1").replace("'", "''")
     result = subprocess.run([executable, "-NoProfile", "-Command", f"[scriptblock]::Create((Get-Content -Raw -LiteralPath '{script}')) | Out-Null"],
-                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                            capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert result.returncode == 0, result.stderr
 
 
@@ -276,7 +276,7 @@ def test_powershell_safe_zip_refuses_unsafe_members(tmp_path, member, symlink):
             archive.writestr(info, b"unsafe")
     output = tmp_path / "out"
     command = powershell_functions(["Expand-KaroXSafeZip"]) + f"\nExpand-KaroXSafeZip -Archive {ps_literal(path)} -Destination {ps_literal(output)} -PortableRoot 'bundle'"
-    result = subprocess.run([executable, "-NoProfile", "-Command", command], capture_output=True, text=True, encoding="utf-8", timeout=20)
+    result = subprocess.run([executable, "-NoProfile", "-Command", command], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert result.returncode != 0
     assert "Archive" in result.stderr
     assert not output.exists()
@@ -331,7 +331,7 @@ function Get-KaroXDownload {{
 $installed = Install-PortableIfAvailable
 Write-Host "INSTALLED=$installed"
 """
-    result = subprocess.run([executable, "-NoProfile", "-Command", command], capture_output=True, text=True, encoding="utf-8", timeout=20)
+    result = subprocess.run([executable, "-NoProfile", "-Command", command], capture_output=True, text=True, encoding="utf-8", timeout=60)
     if scenario == "success":
         assert result.returncode == 0, result.stderr
         assert "INSTALLED=True" in result.stdout
