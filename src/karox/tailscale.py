@@ -438,12 +438,38 @@ def find_tailscale_gui(executable: Optional[str] = None) -> Optional[str]:
     return str(gui) if gui.is_file() else None
 
 
+def _same_windows_session(pid: int, mine: int, kernel32: Any) -> bool:
+    """True when ``pid`` runs in this process's session; True when undeterminable.
+
+    A machine-wide process list contains every session: on a fast-user-switch or
+    RDP host, another user's tray app must not be mistaken for ours. When the
+    session query is unavailable the answer stays "assume ours", which preserves
+    the pre-existing behaviour instead of silently suppressing a launch.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:  # pragma: no cover - ctypes ships with CPython
+        return True
+    try:
+        theirs = wintypes.DWORD()
+        ours = wintypes.DWORD()
+        if not kernel32.ProcessIdToSessionId(pid, ctypes.byref(theirs)):
+            return True
+        if not kernel32.ProcessIdToSessionId(mine, ctypes.byref(ours)):
+            return True
+    except (AttributeError, OSError):  # pragma: no cover - no session query
+        return True
+    return int(theirs.value) == int(ours.value)
+
+
 def tailscale_gui_pids(gui_name: str = "tailscale-ipn.exe") -> tuple[int, ...]:
     """PIDs of the Tailscale GUI app running in this user session, if any.
 
     Read straight from the OS process list, so the check itself cannot open a
     console or a window. Returns an empty tuple on any platform where the
-    enumeration is unavailable rather than raising into a recovery path.
+    enumeration is unavailable rather than raising into a recovery path, and
+    ignores instances that belong to another logged-in session.
     """
     if os.name != "nt":
         return ()
@@ -468,10 +494,24 @@ def tailscale_gui_pids(gui_name: str = "tailscale-ipn.exe") -> tuple[int, ...]:
         ]
 
     kernel32 = ctypes.windll.kernel32
+    # Undeclared ctypes signatures default to a 32-bit return, which truncates
+    # the snapshot HANDLE on Windows x64.
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if snapshot == -1:
+    if snapshot in (-1, ctypes.c_void_p(-1).value):
         return ()
     wanted = gui_name.lower()
+    mine = os.getpid()
     found: list[int] = []
     try:
         entry = ProcessEntry32W()
@@ -479,11 +519,12 @@ def tailscale_gui_pids(gui_name: str = "tailscale-ipn.exe") -> tuple[int, ...]:
         if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
             return ()
         while True:
-            if entry.szExeFile.lower() == wanted:
-                found.append(int(entry.th32ProcessID))
+            pid = int(entry.th32ProcessID)
+            if entry.szExeFile.lower() == wanted and _same_windows_session(pid, mine, kernel32):
+                found.append(pid)
             if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
                 break
-    except OSError:  # pragma: no cover - enumeration refused
+    except (OSError, AttributeError):  # pragma: no cover - enumeration refused
         return ()
     finally:
         kernel32.CloseHandle(snapshot)

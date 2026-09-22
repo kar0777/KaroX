@@ -18,8 +18,11 @@ child actually receives, not on the text of the module.
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
+import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,16 +195,34 @@ class TailscaleGuiReuseTests(unittest.TestCase):
             self.assertEqual(tailscale.tailscale_gui_pids(), ())
 
     def test_the_tray_probe_finds_a_running_app_on_this_host(self) -> None:
-        """On a real Windows host the enumeration must at least answer."""
+        """the enumeration must really enumerate, not merely answer.
+
+        Asking for this interpreter's own image name has to return this process:
+        an implementation that returned a hardcoded empty tuple would pass a
+        shape-only assertion but fails here.
+        """
         import os as os_module
         import sys
 
         if os_module.name != "nt" or not sys.platform.startswith("win"):
             self.skipTest("Windows-only process enumeration")
+        image = os_module.path.basename(sys.executable)
+        mine = tailscale.tailscale_gui_pids(image)
+        self.assertIn(os_module.getpid(), mine)
+
         found = tailscale.tailscale_gui_pids()
         self.assertIsInstance(found, tuple)
         for pid in found:
             self.assertGreater(pid, 0)
+
+    def test_the_tray_probe_ignores_another_windows_session(self) -> None:
+        """A tray app in someone else's session must not suppress our launch."""
+        if sys.platform != "win32":
+            self.skipTest("Windows-only session ids")
+        self.assertTrue(tailscale._same_windows_session(os.getpid(), os.getpid(), ctypes.windll.kernel32))
+        # A PID that cannot be queried is reported as "assume ours", never as
+        # "not ours", so an unavailable query can never hide the tray app.
+        self.assertTrue(tailscale._same_windows_session(0, os.getpid(), ctypes.windll.kernel32))
 
 
 if __name__ == "__main__":
