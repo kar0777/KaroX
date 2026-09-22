@@ -140,7 +140,12 @@ class BackgroundProbeFlagTests(TestCase):
             captured.update(kwargs)
             return SimpleNamespace(returncode=0, stdout="/repo\n")
 
-        with mock.patch.object(quickstart.os, "name", "posix"):
+        # Patch the module binding, never the shared ``os`` module: flipping
+        # ``os.name`` globally makes pathlib build a ``PosixPath`` on a Windows
+        # host, and Python 3.10 refuses to instantiate one there (the check was
+        # dropped in 3.11), so this file cannot use that shortcut.
+        posix = SimpleNamespace(name="posix", environ={})
+        with mock.patch.object(quickstart, "os", posix):
             quickstart.git_toplevel(Path("."), run=fake_run)
 
         self.assertEqual(captured["creationflags"], 0)
