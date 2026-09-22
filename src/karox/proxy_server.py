@@ -1342,10 +1342,17 @@ def build_proxy_asgi_app(
         except HostedApprovalRequired:
             # The native approval UX is carried by the stateless 2026-07-28
             # input_required wire below. Older SDK/session clients must fail
-            # closed rather than receiving or inventing an approval token.
+            # closed rather than receiving or inventing an approval token, and
+            # no page URL is offered: a link the model can hand out is not proof
+            # the owner answered. The supported channels are named so an agent
+            # knows what to ask the owner for.
             return bridge_error_result(
                 "denied",
-                detail="this action requires an MCP 2026-07-28 user approval round",
+                detail=(
+                    "this action needs an exact user approval: the owner approves it "
+                    "in the chat and the same tool call is retried, or the client "
+                    "carries an MCP 2026-07-28 user approval round"
+                ),
             )
 
     def modern_result_meta() -> dict[str, Any]:
