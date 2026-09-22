@@ -410,7 +410,7 @@ python -m pytest tests -n 6 --dist=loadfile
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Полный suite содержит 3525 тестов. CI дополнительно проверяет зависимости,
+Полный suite содержит 3526 тестов. CI дополнительно проверяет зависимости,
 версии, опубликованный test count, release contract, release workflow ordering,
 lint, types, coverage, сборку wheel и кроссплатформенную установку.
 
