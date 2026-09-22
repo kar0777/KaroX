@@ -2444,10 +2444,19 @@ def build_connections_screens(base_app: Any) -> Dict[str, type]:
             )
 
         def on_mount(self) -> None:
-            # Runtime status for saved connections may touch the Windows process
-            # table and runtime files. Draw/focus the hub first and collect that
-            # state off the Textual event loop so returning from a child modal is
-            # instantaneous even when one old connection is slow to probe.
+            # Textual can deliver a screen's Mount before its children are
+            # mounted, and this screen's first act is to preset the list with a
+            # loading row; querying then crashed the hub with "No nodes match
+            # '#connhub-list'" on a loaded runner. Take the normal path when the
+            # children are already there and defer only when they are not: an
+            # unconditional deferral cost an extra event-loop hop on every open
+            # and pushed another test's bounded wait over its limit.
+            if next(iter(self.query("#connhub-list")), None) is None:
+                self.call_after_refresh(self._begin_hub_refresh)
+                return
+            self._begin_hub_refresh()
+
+        def _begin_hub_refresh(self) -> None:
             options = self.query_one("#connhub-list", OptionList)
             options.clear_options()
             options.add_option(
