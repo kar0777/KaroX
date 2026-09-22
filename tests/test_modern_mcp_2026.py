@@ -332,8 +332,6 @@ def test_non_external_approval_is_deferred_without_blocking_the_turn() -> None:
     app = build_proxy_asgi_app(
         runtime,
         "modern-test-token",
-        human_approval_secret="human-approval-secret",
-        human_approval_base_url="https://public.example.test",
     )
     request = _without_elicitation(
         _modern_request(
@@ -363,17 +361,21 @@ def test_non_external_approval_is_deferred_without_blocking_the_turn() -> None:
     assert runtime.approved_digests == []
 
 
-def test_modern_approval_browser_fallback_is_human_bound_and_one_shot() -> None:
+def test_modern_approval_never_offers_a_browser_url_to_the_model() -> None:
+    """Approvals arrive in the chat; the model is never handed a URL to give out.
+
+    A client that cannot carry an MCP elicitation round used to receive an
+    approval page URL it could forward. A URL the model can pass on is not proof
+    that the owner answered, and the owner asked for chat-only approvals, so the
+    action now fails closed and names the two supported channels: an approval
+    relayed in the chat, or a client that can carry the elicitation round. The
+    approval page itself is gone from this app, so the old route is a 404.
+    """
     runtime = _ApprovalRuntime()
-    app = build_proxy_asgi_app(
-        runtime,
-        "modern-test-token",
-        human_approval_secret="human-approval-secret",
-        human_approval_base_url="https://public.example.test",
-    )
+    app = build_proxy_asgi_app(runtime, "modern-test-token")
     arguments = {"remote": "origin", "branch": "main"}
 
-    async def scenario() -> tuple[Any, Any, Any, Any, Any, Any]:
+    async def scenario() -> tuple[Any, Any]:
         tool_request = _without_elicitation(
             _modern_request(
                 "tools/call",
@@ -382,226 +384,75 @@ def test_modern_approval_browser_fallback_is_human_bound_and_one_shot() -> None:
             )
         )
         first = await _asgi_request(app, tool_request)
-        first_payload = first.json()["result"]["structuredContent"]
-        approval_url = first_payload["approval_url"]
-        assert approval_url.startswith("https://public.example.test/mcp/approval?")
-        parsed = urlsplit(approval_url)
-        states = parse_qs(parsed.query).get("state", [])
-        assert len(states) == 1
-        state = states[0]
         page = await _asgi_request(
             app,
             {
                 "method": "GET",
-                "path": parsed.path,
-                "query_string": parsed.query.encode("ascii"),
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("origin", "https://chatgpt.com"),
-                ],
+                "path": "/mcp/approval",
+                "query_string": b"state=whatever",
+                "headers": [("host", "127.0.0.1:8765")],
             },
         )
-        wrong = await _asgi_request(
-            app,
-            {
-                "method": "POST",
-                "path": parsed.path,
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("content-type", "application/x-www-form-urlencoded"),
-                ],
-                "body": urlencode({"state": state, "password": "wrong"}).encode(),
-            },
-        )
-        assert runtime.approved_digests == []
-        approved_page = await _asgi_request(
-            app,
-            {
-                "method": "POST",
-                "path": parsed.path,
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("content-type", "application/x-www-form-urlencoded"),
-                ],
-                "body": urlencode(
-                    {"state": state, "password": "human-approval-secret"}
-                ).encode(),
-            },
-        )
-        approved = await _asgi_request(app, tool_request)
-        replay = await _asgi_request(app, tool_request)
-        return first, page, wrong, approved_page, approved, replay
+        retry = await _asgi_request(app, tool_request)
+        return first, (page, retry)
 
-    first, page, wrong, approved_page, approved, replay = _run_with_lifespan(app, scenario)
+    first, (page, retry) = _run_with_lifespan(app, scenario)
     assert first.status == 200
-    first_result = first.json()["result"]
-    assert first_result["resultType"] == "complete"
-    assert first_result["isError"] is True
-    assert first_result["structuredContent"]["error_code"] == "approval_browser_required"
-    assert page.status == 200
-    assert "human-approval-secret" not in page.text
-    assert "Approve one KaroX action" in page.text
-    assert wrong.status == 403
-    assert approved_page.status == 200
-    assert "Action approved" in approved_page.text
-    assert approved.status == 200
-    approved_result = approved.json()["result"]
-    assert approved_result["structuredContent"]["approved"] is True
-    assert runtime.approved_digests == ["a" * 64]
-    assert replay.status == 200
-    replay_result = replay.json()["result"]
-    assert replay_result["structuredContent"]["error_code"] == "approval_browser_required"
-    assert runtime.approved_digests == ["a" * 64]
-
-
-def test_trusted_approval_cookie_reduces_followup_to_one_click() -> None:
-    runtime = _ApprovalRuntime()
-    app = build_proxy_asgi_app(
-        runtime,
-        "modern-test-token",
-        human_approval_secret="human-approval-secret",
-        human_approval_base_url="https://public.example.test",
-    )
-
-    async def scenario() -> tuple[Any, Any, Any, Any, Any]:
-        first_args = {"remote": "origin", "branch": "main"}
-        first_call = _without_elicitation(
-            _modern_request(
-                "tools/call",
-                {"name": "karox_git_push", "arguments": first_args},
-                name="karox_git_push",
-            )
-        )
-        first = await _asgi_request(app, first_call)
-        first_url = urlsplit(first.json()["result"]["structuredContent"]["approval_url"])
-        first_state = parse_qs(first_url.query)["state"][0]
-        approved_page = await _asgi_request(
-            app,
-            {
-                "method": "POST",
-                "path": first_url.path,
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("content-type", "application/x-www-form-urlencoded"),
-                ],
-                "body": urlencode(
-                    {"state": first_state, "password": "human-approval-secret"}
-                ).encode(),
-            },
-        )
-        cookie_header = next(
-            value.decode("latin-1")
-            for name, value in approved_page.headers
-            if name.lower() == b"set-cookie"
-        )
-        cookie = cookie_header.split(";", 1)[0]
-        assert "HttpOnly" in cookie_header
-        assert "Secure" in cookie_header
-        await _asgi_request(app, first_call)
-
-        second_args = {"remote": "origin", "branch": "release"}
-        second_call = _without_elicitation(
-            _modern_request(
-                "tools/call",
-                {"name": "karox_git_push", "arguments": second_args},
-                name="karox_git_push",
-            )
-        )
-        second = await _asgi_request(app, second_call)
-        second_url = urlsplit(second.json()["result"]["structuredContent"]["approval_url"])
-        trusted_page = await _asgi_request(
-            app,
-            {
-                "method": "GET",
-                "path": second_url.path,
-                "query_string": second_url.query.encode("ascii"),
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("cookie", cookie),
-                ],
-            },
-        )
-        assert 'name="password"' not in trusted_page.text
-        assert "already trusted" in trusted_page.text
-        second_state = parse_qs(second_url.query)["state"][0]
-        click = await _asgi_request(
-            app,
-            {
-                "method": "POST",
-                "path": second_url.path,
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("content-type", "application/x-www-form-urlencoded"),
-                    ("cookie", cookie),
-                ],
-                "body": urlencode({"state": second_state}).encode(),
-            },
-        )
-        executed = await _asgi_request(app, second_call)
-        return approved_page, second, trusted_page, click, executed
-
-    approved_page, second, trusted_page, click, executed = _run_with_lifespan(app, scenario)
-    assert approved_page.status == 200
-    assert second.status == 200
-    assert trusted_page.status == 200
-    assert click.status == 200
-    assert executed.status == 200
-    assert executed.json()["result"]["structuredContent"]["approved"] is True
-    assert runtime.approved_digests == ["a" * 64, "a" * 64]
-
-
-def test_tampered_trusted_cookie_does_not_bypass_password() -> None:
-    runtime = _ApprovalRuntime()
-    app = build_proxy_asgi_app(
-        runtime,
-        "modern-test-token",
-        human_approval_secret="human-approval-secret",
-        human_approval_base_url="https://public.example.test",
-    )
-
-    async def scenario() -> tuple[Any, Any]:
-        arguments = {"remote": "origin", "branch": "main"}
-        tool_call = _without_elicitation(
-            _modern_request(
-                "tools/call",
-                {"name": "karox_git_push", "arguments": arguments},
-                name="karox_git_push",
-            )
-        )
-        first = await _asgi_request(app, tool_call)
-        approval_url = urlsplit(first.json()["result"]["structuredContent"]["approval_url"])
-        state = parse_qs(approval_url.query)["state"][0]
-        page = await _asgi_request(
-            app,
-            {
-                "method": "GET",
-                "path": approval_url.path,
-                "query_string": approval_url.query.encode("ascii"),
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("cookie", "__Secure-karox-approval=v1.invalid.invalid"),
-                ],
-            },
-        )
-        click = await _asgi_request(
-            app,
-            {
-                "method": "POST",
-                "path": approval_url.path,
-                "headers": [
-                    ("host", "127.0.0.1:8765"),
-                    ("content-type", "application/x-www-form-urlencoded"),
-                    ("cookie", "__Secure-karox-approval=v1.invalid.invalid"),
-                ],
-                "body": urlencode({"state": state}).encode(),
-            },
-        )
-        return page, click
-
-    page, click = _run_with_lifespan(app, scenario)
-    assert 'name="password"' in page.text
-    assert click.status == 403
+    result = first.json()["result"]
+    payload = result["structuredContent"]
+    assert payload["error_code"] == "denied"
+    assert "approval_url" not in json.dumps(result)
+    assert "chat" in payload["error"]
+    assert page.status == 404
+    assert retry.json()["result"]["structuredContent"]["error_code"] == "denied"
     assert runtime.approved_digests == []
+
+
+def test_trusted_approval_cookie_is_signed_and_time_bounded() -> None:
+    """The OAuth consent surface still trusts a browser it approved before.
+
+    The cookie is the part of the former approval page that stays in the
+    product, so its guarantees are asserted directly: a signed cookie validates
+    inside its lifetime, and an expired one never does.
+    """
+    from karox.browser_approval import (
+        TRUST_COOKIE_MAX_AGE_SECONDS,
+        issue_trusted_approval_cookie,
+        validate_trusted_approval_cookie,
+    )
+
+    secret = "human-approval-secret"
+    issued = issue_trusted_approval_cookie(secret, now=1_000.0)
+    assert validate_trusted_approval_cookie(issued, secret, now=1_001.0) is True
+    assert (
+        validate_trusted_approval_cookie(
+            issued, secret, now=1_000.0 + TRUST_COOKIE_MAX_AGE_SECONDS + 1
+        )
+        is False
+    )
+    assert validate_trusted_approval_cookie(issued, "another-secret", now=1_001.0) is False
+
+
+def test_tampered_trusted_cookie_never_validates() -> None:
+    """A rewritten cookie cannot be presented as a previous approval."""
+    from karox.browser_approval import (
+        issue_trusted_approval_cookie,
+        validate_trusted_approval_cookie,
+    )
+
+    secret = "human-approval-secret"
+    issued = issue_trusted_approval_cookie(secret, now=1_000.0)
+    header, payload, signature = issued.split(".")
+
+    rewritten = ("A" if payload[-1] != "A" else "B") + payload[1:]
+    for candidate in (
+        f"{header}.{rewritten}.{signature}",
+        f"{header}.{payload}.{signature[:-2]}AA",
+        f"{header}.{payload}",
+        "v1.invalid.invalid",
+        "",
+    ):
+        assert validate_trusted_approval_cookie(candidate, secret, now=1_001.0) is False, candidate
 
 
 def test_modern_approval_decline_and_tampered_state_never_execute() -> None:

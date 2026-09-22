@@ -1323,8 +1323,6 @@ def build_oauth_proxy_asgi_app(
             )
         },
         allowed_hosts=(public_host,),
-        human_approval_secret=approval_secret,
-        human_approval_base_url=service.public_url,
     )
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
