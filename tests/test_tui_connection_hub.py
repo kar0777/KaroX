@@ -423,7 +423,17 @@ class HubScreenTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 42)) as pilot:
             await pilot.pause()
             screen = await self._hub(pilot, app)
-            ids = self._option_ids(screen)
+            # The hub renders a loading entry first and fills its options when
+            # the controller answers. Asserting straight after the push read
+            # ['connhub-loading'] on a loaded runner, so wait for the state the
+            # assertion is about; the subTests below still fail if an entry
+            # never arrives.
+            ids: list = []
+            for _ in range(100):
+                ids = self._option_ids(screen)
+                if all(action in ids for action in hub.HUB_ADD_ACTIONS):
+                    break
+                await pilot.pause()
             for action in hub.HUB_ADD_ACTIONS:
                 with self.subTest(action=action):
                     self.assertIn(action, ids)
