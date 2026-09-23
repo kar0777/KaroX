@@ -44,6 +44,10 @@ All notable changes to KaroX 5 are documented here. The format follows
 - `karox orchestrate run` no longer aborts before its first worker: a
   subscription worker publishes its check evidence under a context kind the bus
   vocabulary did not list.
+- A mission no longer fails at the handoff because a worker answered at length:
+  the handoff summary is clipped to the bound the protocol enforces, instead of
+  raising "message summary exceeds 3000 characters" after the work was done and
+  verified. The journal and the step result still carry the worker's own text.
 
 ## [5.0.0rc2] — 2026-09-18
 

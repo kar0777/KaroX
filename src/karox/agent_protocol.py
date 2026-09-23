@@ -49,6 +49,32 @@ def _safe_text(value: str, label: str, limit: int) -> str:
     return redacted if isinstance(redacted, str) else str(redacted)
 
 
+# The bound a handoff summary and question have to respect. Named because the
+# producer clips model output to the same number the validator enforces: two
+# literals would drift apart.
+SUMMARY_LIMIT = 3000
+QUESTION_LIMIT = 1000
+
+
+def bounded_summary(text: str, limit: int = SUMMARY_LIMIT) -> str:
+    """Clip a model-produced summary to what a message may carry.
+
+    A worker's summary is whatever the model wrote, so it can be longer than the
+    protocol allows. Rejecting it there aborts the mission at the handoff --
+    after the work was done and verified, which is the worst moment to fail. The
+    text is normalised exactly as the validator does and then clipped, so the
+    result always passes that validation. This is a length bound, not a content
+    filter: the validator's own redaction rules are unchanged.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    redacted = redact_content(text.replace("\x00", "").strip())
+    normalised = redacted if isinstance(redacted, str) else str(redacted)
+    if len(normalised) <= limit:
+        return normalised
+    return normalised[: limit - 1].rstrip() + "…"
+
+
 @dataclasses.dataclass(frozen=True)
 class EvidenceReference:
     artifact_id: str
@@ -131,14 +157,14 @@ class AgentMessage:
         _safe_id(self.source_role, "source role")
         if self.target_role is not None:
             _safe_id(self.target_role, "target role")
-        _safe_text(self.summary, "message summary", 3000)
+        _safe_text(self.summary, "message summary", SUMMARY_LIMIT)
         for ref in (self.baseline_ref, self.changeset_ref):
             if ref is not None:
                 _safe_id(ref, "artifact reference")
         if len(self.evidence) > 100 or len(self.questions) > 50 or len(self.findings) > 100:
             raise ValueError("agent message exceeds bounded evidence/questions/findings")
         for question in self.questions:
-            _safe_text(question, "question", 1000)
+            _safe_text(question, "question", QUESTION_LIMIT)
         if self.created_at < 0:
             raise ValueError("created_at must be non-negative")
 
@@ -167,11 +193,11 @@ class AgentMessage:
             target_endpoint_id=target_endpoint_id,
             source_role=source_role,
             target_role=target_role,
-            summary=_safe_text(summary, "message summary", 3000),
+            summary=_safe_text(summary, "message summary", SUMMARY_LIMIT),
             baseline_ref=baseline_ref,
             changeset_ref=changeset_ref,
             evidence=tuple(evidence),
-            questions=tuple(_safe_text(item, "question", 1000) for item in questions),
+            questions=tuple(_safe_text(item, "question", QUESTION_LIMIT) for item in questions),
             findings=tuple(findings),
             created_at=time.time(),
         )

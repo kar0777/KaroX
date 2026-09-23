@@ -28,6 +28,7 @@ from .agent_protocol import (
     MESSAGE_REVIEW_FAIL,
     MESSAGE_REVIEW_PASS,
     ReviewFinding,
+    bounded_summary,
     independent_review_exclusions,
 )
 from .context_bus import ContextBus, ContextDelta
@@ -1062,7 +1063,9 @@ class OrchestrationRuntime:
                 target_endpoint_id=item.endpoint.endpoint_id,
                 source_role="orchestrator",
                 target_role=item.step.role,
-                summary=f"Execute {item.step.step_id}: {self.plan.objective}",
+                summary=bounded_summary(
+                    f"Execute {item.step.step_id}: {self.plan.objective}"
+                ),
             )
             self.handoffs.append(request_message)
             journal_step = self.journal.mark_started(item.step.step_id)
@@ -1149,7 +1152,7 @@ class OrchestrationRuntime:
                 target_endpoint_id=self.plan.orchestrator_endpoint.endpoint_id,
                 source_role=item.step.role,
                 target_role="orchestrator",
-                summary=worker_result.summary,
+                summary=bounded_summary(worker_result.summary),
                 changeset_ref=worker_result.changeset_ref,
                 evidence=worker_result.evidence,
                 findings=worker_result.findings,
@@ -1421,7 +1424,9 @@ class OrchestrationRuntime:
                     target_endpoint_id=item.endpoint.endpoint_id,
                     source_role="orchestrator",
                     target_role=item.step.role,
-                    summary=f"Execute {item.step.step_id}: {self.plan.objective}",
+                    summary=bounded_summary(
+                    f"Execute {item.step.step_id}: {self.plan.objective}"
+                ),
                 )
                 self.handoffs.append(request_message)
                 journal_step = self.journal.mark_started(item.step.step_id)
@@ -1569,7 +1574,7 @@ class OrchestrationRuntime:
                         target_endpoint_id=self.plan.orchestrator_endpoint.endpoint_id,
                         source_role=item.step.role,
                         target_role="orchestrator",
-                        summary=worker_result.summary,
+                        summary=bounded_summary(worker_result.summary),
                         changeset_ref=worker_result.changeset_ref,
                         evidence=worker_result.evidence,
                         findings=worker_result.findings,

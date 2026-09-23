@@ -15,6 +15,7 @@ from karox.agent_protocol import (
     ReviewFinding,
     independent_review_exclusions,
 )
+from karox.agent_protocol import SUMMARY_LIMIT, bounded_summary
 from karox.context_bus import ContextBus, ContextItem
 from karox.economy_engine import (
     EconomyCounters,
@@ -1510,3 +1511,50 @@ def test_runtime_refuses_conflicting_parallel_worktrees(tmp_path: Path) -> None:
     assert result.stopped_reason is not None
     assert "conflicting changes" in result.stopped_reason
     assert len({result.workspaces["impl-a"], result.workspaces["impl-b"]}) == 2
+
+
+def test_a_long_worker_summary_is_clipped_not_fatal(tmp_path: Path) -> None:
+    """A worker that answers at length must not abort the mission at the handoff.
+
+    The summary is model output; the handoff message has a hard bound. Raising
+    there failed a mission whose work was already done and verified, with
+    "message summary exceeds 3000 characters".
+    """
+    plan, endpoint = _simple_plan(tmp_path)
+    long_summary = "verified the change. " * 400
+
+    def worker(_request):
+        return WorkerExecutionResult(
+            ok=True, summary=long_summary, accepted=True, verified=True
+        )
+
+    runtime = OrchestrationRuntime(
+        plan,
+        executors={endpoint.endpoint_id: CallbackWorkerExecutor(worker)},
+        context_bus=ContextBus("run-simple", path=tmp_path / "context-long.json"),
+        mission_control=MissionControlStore(
+            "run-simple", path=tmp_path / "mission-long.json"
+        ),
+        journal=OrchestrationJournal("run-simple", path=tmp_path / "journal-long.json"),
+        telemetry=RoutingTelemetry(tmp_path / "telemetry.json"),
+    )
+
+    result = runtime.run()
+
+    assert result.status == "passed"
+    handoff = runtime.handoffs.latest(plan.task_id)
+    assert handoff is not None
+    assert len(handoff.summary) <= SUMMARY_LIMIT
+    assert handoff.summary.endswith("…")
+    # The durable journal still records what the worker actually said.
+    assert result.steps[0].summary == long_summary
+
+
+def test_bounded_summary_normalises_then_clips() -> None:
+    assert bounded_summary("  short  ") == "short"
+    assert bounded_summary("x" * 10, limit=5) == "xxxx…"
+    assert len(bounded_summary("x" * 5000)) == SUMMARY_LIMIT
+    # The clip is applied to the same normalised text the validator sees, so
+    # the result always passes that validation; an empty string stays empty.
+    assert bounded_summary("") == ""
+    assert bounded_summary("x" * 4000).rstrip("…") != "x" * 4000
