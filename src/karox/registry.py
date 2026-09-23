@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
 import re
+import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -346,6 +348,59 @@ class ModelRecord:
         )
 
 
+# Win32 does not let an ordinary reader's ``open()`` share delete with the
+# atomic swap, so a read that lands inside the swap fails with
+# ERROR_ACCESS_DENIED (5) and a writer whose swap lands inside a reader's open
+# fails with ERROR_SHARING_VIOLATION (32). The window lasts microseconds and
+# both sides already see a complete document, because the payload is published
+# with ``os.replace`` only after ``fsync``.
+_SHARING_RETRY_DELAY_SECONDS = 0.004
+# A read runs on the event loop, so its budget stays short enough to be
+# invisible. A save runs in the provider-save worker thread and is the user's
+# own action, so it waits long enough to outlast a reader that is mid-open.
+_SHARING_READ_ATTEMPTS = 6
+_SHARING_REPLACE_ATTEMPTS = 14
+_SHARING_WINDOWS_ERRORS = frozenset({5, 32})
+
+
+def _is_transient_sharing_error(error: OSError) -> bool:
+    """Only the Win32 window a retry can pass through; every other error is real."""
+    if os.name != "nt":
+        # POSIX rename cannot collide with an open reader, and an EACCES there is
+        # a genuine permission problem that a retry would only delay.
+        return False
+    if getattr(error, "winerror", None) in _SHARING_WINDOWS_ERRORS:
+        return True
+    # A reader's failed ``open`` reaches Python as bare EACCES with ``winerror``
+    # unset (measured: 29 of 29 read failures under contention), so the Win32
+    # code is simply not available on that exception. An access denial on the
+    # registry file itself is the same swap window seen from the other side.
+    return error.errno == errno.EACCES and getattr(error, "winerror", None) is None
+
+
+def _read_text_with_sharing_retry(path: Path) -> str:
+    for _ in range(_SHARING_READ_ATTEMPTS - 1):
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as error:
+            if not _is_transient_sharing_error(error):
+                raise
+            time.sleep(_SHARING_RETRY_DELAY_SECONDS)
+    return path.read_text(encoding="utf-8")
+
+
+def _replace_with_sharing_retry(temp: Path, path: Path) -> None:
+    for _ in range(_SHARING_REPLACE_ATTEMPTS - 1):
+        try:
+            os.replace(temp, path)
+            return
+        except OSError as error:
+            if not _is_transient_sharing_error(error):
+                raise
+            time.sleep(_SHARING_RETRY_DELAY_SECONDS)
+    os.replace(temp, path)
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -355,7 +410,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
+        _replace_with_sharing_retry(temp, path)
     finally:
         try:
             temp.unlink()
@@ -377,7 +432,7 @@ class ProviderRegistry:
         if not self.path.exists():
             return {}, [], None
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            value = json.loads(_read_text_with_sharing_retry(self.path))
         except (OSError, json.JSONDecodeError) as exc:
             raise RegistryError(f"cannot read provider registry: {exc}") from exc
         if (

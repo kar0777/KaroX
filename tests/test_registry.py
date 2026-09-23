@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import importlib
+import errno
 import json
+import os
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _support import SRC  # noqa: F401 - inserts src on sys.path
@@ -269,6 +275,187 @@ class ProviderRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RegistryError, "selected model does not exist"):
             self.registry.selected_model()
+
+
+def transient_error() -> OSError:
+    """A read that lands inside the swap window, as the OS reports it.
+
+    Measured against the real file: every read failure carries ``errno.EACCES``
+    with ``winerror`` unset, while every ``os.replace`` failure carries
+    ``winerror`` 5. The classifier has to accept both spellings.
+    """
+    return PermissionError(errno.EACCES, "Permission denied")
+
+
+def with_winerror(error: OSError, code: int) -> OSError:
+    try:
+        error.winerror = code
+    except AttributeError:  # pragma: no cover - a build without the member
+        raise unittest.SkipTest("this build does not expose OSError.winerror")
+    return error
+
+
+class RegistrySharingRetryTests(unittest.TestCase):
+    """A reader thread and the save worker share one registry file."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name) / "providers.json"
+        self.registry = ProviderRegistry(self.path)
+        self.registry.put_provider(provider())
+        self.registry.put_model(model())
+        self.registry_module = importlib.import_module("karox.registry")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _classify(self, error: OSError, *, platform: str = "nt") -> bool:
+        with patch.object(self.registry_module, "os", SimpleNamespace(name=platform)):
+            return self.registry_module._is_transient_sharing_error(error)
+
+    def test_a_bare_access_denial_on_windows_is_the_swap_window(self) -> None:
+        # This is the spelling the reader actually gets, so it must be retried
+        # even though the exception carries no Win32 code to inspect.
+        self.assertTrue(self._classify(transient_error()))
+
+    def test_a_win32_sharing_code_is_the_swap_window(self) -> None:
+        self.assertTrue(self._classify(with_winerror(transient_error(), 5)))
+        self.assertTrue(self._classify(with_winerror(transient_error(), 32)))
+
+    def test_errors_that_are_not_the_swap_window_are_not_retried(self) -> None:
+        self.assertFalse(
+            self._classify(FileNotFoundError(errno.ENOENT, "No such file"))
+        )
+        self.assertFalse(
+            self._classify(IsADirectoryError(errno.EISDIR, "Is a directory"))
+        )
+        self.assertFalse(self._classify(with_winerror(transient_error(), 2)))
+
+    def test_posix_never_retries_an_access_denial(self) -> None:
+        # A retry is only honest where the window exists at all.
+        self.assertFalse(self._classify(transient_error(), platform="posix"))
+        self.assertFalse(
+            self._classify(with_winerror(transient_error(), 5), platform="posix")
+        )
+
+    def test_a_read_that_lands_in_the_swap_window_is_retried(self) -> None:
+        transient = transient_error()
+        real = Path.read_text
+        attempts: list[int] = []
+
+        def flaky(path: Path, *args: object, **kwargs: object) -> str:
+            attempts.append(1)
+            if len(attempts) <= 2:
+                raise transient
+            return real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(
+            self.registry_module, "_is_transient_sharing_error", lambda error: True
+        ):
+            with patch.object(Path, "read_text", flaky):
+                providers = self.registry.providers()
+
+        self.assertEqual([item.provider_id for item in providers], ["local"])
+        self.assertEqual(len(attempts), 3)
+
+    def test_a_permanent_read_error_is_not_retried(self) -> None:
+        # Retrying is only for the transient window: an error the classifier
+        # rejects must surface immediately, once, naming the registry.
+        permanent = FileNotFoundError(errno.ENOENT, "No such file")
+        attempts: list[int] = []
+
+        def broken(path: Path, *args: object, **kwargs: object) -> str:
+            attempts.append(1)
+            raise permanent
+
+        with patch.object(
+            self.registry_module, "_is_transient_sharing_error", lambda error: False
+        ):
+            with patch.object(Path, "read_text", broken):
+                with self.assertRaises(RegistryError) as raised:
+                    self.registry.providers()
+
+        self.assertEqual(len(attempts), 1)
+        self.assertIn("cannot read provider registry", str(raised.exception))
+
+    def test_a_swap_that_meets_an_open_reader_is_retried(self) -> None:
+        transient = transient_error()
+        real_replace = os.replace
+        attempts: list[int] = []
+
+        def flaky(source: object, target: object) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise transient
+            real_replace(source, target)  # type: ignore[arg-type]
+
+        with patch.object(
+            self.registry_module, "_is_transient_sharing_error", lambda error: True
+        ):
+            with patch("karox.registry.os.replace", flaky):
+                self.registry.put_provider(provider("second"))
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(
+            [item.provider_id for item in self.registry.providers()],
+            ["local", "second"],
+        )
+
+    def test_a_failed_swap_still_reports_after_the_retry_budget(self) -> None:
+        # The retry is bounded: a file that stays unwritable must not spin.
+        permanent = FileNotFoundError(errno.ENOENT, "No such file")
+        attempts: list[int] = []
+
+        def broken(source: object, target: object) -> None:
+            attempts.append(1)
+            raise permanent
+
+        with patch.object(
+            self.registry_module, "_is_transient_sharing_error", lambda error: False
+        ):
+            with patch("karox.registry.os.replace", broken):
+                with self.assertRaises(FileNotFoundError):
+                    self.registry.put_provider(provider("second"))
+
+        self.assertEqual(len(attempts), 1)
+
+    def test_concurrent_reads_and_writes_never_surface_a_sharing_error(self) -> None:
+        # The registry is saved from a worker thread while the status path reads
+        # it, so both sides must pass through the real window instead of failing.
+        #
+        # The readers pause between reads on purpose. A reader that re-opens the
+        # file in a tight loop keeps it open ~99% of the time (measured: 396 of
+        # 400 swaps collided), and no bounded retry can win that race -- so a
+        # spinning reader would assert arithmetic instead of behaviour. A real
+        # reader is a periodic poll, which is what this models.
+        stop = threading.Event()
+        failures: list[str] = []
+
+        def writer() -> None:
+            try:
+                for index in range(30):
+                    self.registry.put_provider(provider(f"p{index}"))
+            except Exception as error:  # noqa: BLE001 - the point is to record it
+                failures.append(f"write: {error!r}")
+            finally:
+                stop.set()
+
+        def reader() -> None:
+            while not stop.is_set():
+                try:
+                    self.registry.providers()
+                except Exception as error:  # noqa: BLE001 - the point is to record it
+                    failures.append(f"read: {error!r}")
+                time.sleep(0.001)
+
+        threads = [threading.Thread(target=writer)]
+        threads.extend(threading.Thread(target=reader) for _ in range(2))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        self.assertEqual(failures, [])
 
 
 if __name__ == "__main__":

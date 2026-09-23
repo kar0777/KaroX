@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from _unittest_compat import enter_context
 
+import time
 import unittest
 from unittest.mock import patch
 
@@ -142,15 +143,19 @@ class ProviderKeyUxTests(unittest.IsolatedAsyncioTestCase):
                 key.value = "benchmark-key-not-real"
                 key.focus()
                 await pilot.press("enter")
-                for _ in range(20):
-                    await pilot.pause(0.05)
-                    if isinstance(app.screen, tui.ModelPickerScreen):
-                        break
+                deadline = time.monotonic() + 10.0
+                while not isinstance(app.screen, tui.ModelPickerScreen) and time.monotonic() < deadline:
+                    await pilot.pause()
+                self.assertIsInstance(app.screen, tui.ModelPickerScreen)
+                await pilot.pause()
                 await pilot.press("enter")
-                for _ in range(20):
-                    await pilot.pause(0.05)
-                    if self.registry.selected_model() is not None:
-                        break
+                # Dismissal is posted after the save worker has closed the
+                # registry. Polling selected_model while that writer was
+                # replacing providers.json raced its Windows file handle.
+                deadline = time.monotonic() + 10.0
+                while screen in app.screen_stack and time.monotonic() < deadline:
+                    await pilot.pause()
+                self.assertNotIn(screen, app.screen_stack, "provider save did not complete")
                 selected = self.registry.selected_model()
                 self.assertIsNotNone(selected)
                 assert selected is not None
