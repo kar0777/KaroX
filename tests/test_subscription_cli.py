@@ -307,3 +307,31 @@ def test_codex_cache_is_unavailable_when_cli_does_not_report_it() -> None:
     assert usage.prompt_tokens == 100
     assert usage.cache_read_tokens == 0
     assert usage.cache_metrics_reported is False
+
+
+def test_a_worker_verification_item_is_an_accepted_context_kind(tmp_path: Path) -> None:
+    """The producer and the bus have to agree on the vocabulary.
+
+    A subscription worker publishes its check evidence as kind ``verification``
+    (``subscription_cli.py``), and the bus validates kinds against a fixed set.
+    When that kind was missing, the whole orchestration run aborted with
+    "unsupported context kind: verification", which ``karox orchestrate run``
+    surfaced as a bare ``karox:`` error before any worker started.
+    """
+    bus = ContextBus("run", path=tmp_path / "context.json")
+
+    bus.put_text(
+        item_id="subscription-verification-step",
+        kind="verification",
+        content=json.dumps({"checks": [], "changed_files": ["index.html"]}),
+        tags=("subscription", "verification"),
+    )
+
+    assert "verification" in {item.kind for item in bus.items()}
+
+
+def test_an_unknown_context_kind_is_still_rejected(tmp_path: Path) -> None:
+    bus = ContextBus("run", path=tmp_path / "context.json")
+
+    with pytest.raises(ValueError, match="unsupported context kind"):
+        bus.put_text(item_id="bad", kind="not-a-kind", content="x")

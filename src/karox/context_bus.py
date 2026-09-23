@@ -35,6 +35,11 @@ KINDS = frozenset(
         "test",
         "diff",
         "evidence",
+        # Published by the subscription CLI once it runs an approved verification
+        # command. This vocabulary is validation-only, so a kind the producer
+        # already emits has to be listed here; otherwise the whole orchestration
+        # run aborts on the evidence it just produced.
+        "verification",
         "decision",
         "task",
         "browser",
