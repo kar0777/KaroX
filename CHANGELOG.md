@@ -36,6 +36,14 @@ All notable changes to KaroX 5 are documented here. The format follows
   created them, deeply nested tool arguments can no longer end a run with a
   RecursionError, and the deferred-tools row says when a step deliberately
   skipped deferral instead of reporting a measured zero.
+- Tool calls work on the StepFun Step Plan endpoint. It streams one call as a
+  first fragment carrying id/type/name and later fragments carrying `"id": ""`
+  and `"type": ""` with only the argument text appended; the empty string was
+  read as a foreign tool-call type, so every tool call on that endpoint failed
+  with `malformed_response`. A foreign type is still rejected.
+- `karox orchestrate run` no longer aborts before its first worker: a
+  subscription worker publishes its check evidence under a context kind the bus
+  vocabulary did not list.
 
 ## [5.0.0rc2] — 2026-09-18
 

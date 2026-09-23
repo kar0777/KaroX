@@ -1023,6 +1023,14 @@ class OpenAIChatCompletionsProvider:
                 ):
                     raise ValueError("tool-call delta requires a non-negative index")
                 raw_type = raw.get("type")
+                # Later fragments of one call carry the identity fields as empty
+                # strings rather than null on some OpenAI-compatible endpoints
+                # (measured on StepFun's Step Plan endpoint: the first chunk has
+                # the id and type, the rest send {"id": "", "type": ""} while
+                # appending arguments). An empty string is that same empty
+                # fragment, not a different kind of tool call.
+                if isinstance(raw_type, str) and not raw_type.strip():
+                    raw_type = None
                 if raw_type is not None and raw_type != "function":
                     raise ValueError("only function tool-call deltas are supported")
                 raw_call_id = raw.get("id")

@@ -438,6 +438,104 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                 if status == 429:
                     self.assertEqual(raised.exception.retry_after, 2.5)
 
+    def test_an_empty_type_is_a_fragment_not_a_foreign_tool_call(self) -> None:
+        # Measured on StepFun's Step Plan endpoint: one tool call streams as a
+        # first chunk carrying id/type/name and later chunks carrying
+        # {"id": "", "type": ""} with only the argument text appended. Rejecting
+        # that shape made every tool call on that endpoint fail.
+        fragments = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "chatcmpl-tool-1",
+                                    "type": "function",
+                                    "function": {"name": "read_file", "arguments": "{"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "type": "",
+                                    "function": {"name": "", "arguments": '"path": '},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "type": "",
+                                    "function": {"name": "", "arguments": '"sample.txt"}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        client = FakeClient([sse_response(fragments)])
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(
+            result.tool_calls,
+            (ToolCall("chatcmpl-tool-1", "read_file", '{"path": "sample.txt"}'),),
+        )
+        self.assertEqual(result.finish_reason, "tool_calls")
+
+    def test_a_foreign_tool_call_type_is_still_rejected(self) -> None:
+        # The empty-string tolerance above must not become a general allowance:
+        # a call that names a different kind of tool is still not executable.
+        event = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "web_search",
+                                "function": {"name": "search", "arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        client = FakeClient([sse_response([event])])
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(self.request())
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.MALFORMED_RESPONSE)
+
     def test_rejects_malformed_sse_json_and_event_schema(self) -> None:
         malformed = (
             "not-json",
