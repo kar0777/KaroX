@@ -21,8 +21,15 @@ represent this single run as compatibility with every vendor.
 
 ## Result
 
-Pending a user-authorized live run against a named endpoint.
+Partial user-authorized StepFun run on 2026-09-23: `step-5-preview` on
+`https://api.stepfun.ai/step_plan/v1` returned HTTP 200 and a complete minimal
+SSE response. Standard `/v1` returned 402 because its allowance is separate.
+The complete Core tool-loop runner was blocked by automatic execution review;
+the required scenario remains pending. See
+`../evidence/release-hardening-2026-09-23.md` for exact scope and limitations.
 
 ## Limitations
 
-Pending.
+No claim for other vendors, provider tools, writable orchestration or billing
+savings follows from the minimal streaming request. The StepFun presets remain
+experimental until the full scenario is executed and recorded.

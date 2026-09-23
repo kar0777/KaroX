@@ -3,6 +3,40 @@
 All notable changes to KaroX 5 are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — 2026-09-23
+
+- Compact tool discovery now accounts for its own prompt overhead. Deferring a
+  small schema never increases the request size, and usage reports show net savings.
+- Repeated reads with equivalent JSON object arguments share stale-result
+  identity; non-finite, malformed and non-object arguments remain distinct.
+- Repository inspection favours relevant primary source over keyword-heavy
+  snapshot paths and coalesces overlapping excerpts within the original budget.
+- The dark terminal shell uses more of narrow viewports. Its command palette
+  keeps the composer visible at 46x14 and scrolls through the full keyboard list.
+- Separate StepFun API and Step Plan presets prevent mixing pay-as-you-go and
+  subscription endpoints. HTTP 402 is classified as a budget error.
+- Added an opt-in, read-only Step 5 Preview acceptance runner with independent
+  review/test-design lanes, strict answer/read evidence, source fingerprints and
+  credential-safe failure reports.
+- A typed command is no longer consumed as pasted text. Enter arriving inside the
+  machine-speed burst that arms the raw-paste detector used to be stored as a
+  pasted newline, so `/connect` never ran and the composer showed a paste marker;
+  the command palette now outranks that reading. The palette's own window also
+  fits the rows its border leaves paintable, so a long catalogue can no longer
+  place the highlighted command in a clipped row.
+- The provider registry read and its atomic swap pass through the Windows sharing
+  window instead of failing: a status read that lands inside the swap, or a save
+  whose swap meets an open reader, is retried on a bounded budget. This fixes the
+  two Windows Python 3.12 CI failures at their cause rather than in the tests
+  that tripped over them.
+- An HTTP 402 is a budget error on both delivery paths, and it falls back to the
+  next configured route: an exhausted allowance belongs to that endpoint's
+  account, while the local budget stop is raised before any route is tried.
+- Repository excerpts can no longer be truncated into hiding the match line that
+  created them, deeply nested tool arguments can no longer end a run with a
+  RecursionError, and the deferred-tools row says when a step deliberately
+  skipped deferral instead of reporting a measured zero.
+
 ## [5.0.0rc2] — 2026-09-18
 
 Release-gate correction candidate. Full notes: `RELEASE_NOTES_v5.0.0rc2.md`.

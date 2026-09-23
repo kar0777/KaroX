@@ -75,6 +75,7 @@ def main() -> int:
                 "KAROX_VNEXT_CONFIG_DIR": str(config),
                 "KAROX_RUNTIME_DIR": str(runtime),
                 "KAROX_VNEXT_RUNTIME_DIR": str(runtime),
+                "KAROX_LEGACY_CONFIG_DIR": str(root / "legacy"),
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONUTF8": "1",
             }

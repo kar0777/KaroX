@@ -89,7 +89,7 @@ git diff --check
 
 ## 4. Core correctness and security
 
-- [ ] Complete 3526-test suite passes on the final release commit; current
+- [ ] Complete 3558-test suite passes on the final release commit; current
   verification is pending. The following is historical evidence, not current
   acceptance: the September 17 beta validation passed. The stale
   2026-09-03 failing-run narration above has been superseded: the CLI surface,

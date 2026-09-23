@@ -18,6 +18,24 @@ python scripts/check_v5_release.py --json
 Не публикуй необработанные логи, support bundle, OAuth tokens, API keys, пароль
 approval или приватный исходный код.
 
+## StepFun сообщает об исчерпанной квоте, хотя подписка активна
+
+У обычного API и Step Plan разные адреса и квоты. Для подписки выбери
+`StepFun Step Plan (subscription)` в подключениях и модель `step-5-preview`.
+
+| Подключение | Base URL для международного аккаунта |
+| --- | --- |
+| StepFun API, оплата по использованию | `https://api.stepfun.ai/v1` |
+| StepFun Step Plan, подписка | `https://api.stepfun.ai/step_plan/v1` |
+
+Ответ `/models` с кодом 200 подтверждает доступ к каталогу, но не наличие
+квоты для генерации на выбранном адресе. Ошибка 402 обычного API не доказывает,
+что закончились Credits подписки. Для китайского аккаунта используются адреса
+с `.com`; регион аккаунта и тип квоты выбираются явно. KaroX не переключает
+подписочный запрос на платный API автоматически.
+
+Подробнее: [официальная документация Step Plan](https://platform.stepfun.ai/docs/en/step-plan/overview).
+
 ## Команда `karox` не найдена
 
 ### Windows

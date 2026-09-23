@@ -1,9 +1,15 @@
 # KaroX 5 implementation status
 
-Last updated: 2026-09-16
-Branch under review: `feat/karox-v5-competitive-upgrade`
+Last updated: 2026-09-23
+Branch under review: `main`
 Runtime version: `5.0.0rc4` (public beta)
 Stable shipping line: `4.1.4`
+
+The current hardening pass improves context reuse, inspection relevance,
+narrow-terminal usability and Step Plan setup. Its measured scope and remaining
+release prerequisites are recorded in
+`docs/evidence/release-hardening-2026-09-23.md`. Runtime/stable versions remain
+unchanged until the strict release gate has real evidence for every prerequisite.
 
 This is the canonical current-status page for KaroX 5. Detailed phase records
 under `docs/vNext/` and the working plans under `docs/archive/` are historical
@@ -242,7 +248,7 @@ still require recorded runs on Windows, macOS and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 3526 tests under:
+The canonical documented suite is now 3558 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -291,7 +297,7 @@ back to the terminal. It is not a P0.
 
 ### Source and automated verification
 
-- run the complete 3526-test suite, lint, typing, coverage and wheel smoke on
+- run the complete 3558-test suite, lint, typing, coverage and wheel smoke on
   the exact release-candidate commit and record it under `docs/evidence/`;
 - validate the release workflow in GitHub Actions and record a green
   Windows/macOS/Linux matrix;
