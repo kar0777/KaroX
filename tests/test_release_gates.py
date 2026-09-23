@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -153,9 +154,24 @@ class CheckTestCountTests(unittest.TestCase):
 
     def test_the_counts_this_repository_publishes_are_current(self) -> None:
         """The real check, against the real tree -- all three copies read 536
-        against a suite of 576 before this gate existed."""
-        code, report = _run_quietly(self.gate, [])
-        self.assertEqual(code, 0, report)
+        against a suite of 576 before this gate existed.
+
+        Run as a subprocess, which is how the repository and CI publish the
+        number. Discovering in-process imports the suite into a session that
+        pytest has already imported, where a module can fail to import and add a
+        phantom ``_FailedTest`` entry: the count then differs from the
+        subprocess's own figure by one and this gate failed on a tree that was
+        correct.
+        """
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_test_count.py")],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            completed.returncode, 0, completed.stdout + completed.stderr
+        )
 
     def test_a_stale_published_count_fails(self) -> None:
         code, report = _run_quietly(self.gate, ["--print", "suite"])
