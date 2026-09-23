@@ -247,9 +247,9 @@ def economy_measurement_lines(
             "economy_reused_chars",
         ),
         counted(
-            "схемы инструментов не отправлены, байт",
-            "schema bytes avoided",
-            "economy_tool_schema_bytes_avoided",
+            "чистая экономия схем инструментов, байт",
+            "net tool-schema bytes avoided",
+            "economy_tool_schema_bytes_saved_net",
         ),
         counted(
             "повторные чтения из кэша",
@@ -301,9 +301,18 @@ def economy_status_lines(
     applied = _label(language, "применяется", "applied")
     shadow = _label(language, "измеряется (без применения)", "shadow-measuring")
     state = applied if economy_mode else shadow
+    # Deferral is decided per step: when the note would cost more than the
+    # schema it saves, the step keeps every tool and the net counter is 0. A
+    # global "applied" label over that number reads as a measured zero instead
+    # of the deliberate skip it is.
+    deferred_state = (
+        _label(language, "не применялось на этом шаге", "not applied on this step")
+        if economy_mode and economy.get("economy_tool_universe_applied") is False
+        else state
+    )
 
-    def row(name: str, detail: str) -> str:
-        return f"{name}: {state} · {detail}"
+    def row(name: str, detail: str, row_state: str | None = None) -> str:
+        return f"{name}: {row_state or state} · {detail}"
 
     def count_detail(key: str, unit_ru: str, unit_en: str) -> str:
         value = _economy_int(economy, key)
@@ -324,7 +333,8 @@ def economy_status_lines(
         ),
         row(
             _label(language, "Отложенные инструменты", "Deferred Tools"),
-            count_detail("economy_tool_schema_bytes_avoided", "байт схем не отправлено", "schema bytes avoided"),
+            count_detail("economy_tool_schema_bytes_saved_net", "чистых байт схем сэкономлено", "net schema bytes saved"),
+            deferred_state,
         ),
         row(
             "Evidence Packets",

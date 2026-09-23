@@ -21,7 +21,7 @@ from karox.agent import AgentKernel, AgentLimits, SYSTEM_PROMPT
 from karox.core_tools import ExtendedCoreRuntime
 from karox.models import AccessProfile, Capability, Origin, OriginKind
 from karox.policy import CapabilityPolicy
-from karox.providers import ModelRequest, ModelResponse, ToolCall
+from karox.providers import ModelRequest, ModelResponse, ProviderTool, ToolCall
 from karox.sessions import SessionStore
 from karox.tool_universe import family_of
 
@@ -159,9 +159,42 @@ class ToolUniverseWiringTests(unittest.TestCase):
         for alias in conditional:
             self.assertIn(alias, system.content or "")
         self.assertGreater(kernel._tool_schema_bytes_avoided, 0)
+        self.assertGreater(kernel._tool_discovery_note_bytes, 0)
+        self.assertEqual(kernel._tool_discovery_note_bytes,
+                         len(json.dumps(kernel._request_system_prompt(), ensure_ascii=False).encode("utf-8"))
+                         - len(json.dumps(kernel.system_prompt, ensure_ascii=False).encode("utf-8")))
+        self.assertGreater(kernel._tool_schema_bytes_saved_net, 0)
         usage = self.sessions.load("session").usage
         rendered = json.dumps(usage, ensure_ascii=False, sort_keys=True)
         self.assertIn('"economy_tool_universe_applied": true', rendered)
+        self.assertIn('"economy_tool_schema_bytes_saved_net":', rendered)
+
+    def test_discovery_note_never_makes_a_small_catalog_larger(self) -> None:
+        """A one-tool deferral must not spend more than its schema saves."""
+        kernel = self._kernel(self._read_then_answer_provider(), economy=True)
+        tiny_schema = {"type": "object", "properties": {}}
+        kernel._permitted_tool_pairs = (
+            ("repo_status", "repo.status"),
+            ("runtime_status", "runtime.status"),
+        )
+        kernel._provider_tools = (
+            ProviderTool("repo_status", "x", tiny_schema),
+            ProviderTool("runtime_status", "x", tiny_schema),
+        )
+
+        kernel._select_tool_universe("what does sample.txt contain?")
+
+        # The omitted runtime schema is smaller than the lossless exact-name
+        # discovery note, so retaining it is both safer for discovery and
+        # strictly cheaper for the actual provider request.
+        self.assertFalse(kernel._tool_universe_applied)
+        self.assertEqual(kernel._universe_note, "")
+        self.assertEqual(
+            {tool.name for tool in kernel._advertised_provider_tools},
+            {"repo_status", "runtime_status"},
+        )
+        self.assertGreater(kernel._tool_schema_bytes_avoided, 0)
+        self.assertEqual(kernel._tool_schema_bytes_saved_net, 0)
 
     def test_omitted_tool_call_executes_and_expands_its_family(self) -> None:
         provider = _QueueProvider(

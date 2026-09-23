@@ -113,9 +113,9 @@ class DiscoveryNoteTests(unittest.TestCase):
                 "browser": ["browser_fetch", "browser_actions"],
             }
         )
-        self.assertIn("browser: browser_actions, browser_fetch", note)
-        self.assertIn("process: dev_command, process_stop", note)
-        self.assertLess(note.index("browser:"), note.index("process:"))
+        self.assertIn("browser[browser_actions,browser_fetch]", note)
+        self.assertIn("process[dev_command,process_stop]", note)
+        self.assertLess(note.index("browser["), note.index("process["))
         self.assertIn("exact name", note)
 
     def test_note_is_names_only_and_bounded(self) -> None:

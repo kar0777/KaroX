@@ -2219,5 +2219,41 @@ class AgentCliEndToEndTests(unittest.TestCase):
             self.assertEqual(len(persisted.evidence), 4)
 
 
+class ActionSignatureTests(unittest.TestCase):
+    """A tool call is identified by its action, whatever the model supplied."""
+
+    def test_deeply_nested_arguments_cannot_end_the_run(self) -> None:
+        # raw_arguments is model output. A deeply nested document makes
+        # json.loads raise RecursionError, which is not a ValueError, so it used
+        # to escape AgentKernel.run instead of degrading to the raw spelling.
+        raw = '{"a":' * 4_000 + "1" + "}" * 4_000
+
+        signature = AgentKernel._action_signature(
+            ToolCall("call-1", "repo_read_file", raw)
+        )
+
+        self.assertEqual(
+            signature,
+            hashlib.sha256(f"repo_read_file\0{raw}".encode("utf-8")).hexdigest(),
+        )
+
+    def test_equivalent_argument_order_is_one_identity(self) -> None:
+        first = ToolCall("call-1", "repo_read_file", '{"path":"a.txt","count":2}')
+        second = ToolCall("call-2", "repo_read_file", '{"count":2,"path":"a.txt"}')
+
+        self.assertEqual(
+            AgentKernel._action_signature(first),
+            AgentKernel._action_signature(second),
+        )
+
+    def test_a_different_tool_name_is_a_different_identity(self) -> None:
+        raw = '{"path":"a.txt"}'
+
+        self.assertNotEqual(
+            AgentKernel._action_signature(ToolCall("call-1", "repo_read_file", raw)),
+            AgentKernel._action_signature(ToolCall("call-1", "repo_write_file", raw)),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,54 @@ _ECONOMY = {
 }
 
 
+class DeferredToolsStatusTests(unittest.TestCase):
+    """The deferral decision is per step, so its label has to be per step too."""
+
+    def _rows(self, *, economy_mode: bool = True, **economy: object) -> list[str]:
+        return economy_status_lines(
+            "en", economy=dict(_ECONOMY, **economy), economy_mode=economy_mode
+        )
+
+    @staticmethod
+    def _row(rows: list[str]) -> str:
+        return next(row for row in rows if row.startswith("Deferred Tools"))
+
+    def test_a_skipped_step_does_not_read_as_a_measured_zero(self) -> None:
+        # Deferral is skipped when its discovery note would cost more than the
+        # schema it defers, and the net counter is then 0. The global "applied"
+        # label over that number claims the feature ran and measured nothing.
+        row = self._row(
+            self._rows(
+                economy_tool_universe_applied=False,
+                economy_tool_schema_bytes_saved_net=0,
+            )
+        )
+        self.assertTrue(row.startswith("Deferred Tools: not applied on this step · "), row)
+        self.assertIn("0 net schema bytes saved", row)
+
+    def test_an_applied_step_keeps_the_applied_label(self) -> None:
+        row = self._row(
+            self._rows(
+                economy_tool_universe_applied=True,
+                economy_tool_schema_bytes_saved_net=74,
+            )
+        )
+        self.assertTrue(row.startswith("Deferred Tools: applied · "), row)
+        self.assertIn("74 net schema bytes saved", row)
+
+    def test_a_disabled_economy_still_reports_shadow_measurement(self) -> None:
+        # With economy off nothing is applied, skipped or otherwise: the row
+        # keeps saying it is only measuring.
+        row = self._row(
+            self._rows(
+                economy_mode=False,
+                economy_tool_universe_applied=False,
+                economy_tool_schema_bytes_saved_net=0,
+            )
+        )
+        self.assertTrue(row.startswith("Deferred Tools: shadow-measuring · "), row)
+
+
 class LastEconomyEventTests(unittest.TestCase):
     def test_picks_newest_event_with_economy_keys(self) -> None:
         usage = {

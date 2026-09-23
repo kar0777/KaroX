@@ -784,6 +784,12 @@ class AgentKernel:
         self._tool_schemas_omitted = 0
         self._tool_schema_bytes_included = 0
         self._tool_schema_bytes_avoided = 0
+        # A discovery note is also part of the request.  Track it separately
+        # from schema bytes so "avoided" never overstates the bytes the
+        # provider actually did not receive.
+        self._tool_discovery_note_bytes = 0
+        self._tool_schema_bytes_saved_net = 0
+        self._tool_universe_applied = False
         self._universe_note = ""
         self._refresh_tool_advertisement()
         self._prefix_stable_steps = 0
@@ -973,15 +979,39 @@ class AgentKernel:
             if omitted
             else 0
         )
-        applied = self.economy_mode and families is not None
-        if applied and omitted:
+        candidate_note = ""
+        if self.economy_mode and families is not None and omitted:
             omitted_names: Dict[str, List[str]] = {}
             for index in omitted:
                 alias, core_name = pairs[index]
                 omitted_names.setdefault(family_of(core_name), []).append(alias)
-            self._universe_note = discovery_note(omitted_names)
-        else:
-            self._universe_note = ""
+            candidate_note = discovery_note(omitted_names)
+
+        # Deferral must reduce the actual request, not merely its schema
+        # portion.  For a small conditional family the lossless discovery
+        # note can be larger than the schemas it explains.  Keeping those
+        # schemas attached preserves every capability while avoiding a token
+        # regression.  The comparison uses UTF-8 bytes, the same unit used by
+        # the provider-payload accounting below.
+        # Include the separating newline and JSON escaping, just like the
+        # serialized schema estimate. Subtract only the two string quotes.
+        note_bytes = (
+            len(json.dumps("\n" + candidate_note, ensure_ascii=False).encode("utf-8")) - 2
+            if candidate_note else 0
+        )
+        gross_avoided = self._tool_schema_bytes_avoided
+        applied = bool(
+            self.economy_mode
+            and families is not None
+            and omitted
+            and gross_avoided > note_bytes
+        )
+        self._universe_note = candidate_note if applied else ""
+        self._tool_discovery_note_bytes = note_bytes if applied else 0
+        self._tool_schema_bytes_saved_net = (
+            gross_avoided - self._tool_discovery_note_bytes if applied else 0
+        )
+        self._tool_universe_applied = applied
         active_payload = included_payload if applied else payload(
             list(range(len(pairs)))
         )
@@ -1471,7 +1501,9 @@ class AgentKernel:
         if selection is not None:
             # Measured on every run; "applied" separates shadow measurement
             # from the economy-mode advertisement that actually omits bytes.
-            usage_event["economy_tool_universe_applied"] = bool(self.economy_mode)
+            usage_event["economy_tool_universe_applied"] = (
+                self._tool_universe_applied
+            )
             usage_event["economy_tool_groups_selected"] = ",".join(
                 selection.families
             )
@@ -1486,6 +1518,12 @@ class AgentKernel:
             )
             usage_event["economy_tool_schema_bytes_avoided"] = (
                 self._tool_schema_bytes_avoided
+            )
+            usage_event["economy_tool_discovery_note_bytes"] = (
+                self._tool_discovery_note_bytes
+            )
+            usage_event["economy_tool_schema_bytes_saved_net"] = (
+                self._tool_schema_bytes_saved_net
             )
             if self._expanded_families:
                 usage_event["economy_tool_groups_expanded"] = ",".join(
@@ -1940,7 +1978,11 @@ class AgentKernel:
             normalized = json.dumps(
                 value, allow_nan=False, ensure_ascii=False, sort_keys=True
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+            # ``raw_arguments`` is model output: a deeply nested document raises
+            # RecursionError from json.loads/json.dumps, which is not a ValueError
+            # and would otherwise escape the run. The raw spelling is the safe
+            # signature, the same fallback the context compiler already uses.
             normalized = call.raw_arguments
         return hashlib.sha256(f"{call.name}\0{normalized}".encode("utf-8")).hexdigest()
 

@@ -173,14 +173,14 @@ def discovery_note(omitted_tools: Mapping[str, Sequence[str]]) -> str:
         names = omitted_tools.get(family)
         if not names:
             continue
-        parts.append(f"{family}: {', '.join(sorted(names))}")
+        # Brackets keep the family/name boundary unambiguous while costing
+        # fewer bytes than prose and repeated punctuation on every turn.
+        parts.append(f"{family}[{','.join(sorted(names))}]")
     if not parts:
         return ""
     note = (
-        "Deferred tool schemas. These tools exist but their schemas are not "
-        "attached: " + "; ".join(parts) + ". You may call any of them by "
-        "exact name with JSON arguments; after such a call the family's "
-        "schemas are attached from the next step."
+        "Deferred tool schemas: " + ";".join(parts) + ". Call by exact "
+        "name with JSON; that family's schemas attach next step."
     )
     if len(note) > _NOTE_CEILING_CHARS:
         note = note[: _NOTE_CEILING_CHARS - 22] + " ... (list truncated)."

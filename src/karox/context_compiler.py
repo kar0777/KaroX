@@ -233,6 +233,30 @@ def _stale_marker(superseding_call_id: str) -> str:
     )
 
 
+def _tool_identity_arguments(raw_arguments: str) -> str:
+    """Canonicalize valid object arguments for stale-result identity.
+
+    Provider wire history retains the model's original JSON spelling.  Object
+    key order is not semantic, though, and treating it as semantic can retain
+    two large results for the same read solely because one call wrote
+    ``path`` before ``start``.  Only valid JSON objects are normalized; every
+    malformed or non-object value keeps its exact spelling so this economy
+    layer cannot merge an ambiguous tool call.
+    """
+
+    try:
+        decoded = json.loads(raw_arguments)
+        if not isinstance(decoded, dict):
+            return raw_arguments
+        # Reject both non-standard constants and float overflow (1e400).
+        # Normalizing either to Infinity would merge an invalid action with
+        # another call and could discard the only successful read evidence.
+        return json.dumps(decoded, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return raw_arguments
+
+
 class ContextCompiler:
     """Deterministically compile typed items into minimal sufficient output.
 
@@ -259,7 +283,9 @@ class ContextCompiler:
                 and item.tool_name
                 and item.tool_arguments is not None
             ):
-                latest_by_identity[(item.tool_name, item.tool_arguments)] = item
+                latest_by_identity[
+                    (item.tool_name, _tool_identity_arguments(item.tool_arguments))
+                ] = item
 
         first_seen: Dict[str, ContextItem] = {}
         decisions: List[Decision] = []
@@ -319,7 +345,7 @@ class ContextCompiler:
         # sideways at another stale copy.
         if item.tool_name and item.tool_arguments is not None:
             latest = latest_by_identity.get(
-                (item.tool_name, item.tool_arguments)
+                (item.tool_name, _tool_identity_arguments(item.tool_arguments))
             )
             if (
                 latest is not None

@@ -79,6 +79,7 @@ _METRIC_KEYS: tuple[tuple[str, str], ...] = (
     ("tool schemas included", "economy_tool_schemas_included"),
     ("tool schemas omitted", "economy_tool_schemas_omitted"),
     ("tool schema bytes avoided", "economy_tool_schema_bytes_avoided"),
+    ("tool schema bytes saved net", "economy_tool_schema_bytes_saved_net"),
     ("duplicate context chars reused", "economy_reused_chars"),
     ("stale chars superseded", "economy_stale_chars"),
     ("read cache hits", "economy_read_cache_hits"),

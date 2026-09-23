@@ -154,6 +154,53 @@ class StaleTests(unittest.TestCase):
             all(d.verdict is Verdict.INCLUDE for d in compiled.decisions)
         )
 
+    def test_equivalent_json_object_arguments_supersede_large_results(self) -> None:
+        """Object key order must not retain an obsolete large read."""
+        before = "a" * 24_000
+        after = "b" * 24_000
+        compiled = ContextCompiler().compile(
+            [
+                _tool(
+                    0,
+                    "c1",
+                    before,
+                    arguments='{"path":"a.txt","start":1,"count":500}',
+                ),
+                _tool(
+                    1,
+                    "c2",
+                    after,
+                    arguments='{"count":500,"path":"a.txt","start":1}',
+                ),
+            ]
+        )
+        self.assertIs(compiled.decisions[0].verdict, Verdict.ELIDE_STALE)
+        self.assertIs(compiled.decisions[1].verdict, Verdict.INCLUDE)
+        self.assertGreater(compiled.stats.chars_saved, 23_000)
+
+    def test_malformed_arguments_remain_distinct(self) -> None:
+        compiled = ContextCompiler().compile(
+            [
+                _tool(0, "c1", "a" * 1200, arguments="{not-json"),
+                _tool(1, "c2", "b" * 1200, arguments="{not-json }"),
+            ]
+        )
+        self.assertTrue(
+            all(decision.verdict is Verdict.INCLUDE for decision in compiled.decisions)
+        )
+
+    def test_nonfinite_arguments_cannot_replace_successful_evidence(self) -> None:
+        for first, second in (
+            ('{"start":1e400}', '{"start":Infinity}'),
+            ('{"value":NaN,"path":"a"}', '{"path":"a","value":NaN}'),
+        ):
+            with self.subTest(first=first):
+                compiled = ContextCompiler().compile([
+                    _tool(0, "c1", "read evidence" * 200, arguments=first),
+                    _tool(1, "c2", "invalid arguments", arguments=second),
+                ])
+                self.assertIs(compiled.decisions[0].verdict, Verdict.INCLUDE)
+
     def test_unknown_tool_identity_is_never_marked_stale(self) -> None:
         one = ContextItem(index=0, role="tool", content="a" * 1200, tool_call_id="c1")
         two = ContextItem(index=1, role="tool", content="b" * 1200, tool_call_id="c2")
