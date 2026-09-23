@@ -170,6 +170,14 @@ def _identifier_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
+def _path_relevance(path: str, tokens: tuple[str, ...]) -> float:
+    """A descriptive backup directory must not outweigh the actual module name."""
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return sum(1.0 if token in name else 0.2 if token in lowered else 0.0
+               for token in tokens)
+
+
 def _content_search_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     """Choose high-signal tokens for repository-wide content search.
 
@@ -237,7 +245,7 @@ def _select_diverse_matches(
     def priority(item: tuple[str, list[dict[str, Any]]]) -> tuple[float, str]:
         path, items = item
         lowered_path = path.lower()
-        path_hits = sum(token in lowered_path for token in tokens)
+        path_hits = _path_relevance(path, tokens)
         coverage: set[str] = {
             token for token in tokens if token in lowered_path
         }
@@ -968,6 +976,7 @@ class RepositoryContextEngine:
                 "include_dependency_hints": bool(include_dependency_hints),
                 "policy_profile": self.policy_profile,
                 "schema_version": REPO_INSPECT_SCHEMA_VERSION,
+                "ranking_version": 2,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1361,11 +1370,11 @@ class RepositoryContextEngine:
         preferred_roots = ("src/", "lib/", "app/", "pkg/", "cmd/", "internal/", "packages/")
 
         def priority(path: str) -> tuple[float, str]:
-            path_hits = sum(token in path.lower() for token in tokens)
+            path_hits = _path_relevance(path, tokens)
             score = path_hits * 30 + len(coverage.get(path, ())) * 10
             score += min(counts.get(path, 0), 8) * 2
             if path.startswith(preferred_roots):
-                score += 6
+                score += 36
             return (-float(score), path)
 
         return sorted(candidates, key=priority)[: budget.max_files]
@@ -1692,8 +1701,7 @@ class RepositoryContextEngine:
         scores: dict[str, float] = {path: 0.0 for path in files}
         reasons: dict[str, list[str]] = {path: [] for path in files}
         for path in files:
-            lowered = path.lower()
-            path_hits = sum(token in lowered for token in tokens)
+            path_hits = _path_relevance(path, tokens)
             if path_hits:
                 scores[path] += path_hits * 20
                 reasons[path].append(f"path-token-hits={path_hits}")
@@ -1739,6 +1747,12 @@ class RepositoryContextEngine:
             for path, count in matched_per_file.items():
                 scores[path] += min(count, 4) * weight
                 reasons[path].append(f"{key}={count}")
+        for path, score in scores.items():
+            if score > 0 and path.startswith(
+                ("src/", "lib/", "app/", "pkg/", "cmd/", "internal/", "packages/")
+            ):
+                scores[path] += 36
+                reasons[path].append("primary-source")
         ranked: list[dict[str, Any]] = [
             {"path": path, "score": round(score, 3), "reasons": sorted(set(reasons[path]))}
             for path, score in scores.items()
@@ -1762,31 +1776,48 @@ class RepositoryContextEngine:
             ),
         )
         excerpts: list[dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
+        file_lines: dict[str, list[str]] = {}
+        emitted_end: dict[str, int] = {}
+        window = budget.context_lines * 2 + 1
+        remaining_lines = budget.max_excerpts * window
         for match in ordered:
             path = str(match["path"])
             line_number = int(match["line"])
-            key = (path, line_number)
-            if key in seen:
+            if path not in file_lines:
+                file_lines[path] = _read_lines(self.repository / path, budget.max_file_bytes)
+            lines = file_lines[path]
+            if not lines or not 1 <= line_number <= len(lines):
                 continue
-            seen.add(key)
-            lines = _read_lines(self.repository / path, budget.max_file_bytes)
-            if not lines:
-                continue
-            start = max(1, line_number - budget.context_lines)
+            start = max(1, line_number - budget.context_lines, emitted_end.get(path, 0) + 1)
             end = min(len(lines), line_number + budget.context_lines)
-            excerpts.append(
-                {
-                    "path": path,
-                    "start": start,
-                    "end": end,
-                    "lines": [
-                        {"line": index, "text": str(redact(lines[index - 1]))[:2000]}
-                        for index in range(start, end + 1)
-                    ],
-                }
-            )
-            if len(excerpts) >= budget.max_excerpts:
+            if start > end:
+                continue
+            end = min(end, start + remaining_lines - 1)
+            if end < line_number and line_number > emitted_end.get(path, 0):
+                # The line budget cannot reach the match that justified this
+                # excerpt: emitting the window anyway would spend context on a
+                # reason the reader never gets to see, and nothing in the result
+                # would say the line was cut. Skip it and let a later match with
+                # a shorter window use what is left.
+                continue
+            previous = excerpts[-1] if excerpts else None
+            merge = (previous is not None and previous["path"] == path
+                     and previous["end"] + 1 == start
+                     and end - previous["start"] + 1 <= window * 4)
+            if not merge and len(excerpts) >= budget.max_excerpts:
+                break
+            content = [
+                {"line": index, "text": str(redact(lines[index - 1]))[:2000]}
+                for index in range(start, end + 1)
+            ]
+            if merge and previous is not None:
+                previous["end"] = end
+                previous["lines"].extend(content)
+            else:
+                excerpts.append({"path": path, "start": start, "end": end, "lines": content})
+            emitted_end[path] = end
+            remaining_lines -= len(content)
+            if remaining_lines <= 0:
                 break
         return excerpts
 

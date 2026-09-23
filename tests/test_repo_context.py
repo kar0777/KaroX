@@ -75,6 +75,80 @@ class RepositoryContextTests(unittest.TestCase):
         self.assertIn("start_saved_bridge", names)
         self.assertEqual(record.sha256, result["content_hash"])
 
+    def test_primary_source_outweighs_snapshot_directory_keywords(self) -> None:
+        source = "src/service.py"
+        snapshot = "tools/bridge-profile-snapshot/src/service.py"
+        tokens = ("bridge", "profile", "service")
+        matches = [{"path": path, "line": 1, "text": "class BridgeProfileService:"}
+                   for path in (source, snapshot)]
+        ranked = self.engine._rank_files((source, snapshot), matches, {}, tokens)
+        self.assertEqual(ranked[0]["path"], source)
+
+    def test_excerpts_emit_each_source_line_once_and_read_each_file_once(self) -> None:
+        from karox.repo_context import InspectBudget, _read_lines
+        source = self.repo / "src" / "dense.py"
+        source.write_text("\n".join(f"line_{i} = {i}" for i in range(1, 61)), encoding="utf-8")
+        matches = [{"path": "src/dense.py", "line": i, "text": "match"}
+                   for i in range(5, 41)]
+        budget = InspectBudget(40, 200, 20, 3, 1_000_000)
+        with mock.patch("karox.repo_context._read_lines", wraps=_read_lines) as read:
+            excerpts = self.engine._excerpts(matches, [{"path": "src/dense.py"}], budget)
+        numbers = [line["line"] for excerpt in excerpts for line in excerpt["lines"]]
+        self.assertEqual(len(numbers), len(set(numbers)))
+        self.assertTrue(set(range(5, 41)).issubset(numbers))
+        self.assertLessEqual(len(numbers), 20 * 7)
+        self.assertEqual(read.call_count, 1)
+
+    def test_an_excerpt_never_hides_the_match_that_created_it(self) -> None:
+        # The line budget can run out mid-window. A window that no longer covers
+        # its own match spends context on a reason the reader cannot see, and
+        # nothing in the result says the line was cut, so it must be dropped
+        # rather than emitted partially.
+        from karox.repo_context import InspectBudget
+
+        dense = self.repo / "src" / "dense.py"
+        dense.write_text(
+            "\n".join(f"line_{i} = {i}" for i in range(1, 301)), encoding="utf-8"
+        )
+        late = self.repo / "src" / "late.py"
+        late.write_text(
+            "\n".join(f"line_{i} = {i}" for i in range(1, 301)), encoding="utf-8"
+        )
+        matches = [{"path": "src/dense.py", "line": i, "text": "match"}
+                   for i in range(5, 136)]
+        matches += [{"path": "src/late.py", "line": 200, "text": "match"},
+                    {"path": "src/late.py", "line": 250, "text": "match"}]
+        budget = InspectBudget(40, 200, 20, 3, 1_000_000)
+
+        excerpts = self.engine._excerpts(
+            matches, [{"path": "src/dense.py"}, {"path": "src/late.py"}], budget
+        )
+
+        self.assertTrue(excerpts)
+        for excerpt in excerpts:
+            covered = [
+                match["line"]
+                for match in matches
+                if match["path"] == excerpt["path"]
+                and excerpt["start"] <= match["line"] <= excerpt["end"]
+            ]
+            self.assertTrue(
+                covered,
+                "excerpt exposes no match of its own: "
+                f"{excerpt['path']} {excerpt['start']}-{excerpt['end']}",
+            )
+        exposed = {
+            (excerpt["path"], line)
+            for excerpt in excerpts
+            for line in range(excerpt["start"], excerpt["end"] + 1)
+        }
+        self.assertLess(
+            len([match for match in matches
+                 if (match["path"], match["line"]) in exposed]),
+            len(matches),
+            "the fixture no longer exhausts the line budget, so it proves nothing",
+        )
+
     def test_non_git_directory_inspects_without_invoking_git(self) -> None:
         plain = Path(self.temp.name) / "plain-directory"
         (plain / "src").mkdir(parents=True)
