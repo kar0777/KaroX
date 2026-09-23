@@ -11,8 +11,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 from _support import SRC, initialize_git_repository
+import karox.agent as agent_module
 from karox.agent import (
     AgentEvent,
     AgentEventKind,
@@ -2222,20 +2224,37 @@ class AgentCliEndToEndTests(unittest.TestCase):
 class ActionSignatureTests(unittest.TestCase):
     """A tool call is identified by its action, whatever the model supplied."""
 
-    def test_deeply_nested_arguments_cannot_end_the_run(self) -> None:
-        # raw_arguments is model output. A deeply nested document makes
-        # json.loads raise RecursionError, which is not a ValueError, so it used
-        # to escape AgentKernel.run instead of degrading to the raw spelling.
-        raw = '{"a":' * 4_000 + "1" + "}" * 4_000
-
-        signature = AgentKernel._action_signature(
-            ToolCall("call-1", "repo_read_file", raw)
-        )
+    def test_a_recursion_error_from_json_cannot_end_the_run(self) -> None:
+        # raw_arguments is model output, and json.loads raises RecursionError on
+        # a document nested past the interpreter's limit -- which is not a
+        # ValueError, so it used to escape AgentKernel.run instead of degrading
+        # to the raw spelling. The guard is exercised directly because where an
+        # interpreter gives up is platform-specific: a 4 000-deep document raised
+        # on Windows and parsed cleanly on macOS and ubuntu, which is how the
+        # first version of this test broke two of the three CI platforms.
+        raw = '{"path":"a.txt"}'
+        with patch.object(agent_module, "_strict_json_loads", side_effect=RecursionError):
+            signature = AgentKernel._action_signature(
+                ToolCall("call-1", "repo_read_file", raw)
+            )
 
         self.assertEqual(
             signature,
             hashlib.sha256(f"repo_read_file\0{raw}".encode("utf-8")).hexdigest(),
         )
+
+    def test_a_deeply_nested_document_still_produces_a_signature(self) -> None:
+        # End to end: whichever way this interpreter answers (parses it, or
+        # refuses at its depth limit), a signature must come back and nothing may
+        # escape the call. The depth is deliberately modest -- this test is about
+        # the contract holding, not about finding where any interpreter stops.
+        raw = '{"a":' * 5_000 + "1" + "}" * 5_000
+
+        signature = AgentKernel._action_signature(
+            ToolCall("call-1", "repo_read_file", raw)
+        )
+
+        self.assertEqual(len(signature), 64)
 
     def test_equivalent_argument_order_is_one_identity(self) -> None:
         first = ToolCall("call-1", "repo_read_file", '{"path":"a.txt","count":2}')

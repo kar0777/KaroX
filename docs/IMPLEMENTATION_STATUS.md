@@ -248,7 +248,7 @@ still require recorded runs on Windows, macOS and Linux.
 
 ## Evidence status
 
-The canonical documented suite is now 3558 tests under:
+The canonical documented suite is now 3560 tests under:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -297,7 +297,7 @@ back to the terminal. It is not a P0.
 
 ### Source and automated verification
 
-- run the complete 3558-test suite, lint, typing, coverage and wheel smoke on
+- run the complete 3560-test suite, lint, typing, coverage and wheel smoke on
   the exact release-candidate commit and record it under `docs/evidence/`;
 - validate the release workflow in GitHub Actions and record a green
   Windows/macOS/Linux matrix;

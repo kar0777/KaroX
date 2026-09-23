@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from _unittest_compat import enter_context
@@ -117,11 +118,49 @@ class HeadlessCase(unittest.IsolatedAsyncioTestCase):
 
     async def wait_screen(self, pilot, app, cls):
         for _ in range(100):
-            if (type(app.screen).__name__ == cls) if isinstance(cls, str) else isinstance(app.screen, cls):
+            current = app.screen
+            matched = (
+                (type(current).__name__ == cls)
+                if isinstance(cls, str)
+                else isinstance(current, cls)
+            )
+            if matched:
+                # One more turn lets compose() finish, which is what the caller
+                # needs. Return the screen that matched, not whatever is current
+                # afterwards: a screen that dismisses itself during that turn
+                # would otherwise come back as the base Screen, and the caller's
+                # assertions would run against it -- observed on a loaded
+                # Windows runner as "'Screen' object has no attribute 'progress'".
                 await pilot.pause()
-                return app.screen
+                return current
             await pilot.pause(0.02)
         self.fail(f"expected {cls}, got {type(app.screen).__name__}")
+
+
+class WaitScreenContractTests(HeadlessCase):
+    """The waiter hands back the screen it matched, not a later one."""
+
+    async def test_a_screen_that_closes_in_the_extra_turn_is_not_returned(self) -> None:
+        # The helper grants one more event-loop turn so compose() can finish.
+        # Re-reading app.screen after that turn returned the base Screen when the
+        # matched screen had dismissed itself, and the caller then asserted
+        # against it -- observed on a loaded Windows runner as
+        # "'Screen' object has no attribute 'progress'".
+        class Matched:
+            pass
+
+        class Replaced:
+            pass
+
+        app = SimpleNamespace(screen=Matched())
+
+        class Pilot:
+            async def pause(self, *args: object, **kwargs: object) -> None:
+                app.screen = Replaced()
+
+        returned = await self.wait_screen(Pilot(), app, Matched)
+
+        self.assertIsInstance(returned, Matched)
 
 
 class OnboardingFlowTests(HeadlessCase):
