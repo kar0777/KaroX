@@ -22,9 +22,9 @@ fact is repeated in the canonical current documents above.
 
 ## Historical test-count evidence
 
-For comparison with archived phase reports, the current unittest baseline contains 3560 cases. This is a discovery count, not a historical run result.
+For comparison with archived phase reports, the current unittest baseline contains 3562 cases. This is a discovery count, not a historical run result.
 
-The unittest-plus-legacy subtotal is 3565: that baseline plus five legacy KaroX 4
+The unittest-plus-legacy subtotal is 3567: that baseline plus five legacy KaroX 4
 checks under `scripts/`. It is not the full pytest count, which also includes
 standalone functions and parameterized cases.
 
