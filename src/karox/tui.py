@@ -7500,7 +7500,10 @@ if _HAS_TEXTUAL:
            instead, so nothing on screen is ever a half-truth. */
         #header-status { height: 1; padding: 0 2; background: #181511;
           color: #e0dccc; }
-        #conversation { height: 1fr; padding: 1 2; scrollbar-color: #6b5c3e; }
+        /* A split-pane terminal is still a real workspace. One-column side
+           inset keeps the shell calm while returning two useful cells to task
+           text before a model name or command needs shortening. */
+        #conversation { height: 1fr; padding: 1 1; scrollbar-color: #6b5c3e; }
         /* The frame around a message is CSS rather than a Rich Panel, and that is
            what makes the message selectable: Widget.get_selection returns None for
            anything whose render is not Content or Text, and a Panel is neither.
@@ -7534,17 +7537,21 @@ if _HAS_TEXTUAL:
            is the contract stated where the layout engine can enforce it: even
            if a line escaped `_fit_activity_line`, it cannot eat the chat. */
         #activity { display: none; height: auto; min-height: 1; max-height: 2;
-          margin: 0 2; padding: 0; background: transparent;
+          margin: 0 1; padding: 0; background: transparent;
           border: none; color: #d4b676; }
         #activity.activity-success { color: #b7c2b0; }
         #activity.activity-error { color: #e0a3a3; }
         #activity.activity-warning { color: #d6c49a; }
-        #command-menu { display: none; height: auto; max-height: 14; margin: 0 2;
+        #command-menu { display: none; height: auto; max-height: 14; margin: 0 1;
           padding: 0 1; background: #191612; border: round #4a4338;
           color: #c6bca8; }
-        #composer-wrap { height: 3; padding: 0 2; background: #181511; }
+        #composer-wrap { height: 3; padding: 0 1; background: #181511; }
         #composer { border: round #4a4338; background: #20201c; color: #e5e5e5; }
+        /* Hover stays quieter than focus: gold is reserved for keyboard position
+           and the current action, while a pointer only confirms editability. */
+        #composer:hover { border: round #6b5c3e; }
         #composer:focus { border: round #c6a56b; }
+        #composer:disabled { border: round #35322c; background: #191917; color: #77736b; }
         """
 
         def __init__(
@@ -9325,13 +9332,39 @@ if _HAS_TEXTUAL:
             if not matches:
                 menu.update("")
                 return
+            # The composer is the command palette's anchor, not collateral
+            # damage. A menu with fourteen wrapped descriptions can claim the
+            # entire lower half of a split terminal and push its own input off
+            # screen. Reserve the one-line header, the three-line composer,
+            # three conversation rows, and the menu's two border rows first.
+            # The selected row stays inside the resulting window, so all
+            # commands remain reachable through the existing Up/Down/Tab path.
+            #
+            # ``max-height: 14`` on #command-menu is an outer height and Textual
+            # lays widgets out border-box, so only 12 content rows are paintable.
+            # A 14-row window would place the highlighted row in the clipped two,
+            # which is exactly the case the window exists to prevent.
+            visible_rows = max(3, min(12, self.size.height - 9))
+            if self.size.width < 60:
+                # At this width a description wraps before it informs. The
+                # command itself is the stable, complete keyboard label; show
+                # it on one line and preserve the full catalogue behind the
+                # selection instead of clipping rows or hiding the composer.
+                descriptions = False
+            else:
+                descriptions = True
+            start = min(
+                max(0, self._command_index - visible_rows + 1),
+                max(0, len(matches) - visible_rows),
+            )
+            visible_matches = matches[start : start + visible_rows]
             rows = []
-            for index, name in enumerate(matches):
+            for index, name in enumerate(visible_matches, start=start):
                 marker = "[bold #e0dccc]> [/]" if index == self._command_index else "  "
-                rows.append(
-                    f"{marker}[bold #d4b676]{escape(name)}[/]  "
-                    f"[dim]{escape(commands[name])}[/]"
-                )
+                row = f"{marker}[bold #d4b676]{escape(name)}[/]"
+                if descriptions:
+                    row += f"  [dim]{escape(commands[name])}[/]"
+                rows.append(row)
             menu.update("\n".join(rows))
 
         def _select_previous_command(self) -> None:
@@ -9583,6 +9616,13 @@ if _HAS_TEXTUAL:
                 # Enter before the 12-character burst threshold. A near-immediate
                 # submit after a machine-speed burst is therefore treated as the
                 # first pasted newline instead of dispatching a partial task.
+                #
+                # An open command palette outranks that reading: it only opens
+                # when the whole composer value is a command prefix, and Enter
+                # there already means "run the highlighted command" below. The
+                # Changed and Submitted handlers share one message pump, so the
+                # flag is current here -- without this the same machine-speed
+                # reading converted a typed ``/connect`` into a paste preview.
                 last_changed = float(
                     getattr(self, "_composer_last_changed_at", 0.0) or 0.0
                 )
@@ -9592,6 +9632,7 @@ if _HAS_TEXTUAL:
                 origin = str(getattr(self, "_composer_burst_origin", ""))
                 if (
                     value
+                    and not self._command_menu_open
                     and last_changed
                     and burst_started
                     and now - last_changed <= 0.15

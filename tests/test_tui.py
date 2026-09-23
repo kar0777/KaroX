@@ -1327,16 +1327,52 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tui, "_selected_model", return_value=None):
             app = tui.KaroXApp(Path.cwd(), language="en")
             async with app.run_test(size=(120, 42)) as pilot:
+                await self.focus(pilot, app, "composer")
                 await pilot.press("/", "c", "o", "n")
-                await pilot.pause(0.1)
+                await pilot.pause()
                 await pilot.press("enter")
-                await pilot.pause(0.3)
+                await self.screen(pilot, app, app._connections_screens_cached()["ConnectionHubScreen"])
                 # ``/connect`` is the single connection entry point and opens the
                 # universal hub. The legacy api/web/both wizard asked the user to
                 # classify a connection before showing them what already exists,
                 # which is the question the hub answers for them.
                 self.assertNotIsInstance(app.screen, tui.ConnectionChoiceScreen)
                 self.assertIn("Hub", type(app.screen).__name__)
+
+    async def test_a_typed_command_burst_is_not_read_as_pasted_text(self) -> None:
+        """Enter inside a machine-speed burst used to become a pasted newline.
+
+        Typing a command fast enough arms the raw-paste detector, and Enter
+        arriving in that same burst was stored as pasted content: the command
+        never ran and the composer showed a paste marker instead.
+
+        ``pilot.press`` cannot produce that state -- it paces keys about 70 ms
+        apart, which is the boundary the burst detector tests -- so the burst is
+        written the way a terminal delivers one: several value changes with no
+        event-loop turn between them, then the submit.
+        """
+        with patch.object(tui, "_selected_model", return_value=None):
+            app = tui.KaroXApp(Path.cwd(), language="en")
+            delivered: list[str] = []
+            with patch.object(app, "_handle_command", side_effect=delivered.append):
+                async with app.run_test(size=(120, 42)) as pilot:
+                    await self.focus(pilot, app, "composer")
+                    composer = app.query_one("#composer", tui.CommandInput)
+                    for prefix in ("/", "/u", "/us", "/usa", "/usag", "/usage"):
+                        composer.value = prefix
+                    await pilot.pause()
+                    # "/usage" is discoverable by prefix, so the palette is open
+                    # and Enter means "run the highlighted command".
+                    self.assertTrue(app._command_menu_open)
+                    composer.post_message(
+                        tui.CommandInput.Submitted(composer, "/usage")
+                    )
+                    await pilot.pause()
+                    self.assertEqual(delivered, ["/usage"])
+                    self.assertEqual(composer.value, "")
+                    self.assertFalse(
+                        getattr(app, "_composer_raw_capture_active", False)
+                    )
 
     async def test_english_connection_flow_stays_in_english(self) -> None:
         with patch.object(tui, "_selected_model", return_value=None):

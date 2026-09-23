@@ -19,6 +19,7 @@ forgotten, and cannot be silently reintroduced afterwards.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from _tui_harness import (  # noqa: F401 - inserts src on sys.path via _support
     NARROW,
@@ -120,6 +121,73 @@ class ConversationAreaShareTests(unittest.IsolatedAsyncioTestCase):
         # with no scrollbar or marker to suggest anything is above.
         async with karox_app(size=NARROW, sponsors=True) as (app, _pilot):
             self.assertIn("KaroX готов", visible_text(app))
+
+    async def test_command_palette_keeps_its_composer_visible_and_actionable(self) -> None:
+        """A short terminal must not hide the input behind command suggestions."""
+
+        for size in (NARROW, STANDARD):
+            async with karox_app(size=size) as (app, pilot):
+                await pilot.press("/")
+                await pilot.pause()
+                menu = app.query_one("#command-menu", tui.Static)
+                composer = app.query_one("#composer", tui.CommandInput)
+                self.assertTrue(app._command_menu_open)
+                self.assertLessEqual(
+                    menu.region.bottom,
+                    composer.region.y,
+                    f"menu obscures its composer at {size}: {menu.region} / {composer.region}",
+                )
+                self.assertTrue(composer.has_focus)
+
+                # The window can page the visible rows, but selection and Tab
+                # still operate on the complete list rather than only the rows
+                # currently painted in the narrow terminal.
+                await pilot.press("down")
+                await pilot.press("tab")
+                await pilot.pause()
+                self.assertEqual(composer.value, "/effort")
+                self.assertTrue(composer.has_focus)
+
+    async def test_a_long_command_catalogue_always_paints_the_selection(self) -> None:
+        """A window that outgrows its own border hides the highlighted row.
+
+        ``#command-menu`` is ``max-height: 14`` laid out border-box, so only
+        twelve content rows can ever be painted. A window computed in content
+        rows could ask for fourteen and place the selection in the two that are
+        clipped -- the menu then shows other commands while Enter acts on one
+        the user cannot see.
+        """
+
+        catalogue = {
+            f"/my-{index:02d}": f"user command · demo {index}" for index in range(1, 30)
+        }
+        for size in (NARROW, STANDARD, WIDE):
+            with patch.object(tui, "_discoverable_commands", return_value=dict(catalogue)):
+                async with karox_app(size=size) as (app, pilot):
+                    await pilot.pause()
+                    app._update_command_menu("/my")
+                    await pilot.pause()
+                    menu = app.query_one("#command-menu", tui.Static)
+                    self.assertGreater(
+                        len(app._filtered_commands),
+                        menu.content_size.height,
+                        f"the fixture no longer fills the menu at {size}",
+                    )
+                    for index in (0, len(app._filtered_commands) - 1):
+                        app._command_index = index
+                        app._update_command_menu("/my")
+                        await pilot.pause()
+                        painted = region_lines(app, menu)
+                        self.assertLessEqual(
+                            len(painted),
+                            menu.region.height,
+                            f"the menu paints outside its own region at {size}",
+                        )
+                        self.assertTrue(
+                            any(">" in line for line in painted),
+                            f"the selected command is painted nowhere at {size} "
+                            f"(row {index} of {len(app._filtered_commands)})",
+                        )
 
 
 @unittest.skipUnless(tui._HAS_TEXTUAL, "textual is not installed")
