@@ -408,6 +408,7 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
         cases = {
             401: ProviderErrorKind.AUTHENTICATION,
+            402: ProviderErrorKind.BUDGET_EXCEEDED,
             403: ProviderErrorKind.PERMISSION,
             404: ProviderErrorKind.MODEL_UNAVAILABLE,
             422: ProviderErrorKind.INVALID_REQUEST,

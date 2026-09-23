@@ -287,6 +287,11 @@ class RoutingTests(_RoutingFixture):
                 # A rejected payload is deterministic for this endpoint but not
                 # for the next one, so it falls back; see the case below.
                 ProviderErrorKind.INVALID_REQUEST,
+                # An exhausted allowance belongs to the endpoint's account, not
+                # to the request, so the next configured route still gets its
+                # turn; see the case below. The local budget stop is raised
+                # before any route is tried, so it never reaches this decision.
+                ProviderErrorKind.BUDGET_EXCEEDED,
             }
         )
         for kind in sorted(non_fallback, key=lambda item: item.value):
@@ -313,6 +318,30 @@ class RoutingTests(_RoutingFixture):
         providers = {
             "first": FakeProvider(
                 [ProviderError(ProviderErrorKind.INVALID_REQUEST, "unsupported field")]
+            ),
+            "second": FakeProvider([response()]),
+        }
+        routed, factory = self.routed((first, second), providers)
+
+        result = routed.complete(request())
+
+        self.assertEqual(factory.created, ["first", "second"])
+        self.assertEqual(result.selected_provider, "second")
+        self.assertEqual(
+            [item["status"] for item in result.route_attempts],
+            ["fallback", "completed"],
+        )
+
+    def test_an_exhausted_allowance_moves_to_the_next_route(self) -> None:
+        # A pay-as-you-go endpoint and a subscription endpoint have separate
+        # allowances, so a 402 from route 0 says nothing about route 1. Ending
+        # the run there would make a configured fallback useless exactly when a
+        # user has one endpoint out of credit and another one healthy.
+        first = self.add_route("first")
+        second = self.add_route("second")
+        providers = {
+            "first": FakeProvider(
+                [ProviderError(ProviderErrorKind.BUDGET_EXCEEDED, "quota_exceeded")]
             ),
             "second": FakeProvider([response()]),
         }

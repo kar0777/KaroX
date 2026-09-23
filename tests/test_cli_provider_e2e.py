@@ -147,6 +147,8 @@ class CliProviderE2ETests(unittest.TestCase):
                 "openai": "openai_responses",
                 "anthropic": "anthropic_messages",
                 "gemini": "gemini_generate_content",
+                "stepfun": "openai_compatible_chat",
+                "stepfun-plan": "openai_compatible_chat",
                 "openai-compatible": "openai_compatible_chat",
                 "anthropic-compatible": "anthropic_messages",
                 "local-openai": "openai_compatible_chat",
@@ -157,6 +159,9 @@ class CliProviderE2ETests(unittest.TestCase):
                     self.assertEqual(catalog[preset_id]["adapter_kind"], adapter)
             self.assertFalse(catalog["puter"]["installable"])
             self.assertIsNone(catalog["puter"]["adapter_kind"])
+            self.assertEqual(catalog["stepfun"]["base_url"], "https://api.stepfun.ai/v1")
+            self.assertEqual(catalog["stepfun-plan"]["base_url"],
+                             "https://api.stepfun.ai/step_plan/v1")
 
             for preset_id in ("openai", "anthropic", "gemini"):
                 saved = self.run_cli(

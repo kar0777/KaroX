@@ -288,6 +288,24 @@ _PRESETS = (
         "stable",
         contract_source="https://ai.google.dev/api",
     ),
+    ProviderPreset(
+        "stepfun",
+        "StepFun API (usage billing)",
+        "openai_compatible_chat",
+        "https://api.stepfun.ai/v1",
+        "experimental",
+        contract_source="https://platform.stepfun.ai/docs/en/api-reference/chat/chat-completion-create",
+        setup_note="Standard API allowance. For subscription Credits, select StepFun Step Plan.",
+    ),
+    ProviderPreset(
+        "stepfun-plan",
+        "StepFun Step Plan (subscription)",
+        "openai_compatible_chat",
+        "https://api.stepfun.ai/step_plan/v1",
+        "experimental",
+        contract_source="https://platform.stepfun.ai/docs/en/step-plan/overview",
+        setup_note="Uses Step Plan subscription Credits, separate from the standard API balance.",
+    ),
     # --- Aggregating gateways ---------------------------------------------
     # One preset per gateway, not one per provider behind it. A gateway already
     # normalises hundreds of upstreams to a single OpenAI-compatible contract

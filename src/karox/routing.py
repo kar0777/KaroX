@@ -40,7 +40,16 @@ _RETRYABLE_ERRORS = frozenset(
 # model disagree about parameter names and limits often enough that a 400 on
 # route 0 is exactly what a fallback route exists for -- and ending the whole
 # run there defeated the point of configuring one.
-_FALLBACK_ERRORS = _RETRYABLE_ERRORS | {ProviderErrorKind.INVALID_REQUEST}
+#
+# A provider-reported 402 belongs here for the same reason: an exhausted
+# allowance is a property of that endpoint's account, not of the request, and
+# another configured route may still serve it. The local budget stop is a
+# different signal -- it is raised by ``_check_global_budgets`` before any route
+# is tried, so it never reaches this decision.
+_FALLBACK_ERRORS = _RETRYABLE_ERRORS | {
+    ProviderErrorKind.INVALID_REQUEST,
+    ProviderErrorKind.BUDGET_EXCEEDED,
+}
 
 
 class ProviderBuilder(Protocol):

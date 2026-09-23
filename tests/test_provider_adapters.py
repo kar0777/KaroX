@@ -11,6 +11,7 @@ from karox.provider_adapters import (
     AnthropicMessagesProvider,
     GeminiGenerateContentProvider,
     OpenAIResponsesProvider,
+    stream_error_kind,
 )
 from karox.providers import (
     ModelMessage,
@@ -1021,6 +1022,30 @@ class ProviderAdapterTests(unittest.TestCase):
                 messages=(ModelMessage("user", "work"),),
                 reasoning_effort="maximum",
             )
+
+
+class StreamedErrorKindTests(unittest.TestCase):
+    """A streamed error must not tell a different story than a status code.
+
+    ``tests/test_providers.py`` already pins the status path's ``402 ->
+    BUDGET_EXCEEDED``. The same condition arriving inside a 200 SSE body has to
+    land on the same kind, or routing retries and falls back differently for the
+    same upstream state depending on how the provider chose to report it.
+    """
+
+    def test_an_explicit_402_is_a_budget_error(self) -> None:
+        self.assertIs(
+            stream_error_kind({"code": 402, "message": "quota_exceeded"}),
+            ProviderErrorKind.BUDGET_EXCEEDED,
+        )
+
+    def test_a_credit_hint_without_a_code_stays_a_permission_problem(self) -> None:
+        self.assertIs(
+            stream_error_kind(
+                {"type": "billing_error", "message": "insufficient credit"}
+            ),
+            ProviderErrorKind.PERMISSION,
+        )
 
 
 if __name__ == "__main__":

@@ -1101,6 +1101,8 @@ class OpenAIChatCompletionsProvider:
         status = response.status_code
         if status == 401:
             kind = ProviderErrorKind.AUTHENTICATION
+        elif status == 402:
+            kind = ProviderErrorKind.BUDGET_EXCEEDED
         elif status == 403:
             kind = ProviderErrorKind.PERMISSION
         elif status == 429:
