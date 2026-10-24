@@ -1,0 +1,1442 @@
+"""Dedicated streaming adapters for non-Chat-Completions provider APIs.
+
+The adapters normalize protocol-specific messages, tool calls, usage, and
+errors into :mod:`karox.providers` contracts.  They deliberately share only
+transport mechanics: protocol event handling stays explicit so an upstream API
+change fails as a malformed response instead of being silently reinterpreted.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import threading
+from dataclasses import replace
+import time
+import uuid
+from typing import Any, Dict, Iterator, Mapping, Optional
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+
+import httpx
+
+from .providers import (
+    CredentialAccessor,
+    ModelEvent,
+    ModelEventKind,
+    accumulate_response,
+    ModelRequest,
+    ModelResponse,
+    OpenAIChatCompletionsProvider,
+    ProviderError,
+    ProviderErrorKind,
+    ReasoningBlock,
+    ToolCallDelta,
+    _REASONING_FAMILY,
+)
+
+
+def _openai_effort(effort: str) -> str:
+    """Map KaroX's five reasoning levels onto the four OpenAI accepts.
+
+    OpenAI's scale tops out at ``high``, so ``xhigh`` and ``max`` land there.
+    Sending a level the endpoint does not know would be rejected outright, and
+    silently dropping the dial would be worse: the caller asked for maximum
+    thinking and would get the default.
+    """
+
+    return "high" if effort in {"xhigh", "max"} else effort
+
+
+def _gemini_thinking_level(effort: str) -> str:
+    """Map the same five levels onto Gemini's thinking levels.
+
+    Gemini names the idea ``thinking_level`` and offers low/medium/high, so the
+    top two KaroX levels are clamped to ``high`` for the same reason.
+    """
+
+    return "high" if effort in {"xhigh", "max"} else effort
+
+
+def stream_error_kind(error_body: Any) -> ProviderErrorKind:
+    """Classify an error delivered inside an otherwise-200 SSE stream.
+
+    The HTTP status classifier never runs for these: the body arrives as an
+    ``error`` event (Anthropic/Gemini) or a ``response.failed`` payload
+    (Responses). Mapping every one of them to PROVIDER_INTERNAL made routing
+    retry and fallback-cycle auth and quota errors as if they were transient,
+    unlike the same error delivered with a status code. The body's ``code``
+    (int HTTP-like or vendor string) and ``type``/``status`` markers are read
+    through the same ladder the status path uses; anything unreadable stays
+    PROVIDER_INTERNAL so the conservative default is unchanged.
+    """
+
+    if not isinstance(error_body, dict):
+        return ProviderErrorKind.PROVIDER_INTERNAL
+    code = error_body.get("code")
+    marker = " ".join(
+        str(error_body.get(key) or "")
+        for key in ("type", "status", "error_type")
+    ).lower()
+    text = str(error_body.get("message") or "").lower()
+    if isinstance(code, bool):
+        code = None
+    status = code if isinstance(code, int) else None
+    vendor = str(code).lower() if code is not None else ""
+    combined = f"{marker} {vendor} {text}"
+    if status in {401, 403} or any(
+        token in combined for token in ("authentication", "permission", "unauthorized", "forbidden")
+    ):
+        return ProviderErrorKind.AUTHENTICATION
+    if status == 402:
+        # The ladder has to agree with the status path, which reads an explicit
+        # 402 as an exhausted allowance rather than a permission problem.
+        return ProviderErrorKind.BUDGET_EXCEEDED
+    if "credit" in combined or "billing" in combined:
+        return ProviderErrorKind.PERMISSION
+    if status == 429 or "rate_limit" in combined or "rate limit" in combined or "quota" in combined:
+        return ProviderErrorKind.RATE_LIMIT
+    if status in {400, 405, 409, 415, 422} or "invalid_request" in combined:
+        return ProviderErrorKind.INVALID_REQUEST
+    if status in {404, 410} or "not_found" in combined or "model_not_found" in combined:
+        return ProviderErrorKind.MODEL_UNAVAILABLE
+    return ProviderErrorKind.PROVIDER_INTERNAL
+
+
+class _StreamingAdapter:
+    """Secret-safe HTTP/SSE transport and normalized response assembly."""
+
+    provider_name = "provider"
+    MAX_SSE_LINE_CHARS = 1_048_576
+    # Tiny reasoning/tool deltas can legitimately produce far more than 10k
+    # frames. The byte ceiling below is the authoritative memory/network bound;
+    # this count only rejects pathological event fragmentation.
+    MAX_SSE_EVENTS = 100_000
+    MAX_SSE_TOTAL_CHARS = 16_777_216
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        credential: Optional[CredentialAccessor] = None,
+        headers: Optional[Mapping[str, str]] = None,
+        query: Optional[Mapping[str, str]] = None,
+        timeout_seconds: float = 60.0,
+        max_transport_retries: int = 2,
+        retry_backoff_seconds: float = 0.1,
+    ) -> None:
+        # Reuse the audited public-metadata validation from the compatible
+        # adapter.  Authentication is added only after validation.
+        self.base_url = self._base_url(base_url)
+        self._credential = credential
+        self._headers = OpenAIChatCompletionsProvider._validate_headers(headers or {})
+        self._query = self._validate_query(query or {})
+        if credential is not None and not OpenAIChatCompletionsProvider._credential_transport_is_secure(
+            self.base_url
+        ):
+            raise ValueError(
+                "provider credentials require HTTPS or a loopback HTTP endpoint"
+            )
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or not 0.05 <= float(timeout_seconds) <= 3600
+        ):
+            raise ValueError("provider timeout must be between 0.05 and 3600 seconds")
+        if (
+            isinstance(max_transport_retries, bool)
+            or not isinstance(max_transport_retries, int)
+            or not 0 <= max_transport_retries <= 10
+        ):
+            raise ValueError("transport retries must be between 0 and 10")
+        if (
+            isinstance(retry_backoff_seconds, bool)
+            or not isinstance(retry_backoff_seconds, (int, float))
+            or not math.isfinite(float(retry_backoff_seconds))
+            or retry_backoff_seconds < 0
+        ):
+            raise ValueError("retry backoff must be finite and non-negative")
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_transport_retries = max_transport_retries
+        self.retry_backoff_seconds = float(retry_backoff_seconds)
+        self._client_lock = threading.Lock()
+        self._client: Optional[httpx.Client] = None
+
+    def _http_client(self) -> httpx.Client:
+        client = self._client
+        if client is not None and not bool(getattr(client, "is_closed", False)):
+            return client
+        with self._client_lock:
+            client = self._client
+            if client is None or bool(getattr(client, "is_closed", False)):
+                client = httpx.Client(
+                    follow_redirects=False,
+                    limits=httpx.Limits(
+                        max_connections=100,
+                        max_keepalive_connections=20,
+                        keepalive_expiry=120.0,
+                    ),
+                )
+                self._client = client
+            return client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client = self._client
+            self._client = None
+        closer = getattr(client, "close", None) if client is not None else None
+        if callable(closer):
+            closer()
+
+    @staticmethod
+    def _base_url(value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("provider base URL is required")
+        parts = urlsplit(value.strip())
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "provider base URL must be HTTP(S) without credentials, query, or fragment"
+            )
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")
+        )
+
+    @staticmethod
+    def _validate_query(query: Mapping[str, str]) -> Dict[str, str]:
+        # Building a dummy compatible endpoint applies the same secret checks.
+        endpoint = OpenAIChatCompletionsProvider._endpoint(
+            "https://validation.invalid", query
+        )
+        parsed = urlsplit(endpoint)
+        # Values were already encoded by _endpoint.  Preserve the original
+        # validated mapping instead of parsing and normalizing it again.
+        assert parsed.query or not query
+        return {str(name): str(value) for name, value in query.items()}
+
+    def _secret(self) -> Optional[str]:
+        if self._credential is None:
+            return None
+        try:
+            value = self._credential()
+        except Exception as exc:
+            raise ProviderError(
+                ProviderErrorKind.AUTHENTICATION,
+                f"credential accessor failed: {type(exc).__name__}",
+            ) from exc
+        if not isinstance(value, str) or not value.strip():
+            raise ProviderError(
+                ProviderErrorKind.AUTHENTICATION,
+                "credential accessor returned no API key",
+            )
+        if "\r" in value or "\n" in value:
+            raise ProviderError(
+                ProviderErrorKind.AUTHENTICATION,
+                "credential contains invalid characters",
+            )
+        return value
+
+    def _endpoint(self, request: ModelRequest) -> str:
+        raise NotImplementedError
+
+    def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def _request_headers(self) -> Dict[str, str]:
+        raise NotImplementedError
+
+    def _events(
+        self,
+        response: httpx.Response,
+        attempts: int,
+        deadline: float,
+    ) -> Iterator[ModelEvent]:
+        raise NotImplementedError
+
+    def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
+        endpoint = self._endpoint(request)
+        payload = self._request_payload(request)
+        headers = self._request_headers()
+        request_started = time.monotonic()
+        deadline = request_started + float(request.deadline_seconds)
+        attempts = 0
+        while True:
+            attempts += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProviderError(
+                    ProviderErrorKind.TRANSPORT, "provider request deadline expired"
+                )
+            response_started = False
+            event_started = False
+            try:
+                client = self._http_client()
+                with client.stream(
+                    "POST",
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=min(self.timeout_seconds, max(remaining, 0.05)),
+                ) as response:
+                    response_started = True
+                    response_headers_ms = round(
+                        max(0.0, (time.monotonic() - request_started) * 1000.0),
+                        3,
+                    )
+                    if response.status_code >= 400:
+                        raise OpenAIChatCompletionsProvider._http_error(response)
+                    first_event_ms: Optional[float] = None
+                    try:
+                        for event in self._events(response, attempts, deadline):
+                            now = time.monotonic()
+                            if first_event_ms is None:
+                                first_event_ms = round(
+                                    max(0.0, (now - request_started) * 1000.0),
+                                    3,
+                                )
+                            if event.kind is ModelEventKind.COMPLETION:
+                                event = replace(
+                                    event,
+                                    transport_metrics={
+                                        "response_headers_ms": response_headers_ms,
+                                        "first_event_ms": first_event_ms,
+                                        "total_ms": round(
+                                            max(
+                                                0.0,
+                                                (now - request_started) * 1000.0,
+                                            ),
+                                            3,
+                                        ),
+                                    },
+                                )
+                            event_started = True
+                            yield event
+                    except httpx.TransportError as exc:
+                        if event_started:
+                            raise ProviderError(
+                                ProviderErrorKind.TRANSPORT,
+                                f"provider stream interrupted: {type(exc).__name__}",
+                                status_code=response.status_code,
+                                transport_attempts=attempts,
+                            ) from exc
+                        raise
+                    return
+            except ProviderError as exc:
+                if (
+                    exc.kind is ProviderErrorKind.TRANSPORT
+                    and exc.transport_attempts < attempts
+                ):
+                    raise ProviderError(
+                        exc.kind,
+                        exc.safe_message,
+                        status_code=exc.status_code,
+                        retry_after=exc.retry_after,
+                        route_attempts=exc.route_attempts,
+                        transport_attempts=attempts,
+                    ) from exc
+                raise
+            except httpx.TransportError as exc:
+                if (
+                    response_started
+                    and event_started
+                    or attempts >= self.max_transport_retries + 1
+                ):
+                    raise ProviderError(
+                        ProviderErrorKind.TRANSPORT,
+                        (
+                            f"provider stream interrupted: {type(exc).__name__}"
+                            if response_started and event_started
+                            else f"provider transport failed: {type(exc).__name__}"
+                        ),
+                        transport_attempts=attempts,
+                    ) from exc
+                delay = self.retry_backoff_seconds * (2 ** (attempts - 1))
+                if delay:
+                    if delay >= deadline - time.monotonic():
+                        raise ProviderError(
+                            ProviderErrorKind.TRANSPORT,
+                            "provider request deadline expired during retry",
+                            transport_attempts=attempts,
+                        ) from exc
+                    time.sleep(delay)
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        return accumulate_response(self.stream(request))
+
+    @classmethod
+    def _sse_records(
+        cls, response: httpx.Response, deadline: float
+    ) -> Iterator[tuple[Optional[str], str]]:
+        event_name: Optional[str] = None
+        data_lines: list[str] = []
+        event_count = 0
+        total_chars = 0
+        for line in response.iter_lines():
+            if time.monotonic() >= deadline:
+                raise ProviderError(
+                    ProviderErrorKind.TRANSPORT,
+                    "provider request deadline expired while reading stream",
+                    status_code=response.status_code,
+                )
+            if not isinstance(line, str):
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE stream contained a non-text line",
+                    status_code=response.status_code,
+                )
+            if len(line) > cls.MAX_SSE_LINE_CHARS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE line exceeds the size limit",
+                    status_code=response.status_code,
+                )
+            total_chars += len(line) + 1
+            if total_chars > cls.MAX_SSE_TOTAL_CHARS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE stream exceeds the size limit",
+                    status_code=response.status_code,
+                )
+            if line == "":
+                if data_lines:
+                    event_count += 1
+                    if event_count > cls.MAX_SSE_EVENTS:
+                        raise ProviderError(
+                            ProviderErrorKind.MALFORMED_RESPONSE,
+                            "provider SSE stream contains too many events",
+                            status_code=response.status_code,
+                        )
+                    yield event_name, "\n".join(data_lines)
+                event_name, data_lines = None, []
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value if separator else "")
+        if data_lines:
+            event_count += 1
+            if event_count > cls.MAX_SSE_EVENTS:
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "provider SSE stream contains too many events",
+                    status_code=response.status_code,
+                )
+            yield event_name, "\n".join(data_lines)
+
+    @staticmethod
+    def _json_event(data: str, status_code: int) -> Dict[str, Any]:
+        try:
+            value = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            raise ProviderError(
+                ProviderErrorKind.MALFORMED_RESPONSE,
+                "provider SSE event contained invalid JSON",
+                status_code=status_code,
+            ) from exc
+        if not isinstance(value, dict):
+            raise ProviderError(
+                ProviderErrorKind.MALFORMED_RESPONSE,
+                "provider SSE event root must be an object",
+                status_code=status_code,
+            )
+        return value
+
+    @staticmethod
+    def _usage(raw: Any, names: Mapping[str, str]) -> Dict[str, int]:
+        if not isinstance(raw, dict):
+            raise ValueError("usage must be an object")
+        result: Dict[str, int] = {}
+        for source, target in names.items():
+            # A dotted source walks into a nested object: OpenAI reports the
+            # cached share of the prompt under prompt_tokens_details rather than
+            # at the top level, and a missing branch is simply an absent field.
+            value: Any = raw
+            for step in source.split("."):
+                if not isinstance(value, dict) or step not in value:
+                    value = None
+                    break
+                value = value[step]
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError("known usage field must be a non-negative integer")
+            result[target] = value
+        return result
+
+    def _url(self, suffix: str, extra_query: Optional[Mapping[str, str]] = None) -> str:
+        parts = urlsplit(self.base_url)
+        query = {**self._query, **(extra_query or {})}
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path.rstrip("/") + suffix,
+                urlencode(query),
+                "",
+            )
+        )
+
+
+class OpenAIResponsesProvider(_StreamingAdapter):
+    provider_name = "openai_responses"
+
+    def _endpoint(self, request: ModelRequest) -> str:
+        return self._url("/responses")
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            **self._headers,
+        }
+        secret = self._secret()
+        if secret is not None:
+            headers["Authorization"] = f"Bearer {secret}"
+        return headers
+
+    @staticmethod
+    def _input(request: ModelRequest) -> list[Dict[str, Any]]:
+        result: list[Dict[str, Any]] = []
+        for message in request.messages:
+            if message.role == "tool":
+                result.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.tool_call_id,
+                        "output": message.content or "",
+                    }
+                )
+                continue
+            if message.content is not None:
+                result.append({"role": message.role, "content": message.content})
+            for call in message.tool_calls:
+                result.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.raw_arguments,
+                    }
+                )
+        return result
+
+    def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": request.model,
+            "input": self._input(request),
+            "stream": True,
+        }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": item.name,
+                    "description": item.description,
+                    "parameters": item.input_schema,
+                }
+                for item in request.tools
+            ]
+            payload["tool_choice"] = request.tool_choice
+        if request.temperature is not None:
+            # Reasoning models on the Responses wire reject temperature the
+            # same way their Chat-Completions siblings do; the shared family
+            # check keeps one preset from killing every gpt-5/o-series route.
+            if not _REASONING_FAMILY.match(
+                request.model.rsplit("/", 1)[-1].strip().lower()
+            ):
+                payload["temperature"] = request.temperature
+        if request.max_output_tokens is not None:
+            payload["max_output_tokens"] = request.max_output_tokens
+        if request.cache_key is not None:
+            # OpenAI caches automatically; the key only routes requests sharing
+            # a prefix to the same cache, which an agent loop always does.
+            payload["prompt_cache_key"] = request.cache_key
+        if request.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort)}
+        return payload
+
+    def _events(
+        self, response: httpx.Response, attempts: int, deadline: float
+    ) -> Iterator[ModelEvent]:
+        response_id: Optional[str] = None
+        call_indexes: Dict[str, int] = {}
+        call_output_indexes: set[int] = set()
+        next_index = 0
+        terminal_event: Optional[ModelEvent] = None
+        for event_name, data in self._sse_records(response, deadline):
+            if terminal_event is not None:
+                # Protocol completion is known; consume the remaining HTTP body
+                # without interpreting post-terminal frames so the socket can
+                # return to the persistent client's connection pool.
+                continue
+            if data.strip() == "[DONE]":
+                continue
+            value = self._json_event(data, response.status_code)
+            kind = value.get("type") or event_name
+            if not isinstance(kind, str):
+                raise ProviderError(
+                    ProviderErrorKind.MALFORMED_RESPONSE,
+                    "Responses event has no type",
+                    status_code=response.status_code,
+                )
+            raw_response = value.get("response")
+            if isinstance(raw_response, dict) and isinstance(raw_response.get("id"), str):
+                response_id = raw_response["id"]
+            if kind in {
+                "response.created",
+                "response.in_progress",
+                "response.output_item.done",
+                "response.content_part.added",
+                "response.content_part.done",
+                "response.output_text.done",
+                "response.refusal.done",
+                "response.function_call_arguments.done",
+            }:
+                continue
+            if kind in {"response.output_text.delta", "response.refusal.delta"}:
+                delta = value.get("delta")
+                if not isinstance(delta, str):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Responses text delta must be text",
+                    )
+                yield ModelEvent(
+                    ModelEventKind.TEXT_DELTA,
+                    text_delta=delta,
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+            if kind == "response.output_item.added":
+                item = value.get("item")
+                if not isinstance(item, dict):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Responses output item must be an object",
+                )
+                if item.get("type") == "function_call":
+                    item_id = item.get("id")
+                    call_id = item.get("call_id")
+                    name = item.get("name")
+                    if (
+                        (item_id is not None and not isinstance(item_id, str))
+                        or not isinstance(call_id, str)
+                        or not isinstance(name, str)
+                    ):
+                        raise ProviderError(
+                            ProviderErrorKind.MALFORMED_RESPONSE,
+                            "Responses function call requires ID and name",
+                        )
+                    index = value.get("output_index", next_index)
+                    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                        raise ProviderError(
+                            ProviderErrorKind.MALFORMED_RESPONSE,
+                            "Responses output index must be non-negative",
+                        )
+                    aliases = {call_id}
+                    if item_id:
+                        aliases.add(item_id)
+                    if index in call_output_indexes or any(
+                        alias in call_indexes for alias in aliases
+                    ):
+                        raise ProviderError(
+                            ProviderErrorKind.MALFORMED_RESPONSE,
+                            "Responses function call has duplicate identity or index",
+                        )
+                    next_index = max(next_index, index + 1)
+                    call_output_indexes.add(index)
+                    for alias in aliases:
+                        call_indexes[alias] = index
+                    yield ModelEvent(
+                        ModelEventKind.TOOL_CALL_DELTA,
+                        tool_call_delta=ToolCallDelta(index, call_id, name, ""),
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                continue
+            if kind == "response.function_call_arguments.delta":
+                raw_aliases = (value.get("item_id"), value.get("call_id"))
+                aliases = [alias for alias in raw_aliases if alias is not None]
+                delta = value.get("delta")
+                if (
+                    not aliases
+                    or any(not isinstance(alias, str) or alias not in call_indexes for alias in aliases)
+                    or len({call_indexes[alias] for alias in aliases}) != 1
+                    or not isinstance(delta, str)
+                ):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Responses function arguments reference an unknown or conflicting call",
+                    )
+                yield ModelEvent(
+                    ModelEventKind.TOOL_CALL_DELTA,
+                    tool_call_delta=ToolCallDelta(
+                        call_indexes[aliases[0]], arguments_fragment=delta
+                    ),
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+            if kind == "response.completed":
+                if not isinstance(raw_response, dict):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Responses completion omitted response data",
+                    )
+                try:
+                    usage = self._usage(
+                        raw_response.get("usage"),
+                        {
+                            "input_tokens": "prompt_tokens",
+                            "output_tokens": "completion_tokens",
+                            "total_tokens": "total_tokens",
+                            "input_tokens_details.cached_tokens": "cache_read_tokens",
+                            "output_tokens_details.reasoning_tokens": "reasoning_tokens",
+                        },
+                    )
+                except ValueError as exc:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "OpenAI Responses usage is invalid",
+                    ) from exc
+                if usage:
+                    yield ModelEvent(
+                        ModelEventKind.USAGE,
+                        usage=usage,
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                terminal_event = ModelEvent(
+                    ModelEventKind.COMPLETION,
+                    finish_reason="completed",
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+            if kind in {"response.failed", "error"}:
+                raise ProviderError(
+                    stream_error_kind(
+                        raw_response.get("error")
+                        if isinstance(raw_response, dict)
+                        else None
+                    ),
+                    "OpenAI Responses reported a failed response",
+                    status_code=response.status_code,
+                )
+            if kind == "response.incomplete":
+                reason = "incomplete"
+                if isinstance(raw_response, dict):
+                    details = raw_response.get("incomplete_details")
+                    if isinstance(details, dict) and isinstance(details.get("reason"), str):
+                        reason = details["reason"]
+                terminal_event = ModelEvent(
+                    ModelEventKind.COMPLETION,
+                    finish_reason=reason,
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+        if terminal_event is not None:
+            yield terminal_event
+            return
+        raise ProviderError(
+            ProviderErrorKind.TRANSPORT,
+            "Responses stream ended before a terminal event",
+            status_code=response.status_code,
+        )
+
+
+# Anthropic content blocks that carry the model's own reasoning rather than its
+# answer. ``redacted_thinking`` holds an encrypted payload with no readable text;
+# both are routed to the reasoning channel and neither becomes assistant content.
+_ANTHROPIC_REASONING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+
+# Used only when neither the caller nor the model registry states a ceiling.
+# Chosen to be large enough for a substantial code change rather than to match
+# any one model's maximum, which KaroX cannot know for an unregistered endpoint.
+_ANTHROPIC_DEFAULT_MAX_TOKENS = 32_000
+
+
+class AnthropicMessagesProvider(_StreamingAdapter):
+    provider_name = "anthropic_messages"
+
+    def _endpoint(self, request: ModelRequest) -> str:
+        return self._url("/messages")
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            **self._headers,
+        }
+        secret = self._secret()
+        if secret is not None:
+            headers["x-api-key"] = secret
+        return headers
+
+    @staticmethod
+    def _messages(request: ModelRequest) -> tuple[str, list[Dict[str, Any]]]:
+        system: list[str] = []
+        messages: list[Dict[str, Any]] = []
+        for message in request.messages:
+            if message.role == "system":
+                if message.content:
+                    system.append(message.content)
+                continue
+            if message.role == "tool":
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": message.tool_call_id,
+                    "content": message.content or "",
+                }
+                if messages and messages[-1]["role"] == "user" and isinstance(
+                    messages[-1]["content"], list
+                ):
+                    messages[-1]["content"].append(block)
+                else:
+                    messages.append({"role": "user", "content": [block]})
+                continue
+            role = "assistant" if message.role == "assistant" else "user"
+            blocks: list[Dict[str, Any]] = []
+            # Thinking comes first, in the order the model produced it, and comes
+            # back with the tool calls it preceded: the API verifies each
+            # signature and refuses a turn whose thinking was edited or dropped.
+            # A block whose stored text no longer matches what was signed is left
+            # out rather than sent and rejected.
+            for reasoning in message.reasoning_blocks:
+                if not reasoning.replayable or not reasoning.signature:
+                    continue
+                if reasoning.kind == "redacted_thinking":
+                    blocks.append(
+                        {"type": "redacted_thinking", "data": reasoning.data}
+                    )
+                else:
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": reasoning.text,
+                            "signature": reasoning.signature,
+                        }
+                    )
+            if message.content is not None:
+                blocks.append({"type": "text", "text": message.content})
+            blocks.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.call_id,
+                    "name": call.name,
+                    "input": json.loads(call.raw_arguments),
+                }
+                for call in message.tool_calls
+            )
+            messages.append({"role": role, "content": blocks})
+        return "\n\n".join(system), messages
+
+    @staticmethod
+    def _cache_breakpoints(messages: list[Dict[str, Any]]) -> None:
+        """Mark the blocks Anthropic should cache the prompt up to.
+
+        Caching is a prefix match, so a breakpoint is only useful where the
+        bytes before it will be identical on the next request. Two rules follow.
+
+        Positions are placed on a fixed grid rather than measured back from the
+        end, so a breakpoint written on one turn sits at the same offset on the
+        next and can actually be read. And the gap between consecutive
+        breakpoints stays under the twenty-block window the API looks back
+        through, or a long turn would step over every entry the previous turn
+        wrote and silently miss.
+
+        The last block always gets one so the newest turn is cached for the turn
+        after it. Anthropic allows four breakpoints per request and the system
+        block holds one, leaving three here.
+
+        Spacing is measured over every block, because the lookback window counts
+        every block -- but a breakpoint is only ever written onto one that accepts
+        it. A thinking block does not, so a position that lands on one slides back
+        to the nearest block that does rather than making the whole request
+        invalid.
+        """
+        blocks = [
+            block
+            for message in messages
+            for block in message["content"]
+            if isinstance(block, dict)
+        ]
+        if not blocks:
+            return
+
+        def cacheable_at_or_before(position: int) -> int:
+            while position >= 0 and blocks[position].get("type") in _ANTHROPIC_REASONING_BLOCKS:
+                position -= 1
+            return position
+
+        stride = 15
+        grid = [index for index in range(stride, len(blocks) - 1, stride)]
+        chosen = {*grid[-2:], len(blocks) - 1}
+        resolved = {
+            position
+            for position in (cacheable_at_or_before(index) for index in chosen)
+            if position >= 0
+        }
+        for index in sorted(resolved):
+            blocks[index]["cache_control"] = {"type": "ephemeral"}
+
+    def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
+        try:
+            system, messages = self._messages(request)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProviderError(
+                ProviderErrorKind.INVALID_REQUEST,
+                "persisted tool arguments are not valid JSON",
+            ) from exc
+        if request.cache_key is not None:
+            self._cache_breakpoints(messages)
+        payload: Dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            # Anthropic requires max_tokens, so a default is unavoidable. 4096
+            # was far below what current models allow and silently truncated a
+            # long refactor; the routed model's registered ceiling is used when
+            # it is known, and this is only the floor for an unregistered model.
+            "max_tokens": request.max_output_tokens or _ANTHROPIC_DEFAULT_MAX_TOKENS,
+            "stream": True,
+        }
+        if system:
+            # Tools render before the system prompt, so one breakpoint on the
+            # system block caches the whole static prefix -- the tool table and
+            # the instructions -- which is the largest part that never changes.
+            payload["system"] = (
+                [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                if request.cache_key is not None
+                else system
+            )
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "input_schema": item.input_schema,
+                }
+                for item in request.tools
+            ]
+            payload["tool_choice"] = {"type": "any" if request.tool_choice == "required" else "auto"}
+        if request.reasoning_effort is not None:
+            # Anthropic carries the dial inside output_config, and accepts the
+            # full range KaroX exposes, so nothing is narrowed here.
+            payload["output_config"] = {"effort": request.reasoning_effort}
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        return payload
+
+    def _events(
+        self, response: httpx.Response, attempts: int, deadline: float
+    ) -> Iterator[ModelEvent]:
+        response_id: Optional[str] = None
+        finish_reason: Optional[str] = None
+        message_started = False
+        block_types: Dict[int, str] = {}
+        stopped_blocks: set[int] = set()
+        # Per block index, because a signature belongs to one block rather than to
+        # the concatenated reasoning string.
+        reasoning_parts: Dict[int, Dict[str, Any]] = {}
+        terminal_event: Optional[ModelEvent] = None
+        for event_name, data in self._sse_records(response, deadline):
+            if terminal_event is not None:
+                continue
+            value = self._json_event(data, response.status_code)
+            kind = event_name or value.get("type")
+            if kind == "message_start":
+                if message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic message_start is duplicate",
+                    )
+                message = value.get("message")
+                if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic message_start is invalid",
+                    )
+                message_started = True
+                response_id = message["id"]
+                try:
+                    # input_tokens counts only what was NOT served from cache,
+                    # so reporting it alone understates the prompt and hides
+                    # whether caching worked at all. Caching fails silently --
+                    # one changed byte in the prefix and every request pays full
+                    # price with no error -- so the read count is the only
+                    # evidence there is.
+                    usage = self._usage(
+                        message.get("usage", {}),
+                        {
+                            "input_tokens": "prompt_tokens",
+                            "cache_read_input_tokens": "cache_read_tokens",
+                            "cache_creation_input_tokens": "cache_write_tokens",
+                        },
+                    )
+                except ValueError as exc:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic usage is invalid",
+                    ) from exc
+                # Anthropic reports the three parts of the prompt separately;
+                # every other provider reports the total with the cached part as
+                # a subset of it. Normalising to the second shape gives one
+                # meaning of prompt_tokens across the product -- the whole
+                # prompt -- and one costing rule that is correct for all of them.
+                if usage:
+                    usage["prompt_tokens"] = (
+                        usage.get("prompt_tokens", 0)
+                        + usage.get("cache_read_tokens", 0)
+                        + usage.get("cache_write_tokens", 0)
+                    )
+                if usage:
+                    yield ModelEvent(
+                        ModelEventKind.USAGE,
+                        usage=usage,
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                continue
+            if kind == "content_block_start":
+                if not message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content block started before message_start",
+                    )
+                index = value.get("index")
+                block = value.get("content_block")
+                if isinstance(index, bool) or not isinstance(index, int) or not isinstance(block, dict):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content block start is invalid",
+                    )
+                if index < 0 or index in block_types:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content block index is duplicate or invalid",
+                    )
+                block_type = block.get("type")
+                if not isinstance(block_type, str) or not block_type:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content block has no type",
+                    )
+                # Anything other than text or a tool call is recorded so its
+                # deltas and its stop event can be accounted for, then ignored.
+                # Refusing unknown block types aborted the turn outright: the
+                # current Anthropic models emit `thinking` blocks, and on the
+                # flagship model thinking is on by default, so the strict list
+                # made that model unusable rather than safe.
+                block_types[index] = block_type
+                if block_type == "text":
+                    initial_text = block.get("text", "")
+                    if not isinstance(initial_text, str):
+                        raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic text block is invalid")
+                    if initial_text:
+                        yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=initial_text, response_id=response_id, transport_attempts=attempts)
+                elif block_type in _ANTHROPIC_REASONING_BLOCKS:
+                    initial_thinking = block.get("thinking", "")
+                    if not isinstance(initial_thinking, str):
+                        initial_thinking = ""
+                    opaque = block.get("data", "")
+                    reasoning_parts[index] = {
+                        "kind": block_type,
+                        "text": [initial_thinking],
+                        # A redacted block's payload is encrypted and arrives
+                        # whole; only readable thinking streams in deltas.
+                        "data": opaque if isinstance(opaque, str) else "",
+                        "signature": block.get("signature", "")
+                        if isinstance(block.get("signature"), str)
+                        else "",
+                    }
+                    if initial_thinking:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_delta=initial_thinking,
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
+                elif block_type == "tool_use":
+                    call_id, name = block.get("id"), block.get("name")
+                    if not isinstance(call_id, str) or not isinstance(name, str):
+                        raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic tool block is invalid")
+                    initial = block.get("input", {})
+                    if not isinstance(initial, dict):
+                        raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic tool input is invalid")
+                    arguments = "" if initial == {} else json.dumps(initial, ensure_ascii=False, separators=(",", ":"))
+                    yield ModelEvent(ModelEventKind.TOOL_CALL_DELTA, tool_call_delta=ToolCallDelta(index, call_id, name, arguments), response_id=response_id, transport_attempts=attempts)
+                continue
+            if kind == "content_block_delta":
+                if not message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content delta arrived before message_start",
+                    )
+                index, delta = value.get("index"), value.get("delta")
+                if isinstance(index, bool) or not isinstance(index, int) or not isinstance(delta, dict):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic content delta is invalid")
+                if index not in block_types or index in stopped_blocks:
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic content delta references an unknown block")
+                delta_type = delta.get("type")
+                expected_type = block_types[index]
+                if delta_type == "text_delta" and expected_type == "text" and isinstance(delta.get("text"), str):
+                    yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=delta["text"], response_id=response_id, transport_attempts=attempts)
+                elif delta_type == "input_json_delta" and expected_type == "tool_use" and isinstance(delta.get("partial_json"), str):
+                    yield ModelEvent(ModelEventKind.TOOL_CALL_DELTA, tool_call_delta=ToolCallDelta(index, arguments_fragment=delta["partial_json"]), response_id=response_id, transport_attempts=attempts)
+                elif (
+                    delta_type == "thinking_delta"
+                    and expected_type in _ANTHROPIC_REASONING_BLOCKS
+                    and isinstance(delta.get("thinking"), str)
+                ):
+                    if index in reasoning_parts:
+                        reasoning_parts[index]["text"].append(delta["thinking"])
+                    yield ModelEvent(
+                        ModelEventKind.REASONING_DELTA,
+                        reasoning_delta=delta["thinking"],
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                elif delta_type == "signature_delta" and expected_type in _ANTHROPIC_REASONING_BLOCKS:
+                    # The signature authenticates the block it arrives inside, and
+                    # the API verifies it when the block comes back with the tool
+                    # result it preceded. It is accumulated verbatim -- never
+                    # re-encoded, never normalized -- because any edit is rejected.
+                    fragment = delta.get("signature")
+                    if index in reasoning_parts and isinstance(fragment, str):
+                        reasoning_parts[index]["signature"] += fragment
+                    continue
+                elif expected_type not in {"text", "tool_use"}:
+                    # A delta belonging to a block type this adapter does not
+                    # model. Ignoring it keeps a new Anthropic block type from
+                    # ending the turn; the block is not part of the answer.
+                    continue
+                else:
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic content delta does not match its block")
+                continue
+            if kind == "content_block_stop":
+                if not message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content stop arrived before message_start",
+                    )
+                index = value.get("index")
+                if (
+                    isinstance(index, bool)
+                    or not isinstance(index, int)
+                    or index not in block_types
+                    or index in stopped_blocks
+                ):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic content stop references an unknown block",
+                    )
+                stopped_blocks.add(index)
+                pending = reasoning_parts.pop(index, None)
+                if pending is not None:
+                    # Both the text and the signature are complete only now, so
+                    # this is the one moment the whole block can be handed over.
+                    yield ModelEvent(
+                        ModelEventKind.REASONING_DELTA,
+                        reasoning_block=ReasoningBlock(
+                            kind=pending["kind"],
+                            text="".join(pending["text"]),
+                            data=pending["data"],
+                            signature=pending["signature"],
+                        ),
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+                continue
+            if kind == "message_delta":
+                if not message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic message delta arrived before message_start",
+                    )
+                delta = value.get("delta")
+                if not isinstance(delta, dict):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic message delta is invalid")
+                raw_reason = delta.get("stop_reason")
+                if raw_reason is not None and not isinstance(raw_reason, str):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Anthropic stop reason is invalid")
+                finish_reason = raw_reason
+                try:
+                    usage = self._usage(value.get("usage", {}), {"output_tokens": "completion_tokens"})
+                except ValueError as exc:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic usage is invalid",
+                    ) from exc
+                if usage:
+                    yield ModelEvent(ModelEventKind.USAGE, usage=usage, response_id=response_id, transport_attempts=attempts)
+                continue
+            if kind == "message_stop":
+                if not message_started:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic message stopped before message_start",
+                    )
+                if len(stopped_blocks) != len(block_types):
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Anthropic message stopped with open content blocks",
+                    )
+                terminal_event = ModelEvent(
+                    ModelEventKind.COMPLETION,
+                    finish_reason=finish_reason,
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+            if kind == "error":
+                raise ProviderError(
+                    stream_error_kind(value.get("error")),
+                    "Anthropic reported a stream error",
+                )
+            if kind == "ping":
+                continue
+            # Failing closed on content is right; failing closed on protocol
+            # evolution is not. An event type added by the provider after this
+            # code was written carries no content KaroX acts on, so it is
+            # skipped instead of ending an otherwise healthy turn.
+            continue
+        if terminal_event is not None:
+            yield terminal_event
+            return
+        raise ProviderError(ProviderErrorKind.TRANSPORT, "Anthropic stream ended before message_stop")
+
+
+class GeminiGenerateContentProvider(_StreamingAdapter):
+    provider_name = "gemini_generate_content"
+
+    def _endpoint(self, request: ModelRequest) -> str:
+        model = quote(request.model, safe="._-")
+        return self._url(f"/models/{model}:streamGenerateContent", {"alt": "sse"})
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            **self._headers,
+        }
+        secret = self._secret()
+        if secret is not None:
+            headers["x-goog-api-key"] = secret
+        return headers
+
+    @staticmethod
+    def _contents(request: ModelRequest) -> tuple[Optional[Dict[str, Any]], list[Dict[str, Any]]]:
+        systems: list[str] = []
+        contents: list[Dict[str, Any]] = []
+        names: Dict[str, str] = {}
+        for message in request.messages:
+            if message.role == "system":
+                if message.content:
+                    systems.append(message.content)
+                continue
+            if message.role == "tool":
+                name = names.get(message.tool_call_id or "")
+                if name is None:
+                    raise ValueError("Gemini tool result references an unknown call")
+                try:
+                    parsed = json.loads(message.content or "null")
+                except json.JSONDecodeError:
+                    parsed = message.content or ""
+                response_value = parsed if isinstance(parsed, dict) else {"result": parsed}
+                part = {"functionResponse": {"name": name, "response": response_value}}
+                if contents and contents[-1]["role"] == "user":
+                    contents[-1]["parts"].append(part)
+                else:
+                    contents.append({"role": "user", "parts": [part]})
+                continue
+            role = "model" if message.role == "assistant" else "user"
+            parts: list[Dict[str, Any]] = []
+            if message.content is not None:
+                parts.append({"text": message.content})
+            for call in message.tool_calls:
+                names[call.call_id] = call.name
+                parts.append(
+                    {
+                        "functionCall": {
+                            "name": call.name,
+                            "args": json.loads(call.raw_arguments),
+                        }
+                    }
+                )
+            contents.append({"role": role, "parts": parts})
+        system = (
+            {"parts": [{"text": "\n\n".join(systems)}]} if systems else None
+        )
+        return system, contents
+
+    def _request_payload(self, request: ModelRequest) -> Dict[str, Any]:
+        try:
+            system, contents = self._contents(request)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProviderError(
+                ProviderErrorKind.INVALID_REQUEST,
+                "Gemini request contains invalid persisted tool data",
+            ) from exc
+        payload: Dict[str, Any] = {"contents": contents}
+        if system is not None:
+            payload["systemInstruction"] = system
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": item.name,
+                            "description": item.description,
+                            "parameters": item.input_schema,
+                        }
+                        for item in request.tools
+                    ]
+                }
+            ]
+            payload["toolConfig"] = {
+                "functionCallingConfig": {
+                    "mode": "ANY" if request.tool_choice == "required" else "AUTO"
+                }
+            }
+        generation: Dict[str, Any] = {}
+        if request.temperature is not None:
+            generation["temperature"] = request.temperature
+        if request.max_output_tokens is not None:
+            generation["maxOutputTokens"] = request.max_output_tokens
+        if request.reasoning_effort is not None:
+            generation["thinkingConfig"] = {
+                "thinkingLevel": _gemini_thinking_level(request.reasoning_effort)
+            }
+        if generation:
+            payload["generationConfig"] = generation
+        return payload
+
+    def _events(
+        self, response: httpx.Response, attempts: int, deadline: float
+    ) -> Iterator[ModelEvent]:
+        terminal_event: Optional[ModelEvent] = None
+        response_id: Optional[str] = None
+        call_scope = uuid.uuid4().hex
+        next_tool_index = 0
+        for _event_name, data in self._sse_records(response, deadline):
+            if terminal_event is not None:
+                continue
+            value = self._json_event(data, response.status_code)
+            if isinstance(value.get("error"), dict):
+                raise ProviderError(
+                    stream_error_kind(value.get("error")),
+                    "Gemini reported a stream error",
+                )
+            raw_id = value.get("responseId")
+            if raw_id is not None:
+                if not isinstance(raw_id, str):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini response ID is invalid")
+                response_id = raw_id
+            usage_raw = value.get("usageMetadata")
+            if usage_raw is not None:
+                try:
+                    usage = self._usage(
+                        usage_raw,
+                        {
+                            "promptTokenCount": "prompt_tokens",
+                            "candidatesTokenCount": "completion_tokens",
+                            "totalTokenCount": "total_tokens",
+                            # Gemini caches implicitly, so the saving happens
+                            # whether or not KaroX asked for it -- but it is
+                            # invisible unless the count is read back.
+                            "cachedContentTokenCount": "cache_read_tokens",
+                            "thoughtsTokenCount": "reasoning_tokens",
+                        },
+                    )
+                except ValueError as exc:
+                    raise ProviderError(
+                        ProviderErrorKind.MALFORMED_RESPONSE,
+                        "Gemini usage is invalid",
+                    ) from exc
+                yield ModelEvent(ModelEventKind.USAGE, usage=usage, response_id=response_id, transport_attempts=attempts)
+            candidates = value.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                if usage_raw is not None:
+                    continue
+                raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini candidates must be a non-empty array")
+            candidate = candidates[0]
+            if not isinstance(candidate, dict):
+                raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini candidate is invalid")
+            content = candidate.get("content", {})
+            if not isinstance(content, dict) or not isinstance(content.get("parts", []), list):
+                raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini content is invalid")
+            for part in content.get("parts", []):
+                if not isinstance(part, dict):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini content part is invalid")
+                if "text" in part:
+                    if not isinstance(part["text"], str):
+                        raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini text part is invalid")
+                    # A part flagged `thought` is the model's private reasoning,
+                    # not its answer. Treating it as answer text streamed private
+                    # deliberation to the user and persisted it as the response.
+                    if part.get("thought") is True:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_delta=part["text"],
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
+                    else:
+                        yield ModelEvent(ModelEventKind.TEXT_DELTA, text_delta=part["text"], response_id=response_id, transport_attempts=attempts)
+                if "functionCall" in part:
+                    call = part["functionCall"]
+                    if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
+                        raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini function call is invalid")
+                    index = next_tool_index
+                    next_tool_index += 1
+                    response_scope = response_id or "no-response-id"
+                    call_id = f"gemini-call-{call_scope}-{response_scope}-{index}"
+                    yield ModelEvent(
+                        ModelEventKind.TOOL_CALL_DELTA,
+                        tool_call_delta=ToolCallDelta(
+                            index,
+                            call_id,
+                            call["name"],
+                            json.dumps(call["args"], ensure_ascii=False, separators=(",", ":")),
+                        ),
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
+            finish = candidate.get("finishReason")
+            if finish is not None:
+                if not isinstance(finish, str):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini finish reason is invalid")
+                terminal_event = ModelEvent(
+                    ModelEventKind.COMPLETION,
+                    finish_reason=finish,
+                    response_id=response_id,
+                    transport_attempts=attempts,
+                )
+                continue
+        if terminal_event is not None:
+            yield terminal_event
+            return
+        raise ProviderError(ProviderErrorKind.TRANSPORT, "Gemini stream ended before a finish reason")

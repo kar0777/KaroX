@@ -1,0 +1,16 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime state and scratch output
+.karox/
+.tmp/
+*.log

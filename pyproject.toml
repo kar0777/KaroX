@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karox-runtime"
+dynamic = ["version"]
+description = "Local coding agent with a compact terminal client"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "KaroX" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "anyio>=4.4,<4.15",
+  "httpx>=0.27,<1.0",
+  "keyring>=25,<27",
+  # The Linux Secret Service backend is imported directly by the credential
+  # probe, so both halves are declared rather than left to keyring's extras.
+  "SecretStorage>=3.3,<4; sys_platform == 'linux'",
+  "jeepney>=0.8,<1; sys_platform == 'linux'",
+  "mcp>=1.27,<2.0",
+  # Chromium is provisioned lazily on first browser use; the Python package is
+  # installed with the wheel so verification can render a page when asked.
+  "playwright>=1.50,<2.0",
+  "pydantic>=2.7,<3.0",
+  "PyYAML>=6.0,<7.0",
+  "textual>=0.89,<7.0",
+  "rich>=13.7,<15.0",
+  "Pygments>=2.17,<3.0",
+  "markdown-it-py>=3.0,<5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9.1",
+  "pytest-asyncio>=0.26,<1.4",
+  "ruff>=0.14,<1.0",
+  "mypy>=1.13,<2.0",
+]
+
+[project.scripts]
+karox = "karox.entrypoint:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "karox.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"karox.tui" = ["*.tcss"]
+"karox.prompts" = ["*.md", "profiles/*.md"]
+"karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
+"karox.skill_notes" = ["*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+
+[tool.mypy]
+python_version = "3.10"
+platform = "win32"
+# The new release surface is checked strictly by mypy's defaults. The copied
+# agent kernel is not in this list yet: it was excused by name in v5 and is
+# being typed down one module at a time instead of hidden behind a global
+# ignore. Adding a module here is part of paying that debt down.
+files = [
+  "src/karox/cli.py",
+  "src/karox/entrypoint.py",
+  "src/karox/tui",
+]
+warn_redundant_casts = true
+warn_unused_configs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["keyring.*", "secretstorage.*", "jeepney.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["playwright.*"]
+ignore_missing_imports = true
