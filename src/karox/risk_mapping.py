@@ -58,6 +58,12 @@ COMMAND_RISK_KINDS: Mapping[str, str] = {
     "web.fetch": "network.request",
     "dev.command": "process.run_dev",
     "process.run": "process.run_unknown",
+    # A skill script is a repository-owned recipe the catalogue already
+    # validated; running it is the same trust level as running the project's
+    # own dev command. Without this entry the name fell through to
+    # unknown-and-therefore-high, so the leased `skill.run` tool the prompt
+    # advertises was refused at CONFIRM in every run.
+    "skill.run": "process.run_dev",
     "runtime.status": "status.read",
     "bridge.diagnostics": "diagnostics.read",
     "lsp.diagnostics": "diagnostics.read",

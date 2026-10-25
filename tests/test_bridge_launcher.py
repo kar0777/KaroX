@@ -256,6 +256,39 @@ def test_bridge_argv_includes_saved_profile_name(tmp_path: Path) -> None:
     assert argv[argv.index("--saved-profile-name") + 1] == "demo"
 
 
+@pytest.mark.parametrize("profile", ["notion", "adapt", "chatgpt-web"])
+def test_launcher_argv_parses_with_the_cli_bridge_serve_parser(
+    tmp_path: Path, profile: str
+) -> None:
+    """The spawned child must be accepted by ``karox.cli bridge serve``.
+
+    The launcher builds the child argv by hand; the CLI parser is the other
+    half of that contract. They drifted once (four flags existed only in the
+    launcher, so every spawned bridge exited 2), so this test parses the
+    launcher's exact argv with the CLI parser and converts the namespace back
+    into a serve config.
+    """
+    from karox import cli
+
+    config = _config(
+        tmp_path,
+        profile=profile,
+        verification_commands=(("python", "-m", "pytest", "-q"),),
+    )
+    argv = _bridge_argv(
+        config, session_id="web-saved-abc123", public_url="https://bridge.example.test"
+    )
+    assert argv[1:3] == ("-m", "karox.cli")
+    namespace = cli._parser().parse_args(list(argv[3:]))
+    assert namespace.bridge_command == "serve"
+    serve_config = bridge_serve.config_from_namespace(namespace)
+    assert serve_config.protocol == "mcp"
+    assert serve_config.session_id == "web-saved-abc123"
+    assert serve_config.profile == config.profile
+    assert serve_config.verification_commands == (("python", "-m", "pytest", "-q"),)
+    assert serve_config.tools == config.tools
+
+
 # --------------------------------------------------------------------------- #
 # Durable identity and credentials                                             #
 # --------------------------------------------------------------------------- #

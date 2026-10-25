@@ -517,10 +517,26 @@ def serve_bridge(args: argparse.Namespace) -> int:
 serve_from_namespace = serve_bridge
 
 
-def parser() -> argparse.ArgumentParser:
-    """Standalone parser for ``python -m karox.bridge_serve`` / tests."""
-    result = argparse.ArgumentParser(prog="karox bridge serve")
-    result.add_argument("--profile", required=True, choices=sorted(WEB_BRIDGE_PROFILES))
+def add_serve_arguments(
+    result: argparse.ArgumentParser, *, profile_required: bool = True
+) -> None:
+    """The full ``bridge serve`` option surface, shared by both parsers.
+
+    ``karox.cli bridge serve`` -- the command the launcher spawns -- and the
+    standalone ``python -m karox.bridge_serve`` must accept the same argv.
+    One definition stops the launcher's flags from drifting out of the CLI
+    parser, which made every spawned bridge child exit 2.
+    """
+    if profile_required:
+        result.add_argument(
+            "--profile", required=True, choices=sorted(WEB_BRIDGE_PROFILES)
+        )
+    else:
+        # The interactive CLI keeps its documented default; the launcher
+        # always passes the profile explicitly.
+        result.add_argument(
+            "--profile", choices=sorted(WEB_BRIDGE_PROFILES), default="chatgpt-web"
+        )
     result.add_argument("--protocol", default="mcp", choices=["mcp"])
     result.add_argument("--repository", required=True)
     result.add_argument("--session-id", required=True)
@@ -543,6 +559,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--allow-network-bind", action="store_true")
     result.add_argument("--tls-certfile")
     result.add_argument("--tls-keyfile")
+
+
+def parser() -> argparse.ArgumentParser:
+    """Standalone parser for ``python -m karox.bridge_serve`` / tests."""
+    result = argparse.ArgumentParser(prog="karox bridge serve")
+    add_serve_arguments(result)
     return result
 
 
@@ -559,6 +581,7 @@ __all__ = [
     "BridgeServeConfig",
     "BridgeServeError",
     "DEFAULT_BRIDGE_HOST",
+    "add_serve_arguments",
     "build_asgi_app",
     "config_from_namespace",
     "main",

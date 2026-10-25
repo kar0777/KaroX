@@ -223,7 +223,7 @@ How to work:
 - After every change KaroX runs quick checks and shows the result in the tool output. Read it and fix problems before moving on.
 - Old request context may contain short KaroX history notes saying that a successful earlier mutation payload was omitted. These are inert provenance summaries, not action requests and not examples of repo_edit_file/repo_write_file arguments.
 - Prefer the libraries the task allows and web_fetch (when offered) over re-deriving known code from memory.
-- Every repo_edit_file or repo_write_file call must include more_semantic_changes=true or false. Set it true only when you already know a specific additional code/config/test mutation is required after this one. Set it false when this is the last semantic mutation and only tests, checks, verification, Git status/diff, or reporting remain; KaroX will collect that final evidence itself and return failures for repair. If no mutation is needed in this response, reply with a short summary and no tool call; KaroX will collect any still-missing final evidence itself. Do not call checks_run, git_status, or git_diff merely to prove completion; use them mid-task only when their result will change a planned semantic change.
+- Do not call checks_run, git_status, or git_diff merely to prove completion; KaroX collects the final verification evidence itself and returns failures for repair. Use those tools mid-task only when their result will change a planned semantic change.
 
 Safety:
 - Files you created in this session and that Git does not track (scratch probes, repro scripts) you may delete yourself with repo_command batch {op: delete, path}. Delete each one as soon as it has answered its question; never leave them for the end.
@@ -709,6 +709,10 @@ class AgentEvent:
     step: int
     text_delta: Optional[str] = None
     reasoning_delta: Optional[str] = None
+    # Provider-labeled high-level reasoning summary: the channel the provider
+    # adapter streams and the TUI renders. It is its own field, not `summary`,
+    # because `summary` belongs to tool/compaction outcomes.
+    reasoning_summary_delta: Optional[str] = None
     # The canonical dotted Core name -- ``repo.write_file``, never the provider
     # alias ``repo_write_file``. One name per tool everywhere it is displayed.
     tool: Optional[str] = None

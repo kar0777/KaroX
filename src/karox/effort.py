@@ -133,8 +133,6 @@ class EffortBudget:
     map_depth: str
     # Commits of Git history the agent may mine for evidence (0 = none).
     git_history_depth: int
-    # Parallel subagents this level may spawn (0 = stay single-threaded).
-    allowed_subagents: int
     # External research/documentation lookups budgeted for the task.
     research_calls: int
     # Test scope the level must run before claiming success.
@@ -157,7 +155,6 @@ class EffortBudget:
             "investigation_breadth",
             "hypothesis_budget",
             "git_history_depth",
-            "allowed_subagents",
             "research_calls",
         ):
             value = getattr(self, name)
@@ -197,7 +194,6 @@ _BUDGETS: Dict[str, EffortBudget] = {
         verification_rung=2,
         map_depth="low",
         git_history_depth=0,
-        allowed_subagents=0,
         research_calls=0,
         test_breadth="targeted",
     ),
@@ -213,7 +209,6 @@ _BUDGETS: Dict[str, EffortBudget] = {
         verification_rung=3,
         map_depth="medium",
         git_history_depth=10,
-        allowed_subagents=0,
         research_calls=2,
         test_breadth="affected",
     ),
@@ -229,7 +224,6 @@ _BUDGETS: Dict[str, EffortBudget] = {
         verification_rung=4,
         map_depth="high",
         git_history_depth=50,
-        allowed_subagents=2,
         research_calls=5,
         test_breadth="affected",
     ),
@@ -245,7 +239,6 @@ _BUDGETS: Dict[str, EffortBudget] = {
         verification_rung=4,
         map_depth="extra-high",
         git_history_depth=200,
-        allowed_subagents=4,
         research_calls=10,
         test_breadth="full",
     ),
@@ -261,7 +254,6 @@ _BUDGETS: Dict[str, EffortBudget] = {
         verification_rung=5,
         map_depth="ultra",
         git_history_depth=1_000,
-        allowed_subagents=8,
         research_calls=20,
         test_breadth="full",
     ),

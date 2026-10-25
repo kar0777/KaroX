@@ -91,13 +91,10 @@ tests cover the same wire in-process; the manual HTTP pass is recorded in
 The wheel must contain:
 
 - every Python module under `src/karox`;
-- `tui/theme.tcss` and `tui2/theme.tcss`;
+- `tui/theme.tcss`;
 - `prompts/*.md` and `prompts/profiles/*.md`;
 - `builtin_skills/*/SKILL.md`;
-- `skill_notes/*.md`;
-- the engine's packaged protocol: `engine/config/*.yaml` (the default path
-  reads `engine/config/default.yaml` at runtime), `engine/config/benchmarks/*`,
-  `engine/py.typed` and its license/notice files;
+- `engine/py.typed` and its license/notice files;
 - `LICENSE`.
 
 It must not contain `__pycache__`, `.pyc`, tests or an old

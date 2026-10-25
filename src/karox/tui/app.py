@@ -74,7 +74,6 @@ class RunState:
     tests_failed: int = 0
     mcp_calls: int = 0
     skill_calls: int = 0
-    subagents: int = 0
     inspections: int = 0
     files: list[str] = field(default_factory=list)
 
@@ -146,9 +145,13 @@ class KaroxApp(App[int]):
         self._stopping = False
         self.run_state = RunState()
         self.checkpoint: SessionState | None = None
-        self._verification: tuple[tuple[str, ...], ...] = _detect_verification(
-            self.repository
+        # Detection is a suggestion shown to the user, never approval: the CLI
+        # treats --verification-command as an explicit human decision. Only
+        # commands the user adds with /verify travel to the child.
+        self._detected_verification: tuple[tuple[str, ...], ...] = (
+            _detect_verification(self.repository)
         )
+        self._verification: tuple[tuple[str, ...], ...] = ()
         effort = stored.get("effort_level")
         self.effort = effort if effort in _EFFORT_LEVELS else "auto"
         mode = stored.get("agent_mode")
@@ -248,8 +251,9 @@ class KaroxApp(App[int]):
         facts.append(
             tr(self.language, "welcome.facts.session", id=self.session_id[:16])
         )
-        if self._verification:
-            commands = "; ".join(" ".join(item) for item in self._verification)
+        if self._verification or self._detected_verification:
+            shown = self._verification or self._detected_verification
+            commands = "; ".join(" ".join(item) for item in shown)
             facts.append(
                 tr(self.language, "welcome.facts.verification", commands=commands)
             )
@@ -536,8 +540,6 @@ class KaroxApp(App[int]):
             state.mcp_calls += 1
         elif category == "skill":
             state.skill_calls += 1
-        elif category == "subagent":
-            state.subagents += 1
         elif category == "inspect":
             state.inspections += 1
 
@@ -659,10 +661,8 @@ class KaroxApp(App[int]):
 
     def _add_verification(self, argument: str) -> None:
         if not argument:
-            current = (
-                "\n".join(" ".join(command) for command in self._verification)
-                or "(none)"
-            )
+            shown = self._verification or self._detected_verification
+            current = "\n".join(" ".join(command) for command in shown) or "(none)"
             self._notice(current, "info")
             return
         try:
@@ -720,7 +720,8 @@ class KaroxApp(App[int]):
 
     def _status_text(self) -> str:
         model = self._model_label() or tr(self.language, "status.no_model")
-        checks = "; ".join(" ".join(item) for item in self._verification) or "(none)"
+        shown = self._verification or self._detected_verification
+        checks = "; ".join(" ".join(item) for item in shown) or "(none)"
         state = self.run_state
         lines = [
             f"repository: {self.repository}",
@@ -739,7 +740,6 @@ class KaroxApp(App[int]):
                 bad=state.tests_failed,
                 mcp=state.mcp_calls,
                 skills=state.skill_calls,
-                sub=state.subagents,
             ),
         ]
         if self.checkpoint is not None and self.checkpoint.updated_at:

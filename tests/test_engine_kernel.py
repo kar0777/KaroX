@@ -1152,3 +1152,65 @@ def test_cli_engine_run_auto_activates_and_advertises_skills(
     audit = runtime_dir() / "vnext" / "skill-audit" / "engine-1.jsonl"
     assert audit.is_file()
     assert "greet-feature" in audit.read_text(encoding="utf-8")
+
+
+def test_reasoning_summary_and_compaction_reach_the_observer(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Every event the kernel emits must construct ``AgentEvent``.
+
+    The reasoning-summary channel and the compaction line each used a field the
+    event dataclass did not have; a single TypeError used to mute the observer
+    for the rest of the run, so the UI stopped updating with no error anywhere.
+    This pins both the fields and the survival of the observer.
+    """
+    harness = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "done"),))],
+    )
+    kernel = harness.kernel.implementation
+    kernel._model_event("reasoning_summary_delta", reasoning_summary_delta="plan")
+    kernel._on_compacted(1200, 400, 1)
+
+    kinds = harness.kinds()
+    assert "reasoning_summary_delta" in kinds
+    assert kinds[-1] == "compacted"
+    summaries = [
+        event
+        for event in harness.events
+        if event.kind is AgentEventKind.REASONING_SUMMARY_DELTA
+    ]
+    assert summaries[-1].reasoning_summary_delta == "plan"
+    compacted = [
+        event for event in harness.events if event.kind is AgentEventKind.COMPACTED
+    ][-1]
+    assert "compact" in (compacted.summary or "")
+
+    # One unrenderable event is dropped; the observer stays attached.
+    kernel._emit(AgentEventKind.WARNING, unknown_field="x")  # type: ignore[arg-type]
+    kernel._emit(AgentEventKind.WARNING, summary="still alive")
+    assert harness.events[-1].summary == "still alive"
+
+
+def test_agent_event_carries_the_reasoning_summary_field() -> None:
+    """The TUI protocol reads ``reasoning_summary_delta`` from the JSON event."""
+    from dataclasses import asdict
+
+    event = AgentEvent(
+        AgentEventKind.REASONING_SUMMARY_DELTA, 1, reasoning_summary_delta="thinking"
+    )
+    assert asdict(event)["reasoning_summary_delta"] == "thinking"
+
+
+def test_system_prompt_only_asks_for_arguments_the_tools_have() -> None:
+    """The prompt must not demand a schema field, or prose answers, the engine refuses.
+
+    ``more_semantic_changes`` was a requirement of the retired loop: no tool
+    schema carries it, so a model that obeyed the prompt produced rejected
+    calls, and the same paragraph told the model to answer without a tool call
+    while the engine contract calls that a format error.
+    """
+    lowered = SYSTEM_PROMPT.lower()
+    assert "more_semantic_changes" not in SYSTEM_PROMPT
+    assert "no tool call" not in lowered

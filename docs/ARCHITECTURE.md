@@ -206,8 +206,7 @@ not listed is internal to its layer.
 | `agent.py` | `AgentKernel` facade, `AgentEvent`/`AgentReport` vocabulary, system prompt |
 | `engine_kernel.py` | the engine kernel: provider bridge, typed-tool environment, checkpoints, verification |
 | `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
-| `core_engine.py` | `CoreEngine`: karo-core loop for subagents |
-| `subagents.py` | worker pool over `CoreEngine` |
+| `engine_salvage.py` | recovers one unambiguous fenced shell command from a prose response |
 | `core.py`, `core_tools.py` | typed tool table and the runtimes (`Capability`, `SkillSession`) |
 | `engine_tools.py` | registers `browser.command` / `desktop.*` on the engine run's runtime |
 | `action_execution.py`, `workspace_worker.py`, `workspace_transaction.py` | hot worker: repo commands in a reloadable child process |
@@ -219,11 +218,10 @@ not listed is internal to its layer.
 | `project_context.py`, `project_map.py`, `map_service.py`, `mode_artifacts.py` | bounded orientation, durable Plan/Concept |
 | `effort.py`, `agent_modes.py`, `auto_verify.py`, `completion_gate.py` | effort budgets, modes, quick checks, verified floor |
 | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |
-| `engine_mcp.py` | MCP seam written for `CoreEngine.command_runner` — not wired into the product path (MCP rides the Core runtime's typed tools); decide its fate before extending |
 | `hosted_core.py`, `bridge_oauth.py`, `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`, `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py` | hosted MCP inbound bridge |
 | `browser/`, `computer_use/`, `desktop_apps.py` | Playwright engine; non-intrusive Win32 desktop use |
 | `visual_check.py`, `web_check.py` | render grading and page verification |
 | `skills.py` | skill sessions (`skill.run` is a leased Core tool) |
 | `paths.py`, `security.py`, `detached_process.py`, `process_launcher.py`, `port_ownership.py`, `process_identity.py`, `credential_session.py`, `credential_secret_service.py`, `test_output.py` | platform: paths, redaction, child processes, keyring |
 | `tui/` | Textual client (app, widgets, modals, backend, prefs, i18n, protocol) |
-| `engine/` | vendored karo-core: `agents/default.py` (loop), `environments/local.py`, `models/litellm_model.py` (+`test_models`), pruned to the import closure |
+| `engine/` | vendored karo-core: `agents/default.py` (the loop), `environments/local.py`, `exceptions.py`, `utils/` — pruned to the product's import closure |

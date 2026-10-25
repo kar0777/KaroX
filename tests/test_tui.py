@@ -443,7 +443,6 @@ class SessionStateTests(unittest.TestCase):
         self.assertEqual(state.last_checkpoint_at, 1761382000.0)
         self.assertEqual(state.skill_names, ("threejs_scene",))
         self.assertEqual(state.mcp_server_ids, ("github",))
-        self.assertEqual(state.subagent_jobs, ())
         self.assertEqual(state.requests, 2)
         self.assertEqual(state.token_total, 2300)
         self.assertEqual(state.costs, {"USD": 0.01})
@@ -688,6 +687,23 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause(0.1)
         await pilot.pause(0.1)
 
+    async def test_detected_checks_are_a_suggestion_not_user_approval(self) -> None:
+        """Detection may be shown; only /verify may approve.
+
+        The CLI treats --verification-command as the human's explicit decision.
+        The TUI used to pass its own detected commands through that flag, which
+        silently turned repository discovery into approval.
+        """
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            self.assertTrue(app._detected_verification)
+            self.assertEqual(app._verification, ())
+            app._add_verification("python -m pytest -q")
+            self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
+            app._add_verification("")
+            self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
+
     async def test_welcome_and_help(self) -> None:
         app = self.app()
         async with app.run_test(size=(100, 30)) as pilot:
@@ -790,7 +806,6 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state.tests_failed, 0)
             self.assertEqual(state.mcp_calls, 1)
             self.assertEqual(state.skill_calls, 1)
-            self.assertEqual(state.subagents, 0)
             self.assertEqual(state.inspections, 1)
             self.assertIn("src/app.py", state.files)
             # 1500 + 800 per-step totals, then the report's 1234 wins at the end.

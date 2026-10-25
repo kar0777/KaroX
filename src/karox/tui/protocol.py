@@ -365,9 +365,6 @@ class SessionState:
             if server
         )
 
-    @property
-    def subagent_jobs(self) -> tuple[dict[str, Any], ...]:
-        return self.jobs
 
 
 def _text(value: Any) -> str:

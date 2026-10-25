@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from karox.engine.exceptions import FormatError
-from karox.engine.models.litellm_model import LitellmModel, salvage_fenced_command
+from karox.engine_salvage import salvage_fenced_command
 
 
 def make_response(content: str, *, finish_reason: str = "stop", tool_calls=None):
@@ -29,8 +29,44 @@ def make_response(content: str, *, finish_reason: str = "stop", tool_calls=None)
     )
 
 
-def make_model() -> LitellmModel:
-    return LitellmModel(model_name="openai/race-alias", model_kwargs={})
+def make_model():
+    """The product bridge, not the vendored litellm transport."""
+    from karox.engine_kernel import EngineProviderModel
+    from karox.providers import ModelResponse
+
+    return EngineProviderModel(
+        provider=_single_response(
+            ModelResponse(
+                content="",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+            )
+        ),
+        model_id="race-alias",
+        tools=(),
+        event=lambda kind, **fields: None,
+        deadline_seconds=30.0,
+    )
+
+
+def _single_response(response):
+    class _Provider:
+        def complete(self, request):
+            return response
+
+    return _Provider()
+
+
+def _model_response(content: str, *, finish_reason: str = "stop", tool_calls=()):
+    from karox.providers import ModelResponse
+
+    return ModelResponse(
+        content=content,
+        tool_calls=tuple(tool_calls),
+        finish_reason=finish_reason,
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
+    )
 
 
 def test_salvage_single_mswea_fence():
@@ -73,23 +109,32 @@ def test_one_closed_fence_wins_over_a_later_open_one():
 
 def test_parse_actions_returns_the_fenced_command():
     model = make_model()
-    actions = model._parse_actions(make_response('Let me fix it.\n\n```mswea_bash_command\nmake test\n```'))
+    actions = model._parse_actions(
+        _model_response("Let me fix it.\n\n```mswea_bash_command\nmake test\n```")
+    )
     assert actions == [{"command": "make test"}]
 
 
 def test_parse_actions_still_raises_without_a_command():
     model = make_model()
     with pytest.raises(FormatError):
-        model._parse_actions(make_response("The solution is complete."))
+        model._parse_actions(_model_response("The solution is complete."))
 
 
 def test_tool_calls_win_over_a_fence():
+    from karox.providers import ToolCall
+
     model = make_model()
-    tool_call = SimpleNamespace(
-        id="call_1",
-        function=SimpleNamespace(name="bash", arguments='{"command": "ls"}'),
+    tool_call = ToolCall(
+        call_id="call_1", name="finish", raw_arguments='{"answer": "done"}'
     )
     actions = model._parse_actions(
-        make_response("```mswea_bash_command\npwd\n```", finish_reason="tool_calls", tool_calls=[tool_call])
+        _model_response(
+            "```mswea_bash_command\npwd\n```",
+            finish_reason="tool_calls",
+            tool_calls=(tool_call,),
+        )
     )
-    assert actions == [{"command": "ls", "tool_call_id": "call_1"}]
+    assert actions == [
+        {"name": "finish", "arguments": {"answer": "done"}, "tool_call_id": "call_1"}
+    ]

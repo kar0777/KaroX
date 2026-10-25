@@ -335,3 +335,30 @@ def test_the_v7_read_tools_are_observations_not_confirmations(name: str) -> None
     decision = ActionDecisionEngine().decide(mapped, user_intent="build the page")
     assert decision.consequence is ConsequenceClass.OBSERVATION
     assert decision.disposition is ActionDisposition.AUTO
+
+
+def test_skill_run_is_a_workspace_process_not_an_unknown_confirmation() -> None:
+    """The advertised leased ``skill.run`` tool must be executable.
+
+    Its name had no risk mapping, so every call was classified
+    unknown-and-therefore-high and the engine's typed-tool path could never
+    redeem it. A skill script is a repository-owned recipe the catalogue
+    validated, so it sits at the dev-command level: medium risk, workspace
+    consequence, no user round-trip when the session holds ``process.run``.
+    """
+    from karox.models import CoreCommand, Origin, OriginKind
+    from karox.risk_mapping import action_for_command, risk_kind_for
+
+    command = CoreCommand(
+        name="skill.run",
+        arguments={"name": "web-3d-scene"},
+        session_id="session",
+        origin=Origin(OriginKind.NATIVE_AGENT, "test-agent"),
+        idempotency_key="skill-run-1",
+    )
+    assert risk_kind_for("skill.run", command.arguments) == "process.run_dev"
+    mapped = action_for_command(command)
+    assert mapped.kind == "process.run_dev"
+    decision = ActionDecisionEngine().decide(mapped, user_intent="run the skill")
+    assert decision.consequence is ConsequenceClass.WORKSPACE
+    assert decision.disposition is not ActionDisposition.CONFIRM

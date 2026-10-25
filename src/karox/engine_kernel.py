@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import shlex
@@ -42,6 +43,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 # product import must be silent and must not adopt another tool's config file.
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
+logger = logging.getLogger("karox.engine_kernel")
+
 from jinja2 import StrictUndefined, Template  # noqa: E402
 
 from .engine import __version__ as _engine_version  # noqa: E402
@@ -53,7 +56,7 @@ from .engine.exceptions import (  # noqa: E402
     Submitted,
     UserInterruption,
 )
-from .engine.models.litellm_model import salvage_fenced_command  # noqa: E402
+from .engine_salvage import salvage_fenced_command  # noqa: E402
 
 from . import completion_gate  # noqa: E402
 from . import session_analysis  # noqa: E402
@@ -402,8 +405,9 @@ class EngineProviderModel:
                     reasoning_summary_delta=event.reasoning_summary_delta,
                 )
         except Exception:
-            # An observer is a display concern and may never end the run.
-            self._event = None
+            # An observer is a display concern and may never end the run. One
+            # malformed event must not mute the rest of the stream either.
+            logger.debug("dropping one unrenderable model event", exc_info=True)
 
     def _parse_actions(self, response: ModelResponse) -> List[Dict[str, Any]]:
         calls = response.tool_calls
@@ -1602,7 +1606,7 @@ class EngineKernel:
         }
         self._emit(
             AgentEventKind.COMPACTED,
-            detail=f"engine history compacted to ~{tokens_after} tokens (event {count})",
+            summary=f"engine history compacted to ~{tokens_after} tokens (event {count})",
         )
 
     def _on_engine_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:
@@ -1963,7 +1967,10 @@ class EngineKernel:
         try:
             observer(AgentEvent(kind, self._step, **fields))
         except Exception:
-            self._on_event = None
+            # A display observer must never end the run, and one malformed
+            # event must not permanently mute the stream: drop this event,
+            # keep the observer for the next one.
+            logger.debug("dropping one unrenderable kernel event", exc_info=True)
 
     # -- harness finishing -------------------------------------------------
 

@@ -295,7 +295,7 @@ def _stream_progress() -> Any:
             emit(event.text_delta or "")
             text_open[0] = True
         elif event.kind is AgentEventKind.REASONING_SUMMARY_DELTA:
-            emit(event.summary or "")
+            emit(event.reasoning_summary_delta or "")
             text_open[0] = True
         elif event.kind is AgentEventKind.REASONING_DELTA:
             reasoning[0] += len(event.reasoning_delta or "")
@@ -2507,24 +2507,11 @@ def _parser() -> argparse.ArgumentParser:
     bridge_serve = bridge_commands.add_parser(
         "serve", help="serve one bridge child on loopback"
     )
-    bridge_serve.add_argument("--repository", type=Path, required=True)
-    bridge_serve.add_argument("--session-id", required=True)
-    bridge_serve.add_argument("--credential", required=True)
-    bridge_serve.add_argument(
-        "--profile", choices=sorted(WEB_BRIDGE_PROFILES), default="chatgpt-web"
-    )
-    bridge_serve.add_argument("--path", default="/mcp")
-    bridge_serve.add_argument("--tool", action="append", default=[])
-    bridge_serve.add_argument("--verification-command", action="append", default=[])
-    bridge_serve.add_argument("--public-url")
-    bridge_serve.add_argument("--host", default="127.0.0.1")
-    bridge_serve.add_argument("--port", type=int, default=8765)
-    bridge_serve.add_argument("--deadline-seconds", type=float, default=600.0)
-    bridge_serve.add_argument("--allow-network-bind", action="store_true")
-    bridge_serve.add_argument("--tls-certfile")
-    bridge_serve.add_argument("--tls-keyfile")
-    bridge_serve.add_argument("--allowed-redirect-host", action="append", default=[])
-    bridge_serve.add_argument("--state-dir", type=Path)
+    # One option definition shared with `python -m karox.bridge_serve`, so the
+    # launcher's argv can never drift out of this parser again.
+    from .bridge_serve import add_serve_arguments
+
+    add_serve_arguments(bridge_serve, profile_required=False)
     bridge_serve.add_argument("--json", action="store_true")
 
     bridge_saved = bridge_commands.add_parser("saved", help="saved bridge profiles")

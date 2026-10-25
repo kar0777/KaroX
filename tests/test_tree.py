@@ -34,8 +34,8 @@ LEGACY = {
 }
 
 #: The vendored karo-core engine is pruned to exactly the modules the product
-#: imports (plus test_models for the deterministic test model). Adding a file
-#: under engine/ must be a deliberate act that updates this set.
+#: imports. Adding a file under engine/ must be a deliberate act that updates
+#: this set.
 ENGINE_MODULES = {
     "__init__.py",
     "agents/__init__.py",
@@ -43,17 +43,6 @@ ENGINE_MODULES = {
     "environments/__init__.py",
     "environments/local.py",
     "exceptions.py",
-    "models/__init__.py",
-    "models/litellm_model.py",
-    "models/test_models.py",
-    "models/utils/__init__.py",
-    "models/utils/actions_text.py",
-    "models/utils/actions_toolcall.py",
-    "models/utils/actions_toolcall_response.py",
-    "models/utils/anthropic_utils.py",
-    "models/utils/cache_control.py",
-    "models/utils/openai_multimodal.py",
-    "models/utils/retry.py",
     "utils/__init__.py",
     "utils/log.py",
     "utils/serialize.py",

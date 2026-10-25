@@ -172,7 +172,6 @@ _RU: dict[str, str] = {
     "session.section.provider": "провайдер",
     "session.section.mcp": "MCP-серверы",
     "session.section.skills": "навыки",
-    "session.section.subagents": "суб-агенты",
     "session.section.files": "изменённые файлы",
     "session.none": "нет",
     "session.history": "+{count} предыдущих хода",
@@ -183,7 +182,6 @@ _RU: dict[str, str] = {
     "session.verified_at": "проверено на шаге {step}",
     "session.provider_line": "{requests} запросов · {tokens} токенов",
     "session.cost": "стоимость {cost}",
-    "session.subagents_line": "заданий: {count}",
     "session.files_line": "изменено файлов: {count}",
     "skills.title": "Навыки репозитория",
     "skills.hint": "Enter открыть · Esc закрыть",
@@ -346,7 +344,7 @@ _EN: dict[str, str] = {
     "status.no_checkpoint": "no session checkpoint yet",
     "status.run_counters": (
         "last run: reads {reads} · edits {edits} · checks ✓{ok}/✗{bad} · "
-        "mcp {mcp} · skills {skills} · subagents {sub}"
+        "mcp {mcp} · skills {skills}"
     ),
     "session.title": "Session state",
     "session.empty": (
@@ -361,7 +359,6 @@ _EN: dict[str, str] = {
     "session.section.provider": "provider",
     "session.section.mcp": "MCP servers",
     "session.section.skills": "skills",
-    "session.section.subagents": "subagents",
     "session.section.files": "changed files",
     "session.none": "none",
     "session.history": "+{count} earlier turn(s)",
@@ -372,7 +369,6 @@ _EN: dict[str, str] = {
     "session.verified_at": "verified at step {step}",
     "session.provider_line": "{requests} requests · {tokens} tokens",
     "session.cost": "cost {cost}",
-    "session.subagents_line": "jobs: {count}",
     "session.files_line": "changed files: {count}",
     "skills.title": "Repository skills",
     "skills.hint": "Enter open · Esc close",

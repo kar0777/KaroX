@@ -806,12 +806,6 @@ class SessionPanel(ModalScreen[None]):
         value(", ".join(state.skill_names) or tr(lang, "session.none"),
               TEXT if state.skill_names else DIM)
 
-        section("session.section.subagents")
-        if state.subagent_jobs:
-            value(tr(lang, "session.subagents_line", count=len(state.subagent_jobs)))
-        else:
-            value(tr(lang, "session.none"), DIM)
-
         section("session.section.files")
         if state.changed_files:
             value(tr(lang, "session.files_line", count=len(state.changed_files)), MUTED)

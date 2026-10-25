@@ -92,52 +92,19 @@ capability policy and the MCP binding all apply.
 
 ## MCP in the engine-backed agent
 
-The karo-core engine (`karox agent run`'s engine backend) speaks bash, one
-command per step. `karox.engine_mcp` gives that loop the same MCP surface
-through an in-band `mcp` command plus a typed Python API:
+MCP tools reach the engine through the same typed Core surface as every other
+tool: the session's `--tool` selection becomes a `McpRuntimeBinding`, the
+binding is passed to `CoreRuntime`/`CapabilityCoreRuntime`, and the engine's
+tool environment calls those tools exactly like `repo.read_file`. Capability
+policy (`mcp.call`), session binding and revocation, stored selection identity
+(registry digest, schema digest, mutation classification, permission), the
+mutation lease and idempotent replay all apply in the Core runtime, so the
+engine gets no separate MCP path and no shell-text grammar.
 
-```text
-mcp list
-mcp call mcp.filesystem.read_file '{"path":"README.md"}'
-mcp call mcp.notes.write_note '{"name":"n","content":"c"}' \
-    --idempotency-key note-1
-```
-
-The kernel wires it once, at the `command_runner` seam the engine already
-exposes:
-
-```python
-from karox.engine_mcp import EngineMcpAdapter, build_engine_command_runner
-
-adapter = EngineMcpAdapter.from_session(
-    record=store.load(session_id),
-    repository=repository,
-    store=store,
-    registry=McpRegistry(config_dir() / "vnext" / "mcp-servers.json"),
-    origin=origin,          # native agent origin granted mcp.call
-    policy=policy,
-    audit_path=runtime_dir() / "vnext" / "audit.jsonl",
-)
-runner = build_engine_command_runner(adapter, shell_runner)
-CoreEngineConfig(..., command_runner=runner)
-```
-
-`adapter.prompt_block()` returns the protocol text to append to the engine's
-prompt; `adapter.call_tool(name, arguments, idempotency_key=...,
-progress=...)` is the typed path for hosts that drive tools directly, with
-`EngineMcpCallResult` results and `McpProgressEvent` progress callbacks.
-
-The adapter applies the same fail-closed order as the CLI path: capability
-policy (`mcp.call`), session binding and revocation, stored selection
-identity (registry digest, schema digest, mutation classification,
-permission), and only then the wire. Mutating tools require an idempotency
-key and take the session's mutation lease before the remote call; a repeated
-key with the same input replays the stored outcome without re-executing, a
-key reused for different input conflicts, and a call that fails after
-reserving its intent stays pending and refuses the next same-key call until
-the outcome is reconciled. Every engine observation is a typed
-`output`/`returncode` pair — usage mistakes exit 2, tool failures exit 1 —
-never an exception that would look like an environment crash.
+A mutating tool still requires an idempotency key; a repeated key with the
+same input replays the recorded outcome, a key reused for different input
+conflicts, and a call that fails after reserving its intent stays pending
+until the outcome is reconciled.
 
 ## Hosted bridge for ChatGPT Web / Claude Web / HyperAgent
 
