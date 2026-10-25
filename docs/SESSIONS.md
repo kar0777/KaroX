@@ -29,11 +29,37 @@ create → active → verified | failed | stopped
 - **lock** is an inspection helper: it reports whether a lease is held, by
   which owner, and whether it has expired.
 
+## Hosted bridge sessions
+
+`karox bridge connect` creates or reuses a repository-bound session exactly like
+a local run. The session id is stable for a saved profile
+(`web-saved-<sha256(profile)>`), so an existing ChatGPT/Claude connector keeps
+its OAuth grants and approval password across restarts.
+
+A hosted call enters through `hosted_core.CoreToolBridge`, but the session,
+capability grants, risk engine, mutation lease, idempotency records and audit
+trail are the same ones a local agent uses. Revoking the session makes the
+bridge unusable; stopping the owner does not delete evidence.
+
+## Plan and concept artifacts
+
+A Plan or Ideate run whose final answer is non-empty writes a durable artifact
+under the runtime session directory. The report records `saved: true/false`
+and the path; an empty or failed run never leaves a plausible-looking artifact.
+
+## Memory
+
+Relevant local memory is read from `<runtime>/vnext/memory` for the user,
+project and current session scopes, bounded to 1500 characters and ranked
+against the task. Only fresh entries enter the prompt. `--no-memory` (CLI)
+turns the read off; memory is context, and a broken store never fails a run.
+
 ## On disk
 
 ```text
 <runtime>/vnext/sessions/<session-id>/session.json
 <runtime>/vnext/sessions/<session-id>/...
+<runtime>/vnext/memory/
 <runtime>/vnext/audit.jsonl
 ```
 
@@ -68,7 +94,11 @@ A verified run rests on recorded observations:
 - changed files come from the tool result that wrote them;
 - checks are recorded with their argv, exit code and bounded output;
 - an answer that claims a repository fact names the inspections it used;
-- a run that ends worse than a state it already proved can be restored.
+- a run that ends worse than a state it already proved can be restored;
+- a mutating MCP call records its idempotency intent and result, so a retry
+  replays the recorded outcome instead of writing twice;
+- a hosted bridge call carries the same evidence and cannot claim a change the
+  session did not observe.
 
 The report is the authority. A UI must display `verified` and the reason, not
 infer success from a finished process.

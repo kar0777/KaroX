@@ -65,6 +65,8 @@ border and a colour; ordinary prose does not.
 /mode <mode>     build | plan | ideate
 /lang ru|en      interface language
 /status          repository, model, session, effort, checks
+/doctor          provider, credential, MCP and session health
+/bridge          saved ChatGPT/Claude/HyperAgent bridges
 /clear           clear the screen
 /stop            stop the agent
 /quit            exit
@@ -111,21 +113,28 @@ because the user explicitly asked.
 ## Modals
 
 - **Provider setup** selects a preset, fills the endpoint, provider id, model
-  and key, then verifies live before saving. The key is sent to the CLI on
-  stdin and stored by the OS keyring.
-- **Model picker** lists registered models with the selected one marked.
+  and key, then verifies live before saving. A loopback endpoint needs no key;
+  a saved credential is reused when the CLI has one. A new key is sent to the
+  CLI on stdin and stored by the OS keyring.
+- **Model picker** lists registered models with the selected one marked. Model
+  catalogs are refreshed from the CLI with `karox model discover --save`.
 - **Session picker** lists only sessions bound to this repository; selecting
   one clears the screen and shows its task.
 - **MCP panel** lists configured servers with transport, selection and liveness.
-  `a` adds, `d` removes, `p` probes, `s` selects every tool with `allow` after a
-  confirmation.
+  `a` adds a stdio or Streamable HTTP server (environment, headers, credential
+  reference, OAuth, read-only tools, timeout), `d` removes, `p` probes, and `s`
+  selects the server: read-only tools become `allow`, mutating tools become
+  `ask`. Exact per-tool decisions stay in `karox mcp session select`.
+- `/bridge` lists saved inbound bridge profiles. Starting a bridge is a
+  foreground process that owns a tunnel, so the modal points to the exact
+  `karox bridge connect --saved NAME` command instead of hiding it in a worker.
 
 ## Testing
 
 The client is tested through Textual's pilot with a recorded backend:
 `tests/test_tui.py` feeds `Event` and `Outcome` objects and asserts on the
-widgets. No model, network or keyring is involved. The live check is a separate
-smoke run documented in [DEVELOPMENT.md](DEVELOPMENT.md).
+widgets. No model, public network or real keyring write is involved. The live
+check is a separate smoke run documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Language
 

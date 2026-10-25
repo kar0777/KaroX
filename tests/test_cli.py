@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from karox import cli
 from karox.agent import AgentEvent, AgentEventKind
 from karox.models import AccessProfile, Capability
@@ -116,7 +118,126 @@ def test_paths_command_reports_the_three_roots(tmp_path: Path, monkeypatch) -> N
     with contextlib.redirect_stdout(output):
         assert cli.main(["paths"]) == 0
     text = output.getvalue()
-    assert "config:" in text
-    assert "runtime:" in text
-    assert "sessions:" in text
+    assert "config_dir:" in text
+    assert "runtime_dir:" in text
+    assert "session_dir:" in text
     assert os.path.normcase(str(tmp_path)) in os.path.normcase(text)
+
+
+def test_paths_json_uses_stable_keys(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert cli.main(["paths", "--json"]) == 0
+    payload = json.loads(output.getvalue())
+    assert set(payload) == {"config_dir", "runtime_dir", "session_dir"}
+
+
+def test_short_daily_commands_and_bare_groups_list(monkeypatch) -> None:
+    assert cli._normalize_argv(["models"]) == ["model", "list"]
+    assert cli._normalize_argv(["providers", "--json"]) == ["providers", "--json"]
+    assert cli._normalize_argv(["model"]) == ["model", "list"]
+    assert cli._normalize_argv(["session", "--json"]) == ["session", "list", "--json"]
+    assert cli._normalize_argv(["model", "--help"]) == ["model", "--help"]
+
+
+def test_local_provider_setup_needs_no_key_and_doctor_is_healthy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert (
+            cli.main(
+                [
+                    "provider",
+                    "setup",
+                    "local-openai",
+                    "--model",
+                    "llama3",
+                    "--no-test",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+    setup = json.loads(output.getvalue())
+    assert setup["provider"]["privacy_class"] == "local"
+    assert setup["provider"]["credential_ref"] is None
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert cli.main(["doctor", "--json"]) == 0
+    doctor = json.loads(output.getvalue())
+    assert doctor["status"] == "ok"
+    assert doctor["checks"]["registry"]["selected"] == "local-openai/llama3"
+
+
+def test_remote_provider_setup_without_credential_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    with contextlib.redirect_stderr(io.StringIO()):
+        code = cli.main(
+            ["provider", "setup", "openai", "--model", "gpt-5", "--no-test"]
+        )
+    assert code == 2
+
+
+def test_agent_refuses_a_drive_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    drive_root = Path.cwd().anchor
+    with contextlib.redirect_stderr(io.StringIO()):
+        code = cli.main(
+            [
+                "agent",
+                "run",
+                "--repository",
+                drive_root,
+                "--task",
+                "change something",
+            ]
+        )
+    assert code == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows system folders")
+def test_agent_refuses_a_windows_system_folder(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    system = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    if not system.is_dir():
+        pytest.skip("no Windows directory")
+    with contextlib.redirect_stderr(io.StringIO()):
+        code = cli.main(
+            [
+                "agent",
+                "run",
+                "--repository",
+                str(system),
+                "--task",
+                "change something",
+            ]
+        )
+    assert code == 2
+
+
+def test_project_instructions_refuse_a_symlink_outside_the_repository(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "secret.txt"
+    outside.write_text("do not read me\n", encoding="utf-8")
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    link = repository / "AGENTS.md"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available")
+    suffix, metadata = cli._project_instructions(repository)
+    assert "do not read me" not in suffix
+    assert {"name": "AGENTS.md", "reason": "symlink"} in metadata["skipped"]

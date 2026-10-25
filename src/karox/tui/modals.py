@@ -228,12 +228,18 @@ class ProviderSetupScreen(ModalScreen[dict[str, Any] | None]):
         base_url = self.query_one("#base-url", Input).value.strip()
         model = self.query_one("#model", Input).value.strip()
         api_key = self.query_one("#api-key", Input).value.strip()
-        if not isinstance(preset, str) or not model or not api_key:
+        if not isinstance(preset, str) or not model:
             self._error(tr(self.language, "provider.required"))
             return
         selected = self._presets.get(preset, {})
         if not base_url and not selected.get("base_url"):
             self._error(tr(self.language, "provider.required"))
+            return
+        local = (base_url or str(selected.get("base_url") or "")).startswith(
+            ("http://127.0.0.1", "http://localhost", "http://[::1]")
+        )
+        if not api_key and not local:
+            self._error(tr(self.language, "provider.key_required"))
             return
         self._error("")
         self.query_one("#save", Button).disabled = True
@@ -303,6 +309,25 @@ class McpAddScreen(ModalScreen[str | None]):
             yield Input(id="arguments", placeholder="-y @modelcontextprotocol/server-filesystem .")
             yield Static(tr(self.language, "mcp.url"), classes="field-label")
             yield Input(id="url", placeholder="https://example.com/mcp")
+            yield Static(tr(self.language, "mcp.env"), classes="field-label")
+            yield Input(id="env", placeholder="TOKEN=...; REGION=eu")
+            yield Static(tr(self.language, "mcp.headers"), classes="field-label")
+            yield Input(id="headers", placeholder="X-API-Key=...")
+            yield Static(tr(self.language, "mcp.credential_ref"), classes="field-label")
+            yield Input(id="credential-ref", placeholder="os-keyring:mcp/github")
+            yield Static(tr(self.language, "mcp.credential_target"), classes="field-label")
+            yield Input(id="credential-target", placeholder="Authorization")
+            yield Static(tr(self.language, "mcp.oauth"), classes="field-label")
+            yield Select(
+                [("no", "no"), ("yes", "yes")],
+                value="no",
+                allow_blank=False,
+                id="oauth",
+            )
+            yield Static(tr(self.language, "mcp.read_only"), classes="field-label")
+            yield Input(id="read-only", placeholder="read_file,list_files")
+            yield Static(tr(self.language, "mcp.timeout"), classes="field-label")
+            yield Input(id="timeout", value="30")
             yield Static("", id="mcp-error", classes="form-error")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Save", variant="primary", id="save")
@@ -334,11 +359,38 @@ class McpAddScreen(ModalScreen[str | None]):
             self._error("a remote server needs a URL")
             return
         arguments = raw_args.split() if raw_args else []
+        env = self.query_one("#env", Input).value.strip()
+        headers = self.query_one("#headers", Input).value.strip()
+        credential_ref = self.query_one("#credential-ref", Input).value.strip()
+        credential_target = self.query_one("#credential-target", Input).value.strip()
+        oauth = str(self.query_one("#oauth", Select).value or "no") == "yes"
+        read_only = [
+            item.strip()
+            for item in self.query_one("#read-only", Input).value.split(",")
+            if item.strip()
+        ]
+        try:
+            timeout = float(self.query_one("#timeout", Input).value.strip() or "30")
+        except ValueError:
+            self._error("timeout must be a number")
+            return
         self.query_one("#save", Button).disabled = True
         self.query_one("#mcp-status", Static).update(Text("saving…", style=MUTED))
         self.run_worker(
             lambda: self._persist(
-                server_id, namespace, transport, command, url, arguments
+                server_id,
+                namespace,
+                transport,
+                command,
+                url,
+                arguments,
+                env,
+                headers,
+                credential_ref,
+                credential_target,
+                oauth,
+                read_only,
+                timeout,
             ),
             thread=True,
             exclusive=True,
@@ -352,7 +404,26 @@ class McpAddScreen(ModalScreen[str | None]):
         command: str,
         url: str,
         arguments: list[str],
+        env: str,
+        headers: str,
+        credential_ref: str,
+        credential_target: str,
+        oauth: bool,
+        read_only: list[str],
+        timeout: float,
     ) -> None:
+        def pairs(value: str) -> list[tuple[str, str]]:
+            result: list[tuple[str, str]] = []
+            for item in value.split(";"):
+                item = item.strip()
+                if not item:
+                    continue
+                if "=" not in item:
+                    raise BackendError(f"expected NAME=VALUE, got {item!r}")
+                name, raw = item.split("=", 1)
+                result.append((name.strip(), raw))
+            return result
+
         try:
             self.backend.mcp_add(
                 server_id=server_id,
@@ -361,6 +432,13 @@ class McpAddScreen(ModalScreen[str | None]):
                 command=command,
                 url=url,
                 arguments=arguments,
+                environment=pairs(env),
+                headers=pairs(headers),
+                credential_ref=credential_ref,
+                credential_target=credential_target,
+                oauth=oauth,
+                read_only_tools=read_only,
+                timeout_seconds=timeout,
             )
         except BackendError as exc:
             self.app.call_from_thread(self._failed, str(exc))

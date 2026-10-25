@@ -4,14 +4,18 @@ A local coding agent with a compact terminal client, typed tools, durable
 sessions and MCP support.
 
 This is the clean KaroX 6 line. It keeps what proved itself in v5 — the agent
-kernel, capability and risk policy, session evidence, MCP — and leaves behind
-the hosted bridges, browser profiles and orchestration experiments.
+kernel, capability and risk policy, session evidence, MCP in both directions,
+and the hosted bridge that lets ChatGPT Web, Claude Web and HyperAgent call
+KaroX tools over OAuth. Browser profiles, orchestration experiments and the
+legacy shell stay behind.
 
 ## Status
 
-Alpha (`6.0.0a1`). The CLI, terminal client, providers, sessions, MCP and skills
-work end to end. The migration record in [docs/MIGRATION.md](docs/MIGRATION.md)
-lists what is intentionally not ported yet.
+Alpha (`6.0.0a1`). The CLI, terminal client, providers, sessions, outbound MCP,
+the inbound OAuth/MCP bridge and skills work end to end. The migration record in
+[docs/MIGRATION.md](docs/MIGRATION.md) and the parity audit in
+[docs/PARITY.md](docs/PARITY.md) list what was restored, improved or deliberately
+left behind.
 
 ## Install
 
@@ -27,11 +31,21 @@ python -m pip install -e ".[dev]"
 ```text
 karox provider presets
 karox provider setup openai --model gpt-5 --stdin-key
+karox model discover openai --save
+karox doctor
 karox
 ```
 
+For a ChatGPT/Claude/HyperAgent connector:
+
+```text
+karox bridge saved create my-dev --target-profile chatgpt-web --repository . --tunnel tailscale
+karox bridge connect --saved my-dev
+```
+
 `karox` with no arguments opens the terminal client. Inside it, `/provider`
-connects a provider, `/model` picks a model, `/mcp` manages servers, and
+connects a provider, `/model` picks a model, `/mcp` manages outbound servers,
+`/bridge` lists saved inbound bridges, and
 `/help` lists every command and key.
 
 Without a terminal (CI, pipes), the scriptable surface is:

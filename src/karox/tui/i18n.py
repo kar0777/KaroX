@@ -78,12 +78,19 @@ _RU: dict[str, str] = {
     "mcp.command": "Команда (stdio)",
     "mcp.url": "URL (streamable_http)",
     "mcp.args": "Аргументы через пробел",
+    "mcp.env": "Переменные окружения (NAME=VALUE; …)",
+    "mcp.headers": "HTTP-заголовки (NAME=VALUE; …)",
+    "mcp.credential_ref": "Ссылка на секрет (os-keyring:mcp/name)",
+    "mcp.credential_target": "Куда подставлять секрет (header/env)",
+    "mcp.oauth": "OAuth для streamable_http (да/нет)",
+    "mcp.read_only": "Read-only инструменты, через запятую",
+    "mcp.timeout": "Таймаут, сек",
     "mcp.added": "MCP-сервер {server} сохранён.",
     "mcp.removed": "MCP-сервер {server} удалён.",
-    "mcp.select_confirm": "Разрешить все инструменты сервера {server}?",
+    "mcp.select_confirm": "Выбрать инструменты сервера {server}?",
     "mcp.select_confirm_body": (
-        "Инструменты MCP выполняются от вашего имени. Разрешайте только серверы, "
-        "которым доверяете. Можно выбрать позже через karox mcp session select."
+        "Read-only инструменты будут разрешены, изменяющие — помечены ask и "
+        "потребуют отдельного решения. Точный выбор: karox mcp session select."
     ),
     "models.title": "Модели",
     "models.hint": "Enter выбрать · Esc закрыть",
@@ -100,6 +107,7 @@ _RU: dict[str, str] = {
     "provider.save": "Проверить и сохранить",
     "provider.cancel": "Отмена",
     "provider.required": "Заполните обязательные поля.",
+    "provider.key_required": "Для удалённого провайдера нужен API-ключ.",
     "provider.saved": "Провайдер сохранён, модель {model} выбрана.",
     "provider.failed": "Не удалось сохранить: {error}",
     "help.title": "Команды и клавиши",
@@ -115,6 +123,8 @@ _RU: dict[str, str] = {
         "/mode <mode>     build | plan | ideate\n"
         "/lang ru|en      язык интерфейса\n"
         "/status          состояние сессии\n"
+        "/doctor          проверить провайдера, ключи, MCP и сессии\n"
+        "/bridge          сохранённые мосты ChatGPT/Claude/HyperAgent\n"
         "/clear           очистить экран\n"
         "/stop            остановить агента\n"
         "/quit            выйти\n\n"
@@ -191,12 +201,19 @@ _EN: dict[str, str] = {
     "mcp.command": "Command (stdio)",
     "mcp.url": "URL (streamable_http)",
     "mcp.args": "Arguments, space separated",
+    "mcp.env": "Environment (NAME=VALUE; …)",
+    "mcp.headers": "HTTP headers (NAME=VALUE; …)",
+    "mcp.credential_ref": "Secret reference (os-keyring:mcp/name)",
+    "mcp.credential_target": "Injection target (header/env)",
+    "mcp.oauth": "OAuth for streamable_http (yes/no)",
+    "mcp.read_only": "Read-only tools, comma separated",
+    "mcp.timeout": "Timeout, seconds",
     "mcp.added": "MCP server {server} saved.",
     "mcp.removed": "MCP server {server} removed.",
-    "mcp.select_confirm": "Allow every tool of {server}?",
+    "mcp.select_confirm": "Select tools of {server}?",
     "mcp.select_confirm_body": (
-        "MCP tools run with your authority. Allow only servers you trust. "
-        "You can choose later with karox mcp session select."
+        "Read-only tools are allowed; mutating tools are marked ask and need a "
+        "separate decision. Exact choices: karox mcp session select."
     ),
     "models.title": "Models",
     "models.hint": "Enter select · Esc close",
@@ -213,6 +230,7 @@ _EN: dict[str, str] = {
     "provider.save": "Verify and save",
     "provider.cancel": "Cancel",
     "provider.required": "Fill the required fields.",
+    "provider.key_required": "A remote provider needs an API key.",
     "provider.saved": "Provider saved, model {model} selected.",
     "provider.failed": "Could not save: {error}",
     "help.title": "Commands and keys",
@@ -228,6 +246,8 @@ _EN: dict[str, str] = {
         "/mode <mode>     build | plan | ideate\n"
         "/lang ru|en      interface language\n"
         "/status          session state\n"
+        "/doctor          check provider, keys, MCP and sessions\n"
+        "/bridge          saved ChatGPT/Claude/HyperAgent bridges\n"
         "/clear           clear the screen\n"
         "/stop            stop the agent\n"
         "/quit            exit\n\n"

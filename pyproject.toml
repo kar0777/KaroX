@@ -31,6 +31,11 @@ dependencies = [
   "SecretStorage>=3.3,<4; sys_platform == 'linux'",
   "jeepney>=0.8,<1; sys_platform == 'linux'",
   "mcp>=1.27,<2.0",
+  # The hosted MCP bridge is an ASGI app; uvicorn serves it on loopback and
+  # psutil backs port/process ownership for stop and restart.
+  "starlette>=0.37,<2.0",
+  "uvicorn>=0.30,<1.0",
+  "psutil>=5.9,<8.0",
   # Chromium is provisioned lazily on first browser use; the Python package is
   # installed with the wheel so verification can render a page when asked.
   "playwright>=1.50,<2.0",
@@ -90,6 +95,10 @@ files = [
   "src/karox/entrypoint.py",
   "src/karox/tui",
 ]
+# The copied kernel is deliberately outside this gate (see docs/DEVELOPMENT.md).
+# Without this, mypy follows the imports and reports errors in files that are
+# not part of the declared scope; that is noise, not a checked contract.
+follow_imports = "skip"
 warn_redundant_casts = true
 warn_unused_configs = true
 no_implicit_optional = true

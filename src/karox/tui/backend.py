@@ -247,14 +247,31 @@ class CLIBackend:
             preset_id,
             "--model",
             model_id,
-            "--stdin-key",
             "--json",
         ]
         if provider_id:
             arguments.extend(("--provider-id", provider_id))
         if base_url:
             arguments.extend(("--base-url", base_url))
-        payload = self.call(*arguments, input_text=api_key + "\n", timeout=120.0)
+        if api_key:
+            arguments.append("--stdin-key")
+        payload = self.call(
+            *arguments,
+            input_text=(api_key + "\n") if api_key else None,
+            timeout=120.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def bridge_profiles(self) -> list[dict[str, Any]]:
+        payload = self.call("bridge", "saved", "list", "--json")
+        return (
+            [item for item in payload if isinstance(item, dict)]
+            if isinstance(payload, list)
+            else []
+        )
+
+    def doctor(self) -> dict[str, Any]:
+        payload = self.call("doctor", "--json", timeout=90.0)
         return payload if isinstance(payload, dict) else {}
 
     def mcp_status(self, session_id: str | None = None) -> dict[str, Any]:
@@ -273,6 +290,13 @@ class CLIBackend:
         command: str = "",
         url: str = "",
         arguments: Sequence[str] = (),
+        environment: Sequence[tuple[str, str]] = (),
+        headers: Sequence[tuple[str, str]] = (),
+        credential_ref: str = "",
+        credential_target: str = "",
+        oauth: bool = False,
+        read_only_tools: Sequence[str] = (),
+        timeout_seconds: float = 30.0,
     ) -> dict[str, Any]:
         argv = [
             "mcp",
@@ -284,6 +308,8 @@ class CLIBackend:
             "--transport",
             transport,
             "--json",
+            "--timeout-seconds",
+            str(timeout_seconds),
         ]
         if transport == "stdio":
             argv.extend(("--command", command))
@@ -291,6 +317,18 @@ class CLIBackend:
                 argv.extend(("--arg", item))
         else:
             argv.extend(("--url", url))
+        for name, value in environment:
+            argv.extend(("--env", f"{name}={value}"))
+        for name, value in headers:
+            argv.extend(("--header", f"{name}={value}"))
+        if credential_ref:
+            argv.extend(("--credential-ref", credential_ref))
+        if credential_target:
+            argv.extend(("--credential-target", credential_target))
+        if oauth:
+            argv.append("--oauth")
+        for name in read_only_tools:
+            argv.extend(("--read-only-tool", name))
         payload = self.call(*argv)
         return payload if isinstance(payload, dict) else {}
 
@@ -321,10 +359,13 @@ class CLIBackend:
             "--json",
             timeout=90.0,
         )
-        tools = []
+        tools: list[tuple[str, str]] = []
         if isinstance(discovery, dict):
             tools = [
-                str(item.get("remote_name"))
+                (
+                    str(item.get("remote_name")),
+                    "allow" if item.get("read_only") is True else "ask",
+                )
                 for item in discovery.get("tools", [])
                 if isinstance(item, dict) and item.get("remote_name")
             ]
@@ -339,8 +380,8 @@ class CLIBackend:
             str(self.repository),
             "--json",
         ]
-        for name in tools:
-            arguments.extend(("--permission", f"{name}=allow"))
+        for name, permission in tools:
+            arguments.extend(("--permission", f"{name}={permission}"))
         payload = self.call(*arguments, timeout=120.0)
         return payload if isinstance(payload, dict) else {}
 

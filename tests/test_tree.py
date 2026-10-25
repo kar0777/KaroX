@@ -103,6 +103,7 @@ def test_python_line_count_stays_bounded() -> None:
         for path in PACKAGE.rglob("*.py")
     )
     # The kernel is large by design; the guard is for accumulation of new
-    # surface, not for the kernel itself. Raise it deliberately, never to make
-    # a stray copy pass.
-    assert lines < 60_000
+    # surface, not for the kernel itself. 70k includes the hosted MCP bridge
+    # restored as a product surface, and is still well below the ~166k v5 lab.
+    # Raise it deliberately, never to make a stray copy pass.
+    assert lines < 70_000

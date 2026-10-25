@@ -9,8 +9,8 @@ that speaks a line protocol to it.
 │ tui/ (Textual client)    │ ◄──────────────────── │ cli.py (agent run)     │
 │ no runtime imports       │  one event per line   │ session + provider     │
 └────────────┬─────────────┘                       └───────────┬────────────┘
-             │ other surfaces: model/model list,             │
-             │ session list, mcp status, provider presets    │
+             │ other surfaces: model/session list,           │
+             │ mcp status, provider presets, bridge saved    │
              ▼                                               ▼
        cli.py --json                                 agent.py (AgentKernel)
                                                               │
@@ -21,6 +21,17 @@ that speaks a line protocol to it.
                      │                    │                   │
                      ▼                    ▼                   ▼
              policy.py + risk_engine  provider_adapters  runtime_dir()
+
+Hosted client (ChatGPT / Claude / HyperAgent)
+        │ HTTPS + OAuth
+        ▼
+bridge_launcher → bridge_tailscale → localhost uvicorn
+        │
+        ▼
+bridge_oauth (discovery, DCR, PKCE, refresh) → bridge_proxy (Host/Origin, bearer)
+        │
+        ▼
+hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
 ```
 
 ## Layers and dependency direction
@@ -30,32 +41,44 @@ that speaks a line protocol to it.
    `agent`, `core`, `providers` or `sessions`; those changes belong behind the
    CLI.
 2. **Command surface — `cli.py`, `entrypoint.py`.** Parses arguments, resolves
-   a provider/model, creates or resumes a session, constructs the kernel and
-   renders the report. All handlers are thin and return an exit code.
+   a provider route/model, creates or resumes a session, constructs the kernel
+   and renders the report. It also owns the `bridge` and `connections`-style
+   lifecycle commands; all handlers are thin and return an exit code.
 3. **Agent kernel — `agent.py`.** The bounded model loop: request construction,
    tool-call parsing and dispatch, repair turns, context compaction, evidence
    and the final report. It knows about providers, Core, sessions and events.
 4. **Core and tools — `core.py`, `core_tools.py`, `action_execution.py`,
-   `repo_context.py`, `edit_engine.py`, `affected_checks.py`, `check_jobs`-free
-   checks.** Core owns the tool table; `ExtendedCoreRuntime` adds editing,
-   windowed reads, plans and developer commands; `CapabilityCoreRuntime` adds
-   consequence-based authorization.
+   `repo_context.py`, `edit_engine.py`, `workspace_worker.py`,
+   `workspace_transaction.py`, `unified_patch.py`.** Core owns the tool table;
+   `ExtendedCoreRuntime` adds editing, windowed reads, plans and developer
+   commands; `CapabilityCoreRuntime` adds consequence-based authorization. The
+   hot worker executes repository commands and tests in a reloadable child
+   process without losing the authoritative policy boundary.
 5. **Policy — `policy.py`, `risk_engine.py`, `risk_mapping.py`,
    `action_policy.py`, `command_guard.py`.** Capability answers whether an
    origin may ever perform a kind of action; risk answers whether this instance
    is safe now. Both are required.
 6. **Providers — `providers.py`, `provider_adapters.py`, `registry.py`,
    `provider_factory.py`, `provider_controller.py`, `provider_pricing.py`,
-   `provider_presets.py`, `credentials.py`.** Transport, model catalog,
-   capability facts and opaque credentials live here.
-7. **Sessions — `sessions.py`, `requirements.py`, `event_bus.py`,
-   `usage_analytics.py`.** Durable records, leases, history and evidence.
-8. **MCP — `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py`.** Registry,
-   discovery, schema digests, permissions, transports and OAuth.
-9. **Platform — `paths.py`, `security.py`, `detached_process.py`,
-   `process_launcher.py`, `credential_session.py`, `credential_secret_service.py`.**
-   Paths, redaction, child-process identity and OS keyring access.
-10. **Prompt and skills — `context_compiler.py`, `tool_universe.py`,
+   `provider_presets.py`, `routing.py`, `model_discovery.py`,
+   `credentials.py`.** Transport, model catalog, discovery, fallback routes,
+   budgets, capability facts and opaque credentials live here.
+7. **Sessions and context — `sessions.py`, `requirements.py`, `event_bus.py`,
+   `usage_analytics.py`, `memory.py`, `project_context.py`, `project_map.py`,
+   `map_service.py`, `mode_artifacts.py`.** Durable records, leases, history,
+   evidence, bounded project orientation and durable Plan/Concept artifacts.
+8. **MCP outbound — `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py`.**
+   Registry, discovery, schema digests, permissions, transports and OAuth.
+9. **MCP inbound bridge — `hosted_core.py`, `bridge_oauth.py`,
+   `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`,
+   `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py`.**
+   Explicit hosted tool allowlist, OAuth 2.1 authorization server, Streamable
+   HTTP MCP, Tailscale Funnel ownership and saved launch profiles.
+10. **Platform — `paths.py`, `security.py`, `detached_process.py`,
+    `process_launcher.py`, `port_ownership.py`, `process_identity.py`,
+    `credential_session.py`, `credential_secret_service.py`.** Paths, redaction,
+    child-process identity, port ownership and OS keyring access.
+11. **Prompt and skills — `context_compiler.py`, `tool_universe.py`,
     `completion_gate.py`, `skills.py`, `prompts/`, `builtin_skills/`,
     `skill_notes/`.** Stable prompt prefix, tool advertisement, completion
     proof and recipes.
@@ -82,11 +105,13 @@ design error; so is a tool handler importing `cli`.
 ## State and secrets
 
 - Configuration: `paths.config_dir()/vnext/providers.json`,
-  `mcp-servers.json`, `ui.json`.
+  `mcp-servers.json`, `ui.json`, `web-bridge-profiles.json`.
 - Sessions and audit: `paths.runtime_dir()/vnext/sessions/`,
-  `audit.jsonl`.
+  `audit.jsonl`. Bridge OAuth registrations/grants live under
+  `paths.oauth_state_dir()`; the approval password lives only in the keyring.
 - Credentials: OS keyring only; the registry stores an opaque reference such as
-  `os-keyring:provider/openai` or an environment reference named
+  `os-keyring:provider/openai`, `os-keyring:mcp/<name>` or
+  `os-keyring:bridge/<session-id>`, or an environment reference named
   `KAROX_PROVIDER_<NAME>_API_KEY`.
 - A raw API key never appears in the registry, a session record, an event or a
   log line.
@@ -103,6 +128,12 @@ design error; so is a tool handler importing `cli`.
 - Approval cannot be widened by editing prompt text; it is a policy decision.
 - The UI adds no authority. Every action it triggers goes through the same CLI
   path a script would use.
+- A hosted client gets only the tools explicitly selected at launch. OAuth
+  authenticates the client; it does not grant a capability. Every call still
+  passes Core policy and risk, and mutations still require a lease, an
+  idempotency key and replay-safe evidence.
+- The bridge listener binds loopback; public reachability is a separately owned
+  tunnel (Tailscale Funnel) and a proven route is never replaced or reset.
 
 ## Copied kernel
 

@@ -290,10 +290,10 @@ class ChatInput(TextArea):
         if event.key == "enter":
             event.prevent_default()
             event.stop()
-            value = self.text.strip()
+            value = str(self.text).strip()  # type: ignore[has-type]
             if value:
                 self.post_message(self.Submitted(value))
-                self.text = ""
+                self.text = ""  # type: ignore[has-type]
             return
         if event.key in {"shift+enter", "ctrl+j"}:
             event.prevent_default()

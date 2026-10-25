@@ -1,9 +1,10 @@
 # KaroX release — agent guide
 
 This repository is the clean KaroX 6 line. It keeps the verified local-agent
-kernel and one compact terminal client. It is not the v5 laboratory: hosted
-bridges, browser profiles, orchestration experiments and the legacy shell do
-not belong here.
+kernel, one compact terminal client, outbound MCP, and the inbound OAuth/MCP
+bridge for ChatGPT Web, Claude Web and HyperAgent. It is not the v5 laboratory:
+browser profiles, orchestration experiments, autonomy runtimes and the legacy
+shell do not belong here.
 
 Source, tests and the release gates are authoritative when prose disagrees.
 
@@ -19,9 +20,10 @@ Source, tests and the release gates are authoritative when prose disagrees.
 
 ## Layout
 
-- `src/karox/` — the product package. `cli.py`, `entrypoint.py` and `tui/` are
-  the release surface written for this line. The remaining modules are the
-  curated agent kernel copied from v5 (see `docs/MIGRATION.md`).
+- `src/karox/` — the product package. `cli.py`, `entrypoint.py`, `tui/` and the
+  `bridge_*` / `hosted_core.py` group are the release surface written for this
+  line. The remaining modules are the curated agent kernel copied from v5 (see
+  `docs/MIGRATION.md`).
 - `src/karox/prompts/`, `builtin_skills/`, `skill_notes/` — runtime data read
   from the installed package; they must travel in the wheel.
 - `docs/` — current architecture and operator documentation. If a document
@@ -42,6 +44,14 @@ Source, tests and the release gates are authoritative when prose disagrees.
   are opaque OS-keyring references.
 - MCP servers are discovered, selected per session, and called only through
   `mcp_client.py`. A selected tool's schema digest is re-checked at call time.
+- The inbound bridge is a second entry point into the same Core. `hosted_core.py`
+  exposes only an explicit tool allowlist; `bridge_proxy.py` re-checks
+  Host/Origin, bearer/OAuth and idempotency; `bridge_oauth.py` owns discovery,
+  DCR, PKCE and rotating refresh tokens. Never let a hosted call bypass
+  `CapabilityCoreRuntime`.
+- The bridge listener is loopback-only unless TLS and `--allow-network-bind` are
+  both supplied. Tailscale Funnel is the only public ingress the launcher
+  manages; never reset a foreign route.
 - `docs/ARCHITECTURE.md` documents the dependency direction. A new edge that
   points from the kernel back into the UI is a design error.
 
@@ -58,11 +68,19 @@ Source, tests and the release gates are authoritative when prose disagrees.
 ## Verification
 
 ```text
-python -m ruff check src tests
+python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
 python -m pytest
 python -m build --wheel
 python scripts/check_tree.py
+```
+
+The bridge has non-live protocol coverage; do not start a public tunnel in a
+test. A manual local check is:
+
+```text
+karox bridge connect chatgpt-web --repository . --tunnel custom \
+  --public-url https://example.test --diagnostics-only --json
 ```
 
 The live smoke (provider + model configured, gateway reachable) is:
@@ -82,6 +100,9 @@ changed file or check actually proves it.
   and tests for denied/tampered/replayed paths.
 - Any transport or restart change must prove response completion, no duplicate
   side effect, owner identity and recovery after disconnect.
+- Bridge changes must preserve OAuth resource/redirect bindings, one-shot
+  approval, refresh replay revocation, idempotent mutation replay and the
+  saved-profile/keyring names that an existing ChatGPT connector already uses.
 - Generated caches (`__pycache__`, `.pytest_cache`, build artifacts) must never
   be copied into the release tree. `scripts/check_tree.py` fails on them.
 - Update `docs/CHANGELOG.md` when user-visible behavior changes.

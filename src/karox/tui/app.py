@@ -243,6 +243,46 @@ class KaroxApp(App[int]):
             self._set_language(argument)
         elif command == "status":
             self._notice(self._status_text(), "info")
+        elif command == "bridge":
+            try:
+                profiles = self.backend.bridge_profiles()
+            except Exception as exc:
+                self._notice(str(exc), "error")
+            else:
+                if not profiles:
+                    self._notice(
+                        "No saved bridges. Create one with: karox bridge saved create "
+                        "NAME --target-profile chatgpt-web --repository .",
+                        "info",
+                    )
+                else:
+                    lines = ["Saved bridges:"]
+                    for item in profiles:
+                        lines.append(
+                            f"{item.get('name')} → {item.get('target_profile')} "
+                            f":{item.get('port')} ({item.get('tunnel')})"
+                        )
+                    lines.append(
+                        "Start in a terminal: karox bridge connect --saved NAME"
+                    )
+                    self._notice("\n".join(lines), "info")
+        elif command == "doctor":
+            try:
+                report = self.backend.doctor()
+            except Exception as exc:
+                self._notice(str(exc), "error")
+            else:
+                checks = report.get("checks", {})
+                lines = [f"karox: {report.get('status', 'unknown')}"]
+                for name, check in checks.items():
+                    status = (
+                        check.get("status", "unknown")
+                        if isinstance(check, dict)
+                        else "unknown"
+                    )
+                    lines.append(f"{name}: {status}")
+                level = "info" if report.get("status") == "ok" else "warning"
+                self._notice("\n".join(lines), level)
         elif command == "clear":
             self.action_clear()
         elif command == "stop":

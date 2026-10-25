@@ -31,9 +31,11 @@ from .agent import (
     AgentReport,
     SYSTEM_PROMPT,
 )
-from .agent_modes import mode_prompt_delta
+from .agent_modes import mode_policy, mode_prompt_delta
+from .bridge_profiles import WEB_BRIDGE_PROFILES
 from .core import CoreCommand, CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
+from .disk_maintenance import is_drive_root, workspace_system_reason
 from .effort import budget_for as effort_budget_for
 from .mcp_client import (
     McpAccessDenied,
@@ -69,8 +71,18 @@ from .providers import (
     ModelMessage,
     ModelRequest,
     OpenAIChatCompletionsProvider,
+    ProviderError,
 )
-from .registry import ModelRecord, ProviderRecord, ProviderRegistry, RegistryError
+from .registry import (
+    ADAPTER_KINDS,
+    PRIVACY_CLASSES,
+    ModelPricing,
+    ModelRecord,
+    ProviderRecord,
+    ProviderRegistry,
+    RegistryError,
+)
+from .routing import RouteTarget, RoutingPolicy, RoutedProvider
 from .risk_engine import RiskEngine
 from .security import redact
 from .sessions import SessionError, SessionStore
@@ -105,6 +117,32 @@ def _mcp_registry() -> McpRegistry:
 
 def _json(value: Any) -> None:
     _write(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+_SHORT_COMMANDS = {
+    "models": ("model", "list"),
+    "providers": ("provider", "list"),
+    "sessions": ("session", "list"),
+    "skills": ("skill", "list"),
+}
+_DEFAULT_LIST_GROUPS = frozenset({"model", "provider", "session", "skill"})
+
+
+def _normalize_argv(arguments: list[str]) -> list[str]:
+    """Accept the short daily forms without a second command tree."""
+
+    if not arguments:
+        return arguments
+    head = arguments[0]
+    short = _SHORT_COMMANDS.get(head)
+    if short is not None and len(arguments) == 1:
+        return list(short)
+    if head in _DEFAULT_LIST_GROUPS:
+        if len(arguments) == 1:
+            return [head, "list"]
+        if arguments[1].startswith("-") and arguments[1] not in {"-h", "--help"}:
+            return [head, "list", *arguments[1:]]
+    return arguments
 
 
 def _write(text: str) -> None:
@@ -174,6 +212,45 @@ def _pairs(values: Sequence[str], label: str) -> dict[str, str]:
             raise ValueError(f"duplicate {label} name: {name}")
         result[name] = item
     return result
+
+
+def _pricing(args: argparse.Namespace) -> Optional[ModelPricing]:
+    values = (
+        getattr(args, "pricing_version", None),
+        getattr(args, "currency", None),
+        getattr(args, "input_per_million", None),
+        getattr(args, "output_per_million", None),
+        getattr(args, "pricing_source", None),
+    )
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError(
+            "pricing requires version, currency, input/output prices, and source"
+        )
+    return ModelPricing(
+        args.pricing_version,
+        args.currency,
+        args.input_per_million,
+        args.output_per_million,
+        args.pricing_source,
+        cache_read_per_million=getattr(args, "cache_read_per_million", None),
+        cache_write_per_million=getattr(args, "cache_write_per_million", None),
+    )
+
+
+def _load_pricing_registry() -> Any:
+    """Load the versioned pricing document; absence means unknown, not zero."""
+
+    path = session_dir() / "pricing.json"
+    try:
+        from .provider_pricing import PricingRegistry
+
+        registry = PricingRegistry.from_path(path)
+    except ValueError as exc:
+        print(f"warning: ignoring invalid pricing document {path}: {exc}", file=sys.stderr)
+        return None
+    return registry if len(registry) > 0 else None
 
 
 def _verification_argv(value: str) -> tuple[str, ...]:
@@ -262,6 +339,24 @@ def _print_agent_report(report: AgentReport) -> None:
     tokens = report.usage.get("total_tokens")
     if isinstance(tokens, int) and tokens:
         _write(f"tokens: {tokens}\n")
+    costs = report.usage.get("costs")
+    if isinstance(costs, dict) and costs:
+        _write("costs: " + ", ".join(f"{key}={value}" for key, value in costs.items()) + "\n")
+    if report.evidence:
+        _write(f"evidence records: {len(report.evidence)}\n")
+    if report.answer_basis:
+        _write(f"answer basis: {len(report.answer_basis)}\n")
+    sources = report.project_context.get("sources") if report.project_context else None
+    if sources:
+        names = [
+            str(item.get("path")) if isinstance(item, dict) else str(item)
+            for item in sources
+        ]
+        _write("project instructions: " + ", ".join(names) + "\n")
+    if report.compaction:
+        _write("context compacted: " + json.dumps(report.compaction, ensure_ascii=False) + "\n")
+    if report.restored:
+        _write(f"restored: {report.restored}\n")
     answer = redact(report.provider_message or "").strip()
     if answer:
         _write("\n" + answer + "\n")
@@ -299,16 +394,40 @@ def _agent_grants(profile: AccessProfile, mode: str) -> set[Capability]:
     return grants
 
 
+def _route(value: str) -> RouteTarget:
+    if "/" not in value:
+        raise ValueError("route must use provider/model")
+    provider_id, model = value.split("/", 1)
+    return RouteTarget(provider_id, model)
+
+
 def _resolve_runtime(
     args: argparse.Namespace,
     *,
     timeout_seconds: float,
+    record: Any = None,
 ) -> tuple[Any, str, Optional[int], Optional[int], bool]:
     """Return provider, model id, context window, output ceiling, bypass."""
 
-    direct = bool(args.model or args.base_url or args.api_key_env)
     provider: Any
+    direct = bool(args.model or args.base_url or args.api_key_env)
+    routed_options = [
+        name
+        for name, supplied in (
+            ("--route", bool(getattr(args, "route", None))),
+            ("--privacy-limit", getattr(args, "privacy_limit", None) is not None),
+            ("--max-total-tokens", getattr(args, "max_total_tokens", None) is not None),
+            ("--max-cost", getattr(args, "max_cost", None) is not None),
+            ("--currency", getattr(args, "currency", None) is not None),
+        )
+        if supplied
+    ]
     if direct:
+        if routed_options:
+            raise ValueError(
+                "direct provider mode cannot use routed option(s): "
+                + ", ".join(routed_options)
+            )
         if not args.model or not args.base_url:
             raise ValueError("direct provider mode requires --model and --base-url")
         credential = None
@@ -335,17 +454,52 @@ def _resolve_runtime(
             False,
         )
     registry = _registry()
-    selected = registry.selected_model()
-    if selected is None:
-        raise ValueError("no model is selected; run karox model select or provider setup")
-    record = registry.provider(selected.provider_id)
-    provider = ProviderFactory().create(record)
+    routes = tuple(_route(value) for value in getattr(args, "route", ()))
+    if not routes:
+        selected = registry.selected_model()
+        if selected is None:
+            raise ValueError(
+                "no model is selected; run karox model select or provider setup"
+            )
+        routes = (RouteTarget(selected.provider_id, selected.model_id),)
+    windows: list[int] = []
+    ceilings: list[int] = []
+    for target in routes:
+        registry.provider(target.provider_id)
+        entry = registry.model(target.provider_id, target.model)
+        if isinstance(entry.context_window, int) and entry.context_window > 0:
+            windows.append(entry.context_window)
+        if isinstance(entry.max_output_tokens, int) and entry.max_output_tokens > 0:
+            ceilings.append(entry.max_output_tokens)
+    context_window = (
+        min(windows) if windows and len(windows) == len(routes) else None
+    )
+    max_output_tokens = (
+        min(ceilings) if ceilings and len(ceilings) == len(routes) else None
+    )
+    usage = record.usage if record is not None and isinstance(record.usage, dict) else {}
+    costs = usage.get("costs")
+    provider = RoutedProvider(
+        registry,
+        ProviderFactory(),
+        RoutingPolicy(
+            routes=routes,
+            privacy_limit=getattr(args, "privacy_limit", None) or "public",
+            route_strategy=getattr(args, "route_strategy", "ordered"),
+            max_total_tokens=getattr(args, "max_total_tokens", None),
+            max_cost=getattr(args, "max_cost", None),
+            currency=getattr(args, "currency", None),
+        ),
+        initial_usage=usage,
+        initial_costs=costs if isinstance(costs, dict) else {},
+    )
+    first = registry.provider(routes[0].provider_id)
     return (
         provider,
-        selected.model_id,
-        args.context_window or selected.context_window,
-        args.max_output_tokens or selected.max_output_tokens,
-        bool(record.bypass),
+        routes[0].model,
+        args.context_window or context_window,
+        args.max_output_tokens or max_output_tokens,
+        bool(first.bypass),
     )
 
 
@@ -357,10 +511,10 @@ def _mcp_repository(value: Path) -> Path:
 
 
 def _stored_mcp(record: Any, server_id: str) -> Optional[dict[str, Any]]:
+    if any(not isinstance(item, dict) for item in record.mcp_servers):
+        raise McpAccessDenied("stored MCP selection must be an object")
     matches = [
-        item
-        for item in record.mcp_servers
-        if isinstance(item, dict) and item.get("server_id") == server_id
+        item for item in record.mcp_servers if item.get("server_id") == server_id
     ]
     if len(matches) > 1:
         raise McpAccessDenied(f"session contains duplicate MCP selections: {server_id}")
@@ -453,19 +607,38 @@ def _project_instructions(
 
     parts: list[str] = []
     sources: list[str] = []
+    skipped: list[dict[str, str]] = []
     total = 0
+    per_file = 20_000
+    total_limit = 64_000
     for name in ("AGENTS.md", "CLAUDE.md", "KAROX.md"):
         path = repository / name
-        if not path.is_file():
-            continue
         try:
-            text = path.read_text(encoding="utf-8").strip()
+            if path.is_symlink():
+                skipped.append({"name": name, "reason": "symlink"})
+                continue
+            if not path.is_file():
+                continue
+            resolved = path.resolve(strict=True)
+            try:
+                resolved.relative_to(repository)
+            except ValueError:
+                skipped.append({"name": name, "reason": "outside_repository"})
+                continue
+            raw = resolved.read_bytes()[: per_file + 1]
         except OSError:
             continue
+        text = raw.decode("utf-8", "replace").strip()
         if not text:
             continue
-        if len(text) > 20_000:
-            text = text[:20_000] + "\n...[truncated]"
+        if len(raw) > per_file or len(text) > per_file:
+            text = text[:per_file] + "\n...[truncated]"
+        remaining = total_limit - total
+        if remaining <= 0:
+            skipped.append({"name": name, "reason": "total_limit"})
+            continue
+        if len(text) > remaining:
+            text = text[:remaining] + "\n...[truncated]"
         parts.append(f"--- {name} ---\n{text}")
         sources.append(name)
         total += len(text)
@@ -473,6 +646,8 @@ def _project_instructions(
         "enabled": True,
         "sources": sources,
         "instruction_bytes": total,
+        "limits": {"per_file": per_file, "total": total_limit},
+        "skipped": skipped,
     }
     return "\n\n".join(parts), metadata
 
@@ -497,6 +672,16 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
+    system_reason = workspace_system_reason(repository)
+    if system_reason is not None:
+        raise ValueError(
+            f"refusing to run the agent in a protected system folder ({system_reason}): "
+            f"{repository}"
+        )
+    if is_drive_root(repository):
+        raise ValueError(
+            "refusing to run the agent at a drive root; select a project directory"
+        )
     store = SessionStore(session_dir())
     record = None
     if args.session_id and store.state_path(args.session_id).exists():
@@ -515,7 +700,7 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
                 "use --continue-task to append a new turn explicitly"
             )
     provider, model, context_window, max_output_tokens, bypass = _resolve_runtime(
-        args, timeout_seconds=120.0
+        args, timeout_seconds=120.0, record=record
     )
     if record is None:
         selected_provider = None
@@ -532,16 +717,37 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         )
     else:
         profile = AccessProfile(record.access_profile)
-        if bypass and profile == AccessProfile.WORKSPACE_WRITE:
-            profile = AccessProfile.ELEVATED
+    # Bypass is destructive-autonomy authority, not a capability grant: it may
+    # only take effect when the effective profile is already elevated.
+    bypass = bool(bypass and profile == AccessProfile.ELEVATED)
 
     verification: tuple[tuple[str, ...], ...]
+    discovered: tuple[tuple[str, ...], ...] = ()
     if args.verification_command:
         verification = tuple(_verification_argv(item) for item in args.verification_command)
     else:
-        verification = discover_verification_commands(repository)
+        # A command found in the repository is a suggestion, not user approval:
+        # a hostile package.json must not become verification evidence.
+        discovered = discover_verification_commands(repository)
+        verification = (
+            discovered if getattr(args, "accept_discovered_checks", False) else ()
+        )
+    effort_signals = None
+    effort_reasons: list[str] = []
+    if args.effort_level == "auto":
+        try:
+            from .effort import recommend_effort
+            from .effort_signals import derive_task_signals
 
-    budget = effort_budget_for(args.effort_level)
+            derived = derive_task_signals(
+                args.task, repository=repository, mode=args.mode
+            )
+            effort_signals = derived.signals
+            recommendation = recommend_effort(effort_signals)
+            effort_reasons = list(recommendation.reasons)
+        except (ImportError, OSError, ValueError):
+            effort_signals = None
+    budget = effort_budget_for(args.effort_level, effort_signals)
     limits = AgentLimits(
         max_steps=args.max_steps or budget.agent_limits.max_steps,
         max_seconds=args.max_seconds or budget.agent_limits.max_seconds,
@@ -557,6 +763,32 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
     decisions = ActionDecisionEngine(risk)
     mcp_binding, _ = _selected_mcp_runtime(record, repository)
     catalog, skill_block = _skill_catalog(repository)
+    visual_checker = None
+    try:
+        from .visual_check import VisualChecker, is_visual_task
+        from .web_check import default_pages
+
+        vision = False
+        if not (args.model or args.base_url or args.api_key_env):
+            selected_model = _registry().selected_model()
+            vision = selected_model is not None and selected_model.vision == "true"
+        wants_look = is_visual_task(args.task)
+        if not wants_look:
+            with contextlib.suppress(Exception):
+                wants_look = bool(default_pages(repository))
+        if vision and wants_look:
+            from .browser_bootstrap import playwright_chromium_status
+
+            if playwright_chromium_status().ready:
+                visual_checker = VisualChecker(
+                    provider=provider,
+                    model=model,
+                    artifacts=store.state_path(record.session_id).parent / "visual",
+                    vision=True,
+                    goal=args.task,
+                )
+    except Exception:
+        visual_checker = None
     core = CapabilityCoreRuntime(
         repository,
         policy,
@@ -566,24 +798,92 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         verification_commands=verification,
         risk=risk,
         action_decisions=decisions,
-        bypass_mode=bool(bypass),
+        bypass_mode=bypass,
         skill_catalog=catalog,
+        visual_checker=visual_checker,
     )
-    project_suffix, project_metadata = _project_instructions(repository)
+    project_metadata: dict[str, Any]
+    if getattr(args, "no_project_context", False):
+        project_suffix, project_metadata = "", {"enabled": False}
+    else:
+        try:
+            from .project_context import discover_project_context
+
+            project = discover_project_context(
+                repository,
+                branch=record.branch,
+                verification_commands=verification,
+                goal=args.task,
+                session_id=record.session_id,
+            )
+            project_suffix = project.prompt_suffix
+            project_metadata = {"enabled": True, **project.to_dict()}
+        except Exception:
+            project_suffix, project_metadata = _project_instructions(repository)
     project_metadata["skills"] = (
         [item.name for item in catalog.discover()] if catalog is not None else []
     )
+    project_metadata["verification"] = {
+        "approved": [" ".join(item) for item in verification],
+        "discovered": [" ".join(item) for item in discovered],
+    }
+    if discovered and not verification:
+        print(
+            "karox: discovered checks are suggestions only; pass an explicit "
+            "verification command (or --accept-discovered-checks) to count them "
+            "as evidence",
+            file=sys.stderr,
+        )
+    if effort_reasons:
+        project_metadata["effort_auto"] = {
+            "level": budget.level,
+            "reasons": effort_reasons,
+        }
     system_prompt = SYSTEM_PROMPT
     if args.mode != "build":
         system_prompt = system_prompt + "\n\n" + mode_prompt_delta(args.mode)
     if project_suffix:
-        system_prompt += (
-            "\n\nPROJECT INSTRUCTIONS. The repository owner wrote these for "
-            "agents; follow them unless they conflict with the task or the "
-            "safety boundary.\n\n" + project_suffix
-        )
+        system_prompt += project_suffix
+    memory_block = None
+    if not getattr(args, "no_memory", False):
+        try:
+            from .memory import KaroXMemory, MemoryScope
+            from .project_registry import _generated_project_id
+
+            memory_block = (
+                KaroXMemory(session_dir() / "memory").context(
+                    scopes=(
+                        (MemoryScope.USER, "default"),
+                        (MemoryScope.PROJECT, _generated_project_id(repository)),
+                        (MemoryScope.SESSION, record.session_id),
+                    ),
+                    budget_chars=1500,
+                    task=args.task,
+                    fresh_only=True,
+                )
+                or None
+            )
+        except Exception:
+            memory_block = None
+    if memory_block:
+        system_prompt += "\n\n" + memory_block
+        project_metadata["memory"] = True
     if skill_block:
         system_prompt += "\n\n" + skill_block
+    request_images: tuple[Any, ...] = ()
+    if args.image:
+        if args.model or args.base_url or args.api_key_env:
+            raise ValueError(
+                "image attachments require a selected registry model with vision=true"
+            )
+        selected = _registry().selected_model()
+        if selected is None or selected.vision != "true":
+            raise ValueError("the selected model does not advertise vision support")
+        from .image_attachments import load_image_attachments
+
+        loaded = load_image_attachments(repository, args.image)
+        request_images = tuple(item.image for item in loaded)
+        project_metadata["images"] = [item.public_dict() for item in loaded]
     observer = _stream_json() if args.stream_json else (
         _stream_progress() if args.stream else None
     )
@@ -599,8 +899,10 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         project_context=project_metadata,
         require_change=args.expect == "change",
         max_output_tokens=max_output_tokens,
+        pricing_registry=_load_pricing_registry(),
         reasoning_effort=budget.reasoning_effort,
         mode=args.mode,
+        request_images=request_images,
         on_event=observer,
     )
     try:
@@ -610,6 +912,37 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         if callable(close):
             with contextlib.suppress(Exception):
                 close()
+    rules = mode_policy(args.mode)
+    if rules.default_artifact and isinstance(report.provider_message, str) and (
+        report.provider_message.strip()
+    ):
+        from .mode_artifacts import save_mode_artifact
+
+        try:
+            saved = save_mode_artifact(
+                session_id=record.session_id,
+                kind=rules.default_artifact,
+                task=args.task,
+                content=report.provider_message,
+            )
+        except (OSError, ValueError) as exc:
+            report.project_context["mode_artifact"] = {
+                "saved": False,
+                "kind": rules.default_artifact,
+                "error": type(exc).__name__,
+            }
+        else:
+            report.project_context["mode_artifact"] = {"saved": True, **saved}
+            if observer is not None:
+                with contextlib.suppress(Exception):
+                    observer(
+                        AgentEvent(
+                            AgentEventKind.ARTIFACT_CREATED,
+                            report.steps,
+                            path=str(saved.get("path") or "") or None,
+                            detail=rules.default_artifact,
+                        )
+                    )
     if args.stream_json:
         _write(json.dumps({"type": "result", "report": report.to_dict()}, ensure_ascii=False) + "\n")
     elif args.json:
@@ -773,8 +1106,13 @@ def _handle_provider_setup(args: argparse.Namespace) -> int:
     model_id = args.model.strip()
     if not model_id:
         raise ValueError("--model is required")
+    controller = _controller()
+    existing_reference: Optional[str] = None
+    with contextlib.suppress(RegistryError, ValueError):
+        existing_reference = controller.details(provider_id).provider.credential_ref
     secret: Optional[str] = None
     probe_secret: Optional[str] = None
+    credential_ref = args.credential_ref or existing_reference
     if args.stdin_key:
         secret = sys.stdin.readline().rstrip("\r\n")
         if not secret.strip():
@@ -782,26 +1120,45 @@ def _handle_provider_setup(args: argparse.Namespace) -> int:
         probe_secret = secret
     elif args.credential_ref:
         probe_secret = CredentialStore().resolve(args.credential_ref)
+    elif existing_reference:
+        with contextlib.suppress(CredentialError):
+            probe_secret = CredentialStore().resolve(existing_reference)
+    privacy = _privacy_class(base_url, preset.privacy_class)
+    is_local = privacy == "local"
+    if not is_local and not (probe_secret or credential_ref):
+        raise ValueError(
+            "remote provider setup requires --stdin-key, --credential-ref, "
+            "or an existing saved credential"
+        )
     verification: dict[str, Any] = {"status": "skipped"}
     if not args.no_test:
+        if probe_secret is None and not is_local:
+            raise ValueError(
+                "a live test requires --stdin-key, --credential-ref, or a saved credential"
+            )
         if probe_secret is None:
-            raise ValueError("a live test requires --stdin-key or --credential-ref")
-        key = probe_secret
-
-        verification = _probe_candidate(
-            str(preset.adapter_kind),
-            base_url,
-            model_id,
-            credential=lambda: key,
-            timeout_seconds=60.0,
-        )
-    controller = _controller()
+            verification = _probe_candidate(
+                str(preset.adapter_kind),
+                base_url,
+                model_id,
+                credential=None,
+                timeout_seconds=60.0,
+            )
+        else:
+            key = probe_secret
+            verification = _probe_candidate(
+                str(preset.adapter_kind),
+                base_url,
+                model_id,
+                credential=lambda: key,
+                timeout_seconds=60.0,
+            )
     provider = ProviderRecord(
         provider_id=provider_id,
         adapter_kind=str(preset.adapter_kind),
         base_url=base_url,
-        credential_ref=args.credential_ref,
-        privacy_class=_privacy_class(base_url, preset.privacy_class),
+        credential_ref=credential_ref,
+        privacy_class=privacy,
     )
     model = ModelRecord(
         provider_id=provider_id,
@@ -810,6 +1167,7 @@ def _handle_provider_setup(args: argparse.Namespace) -> int:
         max_output_tokens=args.max_output_tokens,
         tools="true",
         streaming="true",
+        pricing=_pricing(args),
         provenance=f"preset-setup:{preset.preset_id}",
     )
     mutation = controller.configure_provider_model(
@@ -854,8 +1212,10 @@ def _handle_provider(args: argparse.Namespace) -> int:
             args.provider_id,
             adapter_kind=args.adapter,
             base_url=args.base_url,
-            credential_ref=args.credential_ref,
-            credential_ref_supplied=bool(args.credential_ref),
+            credential_ref=None if args.clear_credential else args.credential_ref,
+            credential_ref_supplied=bool(args.credential_ref or args.clear_credential),
+            headers=_pairs(args.header, "header") if args.header else None,
+            query=_pairs(args.query, "query") if args.query else None,
             privacy_class=args.privacy_class,
             timeout_seconds=args.timeout_seconds,
             max_transport_retries=args.max_transport_retries,
@@ -939,9 +1299,60 @@ def _handle_model(args: argparse.Namespace) -> int:
             vision=args.vision,
             structured_output=args.structured_output,
             streaming=args.streaming,
+            pricing=_pricing(args),
             provenance=args.provenance,
         )
         _emit(controller.put_model(record).to_dict(), json_output=args.json)
+        return 0
+    if command == "discover":
+        from .model_discovery import discover_models_result, model_record
+
+        provider = registry.provider(args.provider_id)
+        result = discover_models_result(
+            provider,
+            controller.credentials,
+            timeout_seconds=args.timeout_seconds,
+        )
+        if result.base_url != provider.base_url:
+            controller.edit_provider(provider.provider_id, base_url=result.base_url)
+        saved: list[str] = []
+        if args.save:
+            existing = {
+                model.model_id for model in registry.models(provider.provider_id)
+            }
+            for discovered in result.models:
+                if discovered.model_id in existing:
+                    continue
+                controller.put_model(model_record(provider.provider_id, discovered))
+                saved.append(discovered.model_id)
+        _emit(
+            {
+                "provider_id": provider.provider_id,
+                "base_url": result.base_url,
+                "models": [item.as_dict() for item in result.models],
+                "saved": saved,
+                "saved_count": len(saved),
+            },
+            json_output=args.json,
+        )
+        return 0
+    if command == "map":
+        _emit(
+            controller.map_alias(args.provider_id, args.alias, args.model).to_dict(),
+            json_output=args.json,
+        )
+        return 0
+    if command == "repair-selection":
+        repaired = controller.repair_selection(
+            preferred_provider=args.preferred_provider
+        )
+        _emit(
+            {
+                "status": "selected" if repaired is not None else "no_model",
+                "model": asdict(repaired) if repaired is not None else None,
+            },
+            json_output=args.json,
+        )
         return 0
     if command == "remove":
         _emit(
@@ -1055,11 +1466,16 @@ def _handle_mcp_session(args: argparse.Namespace) -> int:
         _emit(selection, json_output=args.json)
         return 0
     if command == "deselect":
-        with store.mutate(
-            args.session_id, f"mcp-deselect-{os.getpid()}", ttl_seconds=5.0
-        ) as record:
-            store.validate_repository(record, repository)
-            removed = _replace_stored_mcp(record, args.server_id, None)
+        record = store.load(args.session_id)
+        store.validate_repository(record, repository)
+        if _stored_mcp(record, args.server_id) is not None:
+            with store.mutate(
+                args.session_id, f"mcp-deselect-{os.getpid()}", ttl_seconds=5.0
+            ) as record:
+                store.validate_repository(record, repository)
+                removed = _replace_stored_mcp(record, args.server_id, None)
+        else:
+            removed = False
         _emit(
             {
                 "server_id": args.server_id,
@@ -1190,7 +1606,18 @@ def _handle_mcp_call(args: argparse.Namespace) -> int:
         idempotency_key=args.idempotency_key,
         deadline_seconds=args.deadline_seconds,
     )
-    result = core.execute(command)
+    lease = None
+    if descriptor.mutates:
+        lease = store.acquire(
+            record.session_id,
+            f"mcp-call-{os.getpid()}",
+            ttl_seconds=max(30.0, min(3600.0, float(args.deadline_seconds) + 10.0)),
+        )
+    try:
+        result = core.execute(command, lease=lease)
+    finally:
+        if lease is not None:
+            store.release(lease)
     _emit(result.to_dict() if hasattr(result, "to_dict") else result, json_output=args.json)
     return 0
 
@@ -1233,6 +1660,261 @@ def _handle_mcp(args: argparse.Namespace) -> int:
     return _handle_mcp_call(args)
 
 
+# --------------------------------------------------------------------- bridge
+
+# The read-only catalogue is the launcher's default. Write mode adds only the
+# concrete mutations a hosted coding session needs; push/publish/auth remain
+# outside every bridge profile.
+_BRIDGE_WRITE_TOOLS = (
+    "karox.repo.write_file",
+    "karox.repo.edit_file",
+    "karox.repo.command",
+    "karox.command.run",
+    "karox.checks.run",
+    "karox.tests.run",
+    "karox.git.commit",
+)
+
+
+def _bridge_tools(
+    selected: Sequence[str], *, write: bool, verification: Sequence[Sequence[str]]
+) -> tuple[str, ...]:
+    from .bridge_launcher import DEFAULT_BRIDGE_TOOLS, core_bridge_tool_names
+
+    tools = list(selected) or list(DEFAULT_BRIDGE_TOOLS)
+    if write:
+        known = core_bridge_tool_names()
+        tools.extend(name for name in _BRIDGE_WRITE_TOOLS if name in known)
+    if "karox.checks.run" in tools and not verification:
+        tools.remove("karox.checks.run")
+    return tuple(dict.fromkeys(tools))
+
+
+def _bridge_verification(args: argparse.Namespace) -> tuple[tuple[str, ...], ...]:
+    return tuple(_verification_argv(item) for item in getattr(args, "verification_command", ()))
+
+
+def _copy_secret_to_clipboard(secret: str) -> None:
+    import subprocess
+
+    from .detached_process import windowless_flags
+
+    commands: list[list[str]] = []
+    if os.name == "nt":
+        commands.append(["clip"])
+    elif sys.platform == "darwin":
+        commands.append(["pbcopy"])
+    else:
+        commands.append(["wl-copy"])
+        commands.append(["xclip", "-selection", "clipboard"])
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                input=secret,
+                text=True,
+                capture_output=True,
+                timeout=10.0,
+                creationflags=windowless_flags() if os.name == "nt" else 0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if completed.returncode == 0:
+            return
+    raise ValueError("no clipboard command is available; use --json and the OS UI")
+
+
+def _bridge_session_id_for(args: argparse.Namespace) -> str:
+    from .bridge_profiles import saved_web_bridge_session_id
+
+    if getattr(args, "saved", None):
+        return saved_web_bridge_session_id(args.saved)
+    session_id = getattr(args, "session_id", None)
+    if not session_id:
+        raise ValueError("--saved or --session-id is required")
+    return str(session_id)
+
+
+def _handle_bridge(args: argparse.Namespace) -> int:
+    from .bridge_profiles import WEB_BRIDGE_PROFILES, BridgeProfileStore
+    from .bridge_profiles import BridgeRegistry
+
+    command = args.bridge_command
+    if command == "list":
+        _emit([item.to_dict() for item in BridgeRegistry().list()], json_output=args.json)
+        return 0
+    if command == "show":
+        _emit(BridgeRegistry().get(args.profile).to_dict(), json_output=args.json)
+        return 0
+    if command == "doctor":
+        payload = BridgeProfileStore().doctor()
+        _emit(payload, json_output=args.json)
+        return 0 if payload.get("status") in {None, "ok"} else 1
+    if command == "saved":
+        store = BridgeProfileStore()
+        sub = args.bridge_saved_command
+        if sub == "list":
+            _emit([item.to_dict() for item in store.list()], json_output=args.json)
+            return 0
+        if sub == "show":
+            _emit(store.get(args.name).to_dict(), json_output=args.json)
+            return 0
+        if sub == "delete":
+            removed = store.delete(args.name)
+            _emit(
+                {"name": removed.name, "status": "deleted"},
+                json_output=args.json,
+            )
+            return 0
+        if sub == "validate":
+            from .bridge_launcher import bridge_diagnostics, config_from_saved_profile
+
+            config = config_from_saved_profile(args.name)
+            _emit(bridge_diagnostics(config), json_output=args.json)
+            return 0
+        from .bridge_profiles import SavedBridgeProfile
+
+        verification = _bridge_verification(args)
+        repository = args.repository.expanduser().resolve(strict=True)
+        profile = SavedBridgeProfile(
+            name=args.name,
+            target_profile=args.target_profile,
+            tools=_bridge_tools(args.tool, write=args.write, verification=verification),
+            repository=str(repository),
+            verification_commands=verification,
+            deadline_seconds=args.deadline_seconds,
+            tunnel=args.tunnel,
+            public_url=args.public_url,
+            language=args.language,
+            access_profile=(
+                AccessProfile.WORKSPACE_WRITE if args.write else AccessProfile.READ_ONLY
+            ),
+            port=args.port,
+            tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+        )
+        saved = store.put(profile, replace_existing=bool(args.replace))
+        _emit(saved.to_dict(), json_output=args.json)
+        return 0
+    if command == "connect":
+        from .bridge_launcher import (
+            DEFAULT_BRIDGE_DEADLINE_SECONDS,
+            WebBridgeConnectConfig,
+            bridge_diagnostics,
+            config_from_saved_profile,
+            connect_bridge,
+        )
+
+        if args.saved:
+            config = config_from_saved_profile(
+                args.saved, tailscale=args.tailscale, session_id=args.session_id
+            )
+        else:
+            if not args.profile:
+                raise ValueError("bridge connect requires a profile or --saved")
+            if args.profile not in WEB_BRIDGE_PROFILES:
+                raise ValueError(f"unknown web bridge profile: {args.profile}")
+            verification = _bridge_verification(args)
+            config = WebBridgeConnectConfig(
+                profile=args.profile,
+                repository=args.repository.expanduser().resolve(strict=True),
+                port=args.port,
+                tools=_bridge_tools(
+                    args.tool, write=args.write, verification=verification
+                ),
+                session_id=args.session_id,
+                access_profile=(
+                    AccessProfile(args.access_profile)
+                    if args.access_profile
+                    else (
+                        AccessProfile.WORKSPACE_WRITE
+                        if args.write
+                        else AccessProfile.READ_ONLY
+                    )
+                ),
+                tunnel=args.tunnel,
+                public_url=args.public_url,
+                tailscale=args.tailscale,
+                tunnel_timeout_seconds=args.tunnel_timeout_seconds,
+                deadline_seconds=args.deadline_seconds
+                or DEFAULT_BRIDGE_DEADLINE_SECONDS,
+                verification_commands=verification,
+                language=args.language,
+            )
+        if args.diagnostics_only:
+            _emit(bridge_diagnostics(config), json_output=args.json)
+            return 0
+        return connect_bridge(config)
+    if command == "serve":
+        from .bridge_launcher import DEFAULT_BRIDGE_TOOLS
+        from .bridge_serve import serve_bridge
+
+        if not args.tool:
+            args.tool = list(DEFAULT_BRIDGE_TOOLS)
+        return serve_bridge(args)
+    if command in {"status", "start", "stop", "restart"}:
+        from .bridge_launcher import (
+            restart_saved_bridge,
+            start_saved_bridge,
+            status_bridge,
+            stop_bridge,
+        )
+
+        functions = {
+            "status": status_bridge,
+            "start": start_saved_bridge,
+            "stop": stop_bridge,
+            "restart": restart_saved_bridge,
+        }
+        payload = functions[command](args.saved)
+        _emit(payload, json_output=args.json)
+        return 0 if payload.get("verdict") not in {"error", "foreign"} else 1
+    if command == "oauth":
+        from .bridge_profiles import BridgeCredentialStore
+
+        session_id = _bridge_session_id_for(args)
+        reference = f"os-keyring:bridge/{session_id}"
+        store = BridgeCredentialStore()
+        secret = store.resolve(reference)
+        payload = {
+            "session_id": session_id,
+            "reference": reference,
+            "fingerprint": store.fingerprint(secret),
+            "status": "available",
+        }
+        if args.copy:
+            _copy_secret_to_clipboard(secret)
+            payload["copied"] = True
+        _emit(payload, json_output=args.json)
+        if not args.quiet and not args.json:
+            _write("The approval password was not printed. Use --copy to place it on the clipboard.\n")
+        return 0
+    if command == "credential":
+        from .bridge_profiles import BridgeCredentialStore
+
+        store = BridgeCredentialStore()
+        session_id = _bridge_session_id_for(args)
+        reference = f"os-keyring:bridge/{session_id}"
+        if args.bridge_credential_command in {"set", "rotate"}:
+            payload = store.set(session_id)
+            payload.pop("secret", None)
+        elif args.bridge_credential_command == "revoke":
+            store.delete(session_id)
+            payload = {"reference": reference, "status": "revoked"}
+        else:
+            secret = store.resolve(reference)
+            payload = {
+                "reference": reference,
+                "status": "available",
+                "fingerprint": store.fingerprint(secret),
+            }
+            if args.bridge_credential_command == "copy" or getattr(args, "copy", False):
+                _copy_secret_to_clipboard(secret)
+                payload["copied"] = True
+        _emit(payload, json_output=args.json)
+        return 0
+    raise ValueError(f"unknown bridge command: {command}")
+
+
 # --------------------------------------------------------------------- skills
 
 
@@ -1263,7 +1945,111 @@ def _handle_skill(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- credentials
 
 
+def _handle_doctor(args: argparse.Namespace) -> int:
+    """One local, read-only health report across providers, MCP and sessions."""
+
+    payload: dict[str, Any] = {"status": "ok", "checks": {}}
+    try:
+        registry = _registry()
+        providers = registry.providers()
+        selected = registry.selected_model()
+        payload["checks"]["registry"] = {
+            "status": "ok",
+            "providers": len(providers),
+            "models": len(registry.models()),
+            "selected": (
+                f"{selected.provider_id}/{selected.model_id}" if selected else None
+            ),
+        }
+    except (RegistryError, OSError) as exc:
+        payload["checks"]["registry"] = {"status": "failed", "error": str(exc)}
+    try:
+        credential = CredentialStore().doctor()
+        payload["checks"]["credentials"] = credential
+    except CredentialError as exc:
+        payload["checks"]["credentials"] = {
+            "status": "unavailable",
+            "error": str(exc),
+            "recovery": "Run 'karox credential setup'.",
+        }
+    try:
+        servers = _mcp_registry().list()
+        status = build_mcp_status(servers)
+        payload["checks"]["mcp"] = {
+            "status": "ok",
+            "servers": len(servers),
+            "attention": status.get("attention", []),
+        }
+    except (McpError, OSError) as exc:
+        payload["checks"]["mcp"] = {"status": "failed", "error": str(exc)}
+    try:
+        sessions = SessionStore(session_dir()).list(include_archived=False)
+        payload["checks"]["sessions"] = {"status": "ok", "count": len(sessions)}
+    except (SessionError, OSError) as exc:
+        payload["checks"]["sessions"] = {"status": "failed", "error": str(exc)}
+    for check in payload["checks"].values():
+        if check.get("status") in {"failed", "unavailable", "missing", "degraded"}:
+            payload["status"] = "degraded"
+    payload["paths"] = {
+        "config_dir": str(config_dir()),
+        "runtime_dir": str(runtime_dir()),
+        "session_dir": str(session_dir()),
+    }
+    _emit(payload, json_output=args.json)
+    # A degraded report is data, not a command failure: the caller decides
+    # whether a missing model or keyring is fatal for its workflow.
+    return 0
+
+
+def _handle_status(args: argparse.Namespace) -> int:
+    registry = _registry()
+    selected = registry.selected_model()
+    store = SessionStore(session_dir())
+    records = store.list(include_archived=False)
+    latest = records[0] if records else None
+    payload = {
+        "version": __version__,
+        "model": (
+            f"{selected.provider_id}/{selected.model_id}" if selected else None
+        ),
+        "providers": len(registry.providers()),
+        "mcp_servers": len(_mcp_registry().list()),
+        "sessions": len(records),
+        "latest_session": _record_summary(latest) if latest is not None else None,
+        "paths": {
+            "config_dir": str(config_dir()),
+            "runtime_dir": str(runtime_dir()),
+            "session_dir": str(session_dir()),
+        },
+    }
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _handle_credential(args: argparse.Namespace) -> int:
+    if args.credential_command == "setup":
+        from .credential_session import (
+            activate_secret_service,
+            setup_plan,
+            unlock_secret_service,
+            verify_child_storage,
+        )
+
+        action = (
+            activate_secret_service
+            if args.activate
+            else unlock_secret_service
+            if args.unlock
+            else verify_child_storage
+            if args.verify
+            else None
+        )
+        try:
+            payload = action(consent=args.consent) if action else setup_plan()
+        except CredentialError as exc:
+            payload = {"status": "unavailable", "error": str(exc)}
+        _emit(payload, json_output=args.json)
+        return 0 if payload.get("status") in {"ok", "manual-setup"} else 1
     store = CredentialStore()
     if args.credential_command == "set":
         secret = (
@@ -1319,6 +2105,19 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--model")
     run.add_argument("--base-url")
     run.add_argument("--api-key-env")
+    run.add_argument(
+        "--route",
+        action="append",
+        default=[],
+        help="provider/model route to try in order (repeatable; first is primary)",
+    )
+    run.add_argument(
+        "--route-strategy", choices=("ordered", "cheapest"), default="ordered"
+    )
+    run.add_argument("--privacy-limit", choices=sorted(PRIVACY_CLASSES))
+    run.add_argument("--max-total-tokens", type=int)
+    run.add_argument("--max-cost", type=float)
+    run.add_argument("--currency")
     run.add_argument("--session-id")
     run.add_argument("--continue-task", action="store_true")
     run.add_argument(
@@ -1337,13 +2136,26 @@ def _parser() -> argparse.ArgumentParser:
         choices=("auto", "low", "medium", "high", "extra-high", "ultra"),
     )
     run.add_argument("--mode", default="build", choices=("build", "plan", "ideate"))
+    run.add_argument("--no-project-context", action="store_true")
+    run.add_argument("--no-memory", action="store_true")
     run.add_argument("--expect", choices=("auto", "change"), default="auto")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--max-seconds", type=float)
     run.add_argument("--context-window", type=int)
     run.add_argument("--max-output-tokens", type=int)
+    run.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="attach one repository-confined PNG/JPEG/WebP (repeatable)",
+    )
     run.add_argument("--stream", action="store_true")
     run.add_argument("--stream-json", action="store_true")
+    run.add_argument(
+        "--accept-discovered-checks",
+        action="store_true",
+        help="treat repository-discovered checks as approved verification evidence",
+    )
     run.add_argument("--json", action="store_true")
 
     session = commands.add_parser("session", help="manage durable sessions")
@@ -1393,7 +2205,7 @@ def _parser() -> argparse.ArgumentParser:
     providers.add_parser("presets").add_argument("--json", action="store_true")
     add = providers.add_parser("add")
     add.add_argument("provider_id")
-    add.add_argument("--adapter", required=True)
+    add.add_argument("--adapter", required=True, choices=sorted(ADAPTER_KINDS))
     add.add_argument("--base-url", required=True)
     add.add_argument("--credential-ref")
     add.add_argument("--privacy-class", default="public")
@@ -1404,9 +2216,13 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--json", action="store_true")
     edit = providers.add_parser("edit")
     edit.add_argument("provider_id")
-    edit.add_argument("--adapter")
+    edit.add_argument("--adapter", choices=sorted(ADAPTER_KINDS))
     edit.add_argument("--base-url")
-    edit.add_argument("--credential-ref")
+    edit_credential = edit.add_mutually_exclusive_group()
+    edit_credential.add_argument("--credential-ref")
+    edit_credential.add_argument("--clear-credential", action="store_true")
+    edit.add_argument("--header", action="append", default=[])
+    edit.add_argument("--query", action="append", default=[])
     edit.add_argument("--privacy-class")
     edit.add_argument("--timeout-seconds", type=float)
     edit.add_argument("--max-transport-retries", type=int)
@@ -1446,6 +2262,13 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument("--stdin-key", action="store_true")
     setup.add_argument("--no-test", action="store_true")
     setup.add_argument("--no-activate", action="store_true")
+    setup.add_argument("--pricing-version")
+    setup.add_argument("--currency")
+    setup.add_argument("--input-per-million", type=float)
+    setup.add_argument("--output-per-million", type=float)
+    setup.add_argument("--cache-read-per-million", type=float)
+    setup.add_argument("--cache-write-per-million", type=float)
+    setup.add_argument("--pricing-source")
     setup.add_argument("--json", action="store_true")
 
     model = commands.add_parser("model", help="manage provider models")
@@ -1471,8 +2294,28 @@ def _parser() -> argparse.ArgumentParser:
         add_model.add_argument(
             f"--{capability}", choices=("true", "false", "unknown"), default="unknown"
         )
+    add_model.add_argument("--pricing-version")
+    add_model.add_argument("--currency")
+    add_model.add_argument("--input-per-million", type=float)
+    add_model.add_argument("--output-per-million", type=float)
+    add_model.add_argument("--cache-read-per-million", type=float)
+    add_model.add_argument("--cache-write-per-million", type=float)
+    add_model.add_argument("--pricing-source")
     add_model.add_argument("--provenance", default="manual")
     add_model.add_argument("--json", action="store_true")
+    discover = models.add_parser("discover")
+    discover.add_argument("provider_id")
+    discover.add_argument("--timeout-seconds", type=float, default=15.0)
+    discover.add_argument("--save", action="store_true")
+    discover.add_argument("--json", action="store_true")
+    map_model = models.add_parser("map")
+    map_model.add_argument("provider_id")
+    map_model.add_argument("alias")
+    map_model.add_argument("model")
+    map_model.add_argument("--json", action="store_true")
+    repair = models.add_parser("repair-selection")
+    repair.add_argument("--preferred-provider")
+    repair.add_argument("--json", action="store_true")
     remove_model = models.add_parser("remove")
     remove_model.add_argument("provider_id")
     remove_model.add_argument("model")
@@ -1551,6 +2394,119 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument("--stdin", action="store_true")
         item.add_argument("--json", action="store_true")
 
+    bridge = commands.add_parser(
+        "bridge", help="hosted MCP bridge for ChatGPT, Claude and HyperAgent web"
+    )
+    bridge_commands = bridge.add_subparsers(dest="bridge_command", required=True)
+    bridge_connect = bridge_commands.add_parser(
+        "connect", help="start a managed bridge and keep it in the foreground"
+    )
+    bridge_connect.add_argument(
+        "profile", nargs="?", choices=sorted(WEB_BRIDGE_PROFILES)
+    )
+    bridge_connect.add_argument("--saved")
+    bridge_connect.add_argument("--repository", type=Path, default=Path.cwd())
+    bridge_connect.add_argument("--session-id")
+    bridge_connect.add_argument("--port", type=int, default=8765)
+    bridge_connect.add_argument("--tool", action="append", default=[])
+    bridge_connect.add_argument("--write", action="store_true")
+    bridge_connect.add_argument(
+        "--access-profile", choices=[item.value for item in AccessProfile]
+    )
+    bridge_connect.add_argument(
+        "--tunnel", choices=("auto", "tailscale", "custom"), default="auto"
+    )
+    bridge_connect.add_argument("--public-url")
+    bridge_connect.add_argument("--tailscale")
+    bridge_connect.add_argument("--tunnel-timeout-seconds", type=float, default=30.0)
+    bridge_connect.add_argument("--deadline-seconds", type=float, default=600.0)
+    bridge_connect.add_argument("--verification-command", action="append", default=[])
+    bridge_connect.add_argument("--language", choices=("en", "ru"), default="en")
+    bridge_connect.add_argument("--diagnostics-only", action="store_true")
+    bridge_connect.add_argument("--json", action="store_true")
+
+    bridge_serve = bridge_commands.add_parser(
+        "serve", help="serve one bridge child on loopback"
+    )
+    bridge_serve.add_argument("--repository", type=Path, required=True)
+    bridge_serve.add_argument("--session-id", required=True)
+    bridge_serve.add_argument("--credential", required=True)
+    bridge_serve.add_argument(
+        "--profile", choices=sorted(WEB_BRIDGE_PROFILES), default="chatgpt-web"
+    )
+    bridge_serve.add_argument("--path", default="/mcp")
+    bridge_serve.add_argument("--tool", action="append", default=[])
+    bridge_serve.add_argument("--verification-command", action="append", default=[])
+    bridge_serve.add_argument("--public-url")
+    bridge_serve.add_argument("--host", default="127.0.0.1")
+    bridge_serve.add_argument("--port", type=int, default=8765)
+    bridge_serve.add_argument("--deadline-seconds", type=float, default=600.0)
+    bridge_serve.add_argument("--allow-network-bind", action="store_true")
+    bridge_serve.add_argument("--tls-certfile")
+    bridge_serve.add_argument("--tls-keyfile")
+    bridge_serve.add_argument("--allowed-redirect-host", action="append", default=[])
+    bridge_serve.add_argument("--state-dir", type=Path)
+    bridge_serve.add_argument("--json", action="store_true")
+
+    bridge_saved = bridge_commands.add_parser("saved", help="saved bridge profiles")
+    saved_commands = bridge_saved.add_subparsers(
+        dest="bridge_saved_command", required=True
+    )
+    saved_commands.add_parser("list").add_argument("--json", action="store_true")
+    for name in ("show", "delete", "validate"):
+        item = saved_commands.add_parser(name)
+        item.add_argument("name")
+        item.add_argument("--json", action="store_true")
+    saved_create = saved_commands.add_parser("create")
+    saved_create.add_argument("name")
+    saved_create.add_argument("--target-profile", required=True, choices=sorted(WEB_BRIDGE_PROFILES))
+    saved_create.add_argument("--repository", type=Path, default=Path.cwd())
+    saved_create.add_argument("--tool", action="append", default=[])
+    saved_create.add_argument("--write", action="store_true")
+    saved_create.add_argument("--verification-command", action="append", default=[])
+    saved_create.add_argument("--deadline-seconds", type=float, default=600.0)
+    saved_create.add_argument(
+        "--tunnel", choices=("auto", "tailscale", "custom"), default="tailscale"
+    )
+    saved_create.add_argument("--public-url")
+    saved_create.add_argument("--language", choices=("en", "ru"), default="en")
+    saved_create.add_argument("--port", type=int, default=8765)
+    saved_create.add_argument("--tunnel-timeout-seconds", type=float, default=30.0)
+    saved_create.add_argument("--replace", action="store_true")
+    saved_create.add_argument("--json", action="store_true")
+
+    for name in ("status", "start", "stop", "restart"):
+        item = bridge_commands.add_parser(name)
+        item.add_argument("--saved", required=True)
+        item.add_argument("--json", action="store_true")
+    bridge_commands.add_parser("list").add_argument("--json", action="store_true")
+    bridge_show = bridge_commands.add_parser("show")
+    bridge_show.add_argument("profile")
+    bridge_show.add_argument("--json", action="store_true")
+    bridge_commands.add_parser("doctor").add_argument("--json", action="store_true")
+
+    bridge_oauth = bridge_commands.add_parser("oauth")
+    oauth_commands = bridge_oauth.add_subparsers(
+        dest="bridge_oauth_command", required=True
+    )
+    approval = oauth_commands.add_parser("approval-password")
+    approval.add_argument("--saved")
+    approval.add_argument("--session-id")
+    approval.add_argument("--copy", action="store_true")
+    approval.add_argument("--quiet", action="store_true")
+    approval.add_argument("--json", action="store_true")
+
+    bridge_credential = bridge_commands.add_parser("credential")
+    bridge_credentials = bridge_credential.add_subparsers(
+        dest="bridge_credential_command", required=True
+    )
+    for name in ("set", "show", "copy", "revoke", "rotate"):
+        item = bridge_credentials.add_parser(name)
+        item.add_argument("session_id")
+        if name in {"show", "copy"}:
+            item.add_argument("--copy", action="store_true")
+        item.add_argument("--json", action="store_true")
+
     skill = commands.add_parser("skill", help="discover and load Skills")
     skills = skill.add_subparsers(dest="skill_command", required=True)
     skills_list = skills.add_parser("list")
@@ -1566,22 +2522,36 @@ def _parser() -> argparse.ArgumentParser:
 
     credential = commands.add_parser("credential", help="manage provider secrets")
     credentials = credential.add_subparsers(dest="credential_command", required=True)
-    for name in ("set", "show", "delete", "doctor"):
+    for name in ("set", "show", "delete", "doctor", "setup"):
         item = credentials.add_parser(name)
-        if name != "doctor":
+        if name not in {"doctor", "setup"}:
             item.add_argument("name")
         if name == "set":
             item.add_argument("--stdin", action="store_true")
         if name == "doctor":
             item.add_argument("--reference")
+        if name == "setup":
+            action = item.add_mutually_exclusive_group()
+            action.add_argument("--activate", action="store_true")
+            action.add_argument("--unlock", action="store_true")
+            action.add_argument("--verify", action="store_true")
+            item.add_argument("--consent", action="store_true")
         item.add_argument("--json", action="store_true")
 
-    commands.add_parser("paths", help="show resolved application paths")
+    doctor = commands.add_parser(
+        "doctor", help="check providers, credentials, MCP and sessions"
+    )
+    doctor.add_argument("--json", action="store_true")
+    status = commands.add_parser("status", help="show the current local state")
+    status.add_argument("--json", action="store_true")
+
+    paths = commands.add_parser("paths", help="show resolved application paths")
+    paths.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
+    arguments = _normalize_argv(list(sys.argv[1:] if argv is None else argv))
     parser = _parser()
     if not arguments:
         if sys.stdin.isatty() and sys.stdout.isatty():
@@ -1610,18 +2580,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _handle_model(args)
         if args.command == "mcp":
             return _handle_mcp(args)
+        if args.command == "bridge":
+            return _handle_bridge(args)
         if args.command == "skill":
             return _handle_skill(args)
         if args.command == "credential":
             return _handle_credential(args)
+        if args.command == "doctor":
+            return _handle_doctor(args)
+        if args.command == "status":
+            return _handle_status(args)
         if args.command == "paths":
             _emit(
                 {
-                    "config": str(config_dir()),
-                    "runtime": str(runtime_dir()),
-                    "sessions": str(session_dir()),
+                    "config_dir": str(config_dir()),
+                    "runtime_dir": str(runtime_dir()),
+                    "session_dir": str(session_dir()),
                 },
-                json_output=False,
+                json_output=bool(args.json),
             )
             return 0
         parser.print_help()
@@ -1630,6 +2606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         AgentError,
         CoreError,
         CredentialError,
+        ProviderError,
         McpError,
         RegistryError,
         SessionError,

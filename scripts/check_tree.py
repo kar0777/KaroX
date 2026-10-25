@@ -34,7 +34,10 @@ LEGACY = {
     "tailscale.py",
     "orchestrator.py",
 }
-MAX_LINES = 60_000
+# The release now carries the hosted MCP bridge as a product surface. The v5
+# laboratory was ~166k lines; 70k keeps this line compact while leaving room for
+# the bridge and its security helpers without silently absorbing legacy modules.
+MAX_LINES = 70_000
 
 
 def module_exists(module: str) -> bool:
