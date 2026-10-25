@@ -15,10 +15,11 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.theme import Theme
@@ -32,9 +33,10 @@ from .modals import (
     ListScreen,
     McpScreen,
     ProviderSetupScreen,
+    SessionPanel,
     TextViewerScreen,
 )
-from .protocol import Event, Outcome
+from .protocol import Event, Outcome, SessionState, tool_category
 from .widgets import (
     ActivityBar,
     AssistantMessage,
@@ -50,6 +52,36 @@ from .widgets import (
 
 _EFFORT_LEVELS = ("auto", "low", "medium", "high", "extra-high", "ultra")
 _MODES = ("build", "plan", "ideate")
+
+
+@dataclass
+class RunState:
+    """Live facts about the current or latest run, for chrome and panels.
+
+    Every field is derived from a typed stream event or the final report --
+    nothing here is inferred from human-readable text.
+    """
+
+    state: str = "idle"  # idle | running | stopping | done | failed | stopped
+    step: int = 0
+    phase: str = ""
+    started_at: float = 0.0
+    prompt_tokens: int = 0
+    context_fraction: float | None = None
+    reads: int = 0
+    edits: int = 0
+    tests_ok: int = 0
+    tests_failed: int = 0
+    mcp_calls: int = 0
+    skill_calls: int = 0
+    subagents: int = 0
+    inspections: int = 0
+    files: list[str] = field(default_factory=list)
+
+    def elapsed(self) -> float:
+        if not self.started_at:
+            return 0.0
+        return max(0.0, time.monotonic() - self.started_at)
 
 
 def run_tui(
@@ -77,9 +109,12 @@ class KaroxApp(App[int]):
         Binding("f2", "models", "Models"),
         Binding("f3", "sessions", "Sessions"),
         Binding("f4", "mcp", "MCP"),
+        Binding("f5", "session_panel", "Session"),
         Binding("ctrl+n", "new_session", "New session", show=False),
         Binding("ctrl+r", "show_reasoning", "Reasoning", show=False),
         Binding("ctrl+l", "clear", "Clear", show=False),
+        Binding("pageup", "scroll_page_up", "Scroll up", show=False, priority=True),
+        Binding("pagedown", "scroll_page_down", "Scroll down", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Stop / quit", show=False, priority=True),
         Binding("escape", "stop", "Stop", show=False),
@@ -109,7 +144,8 @@ class KaroxApp(App[int]):
         self._tokens = 0
         self._agent_running = False
         self._stopping = False
-        self._started_at = 0.0
+        self.run_state = RunState()
+        self.checkpoint: SessionState | None = None
         self._verification: tuple[tuple[str, ...], ...] = _detect_verification(
             self.repository
         )
@@ -189,6 +225,7 @@ class KaroxApp(App[int]):
                 self._notice(notice, "warning")
                 return
         self._continue = True
+        self.checkpoint = SessionState.from_record(record)
 
     def _welcome(self) -> None:
         chat = self.query_one(ChatLog)
@@ -196,8 +233,27 @@ class KaroxApp(App[int]):
             WelcomeCard(
                 tr(self.language, "welcome.title"),
                 tr(self.language, "welcome.body"),
+                facts=self._welcome_facts(),
             )
         )
+
+    def _welcome_facts(self) -> list[str]:
+        facts: list[str] = []
+        repository = self.repository.name or str(self.repository)
+        if self._branch:
+            repository = f"{repository} · {self._branch}"
+        facts.append(repository)
+        model = self._model_label()
+        facts.append(model or tr(self.language, "status.no_model"))
+        facts.append(
+            tr(self.language, "welcome.facts.session", id=self.session_id[:16])
+        )
+        if self._verification:
+            commands = "; ".join(" ".join(item) for item in self._verification)
+            facts.append(
+                tr(self.language, "welcome.facts.verification", commands=commands)
+            )
+        return facts
 
     # ------------------------------------------------------------------ input
 
@@ -230,6 +286,10 @@ class KaroxApp(App[int]):
             self.action_new_session()
         elif command == "mcp":
             self.action_mcp()
+        elif command == "skills":
+            self.action_skills()
+        elif command == "session":
+            self.action_session_panel()
         elif command == "verify":
             self._add_verification(argument)
         elif command == "unverify":
@@ -310,7 +370,8 @@ class KaroxApp(App[int]):
         self._cards.clear()
         self._agent_running = True
         self._stopping = False
-        self._started_at = time.monotonic()
+        self.run_state = RunState(state="running", started_at=time.monotonic())
+        self.query_one("#composer", ChatInput).push_history(task)
         self.query_one(ActivityBar).set_activity(tr(self.language, "status.running"))
         self._refresh_status()
         self._refresh_chrome()
@@ -361,68 +422,143 @@ class KaroxApp(App[int]):
     def _apply_event(self, event: Event) -> None:
         assistant = self._last_assistant
         activity = self.query_one(ActivityBar)
-        if event.kind == "text_delta":
+        state = self.run_state
+        kind = event.kind
+        if kind == "text_delta":
             if assistant is not None:
                 assistant.append_text(event.text)
-        elif event.kind == "reasoning_delta":
+        elif kind == "reasoning_delta":
             if assistant is not None:
                 assistant.append_reasoning(event.reasoning)
-        elif event.kind == "reasoning_summary_delta":
+        elif kind == "reasoning_summary_delta":
             if assistant is not None:
                 assistant.append_reasoning(event.reasoning_summary, summary=True)
-        elif event.kind == "step_started":
-            activity.set_activity(f"step {event.step} · waiting for the model")
-        elif event.kind == "tool_started":
-            card = ToolCard(event.tool, event.call_id)
+        elif kind == "step_started":
+            state.step = max(state.step, event.step)
+            activity.set_activity(tr(self.language, "activity.step", n=event.step))
+            self._refresh_status()
+        elif kind == "step_finished":
+            self._absorb_usage(event.usage)
+        elif kind == "tool_started":
+            card = ToolCard(event.tool, event.call_id, tool_category(event.tool))
             self.query_one(ChatLog).add(card)
             if event.call_id:
                 self._cards[event.call_id] = card
-            activity.set_activity(f"{event.tool} · running")
-        elif event.kind == "tool_finished":
+            activity.set_activity(
+                tr(self.language, "activity.running", tool=event.tool or "tool")
+            )
+        elif kind == "tool_finished":
+            category = tool_category(event.tool)
             finished = self._cards.get(event.call_id)
             if finished is None:
-                finished = ToolCard(event.tool, event.call_id)
+                finished = ToolCard(event.tool, event.call_id, category)
                 self.query_one(ChatLog).add(finished)
                 if event.call_id:
                     self._cards[event.call_id] = finished
             finished.finish(event.ok, event.summary, event.duration_seconds)
+            self._count_tool(category)
             activity.set_activity(
-                f"{event.tool} · {'ok' if event.ok else 'failed'}",
+                tr(
+                    self.language,
+                    "activity.ok" if event.ok else "activity.failed",
+                    tool=event.tool or "tool",
+                ),
                 "success" if event.ok else "error",
             )
-        elif event.kind == "phase_changed":
-            activity.set_activity(f"phase · {event.phase}")
-        elif event.kind == "compacted":
-            self._notice(f"context compacted · {event.summary}", "info")
-            activity.set_activity("context compacted")
-        elif event.kind == "warning":
+        elif kind == "phase_changed":
+            state.phase = event.phase
+            activity.set_activity(
+                tr(self.language, "activity.phase", phase=event.phase or "?")
+            )
+        elif kind == "compacted":
+            self._notice(
+                tr(self.language, "notice.compacted", summary=event.summary or "…"),
+                "info",
+            )
+            activity.set_activity(tr(self.language, "activity.compacted"))
+        elif kind == "warning":
             activity.set_activity(
                 f"{event.reason}: {event.detail}".strip(), "warning"
             )
-        elif event.kind == "error":
+        elif kind == "error":
             self._notice(
                 f"{event.reason}: {event.detail}".strip(": "), "error"
             )
             activity.set_activity(event.reason or "error", "error")
-        elif event.kind == "file_edited":
-            activity.set_activity(f"edited · {event.path}")
-        elif event.kind == "file_read":
-            activity.set_activity(f"read · {event.path}")
-        elif event.kind == "test_started":
-            activity.set_activity(f"test · {event.tool} started")
-        elif event.kind == "test_finished":
+        elif kind == "file_edited":
+            if event.path and event.path not in state.files:
+                state.files.append(event.path)
             activity.set_activity(
-                f"test · {event.tool} {'ok' if event.ok else 'failed'}",
+                tr(self.language, "activity.edited", path=event.path or "?")
+            )
+        elif kind == "file_read":
+            activity.set_activity(
+                tr(self.language, "activity.read", path=event.path or "?")
+            )
+        elif kind == "test_started":
+            activity.set_activity(
+                tr(self.language, "activity.test_started", tool=event.tool or "check")
+            )
+        elif kind == "test_finished":
+            if event.ok:
+                state.tests_ok += 1
+            else:
+                state.tests_failed += 1
+            activity.set_activity(
+                tr(
+                    self.language,
+                    "activity.test_ok" if event.ok else "activity.test_failed",
+                    tool=event.tool or "check",
+                ),
                 "success" if event.ok else "error",
             )
-        elif event.kind == "artifact_created":
-            activity.set_activity(f"artifact · {event.detail or event.path}")
-        elif event.kind == "finished":
+            self._refresh_status()
+        elif kind == "artifact_created":
+            activity.set_activity(
+                tr(
+                    self.language,
+                    "activity.artifact",
+                    name=event.detail or event.path or "?",
+                )
+            )
+        elif kind == "finished":
             activity.set_activity(f"{event.status} · {event.reason}", "success")
-        usage = event.usage.get("total_tokens")
-        if isinstance(usage, int) and usage > 0:
-            self._tokens = usage
-            self._refresh_chrome()
+        if event.usage and kind != "step_finished":
+            self._absorb_usage(event.usage)
+
+    def _count_tool(self, category: str) -> None:
+        state = self.run_state
+        if category == "read":
+            state.reads += 1
+        elif category == "edit":
+            state.edits += 1
+        elif category == "mcp":
+            state.mcp_calls += 1
+        elif category == "skill":
+            state.skill_calls += 1
+        elif category == "subagent":
+            state.subagents += 1
+        elif category == "inspect":
+            state.inspections += 1
+
+    def _absorb_usage(self, usage: dict[str, int]) -> None:
+        if not usage:
+            return
+        state = self.run_state
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and total > 0:
+            self._tokens += total
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens")
+        if isinstance(prompt, int) and prompt > 0:
+            state.prompt_tokens = prompt
+            window = 0
+            if isinstance(self._model, dict):
+                raw = self._model.get("context_window")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    window = raw
+            if window:
+                state.context_fraction = prompt / float(window)
+        self._refresh_chrome()
 
     def _finish(
         self,
@@ -435,20 +571,27 @@ class KaroxApp(App[int]):
         self._agent_running = False
         self._stopping = False
         self.query_one(ActivityBar).set_activity("")
-        elapsed = max(0.0, time.monotonic() - self._started_at)
+        elapsed = self.run_state.elapsed()
         fallback = outcome.provider_message if outcome is not None else ""
         assistant.finish(fallback)
         if self._last_assistant is None:
             self._last_assistant = assistant
         if stopped:
+            self.run_state.state = "stopped"
             self._notice(tr(self.language, "notice.stopped"), "warning")
+            self._refresh_checkpoint()
         elif outcome is not None:
             if outcome.session_id:
                 self.session_id = outcome.session_id
             self._tokens = outcome.token_total or self._tokens
+            self.run_state.state = (
+                "failed" if outcome.status in {"failed", "error"} else "done"
+            )
             self._notice(self._result_text(outcome, elapsed), self._result_level(outcome))
             self._continue = True
+            self._refresh_checkpoint()
         else:
+            self.run_state.state = "failed"
             detail = stderr.strip().splitlines()[-1] if stderr.strip() else f"exit code {exit_code}"
             self._notice(tr(self.language, "notice.backend_error", error=detail), "error")
         if not assistant.answer_text().strip():
@@ -458,6 +601,21 @@ class KaroxApp(App[int]):
         self._refresh_status()
         self._refresh_chrome()
         self.query_one("#composer", ChatInput).focus()
+
+    def _refresh_checkpoint(self) -> None:
+        """Re-read the durable record so the checkpoint state is never guessed.
+
+        A short blocking call after a run just finished: the screen is between
+        tasks, and a stale checkpoint indicator is worse than a brief pause.
+        """
+
+        try:
+            record = self.backend.session(self.session_id)
+        except Exception:  # noqa: BLE001 - a dead CLI must not take the screen down
+            record = None
+        self.checkpoint = (
+            SessionState.from_record(record) if record is not None else None
+        )
 
     def _result_text(self, outcome: Outcome, elapsed: float) -> str:
         if outcome.verified:
@@ -531,6 +689,7 @@ class KaroxApp(App[int]):
         self.effort = argument
         _save_preference(effort_level=argument)
         self._notice(tr(self.language, "notice.effort", level=argument), "info")
+        self._refresh_chrome()
 
     def _set_mode(self, argument: str) -> None:
         if not argument:
@@ -542,6 +701,7 @@ class KaroxApp(App[int]):
         self.mode = argument
         _save_preference(agent_mode=argument)
         self._notice(tr(self.language, "notice.mode", mode=argument), "info")
+        self._refresh_chrome()
 
     def _set_language(self, argument: str) -> None:
         selected = normalise_language(argument)
@@ -555,22 +715,44 @@ class KaroxApp(App[int]):
         )
         self.query_one(StatusBar).set_hint(tr(self.language, "status.hint"))
         self._refresh_status()
+        self._refresh_chrome()
         self._notice(tr(self.language, "notice.language", language=selected), "info")
 
     def _status_text(self) -> str:
         model = self._model_label() or tr(self.language, "status.no_model")
         checks = "; ".join(" ".join(item) for item in self._verification) or "(none)"
-        return "\n".join(
-            [
-                f"repository: {self.repository}",
-                f"branch: {self._branch or '-'}",
-                f"model: {model}",
-                f"session: {self.session_id}",
-                f"effort: {self.effort} · mode: {self.mode}",
-                f"tokens: {self._tokens}",
-                f"verification: {checks}",
-            ]
-        )
+        state = self.run_state
+        lines = [
+            f"repository: {self.repository}",
+            f"branch: {self._branch or '-'}",
+            f"model: {model}",
+            f"session: {self.session_id}",
+            f"effort: {self.effort} · mode: {self.mode}",
+            f"tokens: {self._tokens}",
+            f"verification: {checks}",
+            tr(
+                self.language,
+                "status.run_counters",
+                reads=state.reads,
+                edits=state.edits,
+                ok=state.tests_ok,
+                bad=state.tests_failed,
+                mcp=state.mcp_calls,
+                skills=state.skill_calls,
+                sub=state.subagents,
+            ),
+        ]
+        if self.checkpoint is not None and self.checkpoint.updated_at:
+            lines.append(
+                tr(
+                    self.language,
+                    "status.checkpoint",
+                    when=_clock(self.checkpoint.updated_at),
+                )
+            )
+        else:
+            lines.append(tr(self.language, "status.no_checkpoint"))
+        return "\n".join(lines)
 
     def _resume(self, session_id: str) -> None:
         if not self._idle():
@@ -595,6 +777,7 @@ class KaroxApp(App[int]):
         self.session_id = session_id
         self._continue = True
         self._tokens = 0
+        self.checkpoint = SessionState.from_record(record)
         self.query_one(ChatLog).clear_messages()
         self._welcome()
         task = record.get("task")
@@ -603,6 +786,8 @@ class KaroxApp(App[int]):
         )
         if isinstance(task, str) and task:
             self._notice(f"task: {task}", "info")
+        self._refresh_status()
+        self._refresh_chrome()
 
     # ---------------------------------------------------------------- actions
 
@@ -708,10 +893,13 @@ class KaroxApp(App[int]):
         self.session_id = self._new_session_id()
         self._continue = False
         self._tokens = 0
+        self.checkpoint = None
+        self.run_state = RunState()
         self.query_one(ChatLog).clear_messages()
         self._welcome()
         self._notice(tr(self.language, "notice.new_session", id=self.session_id), "info")
         self._refresh_chrome()
+        self._refresh_status()
 
     def action_mcp(self) -> None:
         if not self._idle():
@@ -719,6 +907,105 @@ class KaroxApp(App[int]):
         self.push_screen(
             McpScreen(self.backend, self.language, self.session_id),
             self._mcp_closed,
+        )
+
+    def action_session_panel(self) -> None:
+        """F5 / /session: the durable record behind this window.
+
+        Read-only, so it stays available while a run is live; the record shown
+        is the last checkpoint the kernel saved.
+        """
+
+        checkpoint = self.checkpoint
+        if checkpoint is None and self.session_id:
+            try:
+                record = self.backend.session(self.session_id)
+            except Exception:  # noqa: BLE001 - the panel degrades to its empty state
+                record = None
+            if record is not None:
+                checkpoint = SessionState.from_record(record)
+        self.push_screen(SessionPanel(checkpoint, self.language, self.session_id))
+
+    def action_skills(self) -> None:
+        if not self._idle():
+            return
+        try:
+            skills = self.backend.skill_list()
+        except BackendError as exc:
+            self._notice(str(exc), "error")
+            return
+        options: list[tuple[str, str]] = []
+        for item in skills:
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            description = " ".join(str(item.get("description") or "").split())
+            if len(description) > 60:
+                description = description[:59] + "…"
+            options.append((name, f"{name} · {description}" if description else name))
+        if not options:
+            self._notice(tr(self.language, "notice.skills_empty"), "warning")
+            return
+        self.push_screen(
+            ListScreen(
+                tr(self.language, "skills.title"),
+                options,
+                tr(self.language, "skills.hint"),
+            ),
+            self._skill_chosen,
+        )
+
+    def _skill_chosen(self, value: str | None) -> None:
+        if not value:
+            return
+        try:
+            skill = self.backend.skill_show(value)
+        except BackendError:
+            skill = None
+        if skill is None:
+            self._notice(tr(self.language, "notice.skill_failed", name=value), "error")
+            return
+        self.push_screen(
+            TextViewerScreen(
+                tr(self.language, "skill.detail_title", name=value),
+                self._skill_text(skill),
+            )
+        )
+
+    def _skill_text(self, skill: dict[str, Any]) -> str:
+        lines: list[str] = []
+        description = str(skill.get("description") or "")
+        if description:
+            lines.append(description)
+        version = str(skill.get("version") or "")
+        if version:
+            lines.append(f"{tr(self.language, 'skill.version')}: {version}")
+        when = str(skill.get("when_to_use") or "")
+        if when:
+            lines.extend(["", tr(self.language, "skill.when_to_use") + ":", when])
+        permissions = skill.get("permissions")
+        if isinstance(permissions, list) and permissions:
+            names = ", ".join(str(item) for item in permissions if item)
+            lines.extend(["", tr(self.language, "skill.permissions") + ": " + names])
+        files = skill.get("files")
+        if isinstance(files, list) and files:
+            names = ", ".join(str(item) for item in files if item)
+            lines.extend(["", tr(self.language, "skill.files") + ": " + names])
+        return "\n".join(lines) or description or "-"
+
+    def action_scroll_page_up(self) -> None:
+        self.query_one(ChatLog).scroll_page_up(animate=False)
+
+    def action_scroll_page_down(self) -> None:
+        self.query_one(ChatLog).scroll_page_down(animate=False)
+
+    @on(ToolCard.Selected)
+    def tool_card_selected(self, event: ToolCard.Selected) -> None:
+        card = event.card
+        self.push_screen(
+            TextViewerScreen(
+                tr(self.language, "tool.detail_title"), card.detail_text()
+            )
         )
 
     def _mcp_closed(self, result: str | None) -> None:
@@ -755,6 +1042,7 @@ class KaroxApp(App[int]):
         if not self._agent_running:
             return
         self._stopping = True
+        self.run_state.state = "stopping"
         self.query_one(StatusBar).set_state(
             tr(self.language, "status.stopping"), "warning"
         )
@@ -804,23 +1092,58 @@ class KaroxApp(App[int]):
             repository=self.repository.name or str(self.repository),
             branch=self._branch,
             model=self._model_label(),
-            session=self.session_id[:12],
             tokens=self._tokens,
             running=self._agent_running,
+            effort=self.effort,
+            mode=self.mode,
+            context_fraction=self.run_state.context_fraction,
+            language=self.language,
+            width=self.size.width,
         )
 
     def _refresh_status(self) -> None:
         bar = self.query_one(StatusBar)
+        state = self.run_state
         if self._stopping:
             bar.set_state(tr(self.language, "status.stopping"), "warning")
         elif self._agent_running:
-            elapsed = max(0, int(time.monotonic() - self._started_at))
-            bar.set_state(
-                f"{tr(self.language, 'status.running')} · {elapsed}s", "warning"
-            )
+            parts = [
+                tr(self.language, "status.running"),
+                tr(self.language, "status.seconds", seconds=state.elapsed()),
+            ]
+            if state.step:
+                parts.insert(1, tr(self.language, "status.step", n=state.step))
+            if state.tests_ok or state.tests_failed:
+                parts.append(
+                    tr(
+                        self.language,
+                        "status.checks_live",
+                        ok=state.tests_ok,
+                        bad=state.tests_failed,
+                    )
+                )
+            if self._tokens:
+                parts.append(_token_text(self._tokens))
+            bar.set_state(" · ".join(parts), "warning")
         else:
-            bar.set_state(tr(self.language, "status.idle"), "success")
+            if state.state == "failed":
+                word, level = tr(self.language, "status.failed"), "error"
+            elif state.state == "stopped":
+                word, level = tr(self.language, "status.stopped"), "warning"
+            else:
+                word, level = tr(self.language, "status.idle"), "success"
+            if self.checkpoint is not None and self.checkpoint.updated_at:
+                word += " · " + tr(
+                    self.language,
+                    "status.saved",
+                    when=_clock(self.checkpoint.updated_at),
+                )
+            bar.set_state(word, level)
         bar.set_hint(tr(self.language, "status.hint"))
+
+    def on_resize(self, event: events.Resize) -> None:
+        del event  # the new size is read from self.size
+        self._refresh_chrome()
 
     def _idle(self) -> bool:
         """Refuse a surface that would move the session under a live run."""

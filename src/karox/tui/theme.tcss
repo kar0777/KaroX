@@ -66,7 +66,25 @@ Screen {
     margin: 0 0 0 2;
     padding: 0 1;
     background: #15181d;
+    border-left: thick #2b313a;
 }
+
+.tool-card:hover {
+    background: #1a1f26;
+}
+
+/* One quiet colour per kind of work, so a scrolling log can be read at a
+   glance: gold mutates, green proves, violet leaves the process. */
+.tool-read { border-left: thick #7fa6c9; }
+.tool-edit { border-left: thick #d6b36a; }
+.tool-test { border-left: thick #7fb08a; }
+.tool-mcp { border-left: thick #a68cc9; }
+.tool-skill { border-left: thick #d6b36a; }
+.tool-plan { border-left: thick #8d96a5; }
+.tool-web { border-left: thick #7fa6c9; }
+.tool-inspect { border-left: thick #8d96a5; }
+.tool-subagent { border-left: thick #a68cc9; }
+.tool-other { border-left: thick #2b313a; }
 
 .notice {
     width: 100%;
@@ -92,6 +110,21 @@ Screen {
     height: 1;
     padding: 0 2;
     background: #0f1115;
+}
+
+#activity LoadingIndicator {
+    width: 3;
+    height: 1;
+    color: #d6b36a;
+    background: #0f1115;
+    margin: 0 1 0 0;
+}
+
+#activity #activity-line {
+    width: 1fr;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #composer {
@@ -203,6 +236,16 @@ Screen {
 .mcp-modal {
     width: 100;
     max-width: 96%;
+}
+
+.session-modal {
+    width: 96;
+    max-width: 96%;
+}
+
+.session-scroll {
+    height: auto;
+    max-height: 26;
 }
 
 .mcp-modal OptionList {

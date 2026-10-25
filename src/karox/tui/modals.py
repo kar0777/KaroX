@@ -6,6 +6,7 @@ app state directly, which is what keeps the screens small and testable.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Iterable
 
 from rich.text import Text
@@ -19,7 +20,8 @@ from textual.widgets.option_list import Option
 
 from .backend import BackendError, CLIBackend
 from .i18n import tr
-from .widgets import MUTED, RED, TEXT
+from .protocol import SessionState
+from .widgets import DIM, GOLD, GREEN, MUTED, RED, TEXT
 
 
 class ListScreen(ModalScreen[str | None]):
@@ -83,6 +85,9 @@ class TextViewerScreen(ModalScreen[None]):
         super().__init__()
         self._title = title
         self._body = body
+
+    def body_text(self) -> str:
+        return self._body
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal help-modal"):
@@ -628,3 +633,190 @@ class McpScreen(ModalScreen[str | None]):
             tr(self.language, "notice.mcp_selected", server=server, count=count),
         )
         self.app.call_from_thread(self._refresh)
+
+def _clock(value: float) -> str:
+    if not value:
+        return "?"
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(float(value)))
+    except (OverflowError, OSError, ValueError):
+        return "?"
+
+
+class SessionPanel(ModalScreen[None]):
+    """The durable record behind the window: every state the run persists.
+
+    One read-only projection of ``karox session show <id> --json``: task and
+    turn history, the model's plan, rollback checkpoints, verification checks,
+    provider usage, MCP selection, loaded skills and subagent jobs. Sections
+    whose record list is empty say so instead of inventing content.
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
+
+    def __init__(
+        self, state: SessionState | None, language: str, session_id: str
+    ) -> None:
+        super().__init__()
+        self._state = state
+        self.language = language
+        self.session_id = session_id
+        self._lines: list[tuple[str, str]] = self._build()
+
+    def body_text(self) -> str:
+        return "\n".join(text for text, _style in self._lines)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal session-modal"):
+            yield Static(tr(self.language, "session.title"), classes="modal-title")
+            with VerticalScroll(classes="session-scroll"):
+                yield Static(Text.assemble(*self._assemble()), markup=False)
+            yield Static("Esc", classes="modal-hint")
+
+    def on_mount(self) -> None:
+        self.query_one(VerticalScroll).focus()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def _assemble(self) -> list[tuple[str, str]]:
+        pieces: list[tuple[str, str]] = []
+        for index, (text, style) in enumerate(self._lines):
+            if index:
+                pieces.append(("\n", style))
+            pieces.append((text, style))
+        return pieces or [("", MUTED)]
+
+    def _build(self) -> list[tuple[str, str]]:
+        lines: list[tuple[str, str]] = []
+        state = self._state
+        lang = self.language
+        if state is None or not state.session_id:
+            lines.append((tr(lang, "session.empty"), MUTED))
+            return lines
+
+        def section(key: str) -> None:
+            lines.append(("", MUTED))
+            lines.append((tr(lang, key).upper(), f"bold {GOLD}"))
+
+        def value(text: str, style: str = TEXT) -> None:
+            if text:
+                lines.append((text, style))
+
+        section("session.section.meta")
+        meta = f"{state.session_id}"
+        if state.name:
+            meta += f"  ·  {state.name}"
+        meta += f"  ·  {state.status or '?'}  ·  {state.phase or '?'}"
+        value(meta)
+        detail = f"rev {state.revision} · updated {_clock(state.updated_at)}"
+        if state.branch:
+            detail += f" · branch {state.branch}"
+        value(detail, MUTED)
+
+        section("session.section.task")
+        value(" ".join(state.task.split()) or "—")
+        if len(state.task_history) > 1:
+            value(
+                tr(lang, "session.history", count=len(state.task_history) - 1), DIM
+            )
+
+        section("session.section.plan")
+        todo, doing, done = state.plan_tally
+        if state.plan_items:
+            value(tr(lang, "session.plan_tally", todo=todo, doing=doing, done=done), MUTED)
+            for item in state.plan_items[:20]:
+                status = str(item.get("status") or "todo")
+                icon = {"done": "✓", "doing": "●"}.get(status, "○")
+                colour = {"done": GREEN, "doing": GOLD}.get(status, MUTED)
+                text = " ".join(str(item.get("text") or "").split())
+                if len(text) > 70:
+                    text = text[:69] + "…"
+                value(f"{icon} {text}", colour)
+        else:
+            value(tr(lang, "session.none"), DIM)
+
+        section("session.section.checkpoints")
+        if state.has_checkpoint:
+            value(
+                tr(
+                    lang,
+                    "session.checkpoints_line",
+                    count=state.checkpoint_count,
+                    when=_clock(state.last_checkpoint_at),
+                )
+            )
+            last = state.checkpoints[-1] if state.checkpoints else {}
+            tracked = last.get("tracked_count")
+            untracked = last.get("untracked_count")
+            if isinstance(tracked, int) or isinstance(untracked, int):
+                value(
+                    tr(
+                        lang,
+                        "session.checkpoint_files",
+                        tracked=tracked if isinstance(tracked, int) else 0,
+                        untracked=untracked if isinstance(untracked, int) else 0,
+                    ),
+                    DIM,
+                )
+        else:
+            value(tr(lang, "session.none"), DIM)
+
+        section("session.section.verification")
+        passed, total = state.check_tally
+        if total:
+            colour = GREEN if passed == total else RED
+            value(tr(lang, "session.checks_line", passed=passed, total=total), colour)
+            for check in state.checks[-4:]:
+                argv = check.get("argv")
+                command = (
+                    " ".join(str(part) for part in argv) if isinstance(argv, list) else "?"
+                )
+                ok = check.get("ok")
+                icon = "✓" if ok is True else "✗" if ok is False else "?"
+                exit_code = check.get("exit_code")
+                suffix = f" · exit {exit_code}" if isinstance(exit_code, int) else ""
+                value(f"{icon} {command}{suffix}", GREEN if ok is True else RED)
+            if state.verified_step:
+                value(tr(lang, "session.verified_at", step=state.verified_step), GREEN)
+        else:
+            value(tr(lang, "session.none"), DIM)
+
+        section("session.section.provider")
+        value(
+            tr(
+                lang,
+                "session.provider_line",
+                requests=state.requests,
+                tokens=f"{state.token_total:,}",
+            )
+        )
+        if state.costs:
+            costs = " · ".join(
+                f"{currency} {amount:.4f}".rstrip("0").rstrip(".")
+                for currency, amount in sorted(state.costs.items())
+            )
+            value(tr(lang, "session.cost", cost=costs), MUTED)
+
+        section("session.section.mcp")
+        value(", ".join(state.mcp_server_ids) or tr(lang, "session.none"),
+              TEXT if state.mcp_server_ids else DIM)
+
+        section("session.section.skills")
+        value(", ".join(state.skill_names) or tr(lang, "session.none"),
+              TEXT if state.skill_names else DIM)
+
+        section("session.section.subagents")
+        if state.subagent_jobs:
+            value(tr(lang, "session.subagents_line", count=len(state.subagent_jobs)))
+        else:
+            value(tr(lang, "session.none"), DIM)
+
+        section("session.section.files")
+        if state.changed_files:
+            value(tr(lang, "session.files_line", count=len(state.changed_files)), MUTED)
+            for path in state.changed_files[:8]:
+                value(f"· {path}")
+        else:
+            value(tr(lang, "session.none"), DIM)
+        return lines

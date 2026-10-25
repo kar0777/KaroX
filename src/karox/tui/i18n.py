@@ -19,7 +19,8 @@ _RU: dict[str, str] = {
     "welcome.body": (
         "Опишите задачу обычным текстом и нажмите Enter.\n"
         "Агент читает репозиторий, правит файлы и проверяет результат.\n\n"
-        "F1 справка · F2 модели · F3 сессии · F4 MCP · /provider подключить модель"
+        "F1 справка · F2 модели · F3 сессии · F4 MCP · F5 состояние сессии\n"
+        "/provider подключить модель · /skills навыки репозитория"
     ),
     "composer.placeholder": "Опишите задачу…  (/help — команды)",
     "status.idle": "готов",
@@ -117,6 +118,8 @@ _RU: dict[str, str] = {
         "/sessions        список сессий и продолжение\n"
         "/new             начать новую сессию\n"
         "/mcp             MCP-серверы и инструменты\n"
+        "/skills          навыки репозитория\n"
+        "/session         состояние сохранённой сессии\n"
         "/verify <cmd>    добавить команду проверки\n"
         "/unverify        сбросить проверки\n"
         "/effort <level>  уровень усилий\n"
@@ -128,9 +131,72 @@ _RU: dict[str, str] = {
         "/clear           очистить экран\n"
         "/stop            остановить агента\n"
         "/quit            выйти\n\n"
-        "F1 справка · F2 модели · F3 сессии · F4 MCP\n"
+        "F1 справка · F2 модели · F3 сессии · F4 MCP · F5 состояние\n"
         "Enter отправить · Ctrl+J новая строка · Esc остановить · Ctrl+Q выход"
     ),
+    "activity.step": "шаг {n} · жду модель",
+    "activity.running": "{tool} · выполняется",
+    "activity.ok": "{tool} · готово",
+    "activity.failed": "{tool} · ошибка",
+    "activity.phase": "фаза · {phase}",
+    "activity.compacted": "контекст сжат",
+    "activity.edited": "правка · {path}",
+    "activity.read": "чтение · {path}",
+    "activity.test_started": "проверка · {tool} запущена",
+    "activity.test_ok": "проверка · {tool} пройдена",
+    "activity.test_failed": "проверка · {tool} провалена",
+    "activity.artifact": "артефакт · {name}",
+    "notice.compacted": "Контрольная точка контекста: {summary}",
+    "status.saved": "сохранено {when}",
+    "status.step": "шаг {n}",
+    "status.seconds": "{seconds:.0f} с",
+    "status.checks_live": "✓{ok}/✗{bad}",
+    "status.failed": "ошибка",
+    "status.stopped": "остановлено",
+    "status.checkpoint": "контрольная точка: {when}",
+    "status.no_checkpoint": "сессия ещё не сохранена",
+    "status.run_counters": (
+        "прошлый запуск: чтения {reads} · правки {edits} · проверки ✓{ok}/✗{bad} · "
+        "mcp {mcp} · навыки {skills} · суб-агенты {sub}"
+    ),
+    "session.title": "Состояние сессии",
+    "session.empty": (
+        "Сохранённой сессии пока нет. Выполните одну задачу — KaroX сохраняет "
+        "возобновляемую контрольную точку автоматически."
+    ),
+    "session.section.meta": "сессия",
+    "session.section.task": "задача",
+    "session.section.plan": "план",
+    "session.section.checkpoints": "контрольные точки",
+    "session.section.verification": "проверки",
+    "session.section.provider": "провайдер",
+    "session.section.mcp": "MCP-серверы",
+    "session.section.skills": "навыки",
+    "session.section.subagents": "суб-агенты",
+    "session.section.files": "изменённые файлы",
+    "session.none": "нет",
+    "session.history": "+{count} предыдущих хода",
+    "session.plan_tally": "к выполнению {todo} · выполняется {doing} · готово {done}",
+    "session.checkpoints_line": "{count} сохранено · последняя {when}",
+    "session.checkpoint_files": "в точке: {tracked} отслеживаемых, {untracked} новых файлов",
+    "session.checks_line": "{passed}/{total} пройдено",
+    "session.verified_at": "проверено на шаге {step}",
+    "session.provider_line": "{requests} запросов · {tokens} токенов",
+    "session.cost": "стоимость {cost}",
+    "session.subagents_line": "заданий: {count}",
+    "session.files_line": "изменено файлов: {count}",
+    "skills.title": "Навыки репозитория",
+    "skills.hint": "Enter открыть · Esc закрыть",
+    "notice.skills_empty": "Навыки для этого репозитория не найдены.",
+    "notice.skill_failed": "Не удалось прочитать навык {name}.",
+    "skill.detail_title": "Навык {name}",
+    "skill.version": "версия",
+    "skill.when_to_use": "Когда использовать",
+    "skill.permissions": "Права",
+    "skill.files": "Файлы",
+    "tool.detail_title": "Вызов инструмента",
+    "welcome.facts.session": "сессия {id}",
+    "welcome.facts.verification": "проверки: {commands}",
     "language.ru": "ru",
     "language.en": "en",
 }
@@ -142,7 +208,8 @@ _EN: dict[str, str] = {
     "welcome.body": (
         "Describe a task in plain text and press Enter.\n"
         "The agent reads the repository, edits files and verifies the result.\n\n"
-        "F1 help · F2 models · F3 sessions · F4 MCP · /provider connect a model"
+        "F1 help · F2 models · F3 sessions · F4 MCP · F5 session state\n"
+        "/provider connect a model · /skills repository skills"
     ),
     "composer.placeholder": "Describe a task…  (/help for commands)",
     "status.idle": "idle",
@@ -240,6 +307,8 @@ _EN: dict[str, str] = {
         "/sessions        list and continue sessions\n"
         "/new             start a new session\n"
         "/mcp             MCP servers and tools\n"
+        "/skills          repository skills\n"
+        "/session         durable session state\n"
         "/verify <cmd>    add a verification command\n"
         "/unverify        clear verification commands\n"
         "/effort <level>  effort level\n"
@@ -251,9 +320,72 @@ _EN: dict[str, str] = {
         "/clear           clear the screen\n"
         "/stop            stop the agent\n"
         "/quit            exit\n\n"
-        "F1 help · F2 models · F3 sessions · F4 MCP\n"
+        "F1 help · F2 models · F3 sessions · F4 MCP · F5 session state\n"
         "Enter send · Ctrl+J newline · Esc stop · Ctrl+Q quit"
     ),
+    "activity.step": "step {n} · waiting for the model",
+    "activity.running": "{tool} · running",
+    "activity.ok": "{tool} · ok",
+    "activity.failed": "{tool} · failed",
+    "activity.phase": "phase · {phase}",
+    "activity.compacted": "context compacted",
+    "activity.edited": "edited · {path}",
+    "activity.read": "read · {path}",
+    "activity.test_started": "test · {tool} started",
+    "activity.test_ok": "test · {tool} ok",
+    "activity.test_failed": "test · {tool} failed",
+    "activity.artifact": "artifact · {name}",
+    "notice.compacted": "Context checkpoint: {summary}",
+    "status.saved": "saved {when}",
+    "status.step": "step {n}",
+    "status.seconds": "{seconds:.0f}s",
+    "status.checks_live": "✓{ok}/✗{bad}",
+    "status.failed": "failed",
+    "status.stopped": "stopped",
+    "status.checkpoint": "session checkpoint: {when}",
+    "status.no_checkpoint": "no session checkpoint yet",
+    "status.run_counters": (
+        "last run: reads {reads} · edits {edits} · checks ✓{ok}/✗{bad} · "
+        "mcp {mcp} · skills {skills} · subagents {sub}"
+    ),
+    "session.title": "Session state",
+    "session.empty": (
+        "No durable session record yet. Run one task; KaroX saves a resumable "
+        "checkpoint automatically."
+    ),
+    "session.section.meta": "session",
+    "session.section.task": "task",
+    "session.section.plan": "plan",
+    "session.section.checkpoints": "checkpoints",
+    "session.section.verification": "verification",
+    "session.section.provider": "provider",
+    "session.section.mcp": "MCP servers",
+    "session.section.skills": "skills",
+    "session.section.subagents": "subagents",
+    "session.section.files": "changed files",
+    "session.none": "none",
+    "session.history": "+{count} earlier turn(s)",
+    "session.plan_tally": "todo {todo} · doing {doing} · done {done}",
+    "session.checkpoints_line": "{count} saved · last {when}",
+    "session.checkpoint_files": "in checkpoint: {tracked} tracked, {untracked} untracked files",
+    "session.checks_line": "{passed}/{total} passed",
+    "session.verified_at": "verified at step {step}",
+    "session.provider_line": "{requests} requests · {tokens} tokens",
+    "session.cost": "cost {cost}",
+    "session.subagents_line": "jobs: {count}",
+    "session.files_line": "changed files: {count}",
+    "skills.title": "Repository skills",
+    "skills.hint": "Enter open · Esc close",
+    "notice.skills_empty": "No skills discovered for this repository.",
+    "notice.skill_failed": "Could not read skill {name}.",
+    "skill.detail_title": "Skill {name}",
+    "skill.version": "version",
+    "skill.when_to_use": "When to use",
+    "skill.permissions": "Permissions",
+    "skill.files": "Files",
+    "tool.detail_title": "Tool call",
+    "welcome.facts.session": "session {id}",
+    "welcome.facts.verification": "verification: {commands}",
     "language.ru": "ru",
     "language.en": "en",
 }
