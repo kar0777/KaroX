@@ -449,6 +449,12 @@ class GuardedEngineEnvironment(LocalEnvironment):
     engine. Anything destructive, external or outside the task's intent
     fails closed: the engine receives a refusal observation it can act on,
     never a silent pass.
+
+    ``in_band_commands`` is the typed-tool seam: a callable that may claim a
+    command line (for example the in-band ``mcp`` protocol) and answer it
+    with an observation directly, applying its own policy, lease and
+    idempotency gates the way the MCP adapter does. A claimed command never
+    reaches the shell; an unclaimed one passes the full gate above.
     """
 
     def __init__(
@@ -465,6 +471,9 @@ class GuardedEngineEnvironment(LocalEnvironment):
         on_event: Optional[AgentObserver],
         command_timeout: int,
         output_char_limit: int,
+        in_band_commands: Optional[
+            Callable[[str, int], Optional[Dict[str, Any]]]
+        ] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(timeout=command_timeout, output_char_limit=output_char_limit, **kwargs)
@@ -477,6 +486,7 @@ class GuardedEngineEnvironment(LocalEnvironment):
         self._bypass_mode = bypass_mode
         self._mode = None if mode is None else normalize_mode(mode)
         self._on_event = on_event
+        self._in_band = in_band_commands
         self.refusals: List[Dict[str, Any]] = []
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
@@ -491,23 +501,36 @@ class GuardedEngineEnvironment(LocalEnvironment):
                 summary=clip_output(command, 200),
             )
         )
-        verdict = self._gate(command)
-        if verdict.allowed:
-            output = self._run_guarded(command, timeout or self.config.timeout)
-        else:
+        claimed: Optional[Dict[str, Any]] = None
+        if self._in_band is not None:
+            claimed = self._in_band(command, int(timeout or self.config.timeout))
+        if claimed is not None:
+            # Normalize to the engine's observation contract: the engine's
+            # observation template reads output.exception_info, so an
+            # in-band handler that omits it must not reach the template.
             output = {
-                "output": (
-                    f"karox refused to run this command: {verdict.reason}\n"
-                    "Adjust the command to stay inside the repository and the "
-                    "task, or finish with COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT."
-                ),
-                "returncode": 126,
-                "exception_info": "",
-                "extra": {"refused": True, "risk": verdict.risk},
+                "output": str(claimed.get("output") or ""),
+                "returncode": int(claimed.get("returncode", -1)),
+                "exception_info": str(claimed.get("exception_info") or ""),
             }
-            self.refusals.append(
-                {"command": command, "reason": verdict.reason, "risk": verdict.risk}
-            )
+        else:
+            verdict = self._gate(command)
+            if verdict.allowed:
+                output = self._run_guarded(command, timeout or self.config.timeout)
+            else:
+                output = {
+                    "output": (
+                        f"karox refused to run this command: {verdict.reason}\n"
+                        "Adjust the command to stay inside the repository and the "
+                        "task, or finish with COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT."
+                    ),
+                    "returncode": 126,
+                    "exception_info": "",
+                    "extra": {"refused": True, "risk": verdict.risk},
+                }
+                self.refusals.append(
+                    {"command": command, "reason": verdict.reason, "risk": verdict.risk}
+                )
         output["output"] = clip_output(output["output"], self.config.output_char_limit)
         # The finish marker raises Submitted from _check_finished, so the
         # tool_finished event is emitted first: a watcher must see every
@@ -797,6 +820,9 @@ class EngineKernel:
         context_token_budget: int = 160_000,
         command_timeout: int = 300,
         output_char_limit: int = 50_000,
+        in_band_commands: Optional[
+            Callable[[str, int], Optional[Dict[str, Any]]]
+        ] = None,
         on_event: Optional[AgentObserver] = None,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
@@ -823,6 +849,7 @@ class EngineKernel:
         self.context_token_budget = context_token_budget
         self.command_timeout = command_timeout
         self.output_char_limit = output_char_limit
+        self.in_band_commands = in_band_commands
         self._on_event = on_event
         self.usage = EngineUsage()
         self._engine_config = yaml.safe_load(
@@ -874,6 +901,7 @@ class EngineKernel:
             on_event=self._on_event,
             command_timeout=self.command_timeout,
             output_char_limit=self.output_char_limit,
+            in_band_commands=self.in_band_commands,
         )
         engine_model = ProviderEngineModel(
             self.provider,

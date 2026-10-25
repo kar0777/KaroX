@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 from typing import Any, List
 
@@ -584,3 +585,222 @@ def test_engine_limits_are_enforced_by_the_engine_itself(
     # The engine's own step limit ended the run after one model call.
     assert report["engine"]["steps"] == 1
     assert report["reason"] == "step_limit"
+
+
+# ------------------------------------------------------- in-band MCP routing
+
+def _request_text(request: ModelRequest) -> str:
+    return "\n".join(message.content or "" for message in request.messages)
+
+
+@pytest.fixture(scope="module")
+def mcp_stdio_server(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """One real stdio MCP echo server, discovered once for these tests."""
+
+    from _mcp_support import ECHO_SERVER, child_process_cleanup
+    from karox.mcp_client import McpClient, McpRegistry, McpServerRecord
+
+    root = tmp_path_factory.mktemp("engine-kernel-mcp")
+    repository = root / "repo"
+    repository.mkdir()
+    record = McpServerRecord(
+        server_id="echo",
+        namespace="echo",
+        transport="stdio",
+        command=sys.executable,
+        args=(str(ECHO_SERVER),),
+        environment={},
+        read_only_tools=("echo",),
+        timeout_seconds=20.0,
+        max_transport_retries=0,
+    )
+    registry = McpRegistry(root / "mcp-servers.json")
+    registry.put(record)
+    tools = McpClient(registry).discover_record(record, repository)
+    try:
+        yield {
+            "root": root,
+            "repo": repository,
+            "record": record,
+            "registry": registry,
+            "tools": tools,
+        }
+    finally:
+        with child_process_cleanup(scripts=[ECHO_SERVER]):
+            pass
+
+
+def test_guarded_environment_routes_in_band_commands(tmp_path: Path) -> None:
+    from karox.agent import AgentEventKind
+
+    events: list[AgentEvent] = []
+    routed: list[tuple[str, int]] = []
+
+    def in_band(command: str, timeout: int) -> Any:
+        if command.strip() == "mcp list":
+            routed.append((command, timeout))
+            return {
+                "output": "bound: mcp.echo.echo",
+                "returncode": 0,
+                "exception_info": "",
+            }
+        return None
+
+    environment = _engine_environment(
+        tmp_path, on_event=events.append, in_band_commands=in_band
+    )
+
+    output = environment.execute({"command": "mcp list"}, timeout=7)
+
+    assert output["returncode"] == 0
+    assert "mcp.echo.echo" in output["output"]
+    assert routed == [("mcp list", 7)]
+    kinds = [event.kind for event in events]
+    assert kinds == [AgentEventKind.TOOL_STARTED, AgentEventKind.TOOL_FINISHED]
+    # Commands the in-band router does not claim still pass the full gate.
+    assert environment.execute({"command": "echo hi"})["returncode"] == 0
+    refused = environment.execute({"command": "git push origin main"})
+    assert refused["returncode"] == 126
+    assert "refused" in refused["output"]
+
+
+def test_engine_run_routes_in_band_mcp_commands_to_the_bound_server(
+    mcp_stdio_server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox.mcp_client import McpRegistry, mcp_selection
+    from karox.paths import config_dir, runtime_dir
+    from karox.sessions import SessionStore
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    (config_dir() / "vnext").mkdir(parents=True, exist_ok=True)
+    McpRegistry(config_dir() / "vnext" / "mcp-servers.json").put(
+        mcp_stdio_server["record"]
+    )
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    task = "create hello.txt with hi"
+    store = SessionStore(runtime_dir() / "vnext" / "sessions")
+    store.create(repository, task, AccessProfile.WORKSPACE_WRITE, session_id="engine-1")
+    selection = mcp_selection(
+        mcp_stdio_server["record"], mcp_stdio_server["tools"], {"echo": "allow"}
+    )
+    with store.mutate("engine-1", "test", ttl_seconds=30.0) as record:
+        record.mcp_servers = [selection]
+
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            bash_response("mcp list"),
+            bash_response(
+                """mcp call mcp.echo.echo '{"message": "from-the-engine"}'"""
+            ),
+            bash_response("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        ],
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(_agent_run_args(repository, "--stream-json"))
+    assert code == 1  # no approved check, by design in this scenario
+
+    # The engine prompt teaches the in-band command and the bound tool.
+    assert "MCP tools are available" in _request_text(provider.requests[0])
+    assert "mcp.echo.echo" in _request_text(provider.requests[0])
+    # The mcp list observation came from the adapter, not a shell.
+    assert "mcp.echo.echo" in _request_text(provider.requests[1])
+    # The real stdio server answered the in-band call.
+    assert "from-the-engine" in _request_text(provider.requests[2])
+    events, report = _parse_stream(output.getvalue())
+    assert report["engine"]["module"] == "karox.engine"
+    tool_events = [event for event in events if event["kind"].startswith("tool_")]
+    assert len(tool_events) == 6  # three commands, every start paired with a finish
+    audit = runtime_dir() / "vnext" / "audit.jsonl"
+    assert audit.is_file()
+    assert "mcp.echo.echo" in audit.read_text(encoding="utf-8")
+
+
+def test_engine_run_without_mcp_selection_has_no_in_band_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            bash_response("mcp list"),
+            bash_response("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        ],
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(_agent_run_args(repository, "--stream-json"))
+    assert code == 1
+    for request in provider.requests:
+        assert "MCP tools are available" not in _request_text(request)
+    # The command reached a real shell, which has no mcp binary to satisfy it.
+    assert "mcp.echo.echo" not in _request_text(provider.requests[1])
+
+
+# ------------------------------------------------------- skill auto-activation
+
+
+def test_engine_run_auto_activates_a_triggered_skill_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = tmp_path / "repo"
+    skill = repository / ".karox" / "skills" / "greet-feature" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: greet-feature\n"
+        "version: 1.0.0\n"
+        "description: Greet the reviewer politely.\n"
+        "when_to_use: the task asks for a greeting.\n"
+        "triggers: [greet]\n"
+        "---\n"
+        "# Greet recipe\n"
+        "GREET RECIPE BODY: open with a polite hello.\n",
+        encoding="utf-8",
+    )
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            bash_response("echo hi > hello.txt"),
+            bash_response("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
+        ],
+    )
+    arguments = [
+        "agent",
+        "run",
+        "--repository",
+        str(repository),
+        "--task",
+        "greet the reviewer and create hello.txt with hi",
+        "--model",
+        "scripted-model",
+        "--base-url",
+        "http://127.0.0.1:9/v1",
+        "--session-id",
+        "engine-1",
+        "--verification-command",
+        _hello_check(),
+        "--stream-json",
+    ]
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(arguments)
+    assert code == 0
+    # The activated recipe rides along with the engine prompt.
+    assert "GREET RECIPE BODY" in _request_text(provider.requests[0])
+    events, report = _parse_stream(output.getvalue())
+    assert report["engine"]["module"] == "karox.engine"
+    assert report["verified"] is True
+    from karox.paths import runtime_dir
+
+    audit = runtime_dir() / "vnext" / "skill-audit" / "engine-1.jsonl"
+    assert audit.is_file()
+    assert "greet-feature" in audit.read_text(encoding="utf-8")

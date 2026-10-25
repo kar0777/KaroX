@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from . import __version__
 from .action_execution import CapabilityCoreRuntime
@@ -38,6 +38,7 @@ from .credentials import CredentialError, CredentialStore
 from .disk_maintenance import is_drive_root, workspace_system_reason
 from .effort import budget_for as effort_budget_for
 from .engine_kernel import EngineKernel
+from .engine_mcp import EngineMcpAdapter
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
@@ -87,6 +88,7 @@ from .routing import RouteTarget, RoutingPolicy, RoutedProvider
 from .risk_engine import RiskEngine
 from .security import redact
 from .sessions import SessionError, SessionStore
+from .skill_runtime import SkillSession
 from .skills import SkillCatalog, SkillError
 from .verification import discover_verification_commands
 
@@ -796,7 +798,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     policy.set_grants(origin, _agent_grants(profile, args.mode))
     risk = RiskEngine()
     decisions = ActionDecisionEngine(risk)
-    mcp_binding, _ = _selected_mcp_runtime(record, repository)
+    mcp_binding, mcp_descriptors = _selected_mcp_runtime(record, repository)
     catalog, skill_block = _skill_catalog(repository)
     visual_checker = None
     try:
@@ -952,9 +954,50 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         # The default path: the vendored karo-core engine executes the task.
         # Repository instructions, memory and the skill catalogue ride along as
         # a prompt suffix; the engine's own packaged protocol stays intact.
+        # The session's selected MCP tools and auto-activated skill recipes
+        # ride along the same way: an in-band command protocol the engine runs
+        # like any shell line, plus the prompt blocks that teach it.
+        in_band: Optional[Callable[[str, int], Optional[dict[str, Any]]]] = None
+        mcp_block = ""
+        if mcp_binding is not None:
+            engine_mcp = EngineMcpAdapter(
+                binding=mcp_binding,
+                descriptors=mcp_descriptors,
+                store=store,
+                session_id=record.session_id,
+                repository=repository,
+                origin=origin,
+                policy=policy,
+                audit_path=runtime_dir() / "vnext" / "audit.jsonl",
+            )
+            in_band = engine_mcp.handle_raw
+            mcp_block = engine_mcp.prompt_block()
+        recipe_block = ""
+        if catalog is not None:
+            try:
+                skill_session = SkillSession(
+                    catalog,
+                    record.session_id,
+                    policy=policy,
+                    invoker_origin=origin,
+                    audit_path=runtime_dir()
+                    / "vnext"
+                    / "skill-audit"
+                    / f"{record.session_id}.jsonl",
+                )
+                if skill_session.activate_automatic(args.task):
+                    recipe_block = skill_session.active_prompt()
+            except (SkillError, OSError):
+                recipe_block = ""
         engine_suffix = "\n\n".join(
             part
-            for part in (project_suffix, memory_block or "", _engine_skill_block(catalog))
+            for part in (
+                project_suffix,
+                memory_block or "",
+                _engine_skill_block(catalog),
+                recipe_block,
+                mcp_block,
+            )
             if part
         )
         window = context.max_input_tokens
@@ -978,6 +1021,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             context_token_budget=(
                 min(160_000, int(window)) if isinstance(window, int) else 160_000
             ),
+            in_band_commands=in_band,
             on_event=observer,
         )
     try:
