@@ -45,6 +45,16 @@ dependencies = [
   "rich>=13.7,<15.0",
   "Pygments>=2.17,<3.0",
   "markdown-it-py>=3.0,<5.0",
+  # The vendored karo-core engine (karox.engine): dotenv+platformdirs are
+  # imported by its package __init__, jinja2 renders its protocol templates,
+  # litellm_model.py — which provides the fenced-command salvage the kernel
+  # reuses — imports litellm at module scope, and its retry helper imports
+  # tenacity directly (litellm no longer re-depends on it).
+  "python-dotenv>=1.0,<2.0",
+  "platformdirs>=4.0,<5.0",
+  "Jinja2>=3.1,<4.0",
+  "litellm>=1.60,<2.0",
+  "tenacity>=8.0,<10.0",
 ]
 
 [project.optional-dependencies]
@@ -66,9 +76,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "karox.tui" = ["*.tcss"]
+"karox.tui2" = ["*.tcss"]
 "karox.prompts" = ["*.md", "profiles/*.md"]
 "karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
 "karox.skill_notes" = ["*.md"]
+# The engine's packaged protocol (config/default.yaml) is read at runtime by
+# engine_kernel.py; the rest of the engine data files travel with it so the
+# vendored package stays complete in an installed wheel.
+"karox.engine" = ["py.typed", "LICENSE.md", "NOTICE.md"]
+"karox.engine.config" = ["*.yaml", "*.tcss", "README.md", "benchmarks/*"]
+"karox.engine.agents" = ["README.md"]
+"karox.engine.environments" = ["README.md"]
+"karox.engine.models" = ["README.md"]
+"karox.engine.run" = ["README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

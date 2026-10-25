@@ -23,7 +23,7 @@ python -m pytest tests/test_tui.py tests/test_cli.py
 The copied kernel is not in mypy's file list yet. It is excused by scope, not by
 `ignore_errors`; `follow_imports = "skip"` keeps mypy from checking files outside
 the declared scope, and moving a module into the list is how that debt is paid
-down. The suite currently collects 485 tests.
+down. The suite currently collects 560 tests.
 
 ## Full gate
 
@@ -91,15 +91,22 @@ tests cover the same wire in-process; the manual HTTP pass is recorded in
 The wheel must contain:
 
 - every Python module under `src/karox`;
-- `tui/theme.tcss`;
+- `tui/theme.tcss` and `tui2/theme.tcss`;
 - `prompts/*.md` and `prompts/profiles/*.md`;
 - `builtin_skills/*/SKILL.md`;
 - `skill_notes/*.md`;
+- the engine's packaged protocol: `engine/config/*.yaml` (the default path
+  reads `engine/config/default.yaml` at runtime), `engine/config/benchmarks/*`,
+  `engine/py.typed` and its license/notice files;
 - `LICENSE`.
 
 It must not contain `__pycache__`, `.pyc`, tests or an old
 `tui_connections.py`/`hosted_bridge.py`. The release bridge modules are
-`hosted_core.py` and `bridge_*.py`; those are expected.
+`hosted_core.py` and `bridge_*.py`; those are expected. The engine's optional
+extras (its own `run/` CLI needs typer, `agents/interactive` needs
+prompt_toolkit, the portkey models need portkey-ai) are deliberately not
+declared dependencies: the product path never imports them, and they fail with
+their own instructive errors if something does.
 
 ## Release checklist
 
