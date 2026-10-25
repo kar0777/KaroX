@@ -210,6 +210,7 @@ not listed is internal to its layer.
 | `engine_provider_bridge.py` | `EngineProviderModel`: the engine's Model protocol over `providers.py` |
 | `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
 | `engine_salvage.py` | recovers one unambiguous fenced shell command from a prose response |
+| `core_types.py` | Core exceptions and `ToolDefinition` — what small modules need |
 | `core.py`, `core_tools.py` | typed tool table, handlers and the runtimes (`Capability`, `SkillSession`) |
 | `tool_schemas.py` | the extended tool names, descriptions and JSON schemas |
 | `engine_tools.py` | registers `browser.command` / `desktop.*` on the engine run's runtime |
@@ -223,7 +224,7 @@ not listed is internal to its layer.
 | `effort.py`, `agent_modes.py`, `auto_verify.py`, `completion_gate.py` | effort budgets, modes, quick checks, verified floor |
 | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |
 | `hosted_core.py`, `bridge_oauth.py`, `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`, `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py` | hosted MCP inbound bridge |
-| `browser/`, `computer_use/`, `desktop_apps.py` | Playwright engine; non-intrusive Win32 desktop use |
+| `browser/`, `computer_use/`, `desktop_apps.py` | Playwright engine (`probes.py` holds the JS and the one secret-field list); non-intrusive Win32 desktop use |
 | `visual_check.py`, `web_check.py` | render grading and page verification |
 | `skills.py` | skill sessions (`skill.run` is a leased Core tool) |
 | `paths.py`, `security.py`, `detached_process.py`, `process_launcher.py`, `port_ownership.py`, `process_identity.py`, `credential_session.py`, `credential_secret_service.py`, `test_output.py` | platform: paths, redaction, child processes, keyring |
