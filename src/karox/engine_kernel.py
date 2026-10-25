@@ -509,7 +509,9 @@ class GuardedEngineEnvironment(LocalEnvironment):
                 {"command": command, "reason": verdict.reason, "risk": verdict.risk}
             )
         output["output"] = clip_output(output["output"], self.config.output_char_limit)
-        self._check_finished(output)
+        # The finish marker raises Submitted from _check_finished, so the
+        # tool_finished event is emitted first: a watcher must see every
+        # tool_started paired, including the one that ends the run.
         self._emit(
             AgentEvent(
                 AgentEventKind.TOOL_FINISHED,
@@ -521,6 +523,7 @@ class GuardedEngineEnvironment(LocalEnvironment):
                 duration_seconds=round(time.monotonic() - started, 3),
             )
         )
+        self._check_finished(output)
         return output
 
     # -- gating -------------------------------------------------------------
