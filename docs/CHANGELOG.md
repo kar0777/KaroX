@@ -1,5 +1,34 @@
 # Changelog
 
+## 6.0.0a2 — 2026-10-25
+
+### Changed
+
+- `karox agent run` (and therefore the TUI backend, which spawns it) now
+  executes the vendored karo-core engine (`src/karox/engine`) as the default
+  runtime. The new `engine_kernel.py` wraps it: models are reached only
+  through the KaroX provider adapters, every shell action passes the
+  capability policy, the no-push/no-publish/no-remote-transport invariants,
+  repository-confinement checks and the consequence engine (confirmation-class
+  actions fail closed as observations), and the harness runs the approved
+  verification commands itself after the engine submits. The report carries an
+  `engine` identity block so the executing loop is provable. The v5
+  `AgentKernel` remains available behind `--legacy-loop` and is unchanged.
+- The line-count guard rose from 70k to 80k: the engine vendoring seeded at
+  4d8d5d9 already put the tree at ~74.8k against the old bound.
+
+### Added
+
+- `--legacy-loop` flag on `agent run`.
+- `scripts/race_task.py`: identical-task race runner with isolated
+  config/runtime, secret redaction, independent-check verdicts and a
+  fairness-aware `compare` subcommand.
+
+### Fixed
+
+- `tests/_support.py` (missing at the seed commit) is restored so the tui2
+  contracts can collect at all.
+
 ## 6.0.0a1 — 2026-10-25
 
 First clean release line. The agent kernel, policy, providers, sessions, MCP and

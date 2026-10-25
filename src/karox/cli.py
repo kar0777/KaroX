@@ -669,6 +669,32 @@ def _skill_catalog(repository: Path) -> tuple[Any, str]:
     return catalog, block
 
 
+def _engine_skill_block(catalog: Any) -> str:
+    """The skill catalogue, phrased for the engine's shell action space.
+
+    The engine loop has no typed skill_load tool; its one action is a shell
+    command, so a matching skill is applied by reading the skill's own files,
+    which the catalog already validated and hashed.
+    """
+
+    if catalog is None:
+        return ""
+    try:
+        skills = catalog.discover()
+    except (SkillError, OSError):
+        return ""
+    if not skills:
+        return ""
+    lines = [
+        f"- {item.name}: {item.description} (files under {item.directory})"
+        for item in skills[:20]
+    ]
+    return (
+        "AVAILABLE SKILLS (when one matches the task, read its files with a "
+        "shell command before acting):\n" + "\n".join(lines)
+    )
+
+
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     """Resolve one agent run end to end and return its report.
 
@@ -924,11 +950,11 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         )
     else:
         # The default path: the vendored karo-core engine executes the task.
-        # Repository instructions, memory and the skill catalog ride along as
+        # Repository instructions, memory and the skill catalogue ride along as
         # a prompt suffix; the engine's own packaged protocol stays intact.
         engine_suffix = "\n\n".join(
             part
-            for part in (project_suffix, memory_block or "", skill_block)
+            for part in (project_suffix, memory_block or "", _engine_skill_block(catalog))
             if part
         )
         window = context.max_input_tokens

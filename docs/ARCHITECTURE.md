@@ -12,13 +12,16 @@ that speaks a line protocol to it.
              │ other surfaces: model/session list,           │
              │ mcp status, provider presets, bridge saved    │
              ▼                                               ▼
-       cli.py --json                                 agent.py (AgentKernel)
-                                                              │
-                     ┌────────────────────────────────────────┼──────────────────┐
-                     ▼                    ▼                   ▼                  ▼
-                 core.py             providers.py        sessions.py        mcp_client.py
-              (typed tools)        (model transport)   (durable state)     (external tools)
-                     │                    │                   │
+       cli.py --json                          engine_kernel.py (EngineKernel)
+                                                │               │
+                        engine/ (karo-core, default)    agent.py (AgentKernel,
+                          DefaultAgent + guard            --legacy-loop only)
+                                                │               │
+                     ┌────────────────────────┼───────────────┐
+                     ▼                    ▼                   ▼
+                 core.py             providers.py        sessions.py
+              (typed tools)        (model transport)   (durable state)  mcp_client.py
+                     │                    │                   │      (external tools)
                      ▼                    ▼                   ▼
              policy.py + risk_engine  provider_adapters  runtime_dir()
 
@@ -44,9 +47,16 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
    a provider route/model, creates or resumes a session, constructs the kernel
    and renders the report. It also owns the `bridge` and `connections`-style
    lifecycle commands; all handlers are thin and return an exit code.
-3. **Agent kernel — `agent.py`.** The bounded model loop: request construction,
-   tool-call parsing and dispatch, repair turns, context compaction, evidence
-   and the final report. It knows about providers, Core, sessions and events.
+3. **Agent runtime — `engine_kernel.py` (default) and `agent.py` (legacy).**
+   `engine_kernel.py` runs the vendored karo-core engine
+   (`engine/agents/default.py`, the loop measured ahead of stock mini) as the
+   default native agent: it speaks the engine's Model protocol on top of
+   `provider_adapters`, gates every shell action through policy, the command
+   invariants, repository confinement and the consequence engine, and runs the
+   approved verification commands itself after the engine submits. `agent.py`
+   keeps the v5 `AgentKernel` (typed tool calls, repair turns, visual checker)
+   behind the explicit `--legacy-loop` flag; it is not the default and not
+   renamed.
 4. **Core and tools — `core.py`, `core_tools.py`, `action_execution.py`,
    `repo_context.py`, `edit_engine.py`, `workspace_worker.py`,
    `workspace_transaction.py`, `unified_patch.py`.** Core owns the tool table;
@@ -92,14 +102,24 @@ design error; so is a tool handler importing `cli`.
 1. The user submits a task. The TUI starts
    `python -m karox.cli agent run --stream-json ...` with a generated session id.
 2. The CLI loads or creates the session, resolves the provider, builds the
-   capability grants, risk engine, MCP binding and `AgentKernel`.
-3. The kernel sends the request through the provider adapter. Tool calls are
-   executed by `CapabilityCoreRuntime`; each mutation passes capability and risk
-   checks first. Every step is written to the durable session.
-4. Typed progress events (`step_started`, `text_delta`, `tool_started`,
-   `tool_finished`, `file_edited`, `phase_changed`, `finished`, ...) are emitted
-   as one JSON line each. The final line is `{"type": "result", "report": ...}`.
-5. The TUI renders deltas, tool cards and a result card. A stopped child leaves
+   capability grants, risk engine, MCP binding and the kernel — `EngineKernel`
+   by default, `AgentKernel` only with `--legacy-loop`.
+3. The engine queries the model through the provider adapter, parses one bash
+   action per response and executes it in the guarded environment: capability
+   policy first, then the string-level command invariants (no push, publish,
+   remote transport), repository confinement for redirects and `cd`, and the
+   consequence engine — anything needing a one-shot approval fails closed as
+   an observation the model can act on. Every turn lands in the durable
+   session; the trajectory is written under the session directory.
+4. When the engine submits, the harness runs the user-approved verification
+   commands through `CapabilityCoreRuntime` and reads git status/diff the same
+   way. Only a passing approved check makes the run verified; the engine's own
+   submission never does.
+5. Typed progress events (`step_started`, `text_delta`, `tool_started`,
+   `tool_finished`, `finished`, ...) are emitted as one JSON line each, and the
+   final line is `{"type": "result", "report": ...}` with the engine identity
+   (`engine.module` = `karox.engine`) so a reader can prove which loop ran.
+6. The TUI renders deltas, tool cards and a result card. A stopped child leaves
    the session resumable; the next task continues it.
 
 ## State and secrets
@@ -119,6 +139,10 @@ design error; so is a tool handler importing `cli`.
 ## Invariants
 
 - One tool name, one implementation, one capability and one risk mapping.
+- The default agent runtime is the vendored karo-core engine; the v5 loop runs
+  only behind an explicit `--legacy-loop`. A report says which loop executed
+  (`engine.module`), and a run is never called verified without a passing
+  user-approved check.
 - A tool call either has an idempotency key or is refused when it mutates an
   external system.
 - Evidence is recorded before it is narrated. A report may not claim a change
@@ -141,3 +165,10 @@ Most of layers 3–10 are a curated copy of the v5 kernel, not a rewrite. The ma
 and the reasons are in [MIGRATION.md](MIGRATION.md). Keeping the code identical
 where it already passed its tests is deliberate: the release changes the
 surface and dependencies, not the verified behavior of the loop.
+
+The exception is the default loop itself: `engine/` is the vendored karo-core
+fork (mini-swe-agent lineage) that was measured ahead of stock mini on the
+same model and grader, and `engine_kernel.py` is new integration code written
+for this release, not a v5 copy. The engine's own sources stay vendored and
+unmodified; every product boundary (providers, policy, risk, sessions,
+verification) is applied around it by `engine_kernel.py`.

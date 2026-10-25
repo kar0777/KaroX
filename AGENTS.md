@@ -36,10 +36,19 @@ Source, tests and the release gates are authoritative when prose disagrees.
 - The terminal client never imports the agent runtime. It spawns
   `karox agent run --stream-json` and reads one JSON document per line.
   Keep that boundary: it is what makes the UI testable without a model.
+- The default agent runtime is the vendored karo-core engine in
+  `src/karox/engine`, driven by `engine_kernel.py`. The v5 `AgentKernel`
+  stays reachable only through the explicit `--legacy-loop` flag; it must
+  never become the default again or be relabelled as the engine. The engine's
+  vendored sources are not edited; product behavior is applied around them.
 - The agent kernel talks to models only through `provider_adapters.py`; new
   provider behavior goes there and in `provider_factory.py`, not into the loop.
+  This holds for the engine path too: `ProviderEngineModel` wraps
+  `Provider.complete`, never the engine's litellm transport.
 - Every mutating tool passes `policy.py` (capability) and `risk_engine.py`
-  (consequence) before execution. Do not add a tool that bypasses either.
+  (consequence) before execution. Do not add a tool that bypasses either. The
+  engine's shell actions count: they run through the guarded environment, and
+  confirmation-class actions fail closed as observations.
 - Durable state lives under `paths.runtime_dir()`. Credentials never do; they
   are opaque OS-keyring references.
 - MCP servers are discovered, selected per session, and called only through

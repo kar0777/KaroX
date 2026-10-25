@@ -524,6 +524,23 @@ def test_engine_commands_need_only_the_ordinary_process_capability() -> None:
     assert engine_environment_caps <= set(grants)
 
 
+def test_engine_skill_block_phrases_skills_for_the_shell() -> None:
+    class Item:
+        name = "deploy-check"
+        description = "verify deploys"
+        directory = Path(".karox/skills/deploy-check")
+
+    class Catalog:
+        def discover(self) -> tuple:
+            return (Item(),)
+
+    block = cli._engine_skill_block(Catalog())
+    assert "deploy-check" in block
+    assert "shell command" in block
+    assert "skill_load" not in block
+    assert cli._engine_skill_block(None) == ""
+
+
 def test_engine_events_use_the_ndjson_event_shape(tmp_path: Path) -> None:
     events: List[AgentEvent] = []
 
