@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .event_bus import EventBus, EventKind, EventLevel
+from .atomic_io import atomic_write
 from .core_types import (
     CoreError,
     InvalidCommand,
@@ -1714,21 +1715,7 @@ class CoreRuntime:
                     )
                 ],
             }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(encoded)
-                handle.flush()
-                if previous_mode is not None and hasattr(os, "fchmod"):
-                    os.fchmod(handle.fileno(), previous_mode)
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+        atomic_write(path, encoded, previous_mode)
         # A write that went around the credential scanner says so in both the
         # result and the durable evidence, so a reviewer can find every one of
         # them rather than having to infer which writes used the escape hatch.

@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from .core_types import CoreError, InvalidCommand
+from .atomic_io import atomic_write
 from .models import EvidenceRecord
 from .security import contains_credential
 
@@ -239,26 +239,6 @@ class WorkspaceTransaction:
             "changes": changes,
         }
 
-    @staticmethod
-    def _atomic_write(path: Path, content: bytes, mode: Optional[int]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{path.name}.", dir=path.parent
-        )
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(content)
-                handle.flush()
-                if mode is not None and hasattr(os, "fchmod"):
-                    os.fchmod(handle.fileno(), mode)
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-
     def _remember_created_parents(self, path: Path) -> None:
         missing: list[Path] = []
         cursor = path.parent
@@ -359,7 +339,7 @@ class WorkspaceTransaction:
                     changed = previous != digest
                     if changed:
                         self._remember_created_parents(path)
-                        self._atomic_write(path, payload["content"], state.mode)
+                        atomic_write(path, payload["content"], state.mode)
                         changed_files.append(payload["relative"])
                     operations.append(
                         {
@@ -473,7 +453,7 @@ class WorkspaceTransaction:
             try:
                 self._revalidate_path(path)
                 if state.exists:
-                    self._atomic_write(path, state.content, state.mode)
+                    atomic_write(path, state.content, state.mode)
                 elif path.exists() and path.is_file():
                     path.unlink()
             except Exception as exc:
