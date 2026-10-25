@@ -1,0 +1,269 @@
+/* KaroX compact client.
+ *
+ * The palette is deliberately quiet: near-black ground, one gold accent for
+ * position and action, green/red reserved for outcomes. No box is drawn around
+ * ordinary prose, so a border always means "this needs attention".
+ */
+
+Screen {
+    background: #0f1115;
+    color: #d8dce3;
+}
+
+#header {
+    height: 1;
+    padding: 0 2;
+    background: #161a20;
+    color: #d8dce3;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#chat {
+    height: 1fr;
+    padding: 1 2 0 2;
+    scrollbar-color: #3a4250;
+    scrollbar-background: #0f1115;
+}
+
+.welcome {
+    width: 100%;
+    margin: 0 0 1 0;
+    padding: 1 2;
+    background: #14181e;
+    border: round #2b313a;
+}
+
+.user-message {
+    width: 100%;
+    margin: 1 0 0 0;
+    padding: 0;
+}
+
+.assistant-message {
+    width: 100%;
+    margin: 0 0 1 0;
+    padding: 0 0 0 2;
+    border-left: thick #2b313a;
+}
+
+.reasoning-line {
+    color: #6b7381;
+    margin-bottom: 0;
+}
+
+.live-answer {
+    color: #d8dce3;
+}
+
+.final-answer {
+    color: #d8dce3;
+    margin: 0;
+}
+
+.tool-card {
+    width: 100%;
+    margin: 0 0 0 2;
+    padding: 0 1;
+    background: #15181d;
+}
+
+.notice {
+    width: 100%;
+    margin: 1 0;
+    padding: 0 1;
+    border: round #2b313a;
+    background: #14181e;
+}
+
+.notice-success {
+    border: round #33513d;
+}
+
+.notice-warning {
+    border: round #4a402a;
+}
+
+.notice-error {
+    border: round #5a3336;
+}
+
+#activity {
+    height: 1;
+    padding: 0 2;
+    background: #0f1115;
+}
+
+#composer {
+    height: 3;
+    margin: 0 2;
+    padding: 0 1;
+    background: #161a20;
+    color: #d8dce3;
+    border: round #2b313a;
+}
+
+#composer:hover {
+    border: round #3a4250;
+}
+
+#composer:focus {
+    border: round #d6b36a;
+}
+
+#composer .text-area--placeholder {
+    color: #6b7381;
+}
+
+#status {
+    height: 1;
+    padding: 0 2;
+    background: #161a20;
+}
+
+#status #hint {
+    width: 1fr;
+    content-align: left middle;
+}
+
+#status #state {
+    width: auto;
+    content-align: right middle;
+}
+
+/* ------------------------------------------------------------------ modals */
+
+.modal {
+    width: 84;
+    max-width: 94%;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    background: #1c2129;
+    border: round #d6b36a;
+}
+
+.modal-title {
+    color: #d6b36a;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.modal-hint {
+    color: #6b7381;
+    margin-top: 1;
+}
+
+.modal-buttons {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+.modal-buttons Button {
+    margin-left: 2;
+}
+
+.field-label {
+    color: #8d96a5;
+    margin-top: 1;
+}
+
+.form-error {
+    color: #d97b7b;
+    margin-top: 1;
+}
+
+.form-modal Input {
+    background: #161a20;
+    border: round #2b313a;
+}
+
+.form-modal Input:focus {
+    border: round #d6b36a;
+}
+
+.form-modal Select {
+    width: 100%;
+}
+
+.help-modal {
+    width: 86;
+}
+
+.help-scroll {
+    height: auto;
+    max-height: 24;
+}
+
+.confirm-modal {
+    width: 64;
+}
+
+.mcp-modal {
+    width: 100;
+    max-width: 96%;
+}
+
+.mcp-modal OptionList {
+    height: auto;
+    max-height: 20;
+    background: #161a20;
+    border: round #2b313a;
+}
+
+.mcp-modal OptionList:focus {
+    border: round #d6b36a;
+}
+
+OptionList {
+    background: #161a20;
+    border: round #2b313a;
+}
+
+OptionList:focus {
+    border: round #d6b36a;
+}
+
+OptionList > .option-list--option-highlighted {
+    background: #2a2418;
+    color: #f0e6cf;
+}
+
+OptionList > .option-list--option-hover {
+    background: #20262f;
+}
+
+SelectCurrent {
+    background: #161a20;
+    border: round #2b313a;
+}
+
+SelectCurrent:focus {
+    border: round #d6b36a;
+}
+
+Button {
+    background: #232a34;
+    color: #d8dce3;
+    border: round #2b313a;
+    min-width: 8;
+}
+
+Button:hover {
+    background: #2b3440;
+}
+
+Button.-primary {
+    background: #d6b36a;
+    color: #14181e;
+    text-style: bold;
+}
+
+Button.-primary:hover {
+    background: #e3c27e;
+}
+
+Button:focus {
+    border: round #d6b36a;
+}
