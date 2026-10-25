@@ -131,8 +131,12 @@ design error; so is a tool handler importing `cli`.
    submission never does.
 5. Typed progress events (`step_started`, `text_delta`, `tool_started`,
    `tool_finished`, `finished`, ...) are emitted as one JSON line each, and the
-   final line is `{"type": "result", "report": ...}` with the engine identity
-   (`engine.module` = `karox.engine`) so a reader can prove which loop ran.
+   final line is `{"type": "result", "report": ...}`. The engine run's report
+   carries an `engine` identity block (`name` = `karo-core`, `version` = the
+   vendored engine's `__version__`, `implementation` =
+   `karox.engine_kernel.EngineAgent`) so a reader can prove which loop ran; the
+   legacy loop's report leaves it `null`, and the engine's trajectory artifact
+   under the session directory is the durable second proof.
 6. The TUI renders deltas, tool cards and a result card. A stopped child leaves
    the session resumable; the next task continues it.
 

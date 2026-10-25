@@ -12,8 +12,13 @@
   repository-confinement checks and the consequence engine (confirmation-class
   actions fail closed as observations), and the harness runs the approved
   verification commands itself after the engine submits. The report carries an
-  `engine` identity block so the executing loop is provable. The v5
-  `AgentKernel` remains available behind `--legacy-loop` and is unchanged.
+  `engine` identity block (name, vendored version, implementation) so the
+  executing loop is provable in-band — the race harness reads exactly this
+  block — and the engine run also writes its own trajectory artifact under
+  the session's runtime dir (`vnext/sessions/<id>/engine/trajectory.json`,
+  tagged with the `karox.engine_kernel.EngineAgent` implementation), which
+  the `--legacy-loop` path never writes. The v5 `AgentKernel` remains
+  available behind `--legacy-loop` and is unchanged.
 - The line-count guard rose from 70k to 80k: the engine vendoring seeded at
   4d8d5d9 already put the tree at ~74.8k against the old bound. The merged
   browser (~6.5k) and computer-use (~6.2k) surfaces then moved it to 90k; the

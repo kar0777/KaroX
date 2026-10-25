@@ -19,6 +19,7 @@ import pytest
 from karox.agent import AgentEvent, AgentEventKind, AgentKernel, SYSTEM_PROMPT
 from karox.agent import AgentLimits, ContextBudget
 from karox.core import CoreRuntime
+from karox.engine import __version__ as engine_version
 from karox.engine_kernel import EngineKernel
 from karox.models import AccessProfile, Capability, Origin, OriginKind
 from karox.policy import CapabilityPolicy
@@ -1021,6 +1022,12 @@ def test_cli_default_run_executes_the_engine(
     data = json.loads(trajectory.read_text(encoding="utf-8"))
     agent_blob = json.dumps(data)
     assert "karox.engine_kernel.EngineAgent" in agent_blob
+    # The report itself names the loop that ran, so a metrics document (the
+    # race harness reads exactly this block) never has to guess.
+    engine_block = report["engine"]
+    assert engine_block["name"] == "karo-core"
+    assert engine_block["version"] == engine_version
+    assert engine_block["implementation"] == "karox.engine_kernel.EngineAgent"
     # The engine path advertises typed tools, never a raw shell.
     assert "repo_write_file" in _request_tools(provider.requests[0])
 
@@ -1069,6 +1076,8 @@ def test_cli_legacy_loop_flag_selects_the_v5_kernel(
         tmp_path / "runtime" / "vnext" / "sessions" / "engine-1" / "engine" / "trajectory.json"
     )
     assert not trajectory.exists()
+    # And its report never claims the engine identity.
+    assert report.get("engine") is None
 
 
 def test_cli_engine_run_calls_the_selected_mcp_tool(

@@ -1203,6 +1203,11 @@ class AgentReport:
     # the legacy default: a run created without the flag behaves as Build and
     # claims nothing beyond that.
     mode: Optional[str] = None
+    # Names the decision loop that produced this report: the engine-backed
+    # kernel stamps the vendored karo-core identity here, the legacy v5 loop
+    # leaves it None. The report is the in-band proof of which loop ran; the
+    # engine's trajectory artifact is the durable one.
+    engine: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(redact(asdict(self)))

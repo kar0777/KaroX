@@ -46,6 +46,7 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 from jinja2 import StrictUndefined, Template  # noqa: E402
 
+from .engine import __version__ as _engine_version  # noqa: E402
 from .engine.agents.default import DefaultAgent  # noqa: E402
 from .engine.environments.local import clip_output  # noqa: E402
 from .engine.exceptions import (  # noqa: E402
@@ -891,6 +892,17 @@ def _result_summary(core_name: str, result: CoreResult) -> str:
     if not parts:
         parts.append("ok" if result.ok else "failed")
     return str(redact(", ".join(parts)))
+
+
+#: The identity the engine-backed report stamps in its ``engine`` block: the
+#: in-band proof for stream consumers (the race harness reads exactly this).
+#: The engine's trajectory artifact under the session's runtime dir is the
+#: durable proof; both name the same implementation.
+_ENGINE_IDENTITY: Dict[str, str] = {
+    "name": "karo-core",
+    "version": _engine_version,
+    "implementation": "karox.engine_kernel.EngineAgent",
+}
 
 
 class EngineAgent(DefaultAgent):
@@ -2384,6 +2396,7 @@ class EngineKernel:
             compaction=dict(self._compaction) if self._compaction else None,
             restored=restored,
             mode=self.mode,
+            engine=dict(_ENGINE_IDENTITY),
         )
 
 
