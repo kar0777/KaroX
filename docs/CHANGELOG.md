@@ -45,6 +45,10 @@ hosted bridge are new.
   authority.
 - `effort-level auto` now resolves from task, project-map and mode signals
   instead of a fixed medium budget.
+- A user-approved `checks.run` may execute safe read-only Git subcommands such
+  as `git diff --check`; `git push` and other remote mutations remain blocked.
+  Root-level `test_*.py` files are detected as pytest verification even without
+  a `pyproject.toml`.
 - Pricing, route budgets and evidence details are surfaced in the human report.
 - The agent refuses drive roots and protected system folders as a workspace,
   reads instruction files without following symlinks outside the repository,

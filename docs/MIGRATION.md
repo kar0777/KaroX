@@ -113,7 +113,7 @@ When a v5 module becomes necessary:
 
 ## Validation of this extraction
 
-- 483 release tests pass (`pytest`), including provider transports, registry
+- 485 release tests pass (`pytest`), including provider transports, registry
   and credentials, MCP client and CLI lease/replay, policy and risk, session
   idempotency, OAuth/DCR/PKCE/refresh replay, hosted allowlist/idempotency and
   Tailscale route ownership.

@@ -33,7 +33,7 @@ the real gaps before the release gates were run.
 | TUI | **Parity + improved** | The release `tui/` is the v5 `tui2` package byte-for-byte, plus `/doctor`, `/bridge`, safer MCP defaults and authenticated remote-MCP fields. |
 | Security boundary | **Stronger** | System folders and drive roots are refused as workspaces; instruction symlinks outside the repository are refused; discovered checks are not evidence without approval; Bypass requires an elevated profile. Core policy/risk/lease code is unchanged. |
 | Packaging | **Improved** | Declared deps now include `starlette`, `uvicorn` and `psutil`; mypy has an explicit scope; `check_tree` counts 98 modules and no legacy surface. |
-| Tests | **Restored** | 22 → 483 tests: provider transports/registry/pricing, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, model discovery, core modules, TUI and tree gates. |
+| Tests | **Restored** | 22 → 485 tests: provider transports/registry/pricing, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, model discovery, core modules, TUI and tree gates. |
 
 ## Restored or improved after the audit
 
@@ -89,7 +89,7 @@ it does not carry laboratory experiments merely because they existed.
 Commands run from `D:\проекты\karox-release`:
 
 ```text
-python -m pytest -q                 # 483 collected, all pass (1 platform skip)
+python -m pytest -q                 # 485 collected, all pass (1 platform skip)
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
 python scripts/check_tree.py        # ok · 98 modules · ~66.4k lines

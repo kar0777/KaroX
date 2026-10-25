@@ -885,7 +885,13 @@ def _detect_verification(repository: Path) -> tuple[tuple[str, ...], ...]:
                 command = ("npm", "test") if name == "test" else ("npm", "run", name)
                 if command not in commands:
                     commands.append(command)
-    if (repository / "pyproject.toml").is_file() and (repository / "tests").is_dir():
+    has_pytest_tests = bool(
+        list(repository.glob("test_*.py"))
+        or list((repository / "tests").glob("test_*.py"))
+    )
+    if has_pytest_tests or (
+        (repository / "pyproject.toml").is_file() and (repository / "tests").is_dir()
+    ):
         commands.append(("python", "-m", "pytest", "-q"))
     if (repository / "Cargo.toml").is_file():
         commands.append(("cargo", "test"))

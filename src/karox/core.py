@@ -1920,7 +1920,6 @@ class CoreRuntime:
                 "cmd",
                 "dash",
                 "fish",
-                "git",
                 "nu",
                 "powershell",
                 "pwsh",
@@ -1937,6 +1936,19 @@ class CoreRuntime:
         )
         if denied:
             raise InvalidCommand("publishing, authentication, and remote Git commands are blocked")
+        if executable == "git":
+            # Git is allowed only through the same read-only subcommand
+            # boundary used by developer commands. A blanket denial also
+            # blocked a legitimate user-approved `git diff --check` check.
+            from .command_guard import (
+                DeveloperCommandBlocked,
+                validate_developer_command_argv,
+            )
+
+            try:
+                validate_developer_command_argv(values)
+            except DeveloperCommandBlocked as exc:
+                raise InvalidCommand(str(exc)) from exc
         return values
 
     def _run(
