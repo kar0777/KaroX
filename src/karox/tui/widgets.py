@@ -45,18 +45,6 @@ CATEGORY_ICONS = {
     "other": "→",
 }
 
-CATEGORY_COLOURS = {
-    "read": MUTED,
-    "edit": GOLD,
-    "test": GREEN,
-    "mcp": AMBER,
-    "skill": GOLD,
-    "plan": MUTED,
-    "web": AMBER,
-    "inspect": MUTED,
-    "subagent": AMBER,
-    "other": MUTED,
-}
 
 _HEADER_WIDE = 100
 _HEADER_MEDIUM = 72

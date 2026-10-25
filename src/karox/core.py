@@ -630,7 +630,6 @@ class CoreRuntime:
         verification_commands: Optional[Iterable[Iterable[str]]] = None,
         risk: Optional[RiskEngine] = None,
         events: Optional[EventBus] = None,
-        mutation_reviewer: Optional[Callable[[CoreCommand, ToolDefinition, float], CoreCommand]] = None,
         session_repository_validator: Optional[Callable[[SessionRecord, Path], None]] = None,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
@@ -640,7 +639,6 @@ class CoreRuntime:
         self.sessions = sessions
         self.audit_path = audit_path.expanduser().resolve() if audit_path else None
         self._mcp_binding = mcp_binding
-        self._mutation_reviewer = mutation_reviewer
         self._session_repository_validator = session_repository_validator
         # Tool availability is stable for one runtime process. Resolve ripgrep
         # once during runtime construction so the first user search does not pay
@@ -1006,36 +1004,6 @@ class CoreRuntime:
             raise InvalidCommand(f"unknown Core command: {command.name}")
         command = self._normalize_command(command)
         self._validate_arguments(definition, command.arguments)
-        if self._mutation_reviewer is not None and definition.mutates:
-            original = command
-            reviewed = self._mutation_reviewer(
-                original, definition, float(original.deadline_seconds)
-            )
-            if not isinstance(reviewed, CoreCommand):
-                raise InvalidCommand("mutation reviewer returned an invalid command")
-            if (
-                reviewed.session_id != original.session_id
-                or reviewed.origin != original.origin
-                or reviewed.correlation_id != original.correlation_id
-                or reviewed.idempotency_key != original.idempotency_key
-                or reviewed.deadline_seconds != original.deadline_seconds
-                or reviewed.confirmation_token != original.confirmation_token
-            ):
-                raise InvalidCommand("mutation reviewer changed immutable command identity")
-            command = reviewed
-            definition = self._definitions.get(command.name)
-            handler = self._handlers.get(command.name)
-            is_mcp = (
-                definition is not None
-                and handler is None
-                and self._mcp_binding is not None
-                and command.name.startswith("mcp.")
-            )
-            if definition is None or (handler is None and not is_mcp):
-                raise InvalidCommand(
-                    f"mutation reviewer returned unknown Core command: {command.name}"
-                )
-            self._validate_arguments(definition, command.arguments)
         try:
             input_digest = command.input_digest()
         except (TypeError, ValueError) as exc:

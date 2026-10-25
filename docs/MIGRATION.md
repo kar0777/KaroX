@@ -25,14 +25,14 @@ most legacy weight.
 
 | Area | Modules |
 | --- | --- |
-| Agent kernel | `agent.py`, `core.py`, `context_compiler.py`, `cache_scheduler.py`, `semantic_shadow.py`, `base_probe.py`, `completion_gate.py`, `requirements.py`, `tool_universe.py` |
+| Agent kernel | `agent.py`, `core.py`, `completion_gate.py`, `requirements.py`, `session_analysis.py` |
 | Tools | `core_tools.py`, `repo_context.py`, `edit_engine.py`, `action_execution.py`, `auto_verify.py`, `verification.py`, `test_output.py`, `lsp_diagnostics.py`, `hot_worker.py`, `workspace_worker.py`, `workspace_transaction.py`, `unified_patch.py`, `artifacts.py`, `web_check.py`, `visual_check.py`, `browser_bootstrap.py` |
 | Policy | `policy.py`, `risk_engine.py`, `risk_mapping.py`, `action_policy.py`, `command_guard.py`, `agent_modes.py`, `effort.py`, `effort_signals.py`, `mode_artifacts.py` |
 | Providers | `providers.py`, `provider_adapters.py`, `provider_factory.py`, `provider_controller.py`, `provider_presets.py`, `provider_pricing.py`, `routing.py`, `model_discovery.py`, `registry.py`, `models.py`, `credentials.py`, `credential_session.py`, `credential_secret_service.py` |
-| Sessions and context | `sessions.py`, `event_bus.py`, `usage_analytics.py`, `cost_intelligence.py`, `memory.py`, `project_context.py`, `project_map.py`, `map_service.py`, `image_attachments.py` |
+| Sessions and context | `sessions.py`, `event_bus.py`, `usage_analytics.py`, `memory.py`, `project_context.py`, `project_map.py`, `map_service.py`, `image_attachments.py` |
 | MCP outbound | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` |
 | MCP inbound bridge | `hosted_core.py` (from `hosted_bridge.py`), `bridge_oauth.py`, `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py` (from `web_bridge_launcher.py`), `bridge_profiles.py`, `bridge_tailscale.py`, `tailscale_routes.py`, `port_ownership.py`, `process_identity.py`, `route_health.py`, `browser_approval.py`, `result_envelope.py`, `tool_telemetry.py`, `project_registry.py`, `task_state.py`, `repository_lease.py`, `ellipsis_checkpoint.py` |
-| Skills | `skills.py`, `builtin_skills/`, `skill_notes/`, `prompts/` |
+| Skills | `skills.py`, `builtin_skills/`, `prompts/` |
 | Platform | `paths.py`, `security.py`, `detached_process.py`, `process_launcher.py` |
 
 `disk_maintenance.py` remains for the protected-workspace check and read-only
@@ -70,15 +70,17 @@ hot-worker module group; desktop control is not a release surface.
   restart/oauth/credential`. It reads existing v5 saved profiles and keyring
   entries unchanged.
 
-## Not ported in 6.0.0a1
+## Not ported (historical 6.0.0a1 list, superseded)
+
+The 6.0.0a2 release made the vendored karo-core engine the only kernel, so
+the engine item below no longer applies; 6.0.0a3 deleted the unreachable
+research-subagent block instead of shipping a second driver.
 
 These remain in v5 and are deliberate gaps, not accidental omissions:
 
-- **karo-core engine.** `karox core run` and the vendored `engine/` are not in
-  this release. The product kernel is the agent here; the bash-oriented engine
-  needs a typed-tool adapter before it can replace it.
-- **Research subagents.** The recursive research branch is not exposed. The
-  project map, dependency hints, file mentions and memory blocks are wired.
+- ~~**karo-core engine.**~~ Superseded: `engine/` is the product kernel.
+- ~~**Research subagents.**~~ Removed: the detached `subagents.py` /
+  `core_engine.py` block was deleted in 6.0.0a3; orchestration stays out.
 - **Per-session skill selection.** `skill list/show/load` works and the agent
   may load a skill, but `skill select/deselect` and skill-level capability
   grants are not exposed.
@@ -87,13 +89,14 @@ These remain in v5 and are deliberate gaps, not accidental omissions:
   Smart Stop, but local Git rollback checkpoints are not created automatically.
 - **Maintenance mode.** Read-only disk maintenance tools exist, but there is no
   autonomous cleanup mode.
-- **Browser and desktop control, autonomy, orchestration, mission control.**
-  These remain v5 laboratory surfaces. The bridge exposes only repository, Git,
-  check and diagnostics tools.
-- **Hosted extras.** Browser/dev-server/hosted-tool runtimes, OpenAPI bridge,
-  external MCP proxy inside the hosted bridge, and interactive hosted approval
-  workflows are not ported. `git.push`, publish, deploy and auth mutations are
-  never exposed.
+- **Autonomy, orchestration, mission control.** These remain v5 laboratory
+  surfaces. Browser and desktop control were ported in 6.0.0a2 and are
+  registered as typed tools around the engine.
+- **Hosted extras.** The old v5 compatibility catalogue (browser/dev-server/
+  task/orchestrate/memory tool names) was removed in 6.0.0a3: it passed launch
+  validation but no runtime served it. An OpenAPI bridge and an external MCP
+  proxy inside the hosted bridge are still not ported. `git.push`, publish,
+  deploy and auth mutations are never exposed.
 - **MCP `ask` as an interactive prompt.** A tool marked `ask` is refused until
   the session selection is edited. The release does not pretend otherwise.
 - **Old terminal shell.** `tui.py`, `tui_connections.py`, `tui_dashboard.py`,
@@ -113,7 +116,7 @@ When a v5 module becomes necessary:
 
 ## Validation of this extraction
 
-- 485 release tests pass (`pytest`), including provider transports, registry
+- 745 release tests pass (`pytest`), including provider transports, registry
   and credentials, MCP client and CLI lease/replay, policy and risk, session
   idempotency, OAuth/DCR/PKCE/refresh replay, hosted allowlist/idempotency and
   Tailscale route ownership.

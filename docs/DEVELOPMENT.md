@@ -3,7 +3,7 @@
 ## Setup
 
 ```text
-cd D:\проекты\karox-release
+cd D:\проекты\KaroX-v5\lab\kernel-duel-20261025\integrate
 python -m venv .venv
 . .venv/Scripts/activate         # Windows
 python -m pip install -e ".[dev]"
@@ -23,7 +23,7 @@ python -m pytest tests/test_tui.py tests/test_cli.py
 The copied kernel is not in mypy's file list yet. It is excused by scope, not by
 `ignore_errors`; `follow_imports = "skip"` keeps mypy from checking files outside
 the declared scope, and moving a module into the list is how that debt is paid
-down. The suite currently collects 560 tests.
+down. The suite currently collects 745 tests.
 
 ## Full gate
 

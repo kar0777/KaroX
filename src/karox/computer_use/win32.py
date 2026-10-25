@@ -372,8 +372,6 @@ class Win32Probe:
     def is_iconic(self, hwnd: int) -> bool:
         return bool(self._user32.IsIconic(hwnd))
 
-    def is_visible(self, hwnd: int) -> bool:
-        return bool(self._user32.IsWindowVisible(hwnd))
 
     def is_hung(self, hwnd: int) -> bool:
         return bool(self._user32.IsHungAppWindow(hwnd))

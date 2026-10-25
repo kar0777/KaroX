@@ -13,7 +13,7 @@ and the Core runtime:
   denial and failure is an audit row;
 * skill text never widens authority.  Activation changes no policy grants --
   the only path from a recipe to capabilities stays
-  :func:`karox.skills.configure_skill_policy`, which the operator drives.
+  the permission decisions stored on the Skill selection.
 
 The narrow integration surface is :class:`SkillSession` (drives the session)
 and :class:`SkillSessionRuntime` (a ``CapabilityCoreRuntime`` that exposes the
@@ -48,7 +48,6 @@ from .skills import (
     SkillMetadata,
     SkillPermission,
     _validate_reference,
-    configure_skill_policy,
     skill_system_prompt,
 )
 
@@ -228,8 +227,7 @@ class SkillSession:
     The session never widens authority.  Activating a recipe loads text; it
     does not touch :class:`CapabilityPolicy`.  The only capability path for a
     recipe is still the operator-driven selection stored by
-    :func:`karox.skills.skill_selection`, applied through
-    :func:`karox.skills.configure_skill_policy`.
+    the permission decisions stored on the Skill selection.
     """
 
     MAX_ACTIVE_SKILLS = 8
@@ -695,5 +693,4 @@ __all__ = [
     "SkillSession",
     "SkillSessionRuntime",
     "SkillPermission",
-    "configure_skill_policy",
 ]

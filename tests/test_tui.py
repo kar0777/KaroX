@@ -29,7 +29,6 @@ from karox.tui.protocol import (
     tool_category,
 )
 from karox.tui.widgets import (
-    CATEGORY_COLOURS,
     CATEGORY_ICONS,
     AssistantMessage,
     Notice,
@@ -553,7 +552,6 @@ class WidgetTests(unittest.TestCase):
             "subagent", "other",
         ):
             self.assertIn(category, CATEGORY_ICONS)
-            self.assertIn(category, CATEGORY_COLOURS)
 
     def test_welcome_card_renders_facts(self) -> None:
         text = str(welcome_text("Ready", "body text", ("repo proj", "model demo/x")))

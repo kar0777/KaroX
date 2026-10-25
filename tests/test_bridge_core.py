@@ -444,18 +444,11 @@ class HostedCoreBridgeTests(unittest.TestCase):
             sorted(all_tools),
         )
 
-    def test_tool_name_universes_are_stable_and_include_every_core_tool(self) -> None:
-        self.assertLessEqual(set(CORE_TOOL_NAMES), set(KNOWN_HOSTED_TOOL_NAMES))
-        # The compatibility catalogue a hosted launch validates against must
-        # keep the names v5 clients already cached.
-        for name in (
-            "karox.browser.open",
-            "karox.dev_server.start",
-            "karox.task.bootstrap",
-            "karox.orchestrate.plan",
-            "karox.memory.recall",
-        ):
-            self.assertIn(name, KNOWN_HOSTED_TOOL_NAMES)
+    def test_hosted_names_are_exactly_the_tools_core_can_serve(self) -> None:
+        # A launch may only validate names the runtime actually serves; the v5
+        # compatibility names used to pass launch validation and fail at call
+        # time, so they were removed rather than advertised.
+        self.assertEqual(set(KNOWN_HOSTED_TOOL_NAMES), set(CORE_TOOL_NAMES))
         self.assertEqual(DEFAULT_HOSTED_DEADLINE_SECONDS, 600.0)
 
     def test_hosted_tool_runtime_protocol_is_satisfied_by_core_bridge(self) -> None:

@@ -241,85 +241,11 @@ CORE_TOOL_NAMES: dict[str, str] = {
 # The catalogue metadata (descriptions, input schemas, capabilities) lives in
 # :mod:`karox.hosted_tools_runtime`; this is only the name universe used for
 # allowlist validation, kept here to avoid an import cycle through that module.
-HOSTED_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "karox.browser.command",
-        "karox.browser.open",
-        "karox.browser.tabs",
-        "karox.browser.new_tab",
-        "karox.browser.switch_tab",
-        "karox.browser.close_tab",
-        "karox.browser.snapshot",
-        "karox.browser.click",
-        "karox.browser.fill",
-        "karox.browser.fill_credential",
-        "karox.browser.select",
-        "karox.browser.press",
-        "karox.browser.wait_for",
-        "karox.browser.get_text",
-        "karox.browser.screenshot",
-        "karox.browser.console",
-        "karox.browser.network_failures",
-        "karox.browser.network_requests",
-        "karox.browser.request_user_takeover",
-        "karox.browser.resume_after_user_takeover",
-        "karox.browser.close",
-        "karox.dev_server.start",
-        "karox.dev_server.status",
-        "karox.dev_server.logs",
-        "karox.dev_server.stop",
-        "karox.dev_server.restart",
-        "karox.checks.start",
-        "karox.checks.status",
-        "karox.checks.logs",
-        "karox.checks.cancel",
-        "karox.command.start",
-        "karox.command.status",
-        "karox.command.logs",
-        "karox.command.cancel",
-        "karox.runtime.restart",
-        "karox.artifact.get",
-        "karox.artifact.read_image",
-    }
-)
-
-AUTONOMY_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "karox.task.bootstrap",
-        "karox.task.checkpoint",
-        "karox.task.resume",
-        "karox.task.status",
-        "karox.task.workstreams",
-        "karox.repo.inspect",
-        "karox.task.execute_plan",
-        "karox.checks.run_affected",
-        # Read-only KaroX 5 orchestration discovery/planning. These tools expose
-        # secret-free inventory and plans, but never start workers or widen the
-        # session's low-level repository capabilities.
-        "karox.intelligence.list",
-        "karox.orchestrate.recipes",
-        "karox.orchestrate.plan",
-        "karox.orchestrate.start",
-        "karox.orchestrate.status",
-        "karox.orchestrate.control",
-        # Universal memory: user/project/workstream/session scoped local
-        # knowledge, served to every client of this runtime through one API.
-        "karox.memory.remember",
-        "karox.memory.recall",
-        "karox.memory.context",
-        "karox.memory.list",
-        "karox.memory.forget",
-        # Stable ChatGPT Project scope marker and compact continuation capsule.
-        # ChatGPT does not currently send a trusted Project ID over MCP, so the
-        # binding is an explicit project-instruction marker rather than auth.
-        "karox.chatgpt_project.bind",
-        "karox.chatgpt_project.resume",
-    }
-)
-
-KNOWN_HOSTED_TOOL_NAMES: frozenset[str] = (
-    frozenset(CORE_TOOL_NAMES) | HOSTED_EXTRA_TOOL_NAMES | AUTONOMY_TOOL_NAMES
-)
+#: Every hosted tool name must be one the Core runtime can actually serve.
+#: The old v5 compatibility catalogue (browser.*, dev_server.*, task.*,
+#: orchestrate.*, memory.*) was validated at launch but rejected at call
+#: time, so those names are gone rather than advertised and denied.
+KNOWN_HOSTED_TOOL_NAMES: frozenset[str] = frozenset(CORE_TOOL_NAMES)
 
 
 # A hosted call's deadline is also the ceiling on how long checks.run may take,
@@ -462,7 +388,6 @@ class CoreToolBridge:
             risk=self._risk,
             action_decisions=self._action_decisions,
             bypass_mode=self._bypass_mode,
-            checkpoint_factory=self._checkpoint_factory_for(self.repository),
             events=self._events,
             session_repository_validator=self._validate_project_session,
         )
@@ -543,31 +468,6 @@ class CoreToolBridge:
         except (OSError, ValueError):
             discovered = ()
         return tuple(dict.fromkeys((*self._verification_commands, *discovered)))
-
-    def _checkpoint_factory_for(self, repository: Path):
-        """On-demand rollback checkpoint hook for one approved project.
-
-        Hosted callers have no pre-turn TUI checkpoint, so every repository
-        deletion used to fall to CONFIRM and surfaced as an opaque deny. The
-        same Git-aware workspace checkpoint the TUI uses lets the decision
-        engine lower a repository-scoped deletion to GUARDED_AUTO with a real
-        rollback guarantee instead of refusing to act.
-        """
-
-        def create_checkpoint() -> Optional[str]:
-            from .ellipsis_checkpoint import WorkspaceCheckpointStore
-            from .paths import runtime_dir
-
-            checkpoint = WorkspaceCheckpointStore(
-                runtime_dir() / "vnext" / "checkpoints"
-            ).create(
-                repository,
-                session_id=self.session_id,
-                sessions=self.sessions,
-            )
-            return checkpoint.checkpoint_id
-
-        return create_checkpoint
 
     def _runtime_for(self, project_id: str) -> CapabilityCoreRuntime:
         try:

@@ -8,7 +8,7 @@ raises bare ``RuntimeError`` across a tool boundary.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
 
 
 class ComputerUseError(RuntimeError):
@@ -99,8 +99,6 @@ def error_struct(exc: ComputerUseError) -> dict[str, Any]:
     return payload
 
 
-def error_struct_from_mapping(error: Mapping[str, Any]) -> dict[str, Any]:
-    return dict(error)
 
 
 __all__ = [

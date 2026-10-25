@@ -104,8 +104,8 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
     `credential_session.py`, `credential_secret_service.py`.** Paths, redaction,
     child-process identity, port ownership and OS keyring access.
 12. **Prompt and skills — `completion_gate.py`, `skills.py`, `prompts/`,
-    `builtin_skills/`, `skill_notes/`.** Completion proof, skill sessions and
-    recipes.
+    `builtin_skills/`.** Completion proof, skill sessions, recipes and the
+    visual-checker prompt.
 
 The intended dependency direction is downward: UI → CLI → kernel → Core →
 policy/providers/sessions/MCP → platform. A kernel module importing `tui` is a

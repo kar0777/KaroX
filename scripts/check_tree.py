@@ -116,7 +116,7 @@ def main() -> int:
     }
     for name in sorted(engine_present - ENGINE_MODULES):
         problems.append(f"engine module outside the vendored closure: {name}")
-    for name in ("prompts", "builtin_skills", "skill_notes"):
+    for name in ("prompts", "builtin_skills"):
         for path in (PACKAGE / name).rglob("*.pyc"):
             if not path.name.startswith("__init__."):
                 problems.append(f"generated cache in package data: {path}")

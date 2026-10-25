@@ -17,7 +17,6 @@ import os
 import secrets
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -97,11 +96,6 @@ def is_consequential(action: str, payload: Mapping[str, Any]) -> bool:
     return False
 
 
-@dataclass(frozen=True)
-class ApprovalRequest:
-    action: str
-    action_digest: str
-    headline: str
 
 
 class ApprovalStore:
@@ -162,11 +156,6 @@ class ApprovalStore:
             if not entry.get("used") and float(entry.get("expires_at", 0.0)) >= now
         }
 
-    def request(self, action: str, payload: Mapping[str, Any], *, session_id: str) -> ApprovalRequest:
-        digest = action_digest(action, payload)
-        headline = f"{action} {json.dumps(normalize_payload(action, payload), sort_keys=True, default=str)}"
-        del session_id
-        return ApprovalRequest(action=action, action_digest=digest, headline=headline[:400])
 
     def issue(
         self,
@@ -229,7 +218,6 @@ class ApprovalStore:
 __all__ = [
     "CONSEQUENTIAL_ACTIONS",
     "ApprovalRejected",
-    "ApprovalRequest",
     "ApprovalStore",
     "action_digest",
     "is_consequential",

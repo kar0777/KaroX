@@ -26,14 +26,13 @@ _REQUIRED_ENTRY_POINTS = (
     "validate_repo_command",
     "execute_repo_command",
     "execute_tests",
-    "execute_browser_command",
 )
 _DEFAULT_MODULE_GROUP = (
     "karox.workspace_transaction",
     "karox.unified_patch",
-    # Desktop app actions are dispatched from workspace_worker but implemented
-    # separately. Keep them in the same last-known-good generation so desktop
-    # safety fixes never require recycling the persistent bridge.
+    # Desktop app actions are implemented separately from the worker. Keep them
+    # in the same last-known-good generation so desktop safety fixes never
+    # require recycling the persistent bridge.
     "karox.desktop_apps",
     "karox.workspace_worker",
 )

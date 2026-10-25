@@ -76,7 +76,7 @@ def test_data_directories_carry_no_generated_cache() -> None:
     # Runtime imports legitimately create __pycache__ next to modules; the
     # migration mistake to catch is a cache copied into the package data that
     # ships in the wheel.
-    for name in ("prompts", "builtin_skills", "skill_notes"):
+    for name in ("prompts", "builtin_skills"):
         cached = [
             path
             for path in (PACKAGE / name).rglob("*.pyc")

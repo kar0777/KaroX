@@ -34,7 +34,6 @@ from ..core import InvalidCommand, ToolDefinition
 from ..models import Capability
 from .credentials import BrowserCredentialStore
 from .errors import (
-    BROWSER_ERROR,
     CANCELLED,
     PERMISSION_DENIED,
     BrowserCancelled,
@@ -221,24 +220,6 @@ class BrowserToolAdapter:
             result = {"result": result}
         return {"ok": True, "action": action, **result}
 
-    def execute_raising(
-        self,
-        arguments: Mapping[str, Any],
-        deadline_seconds: float,
-        cancel: Optional[CancelToken] = None,
-    ) -> dict[str, Any]:
-        """v5-compatible variant: security/browser failures raise, not report."""
-
-        result = self.execute(arguments, deadline_seconds, cancel)
-        if result.get("ok"):
-            return result
-        kind = str(result.get("error_kind") or BROWSER_ERROR)
-        message = str(result.get("error") or "browser call failed")
-        if kind == CANCELLED:
-            raise BrowserCancelled(message)
-        if kind == PERMISSION_DENIED:
-            raise BrowserSecurityError(message)
-        raise BrowserError(f"{kind}: {message}")
 
     def core_handler(
         self, cancel: Optional[CancelToken] = None
@@ -350,8 +331,7 @@ def execute_browser_command(
     which may be a :class:`BrowserSession`, a :class:`BrowserToolAdapter`, or a
     :class:`BrowserToolRuntime` paired with ``runtime._browser_session_id``.
     Unlike v5, security failures return the structured envelope instead of
-    raising, so the model sees the typed refusal and can recover; callers that
-    need the raising behavior use :meth:`BrowserToolAdapter.execute_raising`.
+    raising, so the model sees the typed refusal and can recover.
     """
 
     action = arguments.get("action")

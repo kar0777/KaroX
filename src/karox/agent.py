@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from dataclasses import asdict, dataclass, field
@@ -76,9 +75,6 @@ REQUIRED_TOOLS: frozenset[str] = frozenset(
 # for the verification chain. ``repo.edit_file`` writes through the same audited
 # atomic writer as ``repo.write_file``, so an exact-match edit is just as
 # durable a change as a whole-file rewrite and must not be treated as narrative.
-MUTATION_TOOLS: frozenset[str] = frozenset(
-    {"repo.write_file", "repo.edit_file", "repo.apply_patch"}
-)
 
 # Core tools whose arguments carry a complete replacement of one named target,
 # mapped to the argument key that names it. A later call with the same tool and
@@ -92,25 +88,10 @@ MUTATION_TOOLS: frozenset[str] = frozenset(
 # who asked for a check is exactly what a reviewer needs when that check is the
 # reason a run was allowed to finish.
 HARNESS_ORIGIN = "harness"
-HARNESS_REQUESTED_BY = "harness_final"
 
 # Tools whose successful result is something the model actually looked at, as
 # opposed to something it asserted. A question about the repository is answered
 # rather than changed, so these are what an answer is allowed to rest on.
-INSPECTION_TOOLS: frozenset[str] = frozenset(
-    {
-        "repo.read_file",
-        "repo.read_lines",
-        "repo.inspect",
-        "repo.search",
-        "repo.list_files",
-        "disk.scan",
-        "disk.plan_cleanup",
-        "git.status",
-        "git.diff",
-        "git.log",
-    }
-)
 
 # Repository-content inspections that can legitimately diagnose a failed check
 # but must not form an unbounded repair loop. Git proof reads are intentionally
@@ -145,35 +126,8 @@ def _bounded_failure_summary(output: str) -> str:
 
 
 
-#: When a task's own words say the work is a three.js scene. Deliberately the
-#: plan's rule rather than a cleverer one: a false positive costs the notes'
-#: tokens for one run, while a false negative ships an unlit scene that every
-#: other gate in this product passes.
-_THREE_DIMENSIONAL_TASK = re.compile(r"three(\.js)?", re.IGNORECASE)
-DOMAIN_NOTES_HEADING = "## Domain notes"
 
 
-def domain_notes(task: object) -> str:
-    """The domain notes this task calls for, or "" when it calls for none.
-
-    Read from the installed package so the notes travel with the wheel; a
-    missing file is not an error, because a task that needs no notes is the
-    common case and an installation without the data directory still runs.
-    """
-    if not isinstance(task, str) or _THREE_DIMENSIONAL_TASK.search(task) is None:
-        return ""
-    try:
-        from importlib import resources
-
-        note = resources.files("karox.skill_notes").joinpath("threejs_scene.md").read_text(
-            encoding="utf-8"
-        )
-    except (ModuleNotFoundError, FileNotFoundError, OSError):
-        return ""
-    text = note.strip()
-    if not text:
-        return ""
-    return f"\n\n{DOMAIN_NOTES_HEADING}\n{text}"
 
 
 
@@ -373,8 +327,6 @@ Progress notes: before the first tool batch and when moving to a new phase, writ
 #: write to two megabytes, so this only stops a pathological run from copying a
 #: whole tree; a file over the limit is skipped rather than truncated, because a
 #: truncated artifact is not the state that passed.
-_MAX_SNAPSHOT_FILES = 50
-_MAX_SNAPSHOT_BYTES = 2_000_000
 
 # A native coding agent must not spend a second provider turn asking for
 # repository evidence when the user clearly did not ask about the repository at
@@ -399,12 +351,8 @@ def _is_small_talk_task(task: str) -> bool:
     return any(pattern.fullmatch(normalized) is not None for pattern in _SMALL_TALK_PATTERNS)
 
 
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 
-def _strict_json_loads(value: str) -> Any:
-    return json.loads(value, parse_constant=_reject_json_constant)
 
 
 

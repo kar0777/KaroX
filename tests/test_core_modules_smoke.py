@@ -92,7 +92,6 @@ def test_hot_worker_group_loads_and_validates_entry_points() -> None:
         "validate_repo_command",
         "execute_repo_command",
         "execute_tests",
-        "execute_browser_command",
     ):
         assert callable(getattr(module, name))
     assert hot_worker_supervisor().status()["generation"] >= 1
@@ -498,7 +497,3 @@ def test_routing_falls_back_and_enforces_budgets(tmp_path: Path) -> None:
 def test_workspace_worker_rejects_unknown_actions() -> None:
     with pytest.raises(workspace_worker.InvalidCommand):
         workspace_worker.validate_repo_command({"action": "delete-everything"})
-    with pytest.raises(workspace_worker.InvalidCommand):
-        workspace_worker.execute_browser_command(
-            None, {"action": "open", "payload": {}}, 1.0
-        )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from .action_policy import (
     ActionConfirmationRequired,
@@ -30,8 +30,6 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
         self,
         *args: Any,
         action_decisions: ActionDecisionEngine | None = None,
-        rollback_checkpoint_id: str | None = None,
-        checkpoint_factory: Callable[[], Optional[str]] | None = None,
         bypass_mode: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -44,8 +42,6 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
                     "action decision engine and risk engine must share one ledger"
                 )
         self._action_decisions = action_decisions
-        self._rollback_checkpoint_id = rollback_checkpoint_id
-        self._checkpoint_factory = checkpoint_factory
         self._bypass_mode = bool(bypass_mode)
         super().__init__(*args, **kwargs)
 
@@ -73,9 +69,9 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
             # inherit the durable session task. This keeps scoped authority
             # current without putting user intent into a tool payload.
             user_intent = command.user_intent or record.task
-            # Checkpoints remain useful evidence/rollback support, but they no
-            # longer silently convert source deletion into ordinary autonomy.
-            reversible_by_checkpoint = bool(self._rollback_checkpoint_id)
+            # Checkpoints remain useful evidence/rollback support, but they
+            # never silently convert source deletion into ordinary autonomy.
+            reversible_by_checkpoint = False
         except Exception:
             user_intent = ""
             reversible_by_checkpoint = False
@@ -259,69 +255,5 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
         if tracked.returncode != 0 or tracked.stdout.strip():
             return False
         return True
-
-    def _auto_guard_with_checkpoint(
-        self,
-        command: CoreCommand,
-        stop: ActionConfirmationRequired,
-        user_intent: str,
-    ):
-        """Reversibility adapter: dissolve a deletion CONFIRM with a checkpoint.
-
-        When the only reason a repository-scoped deletion needs confirmation is
-        that no rollback guarantee exists yet, the runtime creates one on demand
-        and lets the decision engine re-evaluate honestly. Safety increases
-        autonomy instead of prompting. System, external, user-data and
-        out-of-repository boundaries are never widened: the engine re-decides
-        with the same rules and only a WORKSPACE deletion backed by a real
-        checkpoint becomes GUARDED_AUTO.
-        """
-
-        engine = self._action_decisions
-        factory = self._checkpoint_factory
-        if engine is None or factory is None:
-            return None
-        if self._rollback_checkpoint_id:
-            # The current turn already has a checkpoint; the stop had a
-            # different cause that a second checkpoint cannot dissolve.
-            return None
-        decision = stop.decision
-        if "delete_not_scoped_by_user" not in decision.reasons:
-            return None
-        try:
-            checkpoint_id = factory()
-        except Exception:
-            checkpoint_id = None
-        if not isinstance(checkpoint_id, str) or not checkpoint_id:
-            return None
-        self._rollback_checkpoint_id = checkpoint_id
-        guarded = action_for_command(
-            command,
-            repository=self.repository,
-            reversible_by_checkpoint=True,
-        )
-        try:
-            recovered = engine.authorize(
-                guarded,
-                user_intent=user_intent,
-                confirmation_token=command.confirmation_token,
-            )
-        except (ActionConfirmationRequired, ActionHardBlocked):
-            return None
-        self._audit(
-            "core.command.auto_guarded_checkpoint",
-            {
-                "session_id": command.session_id,
-                "origin": command.origin.key,
-                "command": command.name,
-                "correlation_id": command.correlation_id,
-                "rollback_checkpoint_id": checkpoint_id,
-                "disposition": recovered.disposition.value,
-                "consequence": recovered.consequence.value,
-                "reasons": list(recovered.reasons),
-            },
-        )
-        return recovered
-
 
 __all__ = ["CapabilityCoreRuntime"]

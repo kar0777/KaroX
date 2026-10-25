@@ -108,7 +108,7 @@ clickable.
    the stream never breaks an older screen.
 4. Text deltas stream into the answer card behind a caret; tool starts create
    one-line cards, categorised by canonical tool name (`read`, `edit`, `test`,
-   `mcp`, `skill`, `plan`, `web`, `inspect`, `subagent`), that are updated when
+   `mcp`, `skill`, `plan`, `web`, `inspect`), that are updated when
    the matching `tool_finished` arrives; `test_started`/`test_finished` drive
    the live verification tally; `step_finished` usage drives the token counter
    and the context-occupancy note; `phase_changed` and `compacted` (a context
@@ -129,7 +129,7 @@ break a screen.
 `app.RunState` holds the live facts of the current or latest run — state word
 (`idle | running | stopping | done | failed | stopped`), step, phase, elapsed,
 tokens, context occupancy, and per-category tool counters (reads, edits,
-checks passed/failed, MCP calls, skill loads, subagent calls, inspections,
+checks passed/failed, MCP calls, skill loads, inspections,
 edited paths). Every field comes from a typed stream event or the final
 report; nothing is inferred from prose.
 
@@ -137,7 +137,7 @@ report; nothing is inferred from prose.
 record behind F5 `/session`: task and turn history, the model's plan
 (todo/doing/done), rollback checkpoints, verification checks and the verified
 snapshot step, provider usage and costs, MCP servers selected for the session,
-loaded skills and subagent jobs. Sections whose record list is empty say
+loaded skills. Sections whose record list is empty say
 "none" instead of inventing content.
 
 ## Event fields

@@ -236,24 +236,6 @@ def _screenshot_in_browser(page: pathlib.Path) -> Optional[bytes]:
     return payload
 
 
-def screenshot(page: pathlib.Path) -> bytes | None:
-    """Render one page and return the PNG a viewer would see.
-
-    The model can look at its own work -- the endpoint this was built for answers
-    correctly about an image -- and the difference is measurable: the run that
-    looked at its page produced striped fish with eyes, the run that only read a
-    verdict produced flat orange ones. This is the same launch the checks use, so
-    the picture is exactly the frame the verdict was measured on.
-    """
-
-    from .browser_bootstrap import playwright_chromium_status
-
-    if not playwright_chromium_status().ready:
-        return None
-    try:
-        return _run_in_browser_thread(lambda: _screenshot_in_browser(page))
-    except Exception:
-        return None
 
 # The metric runs in the browser: it decodes the screenshot it is handed and
 # reports local structure, tone count and how much of the *drawing surface* still

@@ -16,6 +16,7 @@ from typing import Any, List
 
 import pytest
 
+from karox.core import InvalidCommand
 from karox.models import AccessProfile
 from karox.providers import ModelResponse
 from karox.risk_mapping import risk_kind_for
@@ -229,46 +230,55 @@ class _HostedRuntime:
         self.policy.set_grants(self.hosted_origin, grants)
 
 
-def test_workspace_worker_browser_command_fails_closed_and_attaches_lazily(
+def _attach_browser(runtime: Any) -> None:
+    """The one attach step the live entry point expects from its host."""
+    from karox.browser import BrowserAccessPolicy, BrowserToolRuntime
+    from karox.paths import runtime_dir
+
+    def guard(capability: Any) -> None:
+        runtime.policy.require(runtime.hosted_origin, capability)
+
+    runtime._browser = BrowserToolRuntime(
+        BrowserAccessPolicy(session_id="ad-hoc"),
+        browser_root=runtime_dir() / "vnext" / "browser",
+        capability_guard=guard,
+    )
+    runtime._browser_session_id = "hosted-session-1"
+
+
+def test_browser_command_entry_point_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The hosted browser.command entry point runs the real browser engine
-    behind the runtime's capability policy, attaching lazily and failing
-    closed when the runtime has no policy."""
+    """The browser.command entry point refuses a runtime it cannot guard."""
 
-    from karox import workspace_worker
-    from karox.browser import BrowserToolRuntime
+    from karox.browser.tools import execute_browser_command
 
     monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
 
     class Bare:
         session_id = "bare"
 
-    with pytest.raises(workspace_worker.InvalidCommand):
-        workspace_worker.execute_browser_command(
-            Bare(), {"action": "tabs", "payload": {}}, 1.0
-        )
+    with pytest.raises(InvalidCommand):
+        execute_browser_command(Bare(), {"action": "tabs", "payload": {}}, 1.0)
 
     denied = _HostedRuntime(set())
-    refused = workspace_worker.execute_browser_command(
+    _attach_browser(denied)
+    refused = execute_browser_command(
         denied, {"action": "tabs", "payload": {}}, 1.0
     )
     # The guard refusal is a structured typed envelope, and the browser was
     # never launched.
     assert refused["ok"] is False
     assert refused["error_kind"] == "permission_denied"
-    # The lazy runtime still attached itself for this hosted session.
-    assert isinstance(denied._browser, BrowserToolRuntime)
-    assert denied._browser_session_id == "hosted-session-1"
     denied._browser.close_all()
 
 
-def test_workspace_worker_browser_command_opens_a_real_page(
+def test_browser_command_entry_point_opens_a_real_page(
     fixture_site: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A granted hosted runtime drives a real Chromium through the worker."""
+    """A granted runtime drives a real Chromium through the live entry point."""
 
-    from karox import workspace_worker
+    from karox.browser.tools import execute_browser_command
     from karox.browser_bootstrap import playwright_chromium_status
     from karox.models import Capability
 
@@ -279,12 +289,13 @@ def test_workspace_worker_browser_command_opens_a_real_page(
     allowed = _HostedRuntime(
         {Capability.BROWSER_READ, Capability.BROWSER_INPUT, Capability.REPO_READ}
     )
+    _attach_browser(allowed)
     try:
-        opened = workspace_worker.execute_browser_command(
+        opened = execute_browser_command(
             allowed, {"action": "open", "payload": {"url": fixture_site}}, 60.0
         )
         assert opened["ok"] is True
-        text = workspace_worker.execute_browser_command(
+        text = execute_browser_command(
             allowed, {"action": "get_text", "payload": {"selector": "#intro"}}, 30.0
         )
         assert "Welcome to the local fixture site." in text["text"]

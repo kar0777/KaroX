@@ -8,7 +8,8 @@ the real gaps before the release gates were run.
 ## Method
 
 - OLD: `D:\проекты\KaroX-v5` — 280 Python modules, ~165,800 lines.
-- NEW: `D:\проекты\karox-release` — 98 modules, ~66,400 lines.
+- NEW: the race winner tree (`lab/kernel-duel-20261025/b/integrate`) —
+  128 modules, ~68,800 lines at 6.0.0a3.
 - Eight parallel auditors covered providers/API, MCP client, hosted bridge,
   kernel features, CLI/TUI, policy/security, packaging/dependencies and tests.
 - Every claim below was checked against source or a runnable test; the first
@@ -30,10 +31,10 @@ the real gaps before the release gates were run.
 | Project context, memory, artifacts, images | **Restored** | `project_context`, `project_map`, `map_service`, `memory`, `mode_artifacts`, `image_attachments` are wired into `agent run`; visual checker is injected when vision and Chromium are available. |
 | Effort auto | **Fixed regression** | `--effort-level auto` now uses `effort_signals` and `recommend_effort`; previously it always resolved to medium. |
 | CLI daily surface | **Improved** | `doctor`, `status`, `model discover/map/repair-selection`, `credential setup`, `paths --json`, short forms (`karox models`, bare `karox model`) and the full `bridge` group. |
-| TUI | **Parity + improved** | The release `tui/` is the v5 `tui2` package byte-for-byte, plus `/doctor`, `/bridge`, safer MCP defaults and authenticated remote-MCP fields. |
+| TUI | **Parity + improved** | The rebuilt `tui/` package (app, widgets, modals, backend, prefs, i18n, protocol) plus `/doctor`, `/bridge`, safer MCP defaults and authenticated remote-MCP fields. |
 | Security boundary | **Stronger** | System folders and drive roots are refused as workspaces; instruction symlinks outside the repository are refused; discovered checks are not evidence without approval; Bypass requires an elevated profile. Core policy/risk/lease code is unchanged. |
 | Packaging | **Improved** | Declared deps now include `starlette`, `uvicorn` and `psutil`; mypy has an explicit scope; `check_tree` counts 98 modules and no legacy surface. |
-| Tests | **Restored** | 22 → 485 tests: provider transports/registry/pricing, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, model discovery, core modules, TUI and tree gates. |
+| Tests | **Restored + extended** | 22 → 745 tests: provider transports/registry/pricing, engine kernel and its ports, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, browser/desktop units, model discovery, core modules, TUI and tree gates. |
 
 ## Restored or improved after the audit
 
@@ -86,10 +87,10 @@ it does not carry laboratory experiments merely because they existed.
 
 ## Verification evidence
 
-Commands run from `D:\проекты\karox-release`:
+Commands run from the winner tree:
 
 ```text
-python -m pytest -q                 # 485 collected, all pass (1 platform skip)
+python -m pytest -q                 # 745 collected (MCP files serial on Windows)
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
 python scripts/check_tree.py        # ok · 98 modules · ~66.4k lines

@@ -6,7 +6,6 @@ import hashlib
 import os
 import re
 import stat
-import time
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -14,9 +13,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 import yaml
 
-from .models import Capability, Origin, OriginKind
+from .models import Capability
 from .paths import config_dir
-from .policy import CapabilityPolicy
 
 
 class SkillError(RuntimeError):
@@ -267,36 +265,6 @@ def _catalog_text(
     return "\n".join(lines)
 
 
-def skill_catalog_prompt(
-    entries: Sequence[SkillMetadata],
-    *,
-    budget_tokens: int,
-    header: str = CATALOG_HEADER,
-) -> str:
-    """The catalogue section of the v7 contract: name, description, and when.
-
-    Only names and one-liners: the recipe text is loaded through ``skill.load``
-    when a task actually matches, which is the whole point of the catalogue.
-    A catalogue that does not fit its budget drops the last entries -- the
-    lowest-precedence ones -- and says how many it dropped, because a silent
-    truncation would leave the model unable to tell a missing skill from an
-    unlisted one.
-    """
-
-    ordered = sorted(
-        entries,
-        key=lambda item: (
-            _CATALOG_RANKS.get(item.source_kind, _CATALOG_DEFAULT_RANK),
-            item.name,
-        ),
-    )
-    kept = list(ordered)
-    while kept:
-        text = _catalog_text(header, kept, len(ordered) - len(kept))
-        if len(text) // CATALOG_TOKEN_CHARS <= budget_tokens:
-            return text
-        kept.pop()
-    return _catalog_text(header, kept, len(ordered))
 
 
 def _validate_name(value: Any) -> str:
@@ -976,104 +944,10 @@ class SkillCatalog:
             raise SkillError("Skill path is outside its source directory")
 
 
-def skill_selection(
-    metadata: SkillMetadata,
-    decisions: Optional[Mapping[Capability, SkillPermission]] = None,
-    *,
-    previous: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    if metadata.content_sha256 is None:
-        raise SkillError("Skill content must be loaded before permissions are selected")
-    decisions = decisions or {}
-    requested = set(metadata.requested_capabilities)
-    unexpected = set(decisions).difference(requested)
-    if unexpected:
-        raise SkillError(
-            "cannot decide undeclared Skill capabilities: "
-            + ", ".join(sorted(item.value for item in unexpected))
-        )
-    previous_permissions = previous.get("permissions", {}) if previous else {}
-    if not isinstance(previous_permissions, dict):
-        raise SkillError("stored Skill permissions are invalid")
-    permissions: Dict[str, str] = {}
-    for capability in metadata.requested_capabilities:
-        if capability in decisions:
-            decision = decisions[capability]
-            if not isinstance(decision, SkillPermission):
-                raise SkillError("Skill permission decisions must use allow, ask, or deny")
-        elif capability.value in previous_permissions:
-            try:
-                decision = SkillPermission(previous_permissions[capability.value])
-            except (TypeError, ValueError) as exc:
-                raise SkillError("stored Skill permission decision is invalid") from exc
-        else:
-            decision = SkillPermission.ASK
-        permissions[capability.value] = decision.value
-    return {
-        "name": metadata.name,
-        "version": metadata.version,
-        "identity": metadata.identity,
-        "source_kind": metadata.source_kind,
-        "source_root": str(metadata.source_root),
-        "directory": str(metadata.directory),
-        "metadata_sha256": metadata.metadata_sha256,
-        "content_sha256": metadata.content_sha256,
-        "permissions": permissions,
-        "selected_at": time.time(),
-    }
 
 
-def validate_selection(
-    metadata: SkillMetadata, selection: Mapping[str, Any]
-) -> Dict[Capability, SkillPermission]:
-    expected = {
-        "name": metadata.name,
-        "version": metadata.version,
-        "identity": metadata.identity,
-        "source_kind": metadata.source_kind,
-        "source_root": str(metadata.source_root),
-        "directory": str(metadata.directory),
-        "metadata_sha256": metadata.metadata_sha256,
-        "content_sha256": metadata.content_sha256,
-    }
-    for key, value in expected.items():
-        if selection.get(key) != value:
-            raise SkillError(
-                f"stored Skill selection no longer matches discovered {metadata.name}: {key}"
-            )
-    raw_permissions = selection.get("permissions")
-    if not isinstance(raw_permissions, dict):
-        raise SkillError("stored Skill permissions are invalid")
-    declared = {item.value for item in metadata.requested_capabilities}
-    if set(raw_permissions) != declared:
-        raise SkillError("stored Skill permissions do not match declared capabilities")
-    result: Dict[Capability, SkillPermission] = {}
-    for name, raw in raw_permissions.items():
-        try:
-            result[Capability(name)] = SkillPermission(raw)
-        except (TypeError, ValueError) as exc:
-            raise SkillError("stored Skill permission decision is invalid") from exc
-    return result
 
 
-def configure_skill_policy(
-    policy: CapabilityPolicy,
-    metadata: SkillMetadata,
-    selection: Mapping[str, Any],
-    *,
-    parent: Optional[str] = None,
-) -> Origin:
-    decisions = validate_selection(metadata, selection)
-    origin = Origin(OriginKind.SKILL, metadata.identity, parent=parent)
-    policy.set_grants(
-        origin,
-        [item for item, decision in decisions.items() if decision is SkillPermission.ALLOW],
-    )
-    policy.set_denies(
-        origin,
-        [item for item, decision in decisions.items() if decision is SkillPermission.DENY],
-    )
-    return origin
 
 
 def skill_system_prompt(content: SkillContent) -> str:

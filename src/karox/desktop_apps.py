@@ -23,18 +23,11 @@ from .computer_use.errors import (
     DesktopSecurityError,
     InvalidActionError,
 )
-from .core import CoreError, InvalidCommand
+from .core import InvalidCommand
 from .models import AccessProfile, Capability
 from .policy import PolicyDenied
 
 
-class DesktopAppError(CoreError):
-    """The selected native application could not be used safely.
-
-    A guarded runtime failure in the CoreError family, kept so hosted/MCP
-    transports serialize the real failure instead of collapsing a safe Win32
-    refusal into an opaque error.
-    """
 
 
 class DesktopAppSecurityError(PermissionError):
@@ -370,7 +363,6 @@ def execute_desktop_app_action(
 
 
 __all__ = [
-    "DesktopAppError",
     "DesktopAppSecurityError",
     "DesktopAppsController",
     "execute_desktop_app_action",

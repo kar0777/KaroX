@@ -153,17 +153,6 @@ class BrowserCredentialStore:
         safe_password = self._value(password, "password")
         return reference, self._encode(safe_username, safe_password)
 
-    def validate_bundle(
-        self, name: str, *, username: str, password: str
-    ) -> dict[str, str]:
-        """Validate a bundle and return only metadata without touching keyring."""
-
-        reference, payload = self._prepare(name, username=username, password=password)
-        return {
-            "reference": str(reference),
-            "fingerprint": self._fingerprint(payload),
-            "backend": "os-keyring",
-        }
 
     def set(self, name: str, *, username: str, password: str) -> dict[str, str]:
         """Store one login bundle and return only secret-free metadata."""

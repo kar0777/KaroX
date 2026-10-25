@@ -10,7 +10,8 @@ Source, tests and the release gates are authoritative when prose disagrees.
 
 ## Start every task
 
-1. Confirm you are in `D:\проекты\karox-release`, not the v5 tree at
+1. Confirm you are in the winner tree
+   `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\integrate`, not the v5 tree at
    `D:\проекты\KaroX-v5`.
 2. Read `docs/ARCHITECTURE.md` before moving code between layers.
 3. Preserve the working tree. Never reset, clean, or checkout unrelated work.
@@ -24,8 +25,8 @@ Source, tests and the release gates are authoritative when prose disagrees.
   `bridge_*` / `hosted_core.py` group are the release surface written for this
   line. The remaining modules are the curated agent kernel copied from v5 (see
   `docs/MIGRATION.md`).
-- `src/karox/prompts/`, `builtin_skills/`, `skill_notes/` — runtime data read
-  from the installed package; they must travel in the wheel.
+- `src/karox/prompts/`, `builtin_skills/` — runtime data read from the
+  installed package; it must travel in the wheel.
 - `docs/` — current architecture and operator documentation. If a document
   disagrees with code, fix the document in the same change.
 - `tests/` — release contracts. Tests must not import the parent v5 package:

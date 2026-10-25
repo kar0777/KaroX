@@ -14,14 +14,43 @@ import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import completion_gate
-from .agent import (
-    HARNESS_REQUESTED_BY,
-    INSPECTION_TOOLS,
-    MUTATION_TOOLS,
-    _strict_json_loads,
-)
 from .security import redact
 from .sessions import SessionRecord
+
+#: Tools whose successful, non-no-op result counts as a real repository change
+#: for the verification chain.
+MUTATION_TOOLS: frozenset[str] = frozenset(
+    {"repo.write_file", "repo.edit_file", "repo.apply_patch"}
+)
+
+#: Who asked Core for a call. A model's own call carries no marker; the
+#: harness's finishing checks do, so a reviewer can tell what proved a run.
+HARNESS_REQUESTED_BY = "harness_final"
+
+#: Tools whose successful result is something the model actually looked at,
+#: as opposed to something it asserted.
+INSPECTION_TOOLS: frozenset[str] = frozenset(
+    {
+        "repo.read_file",
+        "repo.read_lines",
+        "repo.inspect",
+        "repo.search",
+        "repo.list_files",
+        "disk.scan",
+        "disk.plan_cleanup",
+        "git.status",
+        "git.diff",
+        "git.log",
+    }
+)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
+def _strict_json_loads(value: str) -> Any:
+    return json.loads(value, parse_constant=_reject_json_constant)
 
 
 def safe_arguments(raw: str) -> tuple[str, bool]:

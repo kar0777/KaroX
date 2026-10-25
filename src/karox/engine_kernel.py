@@ -62,7 +62,6 @@ from . import completion_gate  # noqa: E402
 from . import session_analysis  # noqa: E402
 from .agent import (  # noqa: E402
     HARNESS_ORIGIN,
-    HARNESS_REQUESTED_BY,
     REQUIRED_TOOLS,
     SYSTEM_PROMPT,
     AgentError,
@@ -77,6 +76,7 @@ from .agent import (  # noqa: E402
     provider_alias,
 )
 from .agent_modes import normalize_mode  # noqa: E402
+from .session_analysis import HARNESS_REQUESTED_BY  # noqa: E402
 from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
 from .models import CoreCommand, CoreResult, EvidenceRecord, Origin  # noqa: E402

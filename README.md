@@ -20,7 +20,7 @@ left behind.
 ## Install
 
 ```text
-cd D:\проекты\karox-release
+cd D:\проекты\KaroX-v5\lab\kernel-duel-20261025\integrate
 python -m venv .venv
 . .venv/Scripts/activate        # Windows
 python -m pip install -e ".[dev]"

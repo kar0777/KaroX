@@ -3047,7 +3047,6 @@ class BrowserSession:
     # Wrap every action exactly once, after the class body: keeps the methods
     # readable while guaranteeing Playwright never crosses threads, about:blank
     # is healed before page work, and cancellation brackets every call.
-    _ACTION_METHODS = None
 
 
 for _action_name in sorted(ACTION_CAPABILITIES):

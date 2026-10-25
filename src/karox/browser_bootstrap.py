@@ -35,15 +35,6 @@ class BrowserBootstrapStatus:
     executable: Optional[str] = None
     error: Optional[str] = None
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "ready": self.ready,
-            "package_available": self.package_available,
-            "chromium_available": self.chromium_available,
-            "installed_now": self.installed_now,
-            "executable": self.executable,
-            "error": self.error,
-        }
 
 
 def _playwright_package_available() -> bool:
