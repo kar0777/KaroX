@@ -107,6 +107,8 @@ def test_python_line_count_stays_bounded() -> None:
     # the hosted MCP bridge. The seed race commit vendored the karo-core
     # engine (~5.6k lines, src/karox/engine) and B1 added its typed-tool
     # adapter (engine_kernel.py), which is deliberate product surface, so the
-    # bound moved to 80k. Raise it deliberately, never to make a stray copy
-    # pass.
-    assert lines < 80_000
+    # bound moved to 80k. B4 (browser engine, ~6.5k) and B5 (computer use,
+    # ~6.2k) are the same kind of deliberate merged surface, so the merged
+    # integration moved it once more to 90k. Raise it deliberately, never to
+    # make a stray copy pass.
+    assert lines < 90_000

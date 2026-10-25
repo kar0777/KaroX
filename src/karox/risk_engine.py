@@ -146,6 +146,8 @@ MEDIUM_KINDS: frozenset[str] = frozenset(
         "process.run_dev",
         "devserver.start",
         "browser.input",
+        "desktop.input",
+        "desktop.launch",
         "git.commit",
         "mcp.call",
     }
@@ -164,6 +166,7 @@ LOW_KINDS: frozenset[str] = frozenset(
         "browser.read",
         "browser.snapshot",
         "browser.screenshot",
+        "desktop.read",
     }
 )
 

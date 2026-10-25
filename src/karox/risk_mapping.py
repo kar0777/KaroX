@@ -62,6 +62,25 @@ COMMAND_RISK_KINDS: Mapping[str, str] = {
     "bridge.diagnostics": "diagnostics.read",
     "lsp.diagnostics": "diagnostics.read",
     "browser.command": "browser.input",
+    "desktop.status": "desktop.read",
+    "desktop.list_windows": "desktop.read",
+    "desktop.list_apps": "desktop.read",
+    "desktop.request_approval": "desktop.read",
+    "desktop.attach": "desktop.read",
+    "desktop.detach": "desktop.read",
+    "desktop.capture": "desktop.read",
+    "desktop.inspect_ui": "desktop.read",
+    "desktop.type_text": "desktop.input",
+    "desktop.press_key": "desktop.input",
+    "desktop.click": "desktop.input",
+    "desktop.scroll": "desktop.input",
+    # Launch-class desktop actions reach outside the repository, but their
+    # one-shot human approval lives inside the desktop adapter (digest-bound,
+    # session-bound, single-use); the risk gate stays medium so a redeemed
+    # approval is not double-blocked here.
+    "desktop.launch_app": "desktop.launch",
+    "desktop.open_terminal": "desktop.launch",
+    "desktop.show_window": "desktop.launch",
     "artifact.get": "repo.read",
     "artifact.read_image": "repo.read",
 }
@@ -102,6 +121,21 @@ BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "request_user_takeover": "browser.read",
     "resume_after_user_takeover": "browser.read",
     "close": "browser.input",
+    # Read-shaped actions that used to fall back to browser.input; explicit
+    # now so adding an action can never silently change its risk grade.
+    "back": "browser.input",
+    "forward": "browser.input",
+    "reload": "browser.input",
+    "clear": "browser.input",
+    "dblclick": "browser.input",
+    "fill_credential": "browser.input",
+    "focus": "browser.input",
+    "set_checked": "browser.input",
+    "type": "browser.input",
+    "cookies": "browser.read",
+    "page_info": "browser.read",
+    "recover": "browser.read",
+    "reconnect": "browser.input",
     # Stable hot release actions. The publish action carries its own exact,
     # one-shot chat approval and remote reconciliation; mapping it explicitly
     # prevents a future unknown-action fallback from silently changing risk.

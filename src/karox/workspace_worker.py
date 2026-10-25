@@ -485,11 +485,14 @@ def execute_browser_command(
 ) -> dict[str, Any]:
     """Dispatch the stable browser/desktop command entry point.
 
-    The release ships no browser engine. ``app.*`` actions are forwarded to
-    :mod:`karox.desktop_apps`, which is a typed refusal placeholder in this
-    release; every other action is refused here. Both paths keep the worker's
-    ``InvalidCommand`` contract instead of failing with an AttributeError on a
-    session that does not exist.
+    ``app.*`` actions forward to :mod:`karox.desktop_apps`, the real hosted
+    computer-use facade. Every other action runs on the browser engine
+    (:func:`karox.browser.tools.execute_browser_command`) through the
+    session's lazily attached ``BrowserToolRuntime`` -- loopback-only and
+    headless by default, every action re-checked against the runtime's
+    capability policy. Both paths keep the worker's ``InvalidCommand``
+    contract instead of failing with an AttributeError on a session that
+    does not exist.
     """
     action = arguments.get("action")
     payload = arguments.get("payload", {})
@@ -504,7 +507,45 @@ def execute_browser_command(
             "action": action,
             **execute_desktop_app_action(runtime, action, payload, deadline_seconds),
         }
-    raise InvalidCommand(
-        "browser.command is not available in this release; only app.* desktop "
-        "actions are supported"
+    _attach_browser_runtime(runtime)
+    from .browser.tools import execute_browser_command as run_browser_command
+
+    return dict(run_browser_command(runtime, arguments, deadline_seconds))
+
+
+def _attach_browser_runtime(runtime: Any) -> None:
+    """Lazily attach one loopback ``BrowserToolRuntime`` to a hosted runtime.
+
+    Nothing is launched here: the runtime only builds a session when the
+    first browser action actually arrives, and the capability guard routes
+    every action (and any external navigation) through the same policy the
+    native agent path uses. A runtime without a policy and origin fails
+    closed rather than running unguarded.
+    """
+
+    if getattr(runtime, "_browser", None) is not None:
+        return
+    policy = getattr(runtime, "policy", None)
+    origin = getattr(runtime, "hosted_origin", None)
+    if policy is None or origin is None:
+        raise InvalidCommand(
+            "browser actions require a runtime with a capability policy and origin"
+        )
+    from .browser import BrowserAccessPolicy, BrowserToolRuntime
+    from .paths import runtime_dir
+
+    def guard(capability: Any) -> None:
+        policy.require(origin, capability)
+
+    browser = BrowserToolRuntime(
+        BrowserAccessPolicy(session_id="ad-hoc"),
+        browser_root=runtime_dir() / "vnext" / "browser",
+        capability_guard=guard,
     )
+    session_id = str(getattr(runtime, "session_id", "") or "hosted")
+    cleaned = "".join(
+        character if character.isalnum() or character in "._-" else "-"
+        for character in session_id
+    )[:64]
+    runtime._browser = browser
+    runtime._browser_session_id = cleaned or "hosted"

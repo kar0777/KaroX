@@ -15,7 +15,24 @@
   `engine` identity block so the executing loop is provable. The v5
   `AgentKernel` remains available behind `--legacy-loop` and is unchanged.
 - The line-count guard rose from 70k to 80k: the engine vendoring seeded at
-  4d8d5d9 already put the tree at ~74.8k against the old bound.
+  4d8d5d9 already put the tree at ~74.8k against the old bound. The merged
+  browser (~6.5k) and computer-use (~6.2k) surfaces then moved it to 90k; the
+  merged tree is ~87.9k.
+- The default engine agent run (and the TUI backend, which spawns it) now
+  registers the browser and desktop surface tools next to the built-in ones
+  through the new `karox.engine_tools` wiring: `browser.command` (loopback-only,
+  headless, no downloads by default; external navigation still needs the
+  network capability) is advertised to write-profile sessions, and the 15
+  `desktop.*` tools are advertised to elevated sessions only. Every call flows
+  through the same capability policy, Smart-Stop risk gate and audit trail as
+  the built-in tools; `CoreRuntime.register_tool` is the construction-time
+  registration seam. The risk vocabulary gained explicit `desktop.read` /
+  `desktop.input` / `desktop.launch` kinds and explicit grades for the 13
+  previously fallback-graded browser actions.
+- `workspace_worker.execute_browser_command` (the hosted path) now runs the
+  real browser engine behind the runtime's capability policy through a lazily
+  attached loopback `BrowserToolRuntime`, instead of refusing every non-`app.*`
+  action; `app.*` still forwards to the desktop facade.
 
 ### Added
 

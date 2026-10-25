@@ -385,13 +385,25 @@ def _agent_grants(profile: AccessProfile, mode: str) -> set[Capability]:
         Capability.DIAGNOSTICS_READ,
         Capability.MCP_CALL,
         Capability.CODE_FETCH,
+        # Loopback browser control travels with the write tier: the browser
+        # runtime's own policy is localhost-only and headless by default, and
+        # leaving the machine still needs Capability.NETWORK on top.
+        Capability.BROWSER_READ,
+        Capability.BROWSER_INPUT,
     }
     if profile == AccessProfile.ELEVATED:
         grants.update(
-            {Capability.DEV_COMMAND, Capability.GIT_COMMIT, Capability.NETWORK}
+            {
+                Capability.DEV_COMMAND,
+                Capability.GIT_COMMIT,
+                Capability.NETWORK,
+                Capability.DESKTOP_INPUT,
+            }
         )
     if mode in {"plan", "ideate"}:
-        grants -= {Capability.REPO_WRITE, Capability.GIT_COMMIT}
+        # Browser input drives a UI, so plan mode observes but never actuates,
+        # exactly as it never writes repository files.
+        grants -= {Capability.REPO_WRITE, Capability.GIT_COMMIT, Capability.BROWSER_INPUT}
     return grants
 
 
@@ -841,6 +853,17 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
             runtime_dir() / "vnext" / "audit.jsonl",
             **runtime_options,
         )
+    # The b-browser/b-desktop wiring: their engine-neutral adapters become
+    # typed Core tools next to the built-in ones, so the default engine run
+    # advertises and executes them through the same policy/risk gate. Browser
+    # and desktop resources stay lazily initialized; registration never
+    # launches Chromium or touches a window.
+    from .engine_tools import register_browser_tool, register_desktop_tools
+
+    browser_runtime = register_browser_tool(
+        core, capability_policy=policy, origin=origin, session_id=record.session_id
+    )
+    register_desktop_tools(core, session_id=record.session_id)
     project_metadata: dict[str, Any]
     if getattr(args, "no_project_context", False):
         project_suffix, project_metadata = "", {"enabled": False}
@@ -959,6 +982,10 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     try:
         report = kernel.run(record.session_id)
     finally:
+        # The browser session this run lazily created is torn down with the
+        # run; the loopback-only policy means no detached instance survives it.
+        with contextlib.suppress(Exception):
+            browser_runtime.close_all()
         close = getattr(provider, "close", None)
         if callable(close):
             with contextlib.suppress(Exception):

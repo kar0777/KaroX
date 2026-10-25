@@ -878,6 +878,30 @@ class CoreRuntime:
                 )
             self._definitions.update({item.name: item for item in dynamic})
 
+    def register_tool(
+        self,
+        definition: ToolDefinition,
+        handler: Callable[[Dict[str, Any], float], Dict[str, Any]],
+    ) -> None:
+        """Attach one typed tool to this runtime.
+
+        Construction-time wiring for surfaces the product builds around the
+        core (browser, desktop): the definition joins ``tools()`` so a kernel
+        advertises it, and the handler executes through the same ``execute``
+        gate as the built-in tools -- capability decision, Smart Stop, audit
+        and evidence. Registration after the first run is not supported, and
+        a name collision is a hard error rather than a silent override.
+        """
+
+        if definition.name in self._definitions or definition.name in self._handlers:
+            raise CoreError(f"Core tool already registered: {definition.name}")
+        handlers = dict(self._handlers)
+        handlers[definition.name] = handler
+        self._handlers = handlers
+        definitions = dict(self._definitions)
+        definitions[definition.name] = definition
+        self._definitions = definitions
+
     def tools(self) -> List[ToolDefinition]:
         return list(self._definitions.values())
 

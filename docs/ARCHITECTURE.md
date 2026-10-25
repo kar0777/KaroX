@@ -53,42 +53,56 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
    default native agent: it speaks the engine's Model protocol on top of
    `provider_adapters`, gates every shell action through policy, the command
    invariants, repository confinement and the consequence engine, and runs the
-   approved verification commands itself after the engine submits. `agent.py`
+   approved verification commands itself after the engine submits. The
+   session's `allow`-selected MCP tools, the audited `skill.run` tool and the
+   browser/desktop tools registered by `engine_tools.py` are advertised from
+   `core.tools()` and execute through the same gate. `agent.py`
    keeps the v5 `AgentKernel` (typed tool calls, repair turns, visual checker)
    behind the explicit `--legacy-loop` flag; it is not the default and not
    renamed.
 4. **Core and tools — `core.py`, `core_tools.py`, `action_execution.py`,
    `repo_context.py`, `edit_engine.py`, `workspace_worker.py`,
-   `workspace_transaction.py`, `unified_patch.py`.** Core owns the tool table;
-   `ExtendedCoreRuntime` adds editing, windowed reads, plans and developer
-   commands; `CapabilityCoreRuntime` adds consequence-based authorization. The
-   hot worker executes repository commands and tests in a reloadable child
-   process without losing the authoritative policy boundary.
-5. **Policy — `policy.py`, `risk_engine.py`, `risk_mapping.py`,
+   `workspace_transaction.py`, `unified_patch.py`, `engine_tools.py`.** Core
+   owns the tool table; `ExtendedCoreRuntime` adds editing, windowed reads,
+   plans and developer commands; `CapabilityCoreRuntime` adds
+   consequence-based authorization; `engine_tools.py` registers the
+   `browser.command` and `desktop.*` surface tools on the runtime the engine
+   run uses. The hot worker executes repository commands and tests in a
+   reloadable child process without losing the authoritative policy boundary,
+   and its browser.command entry point runs the real browser engine behind
+   the runtime's capability policy.
+5. **Browser and desktop surfaces — `browser/`, `computer_use/`,
+   `desktop_apps.py`.** A real Playwright engine with per-session access
+   policy, credentials, redaction and a typed tool adapter; non-intrusive
+   Win32 computer use (message-based input, on-demand HWND capture, one-shot
+   approvals) with the hosted `app.*` facade over the same adapter. Both
+   register behind the Core capability/risk gate; the agent-path browser
+   policy is loopback-only and headless by default.
+6. **Policy — `policy.py`, `risk_engine.py`, `risk_mapping.py`,
    `action_policy.py`, `command_guard.py`.** Capability answers whether an
    origin may ever perform a kind of action; risk answers whether this instance
    is safe now. Both are required.
-6. **Providers — `providers.py`, `provider_adapters.py`, `registry.py`,
+7. **Providers — `providers.py`, `provider_adapters.py`, `registry.py`,
    `provider_factory.py`, `provider_controller.py`, `provider_pricing.py`,
    `provider_presets.py`, `routing.py`, `model_discovery.py`,
    `credentials.py`.** Transport, model catalog, discovery, fallback routes,
    budgets, capability facts and opaque credentials live here.
-7. **Sessions and context — `sessions.py`, `requirements.py`, `event_bus.py`,
+8. **Sessions and context — `sessions.py`, `requirements.py`, `event_bus.py`,
    `usage_analytics.py`, `memory.py`, `project_context.py`, `project_map.py`,
    `map_service.py`, `mode_artifacts.py`.** Durable records, leases, history,
    evidence, bounded project orientation and durable Plan/Concept artifacts.
-8. **MCP outbound — `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py`.**
+9. **MCP outbound — `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py`.**
    Registry, discovery, schema digests, permissions, transports and OAuth.
-9. **MCP inbound bridge — `hosted_core.py`, `bridge_oauth.py`,
+10. **MCP inbound bridge — `hosted_core.py`, `bridge_oauth.py`,
    `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`,
    `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py`.**
    Explicit hosted tool allowlist, OAuth 2.1 authorization server, Streamable
    HTTP MCP, Tailscale Funnel ownership and saved launch profiles.
-10. **Platform — `paths.py`, `security.py`, `detached_process.py`,
+11. **Platform — `paths.py`, `security.py`, `detached_process.py`,
     `process_launcher.py`, `port_ownership.py`, `process_identity.py`,
     `credential_session.py`, `credential_secret_service.py`.** Paths, redaction,
     child-process identity, port ownership and OS keyring access.
-11. **Prompt and skills — `context_compiler.py`, `tool_universe.py`,
+12. **Prompt and skills — `context_compiler.py`, `tool_universe.py`,
     `completion_gate.py`, `skills.py`, `prompts/`, `builtin_skills/`,
     `skill_notes/`.** Stable prompt prefix, tool advertisement, completion
     proof and recipes.
