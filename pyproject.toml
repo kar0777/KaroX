@@ -76,7 +76,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "karox.tui" = ["*.tcss"]
-"karox.tui2" = ["*.tcss"]
 "karox.prompts" = ["*.md", "profiles/*.md"]
 "karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
 "karox.skill_notes" = ["*.md"]
