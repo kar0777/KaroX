@@ -270,6 +270,25 @@ class CLIBackend:
             else []
         )
 
+    def skill_list(self) -> list[dict[str, Any]]:
+        payload = self.call(
+            "skill", "list", "--repository", str(self.repository), "--json"
+        )
+        skills = payload.get("skills") if isinstance(payload, dict) else None
+        return [item for item in skills if isinstance(item, dict)] if isinstance(skills, list) else []
+
+    def skill_show(self, name: str) -> dict[str, Any] | None:
+        try:
+            payload = self.call(
+                "skill", "show", name, "--repository", str(self.repository), "--json"
+            )
+        except BackendError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        skill = payload.get("skill")
+        return skill if isinstance(skill, dict) else None
+
     def doctor(self) -> dict[str, Any]:
         payload = self.call("doctor", "--json", timeout=90.0)
         return payload if isinstance(payload, dict) else {}
