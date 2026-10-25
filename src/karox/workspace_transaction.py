@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .core import CoreError, InvalidCommand
+from .core_types import CoreError, InvalidCommand
 from .models import EvidenceRecord
 from .security import contains_credential
 

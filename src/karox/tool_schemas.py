@@ -7,7 +7,7 @@ visual-check tools when the runtime was given a catalogue or a checker.
 
 from __future__ import annotations
 
-from .core import ToolDefinition
+from .core_types import ToolDefinition
 from .models import Capability
 
 

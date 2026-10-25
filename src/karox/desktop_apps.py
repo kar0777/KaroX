@@ -23,7 +23,7 @@ from .computer_use.errors import (
     DesktopSecurityError,
     InvalidActionError,
 )
-from .core import InvalidCommand
+from .core_types import InvalidCommand
 from .models import AccessProfile, Capability
 from .policy import PolicyDenied
 

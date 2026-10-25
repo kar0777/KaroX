@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .action_execution import CapabilityCoreRuntime
-from .core import InvalidCommand, ToolDefinition
+from .core_types import InvalidCommand, ToolDefinition
 from .models import Capability, EvidenceRecord, Origin, OriginKind
 from .policy import CapabilityPolicy, PolicyDenied
 from .paths import runtime_dir

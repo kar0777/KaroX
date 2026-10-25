@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .event_bus import EventBus, EventKind, EventLevel
+from .core_types import (
+    CoreError,
+    InvalidCommand,
+    InvalidPath,
+    ToolDefinition,
+    VerificationCommandNotApproved,
+    _path_label,
+)
 from .models import Capability, CoreCommand, CoreResult, EvidenceRecord
 from .policy import CapabilityPolicy
 from .process_launcher import resolve_executable as _resolve_executable
@@ -88,31 +96,14 @@ def _karox_module_launch(argv: Sequence[str]) -> List[str]:
     ]
 
 
-class CoreError(RuntimeError):
-    pass
 
 
-def _path_label(value: object, limit: int = 120) -> str:
-    """The offending value, single-line and short, for a rejection message.
-
-    A path rejection that does not name the path it rejected cannot be acted on:
-    the caller has to guess which of its arguments was wrong and usually guesses
-    the same way again.
-    """
-    text = " ".join(str(value).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-class InvalidPath(CoreError):
-    pass
 
 
-class InvalidCommand(CoreError):
-    pass
 
 
-class VerificationCommandNotApproved(InvalidCommand):
-    """A checks.run argv is valid, but outside the user's verification allowlist."""
 
 
 WILDCARD_ARGUMENT = "*"
@@ -585,19 +576,6 @@ class CheckPlan:
     inline_prefix: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class ToolDefinition:
-    name: str
-    description: str
-    capability: Capability
-    mutates: bool
-    input_schema: Dict[str, Any]
-    additional_capabilities: tuple[Capability, ...] = ()
-    external_schema: bool = False
-    # A mutating tool normally replays its stored outcome for a repeated
-    # idempotency key. A check must not: its answer describes a working tree that
-    # may have changed since, and replaying it reports a stale pass as fresh.
-    replayable: bool = True
 
 
 class CoreRuntime:

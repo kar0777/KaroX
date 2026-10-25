@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from .core import InvalidCommand
+from .core_types import InvalidCommand
 from .workspace_transaction import WorkspaceTransaction
 
 

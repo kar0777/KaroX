@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from ..artifacts import ArtifactStore
-from ..core import InvalidCommand, ToolDefinition
+from ..core_types import InvalidCommand, ToolDefinition
 from ..models import Capability
 from .credentials import BrowserCredentialStore
 from .errors import (

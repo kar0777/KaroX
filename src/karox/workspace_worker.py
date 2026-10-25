@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from .core import InvalidCommand
+from .core_types import InvalidCommand
 from .models import EvidenceRecord
 from .unified_patch import execute_apply_patch, expected_map, parse_unified_patch
 from .workspace_transaction import MAX_BATCH_OPERATIONS, WorkspaceTransaction
