@@ -22,15 +22,55 @@
 - Dead interface kwargs on `EngineKernel` (`economy_mode`,
   `lossless_context_rewrite`, `render_feedback`, `domain_notes_enabled`,
   `repeat_read_suppression`, `semantic_shadow`, `base_probe_enabled`).
+- The detached MCP/subagent block (`engine_mcp.py`, `subagents.py`,
+  `core_engine.py`) and its tests: no product entry point reached it, and MCP
+  rides the Core runtime's typed tools. The vendored engine model layer
+  (`litellm_model.py` and its utils) went with it; the fenced-command salvage
+  lives in `engine_salvage.py`. `litellm` and `tenacity` left the runtime
+  dependencies.
+- Dead seams and data: the checkpoint auto-guard and its factory, the
+  `mutation_reviewer` hook, the worker browser path, the unused
+  `BrowserApprovalBroker`, the v5 hosted name catalogue, the dead skill
+  selection/policy helpers, `skill_notes/`, the v7 prompt assembler and its
+  profile files.
+
+### Fixed
+
+- `karox bridge connect/start/restart` spawned a child the CLI parser refused:
+  the launcher sent `--protocol`, `--saved-profile-name`, `--project`,
+  `--default-project-id` and `--allowed-redirect-hosts`, none of which the
+  `bridge serve` subparser defined. Both parsers now share one
+  `add_serve_arguments()` definition, and a test parses the launcher's exact
+  argv with the CLI parser.
+- The live event channel dropped events silently: `AgentEvent` had no
+  `reasoning_summary_delta` field, and one constructor failure muted the whole
+  observer. The field exists, `COMPACTED` writes `summary`, and a malformed
+  event is dropped without detaching the observer.
+- `SYSTEM_PROMPT` demanded `more_semantic_changes`, which no tool schema has,
+  and told the model to answer without a tool call while the engine contract
+  calls that a format error. Both instructions were removed.
+- `skill.run` had no risk mapping, so every advertised skill call was
+  classified unknown-and-high and refused at CONFIRM. It now maps to
+  `process.run_dev` (workspace consequence).
+- The TUI passed its own detected checks as `--verification-command`, which
+  the CLI treats as explicit user approval. Detection is now display-only;
+  only `/verify` sends an approved command.
+- `tests.run` results claimed `verification_eligible: True` even though only a
+  user-approved `checks.run` may prove a change. The flag is gone and a test
+  pins that `tests.run` output is never evidence.
+- CLI subcommand handlers ended in implicit default branches; an unhandled
+  command name would have executed another command's code. Each group now
+  refuses an unknown name.
 
 ### Changed
 
 - The TUI palette is the v5 rc4 warm set (gold `#d4b676`, amber `#c6a56b`,
   olive muted `#8a7e6a`, ground `#0e0c08`, panels `#1a1712`), replacing the
   cool slate palette.
-- The package is 74.3k lines / 142 modules (from ~88k); the line-count guard
+- The package is 68.8k lines / 128 modules (from ~88k); the line-count guard
   dropped from 90k to 80k.
-- `docs/ARCHITECTURE.md` gained a one-line-per-module map.
+- `docs/ARCHITECTURE.md` gained a one-line-per-module map; MIGRATION, PARITY,
+  DEVELOPMENT, README, AGENTS and TUI.md describe the current tree.
 
 ## 6.0.0a2 — 2026-10-25
 

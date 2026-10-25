@@ -383,7 +383,6 @@ def execute_tests(
                     if effective == timeout_value
                     else "request_deadline_or_runtime_maximum"
                 ),
-                "verification_eligible": True,
             }
         )
         result["_evidence"] = [
@@ -454,7 +453,6 @@ def execute_tests(
                 if effective == timeout_value
                 else "request_deadline_or_runtime_maximum"
             ),
-            "verification_eligible": True,
         }
     )
     result["_evidence"] = [

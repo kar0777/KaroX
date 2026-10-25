@@ -1108,6 +1108,8 @@ def _handle_session(args: argparse.Namespace) -> int:
                 info["locked"] = False
         _emit(info, json_output=args.json)
         return 0
+    if command != "show":
+        raise ValueError(f"unsupported session command: {command}")
     record = store.load(args.session_id)
     _emit(record.to_dict(), json_output=args.json)
     return 0
@@ -1332,6 +1334,8 @@ def _handle_provider(args: argparse.Namespace) -> int:
         )
         _emit(mutation.to_dict(), json_output=args.json)
         return 0
+    if command != "credential-clear":
+        raise ValueError(f"unsupported provider command: {command}")
     mutation = controller.clear_credential(
         args.provider_id, delete_stored=bool(args.delete_stored)
     )
@@ -1439,6 +1443,8 @@ def _handle_model(args: argparse.Namespace) -> int:
             json_output=args.json,
         )
         return 0
+    if command != "test":
+        raise ValueError(f"unsupported model command: {command}")
     _emit(
         controller.test_provider(args.provider_id, model_or_alias=args.model),
         json_output=args.json,
@@ -1736,7 +1742,9 @@ def _handle_mcp(args: argparse.Namespace) -> int:
         return _handle_mcp_credential(args)
     if args.mcp_command == "status":
         return _handle_mcp_status(args)
-    return _handle_mcp_call(args)
+    if args.mcp_command == "call":
+        return _handle_mcp_call(args)
+    raise ValueError(f"unsupported mcp command: {args.mcp_command}")
 
 
 # --------------------------------------------------------------------- bridge
@@ -1851,6 +1859,8 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             config = config_from_saved_profile(args.name)
             _emit(bridge_diagnostics(config), json_output=args.json)
             return 0
+        if sub != "create":
+            raise ValueError(f"unsupported bridge saved command: {sub}")
         from .bridge_profiles import SavedBridgeProfile
 
         verification = _bridge_verification(args)

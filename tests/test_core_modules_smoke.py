@@ -165,7 +165,9 @@ def test_workspace_worker_selects_pytest_targets_and_splits(tmp_path: Path) -> N
         60.0,
     )
     assert focused["targets"] == ["tests/test_a.py::test_ok"]
-    assert focused["verification_eligible"] is True
+    # tests.run is model-chosen execution, never verification evidence:
+    # only a user-approved checks.run argv may prove a change.
+    assert "verification_eligible" not in focused
     assert focused["_evidence"][0].kind == "test_run"
 
     split = workspace_worker.execute_tests(
