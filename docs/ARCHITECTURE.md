@@ -201,13 +201,17 @@ not listed is internal to its layer.
 
 | Module | What it is |
 | --- | --- |
-| `cli.py` | every command; `agent run` resolves the session, provider and kernel |
+| `cli.py` | command handlers; `agent run` resolves the session, provider and kernel |
+| `cli_parser.py` | the declarative command surface and its defaults |
 | `entrypoint.py` | console-script shim |
-| `agent.py` | `AgentKernel` facade, `AgentEvent`/`AgentReport` vocabulary, system prompt |
-| `engine_kernel.py` | the engine kernel: provider bridge, typed-tool environment, checkpoints, verification |
+| `agent.py` | `AgentKernel` facade, module helpers and system prompt |
+| `agent_contract.py` | `AgentEvent`/`AgentEventKind`/`AgentReport`, limits and context budget |
+| `engine_kernel.py` | the engine kernel: typed-tool environment, checkpoints, verification |
+| `engine_provider_bridge.py` | `EngineProviderModel`: the engine's Model protocol over `providers.py` |
 | `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
 | `engine_salvage.py` | recovers one unambiguous fenced shell command from a prose response |
-| `core.py`, `core_tools.py` | typed tool table and the runtimes (`Capability`, `SkillSession`) |
+| `core.py`, `core_tools.py` | typed tool table, handlers and the runtimes (`Capability`, `SkillSession`) |
+| `tool_schemas.py` | the extended tool names, descriptions and JSON schemas |
 | `engine_tools.py` | registers `browser.command` / `desktop.*` on the engine run's runtime |
 | `action_execution.py`, `workspace_worker.py`, `workspace_transaction.py` | hot worker: repo commands in a reloadable child process |
 | `edit_engine.py`, `unified_patch.py`, `repo_context.py` | edits, patches, windowed reads |

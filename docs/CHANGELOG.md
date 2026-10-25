@@ -67,8 +67,9 @@
 - The TUI palette is the v5 rc4 warm set (gold `#d4b676`, amber `#c6a56b`,
   olive muted `#8a7e6a`, ground `#0e0c08`, panels `#1a1712`), replacing the
   cool slate palette.
-- The package is 68.8k lines / 128 modules (from ~88k); the line-count guard
-  dropped from 90k to 80k.
+- The package is 69.0k lines / 132 modules (from ~88k); the line-count guard
+  dropped from 90k to 80k. The CLI parser, tool schemas, agent contract and
+  engine provider bridge are separate modules.
 - `docs/ARCHITECTURE.md` gained a one-line-per-module map; MIGRATION, PARITY,
   DEVELOPMENT, README, AGENTS and TUI.md describe the current tree.
 
