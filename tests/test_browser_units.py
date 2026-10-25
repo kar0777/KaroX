@@ -488,3 +488,21 @@ def test_dropin_execute_browser_command_matches_worker_contract():
 
     with pytest.raises(InvalidCommand):
         execute_browser_command(NoBrowserRuntime(), {"action": "tabs", "payload": {}}, 30.0)
+
+
+def test_secret_fields_have_one_definition_for_python_and_both_probes() -> None:
+    """The page probes and the action guard must classify the same fields secret.
+
+    They had drifted: the Python guard knew `passwd` and `iban`, the page
+    probes did not, so a bank-account or password field could come back with a
+    plaintext length. One keyword list now feeds all three.
+    """
+    from karox.browser import probes
+
+    for name in ("iban", "passwd", "password", "cvv", "api_key", "token"):
+        assert probes.SECRET_FIELD_HINT.search(f"user_{name}") is not None
+    # Both probes embed the shared JS regex, not a copy of their own.
+    assert probes._JS_SECRET_HINT in probes.FORM_STATE_PROBE
+    assert probes._JS_SECRET_HINT in probes.snapshot_probe(10)
+    assert "SECRET_HINT.test" in probes.FORM_STATE_PROBE
+    assert "SECRET_HINT.test" in probes.snapshot_probe(10)
