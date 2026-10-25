@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from . import __version__
 from .action_execution import CapabilityCoreRuntime
@@ -37,8 +37,6 @@ from .core import CoreCommand, CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .disk_maintenance import is_drive_root, workspace_system_reason
 from .effort import budget_for as effort_budget_for
-from .engine_kernel import EngineKernel
-from .engine_mcp import EngineMcpAdapter
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
@@ -88,7 +86,7 @@ from .routing import RouteTarget, RoutingPolicy, RoutedProvider
 from .risk_engine import RiskEngine
 from .security import redact
 from .sessions import SessionError, SessionStore
-from .skill_runtime import SkillSession
+from .skill_runtime import SkillSession, SkillSessionRuntime
 from .skills import SkillCatalog, SkillError
 from .verification import discover_verification_commands
 
@@ -671,32 +669,6 @@ def _skill_catalog(repository: Path) -> tuple[Any, str]:
     return catalog, block
 
 
-def _engine_skill_block(catalog: Any) -> str:
-    """The skill catalogue, phrased for the engine's shell action space.
-
-    The engine loop has no typed skill_load tool; its one action is a shell
-    command, so a matching skill is applied by reading the skill's own files,
-    which the catalog already validated and hashed.
-    """
-
-    if catalog is None:
-        return ""
-    try:
-        skills = catalog.discover()
-    except (SkillError, OSError):
-        return ""
-    if not skills:
-        return ""
-    lines = [
-        f"- {item.name}: {item.description} (files under {item.directory})"
-        for item in skills[:20]
-    ]
-    return (
-        "AVAILABLE SKILLS (when one matches the task, read its files with a "
-        "shell command before acting):\n" + "\n".join(lines)
-    )
-
-
 def _run_agent(args: argparse.Namespace) -> AgentReport:
     """Resolve one agent run end to end and return its report.
 
@@ -798,7 +770,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     policy.set_grants(origin, _agent_grants(profile, args.mode))
     risk = RiskEngine()
     decisions = ActionDecisionEngine(risk)
-    mcp_binding, mcp_descriptors = _selected_mcp_runtime(record, repository)
+    mcp_binding, _ = _selected_mcp_runtime(record, repository)
     catalog, skill_block = _skill_catalog(repository)
     visual_checker = None
     try:
@@ -826,11 +798,22 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                 )
     except Exception:
         visual_checker = None
-    core = CapabilityCoreRuntime(
-        repository,
-        policy,
-        store,
-        runtime_dir() / "vnext" / "audit.jsonl",
+    skill_session = None
+    if catalog is not None:
+        try:
+            skill_session = SkillSession(
+                catalog,
+                record.session_id,
+                policy=policy,
+                invoker_origin=origin,
+                audit_path=runtime_dir()
+                / "vnext"
+                / "skill-audit"
+                / f"{record.session_id}.jsonl",
+            )
+        except (SkillError, OSError):
+            skill_session = None
+    runtime_options: dict[str, Any] = dict(
         mcp_binding=mcp_binding,
         verification_commands=verification,
         risk=risk,
@@ -839,6 +822,25 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         skill_catalog=catalog,
         visual_checker=visual_checker,
     )
+    if skill_session is not None:
+        # The b-skills wiring: the session-bound runtime exposes skill.run as
+        # a leased, idempotent Core tool next to the catalogue's load/read.
+        core: CoreRuntime = SkillSessionRuntime(
+            repository,
+            policy,
+            store,
+            runtime_dir() / "vnext" / "audit.jsonl",
+            skill_session=skill_session,
+            **runtime_options,
+        )
+    else:
+        core = CapabilityCoreRuntime(
+            repository,
+            policy,
+            store,
+            runtime_dir() / "vnext" / "audit.jsonl",
+            **runtime_options,
+        )
     project_metadata: dict[str, Any]
     if getattr(args, "no_project_context", False):
         project_suffix, project_metadata = "", {"enabled": False}
@@ -907,6 +909,12 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         project_metadata["memory"] = True
     if skill_block:
         system_prompt += "\n\n" + skill_block
+    if skill_session is not None:
+        try:
+            if skill_session.activate_automatic(args.task):
+                system_prompt += "\n\n" + skill_session.active_prompt()
+        except (SkillError, OSError):
+            pass
     request_images: tuple[Any, ...] = ()
     if args.image:
         if args.model or args.base_url or args.api_key_env:
@@ -921,109 +929,33 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         loaded = load_image_attachments(repository, args.image)
         request_images = tuple(item.image for item in loaded)
         project_metadata["images"] = [item.public_dict() for item in loaded]
-    if request_images and not getattr(args, "legacy_loop", False):
-        # The engine loop has no multimodal request surface yet; refusing is
-        # honest where silently dropping the image would not be.
-        raise ValueError(
-            "image attachments are not supported by the engine loop; "
-            "use --legacy-loop for a vision-model run with attachments"
-        )
     observer = _stream_json() if args.stream_json else (
         _stream_progress() if args.stream else None
     )
-    if legacy_loop:
-        kernel = AgentKernel(
-            provider=provider,
-            model=model,
-            core=core,
-            sessions=store,
-            origin=origin,
-            limits=limits,
-            system_prompt=system_prompt,
-            context=context,
-            project_context=project_metadata,
-            require_change=args.expect == "change",
-            max_output_tokens=max_output_tokens,
-            pricing_registry=_load_pricing_registry(),
-            reasoning_effort=budget.reasoning_effort,
-            mode=args.mode,
-            request_images=request_images,
-            on_event=observer,
-        )
-    else:
-        # The default path: the vendored karo-core engine executes the task.
-        # Repository instructions, memory and the skill catalogue ride along as
-        # a prompt suffix; the engine's own packaged protocol stays intact.
-        # The session's selected MCP tools and auto-activated skill recipes
-        # ride along the same way: an in-band command protocol the engine runs
-        # like any shell line, plus the prompt blocks that teach it.
-        in_band: Optional[Callable[[str, int], Optional[dict[str, Any]]]] = None
-        mcp_block = ""
-        if mcp_binding is not None:
-            engine_mcp = EngineMcpAdapter(
-                binding=mcp_binding,
-                descriptors=mcp_descriptors,
-                store=store,
-                session_id=record.session_id,
-                repository=repository,
-                origin=origin,
-                policy=policy,
-                audit_path=runtime_dir() / "vnext" / "audit.jsonl",
-            )
-            in_band = engine_mcp.handle_raw
-            mcp_block = engine_mcp.prompt_block()
-        recipe_block = ""
-        if catalog is not None:
-            try:
-                skill_session = SkillSession(
-                    catalog,
-                    record.session_id,
-                    policy=policy,
-                    invoker_origin=origin,
-                    audit_path=runtime_dir()
-                    / "vnext"
-                    / "skill-audit"
-                    / f"{record.session_id}.jsonl",
-                )
-                if skill_session.activate_automatic(args.task):
-                    recipe_block = skill_session.active_prompt()
-            except (SkillError, OSError):
-                recipe_block = ""
-        engine_suffix = "\n\n".join(
-            part
-            for part in (
-                project_suffix,
-                memory_block or "",
-                _engine_skill_block(catalog),
-                recipe_block,
-                mcp_block,
-            )
-            if part
-        )
-        window = context.max_input_tokens
-        kernel = EngineKernel(
-            provider=provider,
-            model=model,
-            core=core,
-            sessions=store,
-            origin=origin,
-            limits=limits,
-            policy=policy,
-            action_decisions=decisions,
-            project_context=project_metadata,
-            prompt_suffix=engine_suffix,
-            verification_commands=verification,
-            require_change=args.expect == "change",
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=budget.reasoning_effort,
-            mode=args.mode,
-            bypass_mode=bypass,
-            context_token_budget=(
-                min(160_000, int(window)) if isinstance(window, int) else 160_000
-            ),
-            in_band_commands=in_band,
-            on_event=observer,
-        )
+    # AgentKernel is the facade over the vendored karo-core engine: the
+    # default run executes src/karox/engine through typed Core tools, with
+    # the selected MCP tools and the skill surface advertised from
+    # core.tools(). --legacy-loop is the explicit escape hatch to the v5
+    # loop, never the default.
+    kernel = AgentKernel(
+        provider=provider,
+        model=model,
+        core=core,
+        sessions=store,
+        origin=origin,
+        limits=limits,
+        system_prompt=system_prompt,
+        context=context,
+        project_context=project_metadata,
+        require_change=args.expect == "change",
+        max_output_tokens=max_output_tokens,
+        pricing_registry=_load_pricing_registry(),
+        reasoning_effort=budget.reasoning_effort,
+        mode=args.mode,
+        request_images=request_images,
+        on_event=observer,
+        legacy=legacy_loop,
+    )
     try:
         report = kernel.run(record.session_id)
     finally:

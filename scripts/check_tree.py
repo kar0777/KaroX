@@ -34,12 +34,12 @@ LEGACY = {
     "tailscale.py",
     "orchestrator.py",
 }
-# The release now carries two deliberate surfaces beyond the curated kernel:
-# the hosted MCP bridge, and the vendored karo-core engine (~26k, seeded at
-# 4d8d5d9, which alone put the tree at ~74.8k against the previous 70k bound)
-# plus its integration layer. The v5 laboratory was ~166k lines; 80k keeps this
-# line compact while leaving room for those surfaces without silently
-# absorbing legacy modules.
+# The release carries the hosted MCP bridge as a product surface. The v5
+# laboratory was ~166k lines. 70k covered the release kernel; the seed race
+# commit vendored the karo-core engine (~5.6k lines, src/karox/engine) and B1
+# added its typed-tool adapter (engine_kernel.py), which is deliberate product
+# surface, so the ceiling moved to 80k. Raise it deliberately for named
+# surface, never to make a stray copy pass.
 MAX_LINES = 80_000
 
 

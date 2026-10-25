@@ -1440,8 +1440,14 @@ def _json_chars(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
-class AgentKernel:
-    """Runs one recoverable, exclusively leased native-agent session."""
+class LegacyAgentKernel:
+    """Runs one recoverable, exclusively leased native-agent session.
+
+    This is the v5 model/tool decision loop, kept importable for comparison
+    runs and compatibility tests. It is not the default: ``AgentKernel``
+    below routes to the vendored karo-core engine (``engine_kernel``), and
+    selecting this class requires an explicit ``legacy=True``.
+    """
 
     def __init__(
         self,
@@ -8991,3 +8997,43 @@ class AgentKernel:
         # heartbeat does not have to read the session back to learn it.
         self._known_revision = saved.revision
         return saved
+
+
+class AgentKernel:
+    """The public agent kernel: the vendored karo-core engine by default.
+
+    ``karox agent run`` and every embedder construct this name. Since B1 the
+    decision loop behind it is ``src/karox/engine`` (see
+    ``engine_kernel.EngineKernel``): the engine's step protocol, context
+    economy, finish contract and recovery from empty/truncated responses
+    drive the run, while KaroX's provider layer, typed Core tools, policy and
+    risk gates, session leases, durable checkpoints and evidence-chain
+    verification stay exactly as they were.
+
+    The legacy v5 loop remains reachable for comparison runs:
+
+    ``AgentKernel(..., legacy=True)``
+
+    The engine path preserves this constructor's full signature and the
+    ``run(session_id) -> AgentReport`` / ``on_event`` stream contract, so the
+    CLI, the TUI backend and existing tests need no changes to move over.
+    """
+
+    def __init__(self, *, engine: bool = True, legacy: bool = False, **kwargs: Any) -> None:
+        if legacy:
+            engine = False
+        if engine:
+            from .engine_kernel import EngineKernel
+
+            self.implementation: Any = EngineKernel(**kwargs)
+        else:
+            self.implementation = LegacyAgentKernel(**kwargs)
+
+    def run(self, session_id: str) -> AgentReport:
+        return self.implementation.run(session_id)
+
+    def cancel(self) -> None:
+        """Request cancellation at the next step boundary (engine path)."""
+        cancel = getattr(self.implementation, "cancel", None)
+        if callable(cancel):
+            cancel()
