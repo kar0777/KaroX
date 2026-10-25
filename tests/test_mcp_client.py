@@ -98,7 +98,7 @@ def _stdio_record(
     *,
     server_id: str = "echo",
     namespace: str = "echo",
-    read_only_tools: tuple[str, ...] = ("echo",),
+    read_only_tools: tuple[str, ...] = ("echo", "slow_echo"),
     environment: Optional[dict[str, str]] = None,
     credential_ref: Optional[str] = None,
     credential_target: Optional[str] = None,
@@ -800,8 +800,9 @@ def _stdio_core(
 
 def test_stdio_discovery_classifies_read_only_tools(stdio_server: Any) -> None:
     by_name = {item.remote_name: item for item in stdio_server.tools}
-    assert set(by_name) == {"echo", "write_note", "reflect_secret"}
+    assert set(by_name) == {"echo", "slow_echo", "write_note", "reflect_secret"}
     assert by_name["echo"].read_only is True
+    assert by_name["slow_echo"].read_only is True
     assert by_name["write_note"].read_only is False
     assert by_name["reflect_secret"].read_only is False
     assert by_name["echo"].name == "mcp.echo.echo"

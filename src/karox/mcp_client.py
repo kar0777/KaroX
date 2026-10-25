@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, Mapping, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import urlsplit
 
 import anyio
@@ -117,6 +117,20 @@ class McpCredentialReference:
         if not isinstance(value, str) or not value.startswith(_MCP_REFERENCE_PREFIX):
             raise ValueError("MCP credential reference must use os-keyring:mcp/<name>")
         return cls(value[len(_MCP_REFERENCE_PREFIX) :])
+
+
+@dataclass(frozen=True)
+class McpProgress:
+    """One progress notification a remote MCP server sent during a call.
+
+    ``total``/``message`` are optional on the wire and stay ``None`` when the
+    server did not send them. The sink receives these inside the transport's
+    event loop, so it must stay cheap and non-blocking.
+    """
+
+    progress: float
+    total: Optional[float] = None
+    message: Optional[str] = None
 
 
 class McpCredentialStore:
@@ -902,6 +916,7 @@ class McpClient:
         arguments: Dict[str, Any],
         repository: Path,
         secret: Optional[str],
+        progress: Optional[Callable[[McpProgress], None]] = None,
     ) -> dict[str, Any]:
         try:
             encoded = json.dumps(
@@ -914,6 +929,15 @@ class McpClient:
             raise McpProtocolError("MCP tool arguments are not valid strict JSON") from exc
         if len(encoded) > record.max_message_bytes:
             raise McpProtocolError("MCP tool arguments exceed the configured message limit")
+        progress_callback: Optional[Callable[..., Any]] = None
+        if progress is not None:
+
+            async def _on_progress(
+                value: float, total: Optional[float], message: Optional[str]
+            ) -> None:
+                progress(McpProgress(float(value), total, message))
+
+            progress_callback = _on_progress
         with anyio.fail_after(record.timeout_seconds):
             async with self._session(record, repository, secret) as session:
                 await session.initialize()
@@ -943,7 +967,9 @@ class McpClient:
                     wire_spelling = call_name.replace(".", "_")
                     if wire_spelling in listed_names:
                         call_name = wire_spelling
-                result = await session.call_tool(call_name, arguments)
+                result = await session.call_tool(
+                    call_name, arguments, progress_callback=progress_callback
+                )
         try:
             payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
             payload = redact(payload, secrets=(secret,) if secret else ())
@@ -975,6 +1001,7 @@ class McpClient:
         descriptor: McpToolDescriptor,
         arguments: Dict[str, Any],
         repository: Path,
+        progress: Optional[Callable[[McpProgress], None]] = None,
     ) -> dict[str, Any]:
         if (
             record.server_id != descriptor.server_id
@@ -994,6 +1021,7 @@ class McpClient:
                     dict(arguments),
                     repository.resolve(strict=True),
                     secret,
+                    progress,
                 )
             except Exception as exc:
                 last = self._classified(
@@ -1012,12 +1040,14 @@ class McpClient:
         descriptor: McpToolDescriptor,
         arguments: Dict[str, Any],
         repository: Path,
+        progress: Optional[Callable[[McpProgress], None]] = None,
     ) -> dict[str, Any]:
         return self.call_record(
             self.registry.get(descriptor.server_id),
             descriptor,
             arguments,
             repository,
+            progress,
         )
 
 
@@ -1117,6 +1147,7 @@ class McpRuntimeBinding:
         name: str,
         arguments: Dict[str, Any],
         record: SessionRecord,
+        progress: Optional[Callable[[McpProgress], None]] = None,
     ) -> dict[str, Any]:
         try:
             descriptor = self._descriptors[name]
@@ -1141,5 +1172,5 @@ class McpRuntimeBinding:
         if bool(tool.get("read_only")) != descriptor.read_only:
             raise McpAccessDenied("MCP tool mutation classification changed; reselect it")
         return self.client.call_record(
-            current, descriptor, arguments, self.repository
+            current, descriptor, arguments, self.repository, progress
         )

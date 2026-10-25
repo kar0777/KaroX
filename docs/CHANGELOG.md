@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `karox.engine_mcp`: MCP tools for the karo-core engine loop. The
+  `EngineMcpAdapter` binds a session's `allow`-selected MCP tools (stdio and
+  Streamable HTTP) and exposes them both as a typed Python API (`call_tool`
+  with `EngineMcpCallResult` results, `McpProgressEvent` progress, mutation
+  lease and idempotent replay) and as an in-band `mcp list` / `mcp call`
+  shell command composed into the engine's `command_runner` via
+  `build_engine_command_runner`.
+- MCP client calls now forward remote progress notifications to an optional
+  progress sink.
+
 ## 6.0.0a1 — 2026-10-25
 
 First clean release line. The agent kernel, policy, providers, sessions, MCP and

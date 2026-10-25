@@ -5,10 +5,15 @@ as a subprocess by ``McpClient`` so the tests exercise the genuine stdio
 transport, JSON-RPC handshake, tool discovery, and tool invocation -- not a
 mock.
 
-The server exposes three tools:
+The server exposes four tools:
 
 * ``echo``  -- read-only, returns ``echo: <message>``.
-* ``write_note`` -- mutating (not declared read-only), returns ``noted: <name>``.
+* ``slow_echo`` -- read-only, reports two progress notifications under the
+  request's progress token before answering, so the client's progress plumbing
+  can be proven on the real stdio wire.
+* ``write_note`` -- mutating (not declared read-only), returns ``noted: <name>``;
+  a note named ``boom`` fails so a mutation that reserved its idempotency intent
+  can be observed in the unknown-outcome state that requires reconciliation.
 * ``reflect_secret`` -- returns the injected test credential so the client's
   redaction boundary can be proven end to end.
 
@@ -89,6 +94,15 @@ def _note_schema() -> dict[str, object]:
     }
 
 
+def _slow_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+        "additionalProperties": False,
+    }
+
+
 def _record_call(name: str) -> None:
     path = os.environ.get("KAROX_MCP_CALL_LOG")
     if not path:
@@ -108,6 +122,11 @@ async def list_tools() -> list[types.Tool]:
             inputSchema=_echo_schema(),
         ),
         types.Tool(
+            name="slow_echo",
+            description="Echo a message after reporting progress.",
+            inputSchema=_slow_schema(),
+        ),
+        types.Tool(
             name="write_note",
             description="Record a named note.",
             inputSchema=_note_schema(),
@@ -120,14 +139,37 @@ async def list_tools() -> list[types.Tool]:
     ]
 
 
+async def _report_progress(progress: float, total: float) -> None:
+    """Send a progress notification on the active request, if it has a token.
+
+    A client that did not ask for progress sends no token, and a notification
+    without one is protocol-invalid -- so the report is skipped entirely.
+    """
+
+    context = server.request_context
+    token = context.meta.progressToken if context and context.meta else None
+    if token is None:
+        return
+    await context.session.send_progress_notification(
+        token, progress, total, f"step {progress}/{total}"
+    )
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, object]) -> list[types.TextContent]:
     _record_call(name)
     if name == "echo":
         message = arguments.get("message", "")
         return [types.TextContent(type="text", text=f"echo: {message}")]
+    if name == "slow_echo":
+        await _report_progress(1.0, 2.0)
+        await _report_progress(2.0, 2.0)
+        message = arguments.get("message", "")
+        return [types.TextContent(type="text", text=f"echo: {message}")]
     if name == "write_note":
         noted = arguments.get("name", "")
+        if noted == "boom":
+            raise ValueError("note storage failed")
         return [types.TextContent(type="text", text=f"noted: {noted}")]
     if name == "reflect_secret":
         return [
