@@ -77,6 +77,11 @@ class SkillMetadata:
     optional_mcp: tuple[str, ...]
     requested_capabilities: tuple[Capability, ...]
     files: tuple[str, ...]
+    # Executable helpers the recipe declares under ``scripts/``. Like
+    # ``files`` these are confined, non-link, bounded reads -- but they may be
+    # executed through the session runtime, which gates them behind the
+    # process.run capability and records an audit row per invocation.
+    scripts: tuple[str, ...]
     validation_rules: tuple[str, ...]
     source_kind: str
     source_root: Path
@@ -105,6 +110,7 @@ class SkillMetadata:
             "optional_mcp": list(self.optional_mcp),
             "permissions": [item.value for item in self.requested_capabilities],
             "files": list(self.files),
+            "scripts": list(self.scripts),
             "validation_rules": list(self.validation_rules),
             "source_kind": self.source_kind,
             "source_root": str(self.source_root),
@@ -410,6 +416,32 @@ def _validate_reference(value: Any) -> str:
     return normalized
 
 
+_SCRIPT_SUFFIXES = (".py", ".sh")
+_SCRIPT_DIRECTORY = "scripts"
+
+
+def _validate_script(value: Any) -> str:
+    """A declared script: a confined reference under ``scripts/``, .py or .sh.
+
+    The prefix and extension are the whole executable surface a recipe may
+    offer. Anything else stays data: it is read through ``files`` and never
+    runs, so a manifest cannot smuggle an interpreter KaroX does not gate.
+    """
+
+    reference = _validate_reference(value)
+    posix = PurePosixPath(reference)
+    if posix.parts[0] != _SCRIPT_DIRECTORY:
+        raise SkillError(
+            f"Skill scripts must live under scripts/: {reference!r}"
+        )
+    if len(posix.parts) < 2 or posix.suffix not in _SCRIPT_SUFFIXES:
+        raise SkillError(
+            "Skill scripts must be .py or .sh files under scripts/: "
+            f"{reference!r}"
+        )
+    return reference
+
+
 def _bounded_frontmatter(path: Path, limit: int) -> tuple[bytes, int, _FileIdentity]:
     before = _identity(path)
     if not stat.S_ISREG(before.mode):
@@ -513,6 +545,7 @@ class SkillCatalog:
     MAX_TOTAL_BYTES = 2 * 1024 * 1024
     MAX_REFERENCES = 64
     MAX_METADATA_LIST_ITEMS = 64
+    MAX_SCRIPTS = 16
     # The catalogue line is what every request pays for, so its two hint fields
     # are one line each. The specification's 150-character ceiling is the
     # contract; the description keeps its own, wider limit because it predates
@@ -527,6 +560,7 @@ class SkillCatalog:
         *,
         extra_directories: Sequence[Path] = (),
         global_directory: Optional[Path] = None,
+        include_builtin: bool = True,
     ) -> None:
         repository_path = repository.expanduser().resolve(strict=True)
         if not repository_path.is_dir():
@@ -538,6 +572,10 @@ class SkillCatalog:
             if global_directory is not None
             else config_dir() / "vnext" / "skills"
         )
+        # Tests and isolated catalogues (a bridge inspecting one repository,
+        # for example) want the project's and the user's recipes only. The
+        # default keeps shipping the built-in collection.
+        self.include_builtin = bool(include_builtin)
         self._skills: Dict[str, SkillMetadata] = {}
         self._diagnostics: list[SkillDiagnostic] = []
         self._discovered = False
@@ -564,7 +602,7 @@ class SkillCatalog:
         # discovered in order and the first skill with a name wins, so a project
         # or user skill of the same name shadows the builtin one instead of
         # silently replacing it.
-        builtin_root = builtin_skills_directory()
+        builtin_root = builtin_skills_directory() if self.include_builtin else None
         if builtin_root is not None:
             sources.append(("builtin", builtin_root, False))
         for source_kind, root, explicit in sources:
@@ -850,6 +888,23 @@ class SkillCatalog:
             if reference in references:
                 raise SkillError(f"duplicate Skill file reference: {reference}")
             references.append(reference)
+        raw_scripts = _metadata_value(
+            value, nested_values, "scripts", "declared_scripts"
+        )
+        if raw_scripts is None:
+            raw_scripts = []
+        if not isinstance(raw_scripts, list):
+            raise SkillError("Skill scripts must be a list")
+        if len(raw_scripts) > self.MAX_SCRIPTS:
+            raise SkillError(
+                f"Skill declares more than {self.MAX_SCRIPTS} scripts"
+            )
+        scripts: list[str] = []
+        for raw in raw_scripts:
+            script = _validate_script(raw)
+            if script in scripts:
+                raise SkillError(f"duplicate Skill script: {script}")
+            scripts.append(script)
         return SkillMetadata(
             name=name,
             description=description.strip(),
@@ -863,6 +918,7 @@ class SkillCatalog:
             optional_mcp=optional_mcp,
             requested_capabilities=tuple(permissions),
             files=tuple(references),
+            scripts=tuple(scripts),
             validation_rules=validation_rules,
             source_kind=source_kind,
             source_root=root,
