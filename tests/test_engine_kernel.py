@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -883,3 +884,289 @@ def test_engine_resume_synthesizes_results_for_interrupted_calls(
     ]
     assert dangling
     assert "interrupted before this call executed" in (dangling[0].content or "")
+
+
+# ------------------------------------------------------- CLI-level integration
+
+def _request_text(request: ModelRequest) -> str:
+    return "\n".join(message.content or "" for message in request.messages)
+
+
+def _request_tools(request: ModelRequest) -> set[str]:
+    return {tool.name for tool in request.tools}
+
+
+def _cli_repo(tmp_path: Path) -> Path:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    _git(repository, "config", "user.name", "Test")
+    _git(repository, "add", "seed.txt")
+    _git(repository, "commit", "-q", "-m", "seed")
+    return repository
+
+
+def _agent_run_args(repository: Path, *flags: str) -> List[str]:
+    arguments = [
+        "agent",
+        "run",
+        "--repository",
+        str(repository),
+        "--task",
+        "create hello.txt with hi",
+        "--model",
+        "scripted-model",
+        "--base-url",
+        "http://127.0.0.1:9/v1",
+        "--session-id",
+        "engine-1",
+        "--max-steps",
+        "6",
+        "--max-seconds",
+        "120",
+        "--verification-command",
+        json.dumps(["python", "-c", "print('ok')"]),
+        "--stream-json",
+    ]
+    arguments.extend(flags)
+    return arguments
+
+
+def _scripted_cli(monkeypatch: pytest.MonkeyPatch, responses: List[ModelResponse]) -> Any:
+    from karox import cli
+
+    provider = ScriptedProvider(responses)
+    monkeypatch.setattr(cli, "OpenAIChatCompletionsProvider", lambda *args, **kwargs: provider)
+    return provider
+
+
+def _parse_stream(output: str) -> tuple[List[dict], dict]:
+    documents = [
+        json.loads(line)
+        for line in output.splitlines()
+        if line.strip() and line.startswith("{")
+    ]
+    events = [item for item in documents if item.get("type") == "event"]
+    results = [item for item in documents if item.get("type") == "result"]
+    assert results, "the stream must end with one result document"
+    return events, results[-1]["report"]
+
+
+@pytest.fixture(scope="module")
+def mcp_stdio_server(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """One real stdio MCP echo server, discovered once for these tests."""
+
+    from _mcp_support import ECHO_SERVER, child_process_cleanup
+    from karox.mcp_client import McpClient, McpRegistry, McpServerRecord
+
+    root = tmp_path_factory.mktemp("engine-cli-mcp")
+    repository = root / "repo"
+    repository.mkdir()
+    record = McpServerRecord(
+        server_id="echo",
+        namespace="echo",
+        transport="stdio",
+        command=sys.executable,
+        args=(str(ECHO_SERVER),),
+        environment={},
+        read_only_tools=("echo",),
+        timeout_seconds=20.0,
+        max_transport_retries=0,
+    )
+    registry = McpRegistry(root / "mcp-servers.json")
+    registry.put(record)
+    tools = McpClient(registry).discover_record(record, repository)
+    try:
+        yield {"record": record, "registry": registry, "tools": tools}
+    finally:
+        with child_process_cleanup(scripts=[ECHO_SERVER]):
+            pass
+
+
+def test_cli_default_run_executes_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI's default run is the engine run: the trajectory proves it."""
+
+    import contextlib
+    import io
+
+    from karox import cli
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = _cli_repo(tmp_path)
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),), content="writing the file"),
+            _response((_finish_call("c2", "created hello.txt with hi"),)),
+        ],
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(_agent_run_args(repository))
+    assert code == 0
+    events, report = _parse_stream(output.getvalue())
+    assert report["verified"] is True
+    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
+    assert "tool_started" in [event["kind"] for event in events]
+    # The engine's own trajectory is the durable identity proof.
+    trajectory = (
+        tmp_path / "runtime" / "vnext" / "sessions" / "engine-1" / "engine" / "trajectory.json"
+    )
+    assert trajectory.is_file()
+    data = json.loads(trajectory.read_text(encoding="utf-8"))
+    agent_blob = json.dumps(data)
+    assert "karox.engine_kernel.EngineAgent" in agent_blob
+    # The engine path advertises typed tools, never a raw shell.
+    assert "repo_write_file" in _request_tools(provider.requests[0])
+
+
+def test_cli_legacy_loop_flag_selects_the_v5_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--legacy-loop runs the v5 loop; no engine trajectory is produced."""
+
+    import contextlib
+    import io
+
+    from karox import cli
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = _cli_repo(tmp_path)
+
+    def final_answer(answer: str) -> ModelResponse:
+        return ModelResponse(
+            content=answer,
+            tool_calls=(),
+            finish_reason="stop",
+            usage={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
+            cost=0.01,
+            currency="USD",
+        )
+
+    _scripted_cli(
+        monkeypatch,
+        [
+            # The v5 loop offers typed tools too; it finishes on a plain answer.
+            _response((_write_call("call-1", "hello.txt", "hi"),), content="writing the file"),
+            final_answer("created hello.txt with hi"),
+        ],
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(_agent_run_args(repository, "--legacy-loop"))
+    assert code == 0
+    _, report = _parse_stream(output.getvalue())
+    assert report["verified"] is True
+    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
+    # The legacy loop never creates the engine's trajectory artifact.
+    trajectory = (
+        tmp_path / "runtime" / "vnext" / "sessions" / "engine-1" / "engine" / "trajectory.json"
+    )
+    assert not trajectory.exists()
+
+
+def test_cli_engine_run_calls_the_selected_mcp_tool(
+    mcp_stdio_server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session's selected MCP tool is advertised and callable on the engine path."""
+
+    import contextlib
+    import io
+
+    from karox import cli
+    from karox.mcp_client import McpRegistry, mcp_selection
+    from karox.paths import config_dir, runtime_dir
+    from karox.sessions import SessionStore
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    (config_dir() / "vnext").mkdir(parents=True, exist_ok=True)
+    McpRegistry(config_dir() / "vnext" / "mcp-servers.json").put(mcp_stdio_server["record"])
+    repository = _cli_repo(tmp_path)
+    task = "create hello.txt with hi"
+    store = SessionStore(runtime_dir() / "vnext" / "sessions")
+    store.create(repository, task, AccessProfile.WORKSPACE_WRITE, session_id="engine-1")
+    selection = mcp_selection(
+        mcp_stdio_server["record"], mcp_stdio_server["tools"], {"echo": "allow"}
+    )
+    with store.mutate("engine-1", "test", ttl_seconds=30.0) as record:
+        record.mcp_servers = [selection]
+
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            _response(
+                (_tool_call("c1", "mcp_echo_echo", {"message": "from-the-engine"}),),
+                content="calling the bound MCP tool",
+            ),
+            _response((_write_call("c2", "hello.txt", "hi"),), content="writing the file"),
+            _response((_finish_call("c3", "done"),)),
+        ],
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(_agent_run_args(repository))
+    assert code == 0
+    # The bound MCP tool is advertised to the model under its provider alias.
+    assert "mcp_echo_echo" in _request_tools(provider.requests[0])
+    # The real stdio server answered; the observation rode back into history.
+    assert "from-the-engine" in _request_text(provider.requests[1])
+    _, report = _parse_stream(output.getvalue())
+    assert report["verified"] is True
+    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_cli_engine_run_auto_activates_and_advertises_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Triggered recipes ride the prompt and skill.run is a typed tool."""
+
+    import contextlib
+    import io
+
+    from karox import cli
+    from karox.paths import runtime_dir
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = _cli_repo(tmp_path)
+    skill = repository / ".karox" / "skills" / "greet-feature" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: greet-feature\n"
+        "version: 1.0.0\n"
+        "description: Greet the reviewer politely.\n"
+        "when_to_use: the task asks for a greeting.\n"
+        "triggers: [greet]\n"
+        "---\n"
+        "# Greet recipe\n"
+        "GREET RECIPE BODY: open with a polite hello.\n",
+        encoding="utf-8",
+    )
+    provider = _scripted_cli(
+        monkeypatch,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),), content="writing the file"),
+            _response((_finish_call("c2", "done"),)),
+        ],
+    )
+    arguments = _agent_run_args(repository)
+    arguments[arguments.index("--task") + 1] = "greet the reviewer and create hello.txt with hi"
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(arguments)
+    assert code == 0
+    # The activated recipe rides the system prompt the engine renders.
+    assert "GREET RECIPE BODY" in _request_text(provider.requests[0])
+    # The session-bound runtime advertises the leased skill.run tool.
+    assert "skill_run" in _request_tools(provider.requests[0])
+    audit = runtime_dir() / "vnext" / "skill-audit" / "engine-1.jsonl"
+    assert audit.is_file()
+    assert "greet-feature" in audit.read_text(encoding="utf-8")
