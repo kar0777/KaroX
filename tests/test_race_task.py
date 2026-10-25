@@ -15,10 +15,14 @@ SCRIPT = ROOT / "scripts" / "race_task.py"
 SECRET = "race-test-secret-value"
 
 
-def run_script(*arguments: object) -> subprocess.CompletedProcess[str]:
+def run_script(
+    *arguments: object, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["RACE_TEST_API_KEY"] = SECRET
     environment["PYTHONIOENCODING"] = "utf-8"
+    for name, value in (extra_env or {}).items():
+        environment[name] = value
     return subprocess.run(
         [sys.executable, str(SCRIPT), *(str(item) for item in arguments)],
         cwd=ROOT,
@@ -262,3 +266,95 @@ def test_runner_rejects_malformed_process_commands(tmp_path: Path, value: str) -
 
     assert completed.returncode == 2
     assert "command JSON" in completed.stderr
+
+
+def _race_task_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("race_task_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_default_command_is_allowed_only_for_this_checkouts_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _race_task_module()
+
+    # This test process resolves karox from this repository's src/ (conftest
+    # puts it first), so the default contender command is this checkout's.
+    command = module._default_command()
+
+    assert command == [sys.executable, "-m", "karox.cli"]
+
+
+def test_default_command_refuses_an_ambient_karox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.util
+
+    module = _race_task_module()
+    foreign = tmp_path / "site-packages" / "karox" / "__init__.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("", encoding="utf-8")
+
+    def fake_find_spec(name: str, *args: object, **kwargs: object):
+        if name != "karox":
+            return importlib.util.find_spec(name, *args, **kwargs)
+        return importlib.util.spec_from_file_location("karox", str(foreign))
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    with pytest.raises(ValueError, match="command-json"):
+        module._default_command()
+
+
+def test_default_command_refuses_when_no_karox_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.util
+
+    module = _race_task_module()
+
+    def fake_find_spec(name: str, *args: object, **kwargs: object):
+        if name != "karox":
+            return importlib.util.find_spec(name, *args, **kwargs)
+        return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    with pytest.raises(ValueError, match="command-json"):
+        module._default_command()
+
+
+def test_runner_without_command_json_refuses_an_ambient_karox(
+    tmp_path: Path,
+) -> None:
+    # Reproduces the real fairness hazard: an ambient karox install (here a
+    # fake package on PYTHONPATH outside this repository) would otherwise be
+    # benchmarked instead of the contender.
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    ambient = tmp_path / "ambient"
+    (ambient / "karox").mkdir(parents=True)
+    (ambient / "karox" / "__init__.py").write_text("", encoding="utf-8")
+
+    completed = run_script(
+        "run",
+        "--label",
+        "ambient",
+        "--repository",
+        repository,
+        "--task",
+        "measure",
+        "--output-dir",
+        tmp_path / "evidence",
+        extra_env={"PYTHONPATH": str(ambient)},
+    )
+
+    assert completed.returncode == 2
+    assert "refusing the default contender command" in completed.stderr
+    assert "--command-json" in completed.stderr
+    assert not (tmp_path / "evidence" / "metrics.json").exists()

@@ -192,6 +192,32 @@ def _engine(report: dict[str, Any] | None) -> Any:
     return None
 
 
+def _default_command() -> list[str]:
+    """The default contender command, but only when it measures this checkout.
+
+    ``python -m karox.cli`` resolves ``karox`` wherever the *interpreter's*
+    sys.path says. On a machine with an ambient KaroX install that is the
+    wrong package silently benchmarked as the contender. The default is
+    therefore allowed only when the resolved ``karox`` package lives inside
+    this repository; every other setup must name the contender explicitly
+    with ``--command-json`` (for example the fresh venv that has the built
+    wheel installed).
+    """
+
+    import importlib.util
+
+    spec = importlib.util.find_spec("karox")
+    origin = Path(spec.origin).resolve() if spec is not None and spec.origin else None
+    checkout = Path(__file__).resolve().parents[1]
+    if origin is None or _outside_repository(origin, checkout):
+        raise ValueError(
+            "refusing the default contender command: this interpreter imports "
+            f"karox from {origin or 'nowhere'}; pass --command-json naming the "
+            "contender interpreter (for example the venv with the built wheel)"
+        )
+    return [sys.executable, "-m", "karox.cli"]
+
+
 def run_task(args: argparse.Namespace) -> int:
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -211,9 +237,7 @@ def run_task(args: argparse.Namespace) -> int:
     output = args.output_dir.expanduser().resolve()
     _prepare_output(output, repository)
     base_command = (
-        _command_json(args.command_json)
-        if args.command_json
-        else [sys.executable, "-m", "karox.cli"]
+        _command_json(args.command_json) if args.command_json else _default_command()
     )
     independent_check = (
         _command_json(args.independent_check_json, label="independent-check command JSON")
@@ -422,7 +446,13 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--repository", required=True, type=Path)
     run.add_argument("--task", required=True)
     run.add_argument("--output-dir", required=True, type=Path)
-    run.add_argument("--command-json", help="JSON argv prefix; defaults to python -m karox.cli")
+    run.add_argument(
+        "--command-json",
+        help=(
+            "JSON argv prefix naming the contender interpreter; required unless "
+            "this interpreter already imports karox from this repository"
+        ),
+    )
     run.add_argument("--session-id")
     run.add_argument("--model")
     run.add_argument("--base-url")
