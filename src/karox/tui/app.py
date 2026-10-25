@@ -158,16 +158,16 @@ class KaroxApp(App[int]):
         self.register_theme(
             Theme(
                 name="karox",
-                primary="#d6b36a",
-                secondary="#8d96a5",
-                accent="#d6b36a",
-                warning="#d6b36a",
-                error="#d97b7b",
-                success="#7fb08a",
-                foreground="#d8dce3",
-                background="#0f1115",
-                surface="#161a20",
-                panel="#1c2129",
+                primary="#d4b676",
+                secondary="#8a7e6a",
+                accent="#d4b676",
+                warning="#c6a56b",
+                error="#e0a3a3",
+                success="#8aab7e",
+                foreground="#e5e5e5",
+                background="#0e0c08",
+                surface="#1a1712",
+                panel="#1a1712",
                 dark=True,
             )
         )

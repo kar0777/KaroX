@@ -6,13 +6,7 @@ import importlib
 from karox.engine import Environment
 
 _ENVIRONMENT_MAPPING = {
-    "docker": "karox.engine.environments.docker.DockerEnvironment",
-    "singularity": "karox.engine.environments.singularity.SingularityEnvironment",
     "local": "karox.engine.environments.local.LocalEnvironment",
-    "swerex_docker": "karox.engine.environments.extra.swerex_docker.SwerexDockerEnvironment",
-    "swerex_modal": "karox.engine.environments.extra.swerex_modal.SwerexModalEnvironment",
-    "bubblewrap": "karox.engine.environments.extra.bubblewrap.BubblewrapEnvironment",
-    "contree": "karox.engine.environments.extra.contree.ContreeEnvironment",
 }
 
 

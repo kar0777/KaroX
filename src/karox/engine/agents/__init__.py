@@ -7,7 +7,6 @@ from karox.engine import Agent, Environment, Model
 
 _AGENT_MAPPING = {
     "default": "karox.engine.agents.default.DefaultAgent",
-    "interactive": "karox.engine.agents.interactive.InteractiveAgent",
 }
 
 

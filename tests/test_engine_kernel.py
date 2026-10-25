@@ -186,25 +186,24 @@ class Harness:
 def test_agent_kernel_default_is_the_engine_kernel(
     tmp_path: Path, repository: Path
 ) -> None:
-    """The public name selects the karo-core engine, not the legacy loop."""
+    """The public name selects the karo-core engine; the v5 loop is gone."""
     harness = Harness(
         repository,
         tmp_path,
         [_response((_finish_call("c1", "done"),))],
     )
     assert isinstance(harness.kernel.implementation, EngineKernel)
-    legacy = AgentKernel(
-        provider=harness.provider,
-        model="test-model",
-        core=harness.core,
-        sessions=harness.store,
-        origin=harness.origin,
-        system_prompt=SYSTEM_PROMPT,
-        legacy=True,
-    )
-    from karox.agent import LegacyAgentKernel
-
-    assert isinstance(legacy.implementation, LegacyAgentKernel)
+    # The retired v5 loop must not come back through the constructor.
+    with pytest.raises(ValueError, match="legacy v5 loop was removed"):
+        AgentKernel(
+            provider=harness.provider,
+            model="test-model",
+            core=harness.core,
+            sessions=harness.store,
+            origin=harness.origin,
+            system_prompt=SYSTEM_PROMPT,
+            legacy=True,
+        )
 
 
 def test_engine_run_verifies_a_change_end_to_end(tmp_path: Path, repository: Path) -> None:
@@ -435,9 +434,9 @@ def test_engine_recovers_from_an_empty_response(tmp_path: Path, repository: Path
 def test_engine_format_error_usage_is_accounted(tmp_path: Path, repository: Path) -> None:
     """A billed response that fails parsing still counts its tokens.
 
-    The legacy loop folds every provider response into session usage; the
-    engine bridge must not drop the tokens of a format-error response, or the
-    session's token evidence undercounts real spend.
+    Every provider response must fold into session usage; the engine bridge
+    must not drop the tokens of a format-error response, or the session's
+    token evidence undercounts real spend.
     """
     harness = Harness(
         repository,
@@ -1032,10 +1031,10 @@ def test_cli_default_run_executes_the_engine(
     assert "repo_write_file" in _request_tools(provider.requests[0])
 
 
-def test_cli_legacy_loop_flag_selects_the_v5_kernel(
+def test_cli_legacy_loop_flag_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--legacy-loop runs the v5 loop; no engine trajectory is produced."""
+    """--legacy-loop is no longer a CLI switch; the engine is the only kernel."""
 
     import contextlib
     import io
@@ -1046,38 +1045,12 @@ def test_cli_legacy_loop_flag_selects_the_v5_kernel(
     monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
     repository = _cli_repo(tmp_path)
 
-    def final_answer(answer: str) -> ModelResponse:
-        return ModelResponse(
-            content=answer,
-            tool_calls=(),
-            finish_reason="stop",
-            usage={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
-            cost=0.01,
-            currency="USD",
-        )
-
-    _scripted_cli(
-        monkeypatch,
-        [
-            # The v5 loop offers typed tools too; it finishes on a plain answer.
-            _response((_write_call("call-1", "hello.txt", "hi"),), content="writing the file"),
-            final_answer("created hello.txt with hi"),
-        ],
-    )
     output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        code = cli.main(_agent_run_args(repository, "--legacy-loop"))
-    assert code == 0
-    _, report = _parse_stream(output.getvalue())
-    assert report["verified"] is True
-    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
-    # The legacy loop never creates the engine's trajectory artifact.
-    trajectory = (
-        tmp_path / "runtime" / "vnext" / "sessions" / "engine-1" / "engine" / "trajectory.json"
-    )
-    assert not trajectory.exists()
-    # And its report never claims the engine identity.
-    assert report.get("engine") is None
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(_agent_run_args(repository, "--legacy-loop"))
+    assert exc.value.code != 0
+    assert "unrecognized arguments" in output.getvalue()
 
 
 def test_cli_engine_run_calls_the_selected_mcp_tool(

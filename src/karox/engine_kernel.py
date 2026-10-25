@@ -21,11 +21,9 @@ Three adapters keep the product's guarantees while the engine drives:
   observations.
 - :class:`EngineKernel` owns the session lease, the durable per-step
   checkpoints, cancellation, the harness finishing calls and the same
-  evidence-chain verification the legacy kernel used -- nothing here may turn
-  a model's prose into a verified claim.
-
-The legacy loop remains importable (``agent.LegacyAgentKernel``) for
-comparison runs, but it is not the default under any name.
+  evidence-chain verification the retired v5 loop used -- nothing here may turn
+  a model's prose into a verified claim. The proof-state readers it shares
+  with that loop live in :mod:`karox.session_analysis`.
 """
 
 from __future__ import annotations
@@ -58,6 +56,7 @@ from .engine.exceptions import (  # noqa: E402
 from .engine.models.litellm_model import salvage_fenced_command  # noqa: E402
 
 from . import completion_gate  # noqa: E402
+from . import session_analysis  # noqa: E402
 from .agent import (  # noqa: E402
     HARNESS_ORIGIN,
     HARNESS_REQUESTED_BY,
@@ -69,13 +68,12 @@ from .agent import (  # noqa: E402
     AgentLimits,
     AgentReport,
     ContextBudget,
-    LegacyAgentKernel,
     _bounded_failure_summary,
     _derived_tool_events,
     _is_small_talk_task,
-    normalize_mode,
     provider_alias,
 )
+from .agent_modes import normalize_mode  # noqa: E402
 from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
 from .models import CoreCommand, CoreResult, EvidenceRecord, Origin  # noqa: E402
@@ -1120,12 +1118,10 @@ class EngineAgent(DefaultAgent):
 class EngineKernel:
     """Runs one engine-backed native-agent session.
 
-    Public surface mirrors the legacy ``AgentKernel``: construct with the
+    Public surface mirrors the historical ``AgentKernel``: construct with the
     provider/model/core/session plumbing and an ``on_event`` observer, call
-    ``run(session_id)``, receive an :class:`AgentReport`. Parameters the
-    legacy loop used for its own economy machinery are accepted for interface
-    compatibility; the engine's native context/output ceilings and recovery
-    behavior are what actually govern this path.
+    ``run(session_id)``, receive an :class:`AgentReport``. The engine's native
+    context/output ceilings and recovery behavior govern this path.
     """
 
     def __init__(
@@ -1143,33 +1139,17 @@ class EngineKernel:
         require_change: bool = False,
         max_output_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
-        economy_mode: bool = False,
-        lossless_context_rewrite: bool = True,
         restore_on_regression: bool = True,
-        render_feedback: bool = True,
-        domain_notes_enabled: bool = True,
-        repeat_read_suppression: bool = True,
         mode: Optional[str] = None,
         maintenance_mode: bool = False,
         request_images: Tuple[ImageAttachment, ...] = (),
         pricing_registry: Optional[Any] = None,
         on_event: Optional[Callable[[AgentEvent], None]] = None,
-        semantic_shadow: bool = False,
-        base_probe_enabled: bool = True,
         output_char_limit: int = 50_000,
         command_timeout: int = 300,
         engine_keep_recent_messages: int = 24,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        del (
-            economy_mode,
-            lossless_context_rewrite,
-            render_feedback,
-            domain_notes_enabled,
-            repeat_read_suppression,
-            semantic_shadow,
-            base_probe_enabled,
-        )
         if not isinstance(model, str) or not model.strip():
             raise ValueError("agent model must be a non-empty string")
         if not isinstance(system_prompt, str) or not system_prompt.strip():
@@ -1302,7 +1282,7 @@ class EngineKernel:
                 return self._report(
                     record,
                     reason="already_verified",
-                    provider_message=LegacyAgentKernel._last_provider_message(record),
+                    provider_message=session_analysis.last_provider_message(record),
                 )
             resume_messages, resume_calls = self._seed_history(session_id, lease, record)
             model = EngineProviderModel(
@@ -1920,7 +1900,7 @@ class EngineKernel:
         response = _response_from_engine_message(message)
         tool_calls = []
         for item in response.tool_calls:
-            safe_arguments, recoverable = LegacyAgentKernel._safe_arguments(
+            safe_arguments, recoverable = session_analysis.safe_arguments(
                 item.raw_arguments
             )
             tool_calls.append(
@@ -2011,7 +1991,7 @@ class EngineKernel:
             ):
                 calls.append(("checks.run", {"argv": list(command)}))
                 seen.add(tuple(command))
-        for argv in LegacyAgentKernel._unresolved_model_checks(record, missing):
+        for argv in session_analysis.unresolved_model_checks(record, missing):
             if len(calls) >= 4:
                 break
             if tuple(argv) not in seen:
@@ -2125,20 +2105,20 @@ class EngineKernel:
     # -- verification ------------------------------------------------------
 
     def _verification(self, record: SessionRecord) -> bool:
-        return LegacyAgentKernel._evidence_chain(record) and not completion_gate.floor(
+        return session_analysis.evidence_chain(record) and not completion_gate.floor(
             self.core, record
         )
 
     def _answer_complete(self, record: SessionRecord) -> bool:
         if self.require_change or record.changed_files:
             return False
-        if LegacyAgentKernel._attempted_mutation(record):
+        if session_analysis.attempted_mutation(record):
             return False
-        if not LegacyAgentKernel._last_provider_message(record):
+        if not session_analysis.last_provider_message(record):
             return False
         if _is_small_talk_task(record.task):
             return True
-        return bool(LegacyAgentKernel._answer_basis(record))
+        return bool(session_analysis.answer_basis(record))
 
     def _completed(self, record: SessionRecord) -> bool:
         visual_ok = (
@@ -2220,7 +2200,7 @@ class EngineKernel:
         if not digests:
             return
         snapshot = {
-            "step": LegacyAgentKernel._step_count(record.provider_history),
+            "step": session_analysis.step_count(record.provider_history),
             "files": digests,
             "checked_at": time.time(),
         }
@@ -2383,15 +2363,15 @@ class EngineKernel:
             phase=record.phase,
             verified=record.status == "verified" and self._completed(record),
             reason=reason,
-            steps=LegacyAgentKernel._step_count(record.provider_history),
+            steps=session_analysis.step_count(record.provider_history),
             changed_files=tuple(record.changed_files),
             checks=tuple(record.checks),
             git_state=dict(record.git_state),
             evidence=tuple(record.evidence),
             usage=dict(record.usage),
             provider_message=provider_message
-            or LegacyAgentKernel._last_provider_message(record),
-            answer_basis=LegacyAgentKernel._answer_basis(record) if reason == "answer" else (),
+            or session_analysis.last_provider_message(record),
+            answer_basis=session_analysis.answer_basis(record) if reason == "answer" else (),
             project_context=dict(self.project_context),
             compaction=dict(self._compaction) if self._compaction else None,
             restored=restored,

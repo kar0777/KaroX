@@ -685,9 +685,9 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     """Resolve one agent run end to end and return its report.
 
     Everything a run needs -- session resolution, the provider, the policy,
-    the Core with its verification allowlist, the kernel (engine by default,
-    v5 behind ``--legacy-loop``) and the mode artifact -- happens here, so a
-    caller that only wants the outcome can take it without the output layer.
+    the Core with its verification allowlist, the kernel (the vendored
+    karo-core engine) and the mode artifact -- happens here, so a caller
+    that only wants the outcome can take it without the output layer.
     """
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
@@ -777,7 +777,6 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         context = context.with_window(context_window, source="advertised")
 
     origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
-    legacy_loop = bool(getattr(args, "legacy_loop", False))
     policy = CapabilityPolicy(profile)
     policy.set_grants(origin, _agent_grants(profile, args.mode))
     risk = RiskEngine()
@@ -956,10 +955,8 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         _stream_progress() if args.stream else None
     )
     # AgentKernel is the facade over the vendored karo-core engine: the
-    # default run executes src/karox/engine through typed Core tools, with
-    # the selected MCP tools and the skill surface advertised from
-    # core.tools(). --legacy-loop is the explicit escape hatch to the v5
-    # loop, never the default.
+    # run executes src/karox/engine through typed Core tools, with the
+    # selected MCP tools and the skill surface advertised from core.tools().
     kernel = AgentKernel(
         provider=provider,
         model=model,
@@ -977,7 +974,6 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         mode=args.mode,
         request_images=request_images,
         on_event=observer,
-        legacy=legacy_loop,
     )
     try:
         report = kernel.run(record.session_id)
@@ -2234,14 +2230,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--stream", action="store_true")
     run.add_argument("--stream-json", action="store_true")
-    run.add_argument(
-        "--legacy-loop",
-        action="store_true",
-        help=(
-            "run the pre-engine v5 agent kernel instead of the karo-core "
-            "engine default (diagnostic escape hatch, not the product path)"
-        ),
-    )
     run.add_argument(
         "--accept-discovered-checks",
         action="store_true",

@@ -33,16 +33,40 @@ LEGACY = {
     "ellipsis_api.py",
     "tailscale.py",
     "orchestrator.py",
+    "cache_scheduler.py",
+    "cost_intelligence.py",
+    "semantic_shadow.py",
 }
-# The release carries the hosted MCP bridge as a product surface. The v5
-# laboratory was ~166k lines. 70k covered the release kernel; the seed race
-# commit vendored the karo-core engine (~5.6k lines, src/karox/engine) and B1
-# added its typed-tool adapter (engine_kernel.py), which is deliberate product
-# surface, so the ceiling moved to 80k. B4 (browser engine, ~6.5k) and B5
-# (computer use, ~6.2k) are the same kind of deliberate merged surface, so the
-# merged integration moved it once more to 90k. Raise it deliberately for
+#: The vendored karo-core engine is pruned to exactly the modules the product
+#: imports (plus test_models for the deterministic test model). Adding a file
+#: under engine/ must be a deliberate act that updates this set.
+ENGINE_MODULES = {
+    "__init__.py",
+    "agents/__init__.py",
+    "agents/default.py",
+    "environments/__init__.py",
+    "environments/local.py",
+    "exceptions.py",
+    "models/__init__.py",
+    "models/litellm_model.py",
+    "models/test_models.py",
+    "models/utils/__init__.py",
+    "models/utils/actions_text.py",
+    "models/utils/actions_toolcall.py",
+    "models/utils/actions_toolcall_response.py",
+    "models/utils/anthropic_utils.py",
+    "models/utils/cache_control.py",
+    "models/utils/openai_multimodal.py",
+    "models/utils/retry.py",
+    "utils/__init__.py",
+    "utils/log.py",
+    "utils/serialize.py",
+}
+# The retired v5 loop and its economy modules were removed (~8.2k lines) and
+# the vendored engine was pruned to the product's import closure (~3.6k
+# lines), so the ceiling dropped from 90k to 80k. Raise it deliberately for
 # named surface, never to make a stray copy pass.
-MAX_LINES = 90_000
+MAX_LINES = 80_000
 
 
 def module_exists(module: str) -> bool:
@@ -95,6 +119,14 @@ def main() -> int:
     present = {path.name for path in PACKAGE.iterdir() if path.is_file()}
     for name in sorted(present & LEGACY):
         problems.append(f"legacy module returned: {name}")
+    engine = PACKAGE / "engine"
+    engine_present = {
+        str(path.relative_to(engine)).replace("\\", "/")
+        for path in engine.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    for name in sorted(engine_present - ENGINE_MODULES):
+        problems.append(f"engine module outside the vendored closure: {name}")
     for name in ("prompts", "builtin_skills", "skill_notes"):
         for path in (PACKAGE / name).rglob("*.pyc"):
             if not path.name.startswith("__init__."):

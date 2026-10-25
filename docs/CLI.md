@@ -85,19 +85,16 @@ karox agent run --task TEXT [--repository PATH]
     [--image PATH]... [--no-project-context] [--no-memory]
     [--max-steps N] [--max-seconds S]
     [--context-window N] [--max-output-tokens N]
-    [--stream] [--stream-json] [--legacy-loop] [--json]
+    [--stream] [--stream-json] [--json]
 ```
 
-- The default runtime is the vendored karo-core engine (`karox.engine`): one
+- The runtime is the vendored karo-core engine (`karox.engine`): one
   bash action per model turn, executed repository-scoped behind the capability
   policy, the command invariants and the consequence engine. The report's
   `engine` field names the loop that ran. The harness runs the approved
   verification commands after the engine submits, so `verified` always means a
-  real check passed.
-- `--legacy-loop` selects the older v5 kernel with its typed tool calls
-  (including `skill_load`, MCP tools mid-task, the visual checker and image
-  attachments). It is a diagnostic escape hatch, not the product path; image
-  attachments are refused on the engine loop rather than silently dropped.
+  real check passed. The retired v5 loop and its `--legacy-loop` flag are
+  gone; the engine is the only kernel.
 
 - Routed mode uses the selected registry model. `--route` adds ordered fallback
   routes; the primary is first. Context and output ceilings are the smallest

@@ -1,20 +1,20 @@
-/* KaroX compact client.
+/* KaroX compact client -- v5 rc4 palette.
  *
- * The palette is deliberately quiet: near-black ground, one gold accent for
- * position and action, green/red reserved for outcomes. No box is drawn around
- * ordinary prose, so a border always means "this needs attention".
+ * Warm near-black ground, one gold accent for position and action, green/red
+ * reserved for outcomes. No box is drawn around ordinary prose, so a border
+ * always means "this needs attention".
  */
 
 Screen {
-    background: #0f1115;
-    color: #d8dce3;
+    background: #0e0c08;
+    color: #e5e5e5;
 }
 
 #header {
     height: 1;
     padding: 0 2;
-    background: #161a20;
-    color: #d8dce3;
+    background: #1a1712;
+    color: #e5e5e5;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
@@ -22,16 +22,16 @@ Screen {
 #chat {
     height: 1fr;
     padding: 1 2 0 2;
-    scrollbar-color: #3a4250;
-    scrollbar-background: #0f1115;
+    scrollbar-color: #4a4338;
+    scrollbar-background: #0e0c08;
 }
 
 .welcome {
     width: 100%;
     margin: 0 0 1 0;
     padding: 1 2;
-    background: #14181e;
-    border: round #2b313a;
+    background: #15120c;
+    border: round #4a4338;
 }
 
 .user-message {
@@ -44,20 +44,20 @@ Screen {
     width: 100%;
     margin: 0 0 1 0;
     padding: 0 0 0 2;
-    border-left: thick #2b313a;
+    border-left: thick #4a4338;
 }
 
 .reasoning-line {
-    color: #6b7381;
+    color: #8a7e6a;
     margin-bottom: 0;
 }
 
 .live-answer {
-    color: #d8dce3;
+    color: #e5e5e5;
 }
 
 .final-answer {
-    color: #d8dce3;
+    color: #e5e5e5;
     margin: 0;
 }
 
@@ -65,58 +65,58 @@ Screen {
     width: 100%;
     margin: 0 0 0 2;
     padding: 0 1;
-    background: #15181d;
-    border-left: thick #2b313a;
+    background: #16130d;
+    border-left: thick #4a4338;
 }
 
 .tool-card:hover {
-    background: #1a1f26;
+    background: #1d1810;
 }
 
 /* One quiet colour per kind of work, so a scrolling log can be read at a
-   glance: gold mutates, green proves, violet leaves the process. */
-.tool-read { border-left: thick #7fa6c9; }
-.tool-edit { border-left: thick #d6b36a; }
-.tool-test { border-left: thick #7fb08a; }
-.tool-mcp { border-left: thick #a68cc9; }
-.tool-skill { border-left: thick #d6b36a; }
-.tool-plan { border-left: thick #8d96a5; }
-.tool-web { border-left: thick #7fa6c9; }
-.tool-inspect { border-left: thick #8d96a5; }
-.tool-subagent { border-left: thick #a68cc9; }
-.tool-other { border-left: thick #2b313a; }
+   glance: gold mutates, green proves, amber leaves the process. */
+.tool-read { border-left: thick #8a7e6a; }
+.tool-edit { border-left: thick #d4b676; }
+.tool-test { border-left: thick #8aab7e; }
+.tool-mcp { border-left: thick #c6a56b; }
+.tool-skill { border-left: thick #d4b676; }
+.tool-plan { border-left: thick #8a7e6a; }
+.tool-web { border-left: thick #c6a56b; }
+.tool-inspect { border-left: thick #8a7e6a; }
+.tool-subagent { border-left: thick #c6a56b; }
+.tool-other { border-left: thick #4a4338; }
 
 .notice {
     width: 100%;
     margin: 1 0;
     padding: 0 1;
-    border: round #2b313a;
-    background: #14181e;
+    border: round #4a4338;
+    background: #15120c;
 }
 
 .notice-success {
-    border: round #33513d;
+    border: round #3f4d38;
 }
 
 .notice-warning {
-    border: round #4a402a;
+    border: round #584a26;
 }
 
 .notice-error {
-    border: round #5a3336;
+    border: round #5c3a3a;
 }
 
 #activity {
     height: 1;
     padding: 0 2;
-    background: #0f1115;
+    background: #0e0c08;
 }
 
 #activity LoadingIndicator {
     width: 3;
     height: 1;
-    color: #d6b36a;
-    background: #0f1115;
+    color: #d4b676;
+    background: #0e0c08;
     margin: 0 1 0 0;
 }
 
@@ -131,27 +131,27 @@ Screen {
     height: 3;
     margin: 0 2;
     padding: 0 1;
-    background: #161a20;
-    color: #d8dce3;
-    border: round #2b313a;
+    background: #1a1712;
+    color: #e5e5e5;
+    border: round #4a4338;
 }
 
 #composer:hover {
-    border: round #3a4250;
+    border: round #c6a56b;
 }
 
 #composer:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }
 
 #composer .text-area--placeholder {
-    color: #6b7381;
+    color: #8a7e6a;
 }
 
 #status {
     height: 1;
     padding: 0 2;
-    background: #161a20;
+    background: #1a1712;
 }
 
 #status #hint {
@@ -172,18 +172,18 @@ Screen {
     height: auto;
     max-height: 90%;
     padding: 1 2;
-    background: #1c2129;
-    border: round #d6b36a;
+    background: #1a1712;
+    border: round #c6a56b;
 }
 
 .modal-title {
-    color: #d6b36a;
+    color: #d4b676;
     text-style: bold;
     margin-bottom: 1;
 }
 
 .modal-hint {
-    color: #6b7381;
+    color: #8a7e6a;
     margin-top: 1;
 }
 
@@ -198,22 +198,22 @@ Screen {
 }
 
 .field-label {
-    color: #8d96a5;
+    color: #8a7e6a;
     margin-top: 1;
 }
 
 .form-error {
-    color: #d97b7b;
+    color: #e0a3a3;
     margin-top: 1;
 }
 
 .form-modal Input {
-    background: #161a20;
-    border: round #2b313a;
+    background: #1a1712;
+    border: round #4a4338;
 }
 
 .form-modal Input:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }
 
 .form-modal Select {
@@ -251,21 +251,21 @@ Screen {
 .mcp-modal OptionList {
     height: auto;
     max-height: 20;
-    background: #161a20;
-    border: round #2b313a;
+    background: #1a1712;
+    border: round #4a4338;
 }
 
 .mcp-modal OptionList:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }
 
 OptionList {
-    background: #161a20;
-    border: round #2b313a;
+    background: #1a1712;
+    border: round #4a4338;
 }
 
 OptionList:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }
 
 OptionList > .option-list--option-highlighted {
@@ -274,39 +274,39 @@ OptionList > .option-list--option-highlighted {
 }
 
 OptionList > .option-list--option-hover {
-    background: #20262f;
+    background: #241e14;
 }
 
 SelectCurrent {
-    background: #161a20;
-    border: round #2b313a;
+    background: #1a1712;
+    border: round #4a4338;
 }
 
 SelectCurrent:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }
 
 Button {
-    background: #232a34;
-    color: #d8dce3;
-    border: round #2b313a;
+    background: #2a241a;
+    color: #e5e5e5;
+    border: round #4a4338;
     min-width: 8;
 }
 
 Button:hover {
-    background: #2b3440;
+    background: #332b1d;
 }
 
 Button.-primary {
-    background: #d6b36a;
-    color: #14181e;
+    background: #d4b676;
+    color: #0e0c08;
     text-style: bold;
 }
 
 Button.-primary:hover {
-    background: #e3c27e;
+    background: #e0c98c;
 }
 
 Button:focus {
-    border: round #d6b36a;
+    border: round #d4b676;
 }

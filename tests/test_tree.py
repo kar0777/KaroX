@@ -28,6 +28,35 @@ LEGACY = {
     "ellipsis_api.py",
     "tailscale.py",
     "orchestrator.py",
+    "cache_scheduler.py",
+    "cost_intelligence.py",
+    "semantic_shadow.py",
+}
+
+#: The vendored karo-core engine is pruned to exactly the modules the product
+#: imports (plus test_models for the deterministic test model). Adding a file
+#: under engine/ must be a deliberate act that updates this set.
+ENGINE_MODULES = {
+    "__init__.py",
+    "agents/__init__.py",
+    "agents/default.py",
+    "environments/__init__.py",
+    "environments/local.py",
+    "exceptions.py",
+    "models/__init__.py",
+    "models/litellm_model.py",
+    "models/test_models.py",
+    "models/utils/__init__.py",
+    "models/utils/actions_text.py",
+    "models/utils/actions_toolcall.py",
+    "models/utils/actions_toolcall_response.py",
+    "models/utils/anthropic_utils.py",
+    "models/utils/cache_control.py",
+    "models/utils/openai_multimodal.py",
+    "models/utils/retry.py",
+    "utils/__init__.py",
+    "utils/log.py",
+    "utils/serialize.py",
 }
 
 
@@ -42,6 +71,16 @@ def _module_exists(module: str) -> bool:
 def test_no_legacy_module_returned() -> None:
     present = {path.name for path in PACKAGE.iterdir() if path.is_file()}
     assert present.isdisjoint(LEGACY)
+
+
+def test_engine_stays_the_pruned_vendored_closure() -> None:
+    engine = PACKAGE / "engine"
+    present = {
+        str(path.relative_to(engine)).replace("\\", "/")
+        for path in engine.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    assert present == ENGINE_MODULES
 
 
 def test_data_directories_carry_no_generated_cache() -> None:
@@ -102,13 +141,10 @@ def test_python_line_count_stays_bounded() -> None:
         len(path.read_text(encoding="utf-8").splitlines())
         for path in PACKAGE.rglob("*.py")
     )
-    # The kernel is large by design; the guard is for accumulation of new
-    # surface, not for the kernel itself. 70k covered the release kernel with
-    # the hosted MCP bridge. The seed race commit vendored the karo-core
-    # engine (~5.6k lines, src/karox/engine) and B1 added its typed-tool
-    # adapter (engine_kernel.py), which is deliberate product surface, so the
-    # bound moved to 80k. B4 (browser engine, ~6.5k) and B5 (computer use,
-    # ~6.2k) are the same kind of deliberate merged surface, so the merged
-    # integration moved it once more to 90k. Raise it deliberately, never to
-    # make a stray copy pass.
-    assert lines < 90_000
+    # The retired v5 loop and its economy modules were removed (~8.2k lines)
+    # and the vendored engine was pruned to the product's import closure
+    # (~3.6k lines), so the ceiling dropped from 90k to 80k. The kernel is
+    # large by design; the guard is for accumulation of new surface, not for
+    # the kernel itself. Raise it deliberately, never to make a stray copy
+    # pass.
+    assert lines < 80_000

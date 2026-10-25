@@ -81,14 +81,9 @@ where = ["src"]
 "karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
 "karox.skill_notes" = ["*.md"]
 # The engine's packaged protocol (config/default.yaml) is read at runtime by
-# engine_kernel.py; the rest of the engine data files travel with it so the
-# vendored package stays complete in an installed wheel.
+# core_engine.py; the vendored engine lives under karox.engine.
 "karox.engine" = ["py.typed", "LICENSE.md", "NOTICE.md"]
-"karox.engine.config" = ["*.yaml", "*.tcss", "README.md", "benchmarks/*"]
-"karox.engine.agents" = ["README.md"]
-"karox.engine.environments" = ["README.md"]
-"karox.engine.models" = ["README.md"]
-"karox.engine.run" = ["README.md"]
+"karox.engine.config" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

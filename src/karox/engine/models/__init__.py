@@ -77,14 +77,6 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
 
 _MODEL_CLASS_MAPPING = {
     "litellm": "karox.engine.models.litellm_model.LitellmModel",
-    "litellm_textbased": "karox.engine.models.litellm_textbased_model.LitellmTextbasedModel",
-    "litellm_response": "karox.engine.models.litellm_response_model.LitellmResponseModel",
-    "openrouter": "karox.engine.models.openrouter_model.OpenRouterModel",
-    "openrouter_textbased": "karox.engine.models.openrouter_textbased_model.OpenRouterTextbasedModel",
-    "openrouter_response": "karox.engine.models.openrouter_response_model.OpenRouterResponseModel",
-    "portkey": "karox.engine.models.portkey_model.PortkeyModel",
-    "portkey_response": "karox.engine.models.portkey_response_model.PortkeyResponseAPIModel",
-    "requesty": "karox.engine.models.requesty_model.RequestyModel",
     "deterministic": "karox.engine.models.test_models.DeterministicModel",
 }
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## 6.0.0a3 — 2026-10-25
+
+### Removed
+
+- The v5 `LegacyAgentKernel` loop and the `--legacy-loop` flag. After the
+  kernel duel (independent SWE-rebench + live tasks) the vendored karo-core
+  engine is the only kernel; `AgentKernel(..., legacy=True)` now raises. The
+  seven proof-state readers both loops shared live on in the new
+  `session_analysis.py` (evidence chain, answer basis, step count, safe
+  arguments, unresolved checks, attempted mutation, last provider message).
+- The legacy loop's economy modules: `cache_scheduler.py`,
+  `cost_intelligence.py`, `semantic_shadow.py`, `context_compiler.py`,
+  `tool_universe.py`, `base_probe.py` (~9.2k lines total with the loop).
+- The vendored engine's unused surface: docker/singularity/extra
+  environments, the alternative model backends (openrouter, portkey,
+  requesty, litellm text/response variants), `agents/interactive.py`,
+  `config/` except `default.yaml`, and `run/` (the mini-swe-agent CLI and
+  benchmark harnesses). The vendoring is now exactly the product's import
+  closure plus `models/test_models.py`; `check_tree.py` freezes that set.
+- Dead interface kwargs on `EngineKernel` (`economy_mode`,
+  `lossless_context_rewrite`, `render_feedback`, `domain_notes_enabled`,
+  `repeat_read_suppression`, `semantic_shadow`, `base_probe_enabled`).
+
+### Changed
+
+- The TUI palette is the v5 rc4 warm set (gold `#d4b676`, amber `#c6a56b`,
+  olive muted `#8a7e6a`, ground `#0e0c08`, panels `#1a1712`), replacing the
+  cool slate palette.
+- The package is 74.3k lines / 142 modules (from ~88k); the line-count guard
+  dropped from 90k to 80k.
+- `docs/ARCHITECTURE.md` gained a one-line-per-module map.
+
 ## 6.0.0a2 — 2026-10-25
 
 ### Changed

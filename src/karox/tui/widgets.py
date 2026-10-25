@@ -22,14 +22,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import LoadingIndicator, Markdown, Static, TextArea
 
-GOLD = "#d6b36a"
-MUTED = "#8d96a5"
-TEXT = "#d8dce3"
-GREEN = "#7fb08a"
-RED = "#d97b7b"
-BLUE = "#7fa6c9"
-DIM = "#6b7381"
-VIOLET = "#a68cc9"
+GOLD = "#d4b676"
+MUTED = "#8a7e6a"
+TEXT = "#e5e5e5"
+GREEN = "#8aab7e"
+RED = "#e0a3a3"
+AMBER = "#c6a56b"
+DIM = "#8a7e6a"
 
 #: One icon per tool category, so a running line says what kind of work it is
 #: before the name is read. The finished line switches to the outcome mark.
@@ -47,15 +46,15 @@ CATEGORY_ICONS = {
 }
 
 CATEGORY_COLOURS = {
-    "read": BLUE,
+    "read": MUTED,
     "edit": GOLD,
     "test": GREEN,
-    "mcp": VIOLET,
+    "mcp": AMBER,
     "skill": GOLD,
     "plan": MUTED,
-    "web": BLUE,
+    "web": AMBER,
     "inspect": MUTED,
-    "subagent": VIOLET,
+    "subagent": AMBER,
     "other": MUTED,
 }
 
@@ -100,7 +99,7 @@ def header_segments(
     """
 
     candidates: dict[str, tuple[str, str]] = {}
-    candidates["model"] = (model or "no model", BLUE if model else RED)
+    candidates["model"] = (model or "no model", AMBER if model else RED)
     if tokens > 0:
         candidates["tokens"] = (_token_text(tokens), MUTED)
     if context_fraction is not None and context_fraction >= CONTEXT_WARNING_FRACTION:
@@ -471,8 +470,8 @@ class Notice(Static):
         self.text = text
         self.level = level
         icon = {"info": "ℹ", "success": "✓", "warning": "!", "error": "✗"}.get(level, "ℹ")
-        colour = {"info": BLUE, "success": GREEN, "warning": GOLD, "error": RED}.get(
-            level, BLUE
+        colour = {"info": AMBER, "success": GREEN, "warning": GOLD, "error": RED}.get(
+            level, AMBER
         )
         super().__init__(
             Text.assemble((f"{icon} ", colour), (text, TEXT)),

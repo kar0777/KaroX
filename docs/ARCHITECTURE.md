@@ -13,10 +13,10 @@ that speaks a line protocol to it.
              │ mcp status, provider presets, bridge saved    │
              ▼                                               ▼
        cli.py --json                          engine_kernel.py (EngineKernel)
-                                                │               │
-                        engine/ (karo-core, default)    agent.py (AgentKernel,
-                          DefaultAgent + guard            --legacy-loop only)
-                                                │               │
+                                                │
+                                    engine/ (vendored karo-core)
+                                      DefaultAgent + guard
+                                                │
                      ┌────────────────────────┼───────────────┐
                      ▼                    ▼                   ▼
                  core.py             providers.py        sessions.py
@@ -47,19 +47,20 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
    a provider route/model, creates or resumes a session, constructs the kernel
    and renders the report. It also owns the `bridge` and `connections`-style
    lifecycle commands; all handlers are thin and return an exit code.
-3. **Agent runtime — `engine_kernel.py` (default) and `agent.py` (legacy).**
+3. **Agent runtime — `engine_kernel.py`, `agent.py`, `session_analysis.py`.**
    `engine_kernel.py` runs the vendored karo-core engine
    (`engine/agents/default.py`, the loop measured ahead of stock mini) as the
-   default native agent: it speaks the engine's Model protocol on top of
+   native agent: it speaks the engine's Model protocol on top of
    `provider_adapters`, gates every shell action through policy, the command
    invariants, repository confinement and the consequence engine, and runs the
    approved verification commands itself after the engine submits. The
    session's `allow`-selected MCP tools, the audited `skill.run` tool and the
    browser/desktop tools registered by `engine_tools.py` are advertised from
-   `core.tools()` and execute through the same gate. `agent.py`
-   keeps the v5 `AgentKernel` (typed tool calls, repair turns, visual checker)
-   behind the explicit `--legacy-loop` flag; it is not the default and not
-   renamed.
+   `core.tools()` and execute through the same gate. `agent.py` now holds only
+   the public `AgentKernel` facade, the event/report vocabulary and the system
+   prompt; `session_analysis.py` holds the seven proof-state readers the
+   harness uses to decide what a session already proved. The v5 loop and its
+   `--legacy-loop` flag are deleted.
 4. **Core and tools — `core.py`, `core_tools.py`, `action_execution.py`,
    `repo_context.py`, `edit_engine.py`, `workspace_worker.py`,
    `workspace_transaction.py`, `unified_patch.py`, `engine_tools.py`.** Core
@@ -102,10 +103,9 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
     `process_launcher.py`, `port_ownership.py`, `process_identity.py`,
     `credential_session.py`, `credential_secret_service.py`.** Paths, redaction,
     child-process identity, port ownership and OS keyring access.
-12. **Prompt and skills — `context_compiler.py`, `tool_universe.py`,
-    `completion_gate.py`, `skills.py`, `prompts/`, `builtin_skills/`,
-    `skill_notes/`.** Stable prompt prefix, tool advertisement, completion
-    proof and recipes.
+12. **Prompt and skills — `completion_gate.py`, `skills.py`, `prompts/`,
+    `builtin_skills/`, `skill_notes/`.** Completion proof, skill sessions and
+    recipes.
 
 The intended dependency direction is downward: UI → CLI → kernel → Core →
 policy/providers/sessions/MCP → platform. A kernel module importing `tui` is a
@@ -116,8 +116,8 @@ design error; so is a tool handler importing `cli`.
 1. The user submits a task. The TUI starts
    `python -m karox.cli agent run --stream-json ...` with a generated session id.
 2. The CLI loads or creates the session, resolves the provider, builds the
-   capability grants, risk engine, MCP binding and the kernel — `EngineKernel`
-   by default, `AgentKernel` only with `--legacy-loop`.
+   capability grants, risk engine, MCP binding and the kernel —
+   `EngineKernel` through the `AgentKernel` facade.
 3. The engine queries the model through the provider adapter, parses one bash
    action per response and executes it in the guarded environment: capability
    policy first, then the string-level command invariants (no push, publish,
@@ -134,9 +134,9 @@ design error; so is a tool handler importing `cli`.
    final line is `{"type": "result", "report": ...}`. The engine run's report
    carries an `engine` identity block (`name` = `karo-core`, `version` = the
    vendored engine's `__version__`, `implementation` =
-   `karox.engine_kernel.EngineAgent`) so a reader can prove which loop ran; the
-   legacy loop's report leaves it `null`, and the engine's trajectory artifact
-   under the session directory is the durable second proof.
+   `karox.engine_kernel.EngineAgent`) so a reader can prove which loop ran,
+   and the engine's trajectory artifact under the session directory is the
+   durable second proof.
 6. The TUI renders deltas, tool cards and a result card. A stopped child leaves
    the session resumable; the next task continues it.
 
@@ -157,10 +157,9 @@ design error; so is a tool handler importing `cli`.
 ## Invariants
 
 - One tool name, one implementation, one capability and one risk mapping.
-- The default agent runtime is the vendored karo-core engine; the v5 loop runs
-  only behind an explicit `--legacy-loop`. A report says which loop executed
-  (`engine.module`), and a run is never called verified without a passing
-  user-approved check.
+- The agent runtime is the vendored karo-core engine; the retired v5 loop
+  must not return. A report says which loop executed (`engine.module`), and a
+  run is never called verified without a passing user-approved check.
 - A tool call either has an idempotency key or is refused when it mutates an
   external system.
 - Evidence is recorded before it is narrated. A report may not claim a change
@@ -179,14 +178,52 @@ design error; so is a tool handler importing `cli`.
 
 ## Copied kernel
 
-Most of layers 3–10 are a curated copy of the v5 kernel, not a rewrite. The map
+Layers 3–10 are a curated copy of the v5 kernel, not a rewrite. The map
 and the reasons are in [MIGRATION.md](MIGRATION.md). Keeping the code identical
 where it already passed its tests is deliberate: the release changes the
 surface and dependencies, not the verified behavior of the loop.
 
-The exception is the default loop itself: `engine/` is the vendored karo-core
+The exception is the loop itself: `engine/` is the vendored karo-core
 fork (mini-swe-agent lineage) that was measured ahead of stock mini on the
 same model and grader, and `engine_kernel.py` is new integration code written
 for this release, not a v5 copy. The engine's own sources stay vendored and
 unmodified; every product boundary (providers, policy, risk, sessions,
-verification) is applied around it by `engine_kernel.py`.
+verification) is applied around it by `engine_kernel.py`. The v5
+`LegacyAgentKernel` and its economy modules (`cache_scheduler`,
+`cost_intelligence`, `semantic_shadow`, `context_compiler`, `tool_universe`,
+`base_probe`) were deleted after the engine won the kernel duel: the seven
+proof-state readers both loops shared live on in `session_analysis.py`.
+
+## Module map
+
+Read this instead of the tree. One line per module that matters; anything
+not listed is internal to its layer.
+
+| Module | What it is |
+| --- | --- |
+| `cli.py` | every command; `agent run` resolves the session, provider and kernel |
+| `entrypoint.py` | console-script shim |
+| `agent.py` | `AgentKernel` facade, `AgentEvent`/`AgentReport` vocabulary, system prompt |
+| `engine_kernel.py` | the engine kernel: provider bridge, typed-tool environment, checkpoints, verification |
+| `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
+| `core_engine.py` | `CoreEngine`: karo-core loop for subagents |
+| `subagents.py` | worker pool over `CoreEngine` |
+| `core.py`, `core_tools.py` | typed tool table and the runtimes (`Capability`, `SkillSession`) |
+| `engine_tools.py` | registers `browser.command` / `desktop.*` on the engine run's runtime |
+| `action_execution.py`, `workspace_worker.py`, `workspace_transaction.py` | hot worker: repo commands in a reloadable child process |
+| `edit_engine.py`, `unified_patch.py`, `repo_context.py` | edits, patches, windowed reads |
+| `policy.py`, `risk_engine.py`, `risk_mapping.py`, `action_policy.py`, `command_guard.py` | capability + risk gates |
+| `providers.py`, `provider_adapters.py`, `provider_factory.py` | model transport; the only path to a model |
+| `registry.py`, `model_discovery.py`, `routing.py`, `provider_pricing.py`, `provider_presets.py`, `provider_controller.py`, `credentials.py` | catalog, routes, budgets, keyring |
+| `sessions.py`, `requirements.py`, `usage_analytics.py`, `memory.py` | durable state, leases, evidence, usage |
+| `project_context.py`, `project_map.py`, `map_service.py`, `mode_artifacts.py` | bounded orientation, durable Plan/Concept |
+| `effort.py`, `agent_modes.py`, `auto_verify.py`, `completion_gate.py` | effort budgets, modes, quick checks, verified floor |
+| `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |
+| `engine_mcp.py` | MCP seam written for `CoreEngine.command_runner` — not wired into the product path (MCP rides the Core runtime's typed tools); decide its fate before extending |
+| `hosted_core.py`, `bridge_oauth.py`, `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`, `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py` | hosted MCP inbound bridge |
+| `browser/`, `computer_use/`, `desktop_apps.py` | Playwright engine; non-intrusive Win32 desktop use |
+| `visual_check.py`, `web_check.py` | render grading and page verification |
+| `skills.py` | skill sessions (`skill.run` is a leased Core tool) |
+| `paths.py`, `security.py`, `detached_process.py`, `process_launcher.py`, `port_ownership.py`, `process_identity.py`, `credential_session.py`, `credential_secret_service.py`, `test_output.py` | platform: paths, redaction, child processes, keyring |
+| `tui/` | Textual client (app, widgets, modals, backend, prefs, i18n, protocol) |
+| `engine/` | vendored karo-core: `agents/default.py` (loop), `environments/local.py`, `models/litellm_model.py` (+`test_models`), pruned to the import closure |
