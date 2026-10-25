@@ -37,6 +37,7 @@ from .core import CoreCommand, CoreError, CoreRuntime
 from .credentials import CredentialError, CredentialStore
 from .disk_maintenance import is_drive_root, workspace_system_reason
 from .effort import budget_for as effort_budget_for
+from .engine_kernel import EngineKernel
 from .mcp_client import (
     McpAccessDenied,
     McpClient,
@@ -668,7 +669,14 @@ def _skill_catalog(repository: Path) -> tuple[Any, str]:
     return catalog, block
 
 
-def _handle_agent_run(args: argparse.Namespace) -> int:
+def _run_agent(args: argparse.Namespace) -> AgentReport:
+    """Resolve one agent run end to end and return its report.
+
+    Everything a run needs -- session resolution, the provider, the policy,
+    the Core with its verification allowlist, the kernel (engine by default,
+    v5 behind ``--legacy-loop``) and the mode artifact -- happens here, so a
+    caller that only wants the outcome can take it without the output layer.
+    """
     repository = args.repository.expanduser().resolve(strict=True)
     if not repository.is_dir():
         raise ValueError(f"repository is not a directory: {repository}")
@@ -757,6 +765,7 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         context = context.with_window(context_window, source="advertised")
 
     origin = Origin(OriginKind.NATIVE_AGENT, f"cli-{record.session_id}")
+    legacy_loop = bool(getattr(args, "legacy_loop", False))
     policy = CapabilityPolicy(profile)
     policy.set_grants(origin, _agent_grants(profile, args.mode))
     risk = RiskEngine()
@@ -884,27 +893,67 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
         loaded = load_image_attachments(repository, args.image)
         request_images = tuple(item.image for item in loaded)
         project_metadata["images"] = [item.public_dict() for item in loaded]
+    if request_images and not getattr(args, "legacy_loop", False):
+        # The engine loop has no multimodal request surface yet; refusing is
+        # honest where silently dropping the image would not be.
+        raise ValueError(
+            "image attachments are not supported by the engine loop; "
+            "use --legacy-loop for a vision-model run with attachments"
+        )
     observer = _stream_json() if args.stream_json else (
         _stream_progress() if args.stream else None
     )
-    kernel = AgentKernel(
-        provider=provider,
-        model=model,
-        core=core,
-        sessions=store,
-        origin=origin,
-        limits=limits,
-        system_prompt=system_prompt,
-        context=context,
-        project_context=project_metadata,
-        require_change=args.expect == "change",
-        max_output_tokens=max_output_tokens,
-        pricing_registry=_load_pricing_registry(),
-        reasoning_effort=budget.reasoning_effort,
-        mode=args.mode,
-        request_images=request_images,
-        on_event=observer,
-    )
+    if legacy_loop:
+        kernel = AgentKernel(
+            provider=provider,
+            model=model,
+            core=core,
+            sessions=store,
+            origin=origin,
+            limits=limits,
+            system_prompt=system_prompt,
+            context=context,
+            project_context=project_metadata,
+            require_change=args.expect == "change",
+            max_output_tokens=max_output_tokens,
+            pricing_registry=_load_pricing_registry(),
+            reasoning_effort=budget.reasoning_effort,
+            mode=args.mode,
+            request_images=request_images,
+            on_event=observer,
+        )
+    else:
+        # The default path: the vendored karo-core engine executes the task.
+        # Repository instructions, memory and the skill catalog ride along as
+        # a prompt suffix; the engine's own packaged protocol stays intact.
+        engine_suffix = "\n\n".join(
+            part
+            for part in (project_suffix, memory_block or "", skill_block)
+            if part
+        )
+        window = context.max_input_tokens
+        kernel = EngineKernel(
+            provider=provider,
+            model=model,
+            core=core,
+            sessions=store,
+            origin=origin,
+            limits=limits,
+            policy=policy,
+            action_decisions=decisions,
+            project_context=project_metadata,
+            prompt_suffix=engine_suffix,
+            verification_commands=verification,
+            require_change=args.expect == "change",
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=budget.reasoning_effort,
+            mode=args.mode,
+            bypass_mode=bypass,
+            context_token_budget=(
+                min(160_000, int(window)) if isinstance(window, int) else 160_000
+            ),
+            on_event=observer,
+        )
     try:
         report = kernel.run(record.session_id)
     finally:
@@ -943,6 +992,11 @@ def _handle_agent_run(args: argparse.Namespace) -> int:
                             detail=rules.default_artifact,
                         )
                     )
+    return report
+
+
+def _handle_agent_run(args: argparse.Namespace) -> int:
+    report = _run_agent(args)
     if args.stream_json:
         _write(json.dumps({"type": "result", "report": report.to_dict()}, ensure_ascii=False) + "\n")
     elif args.json:
@@ -2151,6 +2205,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--stream", action="store_true")
     run.add_argument("--stream-json", action="store_true")
+    run.add_argument(
+        "--legacy-loop",
+        action="store_true",
+        help=(
+            "run the pre-engine v5 agent kernel instead of the karo-core "
+            "engine default (diagnostic escape hatch, not the product path)"
+        ),
+    )
     run.add_argument(
         "--accept-discovered-checks",
         action="store_true",

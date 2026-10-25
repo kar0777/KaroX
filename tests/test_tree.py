@@ -103,7 +103,11 @@ def test_python_line_count_stays_bounded() -> None:
         for path in PACKAGE.rglob("*.py")
     )
     # The kernel is large by design; the guard is for accumulation of new
-    # surface, not for the kernel itself. 70k includes the hosted MCP bridge
-    # restored as a product surface, and is still well below the ~166k v5 lab.
-    # Raise it deliberately, never to make a stray copy pass.
-    assert lines < 70_000
+    # surface, not for the kernel itself. 80k covers three deliberate
+    # additions: the hosted MCP bridge restored as a product surface, the
+    # vendored karo-core engine (~26k, seeded at 4d8d5d9, which put the tree
+    # at ~74.8k against the previous 70k bound), and the engine integration
+    # surface that makes that engine the default runtime (~1.1k). Still well
+    # below the ~166k v5 lab. Raise it deliberately, never to make a stray
+    # copy pass.
+    assert lines < 80_000
