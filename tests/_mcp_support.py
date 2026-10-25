@@ -141,8 +141,19 @@ def terminate_server_processes(script: Path, *, timeout: float = 5.0) -> None:
             cmdline = process.info.get("cmdline") or []
         except psutil.Error:
             continue
-        if any(needle in os.path.normcase(str(part)) for part in cmdline):
-            orphans.append(process)
+        if not any(needle in os.path.normcase(str(part)) for part in cmdline):
+            continue
+        # Every xdist worker runs the same fixture script. Killing by path
+        # alone killed another worker's live server and produced transport
+        # errors in unrelated tests; only reap a child of this process (or an
+        # orphan whose parent is gone, which is the lock-leak case).
+        try:
+            parent = process.ppid()
+        except psutil.Error:
+            continue
+        if parent != os.getpid() and psutil.pid_exists(parent):
+            continue
+        orphans.append(process)
     deadline = time.monotonic() + timeout
     for process in orphans:
         try:

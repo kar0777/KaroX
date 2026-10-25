@@ -90,7 +90,7 @@ it does not carry laboratory experiments merely because they existed.
 Commands run from the winner tree:
 
 ```text
-python -m pytest -q                 # 746 collected (MCP files serial on Windows)
+python -m pytest -q                 # 746 collected, all pass
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
 python scripts/check_tree.py        # ok · 98 modules · ~66.4k lines
