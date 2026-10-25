@@ -9,7 +9,7 @@ the real gaps before the release gates were run.
 
 - OLD: `D:\проекты\KaroX-v5` — 280 Python modules, ~165,800 lines.
 - NEW: the race winner tree (`lab/kernel-duel-20261025/b/integrate`) —
-  134 modules, ~69,100 lines at 6.0.0a3.
+  137 modules, ~69,100 lines at 6.0.0a3.
 - Eight parallel auditors covered providers/API, MCP client, hosted bridge,
   kernel features, CLI/TUI, policy/security, packaging/dependencies and tests.
 - Every claim below was checked against source or a runnable test; the first
