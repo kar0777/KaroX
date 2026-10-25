@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from types import SimpleNamespace
+
+# The vendored engine prints a startup banner unless told not to; a product
+# import is silent even when this module is imported first.
+os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from jinja2 import StrictUndefined, Template
 
-from .engine.exceptions import FormatError
+from .engine.exceptions import FormatError  # noqa: E402
 from .engine_salvage import salvage_fenced_command
 from .providers import (
     ImageAttachment,
