@@ -211,7 +211,10 @@ not listed is internal to its layer.
 | `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
 | `engine_salvage.py` | recovers one unambiguous fenced shell command from a prose response |
 | `core_types.py` | Core exceptions and `ToolDefinition` — what small modules need |
-| `core.py`, `core_tools.py` | typed tool table, handlers and the runtimes (`Capability`, `SkillSession`) |
+| `core.py` | the runtime: tool table, policy/risk/lease/idempotency transaction, file and process tools |
+| `core_git.py` | Git methods mixed into `CoreRuntime` (status, diff, commit, guarded push) |
+| `core_search.py` | search methods mixed into `CoreRuntime` (ripgrep, small-tree, git grep, LSP) |
+| `core_tools.py` | the extended runtime: editing, windowed reads, plans, dev commands |
 | `tool_schemas.py` | the extended tool names, descriptions and JSON schemas |
 | `engine_tools.py` | registers `browser.command` / `desktop.*` on the engine run's runtime |
 | `action_execution.py`, `workspace_worker.py`, `workspace_transaction.py` | hot worker: repo commands in a reloadable child process |
