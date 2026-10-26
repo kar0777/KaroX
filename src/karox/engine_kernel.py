@@ -33,10 +33,8 @@ import json
 import logging
 import os
 import pathlib
-import shlex
 import threading
 import time
-from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 # The engine prints a startup banner and loads a global dotenv on import. A
@@ -48,13 +46,13 @@ logger = logging.getLogger("karox.engine_kernel")
 
 from .engine import __version__ as _engine_version  # noqa: E402
 from .engine.agents.default import DefaultAgent  # noqa: E402
-from .engine.environments.local import clip_output  # noqa: E402
 from .engine.exceptions import (  # noqa: E402
     FormatError,
     InterruptAgentFlow,
     Submitted,
     UserInterruption,
 )
+from .engine_tool_env import CoreToolEnvironment  # noqa: E402
 from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
     EngineProviderModel,
@@ -74,15 +72,13 @@ from .agent import (  # noqa: E402
     AgentReport,
     ContextBudget,
     _bounded_failure_summary,
-    _derived_tool_events,
     _is_small_talk_task,
     provider_alias,
 )
 from .agent_modes import normalize_mode  # noqa: E402
 from .session_analysis import HARNESS_REQUESTED_BY  # noqa: E402
-from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
-from .models import CoreCommand, CoreResult, EvidenceRecord, Origin  # noqa: E402
+from .models import CoreResult, Origin  # noqa: E402
 from .providers import (  # noqa: E402
     REASONING_EFFORTS,
     ImageAttachment,
@@ -93,13 +89,9 @@ from .providers import (  # noqa: E402
 )
 from .security import redact, redact_content  # noqa: E402
 from .sessions import MutationLease, SessionRecord, SessionStore  # noqa: E402
-from .test_output import condense_test_output  # noqa: E402
 from .usage_analytics import merge_response_usage, usage_event_from_response  # noqa: E402
 
 
-_READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
-_TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
-_PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
 
 _MAX_SNAPSHOT_FILES = 50
 _MAX_SNAPSHOT_BYTES = 2_000_000
@@ -138,366 +130,8 @@ class _EngineProviderFailure(RuntimeError):
         self.kind = kind
 
 
-class CoreToolEnvironment:
-    """The engine's Environment protocol on CoreRuntime's typed tools.
-
-    Every engine action becomes one audited Core command: capability policy
-    and the risk engine gate it, mutations take the session lease and an
-    idempotency key, results are clipped to the engine's output ceiling and
-    persisted with their evidence. ``finish`` is the submission marker; a bare
-    fenced command only ever runs when it exactly matches an approved
-    verification command, and is otherwise refused with guidance.
-    """
-
-    def __init__(
-        self,
-        *,
-        core: CoreRuntime,
-        session_id: str,
-        origin: Origin,
-        lease: MutationLease,
-        kernel: "EngineKernel",
-        output_char_limit: int,
-        command_timeout: int,
-    ) -> None:
-        self._core = core
-        self._session_id = session_id
-        self._origin = origin
-        self._lease = lease
-        self._kernel = kernel
-        self.config = SimpleNamespace(
-            cwd=str(core.repository),
-            timeout=command_timeout,
-            output_char_limit=output_char_limit,
-            env={},
-        )
-        self._aliases: Dict[str, str] = kernel.engine_tool_aliases
-        self._definitions: Dict[str, ToolDefinition] = {
-            definition.name: definition for definition in core.tools()
-        }
-
-    # -- Environment protocol ----------------------------------------------
-
-    def execute(
-        self, action: Dict[str, Any], cwd: str = "", *, timeout: Optional[int] = None
-    ) -> Dict[str, Any]:
-        del cwd, timeout
-        return self._execute(action, requested_by="model")
-
-    def get_template_vars(self, **kwargs: Any) -> Dict[str, Any]:
-        return {
-            "cwd": self.config.cwd,
-            "timeout": self.config.timeout,
-            "output_char_limit": self.config.output_char_limit,
-            **kwargs,
-        }
-
-    def serialize(self) -> Dict[str, Any]:
-        return {
-            "info": {
-                "config": {
-                    "environment": {
-                        "environment_type": f"{type(self).__module__}.{type(self).__name__}",
-                        "cwd": self.config.cwd,
-                        "output_char_limit": self.config.output_char_limit,
-                    }
-                }
-            }
-        }
-
-    # -- internals ---------------------------------------------------------
-
-    def _execute(self, action: Mapping[str, Any], *, requested_by: str) -> Dict[str, Any]:
-        name = action.get("name")
-        if name == FINISH_TOOL_NAME:
-            return self._finish(action)
-        if name is None:
-            return self._fenced_command(action)
-        core_name = self._aliases.get(str(name))
-        if core_name is None:
-            return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
-        arguments = action.get("arguments")
-        if not isinstance(arguments, dict):
-            return self._refusal(action, "malformed_arguments", "tool arguments must be an object")
-        definition = self._definitions.get(core_name)
-        if definition is None:
-            return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
-        display = core_name
-        call_id = str(action.get("tool_call_id", "") or "")
-        started = self._kernel.monotonic()
-        self._kernel._emit(AgentEventKind.TOOL_STARTED, tool=display, call_id=call_id or None)
-        if core_name in _TEST_TOOLS:
-            self._kernel._emit(AgentEventKind.TEST_STARTED, tool=display, call_id=call_id or None)
-        remaining = max(0.1, self._kernel.remaining_seconds())
-        identity = f"{self._session_id}\0{call_id}\0{core_name}".encode("utf-8")
-        digest = hashlib.sha256(identity).hexdigest()
-        command = CoreCommand(
-            name=core_name,
-            arguments=dict(arguments),
-            session_id=self._session_id,
-            origin=self._origin,
-            correlation_id=f"agent-{digest[:32]}",
-            idempotency_key=f"agent-{digest}" if definition.mutates else None,
-            deadline_seconds=min(3600.0, remaining),
-        )
-        proof_before = (
-            completion_gate.identity(self._core, self._core.sessions.load(self._session_id))
-            if core_name in _PROOF_TOOLS
-            else None
-        )
-        try:
-            result = self._core.execute(
-                command, lease=self._lease if definition.mutates else None
-            )
-        except Exception as exc:  # noqa: BLE001 - a refusal is an observation
-            message = f"{type(exc).__name__}: {redact(str(exc))}"
-            self._kernel._persist_engine_tool_error(
-                call_id, str(name), core_name, type(exc).__name__, message
-            )
-            self._kernel._emit(
-                AgentEventKind.ERROR,
-                tool=display,
-                call_id=call_id or None,
-                reason=type(exc).__name__,
-                detail=str(redact(str(exc)))[:400],
-            )
-            self._kernel._emit(
-                AgentEventKind.TOOL_FINISHED,
-                tool=display,
-                call_id=call_id or None,
-                ok=False,
-                summary=type(exc).__name__,
-                duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
-            )
-            return self._observation(message, 1, "refused")
-        if proof_before is not None:
-            proof_after = completion_gate.identity(
-                self._core, self._core.sessions.load(self._session_id)
-            )
-            proof = proof_before if proof_before == proof_after else {}
-            result.data["completion_identity"] = proof
-            result.data["completion_target"] = arguments.get("path", "")
-            if not result.evidence:
-                result.evidence.append(
-                    EvidenceRecord(kind="completion_observation", summary=core_name)
-                )
-            for item in result.evidence:
-                item.metadata["completion_identity"] = proof
-        self._attach_quick_checks(result)
-        output = self._render_output(core_name, result)
-        self._kernel._persist_engine_tool_result(
-            call_id=call_id,
-            alias=str(name),
-            core_name=core_name,
-            result=result,
-            output=output,
-            requested_by=requested_by,
-        )
-        for kind, fields in _derived_tool_events(core_name, result):
-            self._kernel._emit(kind, **fields)
-        if core_name in _TEST_TOOLS:
-            exit_code = result.data.get("exit_code")
-            self._kernel._emit(
-                AgentEventKind.TEST_FINISHED,
-                tool=display,
-                call_id=call_id or None,
-                ok=result.ok,
-                detail=(
-                    f"exit {exit_code}"
-                    if isinstance(exit_code, int) and not isinstance(exit_code, bool)
-                    else None
-                ),
-            )
-        self._kernel._emit(
-            AgentEventKind.TOOL_FINISHED,
-            tool=display,
-            call_id=call_id or None,
-            ok=result.ok,
-            summary=_result_summary(core_name, result),
-            duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
-        )
-        return output
-
-    def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:
-        arguments = action.get("arguments")
-        answer = ""
-        if isinstance(arguments, dict):
-            answer = str(arguments.get("answer") or "")
-        if not answer.strip():
-            return self._refusal(
-                action,
-                "malformed_arguments",
-                'finish requires {"answer": "<final answer text>"}',
-            )
-        raise Submitted(
-            {
-                "role": "exit",
-                "content": answer,
-                "extra": {
-                    "exit_status": "Submitted",
-                    "exit_reason": "finish",
-                    "submission": answer,
-                },
-            }
-        )
-
-    def _fenced_command(self, action: Mapping[str, Any]) -> Dict[str, Any]:
-        """A salvaged fenced command, matched fail-closed against approvals.
-
-        karo-core port 5 kept runs alive by executing the command the model
-        wrote in text. KaroX has no shell, so the only fenced text that can
-        run is one that exactly matches a user-approved verification command;
-        everything else is refused with the typed-tool guidance.
-        """
-        command = str(action.get("command", "")).strip()
-        try:
-            argv = shlex.split(command, posix=True)
-        except ValueError:
-            argv = []
-        if argv:
-            approved = self._core.verification_command_order or ()
-            for rule in approved:
-                expected = tuple(item for item in rule if item != "*")
-                if expected and tuple(argv) == expected:
-                    call_id = (
-                        f"fenced-{hashlib.sha256(command.encode('utf-8')).hexdigest()[:16]}"
-                    )
-                    return self._execute(
-                        {
-                            "name": "checks_run",
-                            "arguments": {"argv": list(argv)},
-                            "tool_call_id": call_id,
-                        },
-                        requested_by="model",
-                    )
-        self._kernel._emit(
-            AgentEventKind.WARNING,
-            reason="fenced_command_refused",
-            detail="KaroX executes typed tools, not shell text",
-        )
-        return self._refusal(
-            action,
-            "fenced_command_refused",
-            "KaroX has no shell: reissue the action as a typed tool call "
-            "(repo_write_file, checks_run, ...). Fenced shell text only runs "
-            "when it exactly matches an approved verification command.",
-        )
-
-    def _refusal(self, action: Mapping[str, Any], reason: str, message: str) -> Dict[str, Any]:
-        call_id = str(action.get("tool_call_id", "") or "")
-        alias = str(action.get("name", "") or "")
-        core_name = self._aliases.get(alias)
-        if core_name is None and alias == "checks_run":
-            core_name = "checks.run"
-        self._kernel._persist_engine_tool_error(call_id, alias, core_name, reason, message)
-        self._kernel._emit(
-            AgentEventKind.WARNING,
-            tool=core_name or alias or None,
-            call_id=call_id or None,
-            reason=reason,
-            detail=str(redact(message))[:400],
-        )
-        return self._observation(message, 1, reason)
-
-    def _observation(self, text: str, returncode: int, reason: str) -> Dict[str, Any]:
-        clipped = clip_output(text, int(self.config.output_char_limit))
-        return {
-            "output": clipped,
-            "observation": clipped,
-            "returncode": returncode,
-            "exception_info": "" if returncode == 0 else reason,
-        }
-
-    def _attach_quick_checks(self, result: CoreResult) -> None:
-        """The harness's cheap per-file checks, inside the result the model reads.
-
-        Same rule as the legacy kernel: a syntax check is a catch-now aid, not
-        verification evidence.
-        """
-        if not result.ok or not isinstance(result.data, dict):
-            return
-        data = result.data
-        if data.get("changed") is not True:
-            return
-        paths: List[str] = []
-        path = data.get("path")
-        if isinstance(path, str) and path:
-            paths.append(path)
-        else:
-            changed = data.get("changed_files")
-            if isinstance(changed, list):
-                paths.extend(item for item in changed if isinstance(item, str) and item)
-        if not paths:
-            return
-        try:
-            checks = quick_checks(self._core.repository, paths)
-        except Exception:  # noqa: BLE001 - a broken helper must not break the run
-            return
-        if not checks:
-            return
-        data["quick_checks"] = [check.to_dict() for check in checks]
-        data["quick_checks_line"] = summarize_quick_checks(checks)
-
-    def _render_output(self, core_name: str, result: CoreResult) -> Dict[str, Any]:
-        data = result.data if isinstance(result.data, dict) else {}
-        returncode = 0 if result.ok else 1
-        if core_name == "checks.run":
-            text = str(data.get("stdout") or "")
-            condensed = condense_test_output(text)
-            if condensed is not None:
-                text = str(condensed.get("text") or text)
-            exit_code = data.get("exit_code")
-            detail = f"exit {exit_code}" if isinstance(exit_code, int) else "finished"
-            if data.get("timed_out"):
-                detail = "timed out"
-            text = f"[checks.run {detail}]\n{text}".strip()
-            if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
-                returncode = exit_code if exit_code > 0 else 1
-        elif core_name in _READABLE_TOOLS and result.ok:
-            path = data.get("path")
-            content = data.get("content")
-            header = f"[{core_name} {path}]" if isinstance(path, str) else f"[{core_name}]"
-            text = (
-                f"{header}\n{content}"
-                if isinstance(content, str)
-                else json.dumps(data, ensure_ascii=False, sort_keys=True)
-            )
-        else:
-            text = json.dumps(
-                {
-                    "ok": result.ok,
-                    "data": data,
-                    "evidence": [item.evidence_id for item in result.evidence],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        clipped = clip_output(text, int(self.config.output_char_limit))
-        return {
-            "output": clipped,
-            "observation": clipped,
-            "returncode": returncode,
-            "exception_info": "",
-        }
 
 
-def _result_summary(core_name: str, result: CoreResult) -> str:
-    del core_name
-    data = result.data if isinstance(result.data, dict) else {}
-    parts: List[str] = []
-    exit_code = data.get("exit_code")
-    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-        parts.append(f"exit {exit_code}")
-    path = data.get("path")
-    if isinstance(path, str) and path:
-        parts.append(path)
-    for key in ("matches", "files", "entries"):
-        value = data.get(key)
-        if isinstance(value, (list, tuple)):
-            parts.append(f"{key}={len(value)}")
-    if not parts:
-        parts.append("ok" if result.ok else "failed")
-    return str(redact(", ".join(parts)))
 
 
 #: The identity the engine-backed report stamps in its ``engine`` block: the
