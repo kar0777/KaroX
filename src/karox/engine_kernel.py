@@ -99,14 +99,27 @@ _MAX_SNAPSHOT_BYTES = 2_000_000
 
 #: The engine execution contract appended to the product system prompt. It is
 #: deliberately the last thing the model reads before deciding an action.
+#:
+#: Batching is part of the contract because it is the one lever the loop can
+#: give the model without spending turns: every tool call in a response runs in
+#: order and all observations return together, so two independent reads cost one
+#: model call instead of two. The product prompt asks for the same thing; this
+#: text used to say "prefer exactly one", which contradicted it and taught the
+#: model to serialise work. Dependent calls stay serialised: a later argument
+#: must not be guessed from a result the same response has not seen yet.
 _ENGINE_CONTRACT = """
 
 # KaroX engine execution contract
 
 You act through typed tool calls; there is no shell.
-- Prefer exactly one tool call per response. Observations are clipped: keep
-  command and read output small.
-- Read before you write; verify after you change.
+- Batch independent actions: several tool calls in one response execute in
+  order and their observations return together. Batch reads, and batch 2-4
+  mutations whose arguments are already fully known. Never batch a call whose
+  arguments depend on another call's result.
+- Keep tool output small; observations are clipped.
+- Read before you write. KaroX runs the approved checks itself after a change
+  and returns failures for repair; call checks only when the result changes
+  your next step.
 - When the task is complete, call the finish tool with {"answer": "<final
   answer text>"}. After finish you cannot continue working.
 - Never print tool markup as prose; a response without a tool call is a format

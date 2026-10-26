@@ -240,6 +240,46 @@ def test_engine_run_verifies_a_change_end_to_end(tmp_path: Path, repository: Pat
     assert record.evidence, "a verified run must persist evidence"
 
 
+def test_engine_runs_independent_calls_batched_in_one_response(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Two independent mutations in one response cost one model call, not two.
+
+    The execution contract tells the model to batch independent actions, and
+    the product prompt asks for the same. This is the mechanical guarantee
+    behind that instruction: both calls run in order, both results are
+    persisted against their own call ids, and the run still verifies.
+    """
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response(
+                (
+                    _write_call("c1", "a.txt", "one"),
+                    _write_call("c2", "b.txt", "two"),
+                )
+            ),
+            _response((_finish_call("c3", "created both files"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert (repository / "a.txt").read_text(encoding="utf-8") == "one"
+    assert (repository / "b.txt").read_text(encoding="utf-8") == "two"
+    assert report.verified is True, report.reason
+    assert report.changed_files == ("a.txt", "b.txt")
+    # Two model calls: the batch and the finish. A serialised loop would need
+    # three and would re-pay the whole prefix for the extra one.
+    assert report.steps == 2
+    persisted = {
+        str(entry.get("tool_call_id"))
+        for entry in harness.record().provider_history
+        if entry.get("role") == "tool" and entry.get("tool_call_id") in {"c1", "c2"}
+    }
+    assert persisted == {"c1", "c2"}
+
+
 def test_engine_run_emits_the_stream_event_contract(tmp_path: Path, repository: Path) -> None:
     harness = Harness(
         repository,
