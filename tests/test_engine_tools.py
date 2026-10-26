@@ -336,3 +336,92 @@ def test_engine_browser_policy_enables_downloads_for_the_session(tmp_path: Path)
     assert runtime.policy.session_id == "s-downloads"
     assert runtime.policy.external_https is False
     assert runtime.policy.allow_detach is False
+
+
+def test_desktop_tool_accepts_integer_arguments_through_core(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race failure end to end: window_id, x and y reach a real adapter.
+
+    The desktop tools are registered as built-in Core tools. Before the
+    validator unification every integer argument was refused as an unsupported
+    schema type, so the handler never ran and the computer-use benchmark could
+    not click anything. A fake probe proves the whole path: policy grant,
+    validation, adapter dispatch and the posted input messages.
+    """
+    from _computer_use_fake import FakeProbe, FakeWindow
+
+    from karox import engine_tools
+    from karox.computer_use.adapter import ComputerUseAdapter
+    from karox.core import CoreCommand, CoreRuntime
+    from karox.models import Capability, Origin, OriginKind
+    from karox.policy import CapabilityPolicy
+    from karox.sessions import SessionStore
+
+    probe = FakeProbe()
+    probe.add_window(
+        FakeWindow(1001, "KaroX Test Editor", "Notepad", (100, 100, 900, 700), 4242)
+    )
+    adapter = ComputerUseAdapter(
+        runtime_root=tmp_path / "cu", session_id="s-desktop", probe=probe
+    )
+    monkeypatch.setattr(
+        engine_tools, "ComputerUseAdapter", lambda session_id: adapter
+    )
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    origin = Origin(OriginKind.NATIVE_AGENT, "desktop-test")
+    policy = CapabilityPolicy(AccessProfile.ELEVATED)
+    policy.set_grants(origin, {Capability.DESKTOP_INPUT})
+    store = SessionStore(tmp_path / "sessions")
+    store.create(
+        repository,
+        "desktop integration",
+        AccessProfile.ELEVATED,
+        session_id="s-desktop",
+    )
+    core = CoreRuntime(repository, policy, store, tmp_path / "audit.jsonl")
+    engine_tools.register_desktop_tools(core, session_id="s-desktop")
+
+    attached = core.execute(
+        CoreCommand(
+            "desktop.attach",
+            {"app_id": "editor", "window_id": 1001, "access": "control"},
+            "s-desktop",
+            origin,
+            deadline_seconds=10.0,
+        )
+    )
+    assert attached.ok is True, attached.data
+    assert attached.data["ok"] is True
+    assert attached.data["data"]["attached"] is True
+
+    clicked = core.execute(
+        CoreCommand(
+            "desktop.click",
+            {"app_id": "editor", "x": 10, "y": 10},
+            "s-desktop",
+            origin,
+            deadline_seconds=10.0,
+        )
+    )
+    assert clicked.ok is True, clicked.data
+    assert clicked.data["ok"] is True
+    assert probe.posted, "the click never reached the fake window"
+
+    # The race's second failure mode: the whole call wrapped in ``payload``,
+    # copying browser.command's shape. It is flattened and still runs.
+    probe.posted.clear()
+    wrapped = core.execute(
+        CoreCommand(
+            "desktop.click",
+            {"payload": {"app_id": "editor", "x": 5, "y": 6}},
+            "s-desktop",
+            origin,
+            deadline_seconds=10.0,
+        )
+    )
+    assert wrapped.ok is True, wrapped.data
+    assert wrapped.data["ok"] is True
+    assert probe.posted, "the wrapped click never reached the fake window"

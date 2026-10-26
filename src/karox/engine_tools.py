@@ -130,9 +130,17 @@ def _desktop_schema(raw: Mapping[str, Any], name: str) -> Dict[str, Any]:
 
 
 def _desktop_definition(spec: Mapping[str, Any], schema: Dict[str, Any]) -> ToolDefinition:
+    # The race showed models wrapping desktop arguments in a ``payload``
+    # object, copying browser.command's shape. Every desktop tool takes its
+    # fields at the top level, and saying so in the description is cheaper
+    # than a refused call and a repair turn.
+    description = (
+        "Arguments are passed at the top level of the call, not inside a "
+        "payload object. " + str(spec["description"])
+    )
     return ToolDefinition(
         str(spec["name"]),
-        str(spec["description"]),
+        description,
         Capability.DESKTOP_INPUT,
         False,
         schema,

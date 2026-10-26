@@ -620,8 +620,10 @@ TOOL_SPECS: Mapping[str, dict[str, Any]] = {
     "desktop.attach": {
         "name": "desktop.attach",
         "description": (
-            "Pin one window as a target: HWND+PID+process-creation-time identity. "
-            "access=control is required before any input action."
+            "Pin one window as a target. app_id is your own label for this "
+            "attachment; choose the window with title_contains or with the "
+            "window_id returned by desktop.list_windows. access=control is "
+            "required before any input action."
         ),
         "input_schema": {
             "type": "object",
@@ -744,7 +746,10 @@ TOOL_SPECS: Mapping[str, dict[str, Any]] = {
                 "x": {"type": "integer"},
                 "y": {"type": "integer"},
                 "clicks": {"type": "integer", "minimum": -100, "maximum": 100},
-                "horizontal": {"type": "integer"},
+                "horizontal": {
+                    "type": "integer",
+                    "description": "Horizontal wheel delta; omit for vertical scrolling.",
+                },
             },
             "required": ["app_id"],
             "additionalProperties": False,

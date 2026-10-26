@@ -750,7 +750,47 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
         )
         return _dc_replace(command, arguments=normalized)
 
+    def _unwrap_argument_wrapper(
+        self, name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Flatten a call that wrapped its fields in ``payload``/``arguments``.
+
+        The race logged models copying ``browser.command``'s shape into a
+        desktop tool: every declared field arrived inside ``payload``, so the
+        call was refused as unknown arguments even though the intended action
+        was unambiguous. The repair is deliberately narrow: exactly one
+        undeclared key, named ``payload`` or ``arguments``, holding a non-empty
+        object whose every key the tool declares. The flattened call still goes
+        through the same validation, policy and risk gates as a flat one.
+        """
+        definition = self._definitions.get(name)
+        if definition is None or not isinstance(args, dict) or not args:
+            return args
+        schema = definition.input_schema
+        if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
+            return args
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return args
+        unknown = set(args).difference(properties)
+        if len(unknown) != 1:
+            return args
+        wrapper = next(iter(unknown))
+        if wrapper not in {"payload", "arguments"}:
+            return args
+        inner = args[wrapper]
+        if not isinstance(inner, dict) or not inner:
+            return args
+        if not set(inner).issubset(properties):
+            return args
+        merged = dict(inner)
+        # A declared sibling (for example app_id beside the wrapper) wins: the
+        # wrapper only supplies the fields the caller did not pass directly.
+        merged.update({key: value for key, value in args.items() if key != wrapper})
+        return merged
+
     def _normalize_arguments(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        args = self._unwrap_argument_wrapper(name, args)
         if name == "repo.search":
             if "query" not in args:
                 for alias in self._SEARCH_QUERY_ALIASES:
@@ -848,82 +888,56 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
     def _validate_arguments(
         definition: ToolDefinition, arguments: Dict[str, Any]
     ) -> None:
+        """Enforce the one JSON-Schema subset every Core tool declares.
+
+        Built-in tools and registered external tools (MCP, browser, desktop)
+        are validated by the same code on purpose. The desktop surface shipped
+        integer coordinates that the older built-in validator did not know, so
+        every click, scroll and window-id attach was refused before its handler
+        ran. One validator cannot drift from the schemas it reads.
+        """
         if not isinstance(arguments, dict):
             raise InvalidCommand("Core command arguments must be an object")
-        if definition.external_schema:
-            CoreRuntime._validate_external_schema(
-                definition.input_schema, "arguments"
-            )
-            CoreRuntime._validate_external_value(arguments, definition.input_schema, "arguments")
-            return
-        schema = definition.input_schema
-        properties = schema.get("properties", {})
-        unknown = set(arguments).difference(properties)
-        if unknown:
-            # Name the accepted arguments so the model can repair the call in
-            # one step instead of concluding the tool is unusable.
-            raise InvalidCommand(
-                f"unknown arguments: {sorted(unknown)}; "
-                f"{definition.name} accepts: {sorted(properties)}"
-            )
-        missing = set(schema.get("required", [])).difference(arguments)
-        if missing:
-            raise InvalidCommand(f"missing arguments: {sorted(missing)}")
-        kinds = {
-            "string": str,
-            "array": list,
-            "number": (int, float),
-            "boolean": bool,
-            "object": dict,
+        CoreRuntime._validate_external_schema(definition.input_schema, "arguments")
+        CoreRuntime._validate_external_value(
+            arguments, definition.input_schema, "arguments", definition.name
+        )
+
+    @staticmethod
+    def _schema_type_names(schema: Dict[str, Any], label: str) -> List[str]:
+        """The declared type names, validated; empty when no type is declared."""
+
+        if "type" not in schema:
+            return []
+        declared = schema["type"]
+        if isinstance(declared, str):
+            names = [declared]
+        elif (
+            isinstance(declared, list)
+            and declared
+            and all(isinstance(item, str) for item in declared)
+            and len(set(declared)) == len(declared)
+        ):
+            names = declared
+        else:
+            raise InvalidCommand(f"{label} schema type is malformed")
+        supported = {
+            "null", "boolean", "integer", "number", "string", "array", "object"
         }
-        for name, value in arguments.items():
-            expected_name = properties[name].get("type")
-            expected = kinds.get(expected_name)
-            if expected is None:
-                raise InvalidCommand(f"unsupported schema type for {name}")
-            if expected_name == "number" and isinstance(value, bool):
-                raise InvalidCommand(f"{name} must be number")
-            if not isinstance(value, expected):
-                raise InvalidCommand(f"{name} must be {expected_name}")
-            if expected_name == "number" and not math.isfinite(float(value)):
-                if name == "timeout_seconds":
-                    raise InvalidCommand(
-                        "timeout_seconds must be positive and finite"
-                    )
-                raise InvalidCommand(f"{name} must be finite")
-            item_type = properties[name].get("items", {}).get("type")
-            if item_type and isinstance(value, list):
-                item_kind = kinds.get(item_type)
-                if item_kind is None or not all(
-                    isinstance(item, item_kind) for item in value
-                ):
-                    raise InvalidCommand(f"{name} items must be {item_type}")
+        unsupported = set(names).difference(supported)
+        if unsupported:
+            raise InvalidCommand(
+                f"{label} schema uses unsupported types: {sorted(unsupported)}"
+            )
+        return names
 
     @staticmethod
     def _validate_external_schema(schema: Any, label: str) -> None:
+        """Check the declared subset, not just the call, before trusting it."""
+
         if not isinstance(schema, dict):
             raise InvalidCommand(f"{label} schema must be an object")
-        if "type" in schema:
-            declared = schema["type"]
-            if isinstance(declared, str):
-                type_names = [declared]
-            elif (
-                isinstance(declared, list)
-                and declared
-                and all(isinstance(item, str) for item in declared)
-                and len(set(declared)) == len(declared)
-            ):
-                type_names = declared
-            else:
-                raise InvalidCommand(f"{label} schema type is malformed")
-            supported = {
-                "null", "boolean", "integer", "number", "string", "array", "object"
-            }
-            unsupported = set(type_names).difference(supported)
-            if unsupported:
-                raise InvalidCommand(
-                    f"{label} schema uses unsupported types: {sorted(unsupported)}"
-                )
+        CoreRuntime._schema_type_names(schema, label)
         if "properties" in schema:
             properties = schema["properties"]
             if not isinstance(properties, dict):
@@ -947,64 +961,181 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
                     f"{label} schema required must contain unique strings"
                 )
         if "items" in schema:
-            CoreRuntime._validate_external_schema(
-                schema["items"], f"{label}.items"
-            )
+            CoreRuntime._validate_external_schema(schema["items"], f"{label}.items")
         if "additionalProperties" in schema:
             additional = schema["additionalProperties"]
             if not isinstance(additional, bool):
                 CoreRuntime._validate_external_schema(
                     additional, f"{label}.additionalProperties"
                 )
+        if "enum" in schema:
+            options = schema["enum"]
+            if not isinstance(options, list) or not options:
+                raise InvalidCommand(
+                    f"{label} schema enum must be a non-empty array"
+                )
+        for key in ("minimum", "maximum"):
+            if key in schema:
+                bound = schema[key]
+                if (
+                    isinstance(bound, bool)
+                    or not isinstance(bound, (int, float))
+                    or not math.isfinite(float(bound))
+                ):
+                    raise InvalidCommand(
+                        f"{label} schema {key} must be a finite number"
+                    )
+        for key in ("minLength", "maxLength", "minItems", "maxItems"):
+            if key in schema:
+                limit = schema[key]
+                if (
+                    isinstance(limit, bool)
+                    or not isinstance(limit, int)
+                    or limit < 0
+                ):
+                    raise InvalidCommand(
+                        f"{label} schema {key} must be a non-negative integer"
+                    )
+        if "pattern" in schema and not isinstance(schema["pattern"], str):
+            raise InvalidCommand(f"{label} schema pattern must be a string")
 
     @staticmethod
-    def _validate_external_value(value: Any, schema: Any, label: str) -> None:
+    def _json_equal(left: Any, right: Any) -> bool:
+        """JSON equality: ``1`` equals ``1.0`` but never equals ``true``."""
+
+        if isinstance(left, bool) or isinstance(right, bool):
+            return (
+                isinstance(left, bool)
+                and isinstance(right, bool)
+                and left == right
+            )
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left == right
+        if isinstance(left, dict) and isinstance(right, dict):
+            return set(left) == set(right) and all(
+                CoreRuntime._json_equal(left[key], right[key]) for key in left
+            )
+        if isinstance(left, list) and isinstance(right, list):
+            return len(left) == len(right) and all(
+                CoreRuntime._json_equal(a, b) for a, b in zip(left, right)
+            )
+        return type(left) is type(right) and left == right
+
+    @staticmethod
+    def _validate_constraints(value: Any, schema: Dict[str, Any], label: str) -> None:
+        """Enforce the bounds the schema declares, on the value it describes."""
+
+        options = schema.get("enum")
+        if isinstance(options, list) and options:
+            if not any(CoreRuntime._json_equal(value, option) for option in options):
+                raise InvalidCommand(f"{label} must be one of {options}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            if (
+                isinstance(minimum, (int, float))
+                and not isinstance(minimum, bool)
+                and value < minimum
+            ):
+                raise InvalidCommand(f"{label} must be at least {minimum}")
+            maximum = schema.get("maximum")
+            if (
+                isinstance(maximum, (int, float))
+                and not isinstance(maximum, bool)
+                and value > maximum
+            ):
+                raise InvalidCommand(f"{label} must be at most {maximum}")
+        if isinstance(value, str):
+            min_length = schema.get("minLength")
+            if (
+                isinstance(min_length, int)
+                and not isinstance(min_length, bool)
+                and len(value) < min_length
+            ):
+                raise InvalidCommand(
+                    f"{label} must be at least {min_length} characters"
+                )
+            max_length = schema.get("maxLength")
+            if (
+                isinstance(max_length, int)
+                and not isinstance(max_length, bool)
+                and len(value) > max_length
+            ):
+                raise InvalidCommand(
+                    f"{label} must be at most {max_length} characters"
+                )
+            pattern = schema.get("pattern")
+            if isinstance(pattern, str):
+                try:
+                    compiled = re.compile(pattern)
+                except re.error:
+                    # A remote schema may use ECMA-262 syntax Python rejects.
+                    # The keyword is advisory there; the type and length checks
+                    # still hold, so the call is not refused for a dialect gap.
+                    compiled = None
+                if compiled is not None and compiled.search(value) is None:
+                    raise InvalidCommand(f"{label} does not match {pattern!r}")
+        if isinstance(value, list):
+            min_items = schema.get("minItems")
+            if (
+                isinstance(min_items, int)
+                and not isinstance(min_items, bool)
+                and len(value) < min_items
+            ):
+                raise InvalidCommand(f"{label} must contain at least {min_items} items")
+            max_items = schema.get("maxItems")
+            if (
+                isinstance(max_items, int)
+                and not isinstance(max_items, bool)
+                and len(value) > max_items
+            ):
+                raise InvalidCommand(f"{label} must contain at most {max_items} items")
+
+    @staticmethod
+    def _validate_external_value(
+        value: Any, schema: Any, label: str, tool_name: str = ""
+    ) -> None:
         """Enforce the safe JSON-Schema subset understood by Core.
 
         Unknown keywords are intentionally ignored so a valid remote schema is
-        not rejected merely because Core does not implement every draft feature.
+        not rejected merely because Core does not implement every draft
+        feature. Declared constraints are enforced: a schema that promises an
+        enum or a bound and does not hold it is documentation that lies.
         """
+
         if not isinstance(schema, dict):
             raise InvalidCommand(f"{label} schema must be an object")
-        declared = schema.get("type")
-        type_names: list[str] = []
-        if "type" in schema:
-            if isinstance(declared, str):
-                type_names = [declared]
-            elif (
-                isinstance(declared, list)
-                and declared
-                and all(isinstance(item, str) for item in declared)
-            ):
-                type_names = declared
-            else:
-                raise InvalidCommand(f"{label} schema type is malformed")
-            supported = {
-                "null", "boolean", "integer", "number", "string", "array", "object"
-            }
-            unsupported = set(type_names).difference(supported)
-            if unsupported:
-                raise InvalidCommand(
-                    f"{label} schema uses unsupported types: {sorted(unsupported)}"
-                )
-            matches = any(
+        type_names = CoreRuntime._schema_type_names(schema, label)
+        if type_names:
+            if not any(
                 CoreRuntime._external_type_matches(value, item) for item in type_names
-            )
-            if not matches:
+            ):
                 expected = " or ".join(type_names)
                 raise InvalidCommand(f"{label} must be {expected}")
+        CoreRuntime._validate_constraints(value, schema, label)
         if isinstance(value, dict):
             properties = schema.get("properties")
             properties = properties if isinstance(properties, dict) else {}
             required = schema.get("required")
-            if isinstance(required, list) and all(isinstance(item, str) for item in required):
+            if isinstance(required, list) and all(
+                isinstance(item, str) for item in required
+            ):
                 missing = set(required).difference(value)
                 if missing:
                     raise InvalidCommand(f"missing arguments: {sorted(missing)}")
             if schema.get("additionalProperties") is False:
                 unknown = set(value).difference(properties)
                 if unknown:
-                    raise InvalidCommand(f"unknown arguments: {sorted(unknown)}")
+                    # Name the accepted arguments so the model can repair the
+                    # call in one step instead of concluding the tool is
+                    # unusable (the race logged exactly that failure mode).
+                    hint = (
+                        f"; {tool_name} accepts: {sorted(properties)}"
+                        if tool_name
+                        else ""
+                    )
+                    raise InvalidCommand(
+                        f"unknown arguments: {sorted(unknown)}{hint}"
+                    )
             additional = schema.get("additionalProperties")
             for name, item in value.items():
                 child_schema = properties.get(name)
@@ -1016,7 +1147,9 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
             items = schema.get("items")
             if isinstance(items, dict):
                 for index, item in enumerate(value):
-                    CoreRuntime._validate_external_value(item, items, f"{label}[{index}]")
+                    CoreRuntime._validate_external_value(
+                        item, items, f"{label}[{index}]"
+                    )
 
     @staticmethod
     def _external_type_matches(value: Any, type_name: str) -> bool:

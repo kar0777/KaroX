@@ -65,6 +65,18 @@
 
 ### Fixed
 
+- Every Core tool now passes one argument validator. The built-in validator
+  did not know the `integer` type, so the desktop tools' integer arguments
+  (window ids, click/scroll coordinates, limits, max nodes, pace) were refused
+  before their handlers ran: the computer-use benchmark could not click
+  anything. The same code now enforces the constraints the schemas already
+  declared (enum, minimum/maximum, string and array bounds, pattern), names
+  the accepted arguments on a mismatch, and flattens an unambiguous
+  `payload`/`arguments` wrapper that models copied from `browser.command`.
+  Desktop tool descriptions now say arguments are top-level and explain that
+  `app_id` is the caller's label while `window_id`/`title_contains` choose the
+  window.
+
 - `karox bridge connect/start/restart` spawned a child the CLI parser refused:
   the launcher sent `--protocol`, `--saved-profile-name`, `--project`,
   `--default-project-id` and `--allowed-redirect-hosts`, none of which the
