@@ -742,6 +742,9 @@ def test_finish_batched_with_work_is_refused_and_work_still_runs(
     observed = "\n".join(_tool_messages(harness))
     assert "finish must be the only tool call" in observed
     assert "b.txt" in observed
+    # The observation carries the diff, not the audit metadata.
+    assert "previous_sha256" not in observed
+    assert "secret_literal_allowed" not in observed
 
 
 def test_unproducible_obligation_stops_without_duplicate_checks(
@@ -1798,6 +1801,94 @@ def test_focused_test_failure_is_mapped_for_the_model(
     assert "KaroX failure map" in observed
     assert "tests/test_calc.py:5" in observed
     assert "[tests.run exit 1" in observed
+
+
+def test_domain_tool_schemas_are_not_advertised_for_a_plain_repair(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A pytest repair must not pay for web, disk or batch schemas.
+
+    The tools stay callable and keep their capability gate; only the request's
+    advertised catalog shrinks. This is the measured fixed-cost lever: on the
+    ledger task none of the hidden tools was ever called, yet their JSON rode
+    in every one of the eight requests.
+    """
+
+    check = _calc_repository(repository)
+    (repository / "calc.py").write_text(CALC_RIGHT, encoding="utf-8")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "already correct"),))],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+        task="fix the failing add function in calc.py",
+    )
+    harness.run()
+
+    names = {tool.name for tool in harness.provider.requests[0].tools}
+    assert "repo_edit_file" in names
+    assert "repo_command" not in names
+    assert "web_fetch" not in names
+    assert "disk_scan" not in names
+
+
+def test_a_task_that_names_the_domain_gets_its_tool(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The same repository advertises the batch tool when the task asks for it."""
+
+    check = _calc_repository(repository)
+    (repository / "calc.py").write_text(CALC_RIGHT, encoding="utf-8")
+    harness = Harness(
+        repository,
+        tmp_path / "second",
+        [_response((_finish_call("c1", "already correct"),))],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+        task="rename the module files in one atomic batch",
+    )
+    harness.run()
+
+    names = {tool.name for tool in harness.provider.requests[0].tools}
+    assert "repo_command" in names
+
+
+def test_mutation_observation_keeps_only_the_decision_facts() -> None:
+    """The model reads the diff, not the audit metadata.
+
+    Mutation results used to reach the model as a JSON blob with the whole
+    data dict: hashes, previous hashes and evidence ids were re-sent on every
+    later request. The full result still lives in the session record.
+    """
+
+    from karox.engine_tool_env import _mutation_body
+
+    body = _mutation_body(
+        "repo.edit_file",
+        {
+            "path": "calc.py",
+            "changed": True,
+            "replacements": 1,
+            "bytes": 42,
+            "diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-1\n+2\n",
+            "quick_checks_line": "quick checks: py_compile ok",
+            "affected_tests_line": "affected tests: passed (advisory, not evidence)",
+            "previous_sha256": "a" * 64,
+            "sha256": "b" * 64,
+            "secret_literal_allowed": False,
+        },
+        True,
+    )
+
+    assert body.startswith("[repo.edit_file calc.py]")
+    assert "changed · 1 replacement(s) · 42 bytes" in body
+    assert "-1" in body and "+2" in body
+    assert "quick checks: py_compile ok" in body
+    assert "affected tests: passed" in body
+    assert "sha256" not in body
+    assert "secret_literal_allowed" not in body
+    assert len(body) < 600
 
 
 def test_one_advisory_rerun_per_batched_response(

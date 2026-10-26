@@ -2,6 +2,28 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Changed — the fixed request cost is now part of the task, not the catalog
+
+- Large, domain-specific tool schemas are advertised only when the task names
+  their domain: `web.fetch` needs web/URL/docs/library words, `disk.*` needs
+  disk/cleanup words, and the atomic batch form of `repo.command` needs
+  batch/move/rename/delete words. Hidden names stay callable and audited, so a
+  model that already knows the tool is not refused; an unrelated repair simply
+  stops paying ~3 KB of JSON on every request. Image tasks still get
+  `web.fetch`, because assets are part of that domain.
+- `repo.inspect`, `web.fetch`, `tests.run` and `repo.apply_patch` descriptions
+  lost their duplicated guidance. The inspect paragraph in the system prompt
+  was compressed from ~1,340 to ~640 characters while keeping the project-map,
+  edit_context, greenfield and escalation rules.
+- A mutation observation is now the decision-shaped text the model reads:
+  `[repo.edit_file path]`, changed/replacements/bytes, the diff, the quick-check
+  verdict and the affected-test verdict. Hashes, previous hashes, secret flags
+  and evidence ids stay in the durable result and are no longer re-sent in
+  every later request. Measured on the ledger fixture at the same step count:
+  prompt tokens 95,394 -> 79,352 and wall 37.8 s -> 19.5 s, tests 13/13.
+  On the shop fixture: 46,960 -> 32,032 prompt and 6 -> 5 steps.
+  The full audit record still contains every field.
+
 ### Fixed — findings from the first live A/B against a minimal harness
 
 - `tests.run` now launches the project's own Python (a project `.venv`, then

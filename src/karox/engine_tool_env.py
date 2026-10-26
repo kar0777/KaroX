@@ -54,6 +54,11 @@ FINISH_BATCH_MARKER = "__karox_finish_not_alone__"
 #: budget that cannot turn one edit into a long detour.
 AFFECTED_TESTS_TIMEOUT_SECONDS = 20.0
 AFFECTED_TEST_LIMIT = 4
+#: Tools whose result says "a file changed". The model needs the diff, the
+#: quick-check verdict and the affected-test verdict; hashes, previous hashes,
+#: secret flags and evidence ids stay in the durable result but do not ride in
+#: every later request's history.
+_MUTATION_TOOLS = {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command"}
 
 
 def _batch_tail(action: Mapping[str, Any] | None) -> bool:
@@ -536,6 +541,8 @@ class CoreToolEnvironment:
                 if isinstance(content, str)
                 else json.dumps(data, ensure_ascii=False, sort_keys=True)
             )
+        elif core_name in _MUTATION_TOOLS:
+            text = _mutation_body(core_name, data, result.ok)
         else:
             text = json.dumps(
                 {
@@ -558,6 +565,51 @@ class CoreToolEnvironment:
             "returncode": returncode,
             "exception_info": "",
         }
+
+
+def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:
+    """The small, decision-shaped view of a successful or failed mutation.
+
+    The full result (hashes, previous hashes, secret flags, evidence ids) stays
+    in the session record. This body is what the model reads and what every
+    later request re-sends, so it keeps only the facts a next edit needs.
+    """
+
+    path = data.get("path")
+    header = f"[{core_name} {path}]" if isinstance(path, str) and path else f"[{core_name}]"
+    lines = [header]
+    facts: List[str] = []
+    if data.get("changed") is True:
+        facts.append("changed")
+    replacements = data.get("replacements")
+    if isinstance(replacements, int) and not isinstance(replacements, bool) and replacements > 0:
+        facts.append(f"{replacements} replacement(s)")
+    changed_files = data.get("changed_files")
+    if isinstance(changed_files, list) and changed_files:
+        shown = [str(item) for item in changed_files[:8]]
+        suffix = f" (+{len(changed_files) - 8})" if len(changed_files) > 8 else ""
+        facts.append("files: " + ", ".join(shown) + suffix)
+    size = data.get("bytes")
+    if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        facts.append(f"{size} bytes")
+    if facts:
+        lines.append(" · ".join(facts))
+    diff = data.get("diff")
+    if isinstance(diff, str) and diff.strip():
+        lines.append(diff.strip())
+    for key in ("quick_checks_line", "affected_tests_line"):
+        line = data.get(key)
+        if isinstance(line, str) and line.strip():
+            lines.append(line.strip())
+    if not ok:
+        error = data.get("error") or data.get("detail") or data.get("message")
+        if isinstance(error, dict):
+            error = json.dumps(error, ensure_ascii=False, sort_keys=True)
+        if isinstance(error, str) and error.strip():
+            lines.append("error: " + error.strip()[:2_000])
+        elif len(lines) == 1:
+            lines.append("failed")
+    return "\n".join(lines)
 
 
 def _checks_body(data: Mapping[str, Any]) -> str:

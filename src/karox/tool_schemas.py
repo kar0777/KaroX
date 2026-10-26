@@ -107,20 +107,11 @@ def additional_tool_definitions(
         ),
         "repo.inspect": ToolDefinition(
             "repo.inspect",
-            "Inspect the repository for one goal in a deterministic local pass. "
-            "Returns likely change points, relevant tests/docs, dependency hints, "
-            "and bounded excerpts of the current files. For one small safe top "
-            "change-point it may also return edit_context with the complete current "
-            "file content and exact SHA; when present, edit that path directly and "
-            "do not inspect or read it again. Treat returned excerpts "
-            "as authoritative read evidence: do not list/search/read an excerpted "
-            "file again unless the exact lines you need are absent. Use focused "
-            "first instead of chaining list/search/read calls just to locate "
-            "the implementation. If focused already identifies a likely target "
-            "file but lacks exact lines, read that file or range directly; do "
-            "not repeat repo.inspect at standard/deep merely to obtain more text. "
-            "Escalate depth only when focused failed to locate the target, tests, "
-            "or dependencies you still need.",
+            "Inspect the repository for one goal. Returns likely change points, "
+            "relevant tests, dependency hints, bounded excerpts and, for one "
+            "small safe change point, edit_context (full file + SHA; edit that "
+            "path directly). Treat excerpts as read evidence. Use focused first; "
+            "escalate only when it did not locate the target, tests or dependency.",
             Capability.REPO_READ,
             False,
             {
@@ -226,8 +217,7 @@ def additional_tool_definitions(
             (
                 "Apply one strict unified diff atomically. Prefer this for a "
                 "multi-site repair when exact old/new JSON replacements would be "
-                "large: patch is one string, is fully parsed and validated before "
-                "any filesystem write, and the whole transaction succeeds or fails."
+                "large; the whole transaction succeeds or fails."
             ),
             Capability.REPO_WRITE,
             True,
@@ -272,10 +262,10 @@ def additional_tool_definitions(
                     "payload": {
                         "type": "object",
                         "description": (
-                            "apply_patch payload: {patch, expected_sha256?, dry_run?, "
-                            "allow_secret_literal?}. batch payload: {operations, dry_run?}; "
-                            "each operation uses op=write|delete|move|mkdir with the "
-                            "corresponding path/content/source/destination fields."
+                            "apply_patch: {patch, expected_sha256?, dry_run?}. "
+                            "batch: {operations, dry_run?} with "
+                            "op=write|delete|move|mkdir and "
+                            "path/content/source/destination."
                         ),
                         "properties": {
                             "patch": {"type": "string"},
@@ -354,7 +344,9 @@ def additional_tool_definitions(
         ),
         "tests.run": ToolDefinition(
             "tests.run",
-            "Run a short synchronous project test verification. Python repositories use structured pytest; Node/Vite repositories without Python tests use the package test script (Vitest is forced to one-shot mode). For a long suite, start a durable job instead so it survives a request or tunnel interruption.",
+            "Run a short synchronous test verification: structured pytest for "
+            "Python, the package test script for Node/Vite. Start a durable job "
+            "for a long suite.",
             Capability.CHECKS_RUN,
             True,
             {
@@ -372,10 +364,9 @@ def additional_tool_definitions(
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Paths or node ids to run (focused). When omitted for "
-                            "a focused run, KaroX derives the test files that "
-                            "import or conventionally match this session's "
-                            "changed modules."
+                            "Paths or node ids to run (focused). When omitted, "
+                            "KaroX derives the test files that match this "
+                            "session's changed modules."
                         ),
                     },
                     "split": {
@@ -420,14 +411,10 @@ def additional_tool_definitions(
             (
                 "Read one source file from a public code source (unpkg, "
                 "jsdelivr, cdnjs, esm.sh, raw.githubusercontent) over HTTPS. "
-                "Reuse proven code instead of re-deriving it: read the library "
-                "or example that already solves this, adapt the parts you need, "
-                "and keep a one-line credit where the approach came from. "
-                "Pass path to save the file into the repository and read it "
-                "there, which is how anything large should be handled; without "
-                "path the text comes back in the answer, shortened when it is "
-                "longer than the in-answer limit. Read-only towards the source: "
-                "nothing is uploaded and no credentials are sent."
+                "Reuse proven code instead of re-deriving it and keep a one-line "
+                "credit. Pass path to save into the repository; without it the "
+                "text returns in the answer, shortened. Read-only: nothing is "
+                "uploaded and no credentials are sent."
             ),
             Capability.CODE_FETCH,
             True,

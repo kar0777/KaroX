@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -129,6 +130,92 @@ You act through typed tool calls; there is no shell.
 - Never print tool markup as prose; a response without a tool call is a format
   error.
 """
+
+
+#: Tool schemas whose payload is large and whose domain is narrow. They are
+#: advertised only when the task names that domain. The tool itself, its
+#: capability gate and its handler stay in place, so a model that already knows
+#: the name can still call it; an unrelated task simply stops paying ~3.4 KB of
+#: JSON on every request. Measured on the ledger fixture, the full catalog cost
+#: about 1.1k prompt tokens per call of which none were ever called.
+_DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
+    "web.fetch": (
+        "web",
+        "website",
+        "webpage",
+        "http",
+        "https",
+        "url",
+        "urls",
+        "fetch",
+        "documentation",
+        "docs",
+        "cdn",
+        "unpkg",
+        "jsdelivr",
+        "github",
+        "external library",
+        "third-party",
+        "npm package",
+    ),
+    "disk.scan": (
+        "disk",
+        "cleanup",
+        "clean up",
+        "free space",
+        "storage",
+        "cache",
+        "prune",
+        "temporary files",
+    ),
+    "disk.plan_cleanup": (
+        "disk",
+        "cleanup",
+        "clean up",
+        "free space",
+        "storage",
+        "cache",
+        "prune",
+        "temporary files",
+    ),
+    # The Safety section of the system prompt teaches the exact
+    # `repo_command batch {op: delete, path}` form for deleting a scratch file,
+    # so the name stays callable while it is not advertised. An argument error
+    # on that rare call is cheaper than 1.3 KB of batch schema on every repair
+    # request.
+    "repo.command": (
+        "batch",
+        "atomic",
+        "rename",
+        "mkdir",
+        "move file",
+        "move the file",
+        "delete file",
+        "delete the file",
+        "remove file",
+        "remove the file",
+    ),
+}
+
+
+def _tool_relevant_for_task(
+    core_name: str, task: str, *, visual: bool = False, mode: Optional[str] = None
+) -> bool:
+    """Whether this tool's schema belongs on the request for this task."""
+
+    keywords = _DOMAIN_TOOL_KEYWORDS.get(core_name)
+    if keywords is None:
+        return True
+    if visual:
+        # Image tasks commonly fetch a library or an asset.
+        return True
+    text = f"{task} {mode or ''}".lower()
+    for word in keywords:
+        # Word-ish boundaries: "asset" must not fire on "assets", and "url"
+        # must not fire inside an unrelated identifier.
+        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text):
+            return True
+    return False
 
 
 class _EngineBudgetExceeded(RuntimeError):
@@ -590,10 +677,6 @@ class EngineKernel:
             for alias, core_name in aliases.items()
             if self._may_call(definitions[core_name])
         )
-        self._provider_tools = tuple(
-            _engine_provider_tool(alias, definitions[core_name])
-            for alias, core_name in self._permitted_tool_pairs
-        ) + (_finish_provider_tool(),)
 
     # -- public surface ----------------------------------------------------
 
@@ -634,7 +717,7 @@ class EngineKernel:
             model = EngineProviderModel(
                 provider=self.provider,
                 model_id=self.model,
-                tools=self._provider_tools,
+                tools=self._advertised_tools(record.task or ""),
                 known_names=set(self.engine_tool_aliases) | {FINISH_TOOL_NAME},
                 max_output_tokens=self.max_output_tokens,
                 reasoning_effort=self.reasoning_effort,
@@ -814,6 +897,27 @@ class EngineKernel:
             self.core.policy.decide(self.origin, capability).allowed
             for capability in required
         )
+
+    def _advertised_tools(self, task: str) -> Tuple[ProviderTool, ...]:
+        """The schemas this task pays for, plus finish.
+
+        Capability filtering removes tools this origin may not use at all; this
+        pass additionally removes large, domain-specific schemas whose trigger
+        words the task does not contain. Hidden names stay in ``known_names``,
+        so an explicit call still reaches Core and is audited; the saving is
+        only in what every unrelated request has to carry.
+        """
+
+        return tuple(
+            _engine_provider_tool(alias, self._definitions[core_name])
+            for alias, core_name in self._permitted_tool_pairs
+            if _tool_relevant_for_task(
+                core_name,
+                task,
+                visual=bool(self.request_images),
+                mode=self.mode,
+            )
+        ) + (_finish_provider_tool(),)
 
     def _engine_context_budget(self) -> int:
         """The engine's compaction budget in the engine's own token units.
