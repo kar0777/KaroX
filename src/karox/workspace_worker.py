@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -348,6 +349,32 @@ def _node_test_command(repository: Path) -> tuple[list[str], str] | None:
     return argv, test_script.strip()
 
 
+def _test_python(repository: Path) -> str:
+    """The interpreter the project itself would use for pytest.
+
+    ``tests.run`` used to launch ``sys.executable``, which is KaroX's own
+    environment. A pipx-installed KaroX has no pytest there, so every focused
+    rerun died with "No module named pytest" while the model read a red result
+    and an empty failure map. Prefer a project virtualenv, then the interpreter
+    on PATH -- the same one an approved ``python -m pytest`` check resolves --
+    and only then this runtime.
+    """
+
+    for relative in (
+        ".venv/Scripts/python.exe",
+        ".venv/bin/python",
+        "venv/Scripts/python.exe",
+        "venv/bin/python",
+        "env/Scripts/python.exe",
+        "env/bin/python",
+    ):
+        candidate = repository / relative
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("python") or shutil.which("python3")
+    return found or sys.executable
+
+
 def execute_tests(
     runtime: Any,
     arguments: dict[str, Any],
@@ -419,7 +446,7 @@ def execute_tests(
         ]
         return _attach_failure_map(runtime, result)
 
-    argv = [sys.executable, "-m", "pytest"]
+    argv = [_test_python(runtime.repository), "-m", "pytest"]
     selected: list[str] = []
     part: Optional[int] = None
     split: Optional[int] = None

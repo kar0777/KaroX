@@ -116,6 +116,11 @@ def _response_from_engine_message(message: Mapping[str, Any]) -> ModelResponse:
     """
     extra = message.get("extra") or {}
     usage = extra.get("usage") if isinstance(extra.get("usage"), dict) else {}
+    cost = extra.get("cost")
+    cumulative_cost = extra.get("cumulative_cost")
+    reason = extra.get("cost_unknown_reason")
+    currency = extra.get("currency")
+    pricing_version = extra.get("pricing_version")
     return ModelResponse(
         content=message.get("content") if isinstance(message.get("content"), str) else None,
         tool_calls=_engine_tool_calls(message),
@@ -125,6 +130,30 @@ def _response_from_engine_message(message: Mapping[str, Any]) -> ModelResponse:
         transport_attempts=int(extra.get("transport_attempts") or 1),
         selected_provider=extra.get("provider") if isinstance(extra.get("provider"), str) else None,
         selected_model=extra.get("model") if isinstance(extra.get("model"), str) else None,
+        cost=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        cost_unknown_reason=reason if isinstance(reason, str) and reason else None,
+        cumulative_cost=(
+            float(cumulative_cost)
+            if isinstance(cumulative_cost, (int, float))
+            and not isinstance(cumulative_cost, bool)
+            else None
+        ),
+        uncached_cost=(
+            float(extra.get("uncached_cost"))
+            if isinstance(extra.get("uncached_cost"), (int, float))
+            and not isinstance(extra.get("uncached_cost"), bool)
+            else None
+        ),
+        cache_savings=(
+            float(extra.get("cache_savings"))
+            if isinstance(extra.get("cache_savings"), (int, float))
+            and not isinstance(extra.get("cache_savings"), bool)
+            else None
+        ),
+        currency=currency if isinstance(currency, str) and currency else None,
+        pricing_version=(
+            pricing_version if isinstance(pricing_version, str) and pricing_version else None
+        ),
     )
 
 
@@ -350,6 +379,16 @@ class EngineProviderModel:
                 raise self._format_error(
                     str(actions[0].get("parse_error") or ""), response, has_calls=True
                 )
+            size = len(actions)
+            if size > 1:
+                for index, action in enumerate(actions):
+                    # The environment needs to know where a response's batch
+                    # ends: an advisory test rerun after every edit in a
+                    # three-edit response runs the same suite three times and
+                    # leaves two stale red results in the model's next turn.
+                    # A lone call carries no marker; it is trivially the tail.
+                    action["batch_index"] = index
+                    action["batch_size"] = size
             return actions
         salvaged = salvage_fenced_command(response.content or "")
         if salvaged is not None:
@@ -376,7 +415,13 @@ class EngineProviderModel:
                 "extra": {
                     "interrupt_type": "FormatError",
                     "response": self._persisted_response(response),
-                    "cost": response.cost or 0.0,
+                    "cost": response.cost,
+                    "cost_unknown_reason": response.cost_unknown_reason,
+                    "cumulative_cost": response.cumulative_cost,
+                    "uncached_cost": response.uncached_cost,
+                    "cache_savings": response.cache_savings,
+                    "currency": response.currency,
+                    "pricing_version": response.pricing_version,
                     "usage": dict(response.usage),
                     "provider": response.selected_provider
                     or getattr(self._provider, "provider_name", ""),
@@ -442,7 +487,13 @@ class EngineProviderModel:
         message["extra"] = {
             "actions": actions,
             "response": self._persisted_response(response),
-            "cost": response.cost or 0.0,
+            "cost": response.cost,
+            "cost_unknown_reason": response.cost_unknown_reason,
+            "cumulative_cost": response.cumulative_cost,
+            "uncached_cost": response.uncached_cost,
+            "cache_savings": response.cache_savings,
+            "currency": response.currency,
+            "pricing_version": response.pricing_version,
             "usage": dict(response.usage),
             "timestamp": time.time(),
             "provider": response.selected_provider

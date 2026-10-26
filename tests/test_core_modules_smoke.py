@@ -8,6 +8,7 @@ contracts still hold after extraction from v5.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,33 @@ def test_workspace_worker_apply_patch_dry_run_and_batch(tmp_path: Path) -> None:
     assert applied["action"] == "batch"
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "alpha"
     assert (tmp_path / "nested").is_dir()
+
+
+def test_tests_run_uses_the_project_interpreter(tmp_path: Path) -> None:
+    """A pipx KaroX has no pytest; the project venv does.
+
+    ``tests.run`` used to launch ``sys.executable``, so focused reruns died
+    with "No module named pytest" on every machine where KaroX and the project
+    have different environments.
+    """
+
+    runtime = FakeRuntime(tmp_path)
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_a.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    relative = ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
+    interpreter = tmp_path / relative
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("", encoding="utf-8")
+
+    result = workspace_worker.execute_tests(
+        runtime,
+        {"suite": "focused", "targets": ["tests/test_a.py"]},
+        60.0,
+    )
+
+    assert result["argv"][0] == str(interpreter)
+    assert result["argv"][1:] == ["-m", "pytest", "tests/test_a.py"]
 
 
 def test_workspace_worker_selects_pytest_targets_and_splits(tmp_path: Path) -> None:
@@ -439,6 +467,132 @@ def test_routing_decorates_a_completed_response(tmp_path: Path) -> None:
     over_budget = tight.complete(_request())
     assert over_budget.budget_exceeded is True
     assert over_budget.budget_reason == "cost_budget"
+
+
+def test_missing_usage_is_unknown_and_stops_a_cost_budget(tmp_path: Path) -> None:
+    registry = _routing_registry(tmp_path, ("demo-1",))
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: _FakeProvider(
+            ModelResponse(
+                content="answer",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={},
+            )
+        ),
+        routing.RoutingPolicy(
+            routes=(routing.RouteTarget("demo-1", "model-1"),),
+            max_cost=10.0,
+            currency="USD",
+        ),
+    )
+
+    result = router.complete(_request())
+    assert result.cost is None
+    assert result.cost_unknown_reason == "usage_missing"
+    assert result.cumulative_cost is None
+    assert result.budget_exceeded is True
+    assert result.budget_reason == "cost_unknown"
+
+
+def test_missing_usage_without_a_budget_is_reported_not_priced_at_zero(
+    tmp_path: Path,
+) -> None:
+    registry = _routing_registry(tmp_path, ("demo-1",))
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: _FakeProvider(
+            ModelResponse(
+                content="answer",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={},
+            )
+        ),
+        routing.RoutingPolicy(routes=(routing.RouteTarget("demo-1", "model-1"),)),
+    )
+
+    result = router.complete(_request())
+    assert result.cost is None
+    assert result.cost_unknown_reason == "usage_missing"
+    assert result.budget_exceeded is False
+
+
+def test_missing_usage_cannot_silently_disable_a_token_budget(
+    tmp_path: Path,
+) -> None:
+    registry = _routing_registry(tmp_path, ("demo-1",))
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: _FakeProvider(
+            ModelResponse(
+                content="answer",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={},
+            )
+        ),
+        routing.RoutingPolicy(
+            routes=(routing.RouteTarget("demo-1", "model-1"),),
+            max_total_tokens=10_000,
+        ),
+    )
+
+    result = router.complete(_request())
+    assert result.budget_exceeded is True
+    assert result.budget_reason == "token_unknown"
+
+
+def test_partial_usage_is_unknown_not_a_discount(tmp_path: Path) -> None:
+    registry = _routing_registry(tmp_path, ("demo-1",))
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: _FakeProvider(
+            ModelResponse(
+                content="answer",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={"completion_tokens": 5},
+            )
+        ),
+        routing.RoutingPolicy(routes=(routing.RouteTarget("demo-1", "model-1"),)),
+    )
+
+    result = router.complete(_request())
+    assert result.cost is None
+    assert result.cost_unknown_reason == "usage_missing"
+
+
+def test_unpriced_model_is_visible_as_unknown(tmp_path: Path) -> None:
+    registry = _routing_registry(tmp_path, ("demo-1",))
+    priced = registry.model("demo-1", "model-1")
+    registry.put_model(
+        ModelRecord(
+            provider_id=priced.provider_id,
+            model_id=priced.model_id,
+            tools=priced.tools,
+            streaming=priced.streaming,
+            max_output_tokens=priced.max_output_tokens,
+            pricing=None,
+        )
+    )
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: _FakeProvider(
+            ModelResponse(
+                content="answer",
+                tool_calls=(),
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+        ),
+        routing.RoutingPolicy(routes=(routing.RouteTarget("demo-1", "model-1"),)),
+    )
+
+    result = router.complete(_request())
+    assert result.cost is None
+    assert result.cost_unknown_reason == "no_pricing"
 
 
 @pytest.mark.parametrize(

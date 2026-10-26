@@ -2,6 +2,53 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Fixed — findings from the first live A/B against a minimal harness
+
+- `tests.run` now launches the project's own Python (a project `.venv`, then
+  the interpreter on PATH), not KaroX's environment. A pipx-installed KaroX
+  has no pytest there, so every focused rerun used to fail with "No module
+  named pytest" while the edit result claimed the affected tests had failed.
+- A batched response triggers one advisory rerun, after its last action,
+  instead of one per edit. A three-edit response used to run the same suite
+  three times and leave two stale red results beside the current one.
+- A red advisory run with no parsed failure is reported as "could not run",
+  not "failed": a runner problem must not point the model at code that never
+  ran.
+
+### Fixed — a budget cannot be silently disabled by missing usage
+
+- `ModelPricing.estimate_known` returns `None` when the prompt or completion
+  counter is absent, and the router no longer books an absent usage block as a
+  measured `$0.00`. The old zero also kept both gates from ever tripping.
+- With `--max-cost`, one unknown response stops the run as
+  `budget_exceeded:cost_unknown`; with `--max-total-tokens`, a response that
+  reports no counters stops it as `token_unknown`. A resumed session carries
+  the marker, so the next request is refused before it is sent.
+- The session usage records `cost_status: unknown` and a reason
+  (`usage_missing` or `no_pricing`); the CLI prints `costs: unknown (...)`
+  and the TUI does the same. A partial measured total is labelled incomplete.
+- An engine assistant message now persists its measured cost, cumulative cost,
+  currency and pricing version. The session rebuild used to drop them, so an
+  engine run on a priced model kept per-step cost events but no session total,
+  and an unpriced response lost its unknown marker on the way to the report.
+- An engine provider budget refusal is now a controlled stop
+  (`stopped/budget`), not `failed/provider_error`.
+
+### Fixed — the protected tail is bounded and actually measured
+
+- The compactor counts tool-call arguments and reasoning blocks, not only
+  message bodies. A large `repo.write_file` body was invisible to the estimate
+  and was re-sent forever.
+- When the mutable middle has nothing left to free, the recent tail is clipped
+  in place (roles, order and tool-call ids preserved) instead of being resent
+  forever. A short history used to be compacted at all.
+- Historical tool-call arguments are replaced by a marker once their body is
+  clipped or dropped; the paired tool result keeps its id, so the transcript
+  stays valid for every provider.
+- The engine budget subtracts the output ceiling from the window, and a history
+  that cannot be brought under budget reports `over_budget_tokens` plus a
+  `context_floor_exceeded` warning instead of claiming a successful compaction.
+
 ### Fixed — audit of the check map, the briefing and resume
 
 - pytest failure maps now take path and line from the same frame: an exception

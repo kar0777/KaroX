@@ -132,6 +132,18 @@ class Outcome:
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
 
+    @property
+    def cost_unknown(self) -> str:
+        """A reason when the run total is not a measured cost, else empty."""
+
+        if self.usage.get("cost_status") != "unknown":
+            return ""
+        reason = str(self.usage.get("cost_unknown_reason") or "")
+        return {
+            "usage_missing": "provider did not report usage",
+            "no_pricing": "no pricing for this model",
+        }.get(reason, reason or "unknown reason")
+
 
 @dataclass(frozen=True)
 class Decoded:
@@ -240,6 +252,7 @@ class SessionState:
     requests: int = 0
     total_tokens: int = 0
     costs: dict[str, float] = field(default_factory=dict)
+    cost_unknown: str = ""
     verified_step: int = 0
 
     @classmethod
@@ -282,6 +295,13 @@ class SessionState:
             if isinstance(costs_raw, dict)
             else {}
         )
+        cost_unknown = ""
+        if usage.get("cost_status") == "unknown":
+            reason = str(usage.get("cost_unknown_reason") or "")
+            cost_unknown = {
+                "usage_missing": "provider did not report usage",
+                "no_pricing": "no pricing for this model",
+            }.get(reason, reason or "unknown reason")
         snapshot = record.get("verified_snapshot")
         verified_step = (
             _int(snapshot.get("step")) if isinstance(snapshot, dict) else 0
@@ -331,6 +351,7 @@ class SessionState:
             requests=_int(usage.get("requests")),
             total_tokens=_int(usage.get("total_tokens")),
             costs=costs,
+            cost_unknown=cost_unknown,
             verified_step=verified_step,
         )
 

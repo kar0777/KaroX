@@ -256,9 +256,27 @@ class EngineAgent(DefaultAgent):
         super().manage_context()
         if self.n_context_events > events_before:
             self._kernel._on_compacted(
-                estimate_before, self._estimate_tokens(), self.n_context_events
+                estimate_before,
+                self._estimate_tokens(),
+                self.n_context_events,
+                overflow=int(getattr(self, "context_overflow_tokens", 0) or 0),
             )
             self._refresh_state_briefing()
+        overflow = int(getattr(self, "context_overflow_tokens", 0) or 0)
+        if overflow and self.n_context_events == events_before:
+            if not getattr(self, "_overflow_reported", False):
+                self._overflow_reported = True
+                self._kernel._emit(
+                    AgentEventKind.WARNING,
+                    reason="context_floor_exceeded",
+                    detail=(
+                        f"history is ~{overflow} tokens over the context budget and "
+                        "cannot be compacted further; the next request may exceed "
+                        "the model window"
+                    ),
+                )
+        elif not overflow:
+            self._overflow_reported = False
 
     def _refresh_state_briefing(self) -> None:
         """Append the durable state to the task message after a compaction.
@@ -383,7 +401,9 @@ class EngineAgent(DefaultAgent):
                 self.step()
                 self.n_consecutive_format_errors = 0
             except FormatError as error:
-                self.cost += error.messages[0].get("extra", {}).get("cost", 0.0)
+                self.cost += float(
+                    error.messages[0].get("extra", {}).get("cost") or 0.0
+                )
                 self.n_consecutive_format_errors += 1
                 if (
                     0
@@ -424,6 +444,10 @@ class EngineAgent(DefaultAgent):
             except _EngineBudgetExceeded:
                 raise
             except ProviderError as exc:
+                if exc.kind is ProviderErrorKind.BUDGET_EXCEEDED:
+                    # A budget refusal is a controlled stop, not a provider
+                    # failure: the session can be resumed with a wider budget.
+                    raise _EngineBudgetExceeded("provider_budget") from exc
                 raise _EngineProviderFailure(exc.kind, str(exc)) from exc
             except InterruptAgentFlow as interrupt:
                 self.add_messages(*interrupt.messages)
@@ -800,6 +824,12 @@ class EngineKernel:
         3/4 aligns the engine's estimate with the product's ceiling.
         """
         ceiling = max(1_000, int(self.context.token_ceiling))
+        # Completion is part of the same window. A large output ceiling and a
+        # high utilization could otherwise ask the provider for a prompt that
+        # already fills the window, leaving no room for the answer.
+        reserve = int(self.max_output_tokens or 0)
+        if reserve > 0:
+            ceiling = max(1_000, ceiling - reserve)
         return max(1_000, int(ceiling * 0.75))
 
     def _seed_history(
@@ -949,17 +979,20 @@ class EngineKernel:
         self._step = step
         self._emit(AgentEventKind.STEP_FINISHED)
 
-    def _on_compacted(self, tokens_before: int, tokens_after: int, count: int) -> None:
+    def _on_compacted(
+        self, tokens_before: int, tokens_after: int, count: int, overflow: int = 0
+    ) -> None:
         self._compaction = {
             "engine": True,
             "tokens_before": int(tokens_before),
             "tokens_after": int(tokens_after),
             "count": int(count),
+            "over_budget_tokens": max(0, int(overflow)),
         }
-        self._emit(
-            AgentEventKind.COMPACTED,
-            summary=f"engine history compacted to ~{tokens_after} tokens (event {count})",
-        )
+        summary = f"engine history compacted to ~{tokens_after} tokens (event {count})"
+        if overflow > 0:
+            summary += f"; still ~{overflow} tokens over budget"
+        self._emit(AgentEventKind.COMPACTED, summary=summary)
 
     def _on_engine_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:
         """Persist new engine messages as durable session checkpoints.

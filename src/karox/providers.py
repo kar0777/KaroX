@@ -360,6 +360,10 @@ class ModelResponse:
     selected_provider: Optional[str] = None
     selected_model: Optional[str] = None
     cost: Optional[float] = None
+    #: Why cost is absent: "usage_missing" (the gateway did not report prompt
+    #: or completion counters) or "no_pricing" (this model has no price record).
+    #: None means the cost below is a measured value, not that it was zero.
+    cost_unknown_reason: Optional[str] = None
     # The same response priced with every prompt token at the normal input rate.
     # This lets the UI report the measured cache effect without inventing a
     # second price table or guessing what the provider would have charged.

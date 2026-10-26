@@ -56,6 +56,18 @@ AFFECTED_TESTS_TIMEOUT_SECONDS = 20.0
 AFFECTED_TEST_LIMIT = 4
 
 
+def _batch_tail(action: Mapping[str, Any] | None) -> bool:
+    """True when this action ends a batched response (or carries no batch data)."""
+
+    if not isinstance(action, Mapping):
+        return True
+    index = action.get("batch_index")
+    size = action.get("batch_size")
+    if isinstance(index, int) and isinstance(size, int) and not isinstance(size, bool):
+        return size <= 1 or index == size - 1
+    return True
+
+
 class CoreToolEnvironment:
     """The engine's Environment protocol on CoreRuntime's typed tools.
 
@@ -243,7 +255,7 @@ class CoreToolEnvironment:
             for item in result.evidence:
                 item.metadata["completion_identity"] = proof
         self._attach_quick_checks(result)
-        self._attach_affected_tests(result)
+        self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
         self._kernel._persist_engine_tool_result(
             call_id=call_id,
@@ -398,7 +410,9 @@ class CoreToolEnvironment:
         data["quick_checks"] = [check.to_dict() for check in checks]
         data["quick_checks_line"] = summarize_quick_checks(checks)
 
-    def _attach_affected_tests(self, result: CoreResult) -> None:
+    def _attach_affected_tests(
+        self, result: CoreResult, action: Mapping[str, Any] | None = None
+    ) -> None:
         """Re-run the tests that failed, in the same result as the repair edit.
 
         In a repair loop the model's next turn is almost always "run the check
@@ -407,10 +421,16 @@ class CoreToolEnvironment:
         run is advisory: it never counts as evidence, and only the approved
         command can discharge the floor.
 
+        Only the last action of a batched response triggers the rerun: a
+        three-edit batch would otherwise run the same suite three times and
+        leave two stale results beside the current one.
+
         Everything here fails closed to silence: a missing runtime, a vanished
         test file or an exhausted budget leaves the edit result unchanged.
         """
 
+        if not _batch_tail(action):
+            return
         if "tests.run" not in self._definitions or not isinstance(result.data, dict):
             return
         data = result.data
@@ -451,13 +471,15 @@ class CoreToolEnvironment:
         except Exception:  # noqa: BLE001 - a refused advisory run is not a failure
             return
         payload = outcome.data if isinstance(outcome.data, dict) else {}
+        failure_map = payload.get("failure_map") or {}
+        parsed = failure_map.get("total") if isinstance(failure_map, dict) else None
         data["affected_tests"] = {
             "advisory": True,
             "targets": list(targets),
             "ok": bool(outcome.ok),
             "exit_code": payload.get("exit_code"),
             "timed_out": payload.get("timed_out"),
-            "failure_map": payload.get("failure_map") or {},
+            "failure_map": failure_map,
         }
         if payload.get("timed_out"):
             line = "affected tests: timed out (advisory, not evidence)"
@@ -466,9 +488,15 @@ class CoreToolEnvironment:
                 f"affected tests: passed ({len(targets)} target(s); "
                 "advisory, not evidence)"
             )
+        elif not isinstance(parsed, int) or isinstance(parsed, bool) or parsed <= 0:
+            # A red exit code with no parsed failure is a runner problem (a
+            # missing interpreter, a collection error), not a test verdict.
+            # Calling it "failed" points the model at code that was never run.
+            data["affected_tests"]["unavailable"] = True
+            line = "affected tests: could not run (advisory, not evidence)"
         else:
             first = ""
-            for candidate in render_failure_map(payload.get("failure_map")).splitlines()[1:]:
+            for candidate in render_failure_map(failure_map).splitlines()[1:]:
                 first = candidate
                 break
             line = (

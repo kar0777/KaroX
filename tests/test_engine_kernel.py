@@ -1800,6 +1800,51 @@ def test_focused_test_failure_is_mapped_for_the_model(
     assert "[tests.run exit 1" in observed
 
 
+def test_one_advisory_rerun_per_batched_response(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Three edits in one response must not run the suite three times.
+
+    The stale earlier results are not just wasted work: they arrive as red
+    tool results beside the current one, so the model reads a failure set that
+    no longer describes the workspace.
+    """
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response(
+                (
+                    _write_call("c3", "helpers_a.py", "A = 1\n"),
+                    _write_call("c4", "helpers_b.py", "B = 2\n"),
+                    _write_call("c5", "calc.py", CALC_RIGHT),
+                )
+            ),
+            _response((_finish_call("c6", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    affected = [
+        entry
+        for entry in record.provider_history
+        if "affected_tests" in ((entry.get("result") or {}).get("data") or {})
+    ]
+    assert [entry.get("tool_call_id") for entry in affected] == ["c5"]
+    assert affected[0]["result"]["data"]["affected_tests"]["ok"] is True
+    advisory = [item for item in record.checks if item.get("suite") == "focused"]
+    assert len(advisory) == 1
+    assert advisory[0]["ok"] is True
+
+
 def test_focused_tests_derive_targets_from_the_session_changes(
     tmp_path: Path, repository: Path
 ) -> None:

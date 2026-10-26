@@ -223,6 +223,16 @@ class RoutedProvider:
         self._monotonic = monotonic if monotonic is not None else time.monotonic
         self._jitter = jitter if jitter is not None else random.random
         self._usage = _merge_usage({}, initial_usage or {})
+        # A resumed session carries this marker: a cost budget cannot be
+        # enforced when a previous response did not report what it used.
+        raw_reason = (
+            initial_usage.get("cost_unknown_reason")
+            if isinstance(initial_usage, Mapping)
+            else None
+        )
+        self._cost_unknown_reason: Optional[str] = (
+            str(raw_reason) if isinstance(raw_reason, str) and raw_reason else None
+        )
         self._costs: Dict[str, float] = {}
         for currency, raw_cost in (initial_costs or {}).items():
             if (
@@ -340,6 +350,12 @@ class RoutedProvider:
             )
         if self.policy.max_cost is not None:
             assert self.policy.currency is not None
+            if self._cost_unknown_reason is not None:
+                raise ProviderError(
+                    ProviderErrorKind.BUDGET_EXCEEDED,
+                    "cost budget cannot be enforced: "
+                    f"{self._cost_unknown_reason}",
+                )
             if self._costs.get(self.policy.currency, 0.0) >= self.policy.max_cost:
                 raise ProviderError(
                     ProviderErrorKind.BUDGET_EXCEEDED,
@@ -498,24 +514,41 @@ class RoutedProvider:
         currency = None
         pricing_version = None
         cumulative_cost = None
+        cost_unknown_reason = None
         if model_record.pricing is not None:
-            cost = model_record.pricing.estimate(response.usage)
-            uncached_cost = model_record.pricing.estimate_uncached(response.usage)
-            cache_savings = round(uncached_cost - cost, 12)
-            currency = model_record.pricing.currency
-            pricing_version = model_record.pricing.version
-            self._costs[currency] = round(self._costs.get(currency, 0.0) + cost, 12)
-            cumulative_cost = self._costs[currency]
+            cost = model_record.pricing.estimate_known(response.usage)
+            if cost is None:
+                # Absent counters are unknown spend, not free work. Booking a
+                # zero here also disabled both budget gates for the whole run.
+                cost_unknown_reason = "usage_missing"
+            else:
+                uncached_cost = model_record.pricing.estimate_uncached(response.usage)
+                cache_savings = round(uncached_cost - cost, 12)
+                currency = model_record.pricing.currency
+                pricing_version = model_record.pricing.version
+                self._costs[currency] = round(self._costs.get(currency, 0.0) + cost, 12)
+                cumulative_cost = self._costs[currency]
+        else:
+            cost_unknown_reason = "no_pricing"
+        if cost_unknown_reason is not None:
+            # Sticky: one unpriced response means the run total cannot be
+            # presented as a measured amount, even after a priced one.
+            self._cost_unknown_reason = cost_unknown_reason
 
         exceeded: list[str] = []
-        if (
-            self.policy.max_total_tokens is not None
-            and _usage_total(self._usage) > self.policy.max_total_tokens
-        ):
-            exceeded.append("token_budget")
+        if self.policy.max_total_tokens is not None:
+            if _usage_total(self._usage) > self.policy.max_total_tokens:
+                exceeded.append("token_budget")
+            elif _usage_total(response.usage) <= 0:
+                # A token ceiling cannot be enforced against a response that
+                # reported no counters; charging it as zero would let the run
+                # continue unbounded.
+                exceeded.append("token_unknown")
         if self.policy.max_cost is not None:
             assert self.policy.currency is not None
-            if self._costs.get(self.policy.currency, 0.0) > self.policy.max_cost:
+            if self._cost_unknown_reason is not None:
+                exceeded.append("cost_unknown")
+            elif self._costs.get(self.policy.currency, 0.0) > self.policy.max_cost:
                 exceeded.append("cost_budget")
 
         return replace(
@@ -524,6 +557,7 @@ class RoutedProvider:
             selected_provider=provider_record.provider_id,
             selected_model=model_record.model_id,
             cost=cost,
+            cost_unknown_reason=cost_unknown_reason,
             uncached_cost=uncached_cost,
             cache_savings=cache_savings,
             currency=currency,

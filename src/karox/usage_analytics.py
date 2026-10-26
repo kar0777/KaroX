@@ -160,6 +160,9 @@ def usage_event_from_response(
         event["currency"] = str(response.currency)
     if response.pricing_version:
         event["pricing_version"] = str(response.pricing_version)
+    reason = getattr(response, "cost_unknown_reason", None)
+    if isinstance(reason, str) and reason:
+        event["cost_unknown_reason"] = reason
     return event
 
 
@@ -206,6 +209,15 @@ def merge_response_usage(
         costs = dict(raw_costs) if isinstance(raw_costs, dict) else {}
         costs[response.currency] = response.cumulative_cost
         result["costs"] = costs
+
+    reason = getattr(response, "cost_unknown_reason", None)
+    if isinstance(reason, str) and reason:
+        # Sticky for the session: a later priced response cannot make a
+        # previous unpriced one disappear from the total.
+        result["cost_status"] = "unknown"
+        result["cost_unknown_reason"] = reason
+    elif "cost_status" not in result and response.cost is not None:
+        result["cost_status"] = "measured"
 
     latest_prompt = response.usage.get(
         "prompt_tokens", response.usage.get("input_tokens")

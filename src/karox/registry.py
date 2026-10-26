@@ -132,6 +132,32 @@ class ModelPricing:
             12,
         )
 
+    def estimate_known(self, usage: Mapping[str, Any]) -> Optional[float]:
+        """Price the response, or None when a required counter is absent.
+
+        ``estimate`` answers "what would these counters cost" and treats an
+        absent counter as zero, which is right for a calculator and wrong for a
+        budget: a gateway that omits usage used to produce a measured-looking
+        $0.00, and neither ``--max-cost`` nor ``--max-total-tokens`` could ever
+        trip. A cost is known only when both prompt and completion counters
+        were actually reported; a partial response is unknown, not cheap.
+        """
+
+        prompt_tokens = _usage_count_optional(usage, "prompt_tokens", "input_tokens")
+        output_tokens = _usage_count_optional(usage, "completion_tokens", "output_tokens")
+        if prompt_tokens is None or output_tokens is None:
+            return None
+        cache_read = _usage_count(usage, "cache_read_tokens")
+        cache_write = _usage_count(usage, "cache_write_tokens")
+        full_rate_tokens = max(0, prompt_tokens - cache_read - cache_write)
+        return round(
+            full_rate_tokens * float(self.input_per_million) / 1_000_000
+            + cache_read * self.cache_read_rate / 1_000_000
+            + cache_write * self.cache_write_rate / 1_000_000
+            + output_tokens * float(self.output_per_million) / 1_000_000,
+            12,
+        )
+
     def estimate_uncached(self, usage: Mapping[str, Any]) -> float:
         """Price the same response as if every prompt token billed at full rate.
 
@@ -147,6 +173,17 @@ class ModelPricing:
             + output_tokens * float(self.output_per_million) / 1_000_000,
             12,
         )
+
+
+def _usage_count_optional(usage: Mapping[str, Any], *names: str) -> Optional[int]:
+    for name in names:
+        if name not in usage:
+            continue
+        value = usage.get(name)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
+    return None
 
 
 def _usage_count(usage: Mapping[str, Any], *names: str) -> int:

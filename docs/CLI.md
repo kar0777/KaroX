@@ -108,7 +108,12 @@ karox agent run --task TEXT [--repository PATH]
 - Routed mode uses the selected registry model. `--route` adds ordered fallback
   routes; the primary is first. Context and output ceilings are the smallest
   known across all routes so a fallback never receives a history it cannot fit.
-- `--max-total-tokens` and `--max-cost` are hard ceilings enforced by the router.
+- `--max-total-tokens` and `--max-cost` are ceilings enforced by the router.
+  Token spend is checked before and after each request; a request that crosses
+  the cost ceiling is billed before the run stops. A cost ceiling cannot be
+  enforced when the gateway omits usage counters or the model has no pricing
+  record: the run stops with `budget_exceeded:cost_unknown` instead of
+  treating the missing amount as zero, and the report says `costs: unknown`.
 - Direct mode (`--model` plus `--base-url`) is for a one-off endpoint and
   persists no provider record. It cannot be combined with routed options or
   image attachments.

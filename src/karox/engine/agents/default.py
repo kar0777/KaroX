@@ -75,6 +75,17 @@ class AgentConfig(BaseModel):
     """Messages at the tail of the history that compaction never touches."""
     old_observation_chars: int = 400
     """Clip older message bodies to this many characters before dropping them."""
+    tail_observation_chars: int = 2_000
+    """Longest body a protected tail message may keep when the budget is over.
+
+    The tail stays protected from *dropping*, not from *measurement*: 24 recent
+    messages at the 50k-char tool ceiling are ~300k tokens that were resent on
+    every call forever, and a short history was never compacted at all. When
+    the middle has nothing left to free, the oldest tail bodies are clipped to
+    fit, in place, keeping role and tool-call ids so the transcript stays valid.
+    """
+    tail_min_chars: int = 200
+    """Floor for a clipped tail body; below this the text stops being useful."""
 
 
 #: Fence markers that mean "this text is an attempted action, not a finish".
@@ -95,6 +106,9 @@ class DefaultAgent:
         self.n_calls = 0
         self.n_consecutive_format_errors = 0
         self.n_context_events = 0
+        #: Tokens still over budget after compaction gave up; 0 means the sent
+        #: history fits. The product reports this instead of claiming success.
+        self.context_overflow_tokens = 0
         self._last_action_key: str = ""
         self._same_step_streak = 0
         self._start_time = time.time()
@@ -149,7 +163,7 @@ class DefaultAgent:
                 self.n_consecutive_format_errors = 0  # reset on any clean step
             except FormatError as e:
                 # The call was billed before parsing failed, so query() never got to charge it.
-                self.cost += e.messages[0].get("extra", {}).get("cost", 0.0)
+                self.cost += float(e.messages[0].get("extra", {}).get("cost") or 0.0)
                 self.n_consecutive_format_errors += 1
                 if 0 < self.config.max_consecutive_format_errors <= self.n_consecutive_format_errors:
                     self.add_messages(*e.messages)
@@ -212,7 +226,7 @@ class DefaultAgent:
         self.n_calls += 1
         self.manage_context()
         message = self.model.query(self.messages)
-        self.cost += message.get("extra", {}).get("cost", 0.0)
+        self.cost += float(message.get("extra", {}).get("cost") or 0.0)
         self.add_messages(message)
         return message
 
@@ -257,53 +271,137 @@ class DefaultAgent:
     # ------------------------------------------------------------------
 
     _CLIP_MARKER = "[karo-core context manager: clipped"
+    _TAIL_CLIP_MARKER = "[karo-core context manager: tail clipped"
+    _ARGS_MARKER = "[karo-core context manager: tool arguments elided]"
     _DROP_MARKER = "[dropped by the karo-core context manager]"
 
     def _estimate_tokens(self) -> int:
-        return sum(len(str(m.get("content") or "")) for m in self.messages) // 4
+        """Estimate what the provider is actually sent, not just message bodies.
+
+        ``content`` alone undercounted every assistant turn that carried a
+        ``repo.write_file`` body or a reasoning block: those fields ride in
+        ``tool_calls``/``reasoning_blocks`` and are re-sent on every call.
+        """
+
+        total = 0
+        for message in self.messages:
+            total += len(str(message.get("content") or ""))
+            for call in message.get("tool_calls") or ():
+                if not isinstance(call, dict):
+                    continue
+                total += len(str(call.get("raw_arguments") or ""))
+                total += len(str(call.get("name") or "")) + 16
+            for block in message.get("reasoning_blocks") or ():
+                if not isinstance(block, dict):
+                    continue
+                total += len(str(block.get("text") or ""))
+                total += len(str(block.get("data") or ""))
+                total += len(str(block.get("signature") or ""))
+        return total // 4
+
+    def _elide_tool_arguments(self, message: dict) -> bool:
+        """Replace a large historical tool-call argument with a marker.
+
+        The call keeps its id, name and position, and its tool result keeps the
+        matching ``tool_call_id``, so the transcript remains valid for every
+        provider while a 1 MB ``write_file`` body stops being re-sent forever.
+        """
+
+        changed = False
+        for call in message.get("tool_calls") or ():
+            if not isinstance(call, dict):
+                continue
+            raw = call.get("raw_arguments")
+            if isinstance(raw, str) and len(raw) > 400 and self._ARGS_MARKER not in raw:
+                call["raw_arguments"] = self._ARGS_MARKER
+                changed = True
+        return changed
 
     def _clip_message(self, message: dict, chars: int) -> bool:
         """Clip one message body to ~chars; returns True when it changed."""
         content = message.get("content")
         if not isinstance(content, str) or len(content) <= chars or self._CLIP_MARKER in content:
-            return False
+            return self._elide_tool_arguments(message)
         head = max(0, chars - len(self._CLIP_MARKER) - 24)
         message["content"] = f"{content[:head]}\n... {self._CLIP_MARKER} {len(content) - head} chars] ..."
+        self._elide_tool_arguments(message)
         return True
+
+    def _shrink_tail(self, budget: int) -> bool:
+        """Clip protected tail bodies until the estimate fits; never drop one.
+
+        Oldest first, newest last. The tail keeps its roles, order and tool-call
+        ids; only long bodies are shortened, so a transcript that was valid
+        before compaction stays valid. Returns True when anything changed.
+        """
+
+        changed = False
+        floor = max(0, int(self.config.tail_min_chars))
+        ceiling = max(floor, int(self.config.tail_observation_chars))
+        for message in self.messages[2:]:
+            if self._estimate_tokens() <= budget:
+                break
+            content = message.get("content")
+            if isinstance(content, str) and len(content) > floor:
+                excess_chars = max(0, self._estimate_tokens() - budget) * 4
+                target = max(floor, min(ceiling, len(content) - excess_chars))
+                if target < len(content):
+                    head = max(0, target - len(self._TAIL_CLIP_MARKER) - 24)
+                    message["content"] = (
+                        f"{content[:head]}\n... {self._TAIL_CLIP_MARKER} "
+                        f"{len(content) - head} chars] ..."
+                    )
+                    self._elide_tool_arguments(message)
+                    changed = True
+                    continue
+            # A long write body rides in tool_calls, not content; elide it when
+            # the bodies alone cannot bring the estimate down.
+            if self._estimate_tokens() > budget and self._elide_tool_arguments(message):
+                changed = True
+        return changed
 
     def manage_context(self) -> None:
         """Keep the history under the token budget, oldest-first.
 
-        Two passes per round, both deterministic and model-free: clip old
-        message bodies to ``old_observation_chars``; if the estimate is still
-        over budget, drop them one by one (body replaced by a marker). The
-        system message, the task message and the last ``keep_recent_messages``
-        messages are never modified. Terminates: every iteration shrinks the
-        history or the loop breaks.
+        Both passes are deterministic and model-free. The middle is clipped to
+        ``old_observation_chars`` and then dropped one message at a time. When
+        the middle has nothing left to free -- a short history, or a tail full
+        of huge tool results -- the protected tail is clipped in place to
+        ``tail_observation_chars`` instead of being resent forever. The system
+        message and the task message are never modified. Terminates: every
+        iteration shrinks the history or the loop breaks.
         """
+
         budget = self.config.context_token_budget
         if budget <= 0 or len(self.messages) <= 2:
+            self.context_overflow_tokens = 0
             return
         guard = max(2, self.config.keep_recent_messages)
         changed = False
         while self._estimate_tokens() > budget:
             middle = self.messages[2 : len(self.messages) - guard]
-            if not middle:
-                break
-            if any(self._clip_message(m, self.config.old_observation_chars) for m in middle):
+            if middle:
+                if any(self._clip_message(m, self.config.old_observation_chars) for m in middle):
+                    changed = True
+                    continue
+                target = next((m for m in middle if m.get("content") != self._DROP_MARKER), None)
+                if target is not None:
+                    target["content"] = self._DROP_MARKER
+                    self._elide_tool_arguments(target)
+                    changed = True
+                    continue
+            if self._shrink_tail(budget):
                 changed = True
                 continue
-            target = next((m for m in middle if m.get("content") != self._DROP_MARKER), None)
-            if target is None:
-                break
-            target["content"] = self._DROP_MARKER
-            changed = True
+            break
+        self.context_overflow_tokens = max(0, self._estimate_tokens() - budget)
         if changed:
             self.n_context_events += 1
             self.logger.info(
-                "karo-core context manager: history compacted to ~%d tokens (event %d)",
+                "karo-core context manager: history compacted to ~%d tokens (event %d, over budget by %d)",
                 self._estimate_tokens(),
                 self.n_context_events,
+                self.context_overflow_tokens,
             )
 
     def execute_actions(self, message: dict) -> list[dict]:

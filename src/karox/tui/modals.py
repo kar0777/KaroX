@@ -797,6 +797,11 @@ class SessionPanel(ModalScreen[None]):
                 for currency, amount in sorted(state.costs.items())
             )
             value(tr(lang, "session.cost", cost=costs), MUTED)
+        if state.cost_unknown:
+            value(
+                tr(lang, "session.cost_unknown", reason=state.cost_unknown),
+                MUTED,
+            )
 
         section("session.section.mcp")
         value(", ".join(state.mcp_server_ids) or tr(lang, "session.none"),

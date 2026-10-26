@@ -183,6 +183,35 @@ class ProviderRegistryTests(unittest.TestCase):
             0.25,
         )
 
+    def test_known_cost_requires_both_counters(self) -> None:
+        pricing = ModelPricing("2026-07", "USD", 5.0, 25.0, "test fixture")
+
+        self.assertEqual(
+            pricing.estimate_known(
+                {"prompt_tokens": 1_000_000, "completion_tokens": 1_000}
+            ),
+            5.025,
+        )
+        # A calculator may treat an absent counter as zero; a budget may not.
+        self.assertIsNone(pricing.estimate_known({}))
+        self.assertIsNone(pricing.estimate_known({"prompt_tokens": 10}))
+        self.assertIsNone(pricing.estimate_known({"completion_tokens": 10}))
+        self.assertIsNone(
+            pricing.estimate_known({"prompt_tokens": None, "completion_tokens": 10})
+        )
+        self.assertIsNone(
+            pricing.estimate_known({"prompt_tokens": -1, "completion_tokens": 10})
+        )
+        # A paid-for empty answer is still a known cost, not unknown.
+        self.assertEqual(
+            pricing.estimate_known({"prompt_tokens": 0, "completion_tokens": 0}),
+            0.0,
+        )
+
+    def test_zero_usage_estimate_stays_a_calculator(self) -> None:
+        pricing = ModelPricing("2026-07", "USD", 5.0, 25.0, "test fixture")
+        self.assertEqual(pricing.estimate({}), 0.0)
+
     def test_pricing_rejects_invalid_currency_and_non_finite_values(self) -> None:
         for arguments in (
             ("v1", "usd", 1.0, 2.0, "source"),

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from karox.agent_contract import AgentReport
 from karox.cli import _print_agent_report
+from karox.providers import ModelResponse
+from karox.usage_analytics import merge_response_usage
 
 FAILURE_MAP = {
     "failures": [
@@ -75,3 +77,66 @@ def test_verified_report_has_nothing_unmet() -> None:
 
     assert payload["unmet"] == []
     assert payload["failure_map"] is None
+
+
+def test_human_report_marks_an_unknown_cost(capsys) -> None:  # type: ignore[no-untyped-def]
+    _print_agent_report(
+        _report(
+            usage={
+                "total_tokens": 10,
+                "cost_status": "unknown",
+                "cost_unknown_reason": "usage_missing",
+            }
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert "costs: unknown (the provider did not report usage)" in out
+
+
+def test_human_report_calls_a_partial_total_incomplete(capsys) -> None:  # type: ignore[no-untyped-def]
+    _print_agent_report(
+        _report(
+            usage={
+                "total_tokens": 10,
+                "costs": {"USD": 0.01},
+                "cost_status": "unknown",
+                "cost_unknown_reason": "no_pricing",
+            }
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert "costs: USD=0.01" in out
+    assert "costs: unknown (no pricing record for this model); the measured total is incomplete" in out
+
+
+def _response(**overrides: object) -> ModelResponse:
+    values: dict[str, object] = {
+        "content": "answer",
+        "tool_calls": (),
+        "finish_reason": "stop",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    values.update(overrides)
+    return ModelResponse(**values)  # type: ignore[arg-type]
+
+
+def test_session_usage_keeps_unknown_cost_sticky() -> None:
+    aggregate = merge_response_usage(
+        {},
+        _response(usage={}, cost=None, cost_unknown_reason="usage_missing"),
+        event={"step": 1},
+    )
+    assert aggregate["cost_status"] == "unknown"
+    assert aggregate["cost_unknown_reason"] == "usage_missing"
+
+    aggregate = merge_response_usage(
+        aggregate,
+        _response(cost=0.01, currency="USD", cumulative_cost=0.01),
+        event={"step": 2},
+    )
+    # One unpriced response means the session total is not a measured amount,
+    # even after a priced one.
+    assert aggregate["cost_status"] == "unknown"
+    assert aggregate["costs"] == {"USD": 0.01}

@@ -342,6 +342,14 @@ def _print_agent_report(report: AgentReport) -> None:
     costs = report.usage.get("costs")
     if isinstance(costs, dict) and costs:
         _write("costs: " + ", ".join(f"{key}={value}" for key, value in costs.items()) + "\n")
+    if report.usage.get("cost_status") == "unknown":
+        reason = str(report.usage.get("cost_unknown_reason") or "")
+        detail = {
+            "usage_missing": "the provider did not report usage",
+            "no_pricing": "no pricing record for this model",
+        }.get(reason, reason or "reason unavailable")
+        suffix = "; the measured total is incomplete" if costs else ""
+        _write(f"costs: unknown ({detail}){suffix}\n")
     if report.evidence:
         _write(f"evidence records: {len(report.evidence)}\n")
     if report.answer_basis:
