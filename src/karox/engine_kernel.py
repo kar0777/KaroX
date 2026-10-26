@@ -1255,7 +1255,28 @@ class EngineKernel:
             if tuple(argv) not in seen:
                 seen.add(tuple(argv))
                 calls.append(("checks.run", {"argv": list(argv)}))
-        if not calls:
+        # The fallback exists to produce proof when the floor names an
+        # obligation but not a command (for example "missing behavioral
+        # evidence" after a run that never checked anything). It must not fire
+        # for an obligation a check cannot satisfy: a run whose only missing
+        # proof is the final git.diff review has already run its checks, and
+        # re-running the full suite there is a whole duplicate test run paid
+        # for nothing. Mainline runs do verify themselves when the task asks
+        # them to, so this case is the common one, not the corner one.
+        check_owed = any(
+            reason.startswith(
+                (
+                    "missing current check:",
+                    "unresolved failed check:",
+                    "missing current structural evidence:",
+                    "missing behavioral evidence",
+                    "missing runtime smoke evidence",
+                    "missing browser runtime evidence",
+                )
+            )
+            for reason in missing
+        )
+        if not calls and check_owed:
             commands = [list(item) for item in self.core.verification_command_order] or [
                 list(item) for item in sorted(self.core.verification_commands or ())
             ]

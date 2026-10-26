@@ -13,6 +13,11 @@
   the default policy remains loopback-only, headless and non-detaching. The
   size ceiling is now checked on the saved temp file before the bytes are read
   into memory.
+- The finishing harness no longer re-runs a full approved check the model
+  already passed on the current bytes. The fallback that produces a check when
+  the floor names an obligation without a command used to fire for any missing
+  proof, including only the final `git.diff` review, so a task that verified
+  itself paid for the whole suite twice.
 - The engine contract allows independent tool calls to be batched in one
   response (the product prompt already asked for this, and the contract read
   last said "prefer exactly one", so the model serialised work and spent

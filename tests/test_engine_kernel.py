@@ -240,6 +240,40 @@ def test_engine_run_verifies_a_change_end_to_end(tmp_path: Path, repository: Pat
     assert record.evidence, "a verified run must persist evidence"
 
 
+def test_engine_does_not_rerun_a_check_the_model_already_passed(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A successful check by the model is proof; the harness must not repeat it.
+
+    A task that says "run the tests" makes the model verify itself. The former
+    fallback ran the first approved command whenever anything was missing,
+    including only the final git.diff review, so such a task paid for the whole
+    suite twice. Here only the Git reads are owed.
+    """
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_finish_call("c3", "created hello.txt with hi"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    checks = [entry for entry in record.provider_history if entry.get("core_name") == "checks.run"]
+    assert len(checks) == 1, "the harness re-ran a check the model had already passed"
+    harness_calls = [
+        entry.get("core_name")
+        for entry in record.provider_history
+        if entry.get("role") == "tool"
+        and (entry.get("result") or {}).get("requested_by") == "harness_final"
+    ]
+    assert harness_calls == ["git.status", "git.diff"]
+
+
 def test_engine_runs_independent_calls_batched_in_one_response(
     tmp_path: Path, repository: Path
 ) -> None:
