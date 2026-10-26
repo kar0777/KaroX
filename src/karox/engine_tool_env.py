@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 _READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
 _TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
 _PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
+#: A repair edit is followed by exactly the tests that failed, once, inside a
+#: budget that cannot turn one edit into a long detour.
+AFFECTED_TESTS_TIMEOUT_SECONDS = 20.0
+AFFECTED_TEST_LIMIT = 4
 
 
 class CoreToolEnvironment:
@@ -85,6 +89,9 @@ class CoreToolEnvironment:
         self._definitions: Dict[str, ToolDefinition] = {
             definition.name: definition for definition in core.tools()
         }
+        # The last (content digest, targets) pair already auto-run after an
+        # edit, so a retried call does not pay for the same test run twice.
+        self._affected_key: Optional[tuple[str, tuple[str, ...]]] = None
 
     # -- Environment protocol ----------------------------------------------
 
@@ -223,6 +230,7 @@ class CoreToolEnvironment:
             for item in result.evidence:
                 item.metadata["completion_identity"] = proof
         self._attach_quick_checks(result)
+        self._attach_affected_tests(result)
         output = self._render_output(core_name, result)
         self._kernel._persist_engine_tool_result(
             call_id=call_id,
@@ -377,6 +385,83 @@ class CoreToolEnvironment:
         data["quick_checks"] = [check.to_dict() for check in checks]
         data["quick_checks_line"] = summarize_quick_checks(checks)
 
+    def _attach_affected_tests(self, result: CoreResult) -> None:
+        """Re-run the tests that failed, in the same result as the repair edit.
+
+        In a repair loop the model's next turn is almost always "run the check
+        again". The failing test files are already known from the parsed map,
+        so the harness can answer that question before the model asks it. The
+        run is advisory: it never counts as evidence, and only the approved
+        command can discharge the floor.
+
+        Everything here fails closed to silence: a missing runtime, a vanished
+        test file or an exhausted budget leaves the edit result unchanged.
+        """
+
+        if "tests.run" not in self._definitions or not isinstance(result.data, dict):
+            return
+        data = result.data
+        if data.get("changed") is not True:
+            return
+        try:
+            record = self._core.sessions.load(self._session_id)
+        except Exception:  # noqa: BLE001 - an advisory helper must not break a turn
+            return
+        report = _failed_check_report(record)
+        if report is None:
+            return
+        targets = _failing_targets(report, AFFECTED_TEST_LIMIT)
+        if not targets:
+            return
+        digest = str(data.get("content_sha256") or data.get("sha256") or "")
+        key = (digest, tuple(targets))
+        if key == self._affected_key:
+            return
+        self._affected_key = key
+        material = f"{self._session_id}\0affected\0{digest}\0{'|'.join(targets)}"
+        token = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        command = CoreCommand(
+            name="tests.run",
+            arguments={
+                "suite": "focused",
+                "targets": list(targets),
+                "timeout_seconds": AFFECTED_TESTS_TIMEOUT_SECONDS,
+            },
+            session_id=self._session_id,
+            origin=self._origin,
+            correlation_id=f"agent-affected-{token[:24]}",
+            idempotency_key=f"agent-affected-{token}",
+            deadline_seconds=min(3600.0, max(0.1, self._kernel.remaining_seconds())),
+        )
+        try:
+            outcome = self._core.execute(command, lease=self._lease)
+        except Exception:  # noqa: BLE001 - a refused advisory run is not a failure
+            return
+        payload = outcome.data if isinstance(outcome.data, dict) else {}
+        data["affected_tests"] = {
+            "advisory": True,
+            "targets": list(targets),
+            "ok": bool(outcome.ok),
+            "exit_code": payload.get("exit_code"),
+            "timed_out": payload.get("timed_out"),
+            "failure_map": payload.get("failure_map") or {},
+        }
+        if outcome.ok:
+            line = (
+                f"affected tests: passed ({len(targets)} target(s); "
+                "advisory, not evidence)"
+            )
+        else:
+            first = ""
+            for candidate in render_failure_map(payload.get("failure_map")).splitlines()[1:]:
+                first = candidate
+                break
+            line = (
+                f"affected tests: failed — {first or 'see the map'} "
+                "(advisory, not evidence)"
+            )
+        data["affected_tests_line"] = line
+
     def _render_output(self, core_name: str, result: CoreResult) -> Dict[str, Any]:
         data = result.data if isinstance(result.data, dict) else {}
         returncode = 0 if result.ok else 1
@@ -418,6 +503,11 @@ class CoreToolEnvironment:
                 ensure_ascii=False,
                 sort_keys=True,
             )
+            line = data.get("affected_tests_line")
+            if isinstance(line, str) and line:
+                # The verdict of the tests that failed goes before the JSON:
+                # it is the one fact that decides the next edit.
+                text = f"{line}\n{text}"
         clipped = clip_output(text, int(self.config.output_char_limit))
         return {
             "output": clipped,
@@ -452,6 +542,65 @@ def _checks_body(data: Mapping[str, Any]) -> str:
     if rendered:
         text = f"{rendered}\n{text}" if text.strip() else rendered
     return text
+
+
+def _failed_check_report(record: Any) -> Optional[Dict[str, Any]]:
+    """The parsed failure map of the latest check-family call, if it failed.
+
+    The latest call decides: a green check after a red one means the repair
+    already landed, and an old map must not drive another advisory run.
+    """
+
+    for entry in reversed(record.provider_history):
+        if entry.get("role") != "tool":
+            continue
+        if entry.get("core_name") not in {"checks.run", "tests.run"}:
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        data = result.get("data")
+        if not isinstance(data, dict):
+            continue
+        passed = (
+            result.get("ok") is True
+            and data.get("exit_code") == 0
+            and not data.get("timed_out")
+        )
+        if passed:
+            return None
+        report = data.get("failure_map")
+        return report if isinstance(report, dict) and report.get("failures") else None
+    return None
+
+
+def _failing_targets(report: Mapping[str, Any], limit: int) -> List[str]:
+    """The test files (or exact node ids) a repair should rerun first."""
+
+    targets: List[str] = []
+    rows = report.get("failures")
+    if not isinstance(rows, list):
+        return targets
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = row.get("path")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("tests/")
+            or not path.endswith(".py")
+        ):
+            continue
+        candidate = path
+        test_id = row.get("test_id")
+        if isinstance(test_id, str) and test_id.startswith(path + "::"):
+            # A node id runs one failing test instead of its whole file.
+            candidate = test_id
+        if candidate not in targets:
+            targets.append(candidate)
+        if len(targets) >= limit:
+            break
+    return targets
 
 
 def _result_summary(core_name: str, result: CoreResult) -> str:

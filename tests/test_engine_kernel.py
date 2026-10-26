@@ -1431,6 +1431,7 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
             _response((_finish_call("c5", "fixed add"),)),
         ],
         verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
     )
     report = harness.run()
 
@@ -1465,6 +1466,26 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
     assert repair, "a failed check must produce a repair turn"
     assert "tests/test_calc.py:5" in repair[-1]
     assert 'Targeted rerun: tests.run suite=focused targets=["tests/test_calc.py"]' in repair[-1]
+
+    # The repair edit came back with its own verdict: the exact failing test
+    # was rerun advisory, so the model did not spend a turn asking.
+    repair_edit = next(
+        entry for entry in record.provider_history if entry.get("tool_call_id") == "c4"
+    )
+    affected = repair_edit["result"]["data"]["affected_tests"]
+    assert affected["advisory"] is True
+    assert affected["ok"] is True
+    assert affected["targets"] == ["tests/test_calc.py::test_add"]
+    assert "verification_eligible" not in affected
+    assert "affected tests: passed" in repair_edit["content"]
+    # No extra approved check and no fabricated tool entry: this is feedback,
+    # not a second verification pass.
+    assert (
+        len([e for e in record.provider_history if e.get("core_name") == "checks.run"]) == 2
+    )
+    assert not any(
+        entry.get("core_name") == "tests.run" for entry in record.provider_history
+    )
 
 
 def test_repeated_identical_failure_is_called_out_in_the_repair_turn(
@@ -1557,6 +1578,10 @@ def test_focused_tests_derive_targets_from_the_session_changes(
 
     assert report.verified is True, report.reason
     record = harness.record()
+    write = next(
+        entry for entry in record.provider_history if entry.get("tool_call_id") == "c1"
+    )
+    assert "affected_tests" not in write["result"]["data"]
     runs = [
         entry
         for entry in record.provider_history

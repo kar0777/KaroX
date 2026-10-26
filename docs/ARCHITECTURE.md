@@ -132,8 +132,10 @@ design error; so is a tool handler importing `cli`.
    failure map — runner, test id, file, line, message — before the log is
    clipped. The model reads that map with the result, and a repair turn
    receives the same places plus a targeted rerun hint; an unchanged failure
-   set is named as such. The map is diagnostic only: it can direct an edit,
-   never discharge an obligation.
+   set is named as such. While a check is failing, a successful edit reruns
+   exactly the failing tests and attaches that advisory verdict to the edit
+   result. The map and the advisory run are diagnostic only: they can direct
+   an edit, never discharge an obligation.
 5. Typed progress events (`step_started`, `text_delta`, `tool_started`,
    `tool_finished`, `finished`, ...) are emitted as one JSON line each, and the
    final line is `{"type": "result", "report": ...}`. The engine run's report

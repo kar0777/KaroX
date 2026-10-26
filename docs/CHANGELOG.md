@@ -27,6 +27,12 @@
   this session changed, reports `targets_source: "session_changes"`, and lets
   every path be validated again by the runner. The approved full command
   remains the only evidence; a focused run is fast feedback.
+- **A repair edit answers its own question.** While a check is failing, a
+  successful edit now reruns exactly the failing test files (or node ids) from
+  the map and attaches the verdict to the edit result the model reads — so the
+  turn the model used to spend asking "did that fix it?" is gone. The run is
+  bounded (4 targets, 20 s), once per changed content, and advisory: it never
+  sets `verification_eligible` and is not recorded as a tool entry.
 
 ### Added
 
