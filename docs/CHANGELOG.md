@@ -1,6 +1,24 @@
 # Changelog
 
-## 6.0.0a3 — 2026-10-25
+## 6.0.0a3 — 2026-10-26
+
+### Added
+
+- The default engine run now lets the browser save a download it was asked
+  for. `browser.command {action: download_start}` was implemented and tested
+  in the adapter but the agent-run policy kept `downloads=False`, so a browser
+  task whose deliverable is a file could not produce one. Files land in the
+  KaroX artifact store (content-addressed, 25 MiB cap), never the repository,
+  are not executed, and the navigation that produces them stays policy-gated;
+  the default policy remains loopback-only, headless and non-detaching. The
+  size ceiling is now checked on the saved temp file before the bytes are read
+  into memory.
+- The engine contract allows independent tool calls to be batched in one
+  response (the product prompt already asked for this, and the contract read
+  last said "prefer exactly one", so the model serialised work and spent
+  turns). One unparseable call inside a batch now returns an observation for
+  that call id instead of discarding the valid calls beside it; a lone
+  unparseable call keeps the format-error recovery.
 
 ### Removed
 

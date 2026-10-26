@@ -254,6 +254,17 @@ class BrowserToolRuntime:
         self._sessions: Dict[str, BrowserToolAdapter] = {}
         self._lock = threading.Lock()
 
+    @property
+    def policy(self) -> BrowserAccessPolicy:
+        """The policy template every per-session adapter inherits.
+
+        Exposed for diagnostics: a host that advertises browser tools should
+        be able to state what the browser may do (downloads, takeover, domain
+        allowlists) without opening a session first.
+        """
+
+        return self._policy
+
     def adapter(self, session_id: str) -> BrowserToolAdapter:
         with self._lock:
             existing = self._sessions.get(session_id)

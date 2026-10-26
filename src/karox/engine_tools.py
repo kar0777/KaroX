@@ -9,8 +9,12 @@ trail and stream events -- exactly like the built-in tools. Nothing here
 bypasses the guarded environment, and both adapters stay lazily initialized:
 registering the tools never launches a browser or touches a desktop window.
 
-Browser defaults follow the b-browser report: loopback-only, headless, no
-downloads, no detach, no plain credentials, no takeover. External navigation
+Browser defaults follow the b-browser report with one product correction:
+loopback-only, headless, no detach, no plain credentials, no takeover, and
+downloads enabled. A download lands in the KaroX artifact store (content-capped
+at 25 MiB) rather than the repository, is never executed, and the navigation
+that can produce it is still policy-gated; refusing downloads made a requested
+deliverable impossible to save. External navigation
 still needs ``Capability.NETWORK`` on top of ``browser.input`` because the
 adapter's capability guard re-checks per action.
 
@@ -56,7 +60,7 @@ def register_browser_tool(
     """
 
     runtime = BrowserToolRuntime(
-        BrowserAccessPolicy(session_id="ad-hoc"),
+        BrowserAccessPolicy(session_id=session_id, downloads=True),
         browser_root=runtime_dir() / "vnext" / "browser",
         capability_guard=lambda capability: capability_policy.require(origin, capability),
     )

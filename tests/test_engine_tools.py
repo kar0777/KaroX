@@ -301,3 +301,38 @@ def test_browser_command_entry_point_opens_a_real_page(
         assert "Welcome to the local fixture site." in text["text"]
     finally:
         allowed._browser.close_all()
+
+def test_engine_browser_policy_enables_downloads_for_the_session(tmp_path: Path) -> None:
+    """The default agent-run browser may save a download it was asked for.
+
+    Downloads land in KaroX's artifact store, never the repository, so the
+    missing permission was the only thing standing between a browser task and
+    its requested deliverable. The runtime's policy is the one every
+    per-session adapter inherits.
+    """
+    from karox.browser import BrowserAccessPolicy
+    from karox.core import CoreRuntime
+    from karox.engine_tools import register_browser_tool
+    from karox.models import Origin, OriginKind
+    from karox.policy import CapabilityPolicy
+    from karox.sessions import SessionStore
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
+    core = CoreRuntime(
+        repository,
+        policy,
+        SessionStore(tmp_path / "sessions"),
+        tmp_path / "audit.jsonl",
+    )
+    origin = Origin(OriginKind.NATIVE_AGENT, "engine-tools-test")
+    runtime = register_browser_tool(
+        core, capability_policy=policy, origin=origin, session_id="s-downloads"
+    )
+
+    assert isinstance(runtime.policy, BrowserAccessPolicy)
+    assert runtime.policy.downloads is True
+    assert runtime.policy.session_id == "s-downloads"
+    assert runtime.policy.external_https is False
+    assert runtime.policy.allow_detach is False

@@ -28,7 +28,7 @@ _ARTIFACT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
 # Anything else is stored but never returned as image content.
 _IMAGE_MIME = frozenset({"image/png"})
 _DEFAULT_MIME = "application/octet-stream"
-_MAX_ARTIFACT_BYTES = 25 * 1024 * 1024  # 25 MiB; a full-page PNG is well under this.
+MAX_ARTIFACT_BYTES = 25 * 1024 * 1024  # 25 MiB; a full-page PNG is well under this.
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,7 @@ class ArtifactStore:
     ) -> ArtifactRecord:
         if not isinstance(data, (bytes, bytearray)):
             raise ValueError("artifact data must be bytes")
-        if len(data) > _MAX_ARTIFACT_BYTES:
+        if len(data) > MAX_ARTIFACT_BYTES:
             raise ValueError("artifact exceeds the maximum allowed size")
         if not isinstance(name, str) or not name or len(name) > 256:
             raise ValueError("artifact name must be a 1-256 character string")

@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
-from ..artifacts import ArtifactStore
+from ..artifacts import MAX_ARTIFACT_BYTES, ArtifactStore
 from ..browser_bootstrap import BrowserBootstrapError, ensure_playwright_chromium
 from ..models import Capability
 from ..paths import runtime_dir
@@ -2768,6 +2768,22 @@ class BrowserSession(SessionGuardsMixin):
             tmp_path = self._browser_root / "downloads" / f"{download_id}.part"
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
             download.save_as(str(tmp_path))
+            # Refuse an oversized file before reading it into memory. The
+            # artifact store enforces the same cap, but only after the bytes
+            # are already in RAM; a hostile or accidental multi-gigabyte
+            # download must fail on the temp file, not on the process.
+            size = tmp_path.stat().st_size
+            if size > MAX_ARTIFACT_BYTES:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                entry.status = "failed"
+                entry.error = (
+                    f"download is {size} bytes, over the {MAX_ARTIFACT_BYTES} "
+                    "byte artifact limit"
+                )
+                raise BrowserError(f"download_failure: {entry.error}")
             data = tmp_path.read_bytes()
             record = self._artifacts.put(
                 data,

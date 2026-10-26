@@ -41,7 +41,7 @@ pytest.importorskip("playwright")
 
 # Pytest puts the tests directory on sys.path (prepend import mode), so the
 # shared fixture-site helper is importable directly.
-from _browser_site import site_server  # noqa: E402
+from _browser_site import DOWNLOAD_BODY, site_server  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -249,5 +249,110 @@ def test_network_capability_required_for_external_open(tmp_path):
         assert refused.data["ok"] is False
         assert refused.data["error_kind"] == "permission_denied"
         assert session.is_open is False
+    finally:
+        session.force_close()
+
+def test_browser_command_downloads_and_stores_the_artifact(tmp_path, site):
+    """A requested download is saved in the artifact store, not refused.
+
+    The default agent-run policy enables downloads (the artifact lives in
+    KaroX's store, never the repository), so a benchmark that asks for a
+    downloaded deliverable can actually produce one.
+    """
+    import hashlib
+
+    session_id = f"dl-{uuid.uuid4().hex[:8]}"
+    origin = Origin(OriginKind.NATIVE_AGENT, "kernel-test")
+    core, policy = _build_core(
+        tmp_path,
+        AccessProfile.BROWSER_CONTROL,
+        session_id,
+        origin,
+        grants={
+            Capability.BROWSER_READ,
+            Capability.BROWSER_INPUT,
+            Capability.NETWORK,
+        },
+    )
+    session = _register_browser(core, policy, origin, tmp_path, session_id)
+    try:
+        opened = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "open", "payload": {"url": f"{site}/"}},
+                session_id,
+                origin,
+                deadline_seconds=60.0,
+            )
+        )
+        assert opened.ok is True
+
+        downloaded = core.execute(
+            CoreCommand(
+                "browser.command",
+                {
+                    "action": "download_start",
+                    "payload": {"selector": "#dl-link"},
+                },
+                session_id,
+                origin,
+                deadline_seconds=60.0,
+            )
+        )
+        assert downloaded.ok is True, downloaded.data
+        data = downloaded.data
+        assert data["status"] == "completed"
+        assert data["suggested_filename"] == "report.bin"
+        assert data["size"] == len(DOWNLOAD_BODY)
+        assert data["sha256"] == hashlib.sha256(DOWNLOAD_BODY).hexdigest()
+    finally:
+        session.force_close()
+
+def test_download_over_the_artifact_limit_fails_before_reading(tmp_path, site, monkeypatch):
+    """An oversized download is refused on the temp file, not read into RAM.
+
+    The artifact store enforces the same ceiling, but only after ``read_bytes``
+    has already loaded the whole file. The session checks the saved size first
+    and removes the temp file.
+    """
+    import karox.browser.session as session_module
+
+    monkeypatch.setattr(session_module, "MAX_ARTIFACT_BYTES", 1)
+    session_id = f"dlcap-{uuid.uuid4().hex[:8]}"
+    origin = Origin(OriginKind.NATIVE_AGENT, "kernel-test")
+    core, policy = _build_core(
+        tmp_path,
+        AccessProfile.BROWSER_CONTROL,
+        session_id,
+        origin,
+        grants={
+            Capability.BROWSER_READ,
+            Capability.BROWSER_INPUT,
+            Capability.NETWORK,
+        },
+    )
+    session = _register_browser(core, policy, origin, tmp_path, session_id)
+    try:
+        opened = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "open", "payload": {"url": f"{site}/"}},
+                session_id,
+                origin,
+                deadline_seconds=60.0,
+            )
+        )
+        assert opened.ok is True
+        refused = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "download_start", "payload": {"selector": "#dl-link"}},
+                session_id,
+                origin,
+                deadline_seconds=60.0,
+            )
+        )
+        assert refused.data["ok"] is False
+        assert "artifact limit" in str(refused.data.get("error"))
     finally:
         session.force_close()
