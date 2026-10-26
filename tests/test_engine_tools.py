@@ -336,6 +336,23 @@ def test_engine_browser_policy_enables_downloads_for_the_session(tmp_path: Path)
     assert runtime.policy.session_id == "s-downloads"
     assert runtime.policy.external_https is False
     assert runtime.policy.allow_detach is False
+    # Credentials are a separate, explicit per-run permission.
+    assert runtime.policy.plain_credentials is False
+
+    second = CoreRuntime(
+        repository,
+        policy,
+        SessionStore(tmp_path / "sessions"),
+        tmp_path / "audit-2.jsonl",
+    )
+    permitted = register_browser_tool(
+        second,
+        capability_policy=policy,
+        origin=origin,
+        session_id="s-credentials",
+        plain_credentials=True,
+    )
+    assert permitted.policy.plain_credentials is True
 
 
 def test_desktop_tool_accepts_integer_arguments_through_core(

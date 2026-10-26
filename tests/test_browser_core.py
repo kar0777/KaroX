@@ -41,7 +41,7 @@ pytest.importorskip("playwright")
 
 # Pytest puts the tests directory on sys.path (prepend import mode), so the
 # shared fixture-site helper is importable directly.
-from _browser_site import DOWNLOAD_BODY, site_server  # noqa: E402
+from _browser_site import DOWNLOAD_BODY, LOGIN_PASS, LOGIN_USER, site_server  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -356,3 +356,185 @@ def test_download_over_the_artifact_limit_fails_before_reading(tmp_path, site, m
         assert "artifact limit" in str(refused.data.get("error"))
     finally:
         session.force_close()
+
+def _engine_browser(tmp_path, monkeypatch, *, plain_credentials):
+    """Register the agent-run browser surface against the fixture site."""
+
+    from karox import engine_tools
+
+    monkeypatch.setattr(engine_tools, "runtime_dir", lambda: tmp_path / "runtime")
+    session_id = f"eng-{uuid.uuid4().hex[:8]}"
+    origin = Origin(OriginKind.NATIVE_AGENT, "kernel-test")
+    core, policy = _build_core(
+        tmp_path,
+        AccessProfile.BROWSER_CONTROL,
+        session_id,
+        origin,
+        grants={Capability.BROWSER_READ, Capability.BROWSER_INPUT},
+    )
+    runtime = engine_tools.register_browser_tool(
+        core,
+        capability_policy=policy,
+        origin=origin,
+        session_id=session_id,
+        plain_credentials=plain_credentials,
+    )
+    return core, runtime, session_id, origin
+
+
+def _browser(core, session_id, origin, action, payload=None):
+    return core.execute(
+        CoreCommand(
+            "browser.command",
+            {"action": action, "payload": payload or {}},
+            session_id,
+            origin,
+            deadline_seconds=60.0,
+        )
+    )
+
+
+def test_engine_browser_refuses_secret_fill_and_character_press_by_default(
+    tmp_path, site, monkeypatch
+):
+    """The password guard covers typing, not just ``fill``.
+
+    A single-character ``press`` writes into the focused element exactly like
+    ``fill``; before the guard it bypassed the password refusal one character
+    at a time. The fixture login form makes both paths observable.
+    """
+    core, runtime, session_id, origin = _engine_browser(
+        tmp_path, monkeypatch, plain_credentials=False
+    )
+    try:
+        assert _browser(core, session_id, origin, "open", {"url": f"{site}/"}).data[
+            "ok"
+        ] is True
+
+        filled = _browser(
+            core, session_id, origin, "fill", {"selector": "#pw", "value": LOGIN_PASS}
+        )
+        assert filled.data["ok"] is False
+        assert "password" in filled.data["error"]
+
+        targeted = _browser(
+            core, session_id, origin, "press", {"selector": "#pw", "key": "a"}
+        )
+        assert targeted.data["ok"] is False
+        assert "password" in targeted.data["error"]
+
+        focused = _browser(core, session_id, origin, "focus", {"selector": "#pw"})
+        assert focused.data["ok"] is True
+        page_level = _browser(core, session_id, origin, "press", {"key": "a"})
+        assert page_level.data["ok"] is False
+        assert "password" in page_level.data["error"]
+
+        # A named key on the same field is a command, not text: Enter submits.
+        submitted = _browser(
+            core, session_id, origin, "press", {"selector": "#pw", "key": "enter"}
+        )
+        assert submitted.data["ok"] is True
+        assert submitted.data["key"] == "Enter"
+    finally:
+        runtime.close_all()
+
+
+def test_engine_browser_logs_in_with_test_credentials_when_allowed(
+    tmp_path, site, monkeypatch
+):
+    """The benchmark flow: fill the fixture login, submit, reach the page.
+
+    Plain test credentials are a per-run user permission; with it the whole
+    login path works through the agent-run surface, and without it the same
+    fill is refused (covered above).
+    """
+    core, runtime, session_id, origin = _engine_browser(
+        tmp_path, monkeypatch, plain_credentials=True
+    )
+    try:
+        assert _browser(core, session_id, origin, "open", {"url": f"{site}/"}).data[
+            "ok"
+        ] is True
+        assert _browser(
+            core,
+            session_id,
+            origin,
+            "fill",
+            {"selector": "#user", "value": LOGIN_USER},
+        ).data["ok"] is True
+        password = _browser(
+            core, session_id, origin, "fill", {"selector": "#pw", "value": LOGIN_PASS}
+        )
+        assert password.data["ok"] is True
+        assert password.data["protected_field"] is True
+
+        clicked = _browser(
+            core, session_id, origin, "click", {"selector": "#login-btn"}
+        )
+        assert clicked.data["ok"] is True
+        _browser(core, session_id, origin, "wait_navigation", {"timeout_ms": 10_000})
+
+        text = _browser(core, session_id, origin, "get_text", {"selector": "#who"})
+        assert text.data["ok"] is True
+        assert text.data["text"].strip() == f"user={LOGIN_USER}"
+    finally:
+        runtime.close_all()
+
+
+def test_engine_browser_press_accepts_punctuation_and_common_names(
+    tmp_path, site, monkeypatch
+):
+    """``press`` handles the spellings models actually emit."""
+
+    core, runtime, session_id, origin = _engine_browser(
+        tmp_path, monkeypatch, plain_credentials=False
+    )
+    try:
+        assert _browser(core, session_id, origin, "open", {"url": f"{site}/"}).data[
+            "ok"
+        ] is True
+        dash = _browser(
+            core, session_id, origin, "press", {"selector": "#user", "key": "-"}
+        )
+        assert dash.data["ok"] is True
+        assert dash.data["key"] == "-"
+        state = _browser(core, session_id, origin, "get_form_state", {})
+        username = [
+            field
+            for form in state.data["forms"]
+            for field in form["fields"]
+            if field.get("id") == "user"
+        ][0]
+        assert username["value"] == "-"
+
+        spaced = _browser(
+            core, session_id, origin, "press", {"selector": "#user", "key": "ctrl + a"}
+        )
+        assert spaced.data["ok"] is True
+        assert spaced.data["key"] == "Control+a"
+
+        named = _browser(core, session_id, origin, "press", {"key": "return"})
+        assert named.data["ok"] is True
+        assert named.data["key"] == "Enter"
+    finally:
+        runtime.close_all()
+
+
+def test_engine_browser_get_text_without_a_selector_reads_the_page(
+    tmp_path, site, monkeypatch
+):
+    """A snapshot already scopes the page; reading it must not need a selector."""
+
+    core, runtime, session_id, origin = _engine_browser(
+        tmp_path, monkeypatch, plain_credentials=False
+    )
+    try:
+        assert _browser(core, session_id, origin, "open", {"url": f"{site}/"}).data[
+            "ok"
+        ] is True
+        text = _browser(core, session_id, origin, "get_text", {})
+        assert text.data["ok"] is True
+        assert text.data["target"] == "page"
+        assert "Research Index" in text.data["text"]
+    finally:
+        runtime.close_all()

@@ -859,7 +859,13 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     from .engine_tools import register_browser_tool, register_desktop_tools
 
     browser_runtime = register_browser_tool(
-        core, capability_policy=policy, origin=origin, session_id=record.session_id
+        core,
+        capability_policy=policy,
+        origin=origin,
+        session_id=record.session_id,
+        plain_credentials=bool(
+            getattr(args, "browser_plain_credentials", False)
+        ),
     )
     register_desktop_tools(core, session_id=record.session_id)
     project_metadata: dict[str, Any]

@@ -87,6 +87,7 @@ from .guards import (
     SessionGuardsMixin,
 )
 from .probes import (
+    ACTIVE_FIELD_METADATA_JS,
     FIND_TEXT_PROBE,
     FORM_STATE_PROBE,
     SECRET_FIELD_HINT as _SECRET_INPUT_HINT,
@@ -321,6 +322,104 @@ ACTION_CAPABILITIES: dict[str, Capability] = {
     **{action: Capability.BROWSER_READ for action in READ_ACTIONS},
     **{action: Capability.BROWSER_INPUT for action in INPUT_ACTIONS},
 }
+
+
+#: Canonical Playwright key names for the spellings models actually emit.
+#: The race showed three refused presses for a single "-": punctuation is a
+#: printable key, and an unknown spelling should be repaired here rather than
+#: cost a model turn.
+_KEY_NAMES = {
+    "enter": "Enter",
+    "return": "Enter",
+    "numpadenter": "NumpadEnter",
+    "tab": "Tab",
+    "escape": "Escape",
+    "esc": "Escape",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "del": "Delete",
+    "insert": "Insert",
+    "ins": "Insert",
+    "space": "Space",
+    "spacebar": "Space",
+    "home": "Home",
+    "end": "End",
+    "pageup": "PageUp",
+    "pgup": "PageUp",
+    "pagedown": "PageDown",
+    "pgdn": "PageDown",
+    "arrowup": "ArrowUp",
+    "up": "ArrowUp",
+    "arrowdown": "ArrowDown",
+    "down": "ArrowDown",
+    "arrowleft": "ArrowLeft",
+    "left": "ArrowLeft",
+    "arrowright": "ArrowRight",
+    "right": "ArrowRight",
+    "capslock": "CapsLock",
+    "numlock": "NumLock",
+    "scrolllock": "ScrollLock",
+    "printscreen": "PrintScreen",
+    "pause": "Pause",
+    "contextmenu": "ContextMenu",
+}
+for _number in range(1, 13):
+    _KEY_NAMES[f"f{_number}"] = f"F{_number}"
+
+_MODIFIER_NAMES = {
+    "ctrl": "Control",
+    "shift": "Shift",
+    "alt": "Alt",
+    "opt": "Alt",
+    "option": "Alt",
+    "meta": "Meta",
+    "cmd": "Meta",
+    "command": "Meta",
+    "win": "Meta",
+    "super": "Meta",
+}
+
+#: Modifiers that turn a letter into a shortcut instead of inserted text.
+_SHORTCUT_MODIFIERS = frozenset({"Control", "Meta", "Alt"})
+
+
+def _normalize_key(raw: str) -> str:
+    """Canonicalize ``ctrl + enter`` / ``return`` / ``"-"`` into a key name."""
+
+    key = re.sub(r"\s*\+\s*", "+", raw.strip())
+    parts = [part for part in key.split("+") if part]
+    if not parts:
+        return key
+    normalized: list[str] = []
+    for part in parts[:-1]:
+        normalized.append(_MODIFIER_NAMES.get(part.lower(), part))
+    final = parts[-1]
+    if len(final) == 1:
+        normalized.append(final)
+    else:
+        normalized.append(_KEY_NAMES.get(final.lower(), final))
+    return "+".join(normalized)
+
+
+def _key_is_valid(key: str) -> bool:
+    parts = key.split("+")
+    if not parts or any(not part for part in parts):
+        return False
+    final = parts[-1]
+    if len(final) == 1:
+        return final.isprintable() and not final.isspace() and len(key) <= 32
+    return bool(re.fullmatch(r"[A-Za-z0-9]{1,20}", final)) and len(key) <= 32
+
+
+def _key_inserts_text(key: str) -> bool:
+    """Whether this press writes a character instead of running a command."""
+
+    parts = key.split("+")
+    final = parts[-1]
+    if len(final) != 1 or not final.isprintable() or final.isspace():
+        return False
+    modifiers = {_MODIFIER_NAMES.get(part.lower(), part) for part in parts[:-1]}
+    return not (modifiers & _SHORTCUT_MODIFIERS)
 
 
 def _windowless_flags() -> int:
@@ -1671,6 +1770,22 @@ class BrowserSession(SessionGuardsMixin):
         cancel: Optional[CancelToken],
     ) -> dict[str, Any]:
         page = self._active_page()
+        if payload.get("selector") is None and payload.get("ref") is None:
+            # The whole page is the common reading action: an agent that has
+            # just taken a snapshot should not need to guess a selector. The
+            # race logged one refused ``get_text`` for exactly this reason.
+            try:
+                text = page.evaluate(
+                    "() => (document.body && document.body.innerText) || ''"
+                )
+            except Exception as exc:
+                raise BrowserError("page text could not be read") from exc
+            raw = str(text or "")
+            return {
+                "text": str(redact(raw[:_MAX_TEXT_CHARS])),
+                "truncated": len(raw) > _MAX_TEXT_CHARS,
+                "target": "page",
+            }
         locator = self._locator(payload, page)
         text = locator.inner_text(timeout=self._timeout_ms(deadline_seconds))
         clipped = text[:_MAX_TEXT_CHARS]
@@ -2046,10 +2161,18 @@ class BrowserSession(SessionGuardsMixin):
         cancel: Optional[CancelToken],
     ) -> dict[str, Any]:
         self._assert_agent_input_allowed()
-        key = self._text(payload.get("key"), name="key")
-        if not re.fullmatch(r"[A-Za-z0-9+]{1,32}", key):
-            raise BrowserError("key must be a 1-32 character key name like Enter or Control+A")
+        key = _normalize_key(self._text(payload.get("key"), name="key"))
+        if not _key_is_valid(key):
+            raise BrowserError(
+                "key must be a key name like Enter or Control+A, or one "
+                "printable character"
+            )
         page = self._active_page()
+        if _key_inserts_text(key):
+            # A character press writes into the focused element exactly like
+            # ``fill``, so it must pass the same secret-field gate. Without
+            # this, the password guard was bypassed one character at a time.
+            self._assert_press_text_allowed(payload, page)
         selector = payload.get("selector")
         timeout = self._timeout_ms(deadline_seconds)
         if selector is None and payload.get("ref") is None:
@@ -2070,6 +2193,54 @@ class BrowserSession(SessionGuardsMixin):
             "key": key,
             "target": str(payload.get("selector") or payload.get("ref")),
         }
+
+    def _assert_press_text_allowed(
+        self, payload: Mapping[str, Any], page: Any
+    ) -> None:
+        """Refuse a character press aimed at a secret field.
+
+        ``fill`` and ``type`` already refuse password/token fields unless the
+        session was granted plain test credentials or the value comes from the
+        OS keyring. Pressing one character reaches the same field, so the same
+        decision applies here. An uninspectable focused field fails closed.
+        """
+
+        try:
+            if payload.get("selector") is not None or payload.get("ref") is not None:
+                metadata = self._locator_metadata(self._locator(payload, page))
+            else:
+                raw = page.evaluate(ACTIVE_FIELD_METADATA_JS)
+                metadata = {
+                    str(key): str(value) for key, value in (raw or {}).items()
+                }
+        except Exception as exc:
+            raise BrowserSecurityError(
+                "input field could not be inspected safely; use user takeover"
+            ) from exc
+        if not metadata:
+            return
+        descriptor = " ".join(
+            metadata.get(key, "")
+            for key in ("type", "name", "id", "aria", "placeholder")
+        )
+        secret_field = (
+            metadata.get("secret") == "true"
+            or metadata.get("type") == "password"
+            or bool(_SECRET_INPUT_HINT.search(descriptor))
+        )
+        if not secret_field:
+            return
+        if not self.policy.plain_credentials:
+            raise BrowserSecurityError(
+                "password, token, credential, or payment fields must be completed "
+                "through user takeover or fill_credential; explicitly supplied test "
+                "credentials require the plain_credentials session permission"
+            )
+        if _PAYMENT_CREDENTIAL_HINT.search(descriptor):
+            raise BrowserSecurityError(
+                "payment, card, CVV/CVC, IBAN, or billing fields are never filled "
+                "by the agent; use user takeover"
+            )
 
     def _assert_action_safe_page(self, page: Any) -> None:
         """Payment guard for a page-level key press (no single element to inspect)."""

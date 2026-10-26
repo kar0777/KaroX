@@ -52,6 +52,7 @@ def register_browser_tool(
     capability_policy: CapabilityPolicy,
     origin: Origin,
     session_id: str,
+    plain_credentials: bool = False,
 ) -> BrowserToolRuntime:
     """Register ``browser.command`` for one agent session; return the runtime.
 
@@ -60,7 +61,14 @@ def register_browser_tool(
     """
 
     runtime = BrowserToolRuntime(
-        BrowserAccessPolicy(session_id=session_id, downloads=True),
+        BrowserAccessPolicy(
+            session_id=session_id,
+            downloads=True,
+            # Only when the caller (the user, through the CLI flag) states that
+            # the task carries throwaway test credentials. The adapter still
+            # redacts every value filled under this permission.
+            plain_credentials=bool(plain_credentials),
+        ),
         browser_root=runtime_dir() / "vnext" / "browser",
         capability_guard=lambda capability: capability_policy.require(origin, capability),
     )

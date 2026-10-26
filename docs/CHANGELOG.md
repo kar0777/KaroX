@@ -4,6 +4,15 @@
 
 ### Added
 
+- `karox agent run --browser-plain-credentials` lets the browser fill
+  password/token fields with throwaway test credentials supplied in the task;
+  values stay redacted. Without it nothing changes: the default surface still
+  refuses secret fills and named-key submits remain available. A
+  single-character `press` now passes the same secret-field gate as `fill`
+  (it writes text), closing a character-at-a-time bypass; `press` also
+  accepts punctuation keys and normalizes common spellings (`ctrl + enter`,
+  `return`, `esc`, arrow names). `get_text` without a selector returns the
+  whole page's text instead of refusing.
 - The default engine run now lets the browser save a download it was asked
   for. `browser.command {action: download_start}` was implemented and tested
   in the adapter but the agent-run policy kept `downloads=False`, so a browser

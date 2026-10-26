@@ -79,6 +79,7 @@ karox agent run --task TEXT [--repository PATH]
     [--privacy-limit local|private|public]
     [--max-total-tokens N] [--max-cost N --currency USD]
     [--verification-command JSON_OR_SHELL]... [--accept-discovered-checks]
+    [--browser-plain-credentials]
     [--access-profile read_only|browser_control|workspace_write|elevated]
     [--effort-level auto|low|medium|high|extra-high|ultra]
     [--mode build|plan|ideate] [--expect auto|change]
@@ -95,6 +96,14 @@ karox agent run --task TEXT [--repository PATH]
   verification commands after the engine submits, so `verified` always means a
   real check passed. The retired v5 loop and its `--legacy-loop` flag are
   gone; the engine is the only kernel.
+
+- The default browser surface is loopback-only and headless. It can save a
+  download into KaroX's artifact store (25 MiB cap, never the repository), and
+  it refuses password, token and card fields. `--browser-plain-credentials`
+  lets it fill password/token fields with throwaway test credentials supplied
+  in the task; filled values are redacted from results, snapshots and logs.
+  A single-character `press` writes text just like `fill`, so it passes the
+  same credential guard (named keys such as Enter do not).
 
 - Routed mode uses the selected registry model. `--route` adds ordered fallback
   routes; the primary is first. Context and output ceilings are the smallest

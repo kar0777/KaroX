@@ -37,6 +37,26 @@ LOCATOR_METADATA_JS = """el => {
                     };
                 }"""
 
+#: Metadata for the element that currently owns focus. A single-character
+#: ``press`` inserts text into that element, so the page-level path must see
+#: the same secret classification the locator path sees; otherwise the
+#: password guard is bypassed one character at a time.
+ACTIVE_FIELD_METADATA_JS = """() => {
+                    const el = document.activeElement;
+                    if (!el) return {};
+                    const tag = (el.tagName || '').toLowerCase();
+                    const karoxSecret = el.getAttribute('data-karox-secret') === 'true' || el.dataset.karoxSecret === 'true';
+                    return {
+                        type: (el.getAttribute('type') || tag).toLowerCase(),
+                        name: el.getAttribute('name') || '',
+                        id: el.id || '',
+                        aria: el.getAttribute('aria-label') || '',
+                        placeholder: el.getAttribute('placeholder') || '',
+                        secret: karoxSecret ? 'true' : '',
+                        editable: el.isContentEditable ? 'true' : ''
+                    };
+                }"""
+
 #: The page text search. Returns matching refs and visibility, never values.
 FIND_TEXT_PROBE = """
         ([needle, maxResults]) => {

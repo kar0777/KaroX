@@ -88,6 +88,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="treat repository-discovered checks as approved verification evidence",
     )
+    run.add_argument(
+        "--browser-plain-credentials",
+        action="store_true",
+        help=(
+            "allow the browser to fill password/token fields with throwaway "
+            "test credentials supplied in the task (values are redacted)"
+        ),
+    )
     run.add_argument("--json", action="store_true")
 
     session = commands.add_parser("session", help="manage durable sessions")
