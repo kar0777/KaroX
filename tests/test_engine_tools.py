@@ -442,3 +442,291 @@ def test_desktop_tool_accepts_integer_arguments_through_core(
     assert wrapped.ok is True, wrapped.data
     assert wrapped.data["ok"] is True
     assert probe.posted, "the wrapped click never reached the fake window"
+
+
+def test_cli_engine_run_logs_in_and_downloads_a_report(
+    fixture_site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole default surface: login with test credentials, then download.
+
+    The browser-use race failed exactly here: the password fill was refused,
+    downloads were disabled, and the ``get_text`` after the redirect had no
+    selector. This runs the real CLI path with a scripted model and the real
+    fixture site, then checks the artifact store independently.
+    """
+    import contextlib
+    import hashlib
+    import io
+    import json as json_module
+
+    from _browser_site import DOWNLOAD_BODY, LOGIN_PASS, LOGIN_USER
+    from karox import cli
+    from karox.browser_bootstrap import playwright_chromium_status
+
+    if not playwright_chromium_status().ready:
+        pytest.skip("managed chromium is not provisioned")
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = _cli_repo(tmp_path)
+    responses = [
+        _response((_browser_call("c1", "open", {"url": f"{fixture_site}/"}),)),
+        _response(
+            (
+                _browser_call(
+                    "c2", "fill", {"selector": "#user", "value": LOGIN_USER}
+                ),
+                _browser_call(
+                    "c3", "fill", {"selector": "#pw", "value": LOGIN_PASS}
+                ),
+            )
+        ),
+        _response(
+            (_browser_call("c4", "click", {"selector": "#login-btn"}),)
+        ),
+        _response((_browser_call("c5", "wait_navigation", {}),)),
+        _response((_browser_call("c6", "get_text", {}),)),
+        _response(
+            (_browser_call("c7", "open", {"url": f"{fixture_site}/"}),)
+        ),
+        _response(
+            (_browser_call("c8", "download_start", {"selector": "#dl-link"}),)
+        ),
+        _response((_finish_call("c9", "downloaded report.bin after login"),)),
+    ]
+    provider = _scripted_cli(monkeypatch, responses)
+    arguments = [
+        "agent",
+        "run",
+        "--repository",
+        str(repository),
+        "--task",
+        (
+            f"Open {fixture_site}/, log in as {LOGIN_USER}, read the welcome "
+            "page, then return to the home page and download the report."
+        ),
+        "--model",
+        "scripted-model",
+        "--base-url",
+        "http://127.0.0.1:9/v1",
+        "--session-id",
+        "engine-1",
+        "--max-steps",
+        "14",
+        "--max-seconds",
+        "180",
+        "--verification-command",
+        json_module.dumps(["python", "-c", "print('ok')"]),
+        "--browser-plain-credentials",
+        "--stream-json",
+    ]
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = cli.main(arguments)
+
+    assert code == 0
+    assert "browser_command" in _request_tools(provider.requests[0])
+    seen = "\n".join(_request_text(request) for request in provider.requests)
+    assert f"user={LOGIN_USER}" in seen
+    assert "report.bin" in seen
+    _, report = _parse_stream(output.getvalue())
+    assert report["verified"] is True, report["reason"]
+    assert report["reason"] == "answer"
+    assert any(
+        item.get("action") == "download_start" for item in report["answer_basis"]
+    )
+
+    # The download is a durable artifact, not an agent claim.
+    expected = hashlib.sha256(DOWNLOAD_BODY).hexdigest()
+    artifact_dir = tmp_path / "runtime" / "vnext" / "artifacts" / "engine-1"
+    blobs = list(artifact_dir.glob("*.bin")) if artifact_dir.exists() else []
+    assert any(
+        hashlib.sha256(blob.read_bytes()).hexdigest() == expected for blob in blobs
+    ), "the downloaded bytes are not in the artifact store"
+
+
+def test_cli_engine_run_drives_the_real_desktop_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desktop domain end to end: attach by window id, type, capture.
+
+    The race failed here before the handler ran: every integer argument was
+    refused by the validator. This drives the real CLI with a scripted model
+    against an owned background fixture window, then reads the EDIT control
+    independently to prove the posted input landed.
+    """
+    import contextlib
+    import io
+    import json as json_module
+    import os
+    import time
+
+    if os.name != "nt":
+        pytest.skip("the desktop surface is Windows-only")
+
+    from _desktop_test_window import TestWindow
+    from karox import cli
+    from karox.computer_use.win32 import default_probe
+    from karox.sessions import SessionStore
+
+    probe = default_probe()
+    title = f"KaroX Desktop CLI {os.getpid()}-{int(time.time())}"
+    window = TestWindow(title)
+    try:
+        window.start()
+        # Restore the owned window without activation so thread focus can be
+        # established before the scripted run starts; Windows refuses focus for
+        # a minimized window.
+        import ctypes as ctypes_module
+
+        ctypes_module.windll.user32.ShowWindowAsync(window.hwnd, 4)
+        time.sleep(0.2)
+        window.focus_edit()
+    except Exception as exc:  # noqa: BLE001 - no interactive desktop
+        pytest.skip(f"cannot create the fixture window: {exc}")
+    typed = "hello from the engine run"
+    import threading
+
+    keep_focus = threading.Event()
+
+    def focus_loop() -> None:
+        # The fixture refuses thread focus while minimized, and a scripted run
+        # cannot pause for the test to call focus_edit at the right moment.
+        # Re-assert thread focus until the run ends; this never touches the
+        # global foreground.
+        while not keep_focus.is_set():
+            window.focus_edit(timeout=0.05)
+
+    focus_thread = threading.Thread(target=focus_loop, daemon=True)
+    try:
+        focus_thread.start()
+        monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+        repository = _cli_repo(tmp_path)
+        task = f"Attach the window titled {title}, type into it, capture it."
+        SessionStore(tmp_path / "runtime" / "vnext" / "sessions").create(
+            repository,
+            task,
+            AccessProfile.ELEVATED,
+            session_id="engine-1",
+        )
+        responses = [
+            _response(
+                (
+                    _tool_call(
+                        "c1", "desktop_list_windows", {"title_contains": title}
+                    ),
+                )
+            ),
+            _response(
+                (
+                    _tool_call(
+                        "c2",
+                        "desktop_attach",
+                        {
+                            "app_id": "fixture",
+                            "window_id": window.hwnd,
+                            "access": "control",
+                        },
+                    ),
+                )
+            ),
+            _response(
+                (
+                    _tool_call(
+                        "c3",
+                        "desktop_show_window",
+                        {"app_id": "fixture", "mode": "restore_noactivate"},
+                    ),
+                )
+            ),
+            _response(
+                (
+                    _tool_call(
+                        "c4",
+                        "desktop_inspect_ui",
+                        {"app_id": "fixture", "max_nodes": 200},
+                    ),
+                )
+            ),
+            _response(
+                (
+                    _tool_call(
+                        "c5",
+                        "desktop_type_text",
+                        {"app_id": "fixture", "text": typed},
+                    ),
+                )
+            ),
+            _response(
+                (
+                    _tool_call(
+                        "c6",
+                        "desktop_capture",
+                        {"app_id": "fixture", "max_dim": 800},
+                    ),
+                )
+            ),
+            _response((_finish_call("c7", "attached, typed and captured"),)),
+        ]
+        provider = _scripted_cli(monkeypatch, responses)
+        arguments = [
+            "agent",
+            "run",
+            "--repository",
+            str(repository),
+            "--task",
+            task,
+            "--model",
+            "scripted-model",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--session-id",
+            "engine-1",
+            "--access-profile",
+            "elevated",
+            "--max-steps",
+            "12",
+            "--max-seconds",
+            "180",
+            "--verification-command",
+            json_module.dumps(["python", "-c", "print('ok')"]),
+            "--stream-json",
+        ]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cli.main(arguments)
+
+        assert code == 0
+        assert "desktop_attach" in _request_tools(provider.requests[0])
+        deadline = time.monotonic() + 10.0
+        text = ""
+        while time.monotonic() < deadline:
+            text = probe.get_text(window.edit_hwnd, 512)
+            if text == typed:
+                break
+            probe.sleep_ms(50)
+        assert text == typed, "the typed text did not land in the EDIT control"
+
+        _, report = _parse_stream(output.getvalue())
+        assert report["verified"] is True, report["reason"]
+        actions = {
+            item.get("action")
+            for item in report["answer_basis"]
+            if item.get("tool", "").startswith("desktop.")
+        }
+        assert {"list_windows", "inspect_ui", "capture"} <= actions
+        capture = [
+            item
+            for item in report["answer_basis"]
+            if item.get("action") == "capture"
+        ][0]
+        assert capture.get("artifact_id")
+        artifact_dir = (
+            tmp_path / "runtime" / "vnext" / "artifacts" / "engine-1"
+        )
+        blobs = list(artifact_dir.glob("*.bin")) if artifact_dir.exists() else []
+        assert blobs, "the capture artifact is missing"
+    finally:
+        keep_focus.set()
+        window.stop()

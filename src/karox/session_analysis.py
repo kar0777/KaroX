@@ -170,6 +170,40 @@ def evidence_chain(record: SessionRecord) -> bool:
     return True
 
 
+#: Desktop read actions whose successful result is an observation or an
+#: artifact. The same rule as browser reads: a desktop answer that rests on a
+#: capture or an inspected control tree is evidence, not narration.
+DESKTOP_INSPECTION_ACTIONS: frozenset[str] = frozenset(
+    {"status", "list_windows", "list_apps", "capture", "inspect_ui"}
+)
+
+
+#: Browser actions whose successful result is something the model observed or
+#: produced, as opposed to page state it merely navigated to. A research answer
+#: that rests on a page read is evidence exactly like a repository read; the
+#: race's browser tasks ended "no_changes" even after a successful inspection
+#: because only repository tools counted, so a pure browser answer could never
+#: be reported as verified.
+BROWSER_INSPECTION_ACTIONS: frozenset[str] = frozenset(
+    {
+        "snapshot",
+        "snapshot_diff",
+        "find_text",
+        "get_text",
+        "get_form_state",
+        "page_info",
+        "console",
+        "network_failures",
+        "network_requests",
+        "cookies",
+        "screenshot",
+        "screenshot_region",
+        "download_status",
+        "download_start",
+    }
+)
+
+
 def attempted_mutation(record: SessionRecord) -> bool:
     """Whether any mutation tool call appears in the record."""
     return any(
@@ -192,7 +226,11 @@ def answer_basis(record: SessionRecord) -> tuple[Dict[str, Any], ...]:
         if entry.get("role") != "tool":
             continue
         core_name = entry.get("core_name")
-        if core_name not in INSPECTION_TOOLS:
+        if (
+            core_name != "browser.command"
+            and core_name not in INSPECTION_TOOLS
+            and not str(core_name or "").startswith("desktop.")
+        ):
             continue
         result = entry.get("result")
         if not isinstance(result, dict) or result.get("ok") is not True:
@@ -202,6 +240,39 @@ def answer_basis(record: SessionRecord) -> tuple[Dict[str, Any], ...]:
             "tool": core_name,
             "call_id": str(entry.get("tool_call_id", "")),
         }
+        if str(core_name or "").startswith("desktop."):
+            action = str(core_name).split(".", 1)[1]
+            if data.get("ok") is not True or action not in DESKTOP_INSPECTION_ACTIONS:
+                continue
+            item["action"] = action
+            payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+            artifact = (
+                payload.get("artifact")
+                if isinstance(payload.get("artifact"), dict)
+                else {}
+            )
+            for holder, key in (
+                (artifact, "artifact_id"),
+                (payload, "artifact_id"),
+                (payload, "sha256"),
+                (artifact, "sha256"),
+            ):
+                value = holder.get(key)
+                if isinstance(value, str) and value:
+                    item.setdefault(key, value)
+            basis.append(item)
+            continue
+        if core_name == "browser.command":
+            action = str(data.get("action") or "")
+            if data.get("ok") is not True or action not in BROWSER_INSPECTION_ACTIONS:
+                continue
+            item["action"] = action
+            for key in ("artifact_id", "sha256", "url", "target"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    item[key] = value
+            basis.append(item)
+            continue
         for key in ("path", "sha256", "stdout_sha256"):
             value = data.get(key)
             if isinstance(value, str) and value:

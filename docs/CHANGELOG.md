@@ -40,6 +40,22 @@
   that call id instead of discarding the valid calls beside it; a lone
   unparseable call keeps the format-error recovery.
 
+### Added
+
+- Browser observations and desktop reads now count as answer evidence. A pure
+  research or browser task can be reported verified from its own successful
+  `snapshot`/`get_text`/`download_start` observations, and a desktop task from
+  its `capture`/`inspect_ui`/`list_windows` reads; `answer_basis` names the
+  action and the artifact/sha256 when there is one. The finish tool's answer
+  is now the model's final message for that check, so a terse run that never
+  wrote prose can still verify. Before this, a browser-only or desktop-only
+  task always ended `no_changes` however well it went.
+- The agent-run surface has end-to-end coverage of both race domains with a
+  scripted model: the fixture site login with test credentials, submit, then
+  a download whose artifact bytes are checked by sha256; and an owned
+  background desktop window driven through list, attach by window id, inspect,
+  type and capture, with the EDIT control read back independently.
+
 ### Removed
 
 - The v5 `LegacyAgentKernel` loop and the `--legacy-loop` flag. After the

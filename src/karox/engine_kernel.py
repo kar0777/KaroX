@@ -1393,7 +1393,14 @@ class EngineKernel:
             return False
         if session_analysis.attempted_mutation(record):
             return False
-        if not session_analysis.last_provider_message(record):
+        # The finish tool's answer is the model's final message; the
+        # transcript only carries it in the call arguments, so a terse model
+        # that never wrote prose would otherwise leave a browser answer
+        # unverifiable even after a successful inspection.
+        if not (
+            self._engine_submission
+            or session_analysis.last_provider_message(record)
+        ):
             return False
         if _is_small_talk_task(record.task):
             return True
