@@ -172,7 +172,10 @@ design error; so is a tool handler importing `cli`.
 - Evidence is recorded before it is narrated. A report may not claim a change
   the session did not observe.
 - Compaction is deterministic and derived from recorded content, never from a
-  model's summary of work it might not have done.
+  model's summary of work it might not have done. What it drops is replaced by
+  a deterministic state snapshot (`state_briefing.py`) on the task message:
+  requirements, open plan, changed files, the latest approved check and its
+  parsed failures. A later message is always newer than that snapshot.
 - Approval cannot be widened by editing prompt text; it is a policy decision.
 - The UI adds no authority. Every action it triggers goes through the same CLI
   path a script would use.
@@ -231,7 +234,7 @@ not listed is internal to its layer.
 | `policy.py`, `risk_engine.py`, `risk_mapping.py`, `action_policy.py`, `command_guard.py` | capability + risk gates |
 | `providers.py`, `provider_adapters.py`, `provider_factory.py` | model transport; the only path to a model |
 | `registry.py`, `model_discovery.py`, `routing.py`, `provider_pricing.py`, `provider_presets.py`, `provider_controller.py`, `credentials.py` | catalog, routes, budgets, keyring |
-| `sessions.py`, `requirements.py`, `usage_analytics.py`, `memory.py` | durable state, leases, evidence, usage |
+| `sessions.py`, `requirements.py`, `state_briefing.py`, `usage_analytics.py`, `memory.py` | durable state, leases, evidence, compaction snapshot, usage |
 | `project_context.py`, `project_map.py`, `map_service.py`, `mode_artifacts.py` | bounded orientation, durable Plan/Concept |
 | `effort.py`, `agent_modes.py`, `auto_verify.py`, `check_report.py`, `completion_gate.py` | effort budgets, modes, quick checks, parsed failure maps and derived focused targets, verified floor |
 | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |

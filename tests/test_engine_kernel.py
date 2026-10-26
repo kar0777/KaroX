@@ -130,6 +130,7 @@ class Harness:
         max_steps: int = 12,
         create_session: bool = True,
         runtime_cls: type = CoreRuntime,
+        task: str = "create hello.txt with hi",
     ) -> None:
         self.repository = repository
         self.provider = ScriptedProvider(responses)
@@ -159,7 +160,7 @@ class Harness:
         if create_session:
             self.store.create(
                 repository,
-                "create hello.txt with hi",
+                task,
                 AccessProfile.WORKSPACE_WRITE,
                 session_id=session_id,
             )
@@ -669,6 +670,48 @@ def test_engine_context_compaction_fires_and_reports(tmp_path: Path, repository:
     assert "compacted" in kinds
     assert report.compaction is not None
     assert report.compaction["tokens_after"] < report.compaction["tokens_before"]
+
+
+def test_compaction_briefing_keeps_requirements_files_and_failure(
+    tmp_path: Path, repository: Path
+) -> None:
+    """After compaction the model still sees what the task requires and what failed."""
+
+    check = _calc_repository(repository)
+    task = "1. Implement add()\n2. Keep the tests green"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c3", "implemented add"),)),
+            _response((_write_call("c4", "calc.py", CALC_RIGHT),)),
+            _response((_finish_call("c5", "fixed add"),)),
+        ],
+        verification=(check,),
+        task=task,
+    )
+    harness.kernel.implementation.context = ContextBudget(max_input_tokens=1)
+    harness.kernel.implementation._engine_keep_recent_messages = 1
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    task_messages: List[str] = []
+    for request in harness.provider.requests:
+        for message in request.messages:
+            content = message.content or ""
+            if message.role == "user" and "Implement add()" in content:
+                task_messages.append(content)
+                break
+    assert task_messages, "the task message must be present in every request"
+    briefing = task_messages[-1]
+    assert briefing.count("[KaroX durable state") == 1
+    assert "- R1 Implement add()" in briefing
+    assert "- R2 Keep the tests green" in briefing
+    assert "Changed files (1): calc.py" in briefing
+    assert "tests/test_calc.py:5 · test_add" in briefing
+    assert "Verification: `" in briefing
 
 
 def test_engine_rerun_after_verified_needs_no_model(tmp_path: Path, repository: Path) -> None:
@@ -1582,6 +1625,13 @@ def test_focused_tests_derive_targets_from_the_session_changes(
         entry for entry in record.provider_history if entry.get("tool_call_id") == "c1"
     )
     assert "affected_tests" not in write["result"]["data"]
+    # The durable snapshot is a compaction aid, not prompt decoration: a short
+    # run that never compacted must not pay for it.
+    assert not any(
+        "KaroX durable state" in (message.content or "")
+        for request in harness.provider.requests
+        for message in request.messages
+    )
     runs = [
         entry
         for entry in record.provider_history

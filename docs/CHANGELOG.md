@@ -2,6 +2,21 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Added — durable state across compaction
+
+- **Compaction no longer erases what the task requires.** The engine compacts
+  by clipping and then replacing old messages with a marker; after a few
+  events the model could no longer see the requirements, the files it had
+  changed, or the test that failed. `state_briefing.py` now builds a short
+  snapshot from the session record — active requirements, the model's open
+  plan, changed files, the latest approved check and its parsed failure map,
+  and whether `git.diff` ran after the last edit — and appends it to the task
+  message, which the compactor never touches. The block is rebuilt on each
+  compaction event, replaces itself instead of stacking copies, and is only
+  present when a compaction actually fired. Every line is recorded state, not
+  a model summary; the block says it is a snapshot and that later messages are
+  newer, so a stale "check failed" line cannot masquerade as current truth.
+
 ### Added — check intelligence
 
 - **A failing check now arrives as a failure map, not as the tail of a log.**

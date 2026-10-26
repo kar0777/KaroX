@@ -62,6 +62,7 @@ from .engine_provider_bridge import (  # noqa: E402
 from . import completion_gate  # noqa: E402
 from . import check_report  # noqa: E402
 from . import session_analysis  # noqa: E402
+from .state_briefing import build_state_briefing  # noqa: E402
 from .agent import (  # noqa: E402
     HARNESS_ORIGIN,
     REQUIRED_TOOLS,
@@ -180,6 +181,10 @@ class EngineAgent(DefaultAgent):
         super().__init__(model, env, **kwargs)
         self._kernel = kernel
         self.n_calls = int(resume_step_calls)
+        # The task message the durable snapshot is appended to, and its text
+        # before the first append.
+        self._briefing_target: Optional[int] = None
+        self._briefing_base: str = ""
 
     def add_messages(self, *messages: Dict[str, Any]) -> List[Dict[str, Any]]:
         added = super().add_messages(*messages)
@@ -220,6 +225,31 @@ class EngineAgent(DefaultAgent):
             self._kernel._on_compacted(
                 estimate_before, self._estimate_tokens(), self.n_context_events
             )
+            self._refresh_state_briefing()
+
+    def _refresh_state_briefing(self) -> None:
+        """Append the durable state to the task message after a compaction.
+
+        The task message is outside the compactor's middle slice, so the block
+        cannot be clipped or dropped and survives every later compaction. The
+        base text is captured once, so a rebuild replaces the block instead of
+        stacking a second copy.
+        """
+
+        briefing = self._kernel.state_briefing()
+        if not briefing:
+            return
+        if self._briefing_target is None:
+            for index, message in enumerate(self.messages):
+                if message.get("role") == "user":
+                    self._briefing_target = index
+                    self._briefing_base = str(message.get("content") or "")
+                    break
+        if self._briefing_target is None or self._briefing_target >= len(self.messages):
+            return
+        self.messages[self._briefing_target]["content"] = (
+            f"{self._briefing_base}\n\n{briefing}"
+        )
 
     def _check_no_progress(self, message: Dict[str, Any], outputs: List[Dict[str, Any]]) -> None:
         """Same contract as the engine's port 4, with a typed-action key.
@@ -1488,6 +1518,29 @@ class EngineKernel:
                 )
         hint = check_report.render_targets(targets[:4])
         return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
+
+    def state_briefing(self) -> str:
+        """The deterministic session snapshot the agent appends after compaction.
+
+        Built from the record, never from a model summary: requirements, the
+        model's own plan, changed files, the latest approved check and its
+        parsed failures all survive a compaction that drops the messages that
+        first carried them.
+        """
+
+        if self._session_id is None:
+            return ""
+        try:
+            record = self.sessions.load(self._session_id)
+        except Exception:  # noqa: BLE001 - a missing snapshot must not break a turn
+            return ""
+        return build_state_briefing(
+            task=record.task,
+            requirements=record.requirements,
+            plan_items=record.plan_items,
+            changed_files=record.changed_files,
+            history=record.provider_history,
+        )
 
     def _terminal_reason(self, session_id: str, exit_status: str) -> str:
         if exit_status == "LimitsExceeded":
