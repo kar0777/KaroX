@@ -22,7 +22,7 @@ from karox.core import CoreRuntime
 from karox.core_tools import ExtendedCoreRuntime
 from karox.engine import __version__ as engine_version
 from karox.engine_kernel import EngineKernel
-from karox.models import AccessProfile, Capability, Origin, OriginKind
+from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import ModelRequest, ModelResponse, ProviderTool, ToolCall
 from karox.sessions import SessionStore
@@ -712,6 +712,198 @@ def test_compaction_briefing_keeps_requirements_files_and_failure(
     assert "Changed files (1): calc.py" in briefing
     assert "tests/test_calc.py:5 · test_add" in briefing
     assert "Verification: `" in briefing
+
+
+def test_finish_batched_with_work_is_refused_and_work_still_runs(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A submission batched with work must not drop that work or claim it."""
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "a.txt", "hi"),)),
+            _response(
+                (
+                    _finish_call("c2", "created a.txt and b.txt"),
+                    _write_call("c3", "b.txt", "hi"),
+                )
+            ),
+            _response((_finish_call("c4", "created a.txt and b.txt"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert (repository / "a.txt").read_text(encoding="utf-8") == "hi"
+    assert (repository / "b.txt").read_text(encoding="utf-8") == "hi"
+    assert report.verified is True, report.reason
+    assert set(report.changed_files) == {"a.txt", "b.txt"}
+    observed = "\n".join(_tool_messages(harness))
+    assert "finish must be the only tool call" in observed
+    assert "b.txt" in observed
+
+
+def test_unproducible_obligation_stops_without_duplicate_checks(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A proof no approved command can produce must not loop repair turns."""
+
+    tests = repository / "tests"
+    tests.mkdir()
+    (tests / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8"
+    )
+    check = (sys.executable, "-m", "pytest", "-q", "tests/test_ok.py")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "main.py", "print('hi')\n"),)),
+            _response((_finish_call("c2", "created main.py"),)),
+        ],
+        verification=(check,),
+    )
+    report = harness.run()
+
+    assert report.verified is False
+    assert report.reason == "unproducible_requirement"
+    assert any(
+        "no approved producer for runtime smoke evidence" in item
+        for item in report.unmet
+    )
+    assert "engine_repair_prompt" not in [
+        getattr(event, "reason", None) for event in harness.events
+    ]
+    checks = [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("core_name") == "checks.run"
+    ]
+    assert len(checks) == 1
+
+
+def test_resume_gets_a_fresh_step_budget(tmp_path: Path, repository: Path) -> None:
+    """The configured step limit is this run's budget, not the session's total."""
+
+    read = _tool_call("r1", "repo_read_file", {"path": "seed.txt"})
+    first = Harness(
+        repository,
+        tmp_path,
+        [_response((read,))],
+        max_steps=1,
+    )
+    first_report = first.run()
+    assert first_report.verified is False
+    assert first_report.reason == "step_limit"
+
+    second = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_finish_call("c2", "done"),)),
+        ],
+        create_session=False,
+        max_steps=2,
+    )
+    report = second.run()
+
+    assert report.verified is True, report.reason
+
+
+def test_resumed_transcript_keeps_tool_results_next_to_their_calls(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A resumed request must be valid for transports that pair calls/results."""
+
+    read = _tool_call("r1", "repo_read_file", {"path": "seed.txt"})
+    first = Harness(repository, tmp_path, [_response((read,))], max_steps=1)
+    assert first.run().reason == "step_limit"
+
+    with first.store.mutate("s1", "test", ttl_seconds=30.0) as record:
+        record.provider_history.append(
+            {
+                "role": "assistant",
+                "content": "ghost call",
+                "tool_calls": [
+                    {
+                        "call_id": "ghost",
+                        "name": "repo_read_file",
+                        "raw_arguments": '{"path":"seed.txt"}',
+                    }
+                ],
+            }
+        )
+        record.task = "follow up: read the seed file"
+
+    second = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c2", "done"),))],
+        create_session=False,
+        max_steps=2,
+    )
+    second.run()
+
+    messages = second.provider.requests[0].messages
+    first_assistant = next(
+        index for index, message in enumerate(messages) if message.role == "assistant"
+    )
+    task_index = next(
+        index
+        for index, message in enumerate(messages)
+        if message.role == "user"
+        and (message.content or "").endswith("follow up: read the seed file")
+    )
+    assert task_index < first_assistant
+
+    for index, message in enumerate(messages):
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        call_ids = {call.call_id for call in message.tool_calls}
+        seen = set()
+        cursor = index + 1
+        while cursor < len(messages) and messages[cursor].role == "tool":
+            seen.add(messages[cursor].tool_call_id)
+            cursor += 1
+        assert call_ids <= seen, (index, call_ids, seen)
+
+
+def test_failure_map_reads_past_the_display_elision(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A failure in the elided middle of a >1 MB log is still named."""
+
+    code = (
+        "import sys\n"
+        "sys.stdout.write('x' * 600000 + '\\n')\n"
+        "sys.stdout.write('FAILED tests/test_mid.py::test_mid - AssertionError: boom\\n')\n"
+        "sys.stdout.write('x' * 600000 + '\\n')\n"
+        "sys.exit(1)\n"
+    )
+    check = (sys.executable, "-c", code)
+    harness = Harness(repository, tmp_path, [], verification=(check,))
+    lease = harness.store.acquire("s1", "test", ttl_seconds=30.0)
+    command = CoreCommand(
+        name="checks.run",
+        arguments={"argv": list(check)},
+        session_id="s1",
+        origin=harness.origin,
+        correlation_id="map-elision",
+        idempotency_key="map-elision",
+        deadline_seconds=30.0,
+    )
+    try:
+        result = harness.core.execute(command, lease=lease)
+    finally:
+        harness.store.release(lease)
+
+    assert result.ok is False
+    failure_map = result.data["failure_map"]
+    assert failure_map["total"] == 1
+    assert failure_map["failures"][0]["path"] == "tests/test_mid.py"
+    assert result.data["stdout_truncated"] is True
 
 
 def test_engine_rerun_after_verified_needs_no_model(tmp_path: Path, repository: Path) -> None:
@@ -1510,7 +1702,7 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
     ]
     assert repair, "a failed check must produce a repair turn"
     assert "tests/test_calc.py:5" in repair[-1]
-    assert 'Targeted rerun: tests.run suite=focused targets=["tests/test_calc.py"]' in repair[-1]
+    assert 'Targeted rerun: tests.run suite=focused targets=["tests/test_calc.py::test_add"]' in repair[-1]
 
     # The repair edit came back with its own verdict: the exact failing test
     # was rerun advisory, so the model did not spend a turn asking.

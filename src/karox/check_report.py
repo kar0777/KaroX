@@ -25,7 +25,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 from urllib.parse import unquote
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     "render_targets",
     "fingerprints",
     "select_test_targets",
+    "rerun_targets",
 ]
 
 #: How many distinct failures the map keeps. A repair turn can act on a few
@@ -131,7 +132,7 @@ def analyze(
 
     text = _clean(_combined(stdout, stderr))
     if not text.strip():
-        return _report([], 0, 0)
+        return _report([], 0, 0, [])
     raw: list[dict[str, object]] = []
     raw.extend(_pytest(text))
     raw.extend(_unittest(text))
@@ -140,13 +141,18 @@ def analyze(
     raw.extend(_go_test(text))
     raw.extend(_cargo_test(text))
     raw.extend(_lint(text))
-    failures, total, repeats = _collapse(raw, root)
-    return _report(failures, total, repeats)
+    failures, total, repeats, all_fingerprints = _collapse(raw, root)
+    return _report(failures, total, repeats, all_fingerprints)
 
 
 def fingerprints(report: dict[str, object]) -> tuple[str, ...]:
     """The distinct failure identities, for comparing two repair rounds."""
-    rows = report.get("failures") if isinstance(report, dict) else None
+    if not isinstance(report, dict):
+        return ()
+    stored = report.get("fingerprints")
+    if isinstance(stored, list):
+        return tuple(str(item) for item in stored if item)
+    rows = report.get("failures")
     if not isinstance(rows, list):
         return ()
     return tuple(
@@ -194,7 +200,7 @@ def render_failure_map(
             test_id=str(row.get("test_id") or ""),
             code=str(row.get("code") or ""),
             message=str(row.get("message") or ""),
-            count=int(row.get("count") or 1),
+            count=_positive_count(row.get("count")),
         )
         line = f"{index}. "
         if failure.runner in _LINT_RUNNERS:
@@ -256,6 +262,11 @@ def _int_or_none(value: object) -> Optional[int]:
     return None
 
 
+def _positive_count(value: object) -> int:
+    count = _int_or_none(value)
+    return count if count is not None and count > 0 else 1
+
+
 def _relative(path: str, root: Optional[Path | str]) -> str:
     raw = (path or "").strip().strip("\"'`")
     if raw.startswith("file://"):
@@ -304,7 +315,7 @@ def _row(
 
 def _collapse(
     raw: Sequence[dict[str, object]], root: Optional[Path | str]
-) -> tuple[list[Failure], int, int]:
+) -> tuple[list[Failure], int, int, list[str]]:
     """Deduplicate by identity while keeping the order a reader expects."""
 
     ordered = sorted(
@@ -349,7 +360,15 @@ def _collapse(
     failures = [by_fingerprint[key] for key in order]
     total = len(failures)
     repeats = sum(failure.count - 1 for failure in failures)
-    return failures[:FAILURE_LIMIT], total, repeats
+    # The rendered list is capped, but repeat detection must see every distinct
+    # failure: two rounds that differ only in the ninth failure are not the
+    # same set, and calling them identical would mislabel real progress.
+    return (
+        failures[:FAILURE_LIMIT],
+        total,
+        repeats,
+        [failure.fingerprint for failure in failures],
+    )
 
 
 def _priority(runner: str) -> int:
@@ -358,12 +377,17 @@ def _priority(runner: str) -> int:
     return 1
 
 
-def _report(failures: Sequence[Failure], total: int, repeats: int) -> dict[str, object]:
+def _report(
+    failures: Sequence[Failure], total: int, repeats: int, all_fingerprints: Sequence[str]
+) -> dict[str, object]:
     return {
         "failures": [failure.to_dict() for failure in failures],
         "total": total,
         "repeats": repeats,
         "runners": sorted({failure.runner for failure in failures}),
+        # Every distinct identity, not only the rendered eight. Repeat
+        # detection compares these; the list is bounded by the log size.
+        "fingerprints": list(all_fingerprints),
     }
 
 
@@ -388,14 +412,17 @@ def _pytest(text: str) -> list[dict[str, object]]:
             # unittest's own `FAILED (failures=1, errors=1)` summary uses the
             # same word; only a path or a node id is a pytest failure.
             continue
-        path = node.split("::", 1)[0]
+        node_path = node.split("::", 1)[0]
         tail = node.split("::")[-1] if "::" in node else ""
         section = _pytest_section_for(tail, sections)
-        line: Optional[int] = None
-        column: Optional[int] = None
-        if section is not None:
-            location = section
-            line, column = location[1], location[2]
+        # The deepest traceback frame may live in the module under test, not
+        # in the test file. Its path and line must travel together: pairing the
+        # node's test file with the source file's line sends the repair to a
+        # line that does not exist in the file it names.
+        path = section[1] if section is not None and section[1] else node_path
+        line = section[2] if section is not None else None
+        column = section[3] if section is not None else None
+        message = reason or (section[4] if section is not None else "") or "failed"
         rows.append(
             _row(
                 "pytest",
@@ -404,15 +431,14 @@ def _pytest(text: str) -> list[dict[str, object]]:
                 column=column,
                 test_id=node,
                 code=match.group("kind"),
-                message=reason or (section[3] if section is not None else "") or "failed",
+                message=message,
             )
         )
     if rows:
         return rows
     # No short summary (for example pytest stopped with -x and no summary
     # block): the failure sections still name the test and the deepest frame.
-    for index, (name, line, column, message) in enumerate(sections):
-        path = _pytest_section_path(text, name)
+    for name, path, line, column, message in sections:
         rows.append(
             _row(
                 "pytest",
@@ -427,9 +453,11 @@ def _pytest(text: str) -> list[dict[str, object]]:
     return rows
 
 
-def _pytest_sections(text: str) -> list[tuple[str, Optional[int], Optional[int], str]]:
+def _pytest_sections(
+    text: str,
+) -> list[tuple[str, str, Optional[int], Optional[int], str]]:
     marks = list(_PYTEST_SECTION.finditer(text))
-    result: list[tuple[str, Optional[int], Optional[int], str]] = []
+    result: list[tuple[str, str, Optional[int], Optional[int], str]] = []
     for index, mark in enumerate(marks):
         end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
         block = text[mark.end() : end]
@@ -439,7 +467,7 @@ def _pytest_sections(text: str) -> list[tuple[str, Optional[int], Optional[int],
         location = locations[-1] if locations else None
         name = mark.group("name").strip()
         if location is None:
-            result.append((name, None, None, ""))
+            result.append((name, "", None, None, ""))
             continue
         message = (location.group("msg") or "").strip()
         if not message:
@@ -449,6 +477,7 @@ def _pytest_sections(text: str) -> list[tuple[str, Optional[int], Optional[int],
         result.append(
             (
                 name,
+                location.group("path"),
                 int(location.group("line")),
                 _int_or_none(int(location.group("column")) if location.group("column") else None),
                 message,
@@ -459,8 +488,8 @@ def _pytest_sections(text: str) -> list[tuple[str, Optional[int], Optional[int],
 
 def _pytest_section_for(
     tail: str,
-    sections: Sequence[tuple[str, Optional[int], Optional[int], str]],
-) -> Optional[tuple[str, Optional[int], Optional[int], str]]:
+    sections: Sequence[tuple[str, str, Optional[int], Optional[int], str]],
+) -> Optional[tuple[str, str, Optional[int], Optional[int], str]]:
     if not tail:
         return None
     for section in sections:
@@ -468,18 +497,6 @@ def _pytest_section_for(
         if name == tail or name.endswith(tail) or (tail and tail in name):
             return section
     return None
-
-
-def _pytest_section_path(text: str, name: str) -> str:
-    for mark in _PYTEST_SECTION.finditer(text):
-        if mark.group("name").strip() != name:
-            continue
-        block = text[mark.end() :]
-        location = _PYTEST_LOCATION.search(block)
-        if location is not None:
-            return location.group("path")
-        break
-    return ""
 
 
 def _first_error_line(block: str) -> str:
@@ -704,13 +721,17 @@ def _vitest_blocks(text: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     file_marks = list(_VITEST_FILE.finditer(text))
     bullets = list(_VITEST_BULLET.finditer(text))
+    current = ""
+    file_index = -1
     for mark in bullets:
-        current = ""
-        for candidate in file_marks:
-            if candidate.start() < mark.start():
-                current = candidate.group("path")
-            else:
-                break
+        # One forward pass: the previous nested scan was quadratic on a log
+        # with many tests, which a red suite can produce.
+        while (
+            file_index + 1 < len(file_marks)
+            and file_marks[file_index + 1].start() < mark.start()
+        ):
+            file_index += 1
+            current = file_marks[file_index].group("path")
         following = text[mark.end() : mark.end() + 400]
         message = ""
         for line in following.splitlines()[:3]:
@@ -843,12 +864,17 @@ def _go_test(text: str) -> list[dict[str, object]]:
     for match in _GO_PANIC.finditer(text):
         following = text[match.end() : match.end() + 200].lstrip("\n")
         location = _GO_PANIC_LOCATION.match(following)
+        message = match.group("msg").strip() or "panic"
+        # A panic inside a failed test is already that test's message; listing
+        # it again would turn one failure into two and defeat repeat detection.
+        if any(message in str(row.get("message") or "") for row in rows):
+            continue
         rows.append(
             _row(
                 "go-test",
                 path=location.group("path") if location else "",
                 line=location.group("line") if location else None,
-                message=match.group("msg").strip() or "panic",
+                message=message,
             )
         )
     return rows
@@ -900,12 +926,18 @@ def _cargo_test(text: str) -> list[dict[str, object]]:
     for match in _CARGO_ERROR.finditer(text):
         following = text[match.end() : match.end() + 600]
         arrow = _CARGO_ARROW.search(following)
+        if arrow is None:
+            # `error: test failed, to rerun pass ...` is the run summary, not
+            # a second compile failure. A real build error always carries an
+            # arrow with its source position; without one there is nothing to
+            # repair at a line, and counting it would double the failure.
+            continue
         rows.append(
             _row(
                 "cargo-build",
-                path=arrow.group("path") if arrow else "",
-                line=arrow.group("line") if arrow else None,
-                column=arrow.group("column") if arrow else None,
+                path=arrow.group("path"),
+                line=arrow.group("line"),
+                column=arrow.group("column"),
                 code=match.group("code") or "",
                 message=match.group("msg").strip(),
             )
@@ -981,11 +1013,15 @@ def _lint(text: str) -> list[dict[str, object]]:
 _TEST_FILE = re.compile(r"^test_.*\.py$|^.*_test\.py$")
 _IMPORT = re.compile(
     r"^\s*import\s+(?P<modules>[\w.]+(?:\s*,\s*[\w.]+)*)"
-    r"|^\s*from\s+(?P<source>[\w.]+)\s+import\b",
+    r"|^\s*from\s+(?P<source>[\w.]+)\s+import\s+(?P<names>[^\n]+)",
     re.M,
 )
 _IMPORT_CACHE: dict[tuple[str, int, int], tuple[str, ...]] = {}
 _IMPORT_CACHE_LIMIT = 2_048
+#: A generated or vendored test file above this size is not scanned for
+#: imports; reading thousands of them whole was the only unbounded work in the
+#: focused-target path.
+MAX_IMPORT_BYTES = 512 * 1024
 
 
 def select_test_targets(
@@ -1064,6 +1100,10 @@ def _changed_stems(changed_paths: Iterable[str]) -> list[tuple[str, str]]:
 def _test_files(test_root: Path) -> list[Path]:
     files: list[Path] = []
     for path in sorted(test_root.rglob("*.py")):
+        # safe_path refuses a symlink that leaves the repository, so returning
+        # one here would make the model's focused run fail instead of running.
+        if path.is_symlink():
+            continue
         if _TEST_FILE.match(path.name):
             files.append(path)
         if len(files) >= MAX_TEST_FILES:
@@ -1075,6 +1115,8 @@ def _imports_of(path: Path) -> tuple[str, ...]:
     try:
         stat = path.stat()
     except OSError:
+        return ()
+    if path.is_symlink() or stat.st_size > MAX_IMPORT_BYTES:
         return ()
     key = (str(path), stat.st_mtime_ns, stat.st_size)
     cached = _IMPORT_CACHE.get(key)
@@ -1091,7 +1133,16 @@ def _imports_of(path: Path) -> tuple[str, ...]:
                 item.strip() for item in match.group("modules").split(",") if item.strip()
             )
         elif match.group("source"):
-            modules.append(match.group("source"))
+            source_name = match.group("source")
+            modules.append(source_name)
+            # `from pkg import alpha` imports pkg.alpha; without expanding the
+            # names, a changed pkg/alpha.py selected only tests that imported
+            # the full dotted path.
+            names = (match.group("names") or "").strip().strip("()")
+            for item in names.split(","):
+                name = item.strip().split(" as ", 1)[0].strip()
+                if name and name != "*" and re.fullmatch(r"[A-Za-z_]\w*", name):
+                    modules.append(f"{source_name}.{name}")
     result = tuple(dict.fromkeys(modules))
     if len(_IMPORT_CACHE) >= _IMPORT_CACHE_LIMIT:
         _IMPORT_CACHE.clear()
@@ -1113,3 +1164,38 @@ def render_targets(paths: Sequence[str]) -> str:
         return ""
     listed = ", ".join(f'"{path}"' for path in paths)
     return f"Targeted rerun: tests.run suite=focused targets=[{listed}]"
+
+
+def rerun_targets(
+    report: Optional[Mapping[str, Any]], limit: int = 4
+) -> list[str]:
+    """The test files or node ids a focused rerun should use.
+
+    The map's ``path`` is where the failure *raised*, which may be a source
+    file; rerunning a source file is not a test. The node id still names the
+    test, so its file wins when it lies under ``tests/``.
+    """
+
+    targets: list[str] = []
+    if not isinstance(report, Mapping):
+        return targets
+    rows = report.get("failures")
+    if not isinstance(rows, list):
+        return targets
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        test_id = str(row.get("test_id") or "")
+        node_file = test_id.split("::", 1)[0] if "::" in test_id else ""
+        if node_file.startswith("tests/") and node_file.endswith(".py"):
+            candidate = test_id if test_id.startswith(node_file + "::") else node_file
+        else:
+            path = str(row.get("path") or "")
+            if not (path.startswith("tests/") and path.endswith(".py")):
+                continue
+            candidate = path
+        if candidate not in targets:
+            targets.append(candidate)
+        if len(targets) >= limit:
+            break
+    return targets

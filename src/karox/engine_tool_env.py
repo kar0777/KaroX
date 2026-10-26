@@ -29,7 +29,7 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 from . import completion_gate  # noqa: E402
 from .agent import AgentEventKind, _derived_tool_events  # noqa: E402
 from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
-from .check_report import render_failure_map, select_test_targets  # noqa: E402
+from .check_report import render_failure_map, select_test_targets, rerun_targets  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
 from .engine.environments.local import clip_output  # noqa: E402
 from .engine.exceptions import Submitted  # noqa: E402
@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 _READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
 _TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
 _PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
+#: A finish call found in a batch with other calls. It is rewritten to this
+#: marker so the other calls still execute and every call gets its observation;
+#: the model must then submit again with finish alone.
+FINISH_BATCH_MARKER = "__karox_finish_not_alone__"
 #: A repair edit is followed by exactly the tests that failed, once, inside a
 #: budget that cannot turn one edit into a long detour.
 AFFECTED_TESTS_TIMEOUT_SECONDS = 20.0
@@ -132,6 +136,15 @@ class CoreToolEnvironment:
         if parse_error:
             return self._refusal(action, "malformed_arguments", str(parse_error))
         name = action.get("name")
+        if name == FINISH_BATCH_MARKER:
+            return self._refusal(
+                action,
+                "finish_not_alone",
+                "finish must be the only tool call in a response. The other "
+                "calls in this batch ran; review their results, then call "
+                "finish again. A submission batched with work would have "
+                "dropped that work and reported a change that never happened.",
+            )
         if name == FINISH_TOOL_NAME:
             return self._finish(action)
         if name is None:
@@ -410,7 +423,7 @@ class CoreToolEnvironment:
         report = _failed_check_report(record)
         if report is None:
             return
-        targets = _failing_targets(report, AFFECTED_TEST_LIMIT)
+        targets = rerun_targets(report, AFFECTED_TEST_LIMIT)
         if not targets:
             return
         digest = str(data.get("content_sha256") or data.get("sha256") or "")
@@ -446,7 +459,9 @@ class CoreToolEnvironment:
             "timed_out": payload.get("timed_out"),
             "failure_map": payload.get("failure_map") or {},
         }
-        if outcome.ok:
+        if payload.get("timed_out"):
+            line = "affected tests: timed out (advisory, not evidence)"
+        elif outcome.ok:
             line = (
                 f"affected tests: passed ({len(targets)} target(s); "
                 "advisory, not evidence)"
@@ -572,35 +587,6 @@ def _failed_check_report(record: Any) -> Optional[Dict[str, Any]]:
         report = data.get("failure_map")
         return report if isinstance(report, dict) and report.get("failures") else None
     return None
-
-
-def _failing_targets(report: Mapping[str, Any], limit: int) -> List[str]:
-    """The test files (or exact node ids) a repair should rerun first."""
-
-    targets: List[str] = []
-    rows = report.get("failures")
-    if not isinstance(rows, list):
-        return targets
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        path = row.get("path")
-        if (
-            not isinstance(path, str)
-            or not path.startswith("tests/")
-            or not path.endswith(".py")
-        ):
-            continue
-        candidate = path
-        test_id = row.get("test_id")
-        if isinstance(test_id, str) and test_id.startswith(path + "::"):
-            # A node id runs one failing test instead of its whole file.
-            candidate = test_id
-        if candidate not in targets:
-            targets.append(candidate)
-        if len(targets) >= limit:
-            break
-    return targets
 
 
 def _result_summary(core_name: str, result: CoreResult) -> str:

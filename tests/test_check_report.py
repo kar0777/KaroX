@@ -12,11 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from karox.check_report import (
+    MAX_IMPORT_BYTES,
     analyze,
     fingerprints,
     render_failure_map,
     render_targets,
     select_test_targets,
+    rerun_targets,
 )
 
 PYTEST_LOG = """\
@@ -65,6 +67,26 @@ FAILED test_sample.py::test_text - AssertionError: assert 'alpha' == 'beta'
 FAILED test_sample.py::test_error - ValueError: boom
 FAILED test_sample.py::test_params[2] - AssertionError: even value 2
 4 failed, 3 passed in 0.15s
+"""
+
+PYTEST_SOURCE_LOG = """\
+================================== FAILURES ===================================
+__________________________________ test_add ___________________________________
+
+    def test_add():
+>       calc.add(2, 2)
+
+tests/test_calc.py:5:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def add(a, b):
+>       raise ValueError("boom")
+E       ValueError: boom
+
+calc.py:2: ValueError
+=========================== short test summary info ===========================
+FAILED tests/test_calc.py::test_add - ValueError: boom
+1 failed in 0.10s
 """
 
 UNITTEST_LOG = """\
@@ -210,6 +232,34 @@ def test_pytest_keeps_every_failure_with_its_deepest_frame() -> None:
     assert [_failure(payload, index)["line"] for index in range(4)] == [9, 13, 17, 26]
     assert _failure(payload, 2)["message"] == "ValueError: boom"
     assert _failure(payload, 3)["message"] == "AssertionError: even value 2"
+
+
+def test_pytest_names_the_frame_that_raised_not_the_test_file() -> None:
+    """The deepest frame may be in the module under test, not in the test."""
+
+    payload = analyze(PYTEST_SOURCE_LOG)
+
+    row = _failure(payload)
+    assert row["path"] == "calc.py"
+    assert row["line"] == 2
+    assert row["test_id"] == "tests/test_calc.py::test_add"
+    assert row["message"] == "ValueError: boom"
+
+
+def test_pytest_without_a_short_summary_keeps_the_same_frame() -> None:
+    log = PYTEST_SOURCE_LOG.split(
+        "=========================== short test summary info"
+    )[0]
+
+    row = _failure(analyze(log))
+
+    assert (row["path"], row["line"]) == ("calc.py", 2)
+
+
+def test_test_targets_rerun_the_test_not_the_raising_source() -> None:
+    payload = analyze(PYTEST_SOURCE_LOG)
+
+    assert rerun_targets(payload) == ["tests/test_calc.py::test_add"]
 
 
 def test_pytest_parametrised_node_id_with_spaces_is_not_cut() -> None:
@@ -366,6 +416,28 @@ def test_cargo_compile_error_is_a_failure_before_any_test_runs() -> None:
     )
 
 
+def test_cargo_failure_summary_is_not_a_second_build_failure() -> None:
+    """`error: test failed` is the run summary, not another compile error."""
+
+    payload = analyze(
+        CARGO_TEST_LOG + "\nerror: test failed, to rerun pass `--lib`\n"
+    )
+
+    assert payload["total"] == 1
+    assert payload["failures"][0]["runner"] == "cargo-test"
+
+
+def test_go_panic_inside_a_failed_test_is_not_counted_twice() -> None:
+    payload = analyze(
+        "--- FAIL: TestBoom (0.00s)\n"
+        "    x_test.go:12: panic: boom\n"
+        "panic: boom\n"
+    )
+
+    assert payload["total"] == 1
+    assert payload["failures"][0]["message"] == "panic: boom"
+
+
 def test_a_green_log_produces_no_map() -> None:
     payload = analyze("4 passed in 0.12s\n", "")
 
@@ -398,6 +470,22 @@ def test_fingerprints_change_when_the_failure_changes() -> None:
     assert fingerprints(first) != fingerprints(moved)
 
 
+def test_fingerprints_see_failures_beyond_the_rendered_cap() -> None:
+    """A difference in the ninth failure is progress, not an identical set."""
+
+    log = "\n".join(
+        f"FAILED tests/test_many.py::test_{index} - AssertionError: {index}"
+        for index in range(9)
+    )
+    same = analyze(log)
+    changed = analyze(
+        log.replace("test_8 - AssertionError: 8", "test_8 - AssertionError: 9")
+    )
+
+    assert len(same["failures"]) == 8
+    assert fingerprints(same) != fingerprints(changed)
+
+
 def test_absolute_paths_become_repository_relative() -> None:
     payload = analyze(UNITTEST_LOG, root="D:/work")
 
@@ -414,7 +502,9 @@ def _fixture_repository(root: Path) -> None:
     tests = root / "tests"
     (tests / "deep").mkdir(parents=True)
     (tests / "test_alpha.py").write_text("import pkg.alpha\n", encoding="utf-8")
-    (tests / "deep" / "test_feature.py").write_text("from pkg.beta import VALUE\n", encoding="utf-8")
+    (tests / "deep" / "test_feature.py").write_text(
+        "from pkg import beta\n", encoding="utf-8"
+    )
     (tests / "test_unrelated.py").write_text("import json\n", encoding="utf-8")
 
 
@@ -443,6 +533,19 @@ def test_impacted_targets_are_bounded(tmp_path: Path) -> None:
     )
 
     assert len(selected) == 1
+
+
+def test_import_scan_skips_an_oversized_test_file(tmp_path: Path) -> None:
+    _fixture_repository(tmp_path)
+    huge = tmp_path / "tests" / "test_huge.py"
+    huge.write_text(
+        "from pkg.beta import VALUE\n" + "#" * (MAX_IMPORT_BYTES + 1),
+        encoding="utf-8",
+    )
+
+    selected = select_test_targets(tmp_path, ["src/pkg/beta.py"])
+
+    assert "tests/test_huge.py" not in selected
 
 
 def test_render_targets_is_copy_ready() -> None:

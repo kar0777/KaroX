@@ -2,6 +2,40 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Fixed — audit of the check map, the briefing and resume
+
+- pytest failure maps now take path and line from the same frame: an exception
+  raised in the module under test used to be reported as the test file with the
+  source line. The rerun hint still targets the test's node id.
+- A credential echoed by a check is redacted in the durable briefing, and the
+  W&B key shape is a known secret pattern. The briefing also caps a long check
+  argv and each failure place, so a 5,000-character inline check cannot push
+  the failure line out of the block.
+- A check result from before the latest edit is marked "predates the latest
+  edit"; `web.fetch` counts as a change for the review line; a malformed stored
+  count no longer raises in the renderer.
+- cargo's `error: test failed` summary and a go panic inside a failed test are
+  no longer counted as second failures.
+- Repeat detection compares every distinct failure, not only the eight that
+  fit in the rendered map.
+- Focused-target selection skips symlinks and oversized test files, matches
+  `from pkg import name`, and scans vitest file headers in one pass instead of
+  quadratically.
+- A finish batched with other calls is refused and the other calls still run;
+  previously the submission aborted the batch, dropped the later work, and the
+  report could claim a change that never happened. finish must now be alone,
+  and the engine contract says so.
+- An obligation no approved command can produce stops the run with
+  `unproducible_requirement` instead of rerunning a passing check and asking
+  for an impossible repair. The report names the gap.
+- Resume gives the configured step limit to the new run (it used to be
+  exhausted by the session's previous calls), resets the format-error budget
+  for a repair turn, and rebuilds the transcript with the task before the first
+  assistant and every synthesized tool result next to its call.
+- The failure map is parsed from the unelided capture (up to 2 MB), so a
+  failure in the middle of a >1 MB log is still named instead of being lost by
+  the display elision.
+
 ### Added — an honest final report
 
 - A stopped run's report now carries `unmet` (the completion-floor reasons

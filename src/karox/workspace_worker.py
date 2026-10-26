@@ -30,8 +30,8 @@ def _attach_failure_map(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
 
     if result.get("exit_code") != 0 or result.get("timed_out"):
         result["failure_map"] = analyze_check_output(
-            str(result.get("stdout") or ""),
-            str(result.get("stderr") or ""),
+            str(result.pop("_map_stdout", result.get("stdout") or "")),
+            str(result.pop("_map_stderr", result.get("stderr") or "")),
             root=runtime.repository,
         )
     return result
@@ -384,7 +384,7 @@ def execute_tests(
         if arguments.get("split") is not None or arguments.get("part") is not None:
             raise InvalidCommand("Node test suites do not accept split or part")
         argv, test_script = node_test
-        result = runtime._run(argv, effective)
+        result = runtime._run(argv, effective, keep_full=True)
         result.update(
             {
                 "suite": suite,
@@ -456,7 +456,7 @@ def execute_tests(
         if arguments.get("split") is not None or arguments.get("part") is not None:
             raise InvalidCommand("full suite does not accept split or part")
 
-    result = runtime._run(argv, effective)
+    result = runtime._run(argv, effective, keep_full=True)
     result.update(
         {
             "suite": suite,

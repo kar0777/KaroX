@@ -14,6 +14,11 @@ SECRET_VALUE_PATTERNS = (
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\b(?:github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,})\b"),
+    # Weights & Biases issues keys as wandb_v1_<opaque>. The repository keeps
+    # one in a text file at its root, so a check or test that echoes its
+    # environment is the realistic path for it to reach a log and then a
+    # durable briefing.
+    re.compile(r"\bwandb_v1_[A-Za-z0-9_-]{10,}\b"),
     # A bearer credential carries a digit, token punctuation or at least two
     # upper-case letters. The
     # letters-only form matched English prose ("Bearer verification ...") and

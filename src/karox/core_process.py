@@ -384,6 +384,9 @@ class CapturedStream:
     truncated: bool
     total_bytes: int
     elided_bytes: int
+    #: Unelided text for a diagnostic parser. Never serialized into a result:
+    #: callers that ask for it pop it and attach only the derived map.
+    full_text: str = ""
 
 @lru_cache(maxsize=1)
 def _legacy_output_encodings() -> tuple[str, ...]:
@@ -498,6 +501,10 @@ class ProcessToolsMixin:
     _verification_rules: Optional[tuple[VerificationRule, ...]]
     _required: Callable[..., Any]
     MAX_OUTPUT_BYTES: int
+    #: How much unelided output a diagnostic parser may read. The display
+    #: stream keeps its head and tail at MAX_OUTPUT_BYTES, but a failure block
+    #: can sit in the elided middle; this is the budget for finding it.
+    MAX_MAP_BYTES: int = 2_000_000
     MIN_PROCESS_TIMEOUT_SECONDS: float
     MAX_PROCESS_TIMEOUT_SECONDS: float
     DEFAULT_CHECK_TIMEOUT_SECONDS: float
@@ -573,6 +580,7 @@ class ProcessToolsMixin:
         inherit_environment: bool = False,
         redact_output: bool = True,
         extra_environment: Optional[Dict[str, str]] = None,
+        keep_full: bool = False,
     ) -> Dict[str, Any]:
         timeout = min(
             max(float(timeout_seconds), self.MIN_PROCESS_TIMEOUT_SECONDS),
@@ -649,9 +657,9 @@ class ProcessToolsMixin:
                     raise
             finally:
                 tree.close()
-            stdout = self._bounded_stream(stdout_file)
-            stderr = self._bounded_stream(stderr_file)
-        return {
+            stdout = self._bounded_stream(stdout_file, keep_full=keep_full)
+            stderr = self._bounded_stream(stderr_file, keep_full=keep_full)
+        result = {
             # Redaction of the captured streams is a diagnostic-surface rule:
             # audit/console rows must never echo a credential a child printed.
             # Byte-faithful consumers (search backends) opt out; their own
@@ -681,8 +689,18 @@ class ProcessToolsMixin:
             "stderr_elided_bytes": stderr.elided_bytes,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+        if keep_full:
+            # Redacted like the display streams; the consumer pops these and
+            # keeps only the parsed map, so the unelided text never persists.
+            result["_map_stdout"] = (
+                str(redact(stdout.full_text)) if redact_output else stdout.full_text
+            )
+            result["_map_stderr"] = (
+                str(redact(stderr.full_text)) if redact_output else stderr.full_text
+            )
+        return result
 
-    def _bounded_stream(self, handle: Any) -> CapturedStream:
+    def _bounded_stream(self, handle: Any, *, keep_full: bool = False) -> CapturedStream:
         handle.flush()
         handle.seek(0)
         digest = hashlib.sha256()
@@ -693,6 +711,23 @@ class ProcessToolsMixin:
                 break
             digest.update(chunk)
             size += len(chunk)
+        full_text = ""
+        if keep_full:
+            budget = max(0, int(self.MAX_MAP_BYTES))
+            if size <= budget:
+                handle.seek(0)
+                full_text, _ = _decode_captured_bytes(handle.read(size))
+            else:
+                # A pathological stream: keep both ends so the first failure
+                # and the final summary are still parseable.
+                half = max(1, budget // 2)
+                handle.seek(0)
+                head_full = handle.read(half)
+                handle.seek(size - half)
+                tail_full = handle.read(half)
+                head_part, _ = _decode_captured_bytes(head_full)
+                tail_part, _ = _decode_captured_bytes(tail_full, mid_stream_start=True)
+                full_text = head_part + "\n" + tail_part
         limit = max(0, int(self.MAX_OUTPUT_BYTES))
         if size <= limit:
             handle.seek(0)
@@ -704,6 +739,7 @@ class ProcessToolsMixin:
                 False,
                 size,
                 0,
+                full_text,
             )
         # A compiler or a test runner states the root cause first and then repeats
         # it in a summary, so returning only the tail throws away the half of the
@@ -728,7 +764,7 @@ class ProcessToolsMixin:
             + f"\n[karox: {elided} bytes elided from the middle of this stream]\n"
             + tail_text
         )
-        return CapturedStream(text, digest.hexdigest(), True, size, elided)
+        return CapturedStream(text, digest.hexdigest(), True, size, elided, full_text)
 
     def _run_check(
         self, arguments: Dict[str, Any], deadline_seconds: float
@@ -752,6 +788,7 @@ class ProcessToolsMixin:
                 extra_environment={"KAROX_CHECK_CHALLENGE": challenge}
                 if ours
                 else None,
+                keep_full=True,
             )
         if ours and challenge not in str(result.get("stdout", "")):
             result["exit_code"] = 1
@@ -768,8 +805,8 @@ class ProcessToolsMixin:
         # and test id even when the raw log later loses them.
         if result.get("exit_code") != 0 or result.get("timed_out"):
             result["failure_map"] = analyze_check_output(
-                str(result.get("stdout") or ""),
-                str(result.get("stderr") or ""),
+                str(result.pop("_map_stdout", result.get("stdout") or "")),
+                str(result.pop("_map_stderr", result.get("stderr") or "")),
                 root=self.repository,
             )
         # A caller that asked for ten minutes and silently got the host's deadline
@@ -825,6 +862,7 @@ class ProcessToolsMixin:
             result = self._run(
                 [*plan.inline_prefix, script, *plan.inline_tail],
                 plan.effective_timeout,
+                keep_full=True,
             )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)

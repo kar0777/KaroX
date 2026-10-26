@@ -177,3 +177,60 @@ def test_same_state_renders_the_same_text() -> None:
 
 def test_empty_state_has_no_block() -> None:
     assert build_state_briefing(task="") == ""
+
+
+def test_long_check_argv_does_not_push_out_the_failure() -> None:
+    """A long inline check must not consume the block before its failures."""
+
+    history = [
+        _check(argv=("python", "-c", "x" * 5_000), failures=CALC_FAILURES)
+    ]
+
+    text = build_state_briefing(task="fix the parser", history=history)
+
+    assert len(text) <= MAX_STATE_BRIEFING_CHARS
+    assert "failed" in text
+    assert "tests/test_calc.py:5" in text
+
+
+def test_a_credential_in_a_failure_is_redacted_in_the_briefing() -> None:
+    """The block is resent for the rest of the run, so it must not keep a key."""
+
+    failures = [
+        {
+            "path": "tests/test_w.py",
+            "line": 1,
+            "test_id": "tests/test_w.py::test_key",
+            "message": "WANDB_API_KEY=wandb_v1_ABCDEFGHIJ123456",
+        }
+    ]
+
+    text = build_state_briefing(task="fix it", history=[_check(failures=failures)])
+
+    assert "wandb_v1_" not in text
+    assert "[REDACTED]" in text
+
+
+def test_a_check_before_the_latest_edit_is_marked_stale() -> None:
+    history = [_write(), _check(failed=False), _write()]
+
+    text = build_state_briefing(task="fix it", history=history)
+
+    assert "passed" in text
+    assert "predates the latest edit" in text
+
+
+def test_web_fetch_counts_as_a_change_for_the_review_line() -> None:
+    history = [
+        _write(),
+        {"role": "tool", "core_name": "git.diff", "result": {"ok": True, "data": {}}},
+        {
+            "role": "tool",
+            "core_name": "web.fetch",
+            "result": {"ok": True, "data": {"changed": True, "path": "x.js"}},
+        },
+    ]
+
+    text = build_state_briefing(task="fix it", history=history)
+
+    assert "no git.diff review since the last edit" in text

@@ -52,7 +52,7 @@ from .engine.exceptions import (  # noqa: E402
     Submitted,
     UserInterruption,
 )
-from .engine_tool_env import CoreToolEnvironment  # noqa: E402
+from .engine_tool_env import CoreToolEnvironment, FINISH_BATCH_MARKER  # noqa: E402
 from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
     EngineProviderModel,
@@ -123,7 +123,9 @@ You act through typed tool calls; there is no shell.
   and returns failures for repair; call checks only when the result changes
   your next step.
 - When the task is complete, call the finish tool with {"answer": "<final
-  answer text>"}. After finish you cannot continue working.
+  answer text>"}. After finish you cannot continue working. finish must be the
+  only tool call in its response; if it is batched with other calls, it is
+  refused and the other calls run, so call finish again after reviewing them.
 - Never print tool markup as prose; a response without a tool call is a format
   error.
 """
@@ -206,6 +208,37 @@ class EngineAgent(DefaultAgent):
         finally:
             self._kernel._on_step_finished(self.n_calls)
         return result
+
+    def execute_actions(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Run a batch, refusing a finish that is not alone.
+
+        The engine executes calls in order and raises ``Submitted`` from the
+        finish tool. In a batch that aborts the loop before the later calls
+        run and before any observation is added, so a model that wrote
+        ``[finish("created a and b"), write b]`` could be reported verified
+        with only ``a`` on disk. Rewriting that finish to a refusal marker
+        keeps the batch intact: every call runs, every result is visible, and
+        the model must submit again with finish alone.
+        """
+
+        actions = (message.get("extra") or {}).get("actions") or []
+        if len(actions) > 1 and any(
+            isinstance(action, Mapping) and action.get("name") == FINISH_TOOL_NAME
+            for action in actions
+        ):
+            rewritten: List[Any] = []
+            for action in actions:
+                if isinstance(action, Mapping) and action.get("name") == FINISH_TOOL_NAME:
+                    rewritten.append(
+                        {**action, "name": FINISH_BATCH_MARKER, "arguments": {}}
+                    )
+                else:
+                    rewritten.append(action)
+            message = {
+                **message,
+                "extra": {**(message.get("extra") or {}), "actions": rewritten},
+            }
+        return super().execute_actions(message)
 
     def query(self) -> Dict[str, Any]:
         if hasattr(self.model, "step"):
@@ -336,6 +369,9 @@ class EngineAgent(DefaultAgent):
         """Resume the step loop after the caller appended repair messages."""
         if self.messages and self.messages[-1].get("role") == "exit":
             self.messages = self.messages[:-1]
+        # A repair turn is a fresh chance: format errors spent before the
+        # submission must not make its first malformed response the last.
+        self.n_consecutive_format_errors = 0
         return self._loop()
 
     def _loop(self) -> Dict[str, Any]:
@@ -597,7 +633,7 @@ class EngineKernel:
                 environment,
                 kernel=self,
                 resume_step_calls=resume_calls,
-                step_limit=int(self.limits.max_steps),
+                step_limit=int(self.limits.max_steps) + resume_calls,
                 wall_time_limit_seconds=int(float(self.limits.max_seconds)),
                 cost_limit=0.0,
                 context_token_budget=self._engine_context_budget(),
@@ -672,6 +708,21 @@ class EngineKernel:
                     if exit_status != "Submitted":
                         break
                     failure = self._failure_summary(record)
+                    if completion_gate.only_unproducible(
+                        completion_gate.floor(self.core, record)
+                    ):
+                        # A repair turn cannot produce this proof: no approved
+                        # command exists for it. Asking the model to try again
+                        # spends turns and tokens on an impossible obligation.
+                        self._emit(
+                            AgentEventKind.WARNING,
+                            reason="unproducible_requirement",
+                            detail=(
+                                "the remaining proof cannot be produced by an "
+                                "approved command"
+                            ),
+                        )
+                        break
                     remaining = self._deadline - self.monotonic()
                     if (
                         not failure
@@ -809,7 +860,18 @@ class EngineKernel:
                 },
                 phase="execution",
             )
-            messages.append({"role": "user", "content": current_task})
+            # Insert before the first assistant, not at the end: a user message
+            # between an assistant tool call and its result is rejected by
+            # transports that pair them (OpenAI-compatible, Anthropic).
+            insert_at = next(
+                (
+                    index
+                    for index, message in enumerate(messages)
+                    if message.get("role") == "assistant"
+                ),
+                len(messages),
+            )
+            messages.insert(insert_at, {"role": "user", "content": current_task})
         if not messages:
             return None, 0
         answered: Set[str] = {
@@ -817,42 +879,50 @@ class EngineKernel:
             for item in messages
             if item.get("role") == "tool"
         }
-        synthesized: List[Dict[str, Any]] = []
+        # A run interrupted between the model's call and its execution leaves
+        # a tool_use without a tool_result; a transport that pairs them would
+        # refuse the whole resumed request. Insert the synthetic result
+        # immediately after its assistant message: appending all of them at
+        # the end left assistant/user/tool messages in between. Synthesized in
+        # memory only; the durable record still says the call never ran.
+        rebuilt: List[Dict[str, Any]] = []
         for message in messages:
+            rebuilt.append(message)
             if message.get("role") != "assistant":
                 continue
             for call in message.get("tool_calls") or ():
                 call_id = str(call.get("call_id", ""))
-                if call_id and call_id not in answered:
-                    # A run interrupted between the model's call and its
-                    # execution leaves a tool_use without a tool_result; a
-                    # transport that pairs them (Anthropic, Gemini) would
-                    # refuse the whole resumed request. Synthesized in memory
-                    # only: the durable record still says the call never ran.
-                    answered.add(call_id)
-                    synthesized.append(
-                        {
-                            "role": "tool",
-                            "content": (
-                                "<returncode>-1</returncode>\n<output>\nthe run "
-                                "was interrupted before this call executed; it did "
-                                "not run and changed nothing\n</output>"
-                            ),
-                            "tool_call_id": call_id,
-                        }
-                    )
-        if synthesized:
-            messages.extend(synthesized)
-        return messages, assistant_steps
+                if not call_id or call_id in answered:
+                    continue
+                answered.add(call_id)
+                rebuilt.append(
+                    {
+                        "role": "tool",
+                        "content": (
+                            "<returncode>-1</returncode>\n<output>\nthe run "
+                            "was interrupted before this call executed; it did "
+                            "not run and changed nothing\n</output>"
+                        ),
+                        "tool_call_id": call_id,
+                    }
+                )
+        return rebuilt, assistant_steps
 
     @staticmethod
     def _task_covered(record: SessionRecord) -> bool:
         task = str(record.task)
+        if not task:
+            return True
         for entry in record.provider_history:
             if entry.get("kind") == "task" and str(entry.get("content", "")).endswith(task):
                 return True
+        # The first user turn of an engine run is the rendered instance
+        # template, which ends with the task. Requiring exact equality made
+        # every engine-written session look uncovered and injected a second
+        # task message at the end of a resumed transcript.
         return any(
-            entry.get("role") == "user" and str(entry.get("content", "")) == task
+            entry.get("role") == "user"
+            and str(entry.get("content", "")).endswith(task)
             for entry in record.provider_history
         )
 
@@ -955,7 +1025,12 @@ class EngineKernel:
                 self._persist_format_error_nudge(session_id, lease, message)
                 continue
             history = self.sessions.load(session_id).provider_history
-            kind = "task" if not history and role == "user" else "engine_note"
+            # Keep the caller's kind: a repair prompt is engine_repair, not an
+            # anonymous engine_note. Only a message without one gets the
+            # first-turn/observation default.
+            kind = str(message.get("kind") or "")
+            if not kind:
+                kind = "task" if not history and role == "user" else "engine_note"
             self._append_message(
                 session_id,
                 lease,
@@ -1270,6 +1345,11 @@ class EngineKernel:
         missing = completion_gate.floor(self.core, record)
         if any(reason.startswith("active failed check:") for reason in missing):
             return ()
+        if completion_gate.only_unproducible(missing):
+            # No approved command can produce this proof; running the same
+            # passing check again only pays for a duplicate and cannot change
+            # the report. The gap stays visible in ``unmet``.
+            return ()
         calls: List[Tuple[str, Dict[str, Any]]] = []
         seen: Set[Tuple[str, ...]] = set()
         for command in self.core.verification_command_order:
@@ -1480,7 +1560,6 @@ class EngineKernel:
                 continue
             failed.append(data)
         detail = ""
-        targets: List[str] = []
         seen_sets: List[tuple[str, ...]] = []
         last_report: Optional[Dict[str, Any]] = None
         for data in failed:
@@ -1497,18 +1576,9 @@ class EngineKernel:
                     str(data.get(field) or "") for field in ("stdout", "stderr")
                 ).strip()
                 rendered = _bounded_failure_summary(output) if output else ""
-            if rendered:
-                detail = rendered
-        if last_report is not None:
-            for row in last_report.get("failures") or ():
-                path = row.get("path") if isinstance(row, dict) else None
-                if (
-                    isinstance(path, str)
-                    and path.startswith("tests/")
-                    and path.endswith(".py")
-                    and path not in targets
-                ):
-                    targets.append(path)
+            # The latest failed check wins even when it has no rendered detail:
+            # keeping an older map would present a stale failure as current.
+            detail = rendered
         if seen_sets and seen_sets[-1]:
             repeats = sum(1 for item in seen_sets[:-1] if item == seen_sets[-1])
             if repeats:
@@ -1516,7 +1586,7 @@ class EngineKernel:
                     f"\nThe same failure set is still present after {repeats} "
                     "earlier run(s): the last change did not alter it."
                 )
-        hint = check_report.render_targets(targets[:4])
+        hint = check_report.render_targets(check_report.rerun_targets(last_report, 4))
         return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
     @staticmethod
@@ -1578,6 +1648,9 @@ class EngineKernel:
         record = self.sessions.load(session_id)
         if self.require_change and not record.changed_files:
             return "no_changes"
+        missing = completion_gate.floor(self.core, record)
+        if completion_gate.only_unproducible(missing):
+            return "unproducible_requirement"
         if self._failure_summary(record):
             return "verification_failed"
         return "unverified_changes" if record.changed_files else "no_changes"

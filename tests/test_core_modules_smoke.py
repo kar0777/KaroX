@@ -63,8 +63,10 @@ class FakeRuntime:
     def _file_sha256(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    def _run(self, argv: list[str], timeout: float) -> dict[str, object]:
-        del timeout
+    def _run(
+        self, argv: list[str], timeout: float, *, keep_full: bool = False
+    ) -> dict[str, object]:
+        del timeout, keep_full
         return {
             "argv": list(argv),
             "exit_code": 0,

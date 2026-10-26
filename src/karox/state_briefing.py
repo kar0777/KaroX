@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .security import redact
+
 __all__ = ["build_state_briefing", "MAX_STATE_BRIEFING_CHARS"]
 
 #: The block travels in every request after a compaction, so it must stay a
@@ -45,7 +47,7 @@ HEADER = (
 #: Tools whose success means the repository bytes changed. `dev.command` is not
 #: here: starting a server is not an edit, and it must not stale the review.
 _MUTATING_TOOLS = frozenset(
-    {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command"}
+    {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command", "web.fetch"}
 )
 #: How the sections are ordered in the block, and what may be dropped when the
 #: total exceeds the cap. 0 is never dropped.
@@ -106,7 +108,10 @@ def build_state_briefing(
     body = _fit(sections, max(120, int(max_chars) - len(HEADER) - 1))
     if not body:
         return ""
-    return f"{HEADER}\n{body}"
+    # The block is rebound to the never-compacted task message and then resent
+    # on every later request, so a credential that a check or test printed must
+    # not become durable here even if it survived the check-stream redaction.
+    return redact(f"{HEADER}\n{body}")
 
 
 def _fit(sections: Sequence[Tuple[int, int, str]], max_chars: int) -> str:
@@ -163,7 +168,7 @@ def _verification_block(history: Sequence[Mapping[str, Any]]) -> str:
     if check is None:
         return "Verification: no approved check has run yet; KaroX runs one when you finish."
     index, data, result = check
-    argv = " ".join(str(item) for item in data.get("argv") or () if str(item))
+    argv = _one_line(" ".join(str(item) for item in data.get("argv") or () if str(item)), 200)
     passed = (
         result.get("ok") is True
         and data.get("exit_code") == 0
@@ -171,6 +176,11 @@ def _verification_block(history: Sequence[Mapping[str, Any]]) -> str:
     )
     age = max(0, len(history) - index - 1)
     ago = f" ({age} event{'s' if age != 1 else ''} ago)" if age else " (just now)"
+    if _last_mutation_index(history) > index:
+        # A pass or a failure from before the latest edit describes bytes that
+        # are no longer on disk. Saying so prevents a stale "passed" from
+        # ending the repair early and a stale failure from directing an edit.
+        ago = ago[:-1] + "; predates the latest edit)"
     command = f"`{argv}`" if argv else "the approved check"
     if passed:
         return f"Verification: {command} passed{ago}."
@@ -215,10 +225,10 @@ def _failure_lines(report: Any) -> List[str]:
     for row in rows[:FAILURE_ITEMS]:
         if not isinstance(row, Mapping):
             continue
-        path = str(row.get("path") or "")
+        path = _one_line(str(row.get("path") or ""), 180)
         line = row.get("line")
         place = f"{path}:{line}" if path and isinstance(line, int) else path
-        test_id = str(row.get("test_id") or "")
+        test_id = _one_line(str(row.get("test_id") or ""), 120)
         if "::" in test_id:
             test_id = test_id.rsplit("::", 1)[-1]
         label = " · ".join(part for part in (place, test_id) if part)
@@ -259,8 +269,25 @@ def _plan_block(plan_items: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _review_line(history: Sequence[Mapping[str, Any]]) -> str:
-    last_mutation = -1
+    last_mutation = _last_mutation_index(history)
+    if last_mutation < 0:
+        return ""
     last_review = -1
+    for index, entry in enumerate(history):
+        if not isinstance(entry, Mapping):
+            continue
+        result = entry.get("result")
+        if not isinstance(result, Mapping) or result.get("ok") is not True:
+            continue
+        if entry.get("core_name") == "git.diff":
+            last_review = index
+    if last_review > last_mutation:
+        return "Change review: git.diff ran after the last edit."
+    return "Change review: no git.diff review since the last edit."
+
+
+def _last_mutation_index(history: Sequence[Mapping[str, Any]]) -> int:
+    found = -1
     for index, entry in enumerate(history):
         if not isinstance(entry, Mapping):
             continue
@@ -270,14 +297,8 @@ def _review_line(history: Sequence[Mapping[str, Any]]) -> str:
         data = result.get("data")
         data = data if isinstance(data, Mapping) else {}
         if entry.get("core_name") in _MUTATING_TOOLS and data.get("changed") is True:
-            last_mutation = index
-        elif entry.get("core_name") == "git.diff":
-            last_review = index
-    if last_mutation < 0:
-        return ""
-    if last_review > last_mutation:
-        return "Change review: git.diff ran after the last edit."
-    return "Change review: no git.diff review since the last edit."
+            found = index
+    return found
 
 
 def _canonical(text: str) -> str:
