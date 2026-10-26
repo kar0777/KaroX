@@ -59,6 +59,31 @@ def output_token_field(model: str) -> str:
     return "max_completion_tokens" if _REASONING_FAMILY.match(name) else "max_tokens"
 
 
+#: Optional tuning fields an OpenAI-compatible gateway may reject. A retry
+#: without them keeps the required shape -- model, messages, tools,
+#: tool_choice and the output cap -- so it is the same request, not a weaker
+#: one. W&B DeepSeek is the case that made this necessary: it rejects
+#: ``reasoning_effort=medium`` while accepting low/high/xhigh/max/none.
+#: The fields whose rejection justifies the reduced retry. A 400 about a tool
+#: schema must keep its single, accurate failure; only a reasoning dial has a
+#: known cross-provider vocabulary problem.
+_REASONING_TUNING_KEYS = ("reasoning_effort", "reasoning")
+_OPTIONAL_TUNING_KEYS = (
+    *_REASONING_TUNING_KEYS,
+    "temperature",
+    "prompt_cache_key",
+    "parallel_tool_calls",
+)
+
+
+def _has_reasoning_tuning(payload: Mapping[str, Any]) -> bool:
+    return any(key in payload for key in _REASONING_TUNING_KEYS)
+
+
+def _without_optional_tuning(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in _OPTIONAL_TUNING_KEYS}
+
+
 class ProviderErrorKind(str, Enum):
     AUTHENTICATION = "authentication"
     PERMISSION = "permission"
@@ -551,6 +576,9 @@ class OpenAIChatCompletionsProvider:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self._client_lock = threading.Lock()
         self._client: Optional[httpx.Client] = None
+        # Set after a gateway rejects an optional tuning field: later requests
+        # in this session start without it instead of paying a failed attempt.
+        self._omit_optional_tuning = False
 
     def _http_client(self) -> httpx.Client:
         client = self._client
@@ -753,6 +781,10 @@ class OpenAIChatCompletionsProvider:
             hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
         ):
             payload["reasoning"] = {"summary": "auto"}
+        if self._omit_optional_tuning:
+            payload = _without_optional_tuning(payload)
+        tuning_retry = False
+        first_invalid: Optional[ProviderError] = None
         headers = self._request_headers()
         request_started = time.monotonic()
         deadline = request_started + float(request.deadline_seconds)
@@ -819,7 +851,30 @@ class OpenAIChatCompletionsProvider:
                             ) from exc
                         raise
                     return
-            except ProviderError:
+            except ProviderError as exc:
+                if (
+                    exc.kind is ProviderErrorKind.INVALID_REQUEST
+                    and not tuning_retry
+                    and not self._omit_optional_tuning
+                    and _has_reasoning_tuning(payload)
+                ):
+                    # A gateway with a different effort vocabulary rejects a
+                    # tuning field this product always sends. Retry once with
+                    # the optional fields removed; the error body is never
+                    # read, so nothing it echoes can reach a log.
+                    first_invalid = exc
+                    tuning_retry = True
+                    self._omit_optional_tuning = True
+                    payload = _without_optional_tuning(payload)
+                    continue
+                if (
+                    exc.kind is ProviderErrorKind.INVALID_REQUEST
+                    and tuning_retry
+                    and first_invalid is not None
+                ):
+                    # The reduced request failed too, so tuning was not the
+                    # cause; report the first error, which names it.
+                    raise first_invalid
                 raise
             except httpx.TransportError as exc:
                 if response_started and event_started:

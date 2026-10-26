@@ -2,6 +2,19 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Fixed — provider reasoning-effort compatibility
+
+- A model whose gateway uses a different reasoning-effort vocabulary no
+  longer fails the run. When a chat request that carried a reasoning dial is
+  rejected with HTTP 400, the transport retries once without the optional
+  tuning fields (reasoning, temperature, cache key, parallel-tool-calls) while
+  keeping the model, messages, tools and output cap unchanged, and remembers
+  the reduced shape for the rest of the session. W&B DeepSeek V4.1 Flash
+  rejects `medium` while accepting low/high/xhigh/max/none; the first live run
+  failed at step one, and after the change the same task verifies at the
+  default effort (step 1: two attempts, steps 2-5: one). The error body is
+  still never read, so nothing it might echo can reach a log.
+
 ### Added — durable state across compaction
 
 - **Compaction no longer erases what the task requires.** The engine compacts

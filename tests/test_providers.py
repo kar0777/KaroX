@@ -235,6 +235,105 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
             },
         ]
 
+    def test_rejected_reasoning_effort_retries_once_without_optional_tuning(self) -> None:
+        """A gateway with a different effort vocabulary gets one reduced retry.
+
+        W&B DeepSeek rejects ``reasoning_effort=medium`` (it accepts
+        low/high/xhigh/max/none), so the default effort made every live run
+        fail with HTTP 400. The retry drops only optional tuning fields; the
+        messages, tools and output cap are unchanged, and the error body is
+        never read.
+        """
+
+        client = FakeClient(
+            [
+                error_response(400, '{"message":"reasoning_effort must be low or high"}'),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="medium")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(request)
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(len(client.calls), 2)
+        first = client.calls[0]["json"]
+        second = client.calls[1]["json"]
+        self.assertEqual(first["reasoning_effort"], "medium")
+        self.assertIn("temperature", first)
+        self.assertNotIn("reasoning_effort", second)
+        self.assertNotIn("temperature", second)
+        self.assertEqual(second["tools"][0]["function"]["name"], "repo_read_file")
+        self.assertEqual(second["max_tokens"], 123)
+
+    def test_tuning_fallback_is_remembered_for_later_requests(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "one"}, "finish_reason": "stop"}]}]
+                ),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "two"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="medium")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            first = provider.complete(request)
+            second = provider.complete(request)
+
+        self.assertEqual((first.content, second.content), ("one", "two"))
+        self.assertEqual(len(client.calls), 3)
+        self.assertIn("reasoning_effort", client.calls[0]["json"])
+        self.assertNotIn("reasoning_effort", client.calls[1]["json"])
+        # The second request starts without the field: no failed attempt paid.
+        self.assertNotIn("reasoning_effort", client.calls[2]["json"])
+
+    def test_reduced_retry_failing_again_reports_the_first_error(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                error_response(400, "bad tool schema"),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="medium")
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(request)
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.INVALID_REQUEST)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("HTTP 400", raised.exception.safe_message)
+
+    def test_only_invalid_request_earns_the_reduced_retry(self) -> None:
+        client = FakeClient([error_response(401, "no")])
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="medium")
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            provider.complete(request)
+
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.AUTHENTICATION)
+        self.assertEqual(len(client.calls), 1)
+
     def test_normalizes_streamed_request_tools_content_calls_and_usage(self) -> None:
         client = FakeClient([sse_response(self.fragmented_events())])
         provider = OpenAIChatCompletionsProvider(
