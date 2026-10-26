@@ -13,6 +13,12 @@
   the default policy remains loopback-only, headless and non-detaching. The
   size ceiling is now checked on the saved temp file before the bytes are read
   into memory.
+- The system prompt now reads the precomputed project map first: when it
+  already names the likely implementation files and tests as a small, specific
+  set, the model reads those files directly instead of spending a turn on
+  `repo.inspect` to discover what the map already states. Measured on the A/B
+  fixture: 4 model calls instead of 5, 15-32% fewer input tokens, both runs
+  verified.
 - The finishing harness no longer re-runs a full approved check the model
   already passed on the current bytes. The fallback that produces a check when
   the floor names an obligation without a command used to fire for any missing
