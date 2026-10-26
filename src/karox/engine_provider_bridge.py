@@ -314,6 +314,7 @@ class EngineProviderModel:
         calls = response.tool_calls
         if calls:
             actions: List[Dict[str, Any]] = []
+            problems = 0
             for call in calls:
                 error = ""
                 arguments: Any = None
@@ -326,9 +327,28 @@ class EngineProviderModel:
                 if not isinstance(arguments, dict):
                     error += " Tool call arguments must be a JSON object."
                 if error:
-                    raise self._format_error(error.strip(), response, has_calls=True)
+                    problems += 1
+                    # A batch is independent by contract: one unparseable call
+                    # must not discard the calls beside it, so the bad call
+                    # becomes an observation the model can act on while the
+                    # valid calls still run, in order. A lone bad call keeps
+                    # the format-error recovery: there is nothing to preserve
+                    # and the nudge states the mistake more clearly.
+                    actions.append(
+                        {
+                            "name": call.name,
+                            "arguments": {},
+                            "tool_call_id": call.call_id,
+                            "parse_error": error.strip(),
+                        }
+                    )
+                    continue
                 actions.append(
                     {"name": call.name, "arguments": arguments, "tool_call_id": call.call_id}
+                )
+            if problems and len(calls) == 1:
+                raise self._format_error(
+                    str(actions[0].get("parse_error") or ""), response, has_calls=True
                 )
             return actions
         salvaged = salvage_fenced_command(response.content or "")

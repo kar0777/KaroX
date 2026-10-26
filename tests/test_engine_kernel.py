@@ -280,6 +280,80 @@ def test_engine_runs_independent_calls_batched_in_one_response(
     assert persisted == {"c1", "c2"}
 
 
+def test_engine_batch_keeps_valid_calls_when_one_is_malformed(
+    tmp_path: Path, repository: Path
+) -> None:
+    """One unparseable call must not discard the valid calls beside it.
+
+    Batching is only worth the contract text if a typo in one call does not
+    void the whole response. The valid write runs, the bad call returns an
+    actionable observation against its own call id, and the run continues.
+    """
+    malformed = ToolCall(call_id="c2", name="repo_write_file", raw_arguments="{not json")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "a.txt", "one"), malformed)),
+            _response((_finish_call("c3", "created a.txt; one call was rejected"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert (repository / "a.txt").read_text(encoding="utf-8") == "one"
+    assert not (repository / "b.txt").exists()
+    assert report.verified is True, report.reason
+    assert report.steps == 2
+    refused = [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("role") == "tool" and entry.get("tool_call_id") == "c2"
+    ]
+    assert refused, "the rejected call must be visible in the durable transcript"
+    assert refused[0]["error"]["type"] == "malformed_arguments"
+    assert "parsing tool call arguments" in refused[0]["error"]["message"].lower()
+
+
+def test_engine_single_malformed_call_still_gets_the_format_error_nudge(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A lone bad call keeps the format-error recovery, not an observation.
+
+    There is no batch to preserve, and the nudge names the contract the
+    provider broke. The run recovers on the next model call.
+    """
+    malformed = ToolCall(call_id="c1", name="repo_write_file", raw_arguments="{not json")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((malformed,)),
+            _response((_write_call("c2", "hello.txt", "hi"),)),
+            _response((_finish_call("c3", "created hello.txt"),)),
+        ],
+    )
+    report = harness.run()
+
+    notes = [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("kind") == "engine_note"
+    ]
+    assert any(
+        "Error parsing tool call arguments" in str(entry.get("content"))
+        for entry in notes
+    )
+    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
+    assert report.verified is True, report.reason
+    # Three billed responses: the malformed one, the write, the finish. The
+    # malformed response has no assistant turn, so the step count stays at 2
+    # while usage still charges all three requests.
+    assert report.steps == 2
+    usage = harness.record().usage
+    assert usage["requests"] == 3
+    assert (usage.get("events") or [])[0]["kind"] == "format_error"
+
+
 def test_engine_run_emits_the_stream_event_contract(tmp_path: Path, repository: Path) -> None:
     harness = Harness(
         repository,

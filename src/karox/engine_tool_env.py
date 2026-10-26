@@ -117,6 +117,12 @@ class CoreToolEnvironment:
     # -- internals ---------------------------------------------------------
 
     def _execute(self, action: Mapping[str, Any], *, requested_by: str) -> Dict[str, Any]:
+        # A call the bridge could not parse rides in a batch as an observation,
+        # so the calls beside it still run and the model sees the exact error
+        # against the call id that caused it.
+        parse_error = action.get("parse_error")
+        if parse_error:
+            return self._refusal(action, "malformed_arguments", str(parse_error))
         name = action.get("name")
         if name == FINISH_TOOL_NAME:
             return self._finish(action)
