@@ -104,6 +104,37 @@ def test_manage_context_never_touches_head_or_tail():
         assert len(m["content"]) < 500 or agent._DROP_MARKER in m["content"]
 
 
+def test_clipping_keeps_the_end_of_a_large_read():
+    """Head-only clipping lost the failing function at the end of a big file."""
+
+    agent = make_agent(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+    )
+    text = "HEAD_DEFINITION\n" + "x" * 20_000 + "BUG_AT_END\n"
+    clipped = agent._clip_text(text, 1_000, agent._TAIL_CLIP_MARKER)
+
+    assert clipped.startswith("HEAD_DEFINITION")
+    assert clipped.endswith("BUG_AT_END\n")
+    assert agent._TAIL_CLIP_MARKER in clipped
+    assert len(clipped) < 1_200
+
+
+def test_tail_clipping_preserves_the_last_function():
+    body = "def first():\n    pass\n" + "x" * 20_000 + "def bug():\n    return 1\n"
+    message = {"role": "tool", "content": body}
+    agent = make_agent(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}, message],
+        context_token_budget=1_000,
+        keep_recent_messages=24,
+    )
+    agent.manage_context()
+
+    assert message["content"].startswith("def first()")
+    assert message["content"].endswith("def bug():\n    return 1\n")
+    assert agent._TAIL_CLIP_MARKER in message["content"]
+    assert agent._estimate_tokens() <= 1_000
+
+
 def test_manage_context_drops_when_clipping_is_not_enough():
     messages = [
         {"role": "system", "content": "sys"},

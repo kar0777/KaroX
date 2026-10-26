@@ -317,13 +317,31 @@ class DefaultAgent:
                 changed = True
         return changed
 
+    def _clip_text(self, content: str, chars: int, marker: str) -> str:
+        """Keep both ends of a long body, with an explicit omission marker.
+
+        A file read or a traceback is useful at its start *and* at its end: the
+        declaration is at the top and the failing function is often the last
+        one. Head-only clipping made a large fresh read lose exactly the code
+        the task pointed at.
+        """
+
+        if len(content) <= chars:
+            return content
+        budget = max(0, int(chars) - len(marker) - 24)
+        head_len = int(budget * 0.6)
+        tail_len = budget - head_len
+        omitted = max(0, len(content) - head_len - tail_len)
+        middle = f"\n... {marker} {omitted} chars] ...\n"
+        tail = content[-tail_len:] if tail_len else ""
+        return f"{content[:head_len]}{middle}{tail}"
+
     def _clip_message(self, message: dict, chars: int) -> bool:
         """Clip one message body to ~chars; returns True when it changed."""
         content = message.get("content")
         if not isinstance(content, str) or len(content) <= chars or self._CLIP_MARKER in content:
             return self._elide_tool_arguments(message)
-        head = max(0, chars - len(self._CLIP_MARKER) - 24)
-        message["content"] = f"{content[:head]}\n... {self._CLIP_MARKER} {len(content) - head} chars] ..."
+        message["content"] = self._clip_text(content, chars, self._CLIP_MARKER)
         self._elide_tool_arguments(message)
         return True
 
@@ -346,10 +364,8 @@ class DefaultAgent:
                 excess_chars = max(0, self._estimate_tokens() - budget) * 4
                 target = max(floor, min(ceiling, len(content) - excess_chars))
                 if target < len(content):
-                    head = max(0, target - len(self._TAIL_CLIP_MARKER) - 24)
-                    message["content"] = (
-                        f"{content[:head]}\n... {self._TAIL_CLIP_MARKER} "
-                        f"{len(content) - head} chars] ..."
+                    message["content"] = self._clip_text(
+                        content, target, self._TAIL_CLIP_MARKER
                     )
                     self._elide_tool_arguments(message)
                     changed = True

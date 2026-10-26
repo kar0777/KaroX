@@ -69,7 +69,16 @@
   and was re-sent forever.
 - When the mutable middle has nothing left to free, the recent tail is clipped
   in place (roles, order and tool-call ids preserved) instead of being resent
-  forever. A short history used to be compacted at all.
+  forever. A short history used to never be compacted at all.
+- A clipped body keeps **both ends**: the file's first definitions and the
+  failing function at the bottom survive, with the omission marker between
+  them. Head-only clipping made a large fresh read lose exactly the code the
+  task pointed at.
+- Live proof with a deliberately small window: a 345 KB module whose bug sits
+  in its last function was run with `--context-window 16000`. The 50 KB read
+  was compacted in place to ~2 KB (marker present, first lines and the last
+  `total()` function still readable), `over_budget_tokens` was 0, and the run
+  verified in 4 steps / 24.8k prompt tokens.
 - Historical tool-call arguments are replaced by a marker once their body is
   clipped or dropped; the paired tool result keeps its id, so the transcript
   stays valid for every provider.
