@@ -1854,6 +1854,91 @@ def test_a_task_that_names_the_domain_gets_its_tool(
     assert "repo_command" in names
 
 
+def _big_file(repository: Path) -> Path:
+    path = repository / "big.py"
+    path.write_text("value = 1\n" + "# filler\n" * 800 + "tail = 'end'\n", encoding="utf-8")
+    return path
+
+
+def test_a_read_is_marked_stale_after_an_edit_of_the_same_file(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The full original read is not re-sent after the file changed."""
+
+    big = _big_file(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_tool_call("c1", "repo_read_file", {"path": "big.py"}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c2",
+                        "repo_edit_file",
+                        {
+                            "path": "big.py",
+                            "old_string": "value = 1",
+                            "new_string": "value = 2",
+                        },
+                    ),
+                )
+            ),
+            _response((_finish_call("c3", "fixed"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    assert big.read_text(encoding="utf-8").startswith("value = 2\n")
+    final_tools = "\n".join(
+        str(message.content or "")
+        for message in harness.provider.requests[-1].messages
+        if message.role == "tool"
+    )
+    assert "predates a later edit" in final_tools
+    assert "tail = 'end'" in final_tools
+
+
+def test_a_read_after_the_edit_is_not_marked_stale(
+    tmp_path: Path, repository: Path
+) -> None:
+    _big_file(repository)
+    harness = Harness(
+        repository,
+        tmp_path / "after",
+        [
+            _response(
+                (
+                    _tool_call(
+                        "c1",
+                        "repo_edit_file",
+                        {
+                            "path": "big.py",
+                            "old_string": "value = 1",
+                            "new_string": "value = 2",
+                        },
+                    ),
+                )
+            ),
+            _response((_tool_call("c2", "repo_read_file", {"path": "big.py"}),)),
+            _response((_finish_call("c3", "fixed"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    final_tools = "\n".join(
+        str(message.content or "")
+        for message in harness.provider.requests[-1].messages
+        if message.role == "tool"
+    )
+    assert "predates a later edit" not in final_tools
+    assert "value = 2" in final_tools
+
+
 def test_mutation_observation_keeps_only_the_decision_facts() -> None:
     """The model reads the diff, not the audit metadata.
 

@@ -249,6 +249,15 @@ _ENGINE_IDENTITY: Dict[str, str] = {
 }
 
 
+_STALE_READ_TOOLS = {"repo_read_file", "repo_read_lines"}
+_STALE_EDIT_TOOLS = {"repo_edit_file"}
+_STALE_READ_MARKER = (
+    "[KaroX: this read predates a later edit of the same file; "
+    "re-read exact lines if needed]"
+)
+_STALE_READ_CHARS = 1_200
+
+
 class EngineAgent(DefaultAgent):
     """``DefaultAgent`` with resume, cancellation and product event hooks.
 
@@ -337,7 +346,68 @@ class EngineAgent(DefaultAgent):
             raise _EngineBudgetExceeded(reason)
         return message
 
+    def _supersede_stale_reads(self) -> None:
+        """Shrink a read once the same file has been edited after it.
+
+        A repair run reads a file, edits it, then re-sends the full original
+        read on every later request. The edit result carries the diff and the
+        read is no longer the current file, so the body is clipped to a marker
+        with both ends: enough context to keep working, and an explicit note
+        that exact lines need a fresh read. The durable session record keeps the
+        full result; only the in-memory transcript shrinks.
+        """
+
+        edits: Dict[str, int] = {}
+        reads: List[tuple[int, str, str]] = []
+        for index, message in enumerate(self.messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or ():
+                if not isinstance(call, dict):
+                    continue
+                name = str(call.get("name") or "")
+                if name not in _STALE_READ_TOOLS and name not in _STALE_EDIT_TOOLS:
+                    continue
+                try:
+                    arguments = json.loads(str(call.get("raw_arguments") or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(arguments, dict):
+                    continue
+                path = arguments.get("path")
+                if not isinstance(path, str) or not path:
+                    continue
+                if name in _STALE_EDIT_TOOLS:
+                    edits[path] = index
+                else:
+                    reads.append((index, path, str(call.get("call_id") or "")))
+        if not edits:
+            return
+        tool_messages = {
+            str(message.get("tool_call_id") or ""): message
+            for message in self.messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        }
+        for read_index, path, call_id in reads:
+            edit_index = edits.get(path)
+            if edit_index is None or edit_index <= read_index:
+                continue
+            tool_message = tool_messages.get(call_id)
+            if tool_message is None:
+                continue
+            content = tool_message.get("content")
+            if (
+                not isinstance(content, str)
+                or len(content) <= 2_000
+                or _STALE_READ_MARKER in content
+            ):
+                continue
+            tool_message["content"] = self._clip_text(
+                content, _STALE_READ_CHARS, _STALE_READ_MARKER
+            )
+
     def manage_context(self) -> None:
+        self._supersede_stale_reads()
         events_before = self.n_context_events
         estimate_before = self._estimate_tokens()
         super().manage_context()

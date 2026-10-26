@@ -85,6 +85,12 @@
 - The engine budget subtracts the output ceiling from the window, and a history
   that cannot be brought under budget reports `over_budget_tokens` plus a
   `context_floor_exceeded` warning instead of claiming a successful compaction.
+- A read of a file is marked stale once that same file has been edited later.
+  The body is clipped to 1.2 KB with a marker that says exact lines need a
+  fresh read; the durable session record keeps the full result. Live proof: a
+  50 KB read of the 345 KB module was 1,199 characters at the next request, so
+  the prompt fell from 22.7k to 6.0k tokens; the run still verified in 4 steps
+  and 39.7k total prompt tokens (about 13k less than keeping the read).
 
 ### Fixed — audit of the check map, the briefing and resume
 
