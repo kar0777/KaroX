@@ -565,6 +565,40 @@ def test_crlf_pytest_log_keeps_the_section_lines() -> None:
     assert [_failure(payload, index)["line"] for index in range(4)] == [9, 13, 17, 26]
 
 
+def test_checks_body_keeps_the_map_and_only_a_slice_of_the_log() -> None:
+    """A parsed map is the primary signal; the raw log is corroboration.
+
+    Sending the full failure blocks on top of the map repeats the same facts in
+    every later request. With a map, the log is capped at 2.5 KB.
+    """
+
+    from karox.engine_tool_env import _checks_body
+
+    payload = analyze(PYTEST_LOG)
+    long_log = (
+        PYTEST_LOG
+        + "\n=================================== FAILURES ===================================\n"
+        + ("traceback detail line\n" * 600)
+        + "\n3 failed, 1 passed in 0.10s\n"
+    )
+    body = _checks_body({"stdout": long_log, "stderr": "", "failure_map": payload})
+
+    assert body.startswith("[KaroX failure map")
+    assert "test_sample.py:9" in body
+    assert len(body) < 4_500
+    assert "KaroX omitted" in body or len(long_log) < 4_500
+
+
+def test_checks_body_without_a_map_keeps_the_bounded_log() -> None:
+    from karox.engine_tool_env import _checks_body
+
+    long_log = "FAIL tests/cart.test.ts > cart > tax\n" + ("detail\n" * 1_000)
+    body = _checks_body({"stdout": long_log, "stderr": "", "failure_map": {}})
+
+    assert "FAIL tests/cart.test.ts" in body
+    assert len(body) > 2_500
+
+
 def test_checks_body_puts_the_map_before_the_log() -> None:
     from karox.engine_tool_env import _checks_body
 

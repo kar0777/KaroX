@@ -23,6 +23,12 @@
   prompt tokens 95,394 -> 79,352 and wall 37.8 s -> 19.5 s, tests 13/13.
   On the shop fixture: 46,960 -> 32,032 prompt and 6 -> 5 steps.
   The full audit record still contains every field.
+- When a failure map parsed, the raw test log attached beside it is capped at
+  2.5 KB instead of up to 12 KB: the map already names every failure, file and
+  line, and the log is corroboration. A long red check on the ledger fixture
+  fell from 6,651 to 3,355 characters of model-visible output while keeping
+  the map first and the summary tail. Without a map the previous bound stays.
+  The stored result and its byte counts are unchanged.
 
 ### Fixed — findings from the first live A/B against a minimal harness
 

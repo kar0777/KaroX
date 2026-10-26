@@ -20,6 +20,9 @@ from typing import Dict, List, Optional
 CONDENSE_THRESHOLD_CHARS = 4_000
 #: Upper bound for the condensed text; failure blocks are cut from the middle.
 CONDENSED_MAX_CHARS = 12_000
+#: When a parsed failure map already names every failure, the raw log is only
+#: corroboration. Keep a short slice of it instead of the full 12 KB.
+CONDENSED_MAX_CHARS_WITH_MAP = 2_500
 
 _PROGRESS_LINE = re.compile(r"^[.FEsxXuU]+\s*(\[\s*\d+%\])?\s*$")
 _SECTION = re.compile(r"^=+ (.+?) =+$")
@@ -33,10 +36,15 @@ def _looks_like_pytest(text: str) -> bool:
     return bool(_FINAL.search(text[-2_000:])) or "short test summary info" in text
 
 
-def condense_test_output(text: str, *, max_chars: int = CONDENSED_MAX_CHARS) -> Optional[Dict[str, object]]:
+def condense_test_output(
+    text: str,
+    *,
+    max_chars: int = CONDENSED_MAX_CHARS,
+    threshold: int = CONDENSE_THRESHOLD_CHARS,
+) -> Optional[Dict[str, object]]:
     """Return {"text", "original_chars", "kept_chars"} or None when not worth it."""
 
-    if not isinstance(text, str) or len(text) <= CONDENSE_THRESHOLD_CHARS:
+    if not isinstance(text, str) or len(text) <= threshold:
         return None
     if not _looks_like_pytest(text):
         return None

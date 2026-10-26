@@ -37,7 +37,10 @@ from .engine_provider_bridge import FINISH_TOOL_NAME  # noqa: E402
 from .models import CoreCommand, CoreResult, EvidenceRecord, Origin  # noqa: E402
 from .security import redact  # noqa: E402
 from .sessions import MutationLease  # noqa: E402
-from .test_output import condense_test_output  # noqa: E402
+from .test_output import (  # noqa: E402
+    CONDENSED_MAX_CHARS_WITH_MAP,
+    condense_test_output,
+)
 
 if TYPE_CHECKING:
     from .engine_kernel import EngineKernel
@@ -628,12 +631,20 @@ def _checks_body(data: Mapping[str, Any]) -> str:
     else:
         primary, secondary = stderr, ""
     text = primary
-    condensed = condense_test_output(text)
+    rendered = render_failure_map(data.get("failure_map"))
+    if rendered:
+        # The map already names every failure, file and line. The raw log is
+        # corroboration, not the primary signal, so keep a short slice instead
+        # of the full condensed log on every later request.
+        condensed = condense_test_output(
+            text, max_chars=CONDENSED_MAX_CHARS_WITH_MAP, threshold=0
+        )
+    else:
+        condensed = condense_test_output(text)
     if condensed is not None:
         text = str(condensed.get("text") or text)
     if secondary.strip():
         text = f"{text}\n[stderr]\n{secondary}" if text.strip() else secondary
-    rendered = render_failure_map(data.get("failure_map"))
     if rendered:
         text = f"{rendered}\n{text}" if text.strip() else rendered
     return text
