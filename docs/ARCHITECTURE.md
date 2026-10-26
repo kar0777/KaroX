@@ -128,7 +128,12 @@ design error; so is a tool handler importing `cli`.
 4. When the engine submits, the harness runs the user-approved verification
    commands through `CapabilityCoreRuntime` and reads git status/diff the same
    way. Only a passing approved check makes the run verified; the engine's own
-   submission never does.
+   submission never does. A red check is parsed by `check_report.py` into a
+   failure map — runner, test id, file, line, message — before the log is
+   clipped. The model reads that map with the result, and a repair turn
+   receives the same places plus a targeted rerun hint; an unchanged failure
+   set is named as such. The map is diagnostic only: it can direct an edit,
+   never discharge an obligation.
 5. Typed progress events (`step_started`, `text_delta`, `tool_started`,
    `tool_finished`, `finished`, ...) are emitted as one JSON line each, and the
    final line is `{"type": "result", "report": ...}`. The engine run's report
@@ -226,7 +231,7 @@ not listed is internal to its layer.
 | `registry.py`, `model_discovery.py`, `routing.py`, `provider_pricing.py`, `provider_presets.py`, `provider_controller.py`, `credentials.py` | catalog, routes, budgets, keyring |
 | `sessions.py`, `requirements.py`, `usage_analytics.py`, `memory.py` | durable state, leases, evidence, usage |
 | `project_context.py`, `project_map.py`, `map_service.py`, `mode_artifacts.py` | bounded orientation, durable Plan/Concept |
-| `effort.py`, `agent_modes.py`, `auto_verify.py`, `completion_gate.py` | effort budgets, modes, quick checks, verified floor |
+| `effort.py`, `agent_modes.py`, `auto_verify.py`, `check_report.py`, `completion_gate.py` | effort budgets, modes, quick checks, parsed failure maps and derived focused targets, verified floor |
 | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |
 | `hosted_core.py`, `bridge_oauth.py`, `bridge_proxy.py`, `bridge_serve.py`, `bridge_launcher.py`, `bridge_tailscale.py`, `bridge_profiles.py`, `browser_approval.py` | hosted MCP inbound bridge |
 | `browser/`, `computer_use/`, `desktop_apps.py` | Playwright engine (`probes.py` holds the JS and the one secret-field list; `guards.py` the locator refusals); non-intrusive Win32 desktop use |

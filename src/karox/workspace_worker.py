@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from .check_report import analyze as analyze_check_output
 from .core_types import InvalidCommand
 from .models import EvidenceRecord
 from .unified_patch import execute_apply_patch, expected_map, parse_unified_patch
@@ -17,6 +18,23 @@ from .workspace_transaction import MAX_BATCH_OPERATIONS, WorkspaceTransaction
 
 MAX_TEST_TARGETS = 200
 WORKER_PROTOCOL_VERSION = 1
+
+
+def _attach_failure_map(runtime: Any, result: dict[str, Any]) -> dict[str, Any]:
+    """Parse a red test run before the hot worker ships its output back.
+
+    ``tests.run`` is the fast feedback path, so it deserves the same failure
+    map the approved check gets: a model that asked for focused tests should
+    read file:line, not a JSON blob with a stack trace inside it.
+    """
+
+    if result.get("exit_code") != 0 or result.get("timed_out"):
+        result["failure_map"] = analyze_check_output(
+            str(result.get("stdout") or ""),
+            str(result.get("stderr") or ""),
+            root=runtime.repository,
+        )
+    return result
 
 
 def _finite_number(value: Any, name: str) -> float:
@@ -399,7 +417,7 @@ def execute_tests(
                 },
             )
         ]
-        return result
+        return _attach_failure_map(runtime, result)
 
     argv = [sys.executable, "-m", "pytest"]
     selected: list[str] = []
@@ -473,7 +491,7 @@ def execute_tests(
             },
         )
     ]
-    return result
+    return _attach_failure_map(runtime, result)
 
 
 

@@ -25,6 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+from .check_report import analyze as analyze_check_output
 from .core_types import InvalidCommand, VerificationCommandNotApproved, _path_label
 from .models import EvidenceRecord
 from .process_launcher import resolve_executable as _resolve_executable
@@ -761,6 +762,16 @@ class ProcessToolsMixin:
                 "shadows karox.web_check"
             )
         result["verification_eligible"] = plan.verification_eligible
+        # Extracted from the unelided streams: the result the model reads has
+        # its middle cut, and for a many-failure suite that is exactly where
+        # the FAILURES blocks live. The map keeps every failure's file, line
+        # and test id even when the raw log later loses them.
+        if result.get("exit_code") != 0 or result.get("timed_out"):
+            result["failure_map"] = analyze_check_output(
+                str(result.get("stdout") or ""),
+                str(result.get("stderr") or ""),
+                root=self.repository,
+            )
         # A caller that asked for ten minutes and silently got the host's deadline
         # cannot tell a genuine hang from a clamp, so both numbers are reported.
         result["requested_timeout"] = plan.requested_timeout

@@ -371,7 +371,12 @@ def additional_tool_definitions(
                     "targets": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Paths or node ids to run (focused).",
+                        "description": (
+                            "Paths or node ids to run (focused). When omitted for "
+                            "a focused run, KaroX derives the test files that "
+                            "import or conventionally match this session's "
+                            "changed modules."
+                        ),
                     },
                     "split": {
                         "type": "number",

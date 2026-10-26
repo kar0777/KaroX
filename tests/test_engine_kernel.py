@@ -19,6 +19,7 @@ import pytest
 from karox.agent import AgentEvent, AgentEventKind, AgentKernel, SYSTEM_PROMPT
 from karox.agent import AgentLimits, ContextBudget
 from karox.core import CoreRuntime
+from karox.core_tools import ExtendedCoreRuntime
 from karox.engine import __version__ as engine_version
 from karox.engine_kernel import EngineKernel
 from karox.models import AccessProfile, Capability, Origin, OriginKind
@@ -128,6 +129,7 @@ class Harness:
         session_id: str = "s1",
         max_steps: int = 12,
         create_session: bool = True,
+        runtime_cls: type = CoreRuntime,
     ) -> None:
         self.repository = repository
         self.provider = ScriptedProvider(responses)
@@ -147,7 +149,7 @@ class Harness:
                 Capability.GIT_READ,
             },
         )
-        self.core = CoreRuntime(
+        self.core = runtime_cls(
             repository,
             policy,
             self.store,
@@ -1362,3 +1364,206 @@ def test_system_prompt_only_asks_for_arguments_the_tools_have() -> None:
     lowered = SYSTEM_PROMPT.lower()
     assert "more_semantic_changes" not in SYSTEM_PROMPT
     assert "no tool call" not in lowered
+
+
+# --------------------------------------------------------------------------- #
+# Failure intelligence                                                        #
+# --------------------------------------------------------------------------- #
+
+CALC_TEST = """\
+import calc
+
+
+def test_add():
+    assert calc.add(2, 2) == 4
+"""
+CALC_WRONG = "def add(a, b):\n    return a - b\n"
+CALC_WRONG_AGAIN = "def add(a, b):\n    return a - b - 0\n"
+CALC_RIGHT = "def add(a, b):\n    return a + b\n"
+
+
+def _calc_repository(repository: Path) -> tuple[str, ...]:
+    """A committed pytest file whose failure names its own file and line."""
+
+    tests = repository / "tests"
+    tests.mkdir()
+    (tests / "__init__.py").write_text("", encoding="utf-8")
+    (tests / "test_calc.py").write_text(CALC_TEST, encoding="utf-8")
+    _git(repository, "add", "tests")
+    _git(repository, "commit", "-q", "-m", "calc test")
+    return (sys.executable, "-m", "pytest", "-q", "tests/test_calc.py")
+
+
+def _tool_messages(harness: "Harness") -> List[str]:
+    """Every string the provider was actually asked to read as a tool result."""
+
+    seen: List[str] = []
+    for request in harness.provider.requests:
+        for message in request.messages:
+            if message.role == "tool" and message.content:
+                seen.append(message.content)
+    return seen
+
+
+def _user_messages(harness: "Harness") -> List[str]:
+    seen: List[str] = []
+    for request in harness.provider.requests:
+        for message in request.messages:
+            if message.role == "user" and message.content:
+                seen.append(message.content)
+    return seen
+
+
+def test_failed_check_hands_the_model_a_parsed_failure_map(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The model must see file:line of the failing test, not the tail of a log."""
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c3", "implemented add"),)),
+            _response((_write_call("c4", "calc.py", CALC_RIGHT),)),
+            _response((_finish_call("c5", "fixed add"),)),
+        ],
+        verification=(check,),
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    failed = [
+        entry
+        for entry in record.provider_history
+        if entry.get("core_name") == "checks.run"
+        and entry.get("result", {}).get("ok") is False
+    ]
+    assert failed, "the fixture must have failed once before the repair"
+    data = failed[0]["result"]["data"]
+    failure_map = data["failure_map"]
+    assert failure_map["total"] == 1
+    failure = failure_map["failures"][0]
+    assert failure["test_id"] == "tests/test_calc.py::test_add"
+    assert failure["path"] == "tests/test_calc.py"
+    assert failure["line"] == 5
+    assert "assert" in failure["message"]
+
+    # The same turn the model read carried the map, not only the record.
+    observed = "\n".join(_tool_messages(harness))
+    assert "KaroX failure map" in observed
+    assert "tests/test_calc.py:5" in observed
+    # The repair turn named the failing test and a copy-ready rerun.
+    repair = [
+        message
+        for message in _user_messages(harness)
+        if "Verification failed after your finish" in message
+    ]
+    assert repair, "a failed check must produce a repair turn"
+    assert "tests/test_calc.py:5" in repair[-1]
+    assert 'Targeted rerun: tests.run suite=focused targets=["tests/test_calc.py"]' in repair[-1]
+
+
+def test_repeated_identical_failure_is_called_out_in_the_repair_turn(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An edit that changed no failure must not be retried as if it were new."""
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c3", "implemented add"),)),
+            _response((_write_call("c4", "calc.py", CALC_WRONG_AGAIN),)),
+            _response((_finish_call("c5", "tried again"),)),
+            _response((_finish_call("c6", "done"),)),
+        ],
+        verification=(check,),
+    )
+    report = harness.run()
+
+    assert report.verified is False
+    repairs = [
+        message
+        for message in _user_messages(harness)
+        if "Verification failed after your finish" in message
+    ]
+    assert len(repairs) >= 2
+    assert "did not alter it" in repairs[-1]
+    assert "same failure set is still present after 1 earlier run(s)" in repairs[-1]
+
+
+def test_focused_test_failure_is_mapped_for_the_model(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A red focused run must name file:line too, not arrive as a JSON blob."""
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "tests_run", {"suite": "focused"}),)),
+            _response((_write_call("c3", "calc.py", CALC_RIGHT),)),
+            _response((_finish_call("c4", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    runs = [
+        entry
+        for entry in record.provider_history
+        if entry.get("core_name") == "tests.run"
+    ]
+    assert len(runs) == 1
+    data = runs[0]["result"]["data"]
+    assert data["targets_source"] == "session_changes"
+    assert data["failure_map"]["total"] == 1
+    observed = "\n".join(_tool_messages(harness))
+    assert "KaroX failure map" in observed
+    assert "tests/test_calc.py:5" in observed
+    assert "[tests.run exit 1" in observed
+
+
+def test_focused_tests_derive_targets_from_the_session_changes(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A focused run with no targets must use the changed files, not refuse."""
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c2", "tests_run", {"suite": "focused"}),)),
+            _response((_finish_call("c3", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    runs = [
+        entry
+        for entry in record.provider_history
+        if entry.get("core_name") == "tests.run"
+    ]
+    assert len(runs) == 1
+    data = runs[0]["result"]["data"]
+    assert data["suite"] == "focused"
+    assert data["targets"] == ["tests/test_calc.py"]
+    assert data["targets_source"] == "session_changes"

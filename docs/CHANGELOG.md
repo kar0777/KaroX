@@ -2,6 +2,32 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Added — check intelligence
+
+- **A failing check now arrives as a failure map, not as the tail of a log.**
+  `check_report.py` parses pytest, unittest, Jest/Vitest, node:test, go test,
+  cargo test and cargo build errors, ruff, mypy and tsc into runner, test id,
+  file, line, column, code and a one-line message. The map is extracted from
+  the unelided streams before the middle of a long log is cut, so a suite with
+  many failures still names every file and line the model needs. The same map
+  is prepended to the tool result the model reads, and a failed `tests.run`
+  gets it too.
+- **stderr is part of the check result.** Jest and cargo print their failures
+  to stderr; reading only stdout made a red run look silent. The model now
+  sees both streams, labelled.
+- **The repair turn names the exact place and a copy-ready rerun.** A failure
+  summary carries `path:line`, the failing test id and
+  `tests.run suite=focused targets=[...]` for the test files that failed,
+  instead of a bounded tail of stdout. A second identical failure set is
+  labelled as unchanged ("the last change did not alter it"), so a repair turn
+  cannot mistake a repeat for progress.
+- **Focused tests derive their own targets.** `tests.run` with
+  `suite=focused` and no targets used to refuse the call. It now selects the
+  test files under `tests/` that conventionally match or import the modules
+  this session changed, reports `targets_source: "session_changes"`, and lets
+  every path be validated again by the runner. The approved full command
+  remains the only evidence; a focused run is fast feedback.
+
 ### Added
 
 - `karox agent run --browser-plain-credentials` lets the browser fill

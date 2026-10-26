@@ -60,6 +60,7 @@ from .engine_provider_bridge import (  # noqa: E402
 )
 
 from . import completion_gate  # noqa: E402
+from . import check_report  # noqa: E402
 from . import session_analysis  # noqa: E402
 from .agent import (  # noqa: E402
     HARNESS_ORIGIN,
@@ -1414,19 +1415,79 @@ class EngineKernel:
         return (self._verification(record) and visual_ok) or self._answer_complete(record)
 
     def _failure_summary(self, record: SessionRecord) -> str:
+        """What the repair turn is told, in the order a fix needs it.
+
+        The floor reasons say which obligation is unmet; the failure map says
+        where. Parsed failures survive the log clipping, name the exact file
+        and line, and make "nothing changed since the last repair" visible
+        instead of silently repeating a turn.
+        """
+
         pieces = list(completion_gate.floor(self.core, record))
-        output = ""
-        for entry in reversed(record.provider_history):
+        failed: List[Dict[str, Any]] = []
+        # A map from an older state is worse than none: "missing current check"
+        # means no check ran on these bytes, and showing a failure the last
+        # edit may already have fixed sends the repair at the wrong file.
+        failed_owed = any(
+            reason.startswith(("active failed check:", "unresolved failed check:"))
+            for reason in pieces
+        )
+        entries = record.provider_history if failed_owed else ()
+        for entry in entries:
             if entry.get("role") != "tool" or entry.get("core_name") != "checks.run":
                 continue
             result = entry.get("result")
-            data = result.get("data") if isinstance(result, dict) else None
-            if isinstance(data, dict) and data.get("verification_eligible") is True:
-                output = str(data.get("stdout") or "")
-                break
-        if output:
-            pieces.append(_bounded_failure_summary(output))
-        return "; ".join(piece for piece in pieces if piece)
+            if not isinstance(result, dict):
+                continue
+            data = result.get("data")
+            if not isinstance(data, dict) or data.get("verification_eligible") is not True:
+                continue
+            if (
+                result.get("ok") is True
+                and data.get("exit_code") == 0
+                and not data.get("timed_out")
+            ):
+                continue
+            failed.append(data)
+        detail = ""
+        targets: List[str] = []
+        seen_sets: List[tuple[str, ...]] = []
+        last_report: Optional[Dict[str, Any]] = None
+        for data in failed:
+            report = data.get("failure_map")
+            identity = check_report.fingerprints(report) if isinstance(report, dict) else ()
+            seen_sets.append(identity)
+            rendered = check_report.render_failure_map(report)
+            if isinstance(report, dict) and report.get("failures"):
+                # Only the latest failing state feeds the rerun hint: an older
+                # failure may describe a file the last edit already fixed.
+                last_report = report
+            if not rendered:
+                output = "\n".join(
+                    str(data.get(field) or "") for field in ("stdout", "stderr")
+                ).strip()
+                rendered = _bounded_failure_summary(output) if output else ""
+            if rendered:
+                detail = rendered
+        if last_report is not None:
+            for row in last_report.get("failures") or ():
+                path = row.get("path") if isinstance(row, dict) else None
+                if (
+                    isinstance(path, str)
+                    and path.startswith("tests/")
+                    and path.endswith(".py")
+                    and path not in targets
+                ):
+                    targets.append(path)
+        if seen_sets and seen_sets[-1]:
+            repeats = sum(1 for item in seen_sets[:-1] if item == seen_sets[-1])
+            if repeats:
+                detail += (
+                    f"\nThe same failure set is still present after {repeats} "
+                    "earlier run(s): the last change did not alter it."
+                )
+        hint = check_report.render_targets(targets[:4])
+        return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
     def _terminal_reason(self, session_id: str, exit_status: str) -> str:
         if exit_status == "LimitsExceeded":

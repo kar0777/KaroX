@@ -29,6 +29,7 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 from . import completion_gate  # noqa: E402
 from .agent import AgentEventKind, _derived_tool_events  # noqa: E402
 from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
+from .check_report import render_failure_map, select_test_targets  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
 from .engine.environments.local import clip_output  # noqa: E402
 from .engine.exceptions import Submitted  # noqa: E402
@@ -137,6 +138,21 @@ class CoreToolEnvironment:
         definition = self._definitions.get(core_name)
         if definition is None:
             return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
+        # The session already knows which files it changed, so a focused run
+        # can name its own targets instead of refusing the call and spending a
+        # whole model turn on "which test file is this?". The derived list is
+        # ordinary targets: the worker validates every path again.
+        derived_targets: List[str] = []
+        if core_name == "tests.run" and not arguments.get("targets"):
+            suite = arguments.get("suite", "focused")
+            if suite == "focused":
+                record = self._core.sessions.load(self._session_id)
+                derived_targets = select_test_targets(
+                    self._core.repository, record.changed_files
+                )
+                if derived_targets:
+                    arguments = dict(arguments)
+                    arguments["targets"] = derived_targets
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
         started = self._kernel.monotonic()
@@ -185,6 +201,14 @@ class CoreToolEnvironment:
                 duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
             )
             return self._observation(message, 1, "refused")
+        if core_name == "tests.run" and isinstance(result.data, dict):
+            # Say where the target list came from: a reader of the session must
+            # be able to tell a model's choice from the harness's derivation.
+            result.data["targets_source"] = (
+                "session_changes"
+                if derived_targets
+                else ("request" if arguments.get("targets") else "none")
+            )
         if proof_before is not None:
             proof_after = completion_gate.identity(
                 self._core, self._core.sessions.load(self._session_id)
@@ -356,16 +380,23 @@ class CoreToolEnvironment:
     def _render_output(self, core_name: str, result: CoreResult) -> Dict[str, Any]:
         data = result.data if isinstance(result.data, dict) else {}
         returncode = 0 if result.ok else 1
-        if core_name == "checks.run":
-            text = str(data.get("stdout") or "")
-            condensed = condense_test_output(text)
-            if condensed is not None:
-                text = str(condensed.get("text") or text)
+        if core_name in {"checks.run", "tests.run"}:
+            # The fast focused-test path deserves the same readable body as an
+            # approved check: file:line of each failure, then the raw log. It
+            # stays non-evidence; only checks.run can satisfy the floor.
+            text = _checks_body(data)
             exit_code = data.get("exit_code")
             detail = f"exit {exit_code}" if isinstance(exit_code, int) else "finished"
             if data.get("timed_out"):
                 detail = "timed out"
-            text = f"[checks.run {detail}]\n{text}".strip()
+            if core_name == "tests.run":
+                suite = data.get("suite")
+                count = data.get("target_count")
+                if isinstance(suite, str):
+                    detail += f" · {suite}"
+                if isinstance(count, int) and not isinstance(count, bool):
+                    detail += f" · {count} target(s)"
+            text = f"[{core_name} {detail}]\n{text}".strip()
             if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
                 returncode = exit_code if exit_code > 0 else 1
         elif core_name in _READABLE_TOOLS and result.ok:
@@ -394,6 +425,33 @@ class CoreToolEnvironment:
             "returncode": returncode,
             "exception_info": "",
         }
+
+
+def _checks_body(data: Mapping[str, Any]) -> str:
+    """What the model reads for one finished check.
+
+    The failure map comes first: it is the part that survives clipping and it
+    names the file and line a repair has to edit. The raw streams follow,
+    condensed when long. stderr is appended whenever it spoke, because Jest and
+    cargo report there; reading stdout alone made a red run look silent.
+    """
+
+    stdout = str(data.get("stdout") or "")
+    stderr = str(data.get("stderr") or "")
+    if stdout.strip():
+        primary, secondary = stdout, stderr
+    else:
+        primary, secondary = stderr, ""
+    text = primary
+    condensed = condense_test_output(text)
+    if condensed is not None:
+        text = str(condensed.get("text") or text)
+    if secondary.strip():
+        text = f"{text}\n[stderr]\n{secondary}" if text.strip() else secondary
+    rendered = render_failure_map(data.get("failure_map"))
+    if rendered:
+        text = f"{rendered}\n{text}" if text.strip() else rendered
+    return text
 
 
 def _result_summary(core_name: str, result: CoreResult) -> str:
