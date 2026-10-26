@@ -2,6 +2,44 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Added — an honest final report
+
+- A stopped run's report now carries `unmet` (the completion-floor reasons
+  still open) and `failure_map` (the parsed failure map of the last approved
+  check that failed). The human CLI output prints both, and the TUI result
+  card shows the reasons and up to five failure lines. A user no longer has to
+  open the session directory to learn that the approved check failed and which
+  test broke; a verified run carries neither field. This is reporting only:
+  the report still cannot make a run verified.
+
+### Fixed — provider robustness after the live route audit
+
+- **Usage metadata can no longer discard a complete answer.** A gateway may
+  spell an absent count as `null` or send a whole number as a float; those are
+  now treated as absent/valid. A usage-only terminal chunk without `choices`
+  is accepted, and a null field no longer raises after the user has already
+  seen the streamed answer.
+- **DeepSeek cache accounting works.** `prompt_cache_hit_tokens` and
+  `cache_read_input_tokens` are recognised beside OpenAI's
+  `prompt_tokens_details.cached_tokens`. Without this the live W&B route
+  reported the full prompt at full price and hid the cache evidence.
+- **Repeated tool-call identities are not concatenated.** A gateway that
+  repeats the complete id/name on every delta produced `call_1call_1` and
+  `read_fileread_file`, which passed length validation and addressed a tool
+  that does not exist. Exact repeats are ignored; genuine fragment splits
+  still concatenate.
+- **The reduced retry is per model and only remembered after it succeeds.**
+  A rejected `reasoning_effort` on one model no longer disables the dial for
+  every model on the same provider, and a failed reduction is not paid for
+  again. The reduced shape also drops `stream_options` (older Azure versions
+  and proxies reject it) and `tool_choice: auto`, while keeping `required`
+  and the output cap.
+- **A dead key or a broken endpoint falls back.** `AUTHENTICATION`,
+  `PERMISSION` and pre-output `MALFORMED_RESPONSE` now join the router's
+  fallback set: they describe route 0, and another configured route may still
+  serve the request. `stream()` still refuses to fall back after the first
+  emitted delta.
+
 ### Fixed — provider reasoning-effort compatibility
 
 - A model whose gateway uses a different reasoning-effort vocabulary no

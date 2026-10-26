@@ -357,6 +357,14 @@ def _print_agent_report(report: AgentReport) -> None:
         _write("context compacted: " + json.dumps(report.compaction, ensure_ascii=False) + "\n")
     if report.restored:
         _write(f"restored: {report.restored}\n")
+    if report.unmet:
+        _write("unmet: " + "; ".join(report.unmet) + "\n")
+    if report.failure_map:
+        from .check_report import render_failure_map
+
+        rendered = render_failure_map(report.failure_map)
+        if rendered:
+            _write(rendered + "\n")
     answer = redact(report.provider_message or "").strip()
     if answer:
         _write("\n" + answer + "\n")

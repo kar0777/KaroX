@@ -64,24 +64,73 @@ def output_token_field(model: str) -> str:
 #: tool_choice and the output cap -- so it is the same request, not a weaker
 #: one. W&B DeepSeek is the case that made this necessary: it rejects
 #: ``reasoning_effort=medium`` while accepting low/high/xhigh/max/none.
-#: The fields whose rejection justifies the reduced retry. A 400 about a tool
-#: schema must keep its single, accurate failure; only a reasoning dial has a
-#: known cross-provider vocabulary problem.
-_REASONING_TUNING_KEYS = ("reasoning_effort", "reasoning")
+#: Optional tuning fields an OpenAI-compatible gateway may reject. A retry
+#: without them keeps the required shape -- model, messages, tools,
+#: tool_choice and the output cap -- so it is the same request, not a weaker
+#: one. W&B DeepSeek is the case that made this necessary: it rejects
+#: ``reasoning_effort=medium`` while accepting low/high/xhigh/max/none. Older
+#: Azure api-versions and several proxies reject ``stream_options`` instead.
 _OPTIONAL_TUNING_KEYS = (
-    *_REASONING_TUNING_KEYS,
+    "reasoning_effort",
+    "reasoning",
     "temperature",
     "prompt_cache_key",
     "parallel_tool_calls",
+    "stream_options",
 )
 
 
-def _has_reasoning_tuning(payload: Mapping[str, Any]) -> bool:
-    return any(key in payload for key in _REASONING_TUNING_KEYS)
+def _has_optional_tuning(payload: Mapping[str, Any]) -> bool:
+    return any(key in payload for key in _OPTIONAL_TUNING_KEYS)
 
 
 def _without_optional_tuning(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return {key: value for key, value in payload.items() if key not in _OPTIONAL_TUNING_KEYS}
+    reduced = {
+        key: value for key, value in payload.items() if key not in _OPTIONAL_TUNING_KEYS
+    }
+    # `tool_choice: auto` is the default; removing it changes nothing, while a
+    # `required` choice is part of the request's meaning and stays.
+    if reduced.get("tool_choice") == "auto":
+        reduced.pop("tool_choice", None)
+    return reduced
+
+
+def _usage_count(value: object) -> int:
+    """One usage count, accepting whole floats but rejecting everything else.
+
+    Usage is metadata. A gateway that spells an absent count as ``null`` must
+    not invalidate an answer the user has already received, and some gateways
+    send whole numbers as floats. Booleans, negatives, fractions and strings
+    stay refused: counting them would be worse than saying nothing.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError("known usage field must be a non-negative integer")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or value < 0:
+        raise ValueError("known usage field must be a non-negative integer")
+    return value
+
+
+def _join_identity_fragments(parts: list[str]) -> str:
+    """Join streamed id/name fragments, dropping a full repeated identity.
+
+    Some OpenAI-compatible gateways repeat the complete id and name on every
+    delta. Plain concatenation produced ``call_1call_1`` and
+    ``read_fileread_file``: valid-looking strings that address a tool call
+    which does not exist. Exact repeats are ignored; genuine splits still
+    concatenate.
+    """
+
+    text = ""
+    for part in parts:
+        if not part:
+            continue
+        if text and part == text:
+            continue
+        text += part
+    return text
 
 
 class ProviderErrorKind(str, Enum):
@@ -454,8 +503,8 @@ def accumulate_response(
     try:
         tool_calls = tuple(
             ToolCall(
-                call_id="".join(parts["call_id"]),
-                name="".join(parts["name"]),
+                call_id=_join_identity_fragments(parts["call_id"]),
+                name=_join_identity_fragments(parts["name"]),
                 raw_arguments="".join(parts["arguments"]),
             )
             for _, parts in sorted(call_parts.items())
@@ -576,9 +625,12 @@ class OpenAIChatCompletionsProvider:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self._client_lock = threading.Lock()
         self._client: Optional[httpx.Client] = None
-        # Set after a gateway rejects an optional tuning field: later requests
-        # in this session start without it instead of paying a failed attempt.
-        self._omit_optional_tuning = False
+        # Per-model: a model that accepted a reduced request starts reduced
+        # next time; one whose reduced request also failed is never retried
+        # again. Keying on the provider alone would disable a working dial for
+        # every other model on the same endpoint.
+        self._omit_optional_tuning_models: set[str] = set()
+        self._reduced_failed_models: set[str] = set()
 
     def _http_client(self) -> httpx.Client:
         client = self._client
@@ -781,7 +833,7 @@ class OpenAIChatCompletionsProvider:
             hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
         ):
             payload["reasoning"] = {"summary": "auto"}
-        if self._omit_optional_tuning:
+        if request.model in self._omit_optional_tuning_models:
             payload = _without_optional_tuning(payload)
         tuning_retry = False
         first_invalid: Optional[ProviderError] = None
@@ -850,21 +902,26 @@ class OpenAIChatCompletionsProvider:
                                 transport_attempts=attempts,
                             ) from exc
                         raise
+                    # The reduced request was accepted: start reduced for this
+                    # model next time instead of paying the rejection again.
+                    if tuning_retry:
+                        self._omit_optional_tuning_models.add(request.model)
                     return
             except ProviderError as exc:
                 if (
                     exc.kind is ProviderErrorKind.INVALID_REQUEST
                     and not tuning_retry
-                    and not self._omit_optional_tuning
-                    and _has_reasoning_tuning(payload)
+                    and request.model not in self._omit_optional_tuning_models
+                    and request.model not in self._reduced_failed_models
+                    and _has_optional_tuning(payload)
                 ):
-                    # A gateway with a different effort vocabulary rejects a
-                    # tuning field this product always sends. Retry once with
-                    # the optional fields removed; the error body is never
-                    # read, so nothing it echoes can reach a log.
+                    # A gateway with a different parameter vocabulary rejects
+                    # a tuning field this product always sends. Retry once
+                    # with the optional fields removed; the error body is never
+                    # read, so nothing it echoes can reach a log. The reduced
+                    # shape is remembered per model only after it succeeds.
                     first_invalid = exc
                     tuning_retry = True
-                    self._omit_optional_tuning = True
                     payload = _without_optional_tuning(payload)
                     continue
                 if (
@@ -873,7 +930,9 @@ class OpenAIChatCompletionsProvider:
                     and first_invalid is not None
                 ):
                     # The reduced request failed too, so tuning was not the
-                    # cause; report the first error, which names it.
+                    # cause; report the first error and never pay this retry
+                    # for this model again.
+                    self._reduced_failed_models.add(request.model)
                     raise first_invalid
                 raise
             except httpx.TransportError as exc:
@@ -1057,20 +1116,28 @@ class OpenAIChatCompletionsProvider:
                     ("prompt_tokens", raw_usage, "prompt_tokens"),
                     ("completion_tokens", raw_usage, "completion_tokens"),
                     ("total_tokens", raw_usage, "total_tokens"),
-                    ("cached_tokens", detail_source, "cache_read_tokens"),
                 ):
-                    if name not in source:
+                    raw_count = source.get(name)
+                    if raw_count is None:
+                        # A gateway may spell an absent count as null. Usage is
+                        # metadata; it must not invalidate a complete answer.
                         continue
-                    raw_count = source[name]
-                    if (
-                        isinstance(raw_count, bool)
-                        or not isinstance(raw_count, int)
-                        or raw_count < 0
-                    ):
-                        raise ValueError(
-                            "known usage field must be a non-negative integer"
-                        )
-                    usage[target] = raw_count
+                    usage[target] = _usage_count(raw_count)
+                # Cache accounting has three spellings on this wire. The detail
+                # object is OpenAI's; prompt_cache_hit_tokens is DeepSeek's
+                # (the live W&B route), and cache_read_input_tokens appears on
+                # some proxies. First present wins; counting two would inflate
+                # the cached share and understate the cost.
+                for name, source in (
+                    ("cached_tokens", detail_source),
+                    ("prompt_cache_hit_tokens", raw_usage),
+                    ("cache_read_input_tokens", raw_usage),
+                ):
+                    raw_count = source.get(name)
+                    if raw_count is None:
+                        continue
+                    usage["cache_read_tokens"] = _usage_count(raw_count)
+                    break
                 events.append(
                     ModelEvent(
                         ModelEventKind.USAGE,
@@ -1081,6 +1148,10 @@ class OpenAIChatCompletionsProvider:
                 )
 
             choices = value.get("choices")
+            if choices is None and raw_usage is not None:
+                # A usage-only terminal chunk may omit choices entirely; the
+                # empty-choices path below already treats that as a keepalive.
+                choices = []
             if not isinstance(choices, list):
                 raise ValueError("choices must be an array")
             if not choices:

@@ -642,6 +642,19 @@ class KaroxApp(App[int]):
         lines = [" · ".join(parts)]
         if not outcome.verified and outcome.reason:
             lines.append(tr(self.language, "result.reason", reason=outcome.reason))
+        unmet = outcome.raw.get("unmet")
+        if isinstance(unmet, list) and unmet:
+            shown = "; ".join(str(item) for item in unmet[:3])
+            if len(unmet) > 3:
+                shown += f" (+{len(unmet) - 3})"
+            lines.append("unmet: " + shown)
+        failure_map = outcome.raw.get("failure_map")
+        if isinstance(failure_map, dict):
+            from ..check_report import render_failure_map
+
+            rendered = render_failure_map(failure_map)
+            if rendered:
+                lines.extend(rendered.splitlines()[:5])
         if outcome.changed_files:
             shown = ", ".join(outcome.changed_files[:6])
             if len(outcome.changed_files) > 6:

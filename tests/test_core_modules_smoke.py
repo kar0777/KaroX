@@ -439,6 +439,56 @@ def test_routing_decorates_a_completed_response(tmp_path: Path) -> None:
     assert over_budget.budget_reason == "cost_budget"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ProviderErrorKind.AUTHENTICATION,
+        ProviderErrorKind.PERMISSION,
+        ProviderErrorKind.MALFORMED_RESPONSE,
+    ],
+)
+def test_routing_falls_back_on_an_endpoint_scoped_failure(
+    tmp_path: Path, kind: ProviderErrorKind
+) -> None:
+    """A dead key or a broken endpoint must not end a run with a healthy route.
+
+    These are properties of route 0, not of the request: another configured
+    endpoint may still serve it. A malformed response is safe to fall back on
+    only because routing refuses after the first emitted delta, so the user has
+    seen nothing from the broken route.
+    """
+
+    registry = _routing_registry(tmp_path, ("demo-1", "demo-2"))
+    failing = _FakeProvider(None, ProviderError(kind, "endpoint refused"))
+    good = _FakeProvider(
+        ModelResponse(
+            content="fallback",
+            tool_calls=(),
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
+        )
+    )
+    policy = routing.RoutingPolicy(
+        routes=(
+            routing.RouteTarget("demo-1", "model-1"),
+            routing.RouteTarget("demo-2", "model-1"),
+        ),
+        retry=routing.RetryPolicy(max_attempts=1),
+    )
+    router = routing.RoutedProvider(
+        registry,
+        lambda record: good if record.provider_id == "demo-2" else failing,
+        policy,
+        sleep=lambda _seconds: None,
+        jitter=lambda: 0.0,
+    )
+
+    result = router.complete(_request())
+
+    assert result.selected_provider == "demo-2"
+    assert result.route_attempts[0]["status"] == "fallback"
+
+
 def test_routing_falls_back_and_enforces_budgets(tmp_path: Path) -> None:
     registry = _routing_registry(tmp_path, ("demo-1", "demo-2"))
     failing = _FakeProvider(

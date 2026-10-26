@@ -1519,6 +1519,30 @@ class EngineKernel:
         hint = check_report.render_targets(targets[:4])
         return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
+    @staticmethod
+    def _last_failed_check_map(record: SessionRecord) -> Optional[Dict[str, Any]]:
+        """The parsed failure map of the latest approved check, if it failed."""
+
+        for entry in reversed(record.provider_history):
+            if entry.get("role") != "tool" or entry.get("core_name") != "checks.run":
+                continue
+            result = entry.get("result")
+            if not isinstance(result, dict):
+                continue
+            data = result.get("data")
+            if not isinstance(data, dict) or data.get("verification_eligible") is not True:
+                continue
+            passed = (
+                result.get("ok") is True
+                and data.get("exit_code") == 0
+                and not data.get("timed_out")
+            )
+            if passed:
+                return None
+            report = data.get("failure_map")
+            return dict(report) if isinstance(report, dict) else None
+        return None
+
     def state_briefing(self) -> str:
         """The deterministic session snapshot the agent appends after compaction.
 
@@ -1750,18 +1774,27 @@ class EngineKernel:
         provider_message: Optional[str] = None,
         restored: Optional[str] = None,
     ) -> AgentReport:
+        verified = record.status == "verified" and self._completed(record)
+        unmet: tuple[str, ...] = ()
+        failure_map: Optional[Dict[str, Any]] = None
+        if not verified:
+            # A stopped run says why, and where the last approved check failed.
+            # Those two facts are the difference between "not verified" and a
+            # report a user can act on without opening the session directory.
+            unmet = tuple(completion_gate.floor(self.core, record))
+            failure_map = self._last_failed_check_map(record)
         self._emit(
             AgentEventKind.FINISHED,
             reason=reason,
             status=record.status,
-            ok=record.status == "verified" and self._completed(record),
+            ok=verified,
             usage=dict(record.usage) if isinstance(record.usage, dict) else {},
         )
         return AgentReport(
             session_id=record.session_id,
             status=record.status,
             phase=record.phase,
-            verified=record.status == "verified" and self._completed(record),
+            verified=verified,
             reason=reason,
             steps=session_analysis.step_count(record.provider_history),
             changed_files=tuple(record.changed_files),
@@ -1775,6 +1808,8 @@ class EngineKernel:
             project_context=dict(self.project_context),
             compaction=dict(self._compaction) if self._compaction else None,
             restored=restored,
+            unmet=unmet,
+            failure_map=failure_map,
             mode=self.mode,
             engine=dict(_ENGINE_IDENTITY),
         )

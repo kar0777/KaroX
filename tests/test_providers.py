@@ -334,6 +334,236 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.kind, ProviderErrorKind.AUTHENTICATION)
         self.assertEqual(len(client.calls), 1)
 
+    def test_stream_options_rejection_gets_a_reduced_retry(self) -> None:
+        """Older gateways reject stream_options; the retry must drop it."""
+
+        client = FakeClient(
+            [
+                error_response(400, "unknown field stream_options"),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("stream_options", client.calls[0]["json"])
+        self.assertNotIn("stream_options", client.calls[1]["json"])
+        self.assertNotIn("temperature", client.calls[1]["json"])
+
+    def test_reduced_retry_is_remembered_per_model(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "one"}, "finish_reason": "stop"}]}]
+                ),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "two"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        first_request = replace(
+            self.request(), model="model-a", reasoning_effort="medium"
+        )
+        second_request = replace(
+            self.request(), model="model-b", reasoning_effort="high"
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            first = provider.complete(first_request)
+            second = provider.complete(second_request)
+
+        self.assertEqual((first.content, second.content), ("one", "two"))
+        self.assertEqual(len(client.calls), 3)
+        # The rejected model starts reduced; the other model keeps its dial.
+        self.assertNotIn("reasoning_effort", client.calls[1]["json"])
+        self.assertEqual(client.calls[2]["json"]["reasoning_effort"], "high")
+        self.assertIn("stream_options", client.calls[2]["json"])
+
+    def test_reduced_failure_is_not_retried_again(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                error_response(400, "still bad"),
+                error_response(400, "still bad"),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="medium")
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError),
+        ):
+            provider.complete(request)
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError),
+        ):
+            provider.complete(request)
+
+        # First call: original + reduced. Second call: one attempt, because the
+        # reduced shape already failed for this model and is not worth paying
+        # for again.
+        self.assertEqual(len(client.calls), 3)
+
+    def test_usage_null_does_not_discard_a_complete_answer(self) -> None:
+        client = FakeClient(
+            [
+                sse_response(
+                    [
+                        {
+                            "choices": [
+                                {"delta": {"content": "ok"}, "finish_reason": "stop"}
+                            ]
+                        },
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 10.0,
+                                "completion_tokens": None,
+                                "total_tokens": 12,
+                            },
+                        },
+                    ]
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.usage, {"prompt_tokens": 10, "total_tokens": 12})
+
+    def test_deepseek_cache_alias_is_counted(self) -> None:
+        client = FakeClient(
+            [
+                sse_response(
+                    [
+                        {
+                            "choices": [
+                                {"delta": {"content": "ok"}, "finish_reason": "stop"}
+                            ]
+                        },
+                        {
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": 100,
+                                "completion_tokens": 5,
+                                "total_tokens": 105,
+                                "prompt_cache_hit_tokens": 80,
+                            },
+                        },
+                    ]
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(result.usage["cache_read_tokens"], 80)
+
+    def test_usage_chunk_without_choices_is_accepted(self) -> None:
+        client = FakeClient(
+            [
+                sse_response(
+                    [
+                        {
+                            "choices": [
+                                {"delta": {"content": "ok"}, "finish_reason": "stop"}
+                            ]
+                        },
+                        {"usage": {"prompt_tokens": 3, "completion_tokens": 2}},
+                    ]
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.usage, {"prompt_tokens": 3, "completion_tokens": 2})
+
+    def test_repeated_tool_identity_fragments_are_not_concatenated(self) -> None:
+        client = FakeClient(
+            [
+                sse_response(
+                    [
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "read_file",
+                                                    "arguments": "",
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ]
+                        },
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "read_file",
+                                                    "arguments": '{"path":"a"}',
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": "tool_calls",
+                                }
+                            ]
+                        },
+                    ]
+                )
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        self.assertEqual(len(result.tool_calls), 1)
+        call = result.tool_calls[0]
+        self.assertEqual(call.call_id, "call_1")
+        self.assertEqual(call.name, "read_file")
+        self.assertEqual(call.raw_arguments, '{"path":"a"}')
+
     def test_normalizes_streamed_request_tools_content_calls_and_usage(self) -> None:
         client = FakeClient([sse_response(self.fragmented_events())])
         provider = OpenAIChatCompletionsProvider(
@@ -627,15 +857,20 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         }
         for status, kind in cases.items():
             with self.subTest(status=status):
-                client = FakeClient(
-                    [
-                        error_response(
-                            status,
-                            json.dumps({"error": secret}),
-                            **{"Retry-After": "2.5"},
-                        )
-                    ]
-                )
+                # A 422 is an INVALID_REQUEST: the transport now spends one
+                # reduced retry before reporting, so the fake endpoint answers
+                # twice. The first error is still the one surfaced.
+                outcomes = [
+                    error_response(
+                        status,
+                        json.dumps({"error": secret}),
+                        **{"Retry-After": "2.5"},
+                    )
+                    for _ in range(
+                        2 if kind is ProviderErrorKind.INVALID_REQUEST else 1
+                    )
+                ]
+                client = FakeClient(outcomes)
                 provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
                 with (
                     patch("karox.providers.httpx.Client", return_value=client),

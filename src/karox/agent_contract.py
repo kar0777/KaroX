@@ -221,6 +221,13 @@ class AgentReport:
     #: Set when the run ended worse than a state it had already proved, and the
     #: files were put back to that state before reporting.
     restored: Optional[str] = None
+    #: The completion-floor reasons still open when the run stopped. A user
+    #: should not have to open the session to learn why a run is not verified.
+    unmet: tuple[str, ...] = ()
+    #: The parsed failure map of the last approved check that failed, when one
+    #: did. It names exact file:line and test ids; the check result carries the
+    #: same shape, so a reader can act on the report without a second lookup.
+    failure_map: Optional[Dict[str, Any]] = None
     # The stance the run was started with (--mode / the TUI\'s /mode). None is
     # the legacy default: a run created without the flag behaves as Build and
     # claims nothing beyond that.

@@ -1479,6 +1479,8 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
     report = harness.run()
 
     assert report.verified is True, report.reason
+    assert report.unmet == ()
+    assert report.failure_map is None
     record = harness.record()
     failed = [
         entry
@@ -1553,6 +1555,12 @@ def test_repeated_identical_failure_is_called_out_in_the_repair_turn(
     report = harness.run()
 
     assert report.verified is False
+    # The report itself names why and where: no session digging required.
+    assert report.unmet
+    assert report.failure_map is not None
+    assert report.failure_map["total"] == 1
+    assert report.failure_map["failures"][0]["path"] == "tests/test_calc.py"
+    assert report.failure_map["failures"][0]["line"] == 5
     repairs = [
         message
         for message in _user_messages(harness)
