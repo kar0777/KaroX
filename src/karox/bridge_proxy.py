@@ -29,7 +29,8 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from starlette.responses import JSONResponse, Response
 
 from .artifacts import ArtifactStore
-from .core import CoreError, VerificationCommandNotApproved
+from .core import CoreError
+from .core_types import VerificationCommandNotApproved
 from .hosted_core import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
     HostedApprovalRequired,

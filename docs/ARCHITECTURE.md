@@ -61,7 +61,7 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
    prompt; `session_analysis.py` holds the seven proof-state readers the
    harness uses to decide what a session already proved. The v5 loop and its
    `--legacy-loop` flag are deleted.
-4. **Core and tools — `core.py`, `core_tools.py`, `action_execution.py`,
+4. **Core and tools — `core.py`, `core_process.py`, `core_tools.py`, `action_execution.py`,
    `repo_context.py`, `edit_engine.py`, `workspace_worker.py`,
    `workspace_transaction.py`, `unified_patch.py`, `engine_tools.py`.** Core
    owns the tool table; `ExtendedCoreRuntime` adds editing, windowed reads,
@@ -206,12 +206,14 @@ not listed is internal to its layer.
 | `entrypoint.py` | console-script shim |
 | `agent.py` | `AgentKernel` facade, module helpers and system prompt |
 | `agent_contract.py` | `AgentEvent`/`AgentEventKind`/`AgentReport`, limits and context budget |
-| `engine_kernel.py` | the engine kernel: typed-tool environment, checkpoints, verification |
+| `engine_kernel.py` | the engine kernel: session lease, checkpoints, harness calls, verification |
+| `engine_tool_env.py` | `CoreToolEnvironment`: engine actions as audited typed Core calls |
 | `engine_provider_bridge.py` | `EngineProviderModel`: the engine's Model protocol over `providers.py` |
 | `session_analysis.py` | seven proof-state readers over a `SessionRecord` |
 | `engine_salvage.py` | recovers one unambiguous fenced shell command from a prose response |
 | `core_types.py` | Core exceptions and `ToolDefinition` — what small modules need |
-| `core.py` | the runtime: tool table, policy/risk/lease/idempotency transaction, file and process tools |
+| `core.py` | the runtime: tool table, policy/risk/lease/idempotency transaction, file tools |
+| `core_process.py` | process, check and argv surfaces mixed into `CoreRuntime` (process tree, capture, check plans) |
 | `core_git.py` | Git methods mixed into `CoreRuntime` (status, diff, commit, guarded push) |
 | `core_search.py` | search methods mixed into `CoreRuntime` (ripgrep, small-tree, git grep, LSP) |
 | `core_tools.py` | the extended runtime: editing, windowed reads, plans, dev commands |
