@@ -563,6 +563,7 @@ def render_problems(
     console_errors: Sequence[str] = (),
     measured: dict | None = None,
     probe: dict | None = None,
+    resize: dict | None = None,
 ) -> dict:
     """Turn what a render observed into a verdict, without touching a browser.
 
@@ -604,6 +605,23 @@ def render_problems(
                 "paints_with_three": probe.get("paints_with_three"),
             }
         )
+    if isinstance(resize, dict):
+        result["resize"] = {
+            "ok": resize.get("ok"),
+            "target": resize.get("target"),
+            "after": resize.get("after"),
+            "error": resize.get("error"),
+            "reason": resize.get("reason"),
+        }
+        if resize.get("ok") is False:
+            raw_after = resize.get("after")
+            after = raw_after if isinstance(raw_after, dict) else {}
+            raw_canvas = after.get("canvas")
+            canvas = raw_canvas if isinstance(raw_canvas, dict) else {}
+            problems.append(
+                f"{name}: after the viewport changed to 1000x700 the canvas "
+                f"stayed {canvas.get('clientWidth')}x{canvas.get('clientHeight')}"
+            )
     raw_sampled = result.get("sampled")
     sampled = (
         raw_sampled
@@ -775,8 +793,27 @@ def _render_in_browser(page: pathlib.Path) -> dict:
 ANIMATION_SETTLE_MS = 2000
 
 
+_RESIZE_PROBE_JS = """
+() => {
+  const canvas = document.querySelector("canvas");
+  return {
+    innerWidth,
+    innerHeight,
+    canvas: canvas
+      ? {
+          clientWidth: canvas.clientWidth,
+          clientHeight: canvas.clientHeight,
+          width: canvas.width,
+          height: canvas.height,
+        }
+      : null,
+  };
+}
+"""
+
+
 def _observe_in_browser(
-    page: pathlib.Path, *, settle_ms: int, frames: int
+    page: pathlib.Path, *, settle_ms: int, frames: int, check_resize: bool = False
 ) -> dict:
     """Raw observations of one page in the browser thread, judging nothing.
 
@@ -795,6 +832,7 @@ def _observe_in_browser(
     probe: dict = {}
     measured: dict = {}
     shots: list[bytes] = []
+    resize: dict = {}
     view = _new_page(browser)
     try:
         def on_console(message: Any) -> None:
@@ -823,6 +861,38 @@ def _observe_in_browser(
             measured = view.evaluate(
                 _PIXEL_STATS_JS, pixel_payload(probe=probe, shot=shots[0])
             )
+        if check_resize:
+            # A full-viewport scene promises to follow the window. Measure it
+            # instead of asking a vision model to notice a resize that happened
+            # before its screenshots were taken.
+            rect = probe.get("canvas_rect") if isinstance(probe, dict) else None
+            fills = (
+                isinstance(rect, dict)
+                and float(rect.get("width") or 0) >= RENDER_VIEWPORT_WIDTH * 0.9
+                and float(rect.get("height") or 0) >= RENDER_VIEWPORT_HEIGHT * 0.9
+            )
+            if not fills:
+                resize = {"ok": None, "reason": "canvas does not fill the viewport"}
+            else:
+                try:
+                    view.set_viewport_size({"width": 1000, "height": 700})
+                    view.wait_for_timeout(1000)
+                    after = view.evaluate(_RESIZE_PROBE_JS)
+                    canvas = after.get("canvas") if isinstance(after, dict) else None
+                    ok = isinstance(canvas, dict) and (
+                        abs(int(canvas.get("clientWidth") or 0) - 1000) <= 1
+                        and abs(int(canvas.get("clientHeight") or 0) - 700) <= 1
+                    )
+                    resize = {
+                        "ok": ok,
+                        "target": {"width": 1000, "height": 700},
+                        "after": after if isinstance(after, dict) else {},
+                    }
+                except Exception as error:  # noqa: BLE001 - a probe is not a verdict
+                    resize = {
+                        "ok": None,
+                        "error": f"{type(error).__name__}: {str(error)[:200]}",
+                    }
     finally:
         view.close()
     return {
@@ -831,10 +901,16 @@ def _observe_in_browser(
         "measured": measured,
         "probe": probe,
         "frames": shots,
+        "resize": resize,
     }
 
 
-def observe_page(page: pathlib.Path, *, settle_ms: int = ANIMATION_SETTLE_MS) -> dict:
+def observe_page(
+    page: pathlib.Path,
+    *,
+    settle_ms: int = ANIMATION_SETTLE_MS,
+    check_resize: bool = False,
+) -> dict:
     """Observe a page with a warm browser: two frames, console, measurement.
 
     Returns ``{"skipped": reason}`` when this machine cannot render right now,
@@ -849,7 +925,9 @@ def observe_page(page: pathlib.Path, *, settle_ms: int = ANIMATION_SETTLE_MS) ->
         return {"skipped": status.error or "chromium_unavailable"}
     try:
         return _run_in_browser_thread(
-            lambda: _observe_in_browser(page, settle_ms=settle_ms, frames=2)
+            lambda: _observe_in_browser(
+                page, settle_ms=settle_ms, frames=2, check_resize=check_resize
+            )
         )
     except RuntimeError:
         return {"skipped": "playwright_unavailable"}

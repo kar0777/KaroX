@@ -9,6 +9,7 @@ They pin the two KaroX ports:
 
 from __future__ import annotations
 
+import json
 
 from karox.engine.agents.default import DefaultAgent
 from karox.engine.environments.local import LocalEnvironment, clip_output
@@ -236,6 +237,10 @@ def test_context_estimate_counts_tool_arguments_and_reasoning():
     agent.manage_context()
     call = messages[2]["tool_calls"][0]
     assert call["raw_arguments"] == agent._ARGS_MARKER
+    # The gateway validates this field as a JSON object on every later request;
+    # the old plain-text marker produced a deterministic HTTP 400 at step 31 of
+    # a long aquarium run once compaction first touched a tool call.
+    assert isinstance(json.loads(call["raw_arguments"]), dict)
     assert call["call_id"] == "1"
     # Reasoning blocks may carry provider signatures; they are counted but
     # never rewritten.

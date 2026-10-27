@@ -47,9 +47,12 @@ ISSUE_WORDS = 20
 CONSOLE_LIMIT = 3
 CONSOLE_CHARS = 200
 
-#: How many characters of the task the checker is shown. It judges against the
-#: goal, so it needs the goal; it does not need the whole brief.
-GOAL_CHARS = 2000
+#: How many characters of the task the checker is shown. The checker judges
+#: against explicit mandatory requirements, so a 2k prefix used to hide most of
+#: an 8k brief: the aquarium run's fish, gravel, plants, lighting and camera
+#: sections all sat beyond the cut. Twelve kilobytes covers a normal brief
+#: whole while keeping a pathological one bounded.
+GOAL_CHARS = 12_000
 
 CHECKER_DEADLINE_SECONDS = 120.0
 #: The checker's own output ceiling is generous on purpose, and it is not the
@@ -253,7 +256,18 @@ class VisualChecker:
             }
         self._calls += 1
         self.tally.calls += 1
-        observation = observe_page(page, settle_ms=self.settle_ms)
+        # The full task owns the requirements; a caller's goal is a focus for
+        # this look, not a replacement for the brief. The old `goal or self.goal`
+        # let a terse "check the aquarium" hide the fish, gravel, lighting and
+        # camera sections of an 8 KB prompt from the checker.
+        base_goal = (self.goal or "").strip()
+        focus = (goal or "").strip()
+        effective_goal = base_goal or focus
+        if base_goal and focus and focus not in base_goal:
+            effective_goal = f"{base_goal}\n\nThis check's focus:\n{focus}"
+        observation = observe_page(
+            page, settle_ms=self.settle_ms, check_resize=True
+        )
         if "frames" not in observation:
             self.tally.skipped += 1
             return self._unavailable_verdict(
@@ -279,8 +293,10 @@ class VisualChecker:
             console_errors=observation.get("console_errors") or (),
             measured=measured,
             probe=probe,
+            resize=observation.get("resize"),
         )
         issues = list(judged.get("problems") or [])
+        resize = judged.get("resize")
         if len(frames) > 1 and frames[0] == frames[1]:
             issues.append(
                 f"{page.name}: the two frames taken {round(self.settle_ms / 1000, 1)}s "
@@ -303,7 +319,7 @@ class VisualChecker:
         answer, finish_reason = self._ask(
             frames,
             page,
-            goal=goal,
+            goal=effective_goal,
             criteria=criteria or self.criteria,
             issues=issues,
             console=console,
@@ -363,8 +379,9 @@ class VisualChecker:
                 }
             )
         verdict, reported = parsed
-        # A model judgment can never clear an observed runtime exception.
-        if observation.get("page_errors") or observation.get("console_errors"):
+        # A model judgment can never clear an observed runtime exception or a
+        # measured render problem: the model may simply not see it in a frame.
+        if issues or observation.get("page_errors") or observation.get("console_errors"):
             verdict = "needs_work"
         merged = list(reported) + [item for item in issues if item not in reported]
         return self._quality_verdict(
@@ -374,6 +391,7 @@ class VisualChecker:
                 "issues": merged,
                 "console_errors": console,
                 "page_errors": page_errors,
+                "resize": resize,
                 "frames": saved,
             }
         )

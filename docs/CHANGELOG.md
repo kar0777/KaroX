@@ -2,6 +2,26 @@
 
 ## 6.0.0a3 — 2026-10-26
 
+### Fixed — a visual check that can see the whole brief, and valid compacted calls
+
+- The visual checker saw only the first 2,000 characters of the task, so the
+  aquarium brief's fish, gravel, plants, lighting and camera requirements were
+  invisible to all six checks. It now receives the whole brief up to 12 KB, and
+  a caller's `goal` is a focus appended to the task instead of replacing it.
+- The checker prompt treats every visible mandatory sentence as a checklist
+  item: exact counts, named objects, required effects and style. It also
+  receives the measured render problems, and any measured problem forces
+  `needs_work` even when the model says `pass`.
+- A full-viewport canvas is now resized to 1000×700 and measured after one
+  second. The old path only asked a vision model to notice a resize that had
+  happened before its screenshots; a canvas that stayed at its old size is now
+  a named, deterministic issue.
+- Elided historical tool-call arguments are now a valid JSON object
+  (`{"_karo_context_manager":"tool arguments elided"}`). The previous plain-text
+  marker made the whole transcript invalid to OpenAI-compatible gateways; a
+  long live aquarium run failed deterministically with HTTP 400 at step 31 as
+  soon as compaction first touched a tool call. Unit tests now parse the marker.
+
 ### Changed — the fixed request cost is now part of the task, not the catalog
 
 - Large, domain-specific tool schemas are advertised only when the task names

@@ -272,7 +272,11 @@ class DefaultAgent:
 
     _CLIP_MARKER = "[karo-core context manager: clipped"
     _TAIL_CLIP_MARKER = "[karo-core context manager: tail clipped"
-    _ARGS_MARKER = "[karo-core context manager: tool arguments elided]"
+    # A marker that is itself a valid JSON object: OpenAI-compatible gateways
+    # validate `tool_calls[].function.arguments` as an object string on every
+    # later request. The old plain-text marker made a compacted transcript
+    # invalid and the provider answered HTTP 400 at the next step.
+    _ARGS_MARKER = '{"_karo_context_manager":"tool arguments elided"}'
     _DROP_MARKER = "[dropped by the karo-core context manager]"
 
     def _estimate_tokens(self) -> int:
