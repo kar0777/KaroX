@@ -503,6 +503,8 @@ def check_page(page: pathlib.Path) -> list[str]:
         )
     for problem in _document_problems(page.name, text):
         problems.append(problem)
+    for problem in _duplicate_declarations(page.name, text):
+        problems.append(problem)
     return problems
 
 
@@ -524,6 +526,131 @@ class _DocumentEndParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "html":
             self.closed_html = True
+
+
+_JS_DECLARATION = re.compile(
+    r"(?:export\s+)?(?:const|let|class)\s+([A-Za-z_$][\w$]*)"
+)
+
+
+def _top_level_declarations(source: str) -> list[str]:
+    """Names declared at one script's top level, in order.
+
+    A small scanner rather than a parser: strings and comments are skipped and
+    braces track depth, which is enough to tell a module-level ``const FISH_L``
+    from a local of the same name inside a function (legal shadowing).
+    """
+
+    names: list[str] = []
+    depth = 0
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char in "\"'`":
+            quote = char
+            index += 1
+            while index < length:
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "/" and index + 1 < length:
+            if source[index + 1] == "/":
+                newline = source.find("\n", index)
+                index = length if newline < 0 else newline + 1
+                continue
+            if source[index + 1] == "*":
+                end = source.find("*/", index + 2)
+                index = length if end < 0 else end + 2
+                continue
+        if char == "{":
+            depth += 1
+            index += 1
+            continue
+        if char == "}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0:
+            match = _JS_DECLARATION.match(source, index)
+            if match is not None:
+                prefix = source[max(0, index - 24) : index].rstrip()
+                if prefix.endswith(("for (", "for(", "for await (", "for await(")):
+                    # `for (let i ...)` and `for (const sx of ...)` bind inside
+                    # the loop statement; several such loops at module level are
+                    # legal and must not be reported as redeclarations.
+                    index = match.end()
+                    continue
+                names.append(match.group(1))
+                index = match.end()
+                continue
+        index += 1
+    return names
+
+
+class _ScriptBlockParser(HTMLParser):
+    """Collect inline script bodies; external ``src`` scripts are not read."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.blocks: list[str] = []
+        self._buffer: list[str] | None = None
+        self._external = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[no-untyped-def]
+        if tag.lower() != "script":
+            return
+        attributes = {key.lower(): (value or "") for key, value in attrs}
+        self._external = bool(attributes.get("src"))
+        self._buffer = []
+
+    def handle_data(self, data: str) -> None:
+        if self._buffer is not None:
+            self._buffer.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "script" or self._buffer is None:
+            return
+        if not self._external:
+            self.blocks.append("".join(self._buffer))
+        self._buffer = None
+        self._external = False
+
+
+def _duplicate_declarations(name: str, text: str) -> list[str]:
+    """Top-level names a browser would reject as already declared.
+
+    Two aquarium runs added a second ``const FISH_L`` / ``const
+    waterVolumeMaterial`` while appending a section; the page threw before the
+    scene ran and only a visual check could see it. This is the static guard,
+    measured on the file the mutation just wrote.
+    """
+
+    parser = _ScriptBlockParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:  # noqa: BLE001 - a malformed page is reported elsewhere
+        return []
+    problems: list[str] = []
+    for source in parser.blocks:
+        seen: set[str] = set()
+        reported: set[str] = set()
+        for declared in _top_level_declarations(source):
+            if declared in seen and declared not in reported:
+                reported.add(declared)
+                problems.append(
+                    f"{name}: declares '{declared}' more than once at top level; "
+                    f"the browser throws \"Identifier '{declared}' has already "
+                    "been declared\" before the page runs"
+                )
+            seen.add(declared)
+    return problems
 
 
 def _document_problems(name: str, text: str) -> list[str]:

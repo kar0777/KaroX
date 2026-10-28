@@ -63,6 +63,12 @@
   was rendered and inspected, and the bubble material was rendered against a
   blue water background. A verified, zero-failure aquarium run (`karo-14`,
   61 steps, 2.72M tokens) used both.
+- A changed HTML file is checked statically for duplicate top-level `const`,
+  `let` and `class` declarations, and the mutation observation names the
+  browser's own error before a visual check is spent. Two runs lost a check to
+  a second `const FISH_L` / `waterVolumeMaterial`. Per-loop bindings such as
+  `for (let i ...)` and legal `var`/`function` redeclarations stay silent, so
+  every verified artifact in the benchmark reports zero problems.
 
 ### Changed — clarity is part of the visual verdict, not decoration
 
