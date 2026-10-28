@@ -12,6 +12,10 @@ python -m pip install -e ".[dev]"
 The package is `karox` and the version source is `src/karox/__init__.py`.
 `pyproject.toml` reads it dynamically; do not duplicate the number.
 
+For live development runs, the opt-in routes and the local credential file are
+documented in [DEV_PROVIDERS.md](DEV_PROVIDERS.md). They are not product
+defaults and are never required for the test suite.
+
 ## While editing
 
 ```text
@@ -23,7 +27,7 @@ python -m pytest tests/test_tui.py tests/test_cli.py
 The copied kernel is not in mypy's file list yet. It is excused by scope, not by
 `ignore_errors`; `follow_imports = "skip"` keeps mypy from checking files outside
 the declared scope, and moving a module into the list is how that debt is paid
-down. The suite currently collects 842 tests.
+down. The suite currently collects 899 tests.
 
 ## Full gate
 

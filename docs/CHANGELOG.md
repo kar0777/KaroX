@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Changed — the 3D skill is a general technique guide again
+
+- The shipped `web-3d-scene` skill no longer contains the aquarium scene, the
+  clownfish skeleton, the bubble recipe or the "exactly N fish" framing. Those
+  were benchmark material; they now live in
+  `lab/kernel-duel-20261025/live-bench-20261026/aquarium-recipe.md`. The skill
+  keeps the general lessons: composition, lighting, lathe silhouettes, clear
+  transparent materials, small-effect calibration, economy and a stop rule.
+- `tests/test_skill_scope.py` fails if any of the benchmark nouns or counts
+  return to the shipped skill, or if the scope discipline and the validated
+  technique sections disappear.
+
+### Docs — development providers are explicit and local
+
+- `docs/DEV_PROVIDERS.md` records the current DashScope compatible-mode route
+  (model, 1M context, 384k output, max reasoning) and the previous W&B route.
+  Keys stay in the git-ignored `.karox/dev-providers.env` or the owner's
+  out-of-repository file; documentation names the environment variables, never
+  the values. These routes are development-only and are not shipped defaults.
+
 ### Changed — the model is not charged again for work it already did
 
 - A tool call that already ran no longer re-sends its arguments on every later
