@@ -187,3 +187,87 @@ def test_a_resumed_checker_does_not_overwrite_earlier_frames(
 
     assert len(set(first) | set(second)) == 4
     assert all(Path(item).is_file() for item in first + second)
+
+def test_measured_problems_keep_their_slots_in_a_bounded_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken resize must not be crowded out by five model observations.
+
+    The aquarium run measured a broken resize on every check while the model
+    reported five variants of a bubble problem; the bounded verdict kept the
+    model's list and dropped the measured fact, so the resize stayed broken.
+    """
+
+    reported = [f"model observation {index}" for index in range(5)]
+    provider = _FakeProvider(
+        '{"verdict": "needs_work", "issues": ' + str(reported).replace("'", '"') + "}"
+    )
+    monkeypatch.setattr(
+        visual_check, "observe_page", lambda *args, **kwargs: _observation()
+    )
+    checker = VisualChecker(
+        provider=provider,  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal=LONG_GOAL,
+    )
+
+    result = checker(Path("aquarium-test.html"))
+
+    assert len(result["issues"]) == 5
+    assert any("viewport changed to 1000x700" in item for item in result["issues"])
+    assert result["issues"][0].startswith("aquarium-test.html")
+
+
+class _SequenceProvider:
+    def __init__(self, answers: list[str]) -> None:
+        self.answers = list(answers)
+        self.requests: list[object] = []
+
+    def complete(self, request):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        answer = self.answers.pop(0) if self.answers else '{"verdict": "pass", "issues": []}'
+        return ModelResponse(
+            content=answer,
+            tool_calls=(),
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+
+def test_the_second_look_remembers_the_first_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A returning reviewer is not a stranger with a fresh memory.
+
+    The aquarium run was told "no bubbles" on four consecutive checks while the
+    frames showed a few; each look started from zero, so the model got the same
+    sentence instead of "still missing" or "now visible but sparse".
+    """
+
+    provider = _SequenceProvider(
+        [
+            '{"verdict": "needs_work", "issues": ["the bubble stream is absent"]}',
+            '{"verdict": "pass", "issues": []}',
+        ]
+    )
+    monkeypatch.setattr(
+        visual_check,
+        "observe_page",
+        lambda *args, **kwargs: _observation(resize_ok=True),
+    )
+    checker = VisualChecker(
+        provider=provider,  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal=LONG_GOAL,
+    )
+
+    checker(Path("aquarium-test.html"))
+    checker(Path("aquarium-test.html"))
+
+    second = provider.requests[1].messages[-1].content  # type: ignore[attr-defined]
+    assert "the bubble stream is absent" in second
+    assert "whether these frames now show it fixed" in second

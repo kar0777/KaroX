@@ -1,6 +1,6 @@
 ---
 name: web-3d-scene
-version: 1.1.0
+version: 1.2.0
 description: Build or fix a three.js scene that runs in the browser.
 when_to_use: 3D, three.js, WebGL, animated scenes, aquariums, particles, models in a page.
 triggers: [three, webgl, canvas, "*.html"]
@@ -42,6 +42,11 @@ Environment
 - Rocks sit partly sunk into the sand, flattened and irregular, in muted grey-brown; not white eggs lying on top. Plants: several bent blades per plant, and several plants.
 - Light patterns on the sand must be soft and irregular, never a visible repeating grid.
 - Keep objects inside bounds: steer away from walls smoothly instead of teleporting.
+
+Effects a frame has to show
+- A light exists in the code only if its effect exists in the frame. A warm hood lamp must leave a visibly warmer pool on the sand and the top glass; if the tank still reads uniform cool blue, raise the lamp and lower the cool fill. Check the rendered frame, not the light's parameters.
+- Bubbles must survive the tone mapping: at the default camera each bubble is at least ~0.08 world units across, mostly white with a bright rim, and one stream shows 8–12 bubbles between the floor and the surface at once. Spawn 4–6 per second per emitter so the column is continuous, not a few isolated specks.
+- The waterline, ripples and gravel texture are checked in the same frame. If the check says one is missing, fix that effect and re-check; do not rebuild the whole scene.
 
 Before you finish
 - No console errors. Page loads from a clean start.

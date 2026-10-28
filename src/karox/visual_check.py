@@ -219,16 +219,28 @@ class VisualChecker:
     # evidence for "what passed last time" is lost exactly when a regression
     # would need it.
     _run_token: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    #: What this checker told the model last time, per page. Without it the
+    #: second look is as amnesiac as the first: the aquarium run was told "no
+    #: bubbles" four times while the frames showed a few, and the model kept
+    #: rewriting the same emitter. A returning reviewer can say "still missing"
+    #: or "now visible, but sparse" instead.
+    _previous_issues: dict[str, list[str]] = field(default_factory=dict)
 
     def remaining(self) -> int:
         return max(0, self.max_calls - self._quality_calls)
 
-    def _quality_verdict(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _quality_verdict(
+        self, payload: dict[str, Any], *, page: pathlib.Path | None = None
+    ) -> dict[str, Any]:
         """Consume one real visual-quality slot and return a bounded verdict."""
 
         self._quality_calls += 1
         result = dict(payload)
         result["checks_left"] = self.remaining()
+        if page is not None:
+            issues = result.get("issues")
+            if isinstance(issues, list):
+                self._previous_issues[str(page)] = [str(item) for item in issues][:ISSUE_LIMIT]
         return bound_verdict(result)
 
     def _unavailable_verdict(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -321,7 +333,8 @@ class VisualChecker:
                     "console_errors": console,
                     "page_errors": page_errors,
                     "frames": saved,
-                }
+                },
+                page=page,
             )
         answer, finish_reason = self._ask(
             frames,
@@ -330,6 +343,7 @@ class VisualChecker:
             criteria=criteria or self.criteria,
             issues=issues,
             console=console,
+            previous=self._previous_issues.get(str(page), ()),
         )
         if answer is None:
             if issues:
@@ -341,7 +355,8 @@ class VisualChecker:
                         "console_errors": console,
                         "page_errors": page_errors,
                         "frames": saved,
-                    }
+                    },
+                    page=page,
                 )
             return self._unavailable_verdict(
                 {
@@ -373,7 +388,8 @@ class VisualChecker:
                         "console_errors": console,
                         "page_errors": page_errors,
                         "frames": saved,
-                    }
+                    },
+                    page=page,
                 )
             return self._unavailable_verdict(
                 {
@@ -390,7 +406,10 @@ class VisualChecker:
         # measured render problem: the model may simply not see it in a frame.
         if issues or observation.get("page_errors") or observation.get("console_errors"):
             verdict = "needs_work"
-        merged = list(reported) + [item for item in issues if item not in reported]
+        # Measured problems go first. A model can report five variants of one
+        # visible defect and push a broken resize — measured on every check —
+        # out of the bounded verdict, and the aquarium run then never fixed it.
+        merged = list(issues) + [item for item in reported if item not in issues]
         return self._quality_verdict(
             {
                 "verdict": verdict,
@@ -400,7 +419,8 @@ class VisualChecker:
                 "page_errors": page_errors,
                 "resize": resize,
                 "frames": saved,
-            }
+            },
+            page=page,
         )
 
     def _save_frames(self, page: pathlib.Path, frames: Sequence[bytes]) -> list[str]:
@@ -434,6 +454,7 @@ class VisualChecker:
         criteria: Sequence[str],
         issues: Sequence[str],
         console: Sequence[str],
+        previous: Sequence[str] = (),
     ) -> tuple[Optional[str], Optional[str]]:
         """One checker call, without any of this run's history.
 
@@ -454,6 +475,14 @@ class VisualChecker:
             )
         if console:
             lines.append("Console errors:\n" + "\n".join(f"- {item}" for item in console))
+        if previous:
+            lines.append(
+                "Your previous review of this page reported:\n"
+                + "\n".join(f"- {str(item)[:200]}" for item in previous[:ISSUE_LIMIT])
+                + "\nFor each, say whether these frames now show it fixed. If it "
+                "is still present, keep it as an issue; if it is fixed, do not "
+                "repeat it."
+            )
         lines.append(
             "Two frames follow: the first after the page settled, the second "
             f"about {round(self.settle_ms / 1000, 1)} seconds later."

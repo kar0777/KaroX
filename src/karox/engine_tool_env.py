@@ -49,6 +49,12 @@ if TYPE_CHECKING:
 _READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
 _TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
 _PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
+#: Proof bookkeeping, not an observation. ``completion_identity`` carries the
+#: whole task text and every file hash; the completion gate reads it from the
+#: durable result, so putting it in the model-facing body only makes every later
+#: request re-send an 8 KB echo of the brief. Six visual checks paid about
+#: 640k prompt tokens for that in the aquarium run.
+_BOOKKEEPING_KEYS = frozenset({"completion_identity", "completion_target"})
 #: A finish call found in a batch with other calls. It is rewritten to this
 #: marker so the other calls still execute and every call gets its observation;
 #: the model must then submit again with finish alone.
@@ -296,6 +302,15 @@ class CoreToolEnvironment:
             summary=_result_summary(core_name, result),
             duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
         )
+        if (
+            core_name == "visual.check"
+            and isinstance(result.data, dict)
+            and result.data.get("method") == "limit"
+        ):
+            # No further verdict can arrive, so no further edit can make this
+            # run verified. Stop at the next step boundary instead of burning
+            # the step budget (26 and 20 wasted steps in the aquarium runs).
+            self._kernel.note_visual_budget_exhausted()
         return output
 
     def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:
@@ -535,6 +550,8 @@ class CoreToolEnvironment:
             text = f"[{core_name} {detail}]\n{text}".strip()
             if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
                 returncode = exit_code if exit_code > 0 else 1
+        elif core_name == "repo.read_lines" and result.ok:
+            text = _read_lines_body(data)
         elif core_name in _READABLE_TOOLS and result.ok:
             path = data.get("path")
             content = data.get("content")
@@ -546,11 +563,18 @@ class CoreToolEnvironment:
             )
         elif core_name in _MUTATION_TOOLS:
             text = _mutation_body(core_name, data, result.ok)
+        elif core_name == "visual.check":
+            text = _visual_check_body(data, result.ok)
         else:
+            visible = {
+                key: value
+                for key, value in data.items()
+                if key not in _BOOKKEEPING_KEYS
+            }
             text = json.dumps(
                 {
                     "ok": result.ok,
-                    "data": data,
+                    "data": visible,
                     "evidence": [item.evidence_id for item in result.evidence],
                 },
                 ensure_ascii=False,
@@ -568,6 +592,80 @@ class CoreToolEnvironment:
             "returncode": returncode,
             "exception_info": "",
         }
+
+
+def _read_lines_body(data: Mapping[str, Any]) -> str:
+    """The window as plain lines, not a JSON envelope around a list.
+
+    The tool already returns the window start and the total; re-encoding every
+    line as a JSON string costs a quote and a comma per line, escapes the
+    content, and hides the numbers the header already carries. Hashes and the
+    secret flag stay in the durable result.
+    """
+
+    path = data.get("path")
+    lines = data.get("lines")
+    start = data.get("start")
+    if not isinstance(lines, list) or not isinstance(start, int) or isinstance(start, bool):
+        return json.dumps(data, ensure_ascii=False, sort_keys=True)
+    total = data.get("total_lines")
+    last = start + len(lines) - 1 if lines else start
+    header = f"[repo.read_lines {path} {start}-{last}"
+    if isinstance(total, int) and not isinstance(total, bool):
+        header += f" of {total}"
+    header += "]"
+    body = "\n".join(str(line) for line in lines)
+    text = f"{header}\n{body}" if body else header
+    if data.get("has_more"):
+        text += "\n…more lines below"
+    return text
+
+
+def _visual_check_body(data: Mapping[str, Any], ok: bool) -> str:
+    """The verdict the model acts on, without the task echo.
+
+    The durable result keeps ``completion_identity`` so the completion gate can
+    bind the verdict to the bytes; this body keeps only what changes the next
+    action: the verdict, the named issues, runtime errors, the resize verdict
+    and where the frames are. The whole task text is already in the run's first
+    message and does not belong in every later request.
+    """
+
+    verdict = str(data.get("verdict") or ("pass" if ok else "failed"))
+    method = data.get("method")
+    header = f"[visual.check {verdict}"
+    if isinstance(method, str) and method:
+        header += f" · {method}"
+    header += "]"
+    lines = [header]
+    left = data.get("checks_left")
+    if isinstance(left, int) and not isinstance(left, bool):
+        lines.append(f"checks left: {left}")
+    if method == "limit":
+        # The budget exists to stop polishing, not to make the model guess at
+        # feedback it can no longer get. The aquarium run spent 26 more steps
+        # editing after this verdict and broke a working resize.
+        lines.append("No checks remain: stop changing the page and finish.")
+    elif left == 0:
+        lines.append("This was the last check: fix only what it lists, then finish.")
+    issues = data.get("issues")
+    if isinstance(issues, list) and issues:
+        lines.append("issues:")
+        lines.extend(f"- {str(item)[:200]}" for item in issues[:5])
+    for label, key in (
+        ("console errors", "console_errors"),
+        ("page errors", "page_errors"),
+    ):
+        values = data.get(key)
+        if isinstance(values, list) and values:
+            lines.append(label + ": " + "; ".join(str(item)[:200] for item in values[:3]))
+    resize = data.get("resize")
+    if isinstance(resize, dict):
+        lines.append(f"resize: {'ok' if resize.get('ok') else 'failed'}")
+    frames = data.get("frames")
+    if isinstance(frames, list) and frames:
+        lines.append("frames: " + ", ".join(str(item) for item in frames[:2]))
+    return "\n".join(lines)
 
 
 def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:

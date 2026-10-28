@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Changed — the model is not charged again for work it already did
+
+- A tool call that already ran no longer re-sends its arguments on every later
+  request. A whole-document write carries the entire file in its arguments; the
+  content is on disk and the tool result names the path, the size and the diff.
+  Old completed writes and patches now travel as a small valid-JSON marker,
+  while the two most recent keep their arguments so a chunked write can continue
+  from its seam. An `edit_file` call is deliberately left alone: its old/new
+  strings are the anchors the next edits reuse, and eliding them made the
+  aquarium run re-read the file 59 times instead of 14. Failed calls and
+  `finish` are never rewritten.
+- The proof bookkeeping never reaches the model. `completion_identity` contains
+  the whole task text and every file hash; the completion gate reads it from the
+  durable result, so the model-facing body of `visual.check`, `git.status` and
+  `git.diff` now omits it. Six visual checks had made every later request
+  re-send an 8 KB echo of the brief (about 640k prompt tokens in one run).
+- `repo.read_lines` returns the window as plain lines under a header with the
+  start, the end and the total, instead of a JSON object around a list of
+  strings. It is about 9% smaller for a 500-line window, and the model no longer
+  reads escaped content or internal hashes and secret flags.
+
+### Fixed — the visual loop stops instead of burning the step budget
+
+- Measured problems keep the first slots in a bounded verdict. A model can
+  report five variants of one visible defect and push a broken resize — measured
+  on every check — out of the five-issue cap; one run then never fixed it.
+- The checker remembers what it reported last time and asks the model, per
+  issue, whether the new frames show it fixed. Each look used to start from
+  zero, so four consecutive checks repeated "no bubbles" for a page whose
+  frames showed a few.
+- When the checker budget is exhausted, the next `visual.check` stops the run
+  with the honest reason `visual_budget_exhausted`. No further verdict can
+  arrive, so no further edit can make the run verified; two runs spent 26 and
+  20 more steps editing blind and ended on the step limit with a broken resize.
+- The three.js recipe now states the frame-level targets that the checks kept
+  missing: a warm lamp must leave a visibly warmer pool on the sand, and a
+  bubble stream must show 8-12 mostly white bubbles between the floor and the
+  surface at the default camera.
+
 ### Changed — clarity is part of the visual verdict, not decoration
 
 - The checker judged presence and counts, so it passed an aquarium whose

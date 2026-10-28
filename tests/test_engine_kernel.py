@@ -1028,6 +1028,65 @@ def test_engine_model_bridge_builds_provider_requests(repository: Path) -> None:
     assert message["extra"]["actions"][0]["tool_call_id"] == "c1"
 
 
+def test_engine_model_bridge_elides_applied_large_arguments(repository: Path) -> None:
+    """A whole-file write already on disk is not re-sent on every later request.
+
+    The aquarium run wrote 16-20 KB chunks and then paid for those arguments in
+    every following prompt. The wire carries a valid-JSON marker for old
+    completed writes, keeps the two most recent seams, and never touches an
+    edit (its anchors are reused), a failed call, or the finish answer.
+    """
+    from karox.engine_kernel import EngineProviderModel
+
+    provider = ScriptedProvider([_response((_finish_call("c9", "done"),))])
+    model = EngineProviderModel(
+        provider=provider,
+        model_id="test-model",
+        tools=(),
+        deadline_seconds=30.0,
+    )
+    body = json.dumps({"content": "x" * 5_000})
+    answer = json.dumps({"answer": "y" * 5_000})
+    messages = [
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "wrote",
+            "tool_calls": [
+                {"call_id": "c1", "name": "repo_write_file", "raw_arguments": body},
+                {"call_id": "c2", "name": "repo_write_file", "raw_arguments": body},
+                {"call_id": "c3", "name": "repo_write_file", "raw_arguments": body},
+                {"call_id": "c4", "name": "repo_edit_file", "raw_arguments": body},
+                {"call_id": "c5", "name": "repo_edit_file", "raw_arguments": body},
+                {"call_id": "c6", "name": "finish", "raw_arguments": answer},
+                {"call_id": "c7", "name": "repo_read_file", "raw_arguments": "{}"},
+            ],
+        },
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c1"},
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c2"},
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c3"},
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c4"},
+        {"role": "tool", "content": "<returncode>1</returncode>", "tool_call_id": "c5"},
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c6"},
+        {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": "c7"},
+    ]
+
+    model.query(messages)
+
+    sent = provider.requests[0].messages
+    calls = {call.call_id: call for message in sent for call in message.tool_calls}
+    assert json.loads(calls["c1"].raw_arguments)["_karo_context_manager"]
+    # The two most recent successful writes keep their arguments for continuity.
+    assert calls["c2"].raw_arguments == body
+    assert calls["c3"].raw_arguments == body
+    # An edit's old/new strings are the anchors the next edit reuses.
+    assert calls["c4"].raw_arguments == body
+    # A failed call keeps exactly what the model attempted.
+    assert calls["c5"].raw_arguments == body
+    # The deliverable answer is never rewritten.
+    assert calls["c6"].raw_arguments == answer
+
+
 def test_engine_model_bridge_streams_progress_deltas(repository: Path) -> None:
     from karox.providers import ModelEvent, ModelEventKind
 
@@ -2076,3 +2135,27 @@ def test_one_model_reply_may_take_longer_than_two_minutes() -> None:
     assert _model_request_deadline(3600.0) == 300.0
     assert _model_request_deadline(42.0) == 42.0
     assert _model_request_deadline(0.0) == 5.0
+
+
+def test_visual_budget_exhaustion_is_an_honest_stop() -> None:
+    """No further verdict exists, so the run stops instead of burning steps.
+
+    The checker budget is per task; after it every call returns ``limit``. Two
+    aquarium runs spent 26 and 20 more steps editing without feedback and ended
+    on the step limit with a broken resize.
+    """
+
+    class _Kernel:
+        _visual_budget_hit = False
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    kernel = _Kernel()
+    EngineKernel.note_visual_budget_exhausted(kernel)
+
+    assert kernel.cancelled is True
+    assert EngineKernel._terminal_reason(kernel, "s1", "UserInterruption") == (
+        "visual_budget_exhausted"
+    )

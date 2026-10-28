@@ -306,7 +306,11 @@ class EngineAgent(DefaultAgent):
             raise UserInterruption(
                 {
                     "role": "exit",
-                    "content": "cancelled by the user",
+                    "content": (
+                    "visual check budget is exhausted; stopping"
+                    if self._kernel._visual_budget_hit
+                    else "cancelled by the user"
+                ),
                     "extra": {"exit_status": "UserInterruption", "submission": ""},
                 }
             )
@@ -708,6 +712,10 @@ class EngineKernel:
         self.monotonic = monotonic
         self._cancel_event: Optional[threading.Event] = None
         self._cancelled = False
+        #: Set when the model asks for a visual verdict after the checker budget
+        #: is gone. No further check can pass, so the run cannot become
+        #: verified; stopping here is honest and avoids a step-limit burn.
+        self._visual_budget_hit = False
         self._step = 0
         self._known_revision: Optional[int] = None
         self._compaction: Optional[Dict[str, Any]] = None
@@ -767,6 +775,20 @@ class EngineKernel:
         self._cancelled = True
         if self._cancel_event is not None:
             self._cancel_event.set()
+
+    def note_visual_budget_exhausted(self) -> None:
+        """End the run honestly once no further visual verdict can arrive.
+
+        The checker's budget is per task. After it, every ``visual_check`` call
+        returns ``method: limit`` and the completion gate can never see a
+        passing vision verdict, so more edits cannot make the run verified.
+        The aquarium run spent 26 steps editing after the first limit verdict
+        and another 20 in a later run, then ended on the step limit with a
+        broken resize. The report now says why it stopped.
+        """
+
+        self._visual_budget_hit = True
+        self.cancel()
 
     def run(self, session_id: str) -> AgentReport:
         self._cancel_event = threading.Event()
@@ -1861,7 +1883,7 @@ class EngineKernel:
         if exit_status == "TimeExceeded":
             return "wall_time_limit"
         if exit_status == "UserInterruption":
-            return "cancelled"
+            return "visual_budget_exhausted" if self._visual_budget_hit else "cancelled"
         if exit_status == "RepeatedFormatError":
             return "format_errors_exhausted"
         record = self.sessions.load(session_id)

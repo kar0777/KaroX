@@ -17,7 +17,8 @@ from typing import Any, List
 import pytest
 
 from karox.core import InvalidCommand
-from karox.models import AccessProfile
+from karox.engine_tool_env import CoreToolEnvironment, _visual_check_body
+from karox.models import AccessProfile, CoreResult
 from karox.providers import ModelResponse
 from karox.risk_mapping import risk_kind_for
 
@@ -730,3 +731,110 @@ def test_cli_engine_run_drives_the_real_desktop_fixture(
     finally:
         keep_focus.set()
         window.stop()
+
+
+def test_visual_check_body_keeps_the_verdict_and_drops_the_task_echo() -> None:
+    """The checker's identity is bookkeeping, not something the model reads.
+
+    Every verdict carried the whole 8 KB brief in ``completion_identity``, and
+    six checks made every later request re-send it (about 640k prompt tokens in
+    the aquarium run). The gate reads the identity from the durable result, so
+    the model-facing body only needs what decides the next action.
+    """
+
+    task = "Strict 3D benchmark. Every requirement is mandatory. " * 200
+    data = {
+        "verdict": "needs_work",
+        "method": "vision",
+        "checks_left": 3,
+        "issues": ["the tank interior reads as a pale milky slab"],
+        "console_errors": [],
+        "page_errors": [],
+        "resize": {"ok": True},
+        "frames": ["a.png", "b.png"],
+        "completion_identity": {"task": task, "files": {"aquarium.html": "x"}},
+        "completion_target": "aquarium.html",
+    }
+
+    text = _visual_check_body(data, True)
+
+    assert task not in text
+    assert "completion_identity" not in text
+    assert "[visual.check needs_work · vision]" in text
+    assert "checks left: 3" in text
+    assert "milky" in text
+    assert "resize: ok" in text
+    assert len(text) < 1_000
+
+
+def test_other_proof_outputs_hide_bookkeeping_too() -> None:
+    from types import SimpleNamespace
+
+    class _Env:
+        config = SimpleNamespace(output_char_limit=100_000)
+
+    result = CoreResult(
+        ok=True,
+        command="git.status",
+        data={
+            "argv": ["git", "status", "--short"],
+            "stdout": " M aquarium.html\n",
+            "completion_identity": {"task": "x" * 9_000},
+            "completion_target": "aquarium.html",
+        },
+        correlation_id="c1",
+    )
+
+    text = CoreToolEnvironment._render_output(_Env(), "git.status", result)
+
+    assert "completion_identity" not in text["output"]
+    assert "completion_target" not in text["output"]
+    assert "aquarium.html" in text["output"]
+
+
+def test_read_lines_renders_a_numbered_window_without_the_json_envelope() -> None:
+    from types import SimpleNamespace
+
+    class _Env:
+        config = SimpleNamespace(output_char_limit=100_000)
+
+    result = CoreResult(
+        ok=True,
+        command="repo.read_lines",
+        data={
+            "path": "aquarium.html",
+            "start": 10,
+            "count": 3,
+            "total_lines": 40,
+            "has_more": True,
+            "content_sha256": "x" * 64,
+            "secret_like": False,
+            "lines": ["<body>", "  <canvas></canvas>", "</body>"],
+        },
+        correlation_id="c1",
+    )
+
+    text = CoreToolEnvironment._render_output(
+        _Env(), "repo.read_lines", result
+    )["output"]
+
+    assert "[repo.read_lines aquarium.html 10-12 of 40]" in text
+    assert "   10|<body>" not in text
+    assert "<body>\n  <canvas></canvas>\n</body>" in text
+    assert "content_sha256" not in text
+    assert "secret_like" not in text
+    assert "more lines below" in text
+
+
+def test_visual_check_limit_tells_the_model_to_stop() -> None:
+    data = {
+        "verdict": "unavailable",
+        "method": "limit",
+        "checks_left": 0,
+        "issues": ["visual_check produced 6 usable verdicts; its budget is exhausted"],
+    }
+
+    text = _visual_check_body(data, False)
+
+    assert "No checks remain: stop changing the page and finish." in text
+    assert "checks left: 0" in text

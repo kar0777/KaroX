@@ -45,6 +45,88 @@ logger = logging.getLogger("karox.engine_provider_bridge")
 #: engine's ``echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`` marker.
 FINISH_TOOL_NAME = "finish"
 
+#: A whole-document write carries the entire file in its arguments; the content
+#: is on disk and the tool result names the path, the size and the diff. An
+#: `edit_file` call is different: its old/new strings are the anchors the model
+#: reuses in the next edits. Eliding those made the aquarium run re-read the
+#: file 59 times instead of 14 and finish in 71 steps instead of 48, which cost
+#: more in total than the arguments it saved.
+_ELIDABLE_ARGUMENT_TOOLS = frozenset({"repo_write_file", "repo_apply_patch"})
+_ELIDED_ARGUMENT_CHARS = 2_000
+#: Keep the arguments of the most recent large completed calls so a model that
+#: continues a chunked write can still see its own seam. Older calls are the
+#: ones whose carried cost matters. Small calls (reads, checks) never take
+#: these slots.
+_ELIDED_ARGUMENT_KEEP = 2
+
+
+def _elided_argument_marker(name: str) -> str:
+    # Valid JSON on purpose: an OpenAI-compatible gateway rejects a tool call
+    # whose arguments are not a JSON object (the aquarium run's step-31 400).
+    return json.dumps(
+        {
+            "_karo_context_manager": (
+                f"{name} arguments elided after the call ran; "
+                "the tool result carries the outcome"
+            )
+        },
+        ensure_ascii=False,
+    )
+
+
+def _completed_calls(
+    messages: Sequence[Mapping[str, Any]],
+) -> List[tuple[str, str, int]]:
+    """Successful call ids, names and argument sizes, in completion order.
+
+    ``finish`` is excluded: its arguments are the deliverable, and it never has
+    a next request to save.
+    """
+
+    names: Dict[str, str] = {}
+    sizes: Dict[str, int] = {}
+    for entry in messages:
+        if entry.get("role") != "assistant":
+            continue
+        for item in entry.get("tool_calls") or []:
+            if isinstance(item, Mapping):
+                call_id = str(item.get("call_id") or "")
+                if call_id:
+                    names[call_id] = str(item.get("name") or "")
+                    sizes[call_id] = len(str(item.get("raw_arguments") or ""))
+    completed: List[tuple[str, str, int]] = []
+    for entry in messages:
+        if entry.get("role") != "tool":
+            continue
+        call_id = str(entry.get("tool_call_id") or "")
+        if (
+            call_id
+            and names.get(call_id) != FINISH_TOOL_NAME
+            and "<returncode>0</returncode>" in str(entry.get("content") or "")
+        ):
+            completed.append(
+                (call_id, names.get(call_id, ""), sizes.get(call_id, 0))
+            )
+    return completed
+
+
+def _elide_applied_arguments(
+    call: ToolCall, *, completed: Set[str], keep: Set[str]
+) -> ToolCall:
+    if (
+        call.call_id in completed
+        and call.call_id not in keep
+        and call.name in _ELIDABLE_ARGUMENT_TOOLS
+        and len(call.raw_arguments) > _ELIDED_ARGUMENT_CHARS
+    ):
+        return ToolCall(
+            call_id=call.call_id,
+            name=call.name,
+            raw_arguments=_elided_argument_marker(call.name),
+        )
+    return call
+
+
 #: The typed-tool restatement of the engine's format-error nudge. The
 #: output-limit branch is the engine's own text so a truncated response gets
 #: the same recovery it had in the race.
@@ -279,20 +361,33 @@ class EngineProviderModel:
     # -- internals --------------------------------------------------------
 
     def _request_messages(self, messages: Iterable[Mapping[str, Any]]) -> Tuple[ModelMessage, ...]:
+        entries = list(messages)
+        completed_calls = _completed_calls(entries)
+        completed = {call_id for call_id, _, _ in completed_calls}
+        large = [
+            call_id
+            for call_id, name, size in completed_calls
+            if name in _ELIDABLE_ARGUMENT_TOOLS and size > _ELIDED_ARGUMENT_CHARS
+        ]
+        keep = set(large[-_ELIDED_ARGUMENT_KEEP:])
         first_user_seen = False
         converted: List[ModelMessage] = []
-        for entry in messages:
+        for entry in entries:
             role = str(entry.get("role", "user"))
             if role == "exit":
                 continue
             content = entry.get("content")
             text = None if content is None else str(content)
             if role == "assistant":
+                calls = tuple(
+                    _elide_applied_arguments(call, completed=completed, keep=keep)
+                    for call in _engine_tool_calls(entry)
+                )
                 converted.append(
                     ModelMessage(
                         "assistant",
                         text,
-                        tool_calls=_engine_tool_calls(entry),
+                        tool_calls=calls,
                         reasoning_blocks=_engine_reasoning_blocks(entry),
                     )
                 )
