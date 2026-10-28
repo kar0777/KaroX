@@ -429,6 +429,35 @@ def _route(value: str) -> RouteTarget:
     return RouteTarget(provider_id, model)
 
 
+def _run_vision_capability(args: argparse.Namespace) -> bool:
+    """Whether the model this run talks to may be shown images.
+
+    The routed model decides, not the registry selection: a run sent to a
+    text-only model must not offer visual.check. An ``unknown`` capability
+    inherits the selected model's flag because the checker already degrades to
+    measurements when a provider rejects images, and refusing every model the
+    registry has not classified would remove the check from most custom routes.
+    Direct ``--model/--base-url`` runs stay off, as before: nothing there says
+    the endpoint accepts image parts.
+    """
+
+    registry = _registry()
+    direct = bool(args.model or args.base_url or args.api_key_env)
+    routes = tuple(_route(value) for value in (getattr(args, "route", ()) or ()))
+    if routes:
+        provider_id, model_id = routes[0].provider_id, routes[0].model
+        try:
+            record = registry.model(provider_id, model_id)
+        except Exception:
+            record = None
+        if record is not None and record.vision in {"true", "false"}:
+            return record.vision == "true"
+    elif direct:
+        return False
+    selected = registry.selected_model()
+    return selected is not None and selected.vision == "true"
+
+
 def _resolve_runtime(
     args: argparse.Namespace,
     *,
@@ -803,10 +832,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         from .visual_check import VisualChecker, is_visual_task
         from .web_check import default_pages
 
-        vision = False
-        if not (args.model or args.base_url or args.api_key_env):
-            selected_model = _registry().selected_model()
-            vision = selected_model is not None and selected_model.vision == "true"
+        vision = _run_vision_capability(args)
         wants_look = is_visual_task(args.task)
         if not wants_look:
             with contextlib.suppress(Exception):

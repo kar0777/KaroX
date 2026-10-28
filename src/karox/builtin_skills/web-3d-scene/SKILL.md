@@ -1,6 +1,6 @@
 ---
 name: web-3d-scene
-version: 1.0.0
+version: 1.1.0
 description: Build or fix a three.js scene that runs in the browser.
 when_to_use: 3D, three.js, WebGL, animated scenes, aquariums, particles, models in a page.
 triggers: [three, webgl, canvas, "*.html"]
@@ -30,12 +30,20 @@ Keep the implementation economical
 - Prefer reusable constructors, shared materials/geometries and procedural loops over copied objects or huge hard-coded vertex/data tables. A polished self-contained scene should stay readable and compact enough to repair surgically.
 - For a large single-file deliverable, do not spend one enormous model turn regenerating the whole file after it exists. Create a coherent first version, then use targeted edits. If one initial write would become unusually large, use bounded create/append chunks at stable section boundaries instead of one giant JSON tool argument.
 
+Clear materials, not haze
+- The subject must be readable through every transparent surface. A tank, window or glass panel that turns the interior pale, milky or frosted is a bug, not a premium look. The gravel, the far wall and every fish must stay clearly visible.
+- Glass panels: `transparent: true` and `depthWrite: false`, but never `depthTest: false`. A panel drawn without the depth test composites over the subject and turns the whole scene into a frosted box. Do not stack several translucent sheets between the camera and the subject.
+- Water: a thin, mostly transparent surface plus a very faint tint. Do not fill the volume with an emissive or opaque box, and do not raise fog density until the interior washes out. If the far wall looks like it is behind fog, reduce the tint until it is invisible at the far wall.
+- No full-screen CSS layer over the canvas: a `mix-blend-mode: screen` or blurred overlay, however subtle, is a veil on top of the scene. Keep light effects inside WebGL.
+- Bubble/sparkle particles are small and mostly transparent; opaque white spheres read as ping-pong balls.
+
 Environment
-- Ground (sand plane with a lighter color), a few props (rocks, plants as groups of thin boxes or cones that sway), and light fog or a blue gradient for water depth.
+- Ground (sand plane with a lighter color) and a few props (rocks, plants as groups of thin boxes or cones that sway). A slight blue gradient in the background is enough for depth.
 - Rocks sit partly sunk into the sand, flattened and irregular, in muted grey-brown; not white eggs lying on top. Plants: several bent blades per plant, and several plants.
-- Light patterns on the sand must be soft and irregular, never a visible repeating grid. The water volume should read as water: a slight blue tint and depth fog inside the tank.
+- Light patterns on the sand must be soft and irregular, never a visible repeating grid.
 - Keep objects inside bounds: steer away from walls smoothly instead of teleporting.
 
 Before you finish
 - No console errors. Page loads from a clean start.
 - If visual_check is offered, call it and fix what it reports. The subject must be recognizable at first glance: fish must look like fish, not balls or capsules.
+- When visual_check passes, stop changing the look. Further decoration after a pass is how a clear scene becomes hazy; only fix a requirement the goal still names, then check again.

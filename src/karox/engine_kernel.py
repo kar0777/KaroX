@@ -99,6 +99,18 @@ from .usage_analytics import merge_response_usage, usage_event_from_response  # 
 _MAX_SNAPSHOT_FILES = 50
 _MAX_SNAPSHOT_BYTES = 2_000_000
 
+#: Cap on one model request, in seconds. A single reply can legitimately be a
+#: whole file: the aquarium run's first answer was 34k completion tokens, about
+#: two minutes of streaming, and the old 120 s cap killed two runs mid-answer
+#: with "deadline expired while reading stream". The cap still shrinks to the
+#: time the run has left, so a nearly finished run never waits longer than it
+#: has.
+_MODEL_REQUEST_DEADLINE_SECONDS = 300.0
+
+
+def _model_request_deadline(remaining_seconds: float) -> float:
+    return min(_MODEL_REQUEST_DEADLINE_SECONDS, max(5.0, remaining_seconds))
+
 
 #: The engine execution contract appended to the product system prompt. It is
 #: deliberately the last thing the model reads before deciding an action.
@@ -792,7 +804,7 @@ class EngineKernel:
                 max_output_tokens=self.max_output_tokens,
                 reasoning_effort=self.reasoning_effort,
                 event=self._model_event,
-                deadline_seconds=min(120.0, max(5.0, self.remaining_seconds())),
+                deadline_seconds=_model_request_deadline(self.remaining_seconds()),
                 images=self.request_images,
             )
             environment = CoreToolEnvironment(

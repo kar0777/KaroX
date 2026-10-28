@@ -154,3 +154,36 @@ def test_visual_checker_can_still_pass_a_clean_page(
 
     assert result["verdict"] == "pass"
     assert result["issues"] == []
+
+
+def test_a_resumed_checker_does_not_overwrite_earlier_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two checker instances (a resume) must keep their own evidence.
+
+    The call counter restarts at one when a session resumes, so without a token
+    the first frames of the resumed run replaced the frames the earlier verdict
+    was made from -- exactly the evidence a regression would be judged against.
+    """
+
+    monkeypatch.setattr(
+        visual_check,
+        "observe_page",
+        lambda *args, **kwargs: _observation(resize_ok=True),
+    )
+
+    def look() -> list[str]:
+        checker = VisualChecker(
+            provider=_FakeProvider('{"verdict": "pass", "issues": []}'),  # type: ignore[arg-type]
+            model="test-model",
+            artifacts=tmp_path / "visual",
+            vision=True,
+            goal=LONG_GOAL,
+        )
+        return list(checker(Path("aquarium-test.html"))["frames"])
+
+    first = look()
+    second = look()
+
+    assert len(set(first) | set(second)) == 4
+    assert all(Path(item).is_file() for item in first + second)

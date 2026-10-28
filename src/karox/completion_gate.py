@@ -564,6 +564,25 @@ def floor(core: Any, record: Any) -> list[str]:
         if argv not in latest and not _moot_scratch_check(core, argv):
             reasons.append("unresolved failed check: " + " ".join(argv))
     passed_classes = set().union(*(classes for passed, classes in latest.values() if passed)) if latest else set()
+    # A vision-passed visual.check on the changed page is browser-runtime proof:
+    # it loaded the page in Chromium, recorded console/page errors, measured the
+    # viewport resize and frame motion, and a model judged the frames. For a
+    # static page that is the same fact `karox.web_check --render` reports, so
+    # the obligation is discharged instead of ending a correct run unverified.
+    visual_pages: set[str] = set()
+    for key, (passed, classes) in latest.items():
+        # Check keys are argv tuples of any length; only the (name, target)
+        # shape belongs to visual.check.
+        if (
+            len(key) == 2
+            and key[0] == "visual.check"
+            and passed
+            and "visual" in classes
+            and key[1] in record.changed_files
+        ):
+            visual_pages.add(key[1])
+    if browser and visual_pages:
+        passed_classes.add("browser")
     if visual_required(record) and not visual_proven(core, record):
         reasons.append("missing visual evidence")
         if visual_producer_available(core) is False:

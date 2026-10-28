@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Changed — clarity is part of the visual verdict, not decoration
+
+- The checker judged presence and counts, so it passed an aquarium whose
+  interior had turned into a pale, milky slab behind frosted-looking glass.
+  It now checks clarity first and names the failure concretely: no depth behind
+  the glass, gravel and the far wall lost in the same pale tone, a flat sheet
+  where water should ripple, opaque balls for bubbles. A frame that still looks
+  wrong as a picture cannot pass because every checklist item is present.
+- The three.js recipe created that failure: it asked for "depth fog inside the
+  tank" and said nothing about depth-tested glass. It now states the clear
+  material rules: `depthTest: false` on a glass panel composites it over the
+  subject, stacked translucent sheets and an emissive water volume turn the tank
+  into a frosted box, and a full-screen `mix-blend-mode` layer is a veil over
+  the canvas. It also says to stop changing the look after a pass.
+- A vision-passed `visual.check` on the changed page now discharges the
+  browser-runtime obligation. It already loads the page in Chromium, records
+  console and page errors, measures resize and motion, and judges the frames;
+  charging a separate approved browser command for the same fact ended correct
+  visual runs as `unproducible_requirement`.
+- The visual checker's frame filenames include a per-instance token. A resumed
+  session restarts the call counter, so its first frames used to overwrite the
+  frames that earned the earlier verdict.
+- Vision capability now comes from the routed model instead of the registry
+  selection. A run routed to a model marked `vision: false` no longer offers
+  `visual.check` just because the user's selected model can see images; an
+  `unknown` route still inherits the selection, because the checker degrades to
+  measurements when a provider rejects images.
+
 ## 6.0.0a3 — 2026-10-26
 
 ### Fixed — a visual check that can see the whole brief, and valid compacted calls

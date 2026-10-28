@@ -241,3 +241,81 @@ def test_project_instructions_refuse_a_symlink_outside_the_repository(
     suffix, metadata = cli._project_instructions(repository)
     assert "do not read me" not in suffix
     assert {"name": "AGENTS.md", "reason": "symlink"} in metadata["skipped"]
+
+def _model(provider_id: str, model_id: str, vision: str):
+    from karox.registry import ModelRecord
+
+    return ModelRecord(provider_id=provider_id, model_id=model_id, vision=vision)
+
+
+class _VisionRegistry:
+    def __init__(self, models, selected) -> None:
+        self._models = {(item.provider_id, item.model_id): item for item in models}
+        self._selected = selected
+
+    def model(self, provider_id: str, model_or_alias: str):
+        key = (provider_id, model_or_alias)
+        if key in self._models:
+            return self._models[key]
+        raise KeyError(key)
+
+    def selected_model(self):
+        return self._selected
+
+
+def _vision_args(**overrides):
+    from types import SimpleNamespace
+
+    values = dict(model=None, base_url=None, api_key_env=None, route=())
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_route_model_with_vision_enables_the_checker(monkeypatch) -> None:
+    registry = _VisionRegistry(
+        [_model("wandb", "vision-model", "true")],
+        _model("stepfun-plan", "step-5-preview", "false"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(route=("wandb/vision-model",))
+
+    assert cli._run_vision_capability(args) is True
+
+
+def test_route_model_without_vision_wins_over_a_vision_capable_selection(
+    monkeypatch,
+) -> None:
+    registry = _VisionRegistry(
+        [_model("wandb", "text-model", "false")],
+        _model("stepfun-plan", "step-5-preview", "true"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(route=("wandb/text-model",))
+
+    assert cli._run_vision_capability(args) is False
+
+
+def test_unknown_route_capability_inherits_the_selected_model(monkeypatch) -> None:
+    registry = _VisionRegistry(
+        [_model("wandb", "unclassified", "unknown")],
+        _model("stepfun-plan", "step-5-preview", "true"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(route=("wandb/unclassified",))
+
+    assert cli._run_vision_capability(args) is True
+
+
+def test_direct_provider_mode_keeps_the_checker_off(monkeypatch) -> None:
+    registry = _VisionRegistry(
+        [],
+        _model("stepfun-plan", "step-5-preview", "true"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(model="anything", base_url="https://example.invalid/v1")
+
+    assert cli._run_vision_capability(args) is False

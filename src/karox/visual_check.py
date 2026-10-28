@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -212,6 +213,12 @@ class VisualChecker:
     tally: VisualCheckTally = field(default_factory=VisualCheckTally)
     _calls: int = 0
     _quality_calls: int = 0
+    # A resumed session builds a new checker, so the per-instance call counter
+    # restarts at one. Without a token in the filename, the resumed run's first
+    # frames overwrite the frames that earned the earlier verdict, and the
+    # evidence for "what passed last time" is lost exactly when a regression
+    # would need it.
+    _run_token: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def remaining(self) -> int:
         return max(0, self.max_calls - self._quality_calls)
@@ -407,7 +414,7 @@ class VisualChecker:
         directory = self.artifacts
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            stem = f"{page.stem}-{self.tally.calls}"
+            stem = f"{page.stem}-{self._run_token}-{self.tally.calls}"
             for index, payload in enumerate(frames, start=1):
                 target = directory / f"{stem}-{index}.png"
                 target.write_bytes(payload)

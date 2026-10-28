@@ -21,7 +21,7 @@ from karox.agent import AgentLimits, ContextBudget
 from karox.core import CoreRuntime
 from karox.core_tools import ExtendedCoreRuntime
 from karox.engine import __version__ as engine_version
-from karox.engine_kernel import EngineKernel
+from karox.engine_kernel import EngineKernel, _model_request_deadline
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import ModelRequest, ModelResponse, ProviderTool, ToolCall
@@ -2063,3 +2063,16 @@ def test_focused_tests_derive_targets_from_the_session_changes(
     assert data["suite"] == "focused"
     assert data["targets"] == ["tests/test_calc.py"]
     assert data["targets_source"] == "session_changes"
+
+
+def test_one_model_reply_may_take_longer_than_two_minutes() -> None:
+    """A whole-file answer is a normal reply, not a hung request.
+
+    The first aquarium attempt streamed 34k completion tokens and was killed at
+    120 s mid-answer. The cap now allows five minutes while still shrinking to
+    whatever time the run has left.
+    """
+
+    assert _model_request_deadline(3600.0) == 300.0
+    assert _model_request_deadline(42.0) == 42.0
+    assert _model_request_deadline(0.0) == 5.0
