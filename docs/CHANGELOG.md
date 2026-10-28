@@ -40,6 +40,29 @@
   missing: a warm lamp must leave a visibly warmer pool on the sand, and a
   bubble stream must show 8-12 mostly white bubbles between the floor and the
   surface at the default camera.
+- The recipe also carries a validated clownfish skeleton: a lathe body profile
+  (not a scaled sphere), three white bands with black rims that follow the body
+  radius, protruding eyes at 0.05 of the body length, a tail fan and a dorsal
+  fin, with the proportions and the animation hook. The first run that used it
+  produced clean, recognizable fish and a zero-failure external grade.
+- A page edited after the check budget is exhausted gets one closing look,
+  once per page, instead of a `limit` refusal. The sixth check of one run
+  judged a page with a runtime error, the model fixed it, and the fixed bytes
+  were never judged: the artifact passed the external grader while the run
+  stayed unverified. The same bytes, or a second closing attempt, still get the
+  hard limit and the honest stop.
+- After the last real verdict the model gets two more calls — the edit turn and
+  the closing look — and then the run stops. One run kept editing for 40 more
+  steps to the step limit after the budget ran out.
+- The checker judges small effects at the size they appear: a bubble stream
+  passes on presence and continuity rather than glass-perfect transmission at
+  1440 px, and a lamp passes on the warmth it casts on the sand and glass rather
+  than on its hood geometry. Consecutive runs had failed visible bubbles as
+  "absent" and then as "opaque discs", which the model could not resolve.
+- The two 3D effect recipes are validated before shipping: the fish skeleton
+  was rendered and inspected, and the bubble material was rendered against a
+  blue water background. A verified, zero-failure aquarium run (`karo-14`,
+  61 steps, 2.72M tokens) used both.
 
 ### Changed — clarity is part of the visual verdict, not decoration
 

@@ -15,6 +15,7 @@ measurements the render check already takes, and says so instead of pretending.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
@@ -90,6 +91,15 @@ def is_visual_task(text: object) -> bool:
     return isinstance(text, str) and any(
         signal.search(text) for signal in _TASK_SIGNALS
     )
+
+
+def _page_hash(page: pathlib.Path) -> Optional[str]:
+    """The page bytes, or None when the page cannot be read."""
+
+    try:
+        return hashlib.sha256(page.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def goal_brief(text: object, *, limit: int = GOAL_CHARS) -> str:
@@ -225,6 +235,12 @@ class VisualChecker:
     #: rewriting the same emitter. A returning reviewer can say "still missing"
     #: or "now visible, but sparse" instead.
     _previous_issues: dict[str, list[str]] = field(default_factory=dict)
+    #: Bytes each page had at its last real verdict. A page edited after the
+    #: budget ran out gets one closing look instead of a `limit` refusal: the
+    #: model fixed a real error, and that fix could not be judged otherwise.
+    _last_checked_hash: dict[str, str] = field(default_factory=dict)
+    _closing_used: set[str] = field(default_factory=set)
+    _closing_now: bool = False
 
     def remaining(self) -> int:
         return max(0, self.max_calls - self._quality_calls)
@@ -237,10 +253,15 @@ class VisualChecker:
         self._quality_calls += 1
         result = dict(payload)
         result["checks_left"] = self.remaining()
+        if self._closing_now:
+            result["closing"] = True
         if page is not None:
             issues = result.get("issues")
             if isinstance(issues, list):
                 self._previous_issues[str(page)] = [str(item) for item in issues][:ISSUE_LIMIT]
+            digest = _page_hash(page)
+            if digest is not None:
+                self._last_checked_hash[str(page)] = digest
         return bound_verdict(result)
 
     def _unavailable_verdict(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -260,7 +281,18 @@ class VisualChecker:
     ) -> dict[str, Any]:
         """One look at one page. Never raises: a broken check is not a verdict."""
 
-        if (
+        key = str(page)
+        current = _page_hash(page)
+        # A page edited after the budget ran out gets one closing look: the
+        # model fixed a real error and there is no other way to judge the fix.
+        # The same page bytes, or a second closing attempt, get the hard limit.
+        closing = (
+            self._quality_calls >= self.max_calls
+            and key not in self._closing_used
+            and current is not None
+            and current != self._last_checked_hash.get(key)
+        )
+        if not closing and (
             self._quality_calls >= self.max_calls
             or self._calls >= self.max_calls + UNAVAILABLE_RETRY_ALLOWANCE
         ):
@@ -273,6 +305,9 @@ class VisualChecker:
                 ],
                 "checks_left": self.remaining(),
             }
+        if closing:
+            self._closing_used.add(key)
+        self._closing_now = closing
         self._calls += 1
         self.tally.calls += 1
         # The full task owns the requirements; a caller's goal is a focus for

@@ -716,6 +716,10 @@ class EngineKernel:
         #: is gone. No further check can pass, so the run cannot become
         #: verified; stopping here is honest and avoids a step-limit burn.
         self._visual_budget_hit = False
+        #: After the last real visual verdict, the model gets two more calls to
+        #: apply the fix and ask for the closing look. Without a bound, it kept
+        #: editing to the step limit (80 steps, 4.1M tokens in one run).
+        self._visual_grace_until: Optional[int] = None
         self._step = 0
         self._known_revision: Optional[int] = None
         self._compaction: Optional[Dict[str, Any]] = None
@@ -789,6 +793,17 @@ class EngineKernel:
 
         self._visual_budget_hit = True
         self.cancel()
+
+    def note_visual_last_check(self) -> None:
+        """Allow two more model calls after the last real visual verdict.
+
+        The closing look can judge an edit made after the budget, but the model
+        could also keep editing to the step limit (80 steps and 4.1M tokens in
+        the karo-13 run). The grace window is the edit turn and the closing
+        check; the next call stops the run honestly.
+        """
+
+        self._visual_grace_until = self._step + 1
 
     def run(self, session_id: str) -> AgentReport:
         self._cancel_event = threading.Event()
@@ -1168,6 +1183,12 @@ class EngineKernel:
 
     def _cancel_requested(self) -> bool:
         if self._cancelled:
+            return True
+        if (
+            self._visual_grace_until is not None
+            and self._step > self._visual_grace_until
+        ):
+            self._visual_budget_hit = True
             return True
         return self._cancel_event is not None and self._cancel_event.is_set()
 

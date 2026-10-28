@@ -2159,3 +2159,25 @@ def test_visual_budget_exhaustion_is_an_honest_stop() -> None:
     assert EngineKernel._terminal_reason(kernel, "s1", "UserInterruption") == (
         "visual_budget_exhausted"
     )
+
+
+def test_the_last_visual_verdict_grants_only_two_more_calls() -> None:
+    """The edit turn and the closing look, then an honest stop."""
+
+    class _Kernel:
+        _cancelled = False
+        _cancel_event = None
+        _visual_budget_hit = False
+        _visual_grace_until = None
+        _step = 10
+
+    kernel = _Kernel()
+    EngineKernel.note_visual_last_check(kernel)
+
+    assert kernel._visual_grace_until == 11
+    assert EngineKernel._cancel_requested(kernel) is False
+    kernel._step = 11
+    assert EngineKernel._cancel_requested(kernel) is False
+    kernel._step = 12
+    assert EngineKernel._cancel_requested(kernel) is True
+    assert kernel._visual_budget_hit is True

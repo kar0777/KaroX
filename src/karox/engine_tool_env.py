@@ -302,15 +302,17 @@ class CoreToolEnvironment:
             summary=_result_summary(core_name, result),
             duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
         )
-        if (
-            core_name == "visual.check"
-            and isinstance(result.data, dict)
-            and result.data.get("method") == "limit"
-        ):
-            # No further verdict can arrive, so no further edit can make this
-            # run verified. Stop at the next step boundary instead of burning
-            # the step budget (26 and 20 wasted steps in the aquarium runs).
-            self._kernel.note_visual_budget_exhausted()
+        if core_name == "visual.check" and isinstance(result.data, dict):
+            if result.data.get("method") == "limit":
+                # No further verdict can arrive, so no further edit can make
+                # this run verified. Stop at the next step boundary instead of
+                # burning the step budget (26 and 20 wasted steps in the first
+                # aquarium runs).
+                self._kernel.note_visual_budget_exhausted()
+            elif result.data.get("checks_left") == 0:
+                # The last real verdict. Allow the edit turn and the closing
+                # look, then stop; otherwise the model edits to the step limit.
+                self._kernel.note_visual_last_check()
         return output
 
     def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:

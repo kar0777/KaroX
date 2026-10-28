@@ -271,3 +271,51 @@ def test_the_second_look_remembers_the_first_issues(
     second = provider.requests[1].messages[-1].content  # type: ignore[attr-defined]
     assert "the bubble stream is absent" in second
     assert "whether these frames now show it fixed" in second
+
+
+def test_a_page_fixed_after_the_budget_gets_one_closing_look(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last check may judge the fix, not the version before it.
+
+    The aquarium run used its sixth check on a page with a runtime error, fixed
+    the error, and then got only `limit`: the artifact passed the external
+    grader, but no verdict ever saw the fixed bytes. One closing look per page
+    solves that without reopening the budget.
+    """
+
+    provider = _SequenceProvider(
+        [
+            '{"verdict": "needs_work", "issues": ["bubbles are absent"]}',
+            '{"verdict": "pass", "issues": []}',
+        ]
+    )
+    monkeypatch.setattr(
+        visual_check,
+        "observe_page",
+        lambda *args, **kwargs: _observation(resize_ok=True),
+    )
+    page = tmp_path / "aquarium-test.html"
+    page.write_text("<html>v1</html>", encoding="utf-8")
+    checker = VisualChecker(
+        provider=provider,  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal=LONG_GOAL,
+        max_calls=1,
+    )
+
+    first = checker(page)
+    unchanged = checker(page)
+    page.write_text("<html>v2 fixed</html>", encoding="utf-8")
+    closing = checker(page)
+    page.write_text("<html>v3 another edit</html>", encoding="utf-8")
+    exhausted = checker(page)
+
+    assert first["verdict"] == "needs_work"
+    assert unchanged["method"] == "limit"
+    assert closing["verdict"] == "pass"
+    assert closing["closing"] is True
+    assert closing["checks_left"] == 0
+    assert exhausted["method"] == "limit"

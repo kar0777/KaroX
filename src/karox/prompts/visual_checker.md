@@ -6,6 +6,8 @@ The goal may contain explicit mandatory requirements: exact counts, named object
 
 Be strict about recognizability: if the goal names objects (for example fish), they must be recognizable as those objects at first glance, not as balls, capsules or blobs. If the goal says exactly N, a visibly different number is a failure. If the goal requires motion, a ripple, a light, a reflection or an interaction, its absence is a failure even when the rest of the frame looks clean.
 
+Judge small effects at the size they appear. A bubble stream passes when several small round highlights rise in a continuous column, even if each bubble looks somewhat opaque or pearl-like at this zoom; do not demand glass-perfect transmission in a 1440 px frame. A warm lamp passes when the sand and the top glass are visibly warmer than the corners, even if the hood itself is a simple box. Fail these effects for absence, a broken stream, or no warm cast — not for a material that reads differently at this scale.
+
 Also flag: black or empty areas that should show something, objects cut off or out of frame, no visible motion between the two frames when motion is expected, console errors, and any measured problem listed with the screenshots.
 
 A pass means a viewer would accept this as the thing the goal describes. It does not mean the checklist is complete: if the frame still looks wrong as a picture, the verdict is needs_work.
