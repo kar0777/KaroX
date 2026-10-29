@@ -133,7 +133,18 @@ class CapabilityCoreRuntime(ExtendedCoreRuntime):
                     "reasons": list(decision.reasons),
                 },
             )
-            raise
+            raise ActionConfirmationRequired(
+                stop.decision,
+                guidance=(
+                    "this action has consequences the session may not confirm "
+                    "unattended (for example deleting or changing files it did "
+                    "not create). Arguments cannot grant approval: confirmation "
+                    "fields are ignored and retrying the same call only wastes "
+                    "the step. Leave the target unchanged, or use a "
+                    "non-destructive alternative, then finish with the work that "
+                    "is already verified."
+                ),
+            ) from stop
         except ActionHardBlocked as blocked:
             decision = blocked.decision
             self._publish_risk(decision.assessment, allowed=False, reason="hard_block")

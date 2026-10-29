@@ -76,6 +76,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--context-window", type=int)
     run.add_argument("--max-output-tokens", type=int)
     run.add_argument(
+        "--vision",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "whether the run may use visual.check and image evidence; auto uses "
+            "the registry for routed models and stays off for direct --model/--base-url runs"
+        ),
+    )
+    run.add_argument(
         "--image",
         action="append",
         default=[],

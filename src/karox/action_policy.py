@@ -373,9 +373,16 @@ class ActionDecision:
 class ActionConfirmationRequired(SmartStopRequired):
     """Compatibility-preserving Smart Stop with the richer action decision."""
 
-    def __init__(self, decision: ActionDecision) -> None:
+    def __init__(self, decision: ActionDecision, guidance: str = "") -> None:
         super().__init__(decision.assessment)
         self.decision = decision
+        if guidance:
+            # The model sees only ``Type: str(exc)``. A bare command name ("repo.command")
+            # told it nothing about why the gate refused or what would work instead,
+            # and one benchmark run answered that silence with 37 variants of an
+            # invented confirmation flag. Keep the headline first so existing
+            # readers still recognise the action, then say what to do.
+            self.args = (f"{decision.assessment.headline}: {guidance}",)
 
 
 class ActionHardBlocked(PermissionError):

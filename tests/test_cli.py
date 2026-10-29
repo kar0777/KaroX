@@ -266,7 +266,7 @@ class _VisionRegistry:
 def _vision_args(**overrides):
     from types import SimpleNamespace
 
-    values = dict(model=None, base_url=None, api_key_env=None, route=())
+    values = dict(model=None, base_url=None, api_key_env=None, route=(), vision="auto")
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -317,5 +317,33 @@ def test_direct_provider_mode_keeps_the_checker_off(monkeypatch) -> None:
     monkeypatch.setattr(cli, "_registry", lambda: registry)
 
     args = _vision_args(model="anything", base_url="https://example.invalid/v1")
+
+    assert cli._run_vision_capability(args) is False
+
+
+def test_direct_provider_can_opt_into_vision(monkeypatch) -> None:
+    registry = _VisionRegistry(
+        [],
+        _model("stepfun-plan", "step-5-preview", "false"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(
+        model="deepseek-v4.1-flash-1017",
+        base_url="https://example.invalid/v1",
+        vision="on",
+    )
+
+    assert cli._run_vision_capability(args) is True
+
+
+def test_explicit_vision_off_wins_for_a_vision_model(monkeypatch) -> None:
+    registry = _VisionRegistry(
+        [_model("wandb", "vision-model", "true")],
+        _model("stepfun-plan", "step-5-preview", "true"),
+    )
+    monkeypatch.setattr(cli, "_registry", lambda: registry)
+
+    args = _vision_args(route=("wandb/vision-model",), vision="off")
 
     assert cli._run_vision_capability(args) is False

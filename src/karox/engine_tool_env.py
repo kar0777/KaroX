@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
@@ -68,6 +69,47 @@ AFFECTED_TEST_LIMIT = 4
 #: secret flags and evidence ids stay in the durable result but do not ride in
 #: every later request's history.
 _MUTATION_TOOLS = {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command"}
+#: A refused call is not progress, and a model that keeps reshaping the same
+#: rejected arguments spends a whole run on it: one benchmark run sent 37
+#: repo.command variants and 2.03M tokens to delete two scratch files. After
+#: this many consecutive refusals of one tool the observation starts telling the
+#: model to stop; after the higher number the tool is disabled for the run.
+REFUSAL_GUIDANCE_AFTER = 2
+REFUSAL_DISABLE_AFTER = 6
+#: A code task is not a reading exercise. On swe-requests-6028 the model spent
+#: about two dozen model steps downloading and comparing three upstream
+#: releases before its first edit; one such run cost 2.1M tokens with only one
+#: failed tool. These milestones put a direct "stop reading, make the change"
+#: line into the observation. They are advice, not a hard stop: a genuinely
+#: unfamiliar repository can ignore the first one and keep going.
+RESEARCH_BUDGET_STEPS = 12
+RESEARCH_HARD_BUDGET_STEPS = 24
+#: The budget only speaks to tasks whose deliverable is a change. A read-only
+#: question may legitimately survey twenty files; telling it to edit would be
+#: wrong. Plan/ideate and maintenance runs also never mutate.
+_CHANGE_INTENT = re.compile(
+    r"\b(?:build|create|implement|fix|bug|refactor|add|update|change|remove|"
+    r"delete|migrate|rename|repair|patch)\b"
+    r"|исправ|добав|созда|реализ|почини|переимен|обнови|удали",
+    re.IGNORECASE,
+)
+#: What resets the research clock. Downloading an upstream reference file is
+#: still research, not progress: in the fix-only run the model saved a dozen
+#: `_tmp_*` copies and every save reset the budget, so the notice never fired
+#: and the first real edit waited until step 26.
+_CODE_CHANGE_TOOLS = frozenset(
+    {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command"}
+)
+
+
+def _counts_as_repository_change(
+    core_name: str, data: Mapping[str, Any], ok: bool
+) -> bool:
+    return (
+        ok
+        and core_name in _CODE_CHANGE_TOOLS
+        and (data.get("changed") is True or bool(data.get("changed_files")))
+    )
 
 
 def _batch_tail(action: Mapping[str, Any] | None) -> bool:
@@ -122,6 +164,17 @@ class CoreToolEnvironment:
         # The last (content digest, targets) pair already auto-run after an
         # edit, so a retried call does not pay for the same test run twice.
         self._affected_key: Optional[tuple[str, tuple[str, ...]]] = None
+        #: Consecutive refusals per core tool. A success from the same tool resets
+        #: it; other tools do not, because the pathological loop interleaves
+        #: reads and edits between refusals. Alternating error types still counts:
+        #: the model is guessing, not making progress.
+        self._refusals: Dict[str, int] = {}
+        #: Step of the last repository-changing tool result, and the research
+        #: milestones already delivered in this run.
+        self._last_mutation_step = 0
+        self._research_notices: set[int] = set()
+        #: A code task gets the research budget; a question or a plan does not.
+        self._research_applies = self._task_expects_change()
 
     # -- Environment protocol ----------------------------------------------
 
@@ -184,6 +237,9 @@ class CoreToolEnvironment:
         definition = self._definitions.get(core_name)
         if definition is None:
             return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
+        disabled = self._disabled_after_refusals(core_name)
+        if disabled:
+            return self._refusal(action, "tool_disabled_after_refusals", disabled)
         # The session already knows which files it changed, so a focused run
         # can name its own targets instead of refusing the call and spending a
         # whole model turn on "which test file is this?". The derived list is
@@ -228,6 +284,9 @@ class CoreToolEnvironment:
             )
         except Exception as exc:  # noqa: BLE001 - a refusal is an observation
             message = f"{type(exc).__name__}: {redact(str(exc))}"
+            refusals = self._note_refusal(core_name, type(exc).__name__)
+            if refusals >= REFUSAL_GUIDANCE_AFTER:
+                message = f"{message}\n\n{self._refusal_guidance(type(exc).__name__, refusals)}"
             self._kernel._persist_engine_tool_error(
                 call_id, str(name), core_name, type(exc).__name__, message
             )
@@ -247,6 +306,10 @@ class CoreToolEnvironment:
                 duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
             )
             return self._observation(message, 1, "refused")
+        self._refusals.pop(core_name, None)
+        data = result.data if isinstance(result.data, dict) else {}
+        if _counts_as_repository_change(core_name, data, result.ok):
+            self._last_mutation_step = self._kernel._step
         if core_name == "tests.run" and isinstance(result.data, dict):
             # Say where the target list came from: a reader of the session must
             # be able to tell a model's choice from the harness's derivation.
@@ -271,6 +334,11 @@ class CoreToolEnvironment:
         self._attach_quick_checks(result)
         self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
+        notice = self._research_notice(definition)
+        if notice:
+            combined = f"{notice}\n\n{output['output']}"
+            output["output"] = clip_output(combined, int(self.config.output_char_limit))
+            output["observation"] = output["output"]
         self._kernel._persist_engine_tool_result(
             call_id=call_id,
             alias=str(name),
@@ -379,6 +447,84 @@ class CoreToolEnvironment:
             "(repo_write_file, checks_run, ...). Fenced shell text only runs "
             "when it exactly matches an approved verification command.",
         )
+
+    def _task_expects_change(self) -> bool:
+        kernel = self._kernel
+        if getattr(kernel, "maintenance_mode", False):
+            return False
+        if getattr(kernel, "mode", None) in {"plan", "ideate"}:
+            return False
+        if getattr(kernel, "require_change", False):
+            return True
+        try:
+            task = self._core.sessions.load(self._session_id).task
+        except Exception:  # noqa: BLE001 - a missing record means no nudge
+            return False
+        return bool(_CHANGE_INTENT.search(task or ""))
+
+    def _research_notice(self, definition: ToolDefinition) -> str:
+        """A direct "stop reading, change something" line after a long survey."""
+
+        if definition.mutates or not self._research_applies:
+            return ""
+        elapsed = int(self._kernel._step) - int(self._last_mutation_step)
+        for milestone in (RESEARCH_BUDGET_STEPS, RESEARCH_HARD_BUDGET_STEPS):
+            if elapsed < milestone or milestone in self._research_notices:
+                continue
+            self._research_notices.add(milestone)
+            if milestone == RESEARCH_BUDGET_STEPS:
+                return (
+                    f"Research budget: {milestone} model steps have passed without a "
+                    "repository change. Stop collecting references: make the smallest "
+                    "edit that addresses the public check, then run it. More reading "
+                    "will not produce a different answer."
+                )
+            return (
+                f"Research budget exhausted: {milestone} steps without a change. Make "
+                "an edit now, or finish and say why no change is needed. Further "
+                "reading is not the task."
+            )
+        return ""
+
+    def _note_refusal(self, core_name: str, error_name: str) -> int:
+        del error_name
+        count = self._refusals.get(core_name, 0) + 1
+        self._refusals[core_name] = count
+        return count
+
+    def _disabled_after_refusals(self, core_name: str) -> str:
+        count = self._refusals.get(core_name, 0)
+        if count < REFUSAL_DISABLE_AFTER:
+            return ""
+        return (
+            f"{core_name} is disabled for the rest of this run after {count} "
+            "consecutive refusals; further calls will not execute. Stop retrying "
+            "it and finish with the work already verified."
+        )
+
+    @staticmethod
+    def _refusal_guidance(error_name: str, count: int) -> str:
+        prefix = f"This is refusal {count} in a row for this tool. "
+        if error_name == "ActionConfirmationRequired":
+            body = (
+                "The gate needs an explicit user decision and will keep refusing; "
+                "no argument can approve it. Do not send confirmation fields. Leave "
+                "the path as it is, use a non-destructive edit, or finish with the "
+                "work already verified."
+            )
+        elif error_name == "InvalidCommand":
+            body = (
+                "The arguments were rejected before any change. Do not repeat this "
+                "shape or invent fields: re-read the tool schema, send only its "
+                "documented fields, and use another tool if this one cannot express "
+                "the action."
+            )
+        else:
+            body = (
+                "The call was refused before any change. Do not repeat it unchanged; "
+                "change the approach or finish with the work already verified."
+            )
+        return prefix + body
 
     def _refusal(self, action: Mapping[str, Any], reason: str, message: str) -> Dict[str, Any]:
         call_id = str(action.get("tool_call_id", "") or "")

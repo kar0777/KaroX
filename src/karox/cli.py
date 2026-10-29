@@ -437,10 +437,19 @@ def _run_vision_capability(args: argparse.Namespace) -> bool:
     inherits the selected model's flag because the checker already degrades to
     measurements when a provider rejects images, and refusing every model the
     registry has not classified would remove the check from most custom routes.
-    Direct ``--model/--base-url`` runs stay off, as before: nothing there says
-    the endpoint accepts image parts.
+
+    Direct ``--model/--base-url`` runs stay off in ``auto`` because nothing
+    there says the endpoint accepts image parts. A direct run that knows its
+    endpoint is vision-capable can opt in with ``--vision on``; this is what
+    lets a custom OpenAI-compatible vision model use visual.check instead of
+    ending every page task as ``unproducible_requirement``.
     """
 
+    override = str(getattr(args, "vision", "auto") or "auto").lower()
+    if override == "on":
+        return True
+    if override == "off":
+        return False
     registry = _registry()
     direct = bool(args.model or args.base_url or args.api_key_env)
     routes = tuple(_route(value) for value in (getattr(args, "route", ()) or ()))

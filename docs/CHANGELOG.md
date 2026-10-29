@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Added — a direct vision route can use the visual checker
+
+- `karox agent run --vision auto|on|off` now controls `visual.check`. `auto`
+  keeps the old behavior: the registry decides for a routed model, and a direct
+  `--model/--base-url` route stays off because nothing there declares image
+  support. `on` opts a known vision-capable direct endpoint in; without it a
+  page task ended as `unproducible_requirement` even when the page passed the
+  external grader. `off` disables the checker even for a vision model.
+- The arena's Karo arm passes `--vision on` for the web, 3D and game families.
+
+### Fixed — repo.command refusals explain the tool instead of inviting variants
+
+- A shell-shaped `repo.command` call (`command`, `argv`, `cmd`, `shell`) is now
+  refused with the correct alternative: `checks.run` for the approved
+  verification, `tests.run` for extra tests, `dev.command` for a developer
+  command. Batch validation also lists the supported fields and restates the
+  one canonical `{"operations": [...]}` shape instead of naming only the field
+  the model guessed wrong.
+- `web.fetch` records the files it creates. Removing the run's own untracked
+  scratch copy is ordinary cleanup, not a destructive edit of the user's source,
+  so it no longer stops on a confirmation an unattended run cannot give. In the
+  arena run that exposed this, 37 refused `repo.command` calls and 2.03M tokens
+  went into deleting two downloaded reference files.
+- Consecutive refusals of one tool now carry repair guidance after the second
+  and disable that tool for the rest of the run after the sixth. A model can no
+  longer spend dozens of steps reshaping the same rejected call.
+- A research budget now speaks after 12 model steps without a code change, and
+  again at 24: stop collecting references, make the smallest edit, run the
+  public check. It only applies to tasks that ask for a change (a read-only
+  question, a plan, or maintenance mode is left alone), and downloading an
+  upstream reference file does not reset it. It fired at step 12 in all three
+  final `swe-requests-6028` runs; the first edit followed at step 14 in the
+  first of them.
+- Measured on `swe-requests-6028` (same model, task and grader, three final
+  runs): failed tool calls 44 → 1–3, model calls 64 → 31–38, tokens 2.03M →
+  median 0.88M (range 0.76–1.44M), wall 320 s → 195–284 s, still `verified`
+  and still solved by the hidden grader. A fix-only control without the
+  research budget removed the failures but stayed at 2.13M and 65 calls; the
+  token drop is associated with the budget and the shorter run, not with the
+  clearer error text alone. Run-to-run variance is large.
+- The visual-budget stop now collects the checker's closing look. The grace
+  window allowed one edit after the last verdict but skipped the harness-final
+  check, so a page that saw `pass`, then one CSS edit, ended as
+  `visual_budget_exhausted` with current bytes nobody had looked at. The stop
+  path now judges those bytes once before reporting.
+
 ### Changed — the 3D skill is a general technique guide again
 
 - The shipped `web-3d-scene` skill no longer contains the aquarium scene, the

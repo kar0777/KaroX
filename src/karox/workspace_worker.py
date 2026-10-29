@@ -57,6 +57,7 @@ def _reject_unknown_keys(
     if unknown:
         raise InvalidCommand(
             f"{label} contains unsupported fields: " + ", ".join(unknown)
+            + "; supported fields: " + ", ".join(sorted(allowed))
         )
 
 

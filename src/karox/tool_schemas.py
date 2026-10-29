@@ -245,7 +245,13 @@ def additional_tool_definitions(
         ),
         "repo.command": ToolDefinition(
             "repo.command",
-            "Apply an atomic patch or batch through the hot-reload worker.",
+            (
+                "Apply one atomic patch or a batch of file operations "
+                "(write/delete/move/mkdir). This is not a shell and never runs "
+                "commands: use checks.run for the approved verification, "
+                "tests.run for extra tests, and dev.command for a developer "
+                "command."
+            ),
             Capability.REPO_WRITE,
             True,
             {

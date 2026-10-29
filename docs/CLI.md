@@ -83,7 +83,7 @@ karox agent run --task TEXT [--repository PATH]
     [--access-profile read_only|browser_control|workspace_write|elevated]
     [--effort-level auto|low|medium|high|extra-high|ultra]
     [--mode build|plan|ideate] [--expect auto|change]
-    [--image PATH]... [--no-project-context] [--no-memory]
+    [--image PATH]... [--vision auto|on|off] [--no-project-context] [--no-memory]
     [--max-steps N] [--max-seconds S]
     [--context-window N] [--max-output-tokens N]
     [--stream] [--stream-json] [--json]
@@ -122,6 +122,12 @@ karox agent run --task TEXT [--repository PATH]
   you pass `--accept-discovered-checks`.
 - `--image` attaches a repository-confined PNG/JPEG/WebP to the next model turn;
   the selected model must advertise `vision=true`.
+- `--vision` decides whether the run may show the model a rendered page through
+  `visual.check`. `auto` (the default) asks the registry; a direct
+  `--model/--base-url` route stays off because nothing there declares image
+  support. `on` opts a known vision-capable direct endpoint in, which is what
+  lets a page task finish `verified` instead of `unproducible_requirement`; `off`
+  disables the checker even for a vision model.
 - Project instructions (`AGENTS.md`, `CLAUDE.md`, `KAROX.md`), the project map
   and relevant local memory are bounded and attributed in the report.
   `--no-project-context` and `--no-memory` turn those sources off.

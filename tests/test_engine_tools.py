@@ -733,6 +733,67 @@ def test_cli_engine_run_drives_the_real_desktop_fixture(
         window.stop()
 
 
+def test_cli_engine_run_advertises_visual_check_only_when_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct route can opt into visual.check; auto still keeps it off.
+
+    This is the tool-surface half of the fix: ``_run_vision_capability``
+    returning True is not enough, the definition has to reach the model's first
+    request. Otherwise a visual run ends as ``unproducible_requirement`` even
+    though the page itself passes the external grader.
+    """
+
+    import json as json_module
+
+    from karox import cli
+    from karox.browser_bootstrap import playwright_chromium_status
+
+    if not playwright_chromium_status().ready:
+        pytest.skip("managed chromium is not provisioned")
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    repository = _cli_repo(tmp_path)
+    task = "Build a landing page in index.html with a headline and a button."
+
+    def run(session_id: str, *flags: str) -> Any:
+        provider = _scripted_cli(
+            monkeypatch, [_response((_finish_call("c1", "done"),))]
+        )
+        arguments = [
+            "agent",
+            "run",
+            "--repository",
+            str(repository),
+            "--task",
+            task,
+            "--model",
+            "scripted-model",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--session-id",
+            session_id,
+            "--max-steps",
+            "2",
+            "--max-seconds",
+            "60",
+            "--verification-command",
+            json_module.dumps(["python", "-c", "print('ok')"]),
+            "--stream-json",
+        ]
+        arguments.extend(flags)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main(arguments)
+        return provider
+
+    automatic = run("vision-auto")
+    assert "visual_check" not in _request_tools(automatic.requests[0])
+
+    opted_in = run("vision-on", "--vision", "on")
+    assert "visual_check" in _request_tools(opted_in.requests[0])
+
+
 def test_visual_check_body_keeps_the_verdict_and_drops_the_task_echo() -> None:
     """The checker's identity is bookkeeping, not something the model reads.
 

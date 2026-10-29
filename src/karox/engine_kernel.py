@@ -911,6 +911,27 @@ class EngineKernel:
                 )
             exit_status = str(exit_extra.get("exit_status") or "")
             provider_message = self._provider_message()
+            if exit_status == "UserInterruption" and self._visual_budget_hit:
+                # The grace stop lands on the edit that followed the last real
+                # visual verdict: the page has new bytes and no look. The
+                # checker keeps one closing-look slot for exactly this case, so
+                # collect it before reporting a budget stop. In the vision-test
+                # run the model saw a pass, edited one CSS rule, and the run
+                # stopped unverified although the closing look would have
+                # passed the new bytes.
+                self._run_harness_final_calls(session_id, lease, self._deadline)
+                record = self.sessions.load(session_id)
+                if self._completed(record):
+                    reason = "answer" if self._answer_complete(record) else "submitted"
+                    self._snapshot_verified_state(session_id, lease, record)
+                    return self._finish(
+                        session_id,
+                        lease,
+                        "verified",
+                        "verification",
+                        reason,
+                        provider_message,
+                    )
             # Only a submission may be verified. A run that ended on a step or
             # wall-clock limit, a format-error budget or a user stop was not
             # completed by the model, and finishing evidence collected after

@@ -621,9 +621,41 @@ class ExtendedCoreRuntime(CoreRuntime):
         del deadline_seconds
         action = arguments.get("action")
         payload = arguments.get("payload")
+        shellish = sorted(
+            key
+            for key in ("command", "argv", "cmd", "shell", "script", "scripts")
+            if key in arguments or (isinstance(payload, dict) and key in payload)
+        )
+        if shellish:
+            raise InvalidCommand(
+                "repo.command is a patch/batch tool, not a shell; it never runs "
+                f"commands. Remove {', '.join(shellish)} and use checks.run for the "
+                "approved verification, tests.run for extra tests, or dev.command "
+                "for a developer command. Batch shape: action=batch with "
+                'payload={"operations":[{"op":"write|delete|move|mkdir", ...}]}.'
+            )
         if action not in {"apply_patch", "batch"} or not isinstance(payload, dict):
-            raise InvalidCommand("repo.command requires apply_patch or batch with object payload")
-        hot_worker_supervisor().validate_repo(arguments)
+            raise InvalidCommand(
+                "repo.command requires action=apply_patch or action=batch with an "
+                'object payload. apply_patch takes {"patch": "..."}; batch takes '
+                '{"operations": [{"op": "write|delete|move|mkdir", ...}]}. This '
+                "tool edits files; it is not a shell. For a command use "
+                "checks.run, tests.run, or dev.command."
+            )
+        try:
+            hot_worker_supervisor().validate_repo(arguments)
+        except InvalidCommand as exc:
+            # The worker already names the offending field. Restating the one
+            # canonical shape here stops the next call from being another
+            # invented key: the benchmark run sent 37 payload variants, each
+            # refused with only the field name it guessed wrong.
+            raise InvalidCommand(
+                f"{exc} The only batch shape is action=batch with payload="
+                '{"operations": [{"op": "write|delete|move|mkdir", ...}], '
+                '"dry_run": false}; an operation accepts op, path, content, '
+                "source, destination, expected_sha256, missing_ok, overwrite "
+                "or allow_secret_literal, depending on op."
+            ) from exc
         # The handler builds and validates one complete WorkspaceTransaction
         # before its first filesystem mutation. Running a separate dry-run here
         # created a second transaction, widened the preflight/commit race, and
@@ -773,13 +805,22 @@ class ExtendedCoreRuntime(CoreRuntime):
             # repo.write_file would have, so the session's record of what this
             # run touched must show it; otherwise a run could end claiming it
             # changed nothing while a fetched file sits in the tree.
+            #
+            # It must also record files it created. A download is a scratch
+            # copy, and the model routinely removes it before finishing. When
+            # the path never reached ``created_files`` the destructive gate
+            # treated that cleanup as deleting the user's source: it asked for
+            # a confirmation an unattended run cannot give, and one benchmark
+            # run burned 37 refused calls inventing confirmation fields.
             saved = result.data.get("path")
-            if (
-                result.data.get("changed") is True
-                and isinstance(saved, str)
-                and saved not in record.changed_files
-            ):
-                record.changed_files.append(saved)
+            if result.data.get("changed") is True and isinstance(saved, str):
+                if saved not in record.changed_files:
+                    record.changed_files.append(saved)
+                if (
+                    result.data.get("previous_sha256") is None
+                    and saved not in record.created_files
+                ):
+                    record.created_files.append(saved)
             return
         if command.name == "tests.run":
             record.checks.append(
@@ -1501,6 +1542,10 @@ class ExtendedCoreRuntime(CoreRuntime):
                     "path": written.get("path"),
                     "changed": written.get("changed"),
                     "content_sha256": written.get("sha256"),
+                    # None means this fetch created the file. The session needs
+                    # that fact to allow the model to remove its own scratch
+                    # copy without a confirmation nobody can answer.
+                    "previous_sha256": written.get("previous_sha256"),
                 }
             )
             payload["_evidence"] = [*evidence, *written.get("_evidence", [])]

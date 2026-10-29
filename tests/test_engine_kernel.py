@@ -131,6 +131,7 @@ class Harness:
         create_session: bool = True,
         runtime_cls: type = CoreRuntime,
         task: str = "create hello.txt with hi",
+        visual_checker: Any = None,
     ) -> None:
         self.repository = repository
         self.provider = ScriptedProvider(responses)
@@ -156,6 +157,7 @@ class Harness:
             self.store,
             tmp_path / "audit.jsonl",
             verification_commands=verification,
+            **({"visual_checker": visual_checker} if visual_checker is not None else {}),
         )
         if create_session:
             self.store.create(
@@ -2181,3 +2183,63 @@ def test_the_last_visual_verdict_grants_only_two_more_calls() -> None:
     kernel._step = 12
     assert EngineKernel._cancel_requested(kernel) is True
     assert kernel._visual_budget_hit is True
+
+
+def test_an_edit_after_the_last_visual_pass_gets_a_closing_look(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The grace stop must collect the closing look, not report a stale pass.
+
+    The vision-test benchmark run saw a pass, edited one CSS rule, then stopped
+    as ``visual_budget_exhausted``. The checker keeps a closing-look slot for
+    exactly the new bytes, but the stop path skipped the harness-final calls,
+    so the run reported the page unverified although it was fine.
+    """
+
+    first = "<!doctype html><html><body><h1>Focus</h1></body></html>"
+    second = first.replace("Focus", "Focus, beautifully lit")
+    seen: List[str] = []
+
+    def checker(page: Path, *, goal: str = "") -> dict:
+        seen.append(page.read_text(encoding="utf-8"))
+        return {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 0,
+            "issues": [],
+            "console_errors": [],
+            "page_errors": [],
+            "resize": {"ok": True},
+        }
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "index.html", first),)),
+            _response(
+                (_tool_call("c2", "visual_check", {"path": "index.html"}),)
+            ),
+            _response((_write_call("c3", "index.html", second),)),
+            _response(
+                (_tool_call("c4", "repo_read_file", {"path": "index.html"}),)
+            ),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=checker,
+        task="build a landing page in index.html with a polished layout and animation",
+        max_steps=8,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    assert seen[-1] == second, "the closing look did not judge the edited bytes"
+    record = harness.record()
+    closing = [
+        entry
+        for entry in record.provider_history
+        if entry.get("core_name") == "visual.check"
+        and (entry.get("result") or {}).get("requested_by") == "harness_final"
+    ]
+    assert closing, "the stop path skipped the harness-final visual check"
