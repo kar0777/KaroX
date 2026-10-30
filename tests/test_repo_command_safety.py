@@ -379,6 +379,27 @@ def test_research_budget_speaks_twice_then_stays_quiet() -> None:
     assert environment._research_notice(read) == ""
 
 
+def test_patch_and_test_target_shapes_stop_after_two_refusals() -> None:
+    """A malformed patch or target path will not parse on the third try.
+
+    swe-sympy-24213 spent four turns on invented patch formats and three on
+    test paths outside tests/. The tool now closes after two and names the
+    alternative the model can actually use.
+    """
+
+    environment = object.__new__(CoreToolEnvironment)
+    environment._refusals = {"repo.apply_patch": 2, "tests.run": 2}
+
+    patch = environment._disabled_after_refusals("repo.apply_patch")
+    assert "disabled" in patch and "repo.edit_file" in patch
+
+    tests = environment._disabled_after_refusals("tests.run")
+    assert "disabled" in tests and "checks.run" in tests
+
+    # A tool with no early limit keeps the shared six-refusal threshold.
+    assert environment._disabled_after_refusals("repo.command") == ""
+
+
 def test_browser_budget_warns_once_then_disables_probing() -> None:
     """A browser is for checking a named interaction, not endless exploration.
 

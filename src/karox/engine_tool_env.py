@@ -76,6 +76,21 @@ _MUTATION_TOOLS = {"repo.edit_file", "repo.write_file", "repo.apply_patch", "rep
 #: model to stop; after the higher number the tool is disabled for the run.
 REFUSAL_GUIDANCE_AFTER = 2
 REFUSAL_DISABLE_AFTER = 6
+#: Some tools are cheap to stop early: a patch that fails to parse twice will
+#: not parse on the third try, and ``tests.run`` with a target outside
+#: ``tests/`` keeps the same bad path. In the sympy run these two shapes used
+#: seven turns. The refusal message names the working alternative.
+TOOL_FAILURE_LIMITS = {"repo.apply_patch": 2, "tests.run": 2}
+_TOOL_ALTERNATIVE = {
+    "repo.apply_patch": (
+        "Use repo.edit_file with old_string/new_string, or repo.write_file for "
+        "a whole file."
+    ),
+    "tests.run": (
+        "Use checks.run with the approved command, or point targets at "
+        "existing Python files under tests/."
+    ),
+}
 #: A browser can turn verification into an unbounded exploration: the two 3D
 #: re-runs used 57 and 61 browser calls, fixed the actual defects, then hit the
 #: wall clock without finishing their proof. Warn at the lower number, stop
@@ -559,12 +574,15 @@ class CoreToolEnvironment:
 
     def _disabled_after_refusals(self, core_name: str) -> str:
         count = self._refusals.get(core_name, 0)
-        if count < REFUSAL_DISABLE_AFTER:
+        limit = TOOL_FAILURE_LIMITS.get(core_name, REFUSAL_DISABLE_AFTER)
+        if count < limit:
             return ""
+        alternative = _TOOL_ALTERNATIVE.get(
+            core_name, "stop retrying it and finish with the work already verified."
+        )
         return (
             f"{core_name} is disabled for the rest of this run after {count} "
-            "consecutive refusals; further calls will not execute. Stop retrying "
-            "it and finish with the work already verified."
+            f"consecutive refusals; further calls will not execute. {alternative}"
         )
 
     @staticmethod

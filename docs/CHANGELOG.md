@@ -14,6 +14,10 @@
   and 61 calls; the interaction is verified long before that, and the remaining
   time belongs to the final proof. `visual.check` and repository reads stay
   available after the browser closes.
+- A malformed `repo.apply_patch` or a `tests.run` target outside `tests/` now
+  disables that tool after two refusals and names the working alternative
+  (`repo.edit_file`/`repo.write_file`, or `checks.run`). `swe-sympy-24213` spent
+  seven turns on those two shapes alone.
 - Every observation in the last five minutes carries one line: stop exploring,
   fix only a named defect, run the final check and visual review, finish.
 
