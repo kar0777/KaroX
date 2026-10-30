@@ -625,6 +625,42 @@ def test_recover_replays_last_safe_url_after_blank(site, make_session):
     assert _call(session, "get_text", {"selector": "h1"})["text"] == "Research Index"
 
 
+def test_visual_observation_serves_module_pages(tmp_path) -> None:
+    """The checker must load the page the way a browser and grader do.
+
+    A module script is blocked by CORS on ``file://``; the checker then sees an
+    empty canvas and a console error while the served page works. This is the
+    bug that made a 30/30 3D game look like a blank scene.
+    """
+
+    from karox.browser_bootstrap import playwright_chromium_status
+    from karox.web_check import observe_page
+
+    if not playwright_chromium_status().ready:
+        pytest.skip("managed chromium is not provisioned")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "index.html").write_text(
+        "<canvas id='c'></canvas><script type='module' src='app.js'></script>",
+        encoding="utf-8",
+    )
+    (repo / "app.js").write_text(
+        "const c = document.getElementById('c').getContext('2d');"
+        "c.fillStyle = '#ff0000'; c.fillRect(0, 0, 80, 80);",
+        encoding="utf-8",
+    )
+
+    observed = observe_page(
+        repo / "index.html", settle_ms=100, serve_root=repo
+    )
+
+    assert not observed.get("console_errors"), observed
+    assert not observed.get("page_errors"), observed
+    assert observed.get("probe", {}).get("canvases") == 1
+    assert observed.get("frames"), observed
+
+
 def test_actions_survive_dom_replacement(site, make_session):
     session, _root = make_session()
     _open(session, site, "/replace")

@@ -856,6 +856,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                     artifacts=store.state_path(record.session_id).parent / "visual",
                     vision=True,
                     goal=args.task,
+                    serve_root=repository,
                 )
     except Exception:
         visual_checker = None

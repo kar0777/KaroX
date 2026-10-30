@@ -216,6 +216,7 @@ class VisualChecker:
     artifacts: pathlib.Path
     vision: bool = False
     goal: str = ""
+    serve_root: Optional[pathlib.Path] = None
     criteria: tuple[str, ...] = ()
     max_calls: int = CHECKS_PER_TASK
     settle_ms: int = 2000
@@ -320,7 +321,10 @@ class VisualChecker:
         if base_goal and focus and focus not in base_goal:
             effective_goal = f"{base_goal}\n\nThis check's focus:\n{focus}"
         observation = observe_page(
-            page, settle_ms=self.settle_ms, check_resize=True
+            page,
+            settle_ms=self.settle_ms,
+            check_resize=True,
+            serve_root=self.serve_root,
         )
         if "frames" not in observation:
             self.tally.skipped += 1

@@ -945,7 +945,12 @@ _RESIZE_PROBE_JS = """
 
 
 def _observe_in_browser(
-    page: pathlib.Path, *, settle_ms: int, frames: int, check_resize: bool = False
+    page: pathlib.Path,
+    *,
+    settle_ms: int,
+    frames: int,
+    check_resize: bool = False,
+    url: str | None = None,
 ) -> dict:
     """Raw observations of one page in the browser thread, judging nothing.
 
@@ -981,7 +986,7 @@ def _observe_in_browser(
 
         view.on("console", on_console)
         view.on("pageerror", on_page_error)
-        view.goto(page.resolve().as_uri())
+        view.goto(url or page.resolve().as_uri())
         view.wait_for_timeout(RENDER_SETTLE_MS)
         probe = view.evaluate(_PAGE_PROBE_JS)
         if frames > 0:
@@ -1042,12 +1047,15 @@ def observe_page(
     *,
     settle_ms: int = ANIMATION_SETTLE_MS,
     check_resize: bool = False,
+    serve_root: pathlib.Path | None = None,
 ) -> dict:
     """Observe a page with a warm browser: two frames, console, measurement.
 
-    Returns ``{"skipped": reason}`` when this machine cannot render right now,
-    exactly like :func:`render_page`, so a call site keeps the same rule: skip
-    and say so rather than guess a verdict.
+    With ``serve_root`` the page is loaded over a loopback HTTP server instead
+    of ``file://``. A module script is blocked by CORS on ``file://``; the
+    checker then sees an empty canvas and a console error while the same page,
+    served by the grader, works. Returns ``{"skipped": reason}`` when this
+    machine cannot render right now, exactly like :func:`render_page`.
     """
 
     from .browser_bootstrap import playwright_chromium_status
@@ -1056,6 +1064,25 @@ def observe_page(
     if not status.ready:
         return {"skipped": status.error or "chromium_unavailable"}
     try:
+        if serve_root is not None:
+            from .static_server import page_url, serve_repository
+
+            with serve_repository(serve_root) as base:
+                relative = (
+                    page.resolve()
+                    .relative_to(pathlib.Path(serve_root).resolve())
+                    .as_posix()
+                )
+                url = page_url(base, serve_root, relative)
+                return _run_in_browser_thread(
+                    lambda: _observe_in_browser(
+                        page,
+                        settle_ms=settle_ms,
+                        frames=2,
+                        check_resize=check_resize,
+                        url=url,
+                    )
+                )
         return _run_in_browser_thread(
             lambda: _observe_in_browser(
                 page, settle_ms=settle_ms, frames=2, check_resize=check_resize

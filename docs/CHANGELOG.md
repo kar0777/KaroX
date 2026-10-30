@@ -21,6 +21,27 @@
 - Every observation in the last five minutes carries one line: stop exploring,
   fix only a named defect, run the final check and visual review, finish.
 
+### Fixed — the visual checker loads the page over HTTP
+
+- `visual.check` used to open the page through `file://`. Chromium blocks a
+  module script on that scheme, so the checker saw an empty canvas and a console
+  error while the same page, served by the grader, passed 30/30. The checker now
+  shares the loopback server with `browser.command`: it serves the repository on
+  `127.0.0.1`, loads the page over HTTP, and stops the server after the look.
+  `web_check.observe_page(..., serve_root=...)` is the one path; the browser
+  tool and the checker use the same confined handler.
+- A live regression test renders a page with `<script type="module">` through
+  `serve_root` and asserts no console/page errors and a live canvas.
+
+### Fixed — a game's ready state is part of the deliverable
+
+- The system prompt now states that a game's ready/initial state must already
+  show the first obstacles and collectibles, created in `reset()`/initialization
+  rather than only on the first tick, and that restart restores the same set.
+  `3d-game` failed its hidden `items-spawn obstacles=0 coins=0` check while the
+  visual checker also reported the empty ready screen; the missing rule was in
+  how the model set up game state, not in the browser or the gate.
+
 ### Added — the browser can open a page from the repository
 
 - `browser.command open {page: "index.html"}` serves the repository on a random

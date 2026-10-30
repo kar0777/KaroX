@@ -26,14 +26,13 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
-from urllib.parse import quote
 
 from ..artifacts import ArtifactStore
 from ..core_types import InvalidCommand, ToolDefinition
 from ..models import Capability
+from ..static_server import LoopbackServer, RepositoryRequestHandler, page_url
 from .credentials import BrowserCredentialStore
 from .errors import (
     CANCELLED,
@@ -147,34 +146,6 @@ def _external_navigation(payload: Mapping[str, Any]) -> bool:
     return False
 
 
-class _RepositoryRequestHandler(SimpleHTTPRequestHandler):
-    """Serve one repository over loopback, with no path escape.
-
-    The browser tool is confined to localhost; a page the run wrote is a file,
-    not a network target. Serving the repository is the smallest bridge that
-    lets Playwright click that page while keeping every request on 127.0.0.1.
-    ``translate_path`` resolves the result and refuses anything outside the
-    root, including a symlink that points out of the tree.
-    """
-
-    def __init__(self, *args: Any, root: Path, **kwargs: Any) -> None:
-        self._repository_root = root
-        super().__init__(*args, directory=str(root), **kwargs)
-
-    def translate_path(self, path: str) -> str:
-        candidate = Path(super().translate_path(path)).resolve()
-        try:
-            candidate.relative_to(self._repository_root)
-        except ValueError:
-            return str(self._repository_root / "__not_found__")
-        return str(candidate)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        # A local page load is not an operator log line; stdout belongs to the
-        # agent's stream.
-        return
-
-
 class BrowserToolAdapter:
     """Typed, cancellable, engine-neutral wrapper around one browser session."""
 
@@ -188,7 +159,7 @@ class BrowserToolAdapter:
         self.session = session
         self._capability_guard = capability_guard
         self._serve_root = Path(serve_root).resolve() if serve_root is not None else None
-        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._httpd: Optional[LoopbackServer] = None
         self._http_thread: Optional[threading.Thread] = None
         self._serve_url: Optional[str] = None
 
@@ -221,13 +192,12 @@ class BrowserToolAdapter:
             raise InvalidCommand(
                 "local page serving is not configured for this session"
             )
-        server = ThreadingHTTPServer(
+        server = LoopbackServer(
             ("127.0.0.1", 0),
-            lambda *args, **kwargs: _RepositoryRequestHandler(
+            lambda *args, **kwargs: RepositoryRequestHandler(
                 *args, root=root, **kwargs
             ),
         )
-        server.daemon_threads = True
         thread = threading.Thread(
             target=server.serve_forever,
             name="karox-browser-static",
@@ -244,19 +214,10 @@ class BrowserToolAdapter:
         root = self._serve_root
         if root is None:
             raise InvalidCommand("local page serving is not configured")
-        if not isinstance(page, str) or not page.strip():
-            raise InvalidCommand("page must be a non-empty repository-relative path")
-        relative = page.replace("\\", "/").lstrip("/")
         try:
-            target = (root / relative).resolve()
-            target.relative_to(root)
-        except (OSError, ValueError) as exc:
-            raise InvalidCommand(
-                "page must stay inside the repository"
-            ) from exc
-        if not target.is_file():
-            raise InvalidCommand(f"page is not a file: {page}")
-        return self._ensure_server() + quote(target.relative_to(root).as_posix())
+            return page_url(self._ensure_server(), root, page)
+        except ValueError as exc:
+            raise InvalidCommand(str(exc)) from exc
 
     def _open_payload(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         if "page" not in payload:
