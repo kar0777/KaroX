@@ -48,6 +48,41 @@
   `visual_budget_exhausted` with current bytes nobody had looked at. The stop
   path now judges those bytes once before reporting.
 
+### Fixed — a passing page and a patched file count as proof
+
+- A visual pass on the page that renders the change is browser proof even when
+  the page file itself is unchanged. `web-snake` and `web-platformer` edited only
+  `game.js`; `index.html` was the scaffold. The gate required the checked page
+  to be in `changed_files`, so both correct games ended
+  `unproducible_requirement`. The gate now accepts the page when it loads a
+  changed script/stylesheet from its directory; a sibling scratch probe is not
+  required to be referenced.
+- The two-frame probe no longer reports "nothing moved" at all; motion is judged
+  from the frames against the goal. `web-data-viz` is a static SVG chart, but the
+  checker demanded "breathing pulses" on its markers and spent all six looks on
+  them. `web-snake` sits in its `ready` state until a key is pressed, yet the
+  same line made the checker require a pulsing food dot. Both stopped unverified
+  although their graders passed. The checker prompt now says explicitly that a
+  static page and a game at rest are not motion failures, and that a specific
+  animation must be named by the goal.
+- An atomic patch's `post_state` digests now count as current structural
+  evidence. `swe-sympy-24213` removed its scratch code from `si.py` with
+  `apply_patch`; the patch compiled and the public suite passed, but the result
+  carried no `content_sha256`, so the gate failed it as "missing current
+  structural evidence". The digest of every written path is now matched against
+  the current bytes.
+- A visual `pass` now tells the model to run the final review and finish instead
+  of continuing to polish. `3d-viewer` saw a pass, spent about twenty more steps
+  on an unrequested pan fix, invalidated the verdict and hit the wall clock.
+- A malformed `repo.apply_patch` no longer comes back with the batch JSON shape
+  as advice; it names the hunk counts and the single-diff form. The 3D run
+  retried the wrong shape twice because the error text pointed at `batch`.
+- The "bottom quarter is almost black" measurement now applies only to a page
+  that renders a 3D scene. `web-snake` passed 17/17 while the checker reported
+  the 2D board's background band on every look; the visual budget ran out on a
+  page whose lower margin is not a missing floor. A 3D scene with an unlit or
+  undrawn floor still gets the problem.
+
 ### Changed — the 3D skill is a general technique guide again
 
 - The shipped `web-3d-scene` skill no longer contains the aquarium scene, the

@@ -351,11 +351,12 @@ class VisualChecker:
         )
         issues = list(judged.get("problems") or [])
         resize = judged.get("resize")
-        if len(frames) > 1 and frames[0] == frames[1]:
-            issues.append(
-                f"{page.name}: the two frames taken {round(self.settle_ms / 1000, 1)}s "
-                "apart are identical, so nothing in the page moved while it was watched"
-            )
+        # Identical frames are not, by themselves, a defect. The checker used
+        # to add "nothing moved" for every page, and the vision model turned
+        # that into invented requirements: a static chart had to pulse, and a
+        # Snake board in its `ready` state had to animate its food before the
+        # player pressed a key. Motion is judged from the frames against the
+        # goal, not from a deterministic two-frame diff.
         saved = self._save_frames(page, frames)
         console = list(judged.get("console_errors") or [])
         page_errors = list(judged.get("page_errors") or [])

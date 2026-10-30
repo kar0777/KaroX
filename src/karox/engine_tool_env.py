@@ -789,7 +789,17 @@ def _visual_check_body(data: Mapping[str, Any], ok: bool) -> str:
     left = data.get("checks_left")
     if isinstance(left, int) and not isinstance(left, bool):
         lines.append(f"checks left: {left}")
-    if method == "limit":
+    if verdict == "pass":
+        # A pass is the end of the visual loop, not permission to keep
+        # polishing. The 3d-viewer run saw a pass, then spent twenty more
+        # steps on an unrequested pan-offset fix, invalidated the verdict and
+        # hit the wall clock with a page the grader accepted.
+        lines.append(
+            "This pass covers the current bytes: run the final change review "
+            "and finish. Edit again only if you found a defect the checker "
+            "could not see."
+        )
+    elif method == "limit":
         # The budget exists to stop polishing, not to make the model guess at
         # feedback it can no longer get. The aquarium run spent 26 more steps
         # editing after this verdict and broke a working resize.

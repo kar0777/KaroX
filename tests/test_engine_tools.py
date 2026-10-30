@@ -899,3 +899,20 @@ def test_visual_check_limit_tells_the_model_to_stop() -> None:
 
     assert "No checks remain: stop changing the page and finish." in text
     assert "checks left: 0" in text
+
+
+def test_a_visual_pass_tells_the_model_to_finish() -> None:
+    """A pass ends the loop; the 3d-viewer run kept polishing and timed out."""
+
+    text = _visual_check_body(
+        {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 2,
+            "issues": [],
+        },
+        True,
+    )
+
+    assert "run the final change review and finish" in text
+    assert "No checks remain" not in text

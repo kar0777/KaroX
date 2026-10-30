@@ -156,6 +156,96 @@ def test_visual_checker_can_still_pass_a_clean_page(
     assert result["issues"] == []
 
 
+def test_dark_bottom_is_a_3d_scene_problem_not_a_2d_page_problem() -> None:
+    """A 2D board with a dark band below it is not an unlit 3D floor.
+
+    web-snake passed 17/17 while the checker reported the page's bottom quarter
+    as "almost black" on every look; the visual budget ran out on a background
+    band. The measurement only means a missing floor or broken lighting when the
+    page actually renders a 3D scene.
+    """
+
+    measured = _measured()
+    measured["dark_bottom_share"] = 0.84
+    measured["bottom_sampled"] = 200
+
+    two_d = render_problems(
+        "snake.html",
+        page_errors=(),
+        console_errors=(),
+        measured=measured,
+        probe={**_probe(), "paints_with_three": False},
+        resize={"ok": True},
+    )
+    assert not any("bottom quarter" in item for item in two_d["problems"])
+
+    three_d = render_problems(
+        "scene.html",
+        page_errors=(),
+        console_errors=(),
+        measured=measured,
+        probe={**_probe(), "paints_with_three": True},
+        resize={"ok": True},
+    )
+    assert any("bottom quarter" in item for item in three_d["problems"])
+
+
+def test_identical_frames_are_not_a_defect_for_a_static_chart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A static chart is allowed to hold still.
+
+    The deterministic two-frame probe used to add "nothing moved" to every
+    verdict. The vision model turned that into a mandatory pulsing animation,
+    and the temperature chart spent six checks adding motion nobody asked for
+    and stopped unverified although its grader passed.
+    """
+
+    observation = _observation(resize_ok=True)
+    observation["frames"] = [b"same-frame", b"same-frame"]
+    monkeypatch.setattr(visual_check, "observe_page", lambda *args, **kwargs: observation)
+    checker = VisualChecker(
+        provider=_FakeProvider('{"verdict": "pass", "issues": []}'),  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal="Global Temperature Anomalies — interactive SVG chart. Moving the pointer off a point hides the tooltip.",
+    )
+
+    result = checker(Path("chart.html"))
+
+    assert result["verdict"] == "pass"
+    assert not any("identical" in str(item) for item in result["issues"])
+
+
+def test_identical_frames_do_not_create_a_motion_requirement_for_a_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A game at rest is not a broken animation.
+
+    Snake sits in `ready` until the player presses a key. The deterministic
+    two-frame diff used to say "nothing moved"; the checker then demanded a
+    pulsing food dot the task never asked for, and the run spent all six looks
+    on it.
+    """
+
+    observation = _observation(resize_ok=True)
+    observation["frames"] = [b"same-frame", b"same-frame"]
+    monkeypatch.setattr(visual_check, "observe_page", lambda *args, **kwargs: observation)
+    checker = VisualChecker(
+        provider=_FakeProvider('{"verdict": "pass", "issues": []}'),  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal="Canvas Snake game with a visible animation and a deterministic hook.",
+    )
+
+    result = checker(Path("snake.html"))
+
+    assert result["verdict"] == "pass"
+    assert not any("identical" in str(item) for item in result["issues"])
+
+
 def test_a_resumed_checker_does_not_overwrite_earlier_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

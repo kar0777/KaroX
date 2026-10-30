@@ -832,7 +832,12 @@ def render_problems(
         dark_share = result.get("dark_bottom_share")
         bottom_sampled = result.get("bottom_sampled")
         if (
-            isinstance(dark_share, float)
+            # A 3D scene whose floor was never drawn or lit from below is
+            # unreadable. A 2D board with margins legitimately has a dark band
+            # below it: the Snake page passed its grader while this rule kept
+            # reporting the page background and spent the whole visual budget.
+            draws_with_three
+            and isinstance(dark_share, float)
             and isinstance(bottom_sampled, int)
             and not isinstance(bottom_sampled, bool)
             and bottom_sampled >= _MIN_BOTTOM_SAMPLES

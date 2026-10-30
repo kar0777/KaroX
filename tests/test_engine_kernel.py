@@ -2185,6 +2185,58 @@ def test_the_last_visual_verdict_grants_only_two_more_calls() -> None:
     assert kernel._visual_budget_hit is True
 
 
+def test_a_visual_pass_on_a_scaffold_page_verifies_a_changed_script(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The page can be untouched while the script it loads is the change.
+
+    web-snake and web-platformer edited only ``game.js``; the visual check
+    rendered ``index.html`` and passed, but the gate demanded that the checked
+    page itself be in ``changed_files``. Both runs ended
+    ``unproducible_requirement`` although the graders accepted them.
+    """
+
+    (repository / "index.html").write_text(
+        '<html><body><canvas></canvas><script src="game.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    (repository / "game.js").write_text("// seed\n", encoding="utf-8")
+
+    def checker(page: Path, *, goal: str = "") -> dict:
+        del page, goal
+        return {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 2,
+            "issues": [],
+            "console_errors": [],
+            "page_errors": [],
+            "resize": {"ok": True},
+        }
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
+            _response(
+                (_tool_call("c2", "visual_check", {"path": "index.html"}),)
+            ),
+            _response((_tool_call("c3", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_finish_call("c4", "done"),)),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=checker,
+        task="Complete the canvas game in game.js.",
+        max_steps=8,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+
+
 def test_an_edit_after_the_last_visual_pass_gets_a_closing_look(
     tmp_path: Path, repository: Path
 ) -> None:

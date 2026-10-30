@@ -649,6 +649,16 @@ class ExtendedCoreRuntime(CoreRuntime):
             # canonical shape here stops the next call from being another
             # invented key: the benchmark run sent 37 payload variants, each
             # refused with only the field name it guessed wrong.
+            if action == "apply_patch":
+                # A patch failure is about hunk counts or one diff; telling the
+                # model about the batch shape here sent a 3D run into retrying
+                # the wrong form with the wrong guidance.
+                raise InvalidCommand(
+                    f"{exc} apply_patch takes one unified diff in "
+                    'payload.patch; fix the @@ hunk counts instead of changing '
+                    'the tool shape. Use action=batch only when you mean '
+                    '{"operations": [...]}.'
+                ) from exc
             raise InvalidCommand(
                 f"{exc} The only batch shape is action=batch with payload="
                 '{"operations": [{"op": "write|delete|move|mkdir", ...}], '

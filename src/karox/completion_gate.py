@@ -31,6 +31,10 @@ _WEB = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".tsx", ".css"}
 # renders it. A Python change is never graded by a picture.
 _VISUAL_ASSETS = _WEB | {".scss", ".sass", ".less", ".vue", ".svelte", ".svg"}
 _RUNTIME = {"__main__.py", "main.py", "app.py", "server.py", "cli.py", "package.json"}
+# Assets a page loads by relative path. A canvas game often edits only
+# ``game.js`` and leaves the scaffold ``index.html`` untouched; the visual check
+# still rendered that page, so its bytes are the proof surface.
+_PAGE_ASSETS = {".js", ".mjs", ".cjs", ".css"}
 _BEHAVIOR = re.compile(r"\b(?:implement|bugfix|refactor|runtime|behavior|behaviour|execute|launch)\b|исправ.*ошиб|поведен|запуск", re.I)
 _VISUAL = re.compile(
     r"\b(?:appearance|aesthetic|visually|visible|colour|color|layout|animation|animate|typography)\b"
@@ -302,6 +306,38 @@ def visual_producer_available(core: Any) -> Optional[bool]:
         return None
 
 
+def _page_loads_the_change(core: Any, page: str, changed_files: Sequence[str]) -> bool:
+    """Whether an unchanged page is still the surface that renders the change.
+
+    The completion gate used to accept a visual pass only when the checked page
+    itself was in ``changed_files``. A scaffold ``index.html`` that loads an
+    edited ``game.js`` never qualified, so a passing web game ended as
+    ``unproducible_requirement`` even though the checker had rendered the page
+    and the current bytes. Require the page to reference at least one changed
+    stylesheet/script in its own directory: that is the page the change is for,
+    not an unrelated page elsewhere in the repository. A sibling scratch probe
+    (``probe_snake.cjs``) is not loaded by the page and must not block the
+    proof.
+    """
+
+    if page in changed_files:
+        return True
+    page_path = Path(page)
+    assets = [
+        item
+        for item in changed_files
+        if Path(item).suffix.lower() in _PAGE_ASSETS
+        and Path(item).parent == page_path.parent
+    ]
+    if not assets:
+        return False
+    try:
+        text = core.safe_path(page).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return any(Path(item).name in text for item in assets)
+
+
 def visual_proven(core: Any, record: Any) -> bool:
     """Whether the current bytes have a clean visual verdict.
 
@@ -506,11 +542,38 @@ def floor(core: Any, record: Any) -> list[str]:
         data = result.get("data") or {}
         name = entry.get("core_name")
         if data.get("changed") is True and result.get("ok"):
-            path = data.get("path")
             checks = data.get("quick_checks")
+            # An atomic patch reports one digest per written path in
+            # ``post_state`` and none in ``content_sha256``. Reading only the
+            # single-file fields left every patched file without "current
+            # structural evidence", even after a green compile. On
+            # swe-sympy-24213 the model cleaned its scratch code out of si.py
+            # with apply_patch and the correct patch ended verification_failed.
+            digests: dict[str, str] = {}
+            post_state = data.get("post_state")
+            if isinstance(post_state, dict):
+                digests.update(
+                    {
+                        str(relative): str(digest)
+                        for relative, digest in post_state.items()
+                        if isinstance(digest, str)
+                    }
+                )
+            path = data.get("path")
             digest = data.get("content_sha256") or data.get("sha256")
-            if isinstance(path, str) and path in current["files"] and digest == current["files"][path] and isinstance(checks, list):
-                structural[path] = bool(checks) and all(c.get("ok") is True and not str(c.get("summary", "")).startswith("skipped") for c in checks)
+            if isinstance(path, str) and isinstance(digest, str):
+                digests.setdefault(path, digest)
+            for relative, current_digest in digests.items():
+                if (
+                    relative in current["files"]
+                    and current_digest == current["files"][relative]
+                    and isinstance(checks, list)
+                ):
+                    structural[relative] = bool(checks) and all(
+                        c.get("ok") is True
+                        and not str(c.get("summary", "")).startswith("skipped")
+                        for c in checks
+                    )
         if name not in {"checks.run", "visual.check"}:
             continue
         if name == "checks.run" and _is_environment_setup(data.get("argv") or []):
@@ -578,7 +641,10 @@ def floor(core: Any, record: Any) -> list[str]:
             and key[0] == "visual.check"
             and passed
             and "visual" in classes
-            and key[1] in record.changed_files
+            and (
+                key[1] in record.changed_files
+                or _page_loads_the_change(core, key[1], record.changed_files)
+            )
         ):
             visual_pages.add(key[1])
     if browser and visual_pages:

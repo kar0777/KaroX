@@ -184,6 +184,32 @@ def test_repo_command_action_without_the_batch_shape_is_explained(
     assert (core.repository / "seed.txt").exists()
 
 
+def test_an_apply_patch_refusal_keeps_patch_guidance(
+    tmp_path: Path,
+) -> None:
+    """A broken diff must not be answered with the batch JSON shape.
+
+    In the 3d-viewer run a hunk-count error came back with "the only batch
+    shape is ...", so the model retried the wrong form twice.
+    """
+
+    core, _store, _origin = _runtime(tmp_path, "fix the units conversion")
+
+    with pytest.raises(InvalidCommand) as refused:
+        core._prepare_apply_patch(
+            {
+                "patch": (
+                    "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n one\n"
+                )
+            },
+            30.0,
+        )
+
+    message = str(refused.value)
+    assert "apply_patch takes one unified diff" in message
+    assert "The only batch shape" not in message
+
+
 def test_an_unknown_batch_field_lists_the_supported_fields() -> None:
     from karox import workspace_worker
 
