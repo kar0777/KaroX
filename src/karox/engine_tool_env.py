@@ -98,9 +98,21 @@ _TOOL_ALTERNATIVE = {
 #: repository and ask visual.check; it just cannot keep probing.
 BROWSER_CALLS_NOTICE = 20
 BROWSER_CALLS_EXHAUSTED = 36
+#: Input actions stay available after the observation budget: the model may
+#: spend 36 calls looking and only then reach the restart it must press. One
+#: click is cheap; the churn was repeated open/screenshot/wait. A separate cap
+#: keeps a click loop from replacing the observation loop.
+BROWSER_INPUT_LIMIT = 12
+_BROWSER_INPUT_ACTIONS = frozenset(
+    {"click", "dblclick", "press", "fill", "select", "type", "hover"}
+)
 #: Once this little wall time remains, every observation carries one line: stop
 #: exploring and finish. The kernel also reserves this window for final proof.
 TIME_LEFT_NOTICE_SECONDS = 300.0
+#: The completion gate requires a real input for a task that names one of these
+#: controls. The model must hear that before it spends the visual budget, not
+#: only when it tries to finish.
+_INTERACTION_TASK = re.compile(r"\b(?:restart|hotspot)\b", re.IGNORECASE)
 #: A code task is not a reading exercise. On swe-requests-6028 the model spent
 #: about two dozen model steps downloading and comparing three upstream
 #: releases before its first edit; one such run cost 2.1M tokens with only one
@@ -200,10 +212,21 @@ class CoreToolEnvironment:
         self._research_notices: set[int] = set()
         #: A code task gets the research budget; a question or a plan does not.
         self._research_applies = self._task_expects_change()
+        #: The task names a control whose state a screenshot cannot prove.
+        try:
+            self._interaction_task = bool(
+                _INTERACTION_TASK.search(
+                    self._core.sessions.load(self._session_id).task or ""
+                )
+            )
+        except Exception:  # noqa: BLE001 - a missing record means no hint
+            self._interaction_task = False
+        self._interaction_hint_sent = False
         #: Browser calls are counted across the run; a page can be probed
         #: forever without this. The notice and the hard stop are separate so
         #: the model gets one clear chance to finish before the tool closes.
         self._browser_calls = 0
+        self._browser_inputs = 0
         self._browser_notice_sent = False
         self._time_notice_sent = False
 
@@ -271,7 +294,9 @@ class CoreToolEnvironment:
         disabled = self._disabled_after_refusals(core_name)
         if disabled:
             return self._refusal(action, "tool_disabled_after_refusals", disabled)
-        browser_disabled = self._browser_budget_exhausted(core_name)
+        browser_disabled = self._browser_budget_exhausted(
+            core_name, str(arguments.get("action") or "")
+        )
         if browser_disabled:
             return self._refusal(action, "browser_budget_exhausted", browser_disabled)
         # The session already knows which files it changed, so a focused run
@@ -343,6 +368,8 @@ class CoreToolEnvironment:
         self._refusals.pop(core_name, None)
         if core_name == "browser.command":
             self._browser_calls += 1
+            if str(arguments.get("action") or "") in _BROWSER_INPUT_ACTIONS:
+                self._browser_inputs += 1
         data = result.data if isinstance(result.data, dict) else {}
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
@@ -374,6 +401,7 @@ class CoreToolEnvironment:
             self._research_notice(definition),
             self._browser_notice(),
             self._time_left_notice(),
+            self._interaction_hint(core_name),
         )
         notice = "\n\n".join(item for item in notices if item)
         if notice:
@@ -527,16 +555,40 @@ class CoreToolEnvironment:
             )
         return ""
 
-    def _browser_budget_exhausted(self, core_name: str) -> str:
+    def _interaction_hint(self, core_name: str) -> str:
+        if core_name not in {"browser.command", "visual.check"}:
+            return ""
+        if (
+            not self._interaction_task
+            or self._browser_inputs
+            or self._interaction_hint_sent
+        ):
+            return ""
+        self._interaction_hint_sent = True
+        return (
+            "This task names a restart or hotspot. Frames cannot prove it: use "
+            "browser.command click or press on the control, then read the state. "
+            "The run cannot be verified without that input."
+        )
+
+    def _browser_budget_exhausted(self, core_name: str, action: str = "") -> str:
         if core_name != "browser.command":
             return ""
+        if action in _BROWSER_INPUT_ACTIONS:
+            if self._browser_inputs < BROWSER_INPUT_LIMIT:
+                return ""
+            return (
+                f"browser input is disabled for the rest of this run after "
+                f"{self._browser_inputs} click/press/fill actions. Stop "
+                "interacting, run the final check and visual review, and finish."
+            )
         if self._browser_calls < BROWSER_CALLS_EXHAUSTED:
             return ""
         return (
-            f"browser.command is disabled for the rest of this run after "
-            f"{self._browser_calls} calls. The interaction has been examined "
-            "enough; stop probing, run the final check and visual review, and "
-            "finish. Repository reads and visual.check remain available."
+            f"browser observations are disabled for the rest of this run after "
+            f"{self._browser_calls} calls. Stop opening, waiting and taking "
+            "screenshots; click or press the named control if you still owe an "
+            "interaction, then finish. visual.check remains available."
         )
 
     def _browser_notice(self) -> str:

@@ -412,6 +412,7 @@ def test_browser_budget_warns_once_then_disables_probing() -> None:
 
     environment = object.__new__(CoreToolEnvironment)
     environment._browser_calls = 0
+    environment._browser_inputs = 0
     environment._browser_notice_sent = False
     environment._time_notice_sent = False
     environment._kernel = SimpleNamespace(remaining_seconds=lambda: 1000.0)
@@ -426,9 +427,42 @@ def test_browser_budget_warns_once_then_disables_probing() -> None:
     assert environment._browser_budget_exhausted("browser.command") == ""
 
     environment._browser_calls = BROWSER_CALLS_EXHAUSTED
-    disabled = environment._browser_budget_exhausted("browser.command")
-    assert "disabled" in disabled
+    disabled = environment._browser_budget_exhausted("browser.command", "get_text")
+    assert "observations are disabled" in disabled
+    # A late restart click is exactly what the interaction gate needs; the
+    # observation budget must not close the input path.
+    assert environment._browser_budget_exhausted("browser.command", "click") == ""
     assert environment._browser_budget_exhausted("visual.check") == ""
+
+    environment._browser_inputs = 12
+    inputs_disabled = environment._browser_budget_exhausted("browser.command", "click")
+    assert "browser input is disabled" in inputs_disabled
+
+
+def test_interaction_task_hint_fires_before_the_completion_gate() -> None:
+    """A restart task must hear that frames are not proof, early enough to act.
+
+    The gate rejected the run at finish, but the model had already spent its
+    visual budget and never clicked. The hint arrives on the first browser or
+    visual result, so the click can still happen.
+    """
+
+    environment = object.__new__(CoreToolEnvironment)
+    environment._interaction_task = True
+    environment._browser_inputs = 0
+    environment._interaction_hint_sent = False
+
+    assert environment._interaction_hint("repo.edit_file") == ""
+    hint = environment._interaction_hint("browser.command")
+    assert "restart or hotspot" in hint
+    assert "click or press" in hint
+    assert environment._interaction_hint("browser.command") == "", "send once"
+
+    clicked = object.__new__(CoreToolEnvironment)
+    clicked._interaction_task = True
+    clicked._browser_inputs = 1
+    clicked._interaction_hint_sent = False
+    assert clicked._interaction_hint("browser.command") == ""
 
 
 def test_time_left_notice_fires_once_near_the_deadline() -> None:

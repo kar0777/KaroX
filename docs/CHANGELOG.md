@@ -21,6 +21,19 @@
 - Every observation in the last five minutes carries one line: stop exploring,
   fix only a named defect, run the final check and visual review, finish.
 
+### Changed — interaction is guided, not forced by a frame gate
+
+- The system prompt and a one-time observation hint say that a task naming
+  restart or hotspot must be exercised with `browser.command` click/press, not
+  judged from frames alone.
+- Observation and input budgets are separate. A run can reach the observation
+  limit and still press a control up to a separate 12-action cap; screenshots
+  and re-opens stop, the late click remains possible.
+- A hard completion-gate requirement for that click was tried and removed. The
+  last `3d-game` run passed the hidden grader 30/30 without a click and was
+  refused verification; the external grader, not a frame-based gate, is the
+  quality signal. The browser capability and the hint remain.
+
 ### Fixed — the visual checker loads the page over HTTP
 
 - `visual.check` used to open the page through `file://`. Chromium blocks a
