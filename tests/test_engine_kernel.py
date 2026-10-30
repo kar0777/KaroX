@@ -21,7 +21,7 @@ from karox.agent import AgentLimits, ContextBudget
 from karox.core import CoreRuntime
 from karox.core_tools import ExtendedCoreRuntime
 from karox.engine import __version__ as engine_version
-from karox.engine_kernel import EngineKernel, _model_request_deadline
+from karox.engine_kernel import EngineKernel, _model_request_deadline, _model_wall_limit
 from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.providers import ModelRequest, ModelResponse, ProviderTool, ToolCall
@@ -2137,6 +2137,24 @@ def test_one_model_reply_may_take_longer_than_two_minutes() -> None:
     assert _model_request_deadline(3600.0) == 300.0
     assert _model_request_deadline(42.0) == 42.0
     assert _model_request_deadline(0.0) == 5.0
+
+
+def test_the_model_stops_two_minutes_before_the_run_to_collect_proof() -> None:
+    """A 25-minute run must not spend its last seconds editing.
+
+    Both 3D re-runs fixed the artifact and hit 1510 s with the grader passing,
+    then reported ``wall_time_limit`` because the final check and visual look
+    had no time. The model now gets the budget minus the reserve; the kernel
+    uses the reserve for the same final calls a submission gets.
+    """
+
+    from karox.engine_kernel import FINISH_RESERVE_SECONDS
+
+    assert _model_wall_limit(1500) == (1380, FINISH_RESERVE_SECONDS)
+    assert _model_wall_limit(240) == (120, FINISH_RESERVE_SECONDS)
+    # Too short to split: the whole budget is for the model.
+    assert _model_wall_limit(180) == (180, 0.0)
+    assert _model_wall_limit(0) == (0, 0.0)
 
 
 def test_visual_budget_exhaustion_is_an_honest_stop() -> None:

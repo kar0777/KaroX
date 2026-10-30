@@ -112,6 +112,31 @@ def _model_request_deadline(remaining_seconds: float) -> float:
     return min(_MODEL_REQUEST_DEADLINE_SECONDS, max(5.0, remaining_seconds))
 
 
+#: The model's own wall clock is shortened by this much so the kernel can still
+#: collect the proof a finished run owes: the approved check, the visual look
+#: and the change review. Without it a run that fixed the artifact at minute 24
+#: ended ``wall_time_limit`` with the grader passing and the report unverified.
+#: Two 3D re-runs spent 1510 s each and stopped with "missing visual evidence".
+FINISH_RESERVE_SECONDS = 120.0
+
+
+def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
+    """Return ``(engine wall limit, reserved seconds)`` for one run.
+
+    A short run keeps its whole budget: the reserve exists to buy proof time,
+    not to make a 2-minute run stop at 0. A run needs at least the reserve plus
+    two minutes of model time before the split is worth it.
+    """
+
+    total = int(float(max_seconds))
+    if total <= 0:
+        return 0, 0.0
+    if total < int(FINISH_RESERVE_SECONDS) + 120:
+        return max(1, total), 0.0
+    reserve = FINISH_RESERVE_SECONDS
+    return max(1, total - int(reserve)), reserve
+
+
 #: The engine execution contract appended to the product system prompt. It is
 #: deliberately the last thing the model reads before deciding an action.
 #:
@@ -725,6 +750,8 @@ class EngineKernel:
         self._compaction: Optional[Dict[str, Any]] = None
         self._engine_submission = ""
         self._deadline = 0.0
+        #: Seconds held back from the model's wall clock for final proof.
+        self._finish_reserve_seconds = 0.0
         self._session_id: Optional[str] = None
         self._lease: Optional[MutationLease] = None
         self._environment: Optional[CoreToolEnvironment] = None
@@ -854,13 +881,15 @@ class EngineKernel:
                 command_timeout=self._command_timeout,
             )
             self._environment = environment
+            wall_limit, finish_reserve = _model_wall_limit(self.limits.max_seconds)
+            self._finish_reserve_seconds = finish_reserve
             agent = EngineAgent(
                 model,
                 environment,
                 kernel=self,
                 resume_step_calls=resume_calls,
                 step_limit=int(self.limits.max_steps) + resume_calls,
-                wall_time_limit_seconds=int(float(self.limits.max_seconds)),
+                wall_time_limit_seconds=wall_limit,
                 cost_limit=0.0,
                 context_token_budget=self._engine_context_budget(),
                 output_path=self.sessions.session_dir(session_id)
@@ -932,11 +961,32 @@ class EngineKernel:
                         reason,
                         provider_message,
                     )
-            # Only a submission may be verified. A run that ended on a step or
-            # wall-clock limit, a format-error budget or a user stop was not
-            # completed by the model, and finishing evidence collected after
-            # an interrupted run would launder an unfinished workspace into a
-            # verified one.
+            # The model used its shortened wall clock; the rest is reserved for proof.
+            # It gets the same final calls as a submission, and only a clean
+            # completion gate turns that into `verified`.
+            if (
+                exit_status == "TimeExceeded"
+                and self._finish_reserve_seconds > 0
+                and self.remaining_seconds() > 5
+            ):
+                self._run_harness_final_calls(session_id, lease, self._deadline)
+                record = self.sessions.load(session_id)
+                if self._completed(record):
+                    reason = "answer" if self._answer_complete(record) else "submitted"
+                    self._snapshot_verified_state(session_id, lease, record)
+                    return self._finish(
+                        session_id,
+                        lease,
+                        "verified",
+                        "verification",
+                        reason,
+                        provider_message,
+                    )
+            # Only a submission, or the reserved proof window above, may be
+            # verified. A run that ended on a step or wall-clock limit, a
+            # format-error budget or a user stop was not completed by the model,
+            # and finishing evidence collected after an interrupted run would
+            # launder an unfinished workspace into a verified one.
             if exit_status == "Submitted":
                 # The engine submitted. KaroX -- never the model's prose --
                 # decides what counts as verified, collecting the finishing

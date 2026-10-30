@@ -96,6 +96,7 @@ COMMAND_RISK_KINDS: Mapping[str, str] = {
 # is decided from its payload rather than from a separate tool name.
 BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "open": "browser.input",
+    "serve": "browser.read",
     "tabs": "browser.read",
     "new_tab": "browser.input",
     "switch_tab": "browser.input",

@@ -20,6 +20,8 @@ from karox.action_policy import ActionConfirmationRequired, ActionDecisionEngine
 from karox import cli
 from karox.core import CoreCommand, InvalidCommand
 from karox.engine_tool_env import (
+    BROWSER_CALLS_EXHAUSTED,
+    BROWSER_CALLS_NOTICE,
     REFUSAL_DISABLE_AFTER,
     REFUSAL_GUIDANCE_AFTER,
     CoreToolEnvironment,
@@ -375,6 +377,54 @@ def test_research_budget_speaks_twice_then_stays_quiet() -> None:
     environment._research_applies = False
     environment._kernel._step = 40
     assert environment._research_notice(read) == ""
+
+
+def test_browser_budget_warns_once_then_disables_probing() -> None:
+    """A browser is for checking a named interaction, not endless exploration.
+
+    Two 3D re-runs used 57 and 61 browser calls, fixed the artifacts, then hit
+    the wall clock without final proof. The notice arrives at 20 calls and the
+    tool stops accepting calls at 36; visual.check and repository reads stay.
+    """
+
+    from types import SimpleNamespace
+
+    environment = object.__new__(CoreToolEnvironment)
+    environment._browser_calls = 0
+    environment._browser_notice_sent = False
+    environment._time_notice_sent = False
+    environment._kernel = SimpleNamespace(remaining_seconds=lambda: 1000.0)
+
+    assert environment._browser_notice() == ""
+    assert environment._browser_budget_exhausted("browser.command") == ""
+
+    environment._browser_calls = BROWSER_CALLS_NOTICE
+    notice = environment._browser_notice()
+    assert "Browser budget" in notice
+    assert environment._browser_notice() == "", "the notice must not repeat"
+    assert environment._browser_budget_exhausted("browser.command") == ""
+
+    environment._browser_calls = BROWSER_CALLS_EXHAUSTED
+    disabled = environment._browser_budget_exhausted("browser.command")
+    assert "disabled" in disabled
+    assert environment._browser_budget_exhausted("visual.check") == ""
+
+
+def test_time_left_notice_fires_once_near_the_deadline() -> None:
+    from types import SimpleNamespace
+
+    environment = object.__new__(CoreToolEnvironment)
+    environment._time_notice_sent = False
+    environment._kernel = SimpleNamespace(remaining_seconds=lambda: 299.0)
+
+    first = environment._time_left_notice()
+    assert "Only 299 seconds remain" in first
+    assert environment._time_left_notice() == ""
+
+    later = object.__new__(CoreToolEnvironment)
+    later._time_notice_sent = False
+    later._kernel = SimpleNamespace(remaining_seconds=lambda: 900.0)
+    assert later._time_left_notice() == ""
 
 
 def test_web_fetch_does_not_claim_an_existing_file_was_created(

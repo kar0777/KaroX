@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -50,6 +51,55 @@ def site():
 @pytest.fixture()
 def make_session(tmp_path: Path):
     created: list[BrowserSession] = []
+    created_roots: list[Path] = []
+
+    def _terminate_detached(root: Path) -> None:
+        """Kill instances a failed detach test left behind.
+
+        The detach test intentionally keeps a Chromium alive for reconnect, and
+        its body closes it at the end. If an assertion fails before that line,
+        the process survives the pytest worker and its GPU process keeps
+        spinning: four abandoned instances from earlier suite runs had burned
+        more than 8000 CPU seconds each. The fixture now proves ownership from
+        the recorded PID creation time and kills the tree even on failure.
+        """
+
+        from karox.process_identity import read_process_create_time_ns
+
+        instances = root / "instances"
+        if not instances.is_dir():
+            return
+        for record_path in instances.glob("*.json"):
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                pid = int(record.get("pid") or 0)
+                created_ns = int(record.get("create_time_ns") or 0)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pid = 0
+                created_ns = 0
+            live = read_process_create_time_ns(pid) if pid else None
+            if (
+                pid
+                and created_ns
+                and live is not None
+                and int(live) == created_ns
+            ):
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                else:
+                    try:
+                        os.kill(pid, 9)
+                    except OSError:
+                        pass
+            try:
+                record_path.unlink()
+            except OSError:
+                pass
 
     def factory(
         *,
@@ -83,12 +133,17 @@ def make_session(tmp_path: Path):
         )
         uploads = root / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)
+        effective_root = (
+            browser_root if browser_root is not None else root / "browser"
+        )
+        if effective_root not in created_roots:
+            created_roots.append(effective_root)
         session = BrowserSession(
             artifacts,
             policy,
             credential_store,
             upload_roots=upload_roots if upload_roots is not None else (uploads,),
-            browser_root=browser_root if browser_root is not None else root / "browser",
+            browser_root=effective_root,
         )
         created.append(session)
         return session, root
@@ -99,6 +154,8 @@ def make_session(tmp_path: Path):
             session.force_close()
         except Exception:
             pass
+    for root in created_roots:
+        _terminate_detached(root)
 
 
 def _call(session: BrowserSession, action: str, payload: dict | None = None,

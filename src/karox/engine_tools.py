@@ -70,6 +70,7 @@ def register_browser_tool(
             plain_credentials=bool(plain_credentials),
         ),
         browser_root=runtime_dir() / "vnext" / "browser",
+        serve_root=core.repository,
         capability_guard=lambda capability: capability_policy.require(origin, capability),
     )
 

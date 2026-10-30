@@ -85,6 +85,7 @@ def _register_browser(
     session_id: str,
     *,
     downloads: bool = True,
+    serve_root: Path | None = None,
 ) -> BrowserSession:
     artifacts_root = tmp_path / f"artifacts-{session_id}"
     artifacts_root.mkdir(parents=True, exist_ok=True)
@@ -102,7 +103,9 @@ def _register_browser(
         browser_root=tmp_path / f"browser-{session_id}",
     )
     adapter = BrowserToolAdapter(
-        session, capability_guard=lambda cap: policy.require(origin, cap)
+        session,
+        capability_guard=lambda cap: policy.require(origin, cap),
+        serve_root=serve_root,
     )
     definition = browser_tool_definition()
     core._handlers[definition.name] = adapter.core_handler()
@@ -177,6 +180,78 @@ def test_browser_command_runs_through_core_with_policy_and_risk(tmp_path, site):
                     deadline_seconds=10.0,
                 )
             )
+    finally:
+        session.force_close()
+
+
+def test_browser_command_serves_and_clicks_a_repository_page(tmp_path) -> None:
+    """The page Karo wrote is clickable through the browser tool.
+
+    This is the interaction path the 3D runs lacked: a repository page is served
+    on loopback, opened, clicked and read back. It needs no NETWORK grant because
+    nothing leaves 127.0.0.1.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "index.html").write_text(
+        "<html><body>"
+        "<button id='go'>Go</button><div id='out'>idle</div>"
+        "<script>document.getElementById('go').onclick = function () {"
+        "document.getElementById('out').textContent = 'clicked';};</script>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    session_id = f"serve-{uuid.uuid4().hex[:8]}"
+    origin = Origin(OriginKind.NATIVE_AGENT, "kernel-test")
+    core, policy = _build_core(
+        tmp_path,
+        AccessProfile.BROWSER_CONTROL,
+        session_id,
+        origin,
+        grants={
+            Capability.BROWSER_READ,
+            Capability.BROWSER_INPUT,
+            Capability.REPO_READ,
+        },
+    )
+    session = _register_browser(
+        core, policy, origin, tmp_path, session_id, serve_root=repo
+    )
+    try:
+        opened = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "open", "payload": {"page": "index.html"}},
+                session_id,
+                origin,
+                deadline_seconds=60.0,
+            )
+        )
+        assert opened.ok is True and opened.data["ok"] is True
+        assert opened.data["url"].startswith("http://127.0.0.1:")
+
+        clicked = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "click", "payload": {"selector": "#go"}},
+                session_id,
+                origin,
+                deadline_seconds=30.0,
+            )
+        )
+        assert clicked.ok is True and clicked.data["ok"] is True
+
+        seen = core.execute(
+            CoreCommand(
+                "browser.command",
+                {"action": "get_text", "payload": {"selector": "#out"}},
+                session_id,
+                origin,
+                deadline_seconds=30.0,
+            )
+        )
+        assert "clicked" in str(seen.data)
     finally:
         session.force_close()
 

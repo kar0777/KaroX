@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed — the run keeps time to prove what it built
+
+- Two 3D re-runs fixed the artifact (26/26 and 30/30 on the hidden grader) and
+  then hit 1510 s with `wall_time_limit`: the last visual look and change review
+  never ran, so the report said "missing visual evidence" while the grader
+  passed. The model's own wall clock is now two minutes shorter; the reserved
+  window runs the same final calls a submission gets and reports `verified` only
+  if the completion gate is clean.
+- Browser calls now warn at 20 and stop at 36 per run. The two 3D runs used 57
+  and 61 calls; the interaction is verified long before that, and the remaining
+  time belongs to the final proof. `visual.check` and repository reads stay
+  available after the browser closes.
+- Every observation in the last five minutes carries one line: stop exploring,
+  fix only a named defect, run the final check and visual review, finish.
+
+### Added — the browser can open a page from the repository
+
+- `browser.command open {page: "index.html"}` serves the repository on a random
+  loopback port and navigates to that page; `serve {path?}` returns the URL
+  without navigating. Before this, the canvas/3D runs tried `open` with a
+  `file://` URL and got `permission_denied`: `file` is not localhost, so the
+  call demanded NETWORK, and the browser was never allowed to open the page the
+  run had just written. Restart buttons and hotspots therefore stayed
+  unverified even when the frames looked right.
+- The static server binds `127.0.0.1` only, is rooted at the repository, refuses
+  paths and symlinks outside it, and stops when the browser session closes. It
+  is served by the adapter, not by a new public listener; the capability is
+  `browser.read` plus `repo.read`, not `network`.
+- The system prompt now says to exercise a named interaction (button, restart,
+  hotspot, keyboard) through the browser and then use `visual.check` for the
+  visual verdict.
+
 ### Added — a direct vision route can use the visual checker
 
 - `karox agent run --vision auto|on|off` now controls `visual.check`. `auto`

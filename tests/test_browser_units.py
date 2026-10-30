@@ -391,10 +391,14 @@ class _RecordingSession:
         return {"echo": action}
 
 
-def _adapter(session=None, guard=None):
+def _adapter(session=None, guard=None, serve_root=None):
     from karox.browser.tools import BrowserToolAdapter
 
-    return BrowserToolAdapter(session or _RecordingSession(), capability_guard=guard)
+    return BrowserToolAdapter(
+        session or _RecordingSession(),
+        capability_guard=guard,
+        serve_root=serve_root,
+    )
 
 
 def test_adapter_returns_structured_results_and_validates_shape():
@@ -488,6 +492,81 @@ def test_dropin_execute_browser_command_matches_worker_contract():
 
     with pytest.raises(InvalidCommand):
         execute_browser_command(NoBrowserRuntime(), {"action": "tabs", "payload": {}}, 30.0)
+
+
+def test_open_page_serves_the_repository_on_loopback(tmp_path) -> None:
+    """A page the run wrote must be clickable, not only screenshot-able.
+
+    The canvas/3D runs tried ``browser.command open`` with a ``file://`` URL and
+    were refused: file is not localhost, so the call demanded NETWORK. That left
+    restart and hotspot clicks unverified. ``open {page}`` now starts a loopback
+    server rooted at the repository and navigates to the page through it.
+    """
+
+    import urllib.request
+
+    (tmp_path / "index.html").write_text(
+        "<html><body><button id='go'>served</button></body></html>",
+        encoding="utf-8",
+    )
+    session = _RecordingSession()
+    adapter = _adapter(session=session, serve_root=tmp_path)
+    try:
+        result = adapter.execute(
+            {"action": "open", "payload": {"page": "index.html"}}, 30.0
+        )
+
+        assert result["ok"] is True
+        action, payload, _ = session.calls[-1]
+        assert action == "open"
+        url = payload["url"]
+        assert url.startswith("http://127.0.0.1:")
+        with urllib.request.urlopen(url, timeout=5) as response:
+            assert b"served" in response.read()
+    finally:
+        adapter.stop_server()
+
+
+def test_serve_returns_the_loopback_url_without_navigating(tmp_path) -> None:
+    (tmp_path / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    session = _RecordingSession()
+    adapter = _adapter(session=session, serve_root=tmp_path)
+    try:
+        result = adapter.execute(
+            {"action": "serve", "payload": {"path": "index.html"}}, 30.0
+        )
+    finally:
+        adapter.stop_server()
+
+    assert result["ok"] is True
+    assert result["url"].startswith("http://127.0.0.1:")
+    assert result["url"].endswith("/index.html")
+    assert not session.calls
+
+
+def test_open_page_refuses_a_path_outside_the_repository(tmp_path) -> None:
+    (tmp_path / "inside.html").write_text("<html>ok</html>", encoding="utf-8")
+    (tmp_path.parent / "outside.html").write_text("<html>no</html>", encoding="utf-8")
+    adapter = _adapter(serve_root=tmp_path)
+    try:
+        with pytest.raises(InvalidCommand, match="inside the repository"):
+            adapter.execute(
+                {"action": "open", "payload": {"page": "../outside.html"}}, 30.0
+            )
+    finally:
+        adapter.stop_server()
+
+
+def test_serve_is_a_local_read_for_capability_and_risk(tmp_path) -> None:
+    seen = []
+    adapter = _adapter(guard=lambda capability: seen.append(capability), serve_root=tmp_path)
+    try:
+        adapter.execute({"action": "serve", "payload": {}}, 30.0)
+    finally:
+        adapter.stop_server()
+
+    assert seen == [Capability.BROWSER_READ, Capability.REPO_READ]
+    assert risk_kind_for("browser.command", {"action": "serve"}) == "browser.read"
 
 
 def test_secret_fields_have_one_definition_for_python_and_both_probes() -> None:

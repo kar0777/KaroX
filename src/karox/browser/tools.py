@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
+from urllib.parse import quote
 
 from ..artifacts import ArtifactStore
 from ..core_types import InvalidCommand, ToolDefinition
@@ -56,15 +58,23 @@ __all__ = [
     "execute_browser_command",
 ]
 
-BROWSER_ACTIONS = frozenset(ACTION_CAPABILITIES)
+BROWSER_ACTIONS = frozenset(ACTION_CAPABILITIES) | frozenset({"serve"})
+
+#: Actions served by the adapter itself, not the Playwright session. They are
+#: still browser.command actions so the model has one stable surface and the
+#: risk map grades them.
+LOCAL_ACTIONS = frozenset({"serve"})
 
 #: Called with the capability one action needs; raises PermissionError to deny.
 CapabilityGuard = Callable[[Capability], None]
 
 _TOOL_DESCRIPTION = (
     "Drive one session-owned browser: research pages and interact with them. "
-    "Call with action plus a payload object. Navigation: open {url,width?,height?,"
-    "profile?,detach?}, back, forward, reload. Observation: tabs, snapshot "
+    "Call with action plus a payload object. Navigation: open {url|page,width?,"
+    "height?,profile?,detach?} — page is repository-relative and starts a "
+    "loopback server for this repository, so a page you wrote can be clicked and "
+    "read; serve {path?} returns that loopback URL without navigating. Back, "
+    "forward, reload. Observation: tabs, snapshot "
     "(structured page map with refs k1..kN), snapshot_diff, find_text {text}, "
     "get_text {selector|ref?} (whole page when omitted), get_form_state "
     "{selector?}, page_info, iframe "
@@ -137,6 +147,34 @@ def _external_navigation(payload: Mapping[str, Any]) -> bool:
     return False
 
 
+class _RepositoryRequestHandler(SimpleHTTPRequestHandler):
+    """Serve one repository over loopback, with no path escape.
+
+    The browser tool is confined to localhost; a page the run wrote is a file,
+    not a network target. Serving the repository is the smallest bridge that
+    lets Playwright click that page while keeping every request on 127.0.0.1.
+    ``translate_path`` resolves the result and refuses anything outside the
+    root, including a symlink that points out of the tree.
+    """
+
+    def __init__(self, *args: Any, root: Path, **kwargs: Any) -> None:
+        self._repository_root = root
+        super().__init__(*args, directory=str(root), **kwargs)
+
+    def translate_path(self, path: str) -> str:
+        candidate = Path(super().translate_path(path)).resolve()
+        try:
+            candidate.relative_to(self._repository_root)
+        except ValueError:
+            return str(self._repository_root / "__not_found__")
+        return str(candidate)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        # A local page load is not an operator log line; stdout belongs to the
+        # agent's stream.
+        return
+
+
 class BrowserToolAdapter:
     """Typed, cancellable, engine-neutral wrapper around one browser session."""
 
@@ -145,9 +183,14 @@ class BrowserToolAdapter:
         session: Any,
         *,
         capability_guard: Optional[CapabilityGuard] = None,
+        serve_root: Optional[Path] = None,
     ) -> None:
         self.session = session
         self._capability_guard = capability_guard
+        self._serve_root = Path(serve_root).resolve() if serve_root is not None else None
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._http_thread: Optional[threading.Thread] = None
+        self._serve_url: Optional[str] = None
 
     # -- authorization -------------------------------------------------------
 
@@ -155,11 +198,95 @@ class BrowserToolAdapter:
         guard = self._capability_guard
         if guard is None:
             return
+        if action in LOCAL_ACTIONS:
+            # Serving the repository is a local read of bytes the agent may
+            # already read; it must not inherit the browser.input risk of a
+            # click or need the network capability.
+            guard(Capability.BROWSER_READ)
+            guard(Capability.REPO_READ)
+            return
         guard(ACTION_CAPABILITIES[action])
         if action in {"open", "new_tab"} and _external_navigation(payload):
             # Leaving the machine is a second decision, never implied by
             # browser input on a dev server.
             guard(Capability.NETWORK)
+
+    # -- local page serving --------------------------------------------------
+
+    def _ensure_server(self) -> str:
+        if self._httpd is not None and self._serve_url is not None:
+            return self._serve_url
+        root = self._serve_root
+        if root is None or not root.is_dir():
+            raise InvalidCommand(
+                "local page serving is not configured for this session"
+            )
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            lambda *args, **kwargs: _RepositoryRequestHandler(
+                *args, root=root, **kwargs
+            ),
+        )
+        server.daemon_threads = True
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="karox-browser-static",
+            daemon=True,
+        )
+        thread.start()
+        host, port = server.server_address[:2]
+        self._httpd = server
+        self._http_thread = thread
+        self._serve_url = f"http://{host}:{port}/"
+        return self._serve_url
+
+    def _page_url(self, page: Any) -> str:
+        root = self._serve_root
+        if root is None:
+            raise InvalidCommand("local page serving is not configured")
+        if not isinstance(page, str) or not page.strip():
+            raise InvalidCommand("page must be a non-empty repository-relative path")
+        relative = page.replace("\\", "/").lstrip("/")
+        try:
+            target = (root / relative).resolve()
+            target.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise InvalidCommand(
+                "page must stay inside the repository"
+            ) from exc
+        if not target.is_file():
+            raise InvalidCommand(f"page is not a file: {page}")
+        return self._ensure_server() + quote(target.relative_to(root).as_posix())
+
+    def _open_payload(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        if "page" not in payload:
+            return dict(payload)
+        if "url" in payload:
+            raise InvalidCommand("open takes either url or page, not both")
+        updated = dict(payload)
+        page = updated.pop("page")
+        updated["url"] = self._page_url(page)
+        return updated
+
+    def _serve(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        page = payload.get("path")
+        if page is None:
+            base = self._ensure_server()
+            return {"url": base, "root": str(self._serve_root)}
+        return {
+            "url": self._page_url(page),
+            "root": str(self._serve_root),
+            "path": str(page),
+        }
+
+    def stop_server(self) -> None:
+        server = self._httpd
+        self._httpd = None
+        self._http_thread = None
+        self._serve_url = None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
 
     # -- execution -------------------------------------------------------------
 
@@ -183,11 +310,17 @@ class BrowserToolAdapter:
             raise InvalidCommand(f"unsupported browser.command action: {action}")
         if not isinstance(deadline_seconds, (int, float)) or deadline_seconds <= 0:
             raise InvalidCommand("browser.command deadline must be a positive number")
+        if action == "open":
+            payload = self._open_payload(payload)
         try:
             if cancel is not None:
                 cancel.raise_if_cancelled()
-            self._authorize(action, payload)
-            result = self.session.dispatch(action, payload, float(deadline_seconds), cancel)
+            if action == "serve":
+                self._authorize(action, payload)
+                result = self._serve(payload)
+            else:
+                self._authorize(action, payload)
+                result = self.session.dispatch(action, payload, float(deadline_seconds), cancel)
         except BrowserCancelled:
             return {"ok": False, "action": action, "error_kind": CANCELLED,
                     "error": "browser call cancelled"}
@@ -219,6 +352,8 @@ class BrowserToolAdapter:
             }
         if not isinstance(result, dict):
             result = {"result": result}
+        if action == "close":
+            self.stop_server()
         return {"ok": True, "action": action, **result}
 
 
@@ -245,6 +380,7 @@ class BrowserToolRuntime:
         upload_roots: tuple[Path, ...] = (),
         credential_store: Optional[BrowserCredentialStore] = None,
         capability_guard: Optional[CapabilityGuard] = None,
+        serve_root: Optional[Path] = None,
     ) -> None:
         self._policy = policy
         self._artifacts_root = artifacts_root
@@ -252,6 +388,7 @@ class BrowserToolRuntime:
         self._upload_roots = tuple(upload_roots)
         self._credential_store = credential_store
         self._capability_guard = capability_guard
+        self._serve_root = serve_root
         self._sessions: Dict[str, BrowserToolAdapter] = {}
         self._lock = threading.Lock()
 
@@ -284,7 +421,9 @@ class BrowserToolRuntime:
                 browser_root=self._browser_root,
             )
             adapter = BrowserToolAdapter(
-                session, capability_guard=self._capability_guard
+                session,
+                capability_guard=self._capability_guard,
+                serve_root=self._serve_root,
             )
             self._sessions[session_id] = adapter
             return adapter
@@ -314,15 +453,18 @@ class BrowserToolRuntime:
             )
         try:
             if force:
-                return session.force_close()
-            return session.dispatch(
-                "close",
-                {"user_confirmed": True, "reason": "runtime close"},
-                30.0,
-                None,
-            )
+                result = session.force_close()
+            else:
+                result = session.dispatch(
+                    "close",
+                    {"user_confirmed": True, "reason": "runtime close"},
+                    30.0,
+                    None,
+                )
         except BrowserError:
             return {"closed": False, "was_open": session.is_open, "session_id": session_id}
+        adapter.stop_server()
+        return result
 
     def close_all(self) -> None:
         for session_id in list(self._sessions):

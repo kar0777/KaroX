@@ -76,6 +76,16 @@ _MUTATION_TOOLS = {"repo.edit_file", "repo.write_file", "repo.apply_patch", "rep
 #: model to stop; after the higher number the tool is disabled for the run.
 REFUSAL_GUIDANCE_AFTER = 2
 REFUSAL_DISABLE_AFTER = 6
+#: A browser can turn verification into an unbounded exploration: the two 3D
+#: re-runs used 57 and 61 browser calls, fixed the actual defects, then hit the
+#: wall clock without finishing their proof. Warn at the lower number, stop
+#: accepting browser calls at the higher one. The model can still read the
+#: repository and ask visual.check; it just cannot keep probing.
+BROWSER_CALLS_NOTICE = 20
+BROWSER_CALLS_EXHAUSTED = 36
+#: Once this little wall time remains, every observation carries one line: stop
+#: exploring and finish. The kernel also reserves this window for final proof.
+TIME_LEFT_NOTICE_SECONDS = 300.0
 #: A code task is not a reading exercise. On swe-requests-6028 the model spent
 #: about two dozen model steps downloading and comparing three upstream
 #: releases before its first edit; one such run cost 2.1M tokens with only one
@@ -175,6 +185,12 @@ class CoreToolEnvironment:
         self._research_notices: set[int] = set()
         #: A code task gets the research budget; a question or a plan does not.
         self._research_applies = self._task_expects_change()
+        #: Browser calls are counted across the run; a page can be probed
+        #: forever without this. The notice and the hard stop are separate so
+        #: the model gets one clear chance to finish before the tool closes.
+        self._browser_calls = 0
+        self._browser_notice_sent = False
+        self._time_notice_sent = False
 
     # -- Environment protocol ----------------------------------------------
 
@@ -240,6 +256,9 @@ class CoreToolEnvironment:
         disabled = self._disabled_after_refusals(core_name)
         if disabled:
             return self._refusal(action, "tool_disabled_after_refusals", disabled)
+        browser_disabled = self._browser_budget_exhausted(core_name)
+        if browser_disabled:
+            return self._refusal(action, "browser_budget_exhausted", browser_disabled)
         # The session already knows which files it changed, so a focused run
         # can name its own targets instead of refusing the call and spending a
         # whole model turn on "which test file is this?". The derived list is
@@ -307,6 +326,8 @@ class CoreToolEnvironment:
             )
             return self._observation(message, 1, "refused")
         self._refusals.pop(core_name, None)
+        if core_name == "browser.command":
+            self._browser_calls += 1
         data = result.data if isinstance(result.data, dict) else {}
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
@@ -334,7 +355,12 @@ class CoreToolEnvironment:
         self._attach_quick_checks(result)
         self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
-        notice = self._research_notice(definition)
+        notices = (
+            self._research_notice(definition),
+            self._browser_notice(),
+            self._time_left_notice(),
+        )
+        notice = "\n\n".join(item for item in notices if item)
         if notice:
             combined = f"{notice}\n\n{output['output']}"
             output["output"] = clip_output(combined, int(self.config.output_char_limit))
@@ -485,6 +511,45 @@ class CoreToolEnvironment:
                 "reading is not the task."
             )
         return ""
+
+    def _browser_budget_exhausted(self, core_name: str) -> str:
+        if core_name != "browser.command":
+            return ""
+        if self._browser_calls < BROWSER_CALLS_EXHAUSTED:
+            return ""
+        return (
+            f"browser.command is disabled for the rest of this run after "
+            f"{self._browser_calls} calls. The interaction has been examined "
+            "enough; stop probing, run the final check and visual review, and "
+            "finish. Repository reads and visual.check remain available."
+        )
+
+    def _browser_notice(self) -> str:
+        if self._browser_calls < BROWSER_CALLS_NOTICE or self._browser_notice_sent:
+            return ""
+        self._browser_notice_sent = True
+        return (
+            f"Browser budget: {self._browser_calls} calls used. Stop exploring: "
+            "exercise only the interaction the task names, fix what the last "
+            "probe showed, then run the visual check and finish. Browser calls "
+            f"stop at {BROWSER_CALLS_EXHAUSTED}."
+        )
+
+    def _time_left_notice(self) -> str:
+        if self._time_notice_sent:
+            return ""
+        try:
+            remaining = float(self._kernel.remaining_seconds())
+        except Exception:  # noqa: BLE001 - a test double may not expose it
+            return ""
+        if remaining > TIME_LEFT_NOTICE_SECONDS:
+            return ""
+        self._time_notice_sent = True
+        return (
+            f"Only {int(remaining)} seconds remain. Stop exploring and editing "
+            "broadly: fix a named defect if one is open, run the final check and "
+            "visual review, and finish."
+        )
 
     def _note_refusal(self, core_name: str, error_name: str) -> int:
         del error_name
