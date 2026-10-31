@@ -190,6 +190,41 @@ def test_dark_bottom_is_a_3d_scene_problem_not_a_2d_page_problem() -> None:
     assert any("bottom quarter" in item for item in three_d["problems"])
 
 
+def test_a_dark_floor_with_visible_lane_structure_is_not_a_missing_floor() -> None:
+    """A neon game's floor is dark by design; lane lines make it readable.
+
+    The 3D runner's ready frame was 74-83% dark in the bottom quarter while the
+    grid, lane lines and rails were plainly visible. Brightness alone called
+    that a missing floor and spent the visual budget on a design choice.
+    """
+
+    measured = _measured()
+    measured["dark_bottom_share"] = 0.84
+    measured["bottom_sampled"] = 200
+    measured["bottom_structured_share"] = 0.12
+
+    result = render_problems(
+        "runner.html",
+        page_errors=(),
+        console_errors=(),
+        measured=measured,
+        probe=_probe(),
+        resize={"ok": True},
+    )
+
+    assert not any("bottom quarter" in item for item in result["problems"])
+
+
+def test_the_visual_checker_prompt_scopes_games_to_required_facts() -> None:
+    from karox.prompts import visual_checker_text
+
+    text = visual_checker_text()
+
+    assert "For a game or an interactive scene" in text
+    assert "do not demand a particular ship silhouette" in text
+    assert "are notes, not a failed scene" in text
+
+
 def test_identical_frames_are_not_a_defect_for_a_static_chart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

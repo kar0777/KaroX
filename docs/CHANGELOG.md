@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed — a scratch probe is not the deliverable
+
+- `default_pages()` returned every root HTML sorted by name, so `_probe.html`
+  came before `index.html`. The harness-final visual check judged the scratch
+  page, and its failure stayed owed against a correct 3D game. Diagnostic names
+  (leading `_` or a probe/scratch/tmp/debug token) are now excluded, and
+  `index.html`/`index.htm` sort first.
+- A `visual.check` on a scratch page no longer counts as an active failed check
+  and can no longer satisfy `missing visual evidence`. The final check now looks
+  at the page the task actually ships.
+
+### Changed — the game visual rubric follows the task, not an art direction
+
+- The checker now judges a game by the mandatory visual facts the goal states:
+  track/floor, lane lines, rails, player, obstacles, collectibles, HUD, and that
+  they are distinguishable. A simple craft, a flat or dark sky, a geometric
+  obstacle, a clipped decorative hint or a distant item are not failures unless
+  the goal names that style or the defect hides a required element.
+- The dark-bottom measurement now requires the lower frame to have no visible
+  structure. A neon runner's floor is dark by design; its grid, lane lines and
+  rails prove the floor is drawn, so the old brightness-only rule called a
+  readable track a missing floor. Live recheck of the last 3D frame: bottom
+  structure 10.7%, no render problems.
+
 ### Fixed — the run keeps time to prove what it built
 
 - Two 3D re-runs fixed the artifact (26/26 and 30/30 on the hidden grader) and

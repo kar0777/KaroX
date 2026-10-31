@@ -85,7 +85,9 @@ def test_needs_work_still_owes_browser_evidence(tmp_path: Path) -> None:
     assert "missing browser runtime evidence" in reasons
 
 
-def _add_visual_pass(core: _Core, record: object, target: str) -> None:
+def _add_visual(
+    core: _Core, record: object, target: str, verdict: str = "pass"
+) -> None:
     current = completion_gate.identity(core, record)
     assert current, "the fixture must have a stable identity"
     record.evidence.append(
@@ -106,7 +108,7 @@ def _add_visual_pass(core: _Core, record: object, target: str) -> None:
                 "data": {
                     "completion_identity": current,
                     "completion_target": target,
-                    "verdict": "pass",
+                    "verdict": verdict,
                     "method": "vision",
                     "page_errors": [],
                     "console_errors": [],
@@ -114,6 +116,10 @@ def _add_visual_pass(core: _Core, record: object, target: str) -> None:
             },
         }
     )
+
+
+def _add_visual_pass(core: _Core, record: object, target: str) -> None:
+    _add_visual(core, record, target, "pass")
 
 
 def test_an_unchanged_scaffold_page_proves_a_changed_script(tmp_path: Path) -> None:
@@ -156,6 +162,48 @@ def test_an_unrelated_page_does_not_prove_a_changed_script(tmp_path: Path) -> No
     reasons = completion_gate.floor(core, record)
 
     assert "missing browser runtime evidence" in reasons
+
+
+def _probe_record(tmp_path: Path) -> tuple[object, _Core]:
+    (tmp_path / "index.html").write_text(
+        "<html><body><canvas></canvas></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "_probe.html").write_text(
+        "<html><body>probe</body></html>", encoding="utf-8"
+    )
+    record = SimpleNamespace(
+        changed_files=["index.html", "_probe.html"],
+        task="Build a three.js game with a visible track, obstacles and coins.",
+        requirements=[],
+        evidence=[],
+        provider_history=[],
+    )
+    return record, _Core(tmp_path)
+
+
+def test_a_failed_scratch_probe_is_not_an_active_failed_check(
+    tmp_path: Path,
+) -> None:
+    """A diagnostic page must not stay owed against the deliverable."""
+
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "_probe.html", "needs_work")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not any("active failed check" in reason for reason in reasons)
+    assert "missing visual evidence" in reasons
+
+
+def test_a_passing_scratch_probe_does_not_prove_the_deliverable(
+    tmp_path: Path,
+) -> None:
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "_probe.html", "pass")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert "missing visual evidence" in reasons
 
 
 def test_apply_patch_post_state_is_current_structural_evidence(tmp_path: Path) -> None:

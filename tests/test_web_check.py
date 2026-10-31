@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from karox.web_check import check_page
+from karox.web_check import check_page, default_pages, is_scratch_page
 
 
 def _page(tmp_path: Path, body: str) -> Path:
@@ -73,3 +73,25 @@ def test_a_single_declaration_of_each_name_passes(tmp_path: Path) -> None:
     )
 
     assert _duplicate_lines(page) == []
+
+
+def test_scratch_probes_are_not_deliverable_pages(tmp_path: Path) -> None:
+    """A diagnostic page must not outrank or represent the deliverable.
+
+    The 3D run left ``_probe.html`` next to ``index.html``. Sorting every root
+    page put the probe first, so the final visual check judged it and its
+    failure stayed owed against a correct game.
+    """
+
+    for name in ("index.html", "about.html", "_probe.html", "probe2.html", "scratch.html"):
+        (tmp_path / name).write_text("<html></html>", encoding="utf-8")
+
+    assert is_scratch_page("_probe.html")
+    assert is_scratch_page("probe2.html")
+    assert is_scratch_page("my-scratch-page.html")
+    assert not is_scratch_page("index.html")
+    assert not is_scratch_page("about.html")
+    assert [page.name for page in default_pages(tmp_path)] == [
+        "index.html",
+        "about.html",
+    ]

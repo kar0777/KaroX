@@ -76,6 +76,11 @@ _CANVAS_BACKGROUND_SHARE = 0.98
 DARK_BOTTOM_SHARE = 0.6
 #: Brightness (0-1) below which a pixel counts as almost black.
 DARK_LUMA = 0.08
+#: Share of the bottom quarter that must still hold an edge before a dark bottom
+#: counts as unlit. A neon runner's floor is dark by design but its grid, lane
+#: lines and rails give the lower frame strong local structure. The old rule
+#: saw only brightness, so it called a readable dark track a missing floor.
+DARK_BOTTOM_STRUCTURE = 0.04
 #: Standard deviation of brightness below which the frame is one tone. A hundred
 #: distinct dark colours are still an unlit scene, which a count of tones cannot
 #: tell.
@@ -287,6 +292,7 @@ async (payload) => {
   let luma_square_sum = 0;
   let bottom_sampled = 0;
   let dark_bottom = 0;
+  let bottom_structured = 0;
   for (let y = top + 4; y + 4 < bottom; y += 8) {
     for (let x = left + 4; x + 12 < right; x += 8) {
       const here = (y * width + x) * 4;
@@ -315,6 +321,9 @@ async (payload) => {
       luma_square_sum += luma * luma;
       if (y >= bottom_edge) {
         bottom_sampled += 1;
+        if (delta > 24) {
+          bottom_structured += 1;
+        }
         if (luma < dark_luma) {
           dark_bottom += 1;
         }
@@ -352,6 +361,9 @@ async (payload) => {
     dominant_color: modal_color,
     dominant_share: sampled ? Number((modal_count / sampled).toFixed(4)) : null,
     bottom_sampled,
+    bottom_structured_share: bottom_sampled
+      ? Number((bottom_structured / bottom_sampled).toFixed(4))
+      : null,
     dark_bottom_share: bottom_sampled
       ? Number((dark_bottom / bottom_sampled).toFixed(4))
       : null,
@@ -717,7 +729,7 @@ def render_problems(
         for key in (
             "sampled", "structured", "tones", "background_like",
             "dominant_color", "dominant_share", "canvas_rect", "background",
-            "bottom_sampled", "dark_bottom_share", "luma_mean", "luma_std",
+            "bottom_sampled", "bottom_structured_share", "dark_bottom_share", "luma_mean", "luma_std",
         )
         if key in measured
     })
@@ -831,6 +843,7 @@ def render_problems(
             )
         dark_share = result.get("dark_bottom_share")
         bottom_sampled = result.get("bottom_sampled")
+        bottom_structure = result.get("bottom_structured_share")
         if (
             # A 3D scene whose floor was never drawn or lit from below is
             # unreadable. A 2D board with margins legitimately has a dark band
@@ -842,7 +855,14 @@ def render_problems(
             and not isinstance(bottom_sampled, bool)
             and bottom_sampled >= _MIN_BOTTOM_SAMPLES
         ):
-            if dark_share > DARK_BOTTOM_SHARE:
+            # Brightness alone confuses an intentionally dark neon floor with a
+            # missing one. If the lower frame still holds lane lines, grid or
+            # rails, the floor is drawn and the dark tone is the design. Missing
+            # structure is the fact that made the old rule useful; keep that.
+            unlit = not isinstance(bottom_structure, float) or (
+                bottom_structure <= DARK_BOTTOM_STRUCTURE
+            )
+            if dark_share > DARK_BOTTOM_SHARE and unlit:
                 # Nothing in the earlier verdicts looks at where the light falls:
                 # a scene lit from below, or one whose floor was never drawn, can
                 # be neither blank nor flat and still be unreadable.
@@ -1133,24 +1153,59 @@ def render_page(page: pathlib.Path) -> dict:
     )
 
 
+_SCRATCH_PAGE = re.compile(
+    r"(?:^|[-_. ])(?:probe|scratch|debug|tmp|temp)\d*(?:$|[-_. ])", re.I
+)
+
+
+def is_scratch_page(page: str | pathlib.Path) -> bool:
+    """Whether a page is a diagnostic surface, not part of the deliverable.
+
+    A 3D run wrote ``_probe.html`` to inspect pixels and left it in the tree.
+    ``default_pages`` sorted every root HTML, so ``_probe.html`` came before
+    ``index.html`` and the final visual check judged the scratch page. Its
+    failure then stayed owed against a correct game. A leading underscore or a
+    probe/scratch/tmp/debug token in the stem marks a page as scratch; the
+    caller still refuses to let such a page prove or block the deliverable.
+    """
+
+    name = pathlib.Path(page).name
+    if not name:
+        return False
+    if name.startswith(("_", ".")):
+        return True
+    return bool(_SCRATCH_PAGE.search(pathlib.Path(name).stem))
+
+
 def default_pages(root: pathlib.Path) -> list[pathlib.Path]:
-    """Root-level pages, whatever case their suffix uses.
+    """Root-level deliverable pages, with the conventional entry page first.
 
     ``glob("*.html")`` is case-sensitive on POSIX and case-insensitive on Windows,
     so the same repository would be checked on one platform and silently skipped
     on the other -- and a skipped deliverable is the exact failure this check
-    exists to catch.
+    exists to catch. Scratch pages are excluded: checking them is useful on
+    request, but treating them as the deliverable makes a temporary diagnostic
+    page outrank ``index.html`` and block the run.
     """
 
     try:
         entries = sorted(root.iterdir())
     except OSError:
         return []
-    return [
+    pages = [
         path
         for path in entries
-        if path.is_file() and path.suffix.lower() == ".html"
-    ][:_MAX_PAGES]
+        if path.is_file()
+        and path.suffix.lower() == ".html"
+        and not is_scratch_page(path)
+    ]
+    pages.sort(
+        key=lambda path: (
+            0 if path.name.lower() in {"index.html", "index.htm"} else 1,
+            path.name.lower(),
+        )
+    )
+    return pages[:_MAX_PAGES]
 
 
 def check(

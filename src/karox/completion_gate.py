@@ -14,7 +14,7 @@ from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
 from .requirements import ledger_digest
-from .web_check import default_pages
+from .web_check import default_pages, is_scratch_page
 
 _TEXT = {".md", ".rst"}
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -320,6 +320,8 @@ def _page_loads_the_change(core: Any, page: str, changed_files: Sequence[str]) -
     proof.
     """
 
+    if is_scratch_page(page):
+        return False
     if page in changed_files:
         return True
     page_path = Path(page)
@@ -378,6 +380,13 @@ def visual_proven(core: Any, record: Any) -> bool:
             continue
         data = result.get("data")
         if not isinstance(data, dict) or data.get("completion_identity") != current:
+            continue
+        target = str(data.get("completion_target") or "")
+        if not target or not _page_loads_the_change(
+            core, target, record.changed_files
+        ):
+            # A pass on a scratch probe or an unrelated page is not evidence
+            # about the deliverable, even when its bytes are current.
             continue
         attached = result.get("evidence") or []
         if not attached or not all(
@@ -606,7 +615,12 @@ def floor(core: Any, record: Any) -> list[str]:
         ):
             continue
         if name == "visual.check":
-            latest[(name, str(data.get("completion_target", "")))] = (
+            target = str(data.get("completion_target", ""))
+            if is_scratch_page(target):
+                # A failed probe page is diagnostic, not a failed deliverable.
+                # It must not stay owed, and a pass on it must not count either.
+                continue
+            latest[(name, target)] = (
                 data.get("verdict") == "pass" and not data.get("page_errors") and not data.get("console_errors"),
                 {"visual"},
             )
