@@ -931,8 +931,9 @@ def _visual_check_body(data: Mapping[str, Any], ok: bool) -> str:
         # hit the wall clock with a page the grader accepted.
         lines.append(
             "This pass covers the current bytes: run the final change review "
-            "and finish. Edit again only if you found a defect the checker "
-            "could not see."
+            "and finish. Do not edit to address the notes below; an edit "
+            "invalidates this pass. Edit again only if you found a defect the "
+            "checker could not see."
         )
     elif method == "limit":
         # The budget exists to stop polishing, not to make the model guess at
@@ -943,7 +944,13 @@ def _visual_check_body(data: Mapping[str, Any], ok: bool) -> str:
         lines.append("This was the last check: fix only what it lists, then finish.")
     issues = data.get("issues")
     if isinstance(issues, list) and issues:
-        lines.append("issues:")
+        if verdict == "pass":
+            lines.append(
+                "optional cosmetic notes (do not edit for these; editing "
+                "invalidates the pass):"
+            )
+        else:
+            lines.append("issues:")
         lines.extend(f"- {str(item)[:200]}" for item in issues[:5])
     for label, key in (
         ("console errors", "console_errors"),

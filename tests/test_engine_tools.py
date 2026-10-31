@@ -828,6 +828,30 @@ def test_visual_check_body_keeps_the_verdict_and_drops_the_task_echo() -> None:
     assert len(text) < 1_000
 
 
+def test_a_visual_pass_labels_notes_as_optional() -> None:
+    """A pass with cosmetic notes must not read as a repair request.
+
+    The fourth 3d-game run passed visual.check with "cosmetic asymmetry" and
+    then edited the rail colours anyway, invalidating the pass and ending
+    unverified at 30/30.
+    """
+
+    data = {
+        "verdict": "pass",
+        "method": "vision",
+        "checks_left": 2,
+        "issues": ["left rail is a flat magenta band; cosmetic asymmetry"],
+        "console_errors": [],
+        "page_errors": [],
+    }
+
+    text = _visual_check_body(data, True)
+
+    assert "optional cosmetic notes" in text
+    assert "editing invalidates the pass" in text
+    assert "This pass covers the current bytes" in text
+
+
 def test_other_proof_outputs_hide_bookkeeping_too() -> None:
     from types import SimpleNamespace
 

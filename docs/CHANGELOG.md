@@ -20,6 +20,10 @@
   speaking, not a verdict about the page: they leave visual evidence missing but
   no longer become "active failed check".
 - Scratch artifacts also owe no structural proof of their own.
+- The fourth `3d-game` run was 30/30 but ended unverified: visual.check passed
+  with only cosmetic notes, the model edited the rail colours anyway, the bytes
+  changed and the later check returned needs_work. A pass result now labels its
+  notes as optional and says plainly that an edit invalidates the pass.
 - The third `3d-game` run on this fix was verified at 1.69M / 54 / 535 s but
   29/30: its probe asserted `doc.body.dataset === doc.body.dataset`, so a
   `reset()` returning empty obstacles and coins still "passed". The system
