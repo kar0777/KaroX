@@ -20,6 +20,12 @@
   speaking, not a verdict about the page: they leave visual evidence missing but
   no longer become "active failed check".
 - Scratch artifacts also owe no structural proof of their own.
+- The third `3d-game` run on this fix was verified at 1.69M / 54 / 535 s but
+  29/30: its probe asserted `doc.body.dataset === doc.body.dataset`, so a
+  `reset()` returning empty obstacles and coins still "passed". The system
+  prompt now requires a probe to assert `state().obstacles.length > 0` and
+  `state().coins.length > 0` after `reset()`, and says a check that compares a
+  value to itself proves nothing.
 
 ### Fixed — a source-scope instruction does not owe a test edit
 
@@ -34,6 +40,10 @@
   postfix scope negations ("should not modify tests", "rather than in the
   tests", "outside the test files"), and still owes a test change for an
   explicit "add a regression test".
+- Live after the fix: `swe-requests` 0.99M total / 28 steps / 165 s, verified,
+  6/6, 29 calls, 191k billable. The only write was `requests/utils.py`; the
+  repair tail that edited tests is gone (previously 2.05M / 47 calls / 339k
+  billable on the same task).
 
 ### Fixed — a scratch probe is not the deliverable
 
