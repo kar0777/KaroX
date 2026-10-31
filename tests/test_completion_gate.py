@@ -86,14 +86,20 @@ def test_needs_work_still_owes_browser_evidence(tmp_path: Path) -> None:
 
 
 def _add_visual(
-    core: _Core, record: object, target: str, verdict: str = "pass"
+    core: _Core,
+    record: object,
+    target: str,
+    verdict: str = "pass",
+    *,
+    console_errors: tuple[str, ...] = (),
 ) -> None:
     current = completion_gate.identity(core, record)
     assert current, "the fixture must have a stable identity"
+    evidence_id = f"ev-visual-{len(record.evidence)}"
     record.evidence.append(
         {
             "kind": "evidence",
-            "evidence_id": "ev-visual",
+            "evidence_id": evidence_id,
             "metadata": {"completion_identity": current},
         }
     )
@@ -104,14 +110,14 @@ def _add_visual(
             "result": {
                 "ok": True,
                 "requested_by": None,
-                "evidence": [{"evidence_id": "ev-visual"}],
+                "evidence": [{"evidence_id": evidence_id}],
                 "data": {
                     "completion_identity": current,
                     "completion_target": target,
                     "verdict": verdict,
                     "method": "vision",
                     "page_errors": [],
-                    "console_errors": [],
+                    "console_errors": list(console_errors),
                 },
             },
         }
@@ -204,6 +210,77 @@ def test_a_passing_scratch_probe_does_not_prove_the_deliverable(
     reasons = completion_gate.floor(core, record)
 
     assert "missing visual evidence" in reasons
+
+
+def test_identity_ignores_scratch_cleanup(tmp_path: Path) -> None:
+    """Deleting a probe must not make a pass on the deliverable stale."""
+
+    record, core = _probe_record(tmp_path)
+    (tmp_path / "_scratch_check.py").write_text("print('probe')\n", encoding="utf-8")
+    record.changed_files.append("_scratch_check.py")
+
+    before = completion_gate.identity(core, record)
+    (tmp_path / "_probe.html").unlink()
+    (tmp_path / "_scratch_check.py").unlink()
+    after = completion_gate.identity(core, record)
+
+    assert before == after
+    assert "_probe.html" not in before["files"]
+    assert "_scratch_check.py" not in before["files"]
+    assert "index.html" in before["files"]
+
+
+def test_a_later_rejudged_fail_does_not_erase_a_pass_on_same_bytes(
+    tmp_path: Path,
+) -> None:
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "index.html", "pass")
+    _add_visual(core, record, "index.html", "needs_work")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not any("active failed check" in reason for reason in reasons)
+    assert "missing visual evidence" not in reasons
+
+
+def test_a_fail_after_an_edit_is_still_active(tmp_path: Path) -> None:
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "index.html", "pass")
+    (tmp_path / "index.html").write_text(
+        "<html><body><canvas id='new'></canvas></body></html>", encoding="utf-8"
+    )
+    _add_visual(core, record, "index.html", "needs_work")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert any("active failed check" in reason for reason in reasons)
+    assert "missing visual evidence" in reasons
+
+
+def test_an_unavailable_visual_check_is_not_a_failed_check(
+    tmp_path: Path,
+) -> None:
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "index.html", "unavailable")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not any("active failed check" in reason for reason in reasons)
+    assert "missing visual evidence" in reasons
+
+
+def test_a_later_fail_with_console_errors_overrides_an_earlier_pass(
+    tmp_path: Path,
+) -> None:
+    record, core = _probe_record(tmp_path)
+    _add_visual(core, record, "index.html", "pass")
+    _add_visual(
+        core, record, "index.html", "needs_work", console_errors=("boom",)
+    )
+
+    reasons = completion_gate.floor(core, record)
+
+    assert any("active failed check" in reason for reason in reasons)
 
 
 def test_apply_patch_post_state_is_current_structural_evidence(tmp_path: Path) -> None:

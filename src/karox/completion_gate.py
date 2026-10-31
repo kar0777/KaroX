@@ -14,7 +14,7 @@ from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
 from .requirements import ledger_digest
-from .web_check import default_pages, is_scratch_page
+from .web_check import default_pages, is_scratch_artifact, is_scratch_page
 
 _TEXT = {".md", ".rst"}
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -418,12 +418,13 @@ def visual_proven(core: Any, record: Any) -> bool:
             if isinstance(item, dict)
         ):
             continue
-        return bool(
+        if (
             data.get("verdict") == "pass"
             and data.get("method") == "vision"
             and not data.get("page_errors")
             and not data.get("console_errors")
-        )
+        ):
+            return True
     return False
 
 
@@ -432,8 +433,10 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
 
     Missing files have a stable deletion marker. Unreadable/outside paths fail
     closed. Checks also compare before/after identities to reject concurrent edits.
+    Scratch artifacts are not task inputs: deleting a probe after a passing
+    visual check must not make the deliverable's proof stale.
     """
-    paths = set(record.changed_files)
+    paths = {p for p in record.changed_files if not is_scratch_artifact(p)}
     for requirement in record.requirements:
         if (
             not isinstance(requirement, dict)
@@ -441,13 +444,17 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
         ):
             continue
         source_path = requirement.get("source_path")
-        if isinstance(source_path, str) and source_path:
+        if (
+            isinstance(source_path, str)
+            and source_path
+            and not is_scratch_artifact(source_path)
+        ):
             paths.add(source_path)
     for entry in record.provider_history:
         if entry.get("core_name") in {"repo.read_file", "repo.read_lines"}:
             result = entry.get("result") or {}
             path = (result.get("data") or {}).get("path")
-            if result.get("ok") and isinstance(path, str):
+            if result.get("ok") and isinstance(path, str) and not is_scratch_artifact(path):
                 paths.add(path)
     files = {}
     for relative in sorted(paths):
@@ -550,6 +557,11 @@ def floor(core: Any, record: Any) -> list[str]:
     latest: dict[tuple[str, ...], tuple[bool, set[str]]] = {}
     failed_ever: dict[tuple[str, ...], None] = {}
     structural: dict[str, bool] = {}
+    #: Pages with a pass on the current identity. A later aesthetic re-judgment
+    #: of the same bytes must not erase it; the checker is a model, not a
+    #: deterministic measurement. A later result that actually saw page/console
+    #: errors still wins.
+    visual_passes: set[str] = set()
     reasons = []
     if (
         _explicit_test_change_required(record)
@@ -639,10 +651,20 @@ def floor(core: Any, record: Any) -> list[str]:
                 # A failed probe page is diagnostic, not a failed deliverable.
                 # It must not stay owed, and a pass on it must not count either.
                 continue
-            latest[(name, target)] = (
-                data.get("verdict") == "pass" and not data.get("page_errors") and not data.get("console_errors"),
-                {"visual"},
-            )
+            verdict = data.get("verdict")
+            if verdict not in {"pass", "needs_work"}:
+                # `unavailable`/`limit` is the budget speaking, not a judgment
+                # about the page. It can leave visual evidence missing, but it
+                # is not an active failed check.
+                continue
+            errors = bool(data.get("page_errors") or data.get("console_errors"))
+            passed = verdict == "pass" and not errors
+            visual_key = (name, target)
+            if passed:
+                visual_passes.add(target)
+                latest[visual_key] = (True, {"visual"})
+            elif errors or target not in visual_passes:
+                latest[visual_key] = (False, {"visual"})
             continue
         if data.get("verification_eligible") is not True:
             continue
@@ -706,6 +728,10 @@ def floor(core: Any, record: Any) -> list[str]:
                 reasons.append("missing current check: " + " ".join(argv))
         if "structural" not in passed_classes:
             for relative in record.changed_files:
+                if is_scratch_artifact(relative):
+                    # A diagnostic file is not a deliverable and owes no
+                    # structural proof of its own.
+                    continue
                 path = core.safe_path(relative)
                 if path.is_file() and _select_checks(path) and not structural.get(relative):
                     reasons.append("missing current structural evidence: " + relative)

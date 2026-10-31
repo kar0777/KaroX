@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Fixed — cleanup and a re-judged frame do not erase a visual pass
+
+- The confirmation `3d-game` run was 30/30 on the hidden grader but stopped
+  `visual_budget_exhausted`: `visual.check` passed at step 146, the model then
+  deleted `_probe.html`, and `completion_identity` changed because it hashed the
+  probe. The harness-final check re-judged the same deliverable bytes, returned
+  `needs_work`, and the pass became stale. `identity()` now excludes scratch
+  artifacts (probe/scratch/tmp files; HTML keeps the page rule), so cleaning a
+  diagnostic does not invalidate the deliverable's proof.
+- A later `needs_work` on the same current bytes no longer erases an earlier
+  vision pass. The checker is a model, not a deterministic measurement; a
+  contradictory re-judgment of identical bytes is not a regression. A later
+  result that actually saw page/console errors still wins, and a fail after the
+  bytes changed is still active.
+- `visual.check` results with `unavailable`/`method: limit` are the budget
+  speaking, not a verdict about the page: they leave visual evidence missing but
+  no longer become "active failed check".
+- Scratch artifacts also owe no structural proof of their own.
+
 ### Fixed — a source-scope instruction does not owe a test edit
 
 - `completion_gate` read "Changes should be made in the source tree, not in the

@@ -1177,6 +1177,29 @@ def is_scratch_page(page: str | pathlib.Path) -> bool:
     return bool(_SCRATCH_PAGE.search(pathlib.Path(name).stem))
 
 
+_SCRATCH_ARTIFACT = re.compile(
+    r"(?:^|[-_. ])(?:probe|scratch|tmp|temp)\d*(?:$|[-_. ])", re.I
+)
+
+
+def is_scratch_artifact(path: str | pathlib.Path) -> bool:
+    """Whether a path is diagnostic work, not a task input.
+
+    ``identity`` binds every proof to the bytes it judged. A run that deletes
+    its own ``_probe.html`` or ``_scratch_*.py`` after a passing check must not
+    invalidate that proof: the deliverable did not change. HTML keeps the wider
+    page rule; other files need a probe/scratch/tmp token, so ``__init__.py``
+    and ``debug.py`` are not swept away as scratch.
+    """
+
+    name = pathlib.Path(path).name
+    if not name:
+        return False
+    if pathlib.Path(name).suffix.lower() in {".html", ".htm"}:
+        return is_scratch_page(path)
+    return bool(_SCRATCH_ARTIFACT.search(pathlib.Path(name).stem))
+
+
 def default_pages(root: pathlib.Path) -> list[pathlib.Path]:
     """Root-level deliverable pages, with the conventional entry page first.
 
