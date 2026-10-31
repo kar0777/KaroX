@@ -24,6 +24,9 @@
   with only cosmetic notes, the model edited the rail colours anyway, the bytes
   changed and the later check returned needs_work. A pass result now labels its
   notes as optional and says plainly that an edit invalidates the pass.
+- The fifth run confirmed both fixes: 30/30, verified, 1.26M / 43 steps / 478 s.
+  One visual pass; the probe reported ready obstacles 4, ready coins 4 and
+  restart repopulates 4. This is the cheapest and fastest 3D run so far.
 - The third `3d-game` run on this fix was verified at 1.69M / 54 / 535 s but
   29/30: its probe asserted `doc.body.dataset === doc.body.dataset`, so a
   `reset()` returning empty obstacles and coins still "passed". The system
