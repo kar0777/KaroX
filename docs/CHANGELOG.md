@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed — a source-scope instruction does not owe a test edit
+
+- `completion_gate` read "Changes should be made in the source tree, not in the
+  test files" as a request to change tests: the negation came after the change
+  verb, and the rule only looked before it. Both `swe-requests` runs therefore
+  refused their first `finish` with "explicit test change requested but no test
+  file changed" and spent the tail editing tests the task had just put out of
+  scope: 7 of 34 calls in `repo-command-test-3`, 16 of 47 in
+  `swe-tool-budget-20261030` (826k of its 2.05M tokens).
+- Test-change detection now judges one sentence at a time, recognizes modal and
+  postfix scope negations ("should not modify tests", "rather than in the
+  tests", "outside the test files"), and still owes a test change for an
+  explicit "add a regression test".
+
 ### Fixed — a scratch probe is not the deliverable
 
 - `default_pages()` returned every root HTML sorted by name, so `_probe.html`

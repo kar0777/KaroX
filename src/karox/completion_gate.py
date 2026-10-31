@@ -95,13 +95,26 @@ _TEST_CHANGE_REQUEST = re.compile(
     re.I,
 )
 _NEGATED_TEST_CHANGE = re.compile(
-    r"(?:\b(?:without|do\s+not|don't|dont|never|avoid)\b"
+    r"(?:\b(?:(?:do|does|should|must|may|will|would|can|could)\s+not|"
+    r"can't|cannot|don't|dont|never|without|avoid)\b"
     r".{0,45}\b(?:add(?:ing)?|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|"
     r"modify(?:ing)?|chang(?:e|ing)|extend(?:ing)?)\w*\b"
     r".{0,45}\b(?:tests?|test\s+cases?|specs?)\b)"
     r"|(?:(?:\bне\b|\bбез\b).{0,45}"
     r"(?:добав\w*|пис\w*|созда\w*|обнов\w*|измен\w*|меня\w*|расшир\w*|допол\w*)"
     r".{0,45}(?:тест\w*|спек\w*))",
+    re.I,
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+|\n+")
+# A scope instruction puts tests out of bounds ("changes go in the source
+# tree, not in the test files"). The negation follows the change verb, so the
+# prefix rules above cannot see it; the whole sentence is the unit of intent.
+_TESTS_OUT_OF_SCOPE = re.compile(
+    r"(?:\b(?:not|never)\b\s+(?:(?:in|to|into|inside|within)\s+)?"
+    r"(?:the\s+)?(?:tests?|test\s+files?|specs?)\b"
+    r"|(?:rather|instead)\s+(?:than|of)\s+(?:in\s+|inside\s+|within\s+)?"
+    r"(?:the\s+)?(?:tests?|test\s+files?|specs?)\b"
+    r"|outside\s+(?:of\s+)?(?:the\s+)?(?:tests?|test\s+files?)\b)",
     re.I,
 )
 _TEST_EXECUTION_IN_MATCH = re.compile(
@@ -126,15 +139,21 @@ def _active_requirement_texts(record: Any) -> list[str]:
 
 def _explicit_test_change_required(record: Any) -> bool:
     for text in _active_requirement_texts(record):
-        cleaned = _NEGATED_TEST_CHANGE.sub("", text)
-        for match in _TEST_CHANGE_REQUEST.finditer(cleaned):
-            # "change code, then run tests" is verification work, not a request
-            # to edit tests. The broad matcher deliberately understands varied
-            # phrasing, so reject matches whose path to the test noun crosses
-            # an execution verb.
-            if _TEST_EXECUTION_IN_MATCH.search(match.group(0)):
+        # Judge one sentence at a time. A scope sentence must not borrow the
+        # word "tests" from the next sentence, and a negated sentence must not
+        # swallow a following positive request.
+        for sentence in _SENTENCE_BREAK.split(text):
+            if _TESTS_OUT_OF_SCOPE.search(sentence):
                 continue
-            return True
+            cleaned = _NEGATED_TEST_CHANGE.sub("", sentence)
+            for match in _TEST_CHANGE_REQUEST.finditer(cleaned):
+                # "change code, then run tests" is verification work, not a request
+                # to edit tests. The broad matcher deliberately understands varied
+                # phrasing, so reject matches whose path to the test noun crosses
+                # an execution verb.
+                if _TEST_EXECUTION_IN_MATCH.search(match.group(0)):
+                    continue
+                return True
     return False
 
 

@@ -249,6 +249,95 @@ def test_apply_patch_post_state_is_current_structural_evidence(tmp_path: Path) -
     assert "missing current structural evidence: pkg/mod.py" not in reasons
 
 
+def _task_record(task: str, changed_files: list[str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        task=task,
+        requirements=[],
+        changed_files=list(changed_files or ["pkg/mod.py"]),
+        evidence=[],
+        provider_history=[],
+    )
+
+
+_SOURCE_SCOPE_TASK = (
+    "This workspace contains the Requests source tree. From the workspace root run:\n\n"
+    "    python run_public_tests.py\n\n"
+    "This runs the existing tests in `tests/test_utils.py`. "
+    "Changes should be made in the source tree, not in the test files."
+)
+
+
+def test_a_source_scope_instruction_is_not_a_test_change_request() -> None:
+    """SWE task text says where changes go; it does not ask for test edits.
+
+    swe-requests-6028 ends with "Changes should be made in the source tree, not
+    in the test files." The prefix-only negation rule did not see the trailing
+    "not in the test files", so every run was forced into a repair turn that
+    modified tests the task had just placed out of scope.
+    """
+
+    record = _task_record(_SOURCE_SCOPE_TASK)
+
+    assert completion_gate._explicit_test_change_required(record) is False
+
+
+def test_a_source_scope_instruction_does_not_owe_a_test_change(tmp_path: Path) -> None:
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    record = _task_record(_SOURCE_SCOPE_TASK)
+    core = _Core(tmp_path)
+
+    reasons = completion_gate.floor(core, record)
+
+    assert "explicit test change requested but no test file changed" not in reasons
+
+
+def test_a_real_test_request_still_owes_a_test_change(tmp_path: Path) -> None:
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    record = _task_record(
+        "Implement the fix in the source tree. "
+        "Add a regression test in tests/test_proxy_auth.py."
+    )
+    core = _Core(tmp_path)
+
+    reasons = completion_gate.floor(core, record)
+
+    assert "explicit test change requested but no test file changed" in reasons
+
+
+def test_postfix_scope_negations_are_not_test_requests() -> None:
+    for task in (
+        "Make changes in the source tree rather than in the tests.",
+        "Keep the change outside the test files.",
+        "You should not modify tests for this task.",
+    ):
+        assert (
+            completion_gate._explicit_test_change_required(_task_record(task)) is False
+        ), task
+
+
+def test_a_scope_sentence_does_not_borrow_a_later_test_constraint() -> None:
+    task = (
+        "Changes should be made in the source tree, not in the test files. "
+        "The existing tests must keep passing."
+    )
+
+    assert completion_gate._explicit_test_change_required(_task_record(task)) is False
+
+
+def test_a_negated_request_does_not_swallow_a_later_one() -> None:
+    for task in (
+        "Do not modify the existing tests. Add a regression test for the new branch.",
+        "Do not change tests; add a new test file instead.",
+    ):
+        assert (
+            completion_gate._explicit_test_change_required(_task_record(task)) is True
+        ), task
+
+
 def test_a_stale_patch_digest_does_not_prove_the_current_file(tmp_path: Path) -> None:
     target = tmp_path / "pkg" / "mod.py"
     target.parent.mkdir()
