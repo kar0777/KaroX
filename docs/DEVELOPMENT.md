@@ -27,7 +27,8 @@ python -m pytest tests/test_tui.py tests/test_cli.py
 The copied kernel is not in mypy's file list yet. It is excused by scope, not by
 `ignore_errors`; `follow_imports = "skip"` keeps mypy from checking files outside
 the declared scope, and moving a module into the list is how that debt is paid
-down. The suite currently collects 959 tests.
+down. The suite currently collects 1018 tests on Linux; the two tests of
+`tests/test_computer_use_live.py` are Windows-only and fail to import elsewhere.
 
 ## Full gate
 

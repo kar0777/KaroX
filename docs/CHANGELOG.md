@@ -29,6 +29,37 @@
   cannot see it. The old unverified result was an accident of the chain, not a
   catch.
 
+### Measured — sandbox `3d-game` series after the coverage gate
+
+- Setup: a Linux sandbox (2 vCPU, Python 3.13, software-rendered headless
+  Chromium), `deepseek-ai/DeepSeek-V4.1-Flash` on W&B Inference,
+  `--effort-level ultra`, `3d-game` with its task and grader unchanged (task
+  tree `d07965ca…`, checked before each series). Runs went one after another;
+  afterwards each was re-graded on the idle machine, and that grade is the
+  result. Success means idle 30/30 and verified. The runs started on the
+  developer's PC were stopped and are not counted.
+- `e9bcc6e`, 3 runs: 1/3. All three 30/30. r1 and r2 ended unverified
+  (`visual_budget_exhausted`): narrated quotes were refused, a harness page
+  staled the deliverable's proof, and the grace after the last verdict ran out
+  one step before the attested finish (fixed in `2dd230e` and `02fe003`). r3
+  verified: 75 steps, 975 s, 3.92M tokens.
+- `02fe003`, 2 runs (stopped once both causes were found): 0/2, both 30/30 and
+  unverified. The last pass left no room for the attested finish (`8284539`);
+  a deleted harness page staled the proof, and the run believed the browser
+  was closed for good (`c39e8d6`, `5626c35`).
+- `5626c35`, 3 runs: 2/3. r1 30/30, verified (112 steps, 1201 s, 6.11M tokens,
+  2 refused finishes). r2 29/30, unverified (89 steps, 1367 s, 4.11M; see the
+  fix above). r3 30/30, verified (105 steps, 1200 s, 4.99M, 1 refused finish).
+- No run in these series ended verified below 30/30; all three `48195aa` runs
+  had. No output contained the API key. Tokens per run: 3.92M-6.46M, 81-87%
+  of them cached; billable proxy (uncached + completion + 0.1 × cached)
+  0.94M-1.47M.
+- Browser CPU, all Chromium processes, sampled about every 3 s, in % of one
+  core: during the agent runs the median sample is 0-2% (pages parked) and
+  16-45% of samples are above 50%, in the seconds after each browser action
+  and during visual checks. While the hidden grader runs, its own Chromium
+  sits near 200%.
+
 ### Changed — a refused finish says the browser is open again
 
 - The same r2 was told after 36 browser calls that browser observations were
@@ -127,6 +158,41 @@
 - Switches: `KAROX_BROWSER_PARK=0`, `KAROX_BROWSER_PARK_AFTER=<seconds>`
   (default 5, clamped to 0-3600), `KAROX_BROWSER_LOW_PRIORITY=0`. Every step is
   fail-open: a page that cannot be paused or re-prioritised works as before.
+
+### Added — a web deliverable is verified requirement by requirement
+
+- The three `ultra` runs on `48195aa` (below) each ended verified at 29/30. A
+  green check and a visual pass show that the page works and renders; they do
+  not show that every behaviour the task named exists (a restart that begins a
+  new scored run, items after `reset()`).
+- The active ledger is split into atomic clauses (bullets, sentences and
+  semicolon-separated parts), each with a stable ID derived from its
+  requirement (`R7.3`). Headings, labels that only introduce a list and empty
+  fragments are not clauses; with more than 60 clauses each requirement is
+  attested as one item.
+- A web deliverable's `finish` carries `requirements`: one
+  `{id, status, observed}` entry per listed ID. `verified` quotes text from a
+  `browser_command`, `checks_run`, `tests.run` or `visual_check` result
+  received after the last deliverable edit; reads, searches and Git output
+  never count. `not_applicable` needs a reason of three or more words, and
+  `unmet` keeps the clause open. A web deliverable here is a change with a page
+  or visual asset, a default page and at least 3 clauses; a probe page, a
+  documentation-only edit or a short request owes nothing new.
+- Quotes match after normalization (case, punctuation, spacing, JSON escapes)
+  and need two tokens and six characters; the four-token copied run came later
+  (`2dd230e`, above). The attestation is read from the finish call's own
+  arguments in the durable transcript: no new session state, it survives
+  resume, and an edit after it makes every quote stale.
+- A finish with open clauses is refused with their IDs and problems. Each
+  refusal adds 6 browser calls and 3 inputs for the re-probe and keeps the
+  visual grace window open (4 steps; 8 since `02fe003`). After 4 refusals the
+  finish is accepted and the completion floor, which reports every clause
+  still open, decides: the run ends unverified instead of looping.
+- Deterministic and task-neutral: no provider call and no task- or
+  game-specific rule. `tests/test_requirement_coverage.py` and engine-kernel
+  tests cover it, and the instruction-neutrality scan reads the new module.
+  `27f6122` keeps the browser budget readable in environments built without
+  `__init__`.
 
 ### Measured — clean `3d-game` runs on W&B Inference
 

@@ -34,7 +34,7 @@ the real gaps before the release gates were run.
 | TUI | **Parity + improved** | The rebuilt `tui/` package (app, widgets, modals, backend, prefs, i18n, protocol) plus `/doctor`, `/bridge`, safer MCP defaults and authenticated remote-MCP fields. |
 | Security boundary | **Stronger** | System folders and drive roots are refused as workspaces; instruction symlinks outside the repository are refused; discovered checks are not evidence without approval; Bypass requires an elevated profile. Core policy/risk/lease code is unchanged. |
 | Packaging | **Improved** | Declared deps now include `starlette`, `uvicorn` and `psutil`; mypy has an explicit scope; `check_tree` counts 98 modules and no legacy surface. |
-| Tests | **Restored + extended** | 22 → 959 tests: provider transports/registry/pricing, engine kernel and its ports, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, browser/desktop units, model discovery, core modules, visual checks, TUI, tree gates, and a guard that keeps the shipped 3D skill benchmark-neutral. |
+| Tests | **Restored + extended** | 22 → 1020 tests (1018 outside Windows): provider transports/registry/pricing, engine kernel and its ports, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, browser/desktop units (including idle-page parking and process priority), model discovery, core modules, visual checks, requirement coverage, TUI, tree gates, and a guard that keeps the shipped 3D skill benchmark-neutral. |
 
 ## Restored or improved after the audit
 
@@ -87,16 +87,32 @@ it does not carry laboratory experiments merely because they existed.
 
 ## Verification evidence
 
-Commands run from the winner tree:
+Commands run from the winner tree at `d210f86`, on a Linux sandbox (Python
+3.13) rather than the Windows machine of the earlier evidence:
 
 ```text
-python -m pytest -q                 # 959 collected: 953 passed, 5 skipped, 1 failure under load (see below)
+python -m pytest -q                 # 1018 collected: 1004 passed, 5 skipped, 9 failed, 1 collection error (see below)
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
-python scripts/check_tree.py        # ok · 143 modules · ~74.1k lines
+python scripts/check_tree.py        # ok · 145 modules · 75255 lines
 ```
 
-The one failure, at `48195aa`, was
+`tests/test_computer_use_live.py` does not import on Linux (it needs Windows
+`ctypes`). The nine failures fail the same way on `27f6122`, the commit before
+the browser parking and the later gate fixes, in the same sandbox: the two `test_check_report.py`
+path tests, the two open-terminal tests of `test_computer_use.py` (no desktop),
+`test_cli.py::test_local_provider_setup_needs_no_key_and_doctor_is_healthy`,
+`test_browser_live.py::test_detach_and_reconnect_with_ownership_proof`, and
+three `test_engine_kernel.py` failure-map and advisory-rerun tests
+(`test_failed_check_hands_the_model_a_parsed_failure_map`,
+`test_focused_test_failure_is_mapped_for_the_model`,
+`test_one_advisory_rerun_per_batched_response`). Three more fail now and then
+on both commits: `test_browser_live.py::test_console_redaction_and_network_metadata`,
+`test_browser_live.py::test_iframe_read` and
+`test_engine_kernel.py::test_compaction_briefing_keeps_requirements_files_and_failure`.
+
+The previous evidence, at `48195aa` on Windows, was 959 collected: 953 passed,
+5 skipped and one failure under load,
 `test_browser_live.py::test_console_redaction_and_network_metadata`: the suite
 ran at idle priority beside three benchmark runs, and the page's fetch did not
 reach `network_requests` within the test's 10 s window. Run alone it passed
