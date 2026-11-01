@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Measured — clean `3d-game` runs on W&B Inference
+
+- First runs without the benchmark lines: `deepseek-ai/DeepSeek-V4.1-Flash` on
+  W&B Inference, `3d-game`, fresh workspaces, task and grader unchanged.
+- One run at `high` on `865a539`: 30/30 on the hidden grader, verified,
+  2.91M tokens / 93 steps / 892 s.
+- Three runs at `ultra` (`max` on the wire) on `48195aa`, started together:
+  29/30 each, and each ended verified, so all three verified claims were
+  wrong. Medians 4.29M tokens / 89 steps / 1399 s; tokens ranged 2.09M-4.97M.
+- r1 failed `restart-button`: the restart begins a new run, but distance never
+  adds to the score, so the grader cannot tell the new run from the old one.
+  r3 failed `items-spawn`: no obstacle or coin after `reset()` and 3 s of
+  `step()`. Both failures reproduce when the same files are re-graded on an
+  idle machine.
+- r2 failed `restart-button` only under the parallel load: its fresh run had
+  already passed the old run's distance when the state was read. Re-graded
+  idle, the same files pass 30/30 twice. The recorded result stays 29/30.
+
 ### Changed — `ultra` and `extra-high` reach OpenAI-compatible gateways unclamped
 
 - The Chat Completions adapter clamped `xhigh` and `max` to `high` for every

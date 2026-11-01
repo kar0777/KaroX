@@ -34,7 +34,7 @@ the real gaps before the release gates were run.
 | TUI | **Parity + improved** | The rebuilt `tui/` package (app, widgets, modals, backend, prefs, i18n, protocol) plus `/doctor`, `/bridge`, safer MCP defaults and authenticated remote-MCP fields. |
 | Security boundary | **Stronger** | System folders and drive roots are refused as workspaces; instruction symlinks outside the repository are refused; discovered checks are not evidence without approval; Bypass requires an elevated profile. Core policy/risk/lease code is unchanged. |
 | Packaging | **Improved** | Declared deps now include `starlette`, `uvicorn` and `psutil`; mypy has an explicit scope; `check_tree` counts 98 modules and no legacy surface. |
-| Tests | **Restored + extended** | 22 → 957 tests: provider transports/registry/pricing, engine kernel and its ports, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, browser/desktop units, model discovery, core modules, visual checks, TUI, tree gates, and a guard that keeps the shipped 3D skill benchmark-neutral. |
+| Tests | **Restored + extended** | 22 → 959 tests: provider transports/registry/pricing, engine kernel and its ports, MCP client+CLI, policy/risk/action, sessions, OAuth, hosted bridge, launcher, Tailscale routes, browser/desktop units, model discovery, core modules, visual checks, TUI, tree gates, and a guard that keeps the shipped 3D skill benchmark-neutral. |
 
 ## Restored or improved after the audit
 
@@ -90,16 +90,22 @@ it does not carry laboratory experiments merely because they existed.
 Commands run from the winner tree:
 
 ```text
-python -m pytest -q                 # 957 collected: 951 passed, 5 skipped, 1 environment failure (see below)
+python -m pytest -q                 # 959 collected: 953 passed, 5 skipped, 1 failure under load (see below)
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
-python scripts/check_tree.py        # ok · 143 modules · ~74.0k lines
+python scripts/check_tree.py        # ok · 143 modules · ~74.1k lines
 ```
 
-The one failure is `test_bridge_core.py::BridgeWireSecurityTests::test_catalog_advertises_wire_names_and_accepts_the_dotted_alias`
-when the suite runs under a live bridge: the bridge exports
-`KAROX_BRIDGE_DIAGNOSTICS_JSON` to the processes it starts, so the catalog also
-lists `karox_bridge_diagnostics`. With that variable unset the test passes.
+The one failure, at `48195aa`, was
+`test_browser_live.py::test_console_redaction_and_network_metadata`: the suite
+ran at idle priority beside three benchmark runs, and the page's fetch did not
+reach `network_requests` within the test's 10 s window. Run alone it passed
+three times out of three, and the whole file passed.
+
+The suite above ran with `KAROX_BRIDGE_DIAGNOSTICS_JSON` unset. Under a live
+bridge, which exports that variable to the processes it starts,
+`test_bridge_core.py::BridgeWireSecurityTests::test_catalog_advertises_wire_names_and_accepts_the_dotted_alias`
+also fails, because the catalog then lists `karox_bridge_diagnostics`.
 
 Bridge wire evidence (local loopback, isolated config/runtime, no public
 tunnel):
