@@ -2313,3 +2313,115 @@ def test_an_edit_after_the_last_visual_pass_gets_a_closing_look(
         and (entry.get("result") or {}).get("requested_by") == "harness_final"
     ]
     assert closing, "the stop path skipped the harness-final visual check"
+
+
+#: A check whose output states two observable facts, so an attestation can
+#: quote a real result instead of the model's own narrative.
+FACTS_CHECK = (
+    "python",
+    "-c",
+    "print('PASS clock :: score rises over time; PASS restart :: a fresh run begins')",
+)
+COVERAGE_TASK = (
+    "The score rises over time. A restart begins a fresh run. Keep the page offline."
+)
+
+
+def _passing_checker(page: Path, *, goal: str = "") -> dict:
+    del page, goal
+    return {
+        "verdict": "pass",
+        "method": "vision",
+        "checks_left": 2,
+        "issues": [],
+        "console_errors": [],
+        "page_errors": [],
+        "resize": {"ok": True},
+    }
+
+
+def _web_game(repository: Path) -> None:
+    (repository / "index.html").write_text(
+        '<html><body><canvas></canvas><script src="game.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    (repository / "game.js").write_text("// seed\n", encoding="utf-8")
+
+
+def _final_tool_messages(harness: "Harness") -> List[str]:
+    """Tool results in the last request, where each one appears exactly once."""
+
+    final = harness.provider.requests[-1].messages
+    return [m.content for m in final if m.role == "tool" and m.content]
+
+
+def test_a_web_finish_is_refused_until_every_requirement_is_attested(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A green check and a visual pass are not proof of every requested behaviour.
+
+    The first finish carries no attestation and is refused with the open IDs;
+    the model runs a probe, quotes it, and only that finish is accepted.
+    """
+
+    _web_game(repository)
+    attestation = [
+        {"id": "R1.1", "status": "verified", "observed": "PASS clock :: score rises over time"},
+        {"id": "R1.2", "status": "verified", "observed": "PASS restart :: a fresh run begins"},
+        {"id": "R1.3", "status": "not_applicable", "observed": "the page makes no request at all"},
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response((_finish_call("c3", "done"),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(FACTS_CHECK)}),)),
+            _response(
+                (_tool_call("c5", "finish", {"answer": "done", "requirements": attestation}),)
+            ),
+        ],
+        verification=(FACTS_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_passing_checker,
+        task=COVERAGE_TASK,
+        max_steps=10,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
+    assert len(refusals) == 1
+    assert "R1.1 [not attested] The score rises over time." in refusals[0]
+    assert "R1.3 [not attested] Keep the page offline." in refusals[0]
+
+
+def test_a_web_finish_that_never_attests_ends_unverified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Refusals are bounded; the floor then reports the missing attestation."""
+
+    _web_game(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+        ]
+        + [_response((_finish_call(f"f{index}", f"done {index}"),)) for index in range(12)],
+        verification=(FACTS_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_passing_checker,
+        task=COVERAGE_TASK,
+        max_steps=16,
+    )
+
+    report = harness.run()
+
+    assert report.verified is False
+    refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
+    assert 1 <= len(refusals) <= 4
+    assert any(item.startswith("missing requirement attestation") for item in report.unmet)

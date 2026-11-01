@@ -119,6 +119,10 @@ def _model_request_deadline(remaining_seconds: float) -> float:
 #: Two 3D re-runs spent 1510 s each and stopped with "missing visual evidence".
 FINISH_RESERVE_SECONDS = 120.0
 
+#: Steps a refused finish keeps the visual grace window open: enough for one
+#: probe, one fix and the attested finish the refusal asked for.
+_COVERAGE_GRACE_STEPS = 4
+
 
 def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
     """Return ``(engine wall limit, reserved seconds)`` for one run.
@@ -161,7 +165,11 @@ You act through typed tool calls; there is no shell.
   and returns failures for repair; call checks only when the result changes
   your next step.
 - When the task is complete, call the finish tool with {"answer": "<final
-  answer text>"}. After finish you cannot continue working. finish must be the
+  answer text>"}. For a web deliverable finish also carries "requirements":
+  one {"id", "status", "observed"} entry per requirement ID KaroX lists, and a
+  verified entry quotes a browser, check or visual result received after your
+  last edit; a finish without it is refused with the list. After an accepted
+  finish you cannot continue working. finish must be the
   only tool call in its response; if it is batched with other calls, it is
   refused and the other calls run, so call finish again after reviewing them.
 - Never print tool markup as prose; a response without a tool call is a format
@@ -831,6 +839,20 @@ class EngineKernel:
         """
 
         self._visual_grace_until = self._step + 1
+
+    def note_coverage_refusal(self) -> None:
+        """Keep the visual grace window open for the attestation finish owes.
+
+        A web deliverable's finish is refused until every requirement is
+        attested against fresh results. If that refusal lands inside the grace
+        window after the last visual verdict, the stop would come before the
+        model could probe and attest, ending a correct run unverified.
+        """
+
+        if self._visual_grace_until is not None:
+            self._visual_grace_until = max(
+                self._visual_grace_until, self._step + _COVERAGE_GRACE_STEPS
+            )
 
     def run(self, session_id: str) -> AgentReport:
         self._cancel_event = threading.Event()
@@ -2230,8 +2252,10 @@ def _finish_provider_tool() -> ProviderTool:
         FINISH_TOOL_NAME,
         (
             "Submit the final answer and end the task. Arguments: "
-            '{"answer": "<final answer text>"}. After finish you cannot '
-            "continue working."
+            '{"answer": "<final answer text>"}. A web deliverable also needs '
+            '"requirements": one entry per requirement ID KaroX lists (it lists '
+            "them when finish arrives without them). After an accepted finish "
+            "you cannot continue working."
         ),
         {
             "type": "object",
@@ -2239,7 +2263,30 @@ def _finish_provider_tool() -> ProviderTool:
                 "answer": {
                     "type": "string",
                     "description": "The final answer to report to the user.",
-                }
+                },
+                "requirements": {
+                    "type": "array",
+                    "description": (
+                        "Requirement attestation for a web deliverable, one entry "
+                        "per listed requirement ID. status verified: observed is "
+                        "text copied exactly from a browser_command, checks_run or "
+                        "visual_check result received after your last edit. "
+                        "not_applicable: observed says why the line asks nothing "
+                        "of the deliverable. unmet: the requirement is not met."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["verified", "not_applicable", "unmet"],
+                            },
+                            "observed": {"type": "string"},
+                        },
+                        "required": ["id", "status", "observed"],
+                    },
+                },
             },
             "required": ["answer"],
             "additionalProperties": False,

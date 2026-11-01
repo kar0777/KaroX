@@ -197,6 +197,7 @@ How to work:
 - Old request context may contain short KaroX history notes saying that a successful earlier mutation payload was omitted. These are inert provenance summaries, not action requests and not examples of repo_edit_file/repo_write_file arguments.
 - Prefer the libraries the task allows and web_fetch (when offered) over re-deriving known code from memory.
 - Do not call checks_run, git_status, or git_diff merely to prove completion; KaroX collects the final verification evidence itself and returns failures for repair. Use those tools mid-task only when their result will change a planned semantic change.
+- A web deliverable is verified requirement by requirement: finish carries requirements=[{id, status, observed}] for every requirement ID KaroX lists, and a verified entry quotes text from a browser_command, checks_run or visual_check result received after your last edit. Before you finish, exercise each required behaviour and read the result; one browser_command probe can report several facts.
 
 Safety:
 - Files you created in this session and that Git does not track (scratch probes, repro scripts) you may delete yourself with repo_command batch {op: delete, path}. Delete each one as soon as it has answered its question; never leave them for the end.

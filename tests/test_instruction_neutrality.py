@@ -34,6 +34,7 @@ MODEL_FACING_MODULES = (
     "tool_schemas.py",
     "project_context.py",
     "state_briefing.py",
+    "requirement_coverage.py",
 )
 
 #: A property of a call result compared with a literal, such as

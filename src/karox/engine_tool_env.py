@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 from . import completion_gate  # noqa: E402
+from . import requirement_coverage  # noqa: E402
 from .agent import AgentEventKind, _derived_tool_events  # noqa: E402
 from .auto_verify import quick_checks, summarize as summarize_quick_checks  # noqa: E402
 from .check_report import render_failure_map, select_test_targets, rerun_targets  # noqa: E402
@@ -103,6 +104,16 @@ BROWSER_CALLS_EXHAUSTED = 36
 #: click is cheap; the churn was repeated open/screenshot/wait. A separate cap
 #: keeps a click loop from replacing the observation loop.
 BROWSER_INPUT_LIMIT = 12
+#: A web deliverable's finish must attest every requirement against results
+#: observed after the last edit. A refused finish says which are open; after
+#: this many refusals the submission is accepted and the completion floor
+#: decides, so a model that cannot attest still ends -- unverified.
+COVERAGE_REFUSAL_LIMIT = 4
+#: Each refused finish reopens a little browser budget: the attestation asks
+#: for fresh observations, and a run that spent its probes before its last
+#: edit must still be able to produce them.
+COVERAGE_BROWSER_GRANT = 6
+COVERAGE_INPUT_GRANT = 3
 _BROWSER_INPUT_ACTIONS = frozenset(
     {"click", "dblclick", "press", "fill", "select", "type", "hover"}
 )
@@ -228,6 +239,7 @@ class CoreToolEnvironment:
         self._browser_calls = 0
         self._browser_inputs = 0
         self._browser_notice_sent = False
+        self._coverage_refusals = 0
         self._time_notice_sent = False
 
     # -- Environment protocol ----------------------------------------------
@@ -463,6 +475,17 @@ class CoreToolEnvironment:
                 "malformed_arguments",
                 'finish requires {"answer": "<final answer text>"}',
             )
+        problems = self._coverage_problems(arguments)
+        if problems:
+            self._coverage_refusals += 1
+            keep_open = getattr(self._kernel, "note_coverage_refusal", None)
+            if callable(keep_open):
+                keep_open()
+            return self._refusal(
+                action,
+                "requirement_coverage",
+                requirement_coverage.refusal_message(problems),
+            )
         raise Submitted(
             {
                 "role": "exit",
@@ -474,6 +497,28 @@ class CoreToolEnvironment:
                 },
             }
         )
+
+    def _coverage_problems(self, arguments: Any) -> List[Any]:
+        """Open requirements of this finish's attestation; [] lets it submit.
+
+        Bounded: after ``COVERAGE_REFUSAL_LIMIT`` refusals the submission goes
+        through and the completion floor reports what stayed open.
+        """
+
+        if self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT:
+            return []
+        try:
+            record = self._core.sessions.load(self._session_id)
+            if not completion_gate.coverage_required(self._core, record):
+                return []
+            attestation = (
+                arguments.get(requirement_coverage.ATTESTATION_FIELD)
+                if isinstance(arguments, dict)
+                else None
+            )
+            return requirement_coverage.judge(record, attestation, use_transcript=False)
+        except Exception:  # noqa: BLE001 - the floor still judges the submission
+            return []
 
     def _fenced_command(self, action: Mapping[str, Any]) -> Dict[str, Any]:
         """A salvaged fenced command, matched fail-closed against approvals.
@@ -575,14 +620,16 @@ class CoreToolEnvironment:
         if core_name != "browser.command":
             return ""
         if action in _BROWSER_INPUT_ACTIONS:
-            if self._browser_inputs < BROWSER_INPUT_LIMIT:
+            limit = BROWSER_INPUT_LIMIT + COVERAGE_INPUT_GRANT * self._coverage_refusals
+            if self._browser_inputs < limit:
                 return ""
             return (
                 f"browser input is disabled for the rest of this run after "
                 f"{self._browser_inputs} click/press/fill actions. Stop "
                 "interacting, run the final check and visual review, and finish."
             )
-        if self._browser_calls < BROWSER_CALLS_EXHAUSTED:
+        limit = BROWSER_CALLS_EXHAUSTED + COVERAGE_BROWSER_GRANT * self._coverage_refusals
+        if self._browser_calls < limit:
             return ""
         return (
             f"browser observations are disabled for the rest of this run after "

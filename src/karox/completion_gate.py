@@ -13,6 +13,7 @@ import subprocess
 from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
+from . import requirement_coverage
 from .requirements import ledger_digest
 from .web_check import default_pages, is_scratch_artifact, is_scratch_page
 
@@ -199,6 +200,29 @@ def visual_required(record: Any) -> bool:
     if not any(Path(p).suffix.lower() in _VISUAL_ASSETS for p in record.changed_files):
         return False
     return visual_intent(record)
+
+
+def coverage_required(core: Any, record: Any) -> bool:
+    """Whether finishing owes a requirement-by-requirement attestation.
+
+    Only a web deliverable owes it: its behaviour is observable through the
+    browser tools, and its spec is a feature list that a frame and a green
+    check cannot cover item by item. A change to code without a page, a
+    documentation edit, a probe page, and a request too short to need a
+    checklist (fewer than ``requirement_coverage.MIN_CLAUSES`` clauses) owe
+    nothing new.
+    """
+
+    if not getattr(record, "requirements", None):
+        return False
+    deliverables = [p for p in record.changed_files if not is_scratch_artifact(p)]
+    if not any(Path(p).suffix.lower() in _VISUAL_ASSETS for p in deliverables):
+        return False
+    if all(is_doc(p) for p in deliverables) and not _BEHAVIOR.search(record.task):
+        return False
+    if len(requirement_coverage.clauses(record.requirements)) < requirement_coverage.MIN_CLAUSES:
+        return False
+    return bool(default_pages(core.repository))
 
 
 def visual_intent(record: Any) -> bool:
@@ -750,6 +774,10 @@ def floor(core: Any, record: Any) -> list[str]:
         reasons.append("missing " + owed)
         if not producible & needed:
             reasons.append(NO_PRODUCER + owed)
+    if coverage_required(core, record):
+        # Last, so the repair turn reads the failed checks first: a fix
+        # changes the bytes, and every attestation quote must then be renewed.
+        reasons.extend(requirement_coverage.floor_reasons(record))
     return list(dict.fromkeys(reasons))
 
 
