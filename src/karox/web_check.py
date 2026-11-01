@@ -177,6 +177,11 @@ def _shared_browser() -> Optional[tuple[Any, Any]]:
             return None
         _browser_state["playwright"] = playwright
         _browser_state["browser"] = browser
+        # Rendering checks run beside the user's own work; below-normal
+        # priority keeps a software-rendered WebGL frame from starving it.
+        from .browser.resources import demote_headless_browsers
+
+        demote_headless_browsers()
         return playwright, browser
 
 

@@ -19,6 +19,18 @@ LOGIN_USER = "qauser"
 LOGIN_PASS = "qa-pass-123"
 CONSOLE_SECRET = "abcdef1234567890abcdef12"
 
+#: A page that never stops drawing, like a game or 3D scene: every animation
+#: frame bumps a counter, so a test can tell a parked page from a running one.
+ANIMATED = """<!doctype html><html><head><title>Animated</title></head>
+<body><p id="frames">0</p><canvas id="c" width="320" height="200"></canvas>
+<script>
+let n = 0; const g = document.getElementById("c").getContext("2d");
+function tick(t) { n++; document.getElementById("frames").textContent = String(n);
+  g.fillStyle = "hsl(" + (n % 360) + ",70%,50%)"; g.fillRect(0, 0, 320, 200);
+  requestAnimationFrame(tick); }
+requestAnimationFrame(tick);
+</script></body></html>"""
+
 INDEX = """<!doctype html><html><head><title>KaroX Browser Test Site</title></head>
 <body>
 <h1>Research Index</h1>
@@ -145,6 +157,8 @@ class _SiteHandler(BaseHTTPRequestHandler):
             self._send(200, INDEX.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/page2":
             self._send(200, PAGE2.encode("utf-8"), "text/html; charset=utf-8")
+        elif route == "/animated":
+            self._send(200, ANIMATED.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/frame":
             self._send(200, FRAME.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/replace":

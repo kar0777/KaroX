@@ -99,6 +99,14 @@ from .redaction import (
     safe_field_names,
     safe_network_url,
 )
+from .resources import (
+    SETTLE_SCRIPT,
+    demote_headless_browsers,
+    park_after_seconds,
+    park_page,
+    parking_enabled,
+    wake_page,
+)
 
 _MAX_SNAPSHOT_NODES = 500
 _MAX_NETWORK_ENTRIES = 400
@@ -218,6 +226,8 @@ class _BrowserHandle:
     instance_id: Optional[str] = None
     browser_process: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
     cdp_browser: bool = False
+    # tab id -> CDP session holding that tab paused between actions.
+    parked: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -453,6 +463,10 @@ class BrowserSession(SessionGuardsMixin):
         )
         self._handle: Optional[_BrowserHandle] = None
         self._explicit_navigation_target: Optional[str] = None
+        # Idle parking: every action bumps the generation; a park scheduled
+        # for an older generation is stale and does nothing.
+        self._activity = 0
+        self._park_timer: Optional[threading.Timer] = None
 
         self._owner_queue: "queue.Queue[_BrowserCommand]" = queue.Queue()
         self._owner_ready = threading.Event()
@@ -575,7 +589,101 @@ class BrowserSession(SessionGuardsMixin):
         method = getattr(type(self), "_" + action.replace(".", "_"), None)
         if method is None or not callable(method):
             raise BrowserError(f"unsupported browser action: {action}")
-        return dict(self._call_on_owner(method, payload, deadline_seconds, cancel))
+        return dict(
+            self._call_on_owner(
+                type(self)._run_unparked, method, payload, deadline_seconds, cancel
+            )
+        )
+
+    # -- idle parking (see browser/resources.py) -------------------------------
+
+    def _run_unparked(
+        self,
+        method: Callable[..., Any],
+        payload: Mapping[str, Any],
+        deadline_seconds: float,
+        cancel: Optional[CancelToken],
+    ) -> Any:
+        """Wake parked tabs, run one action, schedule parking once idle."""
+
+        self._activity += 1
+        self._cancel_park_timer()
+        self._wake_pages()
+        try:
+            return method(self, payload, deadline_seconds, cancel)
+        finally:
+            self._schedule_park()
+
+    def _cancel_park_timer(self) -> None:
+        timer, self._park_timer = self._park_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_park(self) -> None:
+        handle = self._handle
+        if handle is None or not self._parking_allowed(handle):
+            return
+        delay = park_after_seconds()
+        if delay <= 0:
+            self._park_pages()
+            return
+        timer = threading.Timer(delay, self._park_when_idle, args=(self._activity,))
+        timer.daemon = True
+        self._park_timer = timer
+        timer.start()
+
+    def _park_when_idle(self, generation: int) -> None:
+        # Timer thread: Playwright objects belong to the owner thread.
+        try:
+            self._call_on_owner(type(self)._park_if_idle, generation)
+        except Exception:
+            pass
+
+    def _park_if_idle(self, generation: int) -> None:
+        if generation == self._activity:
+            self._park_pages()
+
+    def _parking_allowed(self, handle: _BrowserHandle) -> bool:
+        # Only a headless browser this session launched itself: a visible or
+        # handed-over browser is the user's to look at, and a detached or
+        # CDP-attached instance may be watched by something else.
+        return (
+            parking_enabled()
+            and not self.policy.headed
+            and not handle.takeover_active
+            and not handle.detached
+            and not handle.cdp_browser
+        )
+
+    def _park_pages(self) -> None:
+        """Pause every open tab until the next action. Never raises."""
+
+        handle = self._handle
+        if handle is None or not self._parking_allowed(handle):
+            return
+        for tab_id, page in list(handle.tabs.items()):
+            if tab_id in handle.parked or self._page_closed(page):
+                continue
+            session = park_page(handle.context, page)
+            if session is not None:
+                handle.parked[tab_id] = session
+        demote_headless_browsers()
+
+    def _wake_pages(self) -> None:
+        """Resume every parked tab. Never raises."""
+
+        handle = self._handle
+        if handle is None or not handle.parked:
+            return
+        parked, handle.parked = handle.parked, {}
+        for session in parked.values():
+            wake_page(session)
+        active = handle.tabs.get(handle.active_tab_id)
+        if handle.active_tab_id in parked and active is not None and not self._page_closed(active):
+            try:
+                active.evaluate(SETTLE_SCRIPT)
+            except Exception:
+                pass
 
     @staticmethod
     def _guarded(
@@ -1511,6 +1619,8 @@ class BrowserSession(SessionGuardsMixin):
         handle = self._handle
         if handle is not None:
             handle.takeover_active = False
+        self._cancel_park_timer()
+        self._wake_pages()
         return self._close({"user_confirmed": True, "reason": "runtime teardown"}, 30.0, None)
 
     # -- tab actions ---------------------------------------------------------------

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Changed — idle headless pages stop drawing between browser actions
+
+- A page that draws every frame (a three.js scene, a canvas game) kept a
+  headless Chromium rendering on the CPU (SwiftShader) for the whole time the
+  model was thinking between calls: a light three.js scene held ~190% CPU on
+  two cores, and three parallel runs made a developer's PC lag.
+- Once a tab of a headless browser the session launched itself has been idle
+  for 5 s after a browser action, it is paused through the DevTools debugger
+  (~2% CPU in the same measurement) and resumed before the next action, which
+  first lets two animation frames paint. `Page.setWebLifecycleState("frozen")`
+  was measured first and did not stop the renderer.
+- Page time keeps running while paused, so time-driven code sees the gap as one
+  long frame, as in a background tab; `wait_for {milliseconds}` lets a page
+  run. The browser tool description says so.
+- Headed, user-takeover, detached and CDP-attached browsers are never paused.
+- Headless Chromium processes started by KaroX (including the shared
+  visual-check browser) run below normal priority: `BELOW_NORMAL` on Windows,
+  `nice` 10 elsewhere.
+- Switches: `KAROX_BROWSER_PARK=0`, `KAROX_BROWSER_PARK_AFTER=<seconds>`
+  (default 5, clamped to 0-3600), `KAROX_BROWSER_LOW_PRIORITY=0`. Every step is
+  fail-open: a page that cannot be paused or re-prioritised works as before.
+
 ### Measured — clean `3d-game` runs on W&B Inference
 
 - First runs without the benchmark lines: `deepseek-ai/DeepSeek-V4.1-Flash` on

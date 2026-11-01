@@ -771,3 +771,33 @@ def test_headed_takeover_flow(site, make_session):
     resumed = _call(session, "resume_after_user_takeover", {})
     assert resumed["ok"] is True and resumed["agent_input_paused"] is False
     assert _call(session, "click", {"selector": "#add-item"})["ok"] is True
+
+
+def _frames(session: BrowserSession) -> int:
+    return int(_call(session, "get_text", {"selector": "#frames"})["text"])
+
+
+def test_idle_page_is_parked_between_actions(site, make_session, monkeypatch):
+    """A page that draws every frame stops drawing between agent actions.
+
+    Measured on a light three.js scene: 190% CPU while it ran between calls,
+    about 2% parked. Here the page only counts frames, so the proof is the
+    counter: it must stand still across an idle gap and run again once the
+    switch is off.
+    """
+
+    monkeypatch.delenv("KAROX_BROWSER_PARK", raising=False)
+    monkeypatch.setenv("KAROX_BROWSER_PARK_AFTER", "0")  # park at once: a crisp gap
+    session, _root = make_session()
+    _open(session, site, "/animated")
+    first = _frames(session)
+    time.sleep(1.5)
+    parked_gap = _frames(session) - first
+    assert parked_gap < 20, f"page kept drawing while idle: {parked_gap} frames"
+
+    monkeypatch.setenv("KAROX_BROWSER_PARK", "0")
+    before = _frames(session)  # wakes the page; nothing parks it again
+    time.sleep(1.5)
+    running_gap = _frames(session) - before
+    assert running_gap > 30, f"page did not run with parking off: {running_gap} frames"
+
