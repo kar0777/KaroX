@@ -119,9 +119,11 @@ def _model_request_deadline(remaining_seconds: float) -> float:
 #: Two 3D re-runs spent 1510 s each and stopped with "missing visual evidence".
 FINISH_RESERVE_SECONDS = 120.0
 
-#: Steps a refused finish keeps the visual grace window open: enough for one
-#: probe, one fix and the attested finish the refusal asked for.
-_COVERAGE_GRACE_STEPS = 4
+#: Steps a refused finish keeps the visual grace window open: enough for a
+#: probe page, a few browser reads and the attested finish the refusal asked
+#: for. At 4, a measured 3D run (30/30 on the grader) re-probed for five steps
+#: after its second refusal and was stopped one step before its finish.
+_COVERAGE_GRACE_STEPS = 8
 
 
 def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
@@ -828,6 +830,23 @@ class EngineKernel:
 
         self._visual_budget_hit = True
         self.cancel()
+
+    def note_visual_limit(self, *, proven: bool) -> None:
+        """React to a ``method: limit`` visual verdict.
+
+        Without a pass on the current bytes no later verdict can make the run
+        verified, so it ends (``note_visual_budget_exhausted``). With one, the
+        limit changes nothing: the run can still finish verified without an
+        edit, so it gets the same short grace as after the last real verdict
+        (never a longer one). A measured run asked for one more look after its
+        last pass and was stopped with a correct, still-proven game.
+        """
+
+        if not proven:
+            self.note_visual_budget_exhausted()
+            return
+        if self._visual_grace_until is None:
+            self._visual_grace_until = self._step + 1
 
     def note_visual_last_check(self) -> None:
         """Allow two more model calls after the last real visual verdict.

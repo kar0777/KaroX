@@ -2203,6 +2203,53 @@ def test_the_last_visual_verdict_grants_only_two_more_calls() -> None:
     assert kernel._visual_budget_hit is True
 
 
+def test_a_limit_verdict_stops_only_a_run_without_a_current_pass() -> None:
+    """A limit after a still-current pass is not the end of a provable run.
+
+    A measured 3D run passed the grader 30/30, asked for one more look after
+    its last pass, got ``limit`` and was stopped unverified while the pass
+    still covered its bytes. Without such a pass the stop stays honest.
+    """
+
+    class _Kernel:
+        _cancelled = False
+        _cancel_event = None
+        _visual_budget_hit = False
+        _visual_grace_until: Optional[int] = None
+        _step = 20
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def note_visual_budget_exhausted(self) -> None:
+            EngineKernel.note_visual_budget_exhausted(self)
+
+    stale = _Kernel()
+    EngineKernel.note_visual_limit(stale, proven=False)
+    assert stale.cancelled is True and stale._visual_budget_hit is True
+
+    proven = _Kernel()
+    EngineKernel.note_visual_limit(proven, proven=True)
+    assert proven.cancelled is False and proven._visual_grace_until == 21
+    # A second limit never lengthens the window.
+    proven._step = 21
+    EngineKernel.note_visual_limit(proven, proven=True)
+    assert proven._visual_grace_until == 21
+
+
+def test_a_refused_finish_keeps_room_to_reprobe_and_attest() -> None:
+    class _Kernel:
+        _visual_grace_until: Optional[int] = 109
+        _step = 111
+
+    kernel = _Kernel()
+    EngineKernel.note_coverage_refusal(kernel)
+    # The measured run needed five probe steps and the finish after them.
+    assert kernel._visual_grace_until is not None
+    assert kernel._visual_grace_until >= 111 + 6
+
+
 def test_a_visual_pass_on_a_scaffold_page_verifies_a_changed_script(
     tmp_path: Path, repository: Path
 ) -> None:

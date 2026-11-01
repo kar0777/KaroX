@@ -461,13 +461,23 @@ class CoreToolEnvironment:
                 # No further verdict can arrive, so no further edit can make
                 # this run verified. Stop at the next step boundary instead of
                 # burning the step budget (26 and 20 wasted steps in the first
-                # aquarium runs).
-                self._kernel.note_visual_budget_exhausted()
+                # aquarium runs) -- unless a pass still covers the current
+                # bytes: then the run can finish verified without an edit.
+                self._kernel.note_visual_limit(proven=self._visual_still_proven())
             elif result.data.get("checks_left") == 0:
                 # The last real verdict. Allow the edit turn and the closing
                 # look, then stop; otherwise the model edits to the step limit.
                 self._kernel.note_visual_last_check()
         return output
+
+    def _visual_still_proven(self) -> bool:
+        """Whether a clean visual verdict covers the current bytes; fail-closed."""
+
+        try:
+            record = self._core.sessions.load(self._session_id)
+            return bool(completion_gate.visual_proven(self._core, record))
+        except Exception:  # noqa: BLE001 - unknown means not proven
+            return False
 
     def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:
         arguments = action.get("arguments")

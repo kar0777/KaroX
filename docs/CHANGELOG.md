@@ -23,6 +23,12 @@
   attestations, and it owes no proof. Pre-existing pages are never diagnostic,
   the created pages are the deliverable when there is no other entry page, and
   an unreadable or large tree (over 500 files) marks nothing.
+- A `limit` visual verdict (budget spent) stopped the run at once, even when a
+  pass still covered the current bytes and only the attested finish was left.
+  It now stops only a run without such a pass; otherwise it gets the same short
+  grace as the last real verdict. A refused finish keeps that grace open for 8
+  steps instead of 4: r2 (also 30/30) re-probed for five steps after its second
+  refusal and was stopped one step before its attested finish.
 
 ### Changed — idle headless pages stop drawing between browser actions
 
