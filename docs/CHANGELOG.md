@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Fixed — a deleted harness page stays the run's own
+
+- Measured on `02fe003`, `3d-game` r2: 30/30 on the hidden grader, unverified.
+  The run wrote `self-test.html` to drive the game's hooks, ran it through
+  `visual_check` twice (both `needs_work`: the harness threw) and then deleted
+  it, as the run is told to do with its probes. `created_files` forgets a
+  deleted file, so the page stopped being diagnostic at that moment: it
+  entered the identity as a deleted file, the visual pass on `index.html`
+  (step 91) went stale and every attestation counted as made before the last
+  edit.
+- A file whose first write in the transcript created it and that is gone
+  again is still the run's own: diagnostic when it is a page nothing refers
+  to. A page that existed before the run stays bound when it is deleted.
+- Verdicts on such a harness page are diagnostics, like a scratch probe's: a
+  `needs_work` there is no active failed check, and a pass there is neither
+  visual nor browser proof of the deliverable (any changed page used to
+  count).
+- Replayed on r2's final state: the `index.html` pass covers the current bytes
+  again; what stays open is the attestation, whose quotes predate the last
+  real edit.
+
 ### Fixed — the last visual pass leaves room for the attested finish
 
 - Measured on `02fe003`, `3d-game` r1: the game passed the hidden grader 30/30

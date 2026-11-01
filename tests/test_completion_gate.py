@@ -249,6 +249,102 @@ def test_identity_ignores_the_runs_own_unreferenced_harness_page(tmp_path: Path)
     assert "selftest.html" in linked["files"]
 
 
+def _mutation(core_name: str, data: dict) -> dict:
+    return {"role": "tool", "core_name": core_name, "result": {"ok": True, "data": data}}
+
+
+def test_identity_ignores_deleting_the_runs_own_harness_page(tmp_path: Path) -> None:
+    """Deleting a harness page the run created must not stale the game's proof.
+
+    ``created_files`` forgets a deleted file. A measured run deleted its
+    ``self-test.html`` as told, the page stopped being diagnostic, entered the
+    identity as deleted and staled every proof and attestation.
+    """
+
+    record, core = _probe_record(tmp_path)
+    (tmp_path / "self-test.html").write_text("<p>PASS 1</p>", encoding="utf-8")
+    record.changed_files.append("self-test.html")
+    record.created_files = ["self-test.html"]
+    record.provider_history.append(
+        _mutation(
+            "repo.write_file",
+            {"path": "self-test.html", "changed": True, "previous_sha256": None},
+        )
+    )
+    before = completion_gate.identity(core, record)
+
+    (tmp_path / "self-test.html").unlink()
+    record.created_files = []
+    record.provider_history.append(
+        _mutation(
+            "repo.apply_patch",
+            {
+                "changed": True,
+                "path": "self-test.html",
+                "post_state": {"self-test.html": None},
+                "operations": [
+                    {"op": "delete", "path": "self-test.html", "changed": True,
+                     "previous_sha256": "abc", "sha256": None}
+                ],
+            },
+        )
+    )
+    after = completion_gate.identity(core, record)
+
+    assert before == after and "self-test.html" not in after["files"]
+    assert completion_gate.diagnostic_paths(core, record) == frozenset({"self-test.html"})
+
+
+def test_a_pass_on_the_runs_own_harness_page_does_not_prove_the_deliverable(
+    tmp_path: Path,
+) -> None:
+    """Only the page the user opens can carry the visual proof.
+
+    A measured run spent its last visual checks on its own ``self-test.html``;
+    a pass there must not stand in for the game page.
+    """
+
+    record, core = _probe_record(tmp_path)
+    (tmp_path / "self-test.html").write_text("<p>PASS 1</p>", encoding="utf-8")
+    record.changed_files.append("self-test.html")
+    record.created_files = ["self-test.html"]
+    _add_visual(core, record, "self-test.html", "pass")
+
+    assert completion_gate.visual_proven(core, record) is False
+    assert "missing visual evidence" in completion_gate.floor(core, record)
+
+    _add_visual(core, record, "index.html", "pass")
+    assert completion_gate.visual_proven(core, record) is True
+
+
+def test_identity_binds_a_deleted_page_the_run_did_not_create(tmp_path: Path) -> None:
+    """Deleting a page that was there before the run is a real change."""
+
+    record, core = _probe_record(tmp_path)
+    (tmp_path / "about.html").write_text("<p>about</p>", encoding="utf-8")
+    record.changed_files.append("about.html")
+    record.created_files = []
+    before = completion_gate.identity(core, record)
+
+    (tmp_path / "about.html").unlink()
+    record.provider_history.append(
+        _mutation(
+            "repo.apply_patch",
+            {
+                "changed": True,
+                "operations": [
+                    {"op": "delete", "path": "about.html", "changed": True,
+                     "previous_sha256": "abc", "sha256": None}
+                ],
+            },
+        )
+    )
+    after = completion_gate.identity(core, record)
+
+    assert after["files"]["about.html"] == "missing" and before != after
+    assert completion_gate.diagnostic_paths(core, record) == frozenset()
+
+
 def test_a_later_rejudged_fail_does_not_erase_a_pass_on_same_bytes(
     tmp_path: Path,
 ) -> None:

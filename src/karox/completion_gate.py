@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from .auto_verify import _select_checks
 from . import requirement_coverage
@@ -134,12 +134,62 @@ def diagnostic_paths(core: Any, record: Any) -> frozenset[str]:
 
     try:
         created = list(getattr(record, "created_files", None) or ())
+        created.extend(
+            path for path in _created_then_deleted(core, record) if path not in created
+        )
         if not created:
             return frozenset()
         named = " ".join([str(record.task or ""), *_active_requirement_texts(record)])
         return frozenset(diagnostic_pages(Path(core.repository), created, named))
     except Exception:  # noqa: BLE001 - the stricter answer is always safe
         return frozenset()
+
+
+def _created_then_deleted(core: Any, record: Any) -> list[str]:
+    """Files this run created and has since deleted.
+
+    ``created_files`` forgets a file once the run deletes it, and the run is
+    told to delete its own probes as soon as they have answered. A measured 3D
+    run deleted its ``self-test.html``; the page stopped being diagnostic at
+    that moment, entered the identity as a deleted file and made every proof
+    and every attestation stale. The transcript still shows the first write
+    created the file (no previous bytes), so a file that is gone again was
+    never the user's and is not part of what the user receives.
+    """
+
+    first: dict[str, bool] = {}
+    for entry in record.provider_history:
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            continue
+        data = result.get("data")
+        if not isinstance(data, dict) or data.get("dry_run") is True:
+            continue
+        name = entry.get("core_name")
+        if name == "repo.write_file":
+            operations = [data]
+        elif name in {"repo.command", "repo.apply_patch"}:
+            operations = [op for op in data.get("operations") or () if isinstance(op, dict)]
+        else:
+            continue
+        for operation in operations:
+            path = operation.get("path")
+            if isinstance(path, str) and operation.get("changed") is True:
+                first.setdefault(path, "previous_sha256" in operation
+                                 and operation.get("previous_sha256") is None)
+    gone: list[str] = []
+    for path, created in first.items():
+        if not created or path not in record.changed_files:
+            continue
+        try:
+            if core.safe_path(path).exists():
+                continue
+        except Exception:  # noqa: BLE001 - an unresolvable path stays bound
+            continue
+        gone.append(path)
+    return gone
 
 
 def _deliverable(path: str, diagnostic: frozenset[str]) -> bool:
@@ -372,7 +422,12 @@ def visual_producer_available(core: Any) -> Optional[bool]:
         return None
 
 
-def _page_loads_the_change(core: Any, page: str, changed_files: Sequence[str]) -> bool:
+def _page_loads_the_change(
+    core: Any,
+    page: str,
+    changed_files: Sequence[str],
+    diagnostic: Collection[str] = frozenset(),
+) -> bool:
     """Whether an unchanged page is still the surface that renders the change.
 
     The completion gate used to accept a visual pass only when the checked page
@@ -383,10 +438,11 @@ def _page_loads_the_change(core: Any, page: str, changed_files: Sequence[str]) -
     stylesheet/script in its own directory: that is the page the change is for,
     not an unrelated page elsewhere in the repository. A sibling scratch probe
     (``probe_snake.cjs``) is not loaded by the page and must not block the
-    proof.
+    proof. Nor is the run's own ``diagnostic`` harness page: nothing the user
+    opens loads it, so its pass proves nothing about the deliverable.
     """
 
-    if is_scratch_page(page):
+    if is_scratch_page(page) or Path(page).as_posix() in diagnostic:
         return False
     if page in changed_files:
         return True
@@ -418,6 +474,7 @@ def visual_proven(core: Any, record: Any) -> bool:
     current = identity(core, record)
     if not current:
         return False
+    diagnostic = diagnostic_paths(core, record)
 
     for evidence in reversed(record.evidence):
         if not isinstance(evidence, dict) or evidence.get("kind") != "render_review":
@@ -449,7 +506,7 @@ def visual_proven(core: Any, record: Any) -> bool:
             continue
         target = str(data.get("completion_target") or "")
         if not target or not _page_loads_the_change(
-            core, target, record.changed_files
+            core, target, record.changed_files, diagnostic
         ):
             # A pass on a scratch probe or an unrelated page is not evidence
             # about the deliverable, even when its bytes are current.
@@ -603,6 +660,9 @@ def floor(core: Any, record: Any) -> list[str]:
         browser or any(_is_runtime_entry(core, p) for p in record.changed_files)
     )
     persisted = {e.get("evidence_id"): e for e in record.evidence if isinstance(e, dict)}
+    #: The run's own unreferenced harness pages: like scratch probes, their
+    #: verdicts are diagnostics, neither owed failures nor proof.
+    harness_pages = diagnostic_paths(core, record)
     latest: dict[tuple[str, ...], tuple[bool, set[str]]] = {}
     failed_ever: dict[tuple[str, ...], None] = {}
     structural: dict[str, bool] = {}
@@ -696,7 +756,7 @@ def floor(core: Any, record: Any) -> list[str]:
             continue
         if name == "visual.check":
             target = str(data.get("completion_target", ""))
-            if is_scratch_page(target):
+            if is_scratch_page(target) or Path(target).as_posix() in harness_pages:
                 # A failed probe page is diagnostic, not a failed deliverable.
                 # It must not stay owed, and a pass on it must not count either.
                 continue
@@ -745,6 +805,7 @@ def floor(core: Any, record: Any) -> list[str]:
             and key[0] == "visual.check"
             and passed
             and "visual" in classes
+            and Path(key[1]).as_posix() not in harness_pages
             and (
                 key[1] in record.changed_files
                 or _page_loads_the_change(core, key[1], record.changed_files)
@@ -776,9 +837,8 @@ def floor(core: Any, record: Any) -> list[str]:
             if classes & {"tests", "structural"} and tuple(argv) not in latest:
                 reasons.append("missing current check: " + " ".join(argv))
         if "structural" not in passed_classes:
-            diagnostic = diagnostic_paths(core, record)
             for relative in record.changed_files:
-                if not _deliverable(relative, diagnostic):
+                if not _deliverable(relative, harness_pages):
                     # A diagnostic file is not a deliverable and owes no
                     # structural proof of its own.
                     continue
@@ -804,9 +864,7 @@ def floor(core: Any, record: Any) -> list[str]:
         # Last, so the repair turn reads the failed checks first: a fix
         # changes the bytes, and every attestation quote must then be renewed.
         reasons.extend(
-            requirement_coverage.floor_reasons(
-                record, diagnostic=diagnostic_paths(core, record)
-            )
+            requirement_coverage.floor_reasons(record, diagnostic=harness_pages)
         )
     return list(dict.fromkeys(reasons))
 
