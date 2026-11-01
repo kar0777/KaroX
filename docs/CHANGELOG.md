@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed — a probe written after the last check no longer leaves the run unverified
+
+- Measured on `5626c35`, `3d-game` r2: its second refused finish asked for
+  fresh quotes, so the run wrote `_hookcheck.html` (a scratch probe), read the
+  game's hooks through it, deleted it and finished with every requirement
+  attested. The floor was clean: its identity leaves scratch artifacts out, so
+  the last `check_public.py` pass still covered the deliverable. The evidence
+  chain (write, check, status, diff) restarts at every changing write, so after
+  the probe it had no check; the harness ran only `git status` and `git diff`,
+  and the run stopped `unverified_changes` without saying why.
+- When the chain's last changing write has no passing check after it, the
+  harness now runs the first approved check once more, on the final bytes; the
+  chain closes only if that check passes. Replayed on the final session states,
+  the chain owes a check in this run and in `e9bcc6e` r2, and in none of the
+  other six graded runs.
+- A failed mutation that reports `changed: false` (a batch edit whose anchors
+  did not match) no longer drops the chain; a failure that may have written
+  still does.
+- The same r2 scores 29/30 on the hidden grader, inline and idle:
+  `restart-button` times out (4 s) because the page draws about 1.5 frames per
+  second in the grader's software-rendered Chromium (r1's game draws about 4).
+  The run's own probe pressed the button through the DOM and passed. With this
+  fix the run would have ended verified: the attestation and the grader
+  disagree on a responsiveness limit the task does not state, and the gate
+  cannot see it. The old unverified result was an accident of the chain, not a
+  catch.
+
 ### Changed — a refused finish says the browser is open again
 
 - The same r2 was told after 36 browser calls that browser observations were

@@ -1,8 +1,9 @@
 """Proof-state readers for a persisted session record.
 
-Seven small pure functions the engine kernel uses to decide what a session
-already proved: which writes happened, what the evidence chain selected, what
-checks the completion floor still owes, and what the model's answer rests on.
+Small pure functions the engine kernel uses to decide what a session already
+proved: which writes happened, what the evidence chain selected, what checks
+the completion floor and the chain still owe, and what the model's answer
+rests on.
 They read only the ``SessionRecord`` the session store checksums, so their
 output is as trustworthy as the record itself. Extracted verbatim from the
 retired v5 loop so the engine inherits its exact semantics.
@@ -11,7 +12,7 @@ retired v5 loop so the engine inherits its exact semantics.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import completion_gate
 from .security import redact
@@ -102,8 +103,11 @@ def unresolved_model_checks(
     return found
 
 
-def evidence_chain(record: SessionRecord) -> bool:
-    """Whether the record holds a complete write -> check -> status/diff chain.
+_Link = Optional[Dict[str, Any]]
+
+
+def _chain_links(record: SessionRecord) -> Tuple[_Link, _Link, _Link, _Link]:
+    """The last changing write and the check, status and diff that follow it.
 
     Who asked for a call is recorded, and only the two known authors are
     evidence: the model's own calls, and the harness's finishing checks. An
@@ -127,7 +131,10 @@ def evidence_chain(record: SessionRecord) -> bool:
         if core_name in MUTATION_TOOLS:
             if ok and data.get("changed") is True:
                 write, check, status, diff = result, None, None, None
-            elif not ok:
+            elif not ok and data.get("changed") is not False:
+                # A failure that may have written leaves bytes nothing proved;
+                # one that reports it changed nothing (an edit whose old text
+                # was not found) leaves the bytes the chain already covers.
                 write, check, status, diff = None, None, None, None
         elif core_name == "checks.run" and write is not None:
             if ok and data.get("verification_eligible") is True:
@@ -138,6 +145,30 @@ def evidence_chain(record: SessionRecord) -> bool:
             status = result if ok else None
         elif core_name == "git.diff" and check is not None:
             diff = result if ok else None
+    return write, check, status, diff
+
+
+def chain_owes_check(record: SessionRecord) -> bool:
+    """Whether the chain's last changing write has no passing check after it.
+
+    The floor judges a check by the bytes it covered, and its identity leaves
+    scratch artifacts and the run's own harness pages out; the chain restarts
+    at every changing write. A probe written after the last check, to collect
+    fresh observations for a finish, therefore leaves a check the floor calls
+    current and a chain without one. Git reads cannot close that gap; only a
+    check that runs after the write can. A text-only change owes no check.
+    """
+
+    if completion_gate.docs_only(record):
+        return False
+    write, check, _status, _diff = _chain_links(record)
+    return write is not None and check is None
+
+
+def evidence_chain(record: SessionRecord) -> bool:
+    """Whether the record holds a complete write -> check -> status/diff chain."""
+
+    write, check, status, diff = _chain_links(record)
     if completion_gate.docs_only(record):
         # No behavioral obligation for text; keep persisted change/review evidence.
         status = diff = None

@@ -1773,6 +1773,13 @@ class EngineKernel:
             )
             for reason in missing
         )
+        # The floor can call a check current while the evidence chain has none:
+        # its identity leaves scratch artifacts and harness pages out, and the
+        # chain restarts at every changing write. A probe written after the
+        # last check (fresh quotes for an attested finish) left a run that the
+        # floor had cleared unverified, with only the Git reads run here. One
+        # check on the final bytes closes the chain; Git reads alone never can.
+        check_owed = check_owed or session_analysis.chain_owes_check(record)
         if not calls and check_owed:
             commands = [list(item) for item in self.core.verification_command_order] or [
                 list(item) for item in sorted(self.core.verification_commands or ())

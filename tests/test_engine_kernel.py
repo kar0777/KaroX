@@ -279,6 +279,93 @@ def test_engine_does_not_rerun_a_check_the_model_already_passed(
     assert harness_calls == ["git.status", "git.diff"]
 
 
+def test_a_probe_written_after_the_last_check_gets_a_harness_check(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A scratch write after the model's last check must not end the run unverified.
+
+    Measured on ``5626c35``, ``3d-game`` r2: after its last check the run wrote a
+    scratch probe page to collect fresh quotes for its attestation, then
+    deleted it. The floor's identity leaves scratch artifacts out, so it called
+    the check current and the harness ran only the Git reads; the evidence
+    chain restarts at every changing write, still had no check after the
+    probe, and the run stopped ``unverified_changes``. The harness now runs
+    the approved check once more, on the final bytes.
+    """
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_write_call("c3", "_probe.txt", "scratch"),)),
+            _response((_finish_call("c4", "created hello.txt with hi"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    record = harness.record()
+    harness_calls = [
+        entry.get("core_name")
+        for entry in record.provider_history
+        if entry.get("role") == "tool"
+        and (entry.get("result") or {}).get("requested_by") == "harness_final"
+    ]
+    assert harness_calls == ["checks.run", "git.status", "git.diff"]
+
+
+def test_an_edit_that_changed_nothing_keeps_the_evidence_chain(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A failed edit that wrote nothing leaves the checked bytes proven.
+
+    The chain used to drop its write, check and Git reads at any failed
+    mutation, so a last edit whose old text was not found left no chain a
+    harness check could complete. A failure that reports ``changed: false``
+    now leaves the chain as it was; one that may have written still resets it.
+    """
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c3",
+                        "repo_edit_file",
+                        {"path": "hello.txt", "edits": [{"old": "absent", "new": "x"}]},
+                    ),
+                )
+            ),
+            _response((_finish_call("c4", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    assert (repository / "hello.txt").read_text(encoding="utf-8") == "hi"
+    record = harness.record()
+    failed = [
+        entry
+        for entry in record.provider_history
+        if entry.get("core_name") == "repo.edit_file"
+        and isinstance(entry.get("result"), dict)
+        and entry["result"].get("ok") is False
+    ]
+    assert failed and failed[0]["result"]["data"].get("changed") is False
+    harness_calls = [
+        entry.get("core_name")
+        for entry in record.provider_history
+        if entry.get("role") == "tool"
+        and (entry.get("result") or {}).get("requested_by") == "harness_final"
+    ]
+    assert harness_calls == ["git.status", "git.diff"]
+
+
 def test_engine_runs_independent_calls_batched_in_one_response(
     tmp_path: Path, repository: Path
 ) -> None:
