@@ -183,6 +183,11 @@ class CoreToolEnvironment:
     verification command, and is otherwise refused with guidance.
     """
 
+    #: Finish submissions refused for missing requirement attestations. The
+    #: class default keeps environments built without ``__init__`` (tests,
+    #: adapters) on the unextended browser budget.
+    _coverage_refusals: int = 0
+
     def __init__(
         self,
         *,
