@@ -512,11 +512,11 @@ class CoreToolEnvironment:
             keep_open = getattr(self._kernel, "note_coverage_refusal", None)
             if callable(keep_open):
                 keep_open()
-            return self._refusal(
-                action,
-                "requirement_coverage",
-                requirement_coverage.refusal_message(problems),
-            )
+            message = requirement_coverage.refusal_message(problems)
+            reopened = self._browser_reopened_note()
+            if reopened:
+                message = f"{message}\n\n{reopened}"
+            return self._refusal(action, "requirement_coverage", message)
         raise Submitted(
             {
                 "role": "exit",
@@ -527,6 +527,33 @@ class CoreToolEnvironment:
                     "submission": answer,
                 },
             }
+        )
+
+    def _browser_reopened_note(self) -> str:
+        """Say so when this refusal reopened a browser budget the model saw closed.
+
+        Each refusal grants browser calls for the re-probe, but the model had
+        been told the browser was "disabled for the rest of this run". A
+        measured run (30/30 on the grader) never called the browser again: it
+        wrote a harness page and spent its last visual checks running it.
+        """
+
+        refusals = int(getattr(self, "_coverage_refusals", 0))
+        calls = int(getattr(self, "_browser_calls", 0))
+        inputs = int(getattr(self, "_browser_inputs", 0))
+        if (
+            calls < BROWSER_CALLS_EXHAUSTED + COVERAGE_BROWSER_GRANT * (refusals - 1)
+            and inputs < BROWSER_INPUT_LIMIT + COVERAGE_INPUT_GRANT * (refusals - 1)
+        ):
+            return ""
+        calls_left = BROWSER_CALLS_EXHAUSTED + COVERAGE_BROWSER_GRANT * refusals - calls
+        inputs_left = BROWSER_INPUT_LIMIT + COVERAGE_INPUT_GRANT * refusals - inputs
+        return (
+            f"browser_command is open again for this re-probe: {max(0, calls_left)} "
+            f"more calls, {max(0, inputs_left)} more click/press/fill. Exercise the "
+            "deliverable page itself and quote those results; a visual_check of a "
+            "harness page spends the visual budget and proves nothing about the "
+            "deliverable."
         )
 
     def _coverage_problems(self, arguments: Any) -> List[Any]:

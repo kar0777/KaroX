@@ -940,3 +940,34 @@ def test_a_visual_pass_tells_the_model_to_finish() -> None:
 
     assert "run the final change review and finish" in text
     assert "No checks remain" not in text
+
+
+def test_a_refusal_says_when_it_reopens_a_closed_browser() -> None:
+    """The model was told the browser closed for good; the grant must be named.
+
+    A measured 3D run never called the browser after its refused finishes and
+    spent its last visual checks running a harness page instead.
+    """
+
+    from karox.engine_tool_env import (
+        BROWSER_CALLS_EXHAUSTED,
+        BROWSER_INPUT_LIMIT,
+        COVERAGE_BROWSER_GRANT,
+        COVERAGE_INPUT_GRANT,
+    )
+
+    environment = object.__new__(CoreToolEnvironment)
+    environment._browser_calls = 10
+    environment._browser_inputs = 2
+    environment._coverage_refusals = 1
+    assert environment._browser_reopened_note() == ""
+
+    environment._browser_calls = BROWSER_CALLS_EXHAUSTED
+    note = environment._browser_reopened_note()
+    assert f"open again for this re-probe: {COVERAGE_BROWSER_GRANT} more calls" in note
+    assert f"{BROWSER_INPUT_LIMIT + COVERAGE_INPUT_GRANT - 2} more click/press/fill" in note
+
+    # A second refusal reopens what the first grant used up.
+    environment._browser_calls = BROWSER_CALLS_EXHAUSTED + COVERAGE_BROWSER_GRANT
+    environment._coverage_refusals = 2
+    assert f"{COVERAGE_BROWSER_GRANT} more calls" in environment._browser_reopened_note()

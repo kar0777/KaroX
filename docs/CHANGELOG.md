@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed — a refused finish says the browser is open again
+
+- The same r2 was told after 36 browser calls that browser observations were
+  "disabled for the rest of this run". Each refused finish grants 6 more calls
+  and 3 more inputs for the re-probe, but the refusal never said so: after its
+  two refusals the run never called the browser again and spent its last
+  visual checks running its harness page instead.
+- A refusal that reopens a closed browser budget now says how many calls and
+  inputs it adds, and that a visual check of a harness page spends the visual
+  budget and proves nothing about the deliverable.
+
 ### Fixed — a deleted harness page stays the run's own
 
 - Measured on `02fe003`, `3d-game` r2: 30/30 on the hidden grader, unverified.
