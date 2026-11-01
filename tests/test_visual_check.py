@@ -221,7 +221,8 @@ def test_the_visual_checker_prompt_scopes_games_to_required_facts() -> None:
     text = visual_checker_text()
 
     assert "For a game or an interactive scene" in text
-    assert "do not demand a particular ship silhouette" in text
+    assert "every element the goal requires to be visible" in text
+    assert "do not demand a particular silhouette" in text
     assert "are notes, not a failed scene" in text
 
 

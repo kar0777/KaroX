@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Fixed — instructions no longer carry one benchmark's checks
+
+- Two system-prompt lines encoded the hidden `3d-game` grader instead of a
+  general rule. `32df1f1` told every game to show its first obstacles and
+  collectibles in the ready state and to create them in `reset()`; `479c5bf`
+  told the probe to assert `state().obstacles.length > 0` and
+  `state().coins.length > 0` after `reset()`, which is the grader's
+  `items-spawn` check. Both are replaced by one task-neutral rule: verify
+  concrete, observable facts the task requires; a check that compares a value
+  to itself, or cannot fail, proves nothing; after initialization or a reset,
+  confirm the state matches the initial conditions the task specifies.
+- The visual checker rubric named fixture objects of two benchmark tasks (an
+  aquarium's tank, water, gravel, bubbles and fish; a neon runner's track, lane
+  lines, rails, ship, obstacles and collectibles). It now checks every element
+  the goal requires to be visible, without a fixed object list or silhouette.
+- `tests/test_instruction_neutrality.py` scans the system prompt, the shipped
+  prompts and the built-in skills for code-level state assertions, harness
+  markers, arena task ids and fixture nouns; the structural detectors also run
+  over the string literals of the modules that build model-facing text.
+- `3d-game` results recorded below after `32df1f1` were produced with at least
+  one of these instructions: the third, fourth and fifth runs of the gate fixes
+  (1.69M / 54 / 535 s, the unverified 30/30, and 1.26M / 43 / 478 s) and the
+  probe counts "ready obstacles 4, ready coins 4". The fourth and fifth also
+  carried the `items-spawn` assertion. They are not clean baselines.
+
 ### Fixed — cleanup and a re-judged frame do not erase a visual pass
 
 - The confirmation `3d-game` run was 30/30 on the hidden grader but stopped
