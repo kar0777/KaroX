@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed — `ultra` and `extra-high` reach OpenAI-compatible gateways unclamped
+
+- The Chat Completions adapter clamped `xhigh` and `max` to `high` for every
+  endpoint, so `--effort-level ultra` never sent `max`, even to gateways that
+  accept it (W&B Inference and DeepSeek accept `xhigh` and `max`). The clamp
+  now applies only where the scale is known to stop at `high`: OpenAI-hosted
+  endpoints (`api.openai.com`, `*.openai.azure.com`). Elsewhere the chosen
+  level is sent unchanged. A gateway that rejects it gets one retry at `high`
+  with every other field unchanged, remembered per model, before the existing
+  optional-tuning retry drops the dial.
+- Benchmark runs recorded with `ultra` on a non-OpenAI gateway before this
+  change ran at `reasoning_effort=high` on the wire.
+
 ### Fixed — instructions no longer carry one benchmark's checks
 
 - Two system-prompt lines encoded the hidden `3d-game` grader instead of a

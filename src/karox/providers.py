@@ -59,6 +59,20 @@ def output_token_field(model: str) -> str:
     return "max_completion_tokens" if _REASONING_FAMILY.match(name) else "max_tokens"
 
 
+# The two KaroX levels above "high". OpenAI's own Chat Completions scale stops
+# at "high", so OpenAI-hosted endpoints get those levels clamped there. Other
+# OpenAI-compatible gateways publish their own scale -- W&B and DeepSeek accept
+# "xhigh" and "max" -- so the level the user chose reaches them unchanged; a
+# gateway that still rejects it gets one retry at "high" before any optional
+# tuning field is dropped.
+_ABOVE_HIGH_EFFORTS = frozenset({"xhigh", "max"})
+
+
+def _effort_scale_stops_at_high(endpoint: str) -> bool:
+    host = (urlsplit(endpoint).hostname or "").lower()
+    return host == "api.openai.com" or host.endswith(".openai.azure.com")
+
+
 #: Optional tuning fields an OpenAI-compatible gateway may reject. A retry
 #: without them keeps the required shape -- model, messages, tools,
 #: tool_choice and the output cap -- so it is the same request, not a weaker
@@ -635,6 +649,7 @@ class OpenAIChatCompletionsProvider:
         # every other model on the same endpoint.
         self._omit_optional_tuning_models: set[str] = set()
         self._reduced_failed_models: set[str] = set()
+        self._effort_clamped_models: set[str] = set()
 
     def _http_client(self) -> httpx.Client:
         client = self._client
@@ -789,14 +804,9 @@ class OpenAIChatCompletionsProvider:
             # agent loop does.
             payload["prompt_cache_key"] = request.cache_key
         if request.reasoning_effort is not None:
-            # Chat Completions spells the dial flat, and its scale tops out at
-            # "high", so the two levels above that are clamped rather than sent
-            # as a value the endpoint would reject.
-            payload["reasoning_effort"] = (
-                "high"
-                if request.reasoning_effort in {"xhigh", "max"}
-                else request.reasoning_effort
-            )
+            # Chat Completions spells the dial flat. `stream` narrows a level
+            # above "high" only where the endpoint's scale stops there.
+            payload["reasoning_effort"] = request.reasoning_effort
         return payload
 
     def _request_headers(self) -> Dict[str, str]:
@@ -828,6 +838,13 @@ class OpenAIChatCompletionsProvider:
 
     def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
         payload = self._request_payload(request)
+        # A level above "high" is clamped only where the scale is known to stop
+        # there, or where this model has already rejected it once.
+        if payload.get("reasoning_effort") in _ABOVE_HIGH_EFFORTS and (
+            _effort_scale_stops_at_high(self.endpoint)
+            or request.model in self._effort_clamped_models
+        ):
+            payload["reasoning_effort"] = "high"
         # OpenRouter can return an explicit high-level reasoning summary without
         # changing the model's reasoning budget. Keep the existing flat
         # reasoning_effort exactly as before and only request summary display;
@@ -840,6 +857,7 @@ class OpenAIChatCompletionsProvider:
         if request.model in self._omit_optional_tuning_models:
             payload = _without_optional_tuning(payload)
         tuning_retry = False
+        effort_retry = False
         first_invalid: Optional[ProviderError] = None
         headers = self._request_headers()
         request_started = time.monotonic()
@@ -910,8 +928,23 @@ class OpenAIChatCompletionsProvider:
                     # model next time instead of paying the rejection again.
                     if tuning_retry:
                         self._omit_optional_tuning_models.add(request.model)
+                    elif effort_retry:
+                        self._effort_clamped_models.add(request.model)
                     return
             except ProviderError as exc:
+                if (
+                    exc.kind is ProviderErrorKind.INVALID_REQUEST
+                    and not effort_retry
+                    and not tuning_retry
+                    and payload.get("reasoning_effort") in _ABOVE_HIGH_EFFORTS
+                ):
+                    # This gateway's effort scale may stop at "high". Retry
+                    # once there with everything else unchanged before
+                    # treating the optional tuning fields as the cause.
+                    first_invalid = exc
+                    effort_retry = True
+                    payload = {**payload, "reasoning_effort": "high"}
+                    continue
                 if (
                     exc.kind is ProviderErrorKind.INVALID_REQUEST
                     and not tuning_retry
@@ -924,7 +957,8 @@ class OpenAIChatCompletionsProvider:
                     # with the optional fields removed; the error body is never
                     # read, so nothing it echoes can reach a log. The reduced
                     # shape is remembered per model only after it succeeds.
-                    first_invalid = exc
+                    if first_invalid is None:
+                        first_invalid = exc
                     tuning_retry = True
                     payload = _without_optional_tuning(payload)
                     continue

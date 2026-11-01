@@ -298,6 +298,57 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         # The second request starts without the field: no failed attempt paid.
         self.assertNotIn("reasoning_effort", client.calls[2]["json"])
 
+    def test_rejected_level_above_high_retries_at_high_and_remembers_it(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "one"}, "finish_reason": "stop"}]}]
+                ),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "two"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="max")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            first = provider.complete(request)
+            second = provider.complete(request)
+
+        self.assertEqual((first.content, second.content), ("one", "two"))
+        efforts = [call["json"].get("reasoning_effort") for call in client.calls]
+        # One rejected attempt at max, then high; the next request starts at high.
+        self.assertEqual(efforts, ["max", "high", "high"])
+        # Only the level changed: the other tuning fields are still sent.
+        self.assertIn("temperature", client.calls[1]["json"])
+        self.assertEqual(client.calls[1]["json"]["max_tokens"], 123)
+
+    def test_level_above_high_drops_tuning_only_after_high_is_rejected_too(self) -> None:
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"),
+                error_response(400, "bad reasoning_effort"),
+                sse_response(
+                    [{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}]
+                ),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="max")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(request)
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(client.calls[0]["json"]["reasoning_effort"], "max")
+        self.assertEqual(client.calls[1]["json"]["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", client.calls[2]["json"])
+
     def test_reduced_retry_failing_again_reports_the_first_error(self) -> None:
         client = FakeClient(
             [
@@ -1223,14 +1274,25 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertNotIn(secret, str(raised.exception))
         self.assertNotIn(secret, raised.exception.safe_message)
 
-    def test_chat_completions_spells_the_effort_dial_flat_and_clamps_it(self) -> None:
-        cases = (("low", "low"), ("high", "high"), ("xhigh", "high"), ("max", "high"))
-        for asked, expected in cases:
-            with self.subTest(effort=asked):
+    def test_chat_completions_spells_the_effort_dial_flat_and_clamps_it_for_openai(self) -> None:
+        cases = (
+            ("https://api.openai.com/v1", "low", "low"),
+            ("https://api.openai.com/v1", "high", "high"),
+            ("https://api.openai.com/v1", "xhigh", "high"),
+            ("https://api.openai.com/v1", "max", "high"),
+            # Other gateways publish their own scale; W&B and DeepSeek accept
+            # the levels above high, so the chosen level is sent unchanged.
+            ("https://provider.example/v1", "low", "low"),
+            ("https://provider.example/v1", "high", "high"),
+            ("https://provider.example/v1", "xhigh", "xhigh"),
+            ("https://api.inference.wandb.ai/v1", "max", "max"),
+        )
+        for base_url, asked, expected in cases:
+            with self.subTest(base_url=base_url, effort=asked):
                 client = FakeClient(
                     [sse_response([{"id": "r", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])]
                 )
-                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                provider = OpenAIChatCompletionsProvider(base_url)
                 asked_request = replace(self.request(), reasoning_effort=asked)
                 with patch("karox.providers.httpx.Client", return_value=client):
                     provider.complete(asked_request)
