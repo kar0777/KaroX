@@ -18,8 +18,9 @@ Two measures, both generic and both off-switchable:
   stop the renderer, so it is not used. The cost is the same as a background
   tab: time-driven page code sees the gap as one long frame.
 * **Lower priority.** Headless browser processes started by this process run
-  below normal priority (Windows ``BELOW_NORMAL``, POSIX ``nice`` 10), so the
-  frames they do render never starve the user's interactive programs.
+  below normal priority (Windows ``BELOW_NORMAL``, POSIX ``nice`` 10; on Linux
+  every thread, since niceness there is per thread), so the frames they do
+  render never starve the user's interactive programs.
 
 ``KAROX_BROWSER_PARK=0`` and ``KAROX_BROWSER_LOW_PRIORITY=0`` restore the old
 behaviour; ``KAROX_BROWSER_PARK_AFTER`` sets the idle grace in seconds. Every
@@ -148,6 +149,32 @@ def _is_headless_root(proc: Any) -> bool:
         return False
 
 
+def _renice_threads(proc: Any) -> bool:
+    """Linux: give every thread of ``proc`` the browser niceness (never lower).
+
+    Linux niceness is per thread and ``setpriority`` on a pid moves only the
+    main thread. Measured on headless Chromium: after the process was reniced
+    its SwiftShader workers still ran at 0 and its compositor threads at -8,
+    so the threads doing the rendering were never demoted.
+    """
+
+    if sys.platform == "win32":
+        return False
+    try:
+        threads = proc.threads()
+    except Exception:
+        return False
+    changed = False
+    for thread in threads:
+        try:
+            if os.getpriority(os.PRIO_PROCESS, thread.id) < POSIX_NICENESS:
+                os.setpriority(os.PRIO_PROCESS, thread.id, POSIX_NICENESS)
+                changed = True
+        except (OSError, AttributeError):
+            pass
+    return changed
+
+
 def _demote(proc: Any, psutil: Any) -> bool:
     try:
         current = proc.nice()
@@ -161,12 +188,17 @@ def _demote(proc: Any, psutil: Any) -> bool:
                 return False
             proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
             return True
-        if current >= POSIX_NICENESS:
-            return False
-        proc.nice(POSIX_NICENESS)
-        return True
+        changed = False
+        if current < POSIX_NICENESS:
+            proc.nice(POSIX_NICENESS)
+            changed = True
     except Exception:
         return False
+    if sys.platform.startswith("linux"):
+        # Threads started after the last pass inherit their creator's
+        # niceness; each park repeats the pass and catches them.
+        changed = _renice_threads(proc) or changed
+    return changed
 
 
 def demote_headless_browsers(root_pid: Optional[int] = None) -> int:

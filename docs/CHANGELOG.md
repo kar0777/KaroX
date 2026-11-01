@@ -19,7 +19,10 @@
 - Headed, user-takeover, detached and CDP-attached browsers are never paused.
 - Headless Chromium processes started by KaroX (including the shared
   visual-check browser) run below normal priority: `BELOW_NORMAL` on Windows,
-  `nice` 10 elsewhere.
+  `nice` 10 elsewhere. On Linux niceness is per thread, so every thread is
+  moved: renicing only the main thread (as first written) left Chromium's
+  SwiftShader workers at 0 and its compositor threads at -8; now all 69 threads
+  of a measured headless browser run at 10.
 - Switches: `KAROX_BROWSER_PARK=0`, `KAROX_BROWSER_PARK_AFTER=<seconds>`
   (default 5, clamped to 0-3600), `KAROX_BROWSER_LOW_PRIORITY=0`. Every step is
   fail-open: a page that cannot be paused or re-prioritised works as before.

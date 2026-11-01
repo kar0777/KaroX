@@ -164,6 +164,41 @@ def test_only_headless_browser_trees_are_demoted(monkeypatch, platform) -> None:
     assert resources.demote_headless_browsers() == 0
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux niceness is per thread")
+def test_linux_demotion_moves_every_thread_of_a_real_process() -> None:
+    import os
+    import subprocess
+
+    psutil = pytest.importorskip("psutil")
+    if os.getpriority(os.PRIO_PROCESS, 0) >= resources.POSIX_NICENESS:
+        pytest.skip("this test process already runs at the browser niceness")
+    code = (
+        "import threading, time\n"
+        "for _ in range(3):\n"
+        "    threading.Thread(target=time.sleep, args=(60,), daemon=True).start()\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+        proc = psutil.Process(child.pid)
+        tids = [thread.id for thread in proc.threads()]
+        assert len(tids) >= 4
+        assert any(os.getpriority(os.PRIO_PROCESS, tid) < resources.POSIX_NICENESS for tid in tids)
+
+        assert resources._demote(proc, psutil) is True
+
+        # Not just the main thread: every worker moved.
+        assert all(
+            os.getpriority(os.PRIO_PROCESS, tid) >= resources.POSIX_NICENESS for tid in tids
+        )
+        assert resources._demote(proc, psutil) is False
+    finally:
+        child.kill()
+        child.wait()
+
+
 def test_demotion_never_raises(monkeypatch) -> None:
     module = types.ModuleType("psutil")
 
