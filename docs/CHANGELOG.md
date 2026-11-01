@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed — the last visual pass leaves room for the attested finish
+
+- Measured on `02fe003`, `3d-game` r1: the game passed the hidden grader 30/30
+  and the run ended unverified (`visual_budget_exhausted`) without a single
+  finish. Its last visual check (step 111) was a pass with no checks left; the
+  run then had the usual two calls, spent them on the change review the pass
+  asks for (a diff and a read) and was stopped. A web deliverable's finish
+  owes a requirement attestation, so two calls could not have been enough: the
+  first finish is refused for it, and the quotes need a fresh probe.
+- When the last real verdict is a pass that still covers the current bytes and
+  the finish owes an attestation, the window is now the one a refused finish
+  gets (8 steps). Otherwise it stays two calls. It is still bounded, and an
+  edit inside it leaves the run unprovable except by the closing look.
+
 ### Fixed — narrated quotes and the run's own harness pages no longer block coverage
 
 - Measured on `e9bcc6e`, `3d-game` r1: the game passed the hidden grader 30/30

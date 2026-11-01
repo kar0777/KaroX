@@ -2203,6 +2203,32 @@ def test_the_last_visual_verdict_grants_only_two_more_calls() -> None:
     assert kernel._visual_budget_hit is True
 
 
+def test_a_last_pass_that_owes_an_attestation_leaves_room_to_attest() -> None:
+    """The coverage window, not two calls, when the last pass still holds.
+
+    A measured 3D run (30/30 on the grader) got its last pass with no checks
+    left, spent both calls on the change review the pass asked for and was
+    stopped before its first finish. The window stays bounded.
+    """
+
+    class _Kernel:
+        _cancelled = False
+        _cancel_event = None
+        _visual_budget_hit = False
+        _visual_grace_until: Optional[int] = None
+        _step = 111
+
+    kernel = _Kernel()
+    EngineKernel.note_visual_last_check(kernel, attest=True)
+
+    assert kernel._visual_grace_until == 111 + 8
+    kernel._step = 113
+    assert EngineKernel._cancel_requested(kernel) is False
+    kernel._step = 111 + 9
+    assert EngineKernel._cancel_requested(kernel) is True
+    assert kernel._visual_budget_hit is True
+
+
 def test_a_limit_verdict_stops_only_a_run_without_a_current_pass() -> None:
     """A limit after a still-current pass is not the end of a provable run.
 
@@ -2443,6 +2469,53 @@ def test_a_web_finish_is_refused_until_every_requirement_is_attested(
     assert len(refusals) == 1
     assert "R1.1 [not attested] The score rises over time." in refusals[0]
     assert "R1.3 [not attested] Keep the page offline." in refusals[0]
+
+
+def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Two calls of grace are not enough when finish owes an attestation.
+
+    The last real verdict is a pass with no checks left. The model reviews its
+    change for two calls, as the pass asks, and then finishes: the first finish
+    is refused for the attestation, it probes, quotes the probe and is
+    accepted. With the two-call window the run stopped before that finish.
+    """
+
+    _web_game(repository)
+
+    def last_pass(page: Path, *, goal: str = "") -> dict:
+        return dict(_passing_checker(page, goal=goal), checks_left=0)
+
+    attestation = [
+        {"id": "R1.1", "status": "verified", "observed": "PASS clock :: score rises over time"},
+        {"id": "R1.2", "status": "verified", "observed": "PASS restart :: a fresh run begins"},
+        {"id": "R1.3", "status": "not_applicable", "observed": "the page makes no request at all"},
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response((_tool_call("c3", "repo_read_file", {"path": "game.js"}),)),
+            _response((_tool_call("c4", "git_diff", {}),)),
+            _response((_finish_call("c5", "done"),)),
+            _response((_tool_call("c6", "checks_run", {"argv": list(FACTS_CHECK)}),)),
+            _response(
+                (_tool_call("c7", "finish", {"answer": "done", "requirements": attestation}),)
+            ),
+        ],
+        verification=(FACTS_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=last_pass,
+        task=COVERAGE_TASK,
+        max_steps=12,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
 
 
 def test_a_web_finish_that_never_attests_ends_unverified(

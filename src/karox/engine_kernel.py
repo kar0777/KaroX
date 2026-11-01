@@ -848,16 +848,28 @@ class EngineKernel:
         if self._visual_grace_until is None:
             self._visual_grace_until = self._step + 1
 
-    def note_visual_last_check(self) -> None:
+    def note_visual_last_check(self, *, attest: bool = False) -> None:
         """Allow two more model calls after the last real visual verdict.
 
         The closing look can judge an edit made after the budget, but the model
         could also keep editing to the step limit (80 steps and 4.1M tokens in
         the karo-13 run). The grace window is the edit turn and the closing
         check; the next call stops the run honestly.
+
+        ``attest``: the verdict is a pass that still covers the bytes of a
+        deliverable whose finish owes a requirement attestation. Such a run is
+        provable without another edit, but its finish needs fresh probes and
+        the attestation, so it gets the window a refused finish gets. A
+        measured 3D run (30/30 on the grader) got its last pass with no checks
+        left, spent the two calls on the change review the pass asked for and
+        was stopped before its first finish. The window is still bounded, and
+        an edit inside it leaves the run unprovable: no further verdict can
+        arrive except the closing look.
         """
 
-        self._visual_grace_until = self._step + 1
+        self._visual_grace_until = self._step + (
+            _COVERAGE_GRACE_STEPS if attest else 1
+        )
 
     def note_coverage_refusal(self) -> None:
         """Keep the visual grace window open for the attestation finish owes.

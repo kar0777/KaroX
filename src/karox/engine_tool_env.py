@@ -467,7 +467,9 @@ class CoreToolEnvironment:
             elif result.data.get("checks_left") == 0:
                 # The last real verdict. Allow the edit turn and the closing
                 # look, then stop; otherwise the model edits to the step limit.
-                self._kernel.note_visual_last_check()
+                # A pass that still covers a deliverable owing an attestation
+                # also leaves room to probe and attest.
+                self._kernel.note_visual_last_check(attest=self._attestation_owed())
         return output
 
     def _visual_still_proven(self) -> bool:
@@ -477,6 +479,20 @@ class CoreToolEnvironment:
             record = self._core.sessions.load(self._session_id)
             return bool(completion_gate.visual_proven(self._core, record))
         except Exception:  # noqa: BLE001 - unknown means not proven
+            return False
+
+    def _attestation_owed(self) -> bool:
+        """A pass covers the current bytes and finish owes coverage; fail-closed."""
+
+        if self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT:
+            return False
+        try:
+            record = self._core.sessions.load(self._session_id)
+            return bool(
+                completion_gate.coverage_required(self._core, record)
+                and completion_gate.visual_proven(self._core, record)
+            )
+        except Exception:  # noqa: BLE001 - unknown means nothing is owed
             return False
 
     def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:
