@@ -1205,6 +1205,91 @@ def is_scratch_artifact(path: str | pathlib.Path) -> bool:
     return bool(_SCRATCH_ARTIFACT.search(pathlib.Path(name).stem))
 
 
+#: Files read when deciding whether a page the run created is referenced.
+#: Bounded so a large tree cannot stall the completion floor; past either bound
+#: nothing is marked diagnostic (the old, stricter behaviour).
+_REFERENCE_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv"})
+_REFERENCE_MAX_FILES = 500
+_REFERENCE_MAX_BYTES = 4_000_000
+
+
+def _reference_texts(root: pathlib.Path) -> Optional[dict[str, str]]:
+    """Lower-cased text of the repository's files by POSIX path, or ``None``."""
+
+    texts: dict[str, str] = {}
+    try:
+        for directory, subdirs, files in os.walk(root):
+            subdirs[:] = sorted(d for d in subdirs if d not in _REFERENCE_SKIP_DIRS)
+            for name in sorted(files):
+                path = pathlib.Path(directory) / name
+                if len(texts) >= _REFERENCE_MAX_FILES:
+                    return None
+                try:
+                    if path.stat().st_size > _REFERENCE_MAX_BYTES:
+                        continue
+                    text = path.read_bytes().decode("utf-8", errors="ignore").lower()
+                except OSError:
+                    continue
+                texts[path.relative_to(root).as_posix()] = text
+    except OSError:
+        return None
+    return texts
+
+
+def diagnostic_pages(
+    root: pathlib.Path, created: Iterable[str], named: str = ""
+) -> set[str]:
+    """Pages this run created that nothing delivers, as given in ``created``.
+
+    A run that must prove each requirement in the browser often writes its own
+    harness page -- a measured 3D run wrote ``selftest.html`` driving the game's
+    hooks and ``layoutprobe.html`` -- next to the real ``index.html``. Neither
+    name carries a probe token, so every edit to the harness counted as a
+    deliverable edit: it made all earlier evidence stale and spent the visual
+    budget re-proving bytes the user never opens.
+
+    A created page stays part of the deliverable when it is the conventional
+    entry page, when ``named`` (the task text) names it, or when any other file
+    of the repository refers to it by file name, directly or through another
+    such page. Pages that existed before the run are never diagnostic, and when
+    no other entry page exists the created pages are the deliverable. Bounded
+    and fail-closed: an unreadable or very large tree marks nothing.
+    """
+
+    named_lower = str(named or "").lower()
+    candidates: dict[str, str] = {}
+    for item in created:
+        relative = str(item).replace("\\", "/")
+        name = pathlib.PurePosixPath(relative).name.lower()
+        if pathlib.PurePosixPath(name).suffix not in {".html", ".htm"}:
+            continue
+        if name in {"index.html", "index.htm"} or is_scratch_page(name):
+            continue
+        if name in named_lower:
+            continue
+        candidates[pathlib.PurePosixPath(relative).as_posix()] = name
+    if not candidates:
+        return set()
+    if not [page for page in default_pages(root)
+            if page.relative_to(root).as_posix() not in candidates]:
+        return set()
+    texts = _reference_texts(root)
+    if texts is None:
+        return set()
+    delivered = {path: text for path, text in texts.items() if path not in candidates}
+    referenced: set[str] = set()
+    sources = list(delivered.values())
+    while sources:
+        found = {
+            path
+            for path, name in candidates.items()
+            if path not in referenced and any(name in text for text in sources)
+        }
+        referenced |= found
+        sources = [texts.get(path, "") for path in found]
+    return set(candidates) - referenced
+
+
 def default_pages(root: pathlib.Path) -> list[pathlib.Path]:
     """Root-level deliverable pages, with the conventional entry page first.
 

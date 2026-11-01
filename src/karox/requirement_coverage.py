@@ -16,7 +16,10 @@ attestation the runtime checks deterministically, with no provider call:
   ``unmet``.
 * A quote is matched after normalization (case, punctuation and spacing), so
   ``score: 37`` read back from ``{"score":37}`` still matches, while text the
-  model never received does not.
+  model never received does not. A longer quote passes when it carries a run
+  of ``COPIED_RUN_TOKENS`` consecutive tokens of one fresh result: models
+  narrate around what they copy ("PASS lane-switch -- lane=1 / PASS jump ..."),
+  and a measured run lost every attestation to the narration alone.
 
 The attestation is read from the durable transcript -- the finish call's own
 arguments -- so it needs no new session state, survives resume, and an edit
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .requirements import canonical
 from .web_check import is_scratch_artifact
@@ -55,6 +58,11 @@ OBSERVATION_TOOLS = frozenset(
 #: characters after normalization. ``true`` alone matches almost anything.
 _MIN_QUOTE_TOKENS = 2
 _MIN_QUOTE_CHARS = 6
+#: A quote of at least this many tokens is discharged by this many consecutive
+#: tokens copied from one fresh result; a shorter quote must match whole. In
+#: the measured run 37 of 37 honest attestations carried such a run while only
+#: 14 matched whole; text the model never received carries none.
+COPIED_RUN_TOKENS = 4
 _MIN_REASON_WORDS = 3
 _CLAUSE_DISPLAY = 160
 
@@ -236,11 +244,19 @@ def _changed_paths(data: Mapping[str, Any]) -> List[str]:
     return paths
 
 
-def last_deliverable_edit(history: Sequence[Mapping[str, Any]]) -> int:
+def _is_deliverable(path: str, diagnostic: Collection[str]) -> bool:
+    return not is_scratch_artifact(path) and path.replace("\\", "/") not in diagnostic
+
+
+def last_deliverable_edit(
+    history: Sequence[Mapping[str, Any]], diagnostic: Collection[str] = ()
+) -> int:
     """Index of the last successful edit of a non-scratch file, or -1.
 
     A probe page written or deleted after the last real edit does not change
-    what the user receives, so it does not make earlier observations stale.
+    what the user receives, so it does not make earlier observations stale;
+    neither does an edit of a ``diagnostic`` page (the run's own unreferenced
+    harness, see ``web_check.diagnostic_pages``).
     """
 
     last = -1
@@ -252,18 +268,21 @@ def last_deliverable_edit(history: Sequence[Mapping[str, Any]]) -> int:
         if not result.get("ok") or not isinstance(data, Mapping) or data.get("changed") is not True:
             continue
         paths = _changed_paths(data)
-        if not paths or any(not is_scratch_artifact(path) for path in paths):
+        if not paths or any(_is_deliverable(path, diagnostic) for path in paths):
             last = index
     return last
 
 
 def fresh_observations(
-    history: Sequence[Mapping[str, Any]], *, before: Optional[int] = None
+    history: Sequence[Mapping[str, Any]],
+    *,
+    before: Optional[int] = None,
+    diagnostic: Collection[str] = (),
 ) -> List[str]:
     """Normalized behavioural results received after the last deliverable edit."""
 
     end = len(history) if before is None or before < 0 else before
-    start = last_deliverable_edit(history[:end]) + 1
+    start = last_deliverable_edit(history[:end], diagnostic) + 1
     seen: List[str] = []
     for entry in history[start:end]:
         if entry.get("role") != "tool" or entry.get("core_name") not in OBSERVATION_TOOLS:
@@ -280,14 +299,40 @@ def _display(text: str) -> str:
     return text if len(text) <= _CLAUSE_DISPLAY else text[: _CLAUSE_DISPLAY - 3] + "..."
 
 
+def _copied_runs(observations: Sequence[str]) -> set[str]:
+    """Every run of ``COPIED_RUN_TOKENS`` consecutive tokens in the observations."""
+
+    runs: set[str] = set()
+    for seen in observations:
+        tokens = seen.split()
+        for start in range(len(tokens) - COPIED_RUN_TOKENS + 1):
+            runs.add(" ".join(tokens[start : start + COPIED_RUN_TOKENS]))
+    return runs
+
+
+def _quoted(quote: str, observations: Sequence[str], runs: set[str]) -> bool:
+    if any(f" {quote} " in seen for seen in observations):
+        return True
+    tokens = quote.split()
+    return any(
+        " ".join(tokens[start : start + COPIED_RUN_TOKENS]) in runs
+        for start in range(len(tokens) - COPIED_RUN_TOKENS + 1)
+    )
+
+
 def judge(
-    record: Any, attestation: Any = None, *, use_transcript: bool = True
+    record: Any,
+    attestation: Any = None,
+    *,
+    use_transcript: bool = True,
+    diagnostic: Collection[str] = (),
 ) -> List[Tuple[str, str, str]]:
     """Every clause the attestation does not discharge: ``(id, text, problem)``.
 
     With ``use_transcript`` the attestation is the latest finish call in the
     durable transcript and quotes must predate it; otherwise ``attestation``
     is the call being made now and every result so far is available to it.
+    ``diagnostic`` names pages whose edits do not make observations stale.
     """
 
     checklist = clauses(getattr(record, "requirements", None) or ())
@@ -299,11 +344,12 @@ def judge(
         index, attestation = _finish_call_index(history)
         if index < 0:
             return [(cid, text, "not attested") for cid, text in checklist]
-        if last_deliverable_edit(history) > index:
+        if last_deliverable_edit(history, diagnostic) > index:
             return [(cid, text, "attested before the last edit") for cid, text in checklist]
         before = index
     attested = parse_attestation(attestation)
-    observations = fresh_observations(history, before=before)
+    observations = fresh_observations(history, before=before, diagnostic=diagnostic)
+    runs = _copied_runs(observations)
     problems: List[Tuple[str, str, str]] = []
     for cid, text in checklist:
         item = attested.get(cid)
@@ -315,7 +361,7 @@ def judge(
             quote = normalize(observed)
             if len(quote.split()) < _MIN_QUOTE_TOKENS or len(quote) < _MIN_QUOTE_CHARS:
                 problems.append((cid, text, "observed text too short to identify a result"))
-            elif not any(f" {quote} " in seen for seen in observations):
+            elif not _quoted(quote, observations, runs):
                 problems.append(
                     (
                         cid,
@@ -333,10 +379,10 @@ def judge(
     return problems
 
 
-def floor_reasons(record: Any) -> List[str]:
+def floor_reasons(record: Any, *, diagnostic: Collection[str] = ()) -> List[str]:
     """The completion-floor form: one reason per open clause, or one summary."""
 
-    problems = judge(record)
+    problems = judge(record, diagnostic=diagnostic)
     if not problems:
         return []
     if all(problem == "not attested" for _, _, problem in problems):
@@ -356,6 +402,9 @@ def refusal_message(problems: Sequence[Tuple[str, str, str]]) -> str:
         '{"id": "<ID>", "status": "verified", "observed": "<text copied exactly '
         "from a browser_command, checks_run or visual_check result you received "
         'after your last edit>"}',
+        "The copy must contain at least four consecutive words of one result (a "
+        "shorter result may be quoted whole); words you add around it are not "
+        "evidence.",
         'Use "not_applicable" with the reason in "observed" only for a line that '
         'asks nothing of the deliverable (a process note or context), and "unmet" '
         "for a requirement that is not met. Exercise or fix a requirement before "

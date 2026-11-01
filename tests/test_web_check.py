@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from karox.web_check import check_page, default_pages, is_scratch_page
+from karox.web_check import check_page, default_pages, diagnostic_pages, is_scratch_page
 
 
 def _page(tmp_path: Path, body: str) -> Path:
@@ -95,3 +95,45 @@ def test_scratch_probes_are_not_deliverable_pages(tmp_path: Path) -> None:
         "index.html",
         "about.html",
     ]
+
+def test_a_created_page_nothing_delivers_is_diagnostic(tmp_path: Path) -> None:
+    """A run's own harness page is not part of what the user opens.
+
+    A measured 3D run wrote ``selftest.html`` (driving the game's hooks) and
+    ``layoutprobe.html`` next to ``index.html``. Neither name has a probe
+    token, so each harness edit made the game's proof stale.
+    """
+
+    (tmp_path / "index.html").write_text(
+        '<script type="module" src="app.js"></script><a href="help.html">help</a>',
+        encoding="utf-8",
+    )
+    (tmp_path / "app.js").write_text("import './hud.js';", encoding="utf-8")
+    (tmp_path / "help.html").write_text('<a href="faq.html">faq</a>', encoding="utf-8")
+    (tmp_path / "faq.html").write_text("<p>faq</p>", encoding="utf-8")
+    (tmp_path / "selftest.html").write_text(
+        '<script type="module">import "./app.js"; // see layoutprobe.html</script>',
+        encoding="utf-8",
+    )
+    (tmp_path / "layoutprobe.html").write_text("<p>layout</p>", encoding="utf-8")
+    (tmp_path / "settings.html").write_text("<p>settings</p>", encoding="utf-8")
+    created = ["selftest.html", "layoutprobe.html", "help.html", "faq.html", "settings.html", "app.js"]
+
+    diagnostic = diagnostic_pages(tmp_path, created, "Add a settings.html page to the game.")
+
+    # Linked from the deliverable (directly or through a linked page) or named
+    # by the task: delivered. Referenced only by another harness page: not.
+    assert diagnostic == {"selftest.html", "layoutprobe.html"}
+
+
+def test_diagnostic_pages_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "game.html").write_text("<canvas></canvas>", encoding="utf-8")
+    (tmp_path / "selftest.html").write_text("<p>harness</p>", encoding="utf-8")
+    # The created pages are the only pages: they are the deliverable.
+    assert diagnostic_pages(tmp_path, ["game.html", "selftest.html"]) == set()
+    # A page that existed before the run is never the run's instrument.
+    (tmp_path / "index.html").write_text("<canvas></canvas>", encoding="utf-8")
+    assert diagnostic_pages(tmp_path, ["index.html"]) == set()
+    assert diagnostic_pages(tmp_path, []) == set()
+    # A missing repository marks nothing.
+    assert diagnostic_pages(tmp_path / "missing", ["selftest.html"]) == set()

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fixed — narrated quotes and the run's own harness pages no longer block coverage
+
+- Measured on `e9bcc6e`, `3d-game` r1: the game passed the hidden grader 30/30
+  and the run still ended unverified (`visual_budget_exhausted`). Four finishes
+  were refused: the model quoted fresh results with its own words around them
+  ("PASS lane-switch — lane=1 / PASS jump ..."), and only 14 of 37 honest
+  attestations matched whole.
+- A quote of four or more tokens now passes when it contains four consecutive
+  tokens of one fresh behavioural result; shorter quotes still match whole and
+  text the model never received still fails. Replayed on r1's transcript, the
+  third finish (step 97) has 0 open requirements instead of 23. The refusal
+  message states the rule.
+- The run had also written `selftest.html`, a harness driving the game's hooks.
+  Its name has no probe token, so each harness edit made every earlier
+  observation and the visual pass stale and spent the visual budget again. A
+  page the run created is now diagnostic when it is not `index.html`, not named
+  by the task and not referred to by any other file (directly or through a
+  referred page); its edits neither stale the deliverable's identity nor its
+  attestations, and it owes no proof. Pre-existing pages are never diagnostic,
+  the created pages are the deliverable when there is no other entry page, and
+  an unreadable or large tree (over 500 files) marks nothing.
+
 ### Changed — idle headless pages stop drawing between browser actions
 
 - A page that draws every frame (a three.js scene, a canvas game) kept a

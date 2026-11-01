@@ -241,3 +241,53 @@ def test_coverage_is_owed_only_by_a_web_deliverable_with_a_checklist(tmp_path: P
     legacy = _record(TASK, [], changed=("app.js",))
     legacy.requirements = []
     assert not completion_gate.coverage_required(core, legacy)
+
+
+def test_narration_around_a_copied_run_still_discharges() -> None:
+    """Four consecutive tokens of one fresh result back a quote; words around them do not.
+
+    In a measured run the model wrote quotes such as ``PASS restart -- the new
+    run starts from zero / PASS jump ...``: every one carried text copied from
+    a fresh result, only 14 of 37 matched whole, and every finish was refused.
+    """
+
+    result = '{"text": "PASS restart :: status=running score=0\\nPASS clock ticks every second"}'
+    narrated = [
+        {"id": "R1.1", "status": "verified", "observed": "selftest says PASS clock ticks every second / all good"},
+        {"id": "R1.2", "status": "verified",
+         "observed": "PASS restart :: status=running score=0 -- the new run starts from zero"},
+        {"id": "R1.3", "status": "not_applicable", "observed": "no network is used anywhere"},
+    ]
+    record = _record(TASK, [_edit("app.js"), _seen(result), _finish(narrated)])
+    assert coverage.judge(record) == []
+
+    # Three copied tokens are not a copy, and a run split across two results
+    # does not join them.
+    weak = [
+        {"id": "R1.1", "status": "verified", "observed": "we saw PASS clock ticks happily"},
+        {"id": "R1.2", "status": "verified", "observed": "running score 0 PASS clock"},
+        {"id": "R1.3", "status": "not_applicable", "observed": "no network is used anywhere"},
+    ]
+    record = _record(TASK, [_edit("app.js"), _seen("PASS clock ticks"), _seen("status=running score=0"),
+                            _finish(weak)])
+    problems = {cid: problem for cid, _, problem in coverage.judge(record)}
+    assert set(problems) == {"R1.1", "R1.2"}
+    assert "four consecutive words" in coverage.refusal_message(coverage.judge(record))
+
+
+def test_a_diagnostic_page_edit_does_not_make_observations_stale() -> None:
+    attestation = [
+        {"id": cid, "status": "verified", "observed": "PASS all three facts"}
+        for cid in ("R1.1", "R1.2", "R1.3")
+    ]
+    history = [
+        _edit("app.js"),
+        _seen("PASS all three facts"),
+        _finish(attestation),
+        _edit("selftest.html"),
+    ]
+    record = _record(TASK, history)
+    # Unknown to be the run's own harness: the edit reopens every clause.
+    assert [p for _, _, p in coverage.judge(record)] == ["attested before the last edit"] * 3
+    assert coverage.judge(record, diagnostic={"selftest.html"}) == []
+    assert coverage.floor_reasons(record, diagnostic={"selftest.html"}) == []

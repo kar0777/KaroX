@@ -521,7 +521,12 @@ class CoreToolEnvironment:
                 if isinstance(arguments, dict)
                 else None
             )
-            return requirement_coverage.judge(record, attestation, use_transcript=False)
+            return requirement_coverage.judge(
+                record,
+                attestation,
+                use_transcript=False,
+                diagnostic=completion_gate.diagnostic_paths(self._core, record),
+            )
         except Exception:  # noqa: BLE001 - the floor still judges the submission
             return []
 

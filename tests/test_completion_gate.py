@@ -230,6 +230,25 @@ def test_identity_ignores_scratch_cleanup(tmp_path: Path) -> None:
     assert "index.html" in before["files"]
 
 
+def test_identity_ignores_the_runs_own_unreferenced_harness_page(tmp_path: Path) -> None:
+    """Editing ``selftest.html`` that nothing links must not stale the game's proof."""
+
+    record, core = _probe_record(tmp_path)
+    (tmp_path / "selftest.html").write_text("<p>PASS 1</p>", encoding="utf-8")
+    record.changed_files.append("selftest.html")
+    record.created_files = ["selftest.html"]
+
+    before = completion_gate.identity(core, record)
+    (tmp_path / "selftest.html").write_text("<p>PASS 1</p><p>PASS 2</p>", encoding="utf-8")
+    after = completion_gate.identity(core, record)
+
+    assert before == after and "selftest.html" not in before["files"]
+    # Once the deliverable links it, it is delivered and bound again.
+    (tmp_path / "index.html").write_text('<a href="selftest.html">tests</a>', encoding="utf-8")
+    linked = completion_gate.identity(core, record)
+    assert "selftest.html" in linked["files"]
+
+
 def test_a_later_rejudged_fail_does_not_erase_a_pass_on_same_bytes(
     tmp_path: Path,
 ) -> None:

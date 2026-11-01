@@ -15,7 +15,7 @@ from typing import Any, Optional, Sequence
 from .auto_verify import _select_checks
 from . import requirement_coverage
 from .requirements import ledger_digest
-from .web_check import default_pages, is_scratch_artifact, is_scratch_page
+from .web_check import default_pages, diagnostic_pages, is_scratch_artifact, is_scratch_page
 
 _TEXT = {".md", ".rst"}
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -124,6 +124,28 @@ _TEST_EXECUTION_IN_MATCH = re.compile(
 )
 
 
+def diagnostic_paths(core: Any, record: Any) -> frozenset[str]:
+    """Created pages that nothing delivers (``web_check.diagnostic_pages``).
+
+    Like a ``_probe.html``, such a page is the run's own instrument: editing it
+    changes nothing the user opens, so it neither owes proof nor makes the
+    deliverable's proof stale. Fail-closed: any error marks nothing.
+    """
+
+    try:
+        created = list(getattr(record, "created_files", None) or ())
+        if not created:
+            return frozenset()
+        named = " ".join([str(record.task or ""), *_active_requirement_texts(record)])
+        return frozenset(diagnostic_pages(Path(core.repository), created, named))
+    except Exception:  # noqa: BLE001 - the stricter answer is always safe
+        return frozenset()
+
+
+def _deliverable(path: str, diagnostic: frozenset[str]) -> bool:
+    return not is_scratch_artifact(path) and Path(path).as_posix() not in diagnostic
+
+
 def _active_requirement_texts(record: Any) -> list[str]:
     entries = [
         entry
@@ -215,7 +237,8 @@ def coverage_required(core: Any, record: Any) -> bool:
 
     if not getattr(record, "requirements", None):
         return False
-    deliverables = [p for p in record.changed_files if not is_scratch_artifact(p)]
+    diagnostic = diagnostic_paths(core, record)
+    deliverables = [p for p in record.changed_files if _deliverable(p, diagnostic)]
     if not any(Path(p).suffix.lower() in _VISUAL_ASSETS for p in deliverables):
         return False
     if all(is_doc(p) for p in deliverables) and not _BEHAVIOR.search(record.task):
@@ -458,9 +481,11 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
     Missing files have a stable deletion marker. Unreadable/outside paths fail
     closed. Checks also compare before/after identities to reject concurrent edits.
     Scratch artifacts are not task inputs: deleting a probe after a passing
-    visual check must not make the deliverable's proof stale.
+    visual check must not make the deliverable's proof stale. Neither are the
+    run's own unreferenced harness pages (``diagnostic_paths``).
     """
-    paths = {p for p in record.changed_files if not is_scratch_artifact(p)}
+    diagnostic = diagnostic_paths(core, record)
+    paths = {p for p in record.changed_files if _deliverable(p, diagnostic)}
     for requirement in record.requirements:
         if (
             not isinstance(requirement, dict)
@@ -471,14 +496,14 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
         if (
             isinstance(source_path, str)
             and source_path
-            and not is_scratch_artifact(source_path)
+            and _deliverable(source_path, diagnostic)
         ):
             paths.add(source_path)
     for entry in record.provider_history:
         if entry.get("core_name") in {"repo.read_file", "repo.read_lines"}:
             result = entry.get("result") or {}
             path = (result.get("data") or {}).get("path")
-            if result.get("ok") and isinstance(path, str) and not is_scratch_artifact(path):
+            if result.get("ok") and isinstance(path, str) and _deliverable(path, diagnostic):
                 paths.add(path)
     files = {}
     for relative in sorted(paths):
@@ -751,8 +776,9 @@ def floor(core: Any, record: Any) -> list[str]:
             if classes & {"tests", "structural"} and tuple(argv) not in latest:
                 reasons.append("missing current check: " + " ".join(argv))
         if "structural" not in passed_classes:
+            diagnostic = diagnostic_paths(core, record)
             for relative in record.changed_files:
-                if is_scratch_artifact(relative):
+                if not _deliverable(relative, diagnostic):
                     # A diagnostic file is not a deliverable and owes no
                     # structural proof of its own.
                     continue
@@ -777,7 +803,11 @@ def floor(core: Any, record: Any) -> list[str]:
     if coverage_required(core, record):
         # Last, so the repair turn reads the failed checks first: a fix
         # changes the bytes, and every attestation quote must then be renewed.
-        reasons.extend(requirement_coverage.floor_reasons(record))
+        reasons.extend(
+            requirement_coverage.floor_reasons(
+                record, diagnostic=diagnostic_paths(core, record)
+            )
+        )
     return list(dict.fromkeys(reasons))
 
 
