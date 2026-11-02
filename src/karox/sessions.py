@@ -82,11 +82,56 @@ def _checksum(value: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+#: ``os.kill(pid, 0)`` is not an existence probe on Windows. Signal 0 is
+#: ``CTRL_C_EVENT`` there, so CPython calls ``GenerateConsoleCtrlEvent`` with
+#: the PID as a console process-group id: a live owner that is not a group
+#: leader in this console answers ERROR_INVALID_PARAMETER (the "spurious
+#: WinError 87"), a dead one answers the same, and a call that does reach a
+#: group delivers a console control event instead of a query. The probe could
+#: therefore never prove an owner dead on Windows, and the stale-lease recovery
+#: below never ran there. Windows asks the process object instead.
+_IS_WINDOWS = os.name == "nt"
+
+
+def _windows_process_alive(pid: int) -> bool:
+    """Query a Windows PID without sending it anything; ambiguity means alive."""
+
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_exit_code.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ACCESS_DENIED cannot prove death; INVALID_PARAMETER is the normal
+        # answer for a PID that no longer exists.
+        return ctypes.get_last_error() == 5  # type: ignore[attr-defined]
+    try:
+        exit_code = ctypes.c_uint32()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259  # STILL_ACTIVE
+    finally:
+        close_handle(handle)
+
+
 def _process_is_running(pid: int) -> bool:
     """Conservatively report whether a local PID can still own a lease."""
 
     if pid <= 0:
         return False
+    if _IS_WINDOWS:
+        try:
+            return _windows_process_alive(pid)
+        except Exception:  # noqa: BLE001 - an unanswerable probe keeps the owner
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

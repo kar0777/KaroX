@@ -194,6 +194,42 @@ class SessionStoreTests(unittest.TestCase):
         with patch("os.kill", spurious_probe_error):
             self.assertFalse(_lease_owner_is_provably_dead(payload))
 
+    def test_windows_probe_asks_the_process_object_not_the_console(self) -> None:
+        """On Windows signal 0 is CTRL_C_EVENT; the probe must never send it.
+
+        ``os.kill(pid, 0)`` there becomes GenerateConsoleCtrlEvent, which can
+        neither prove an owner dead (stale-lease recovery never ran) nor stay
+        silent toward a console process group.
+        """
+
+        import karox.sessions as sessions_module
+
+        self.store.acquire("sample", "owner", ttl_seconds=30)
+        payload = json.loads(
+            self.store.lease_path("sample").read_text(encoding="utf-8")
+        )
+
+        def no_console_signal(pid: int, sig: int) -> None:
+            raise AssertionError("os.kill must not be used as a Windows probe")
+
+        with patch.object(sessions_module, "_IS_WINDOWS", True), patch(
+            "os.kill", no_console_signal
+        ):
+            with patch.object(
+                sessions_module, "_windows_process_alive", return_value=False
+            ):
+                self.assertTrue(_lease_owner_is_provably_dead(payload))
+            with patch.object(
+                sessions_module, "_windows_process_alive", return_value=True
+            ):
+                self.assertFalse(_lease_owner_is_provably_dead(payload))
+            with patch.object(
+                sessions_module,
+                "_windows_process_alive",
+                side_effect=OSError(87, "The parameter is incorrect"),
+            ):
+                self.assertFalse(_lease_owner_is_provably_dead(payload))
+
     def test_a_malformed_lease_owner_is_never_recovered_early(self) -> None:
         payload: dict[str, Any] = {"hostname": "elsewhere", "pid": 1}
         self.assertFalse(_lease_owner_is_provably_dead(payload))
