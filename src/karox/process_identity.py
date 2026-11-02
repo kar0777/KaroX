@@ -244,7 +244,30 @@ def process_is_running(pid: int) -> bool:
         return True
     except OSError:
         return True
-    return True
+    return not _posix_process_is_defunct(pid)
+
+
+def _posix_process_is_defunct(pid: int) -> bool:
+    """Return whether a signalable PID is a zombie that no longer executes.
+
+    ``kill(pid, 0)`` succeeds for a child that exited but was not reaped yet,
+    so a browser or service this process launched and then terminated still
+    looked alive until its parent waited on it. Linux reports the state in
+    ``/proc``; elsewhere the signal probe stays the answer.
+    """
+
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            raw = handle.read(4096)
+    except OSError:
+        return False
+    # The command name is parenthesised and may itself contain ") ", so the
+    # state is the first field after the last closing parenthesis.
+    _, separator, rest = raw.rpartition(b")")
+    if not separator:
+        return False
+    fields = rest.split()
+    return bool(fields) and fields[0] in (b"Z", b"X")
 
 
 CreateTimeReader = Callable[[int], Optional[int]]

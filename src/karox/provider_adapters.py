@@ -109,9 +109,11 @@ class _StreamingAdapter:
     MAX_SSE_LINE_CHARS = 1_048_576
     # Tiny reasoning/tool deltas can legitimately produce far more than 10k
     # frames. The byte ceiling below is the authoritative memory/network bound;
-    # this count only rejects pathological event fragmentation.
-    MAX_SSE_EVENTS = 100_000
-    MAX_SSE_TOTAL_CHARS = 16_777_216
+    # this count only rejects pathological event fragmentation. Both are sized
+    # for a maximal reasoning reply (one ~250-byte frame per token at a 384k
+    # output cap), the same bounds as the Chat Completions transport.
+    MAX_SSE_EVENTS = 1_000_000
+    MAX_SSE_TOTAL_CHARS = 201_326_592
 
     def __init__(
         self,

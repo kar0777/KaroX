@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 # The vendored engine prints a startup banner unless told not to; a product
@@ -31,6 +33,8 @@ from .providers import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ProviderError,
+    ProviderErrorKind,
     ProviderTool,
     ReasoningBlock,
     ToolCall,
@@ -38,6 +42,71 @@ from .providers import (
 )
 
 logger = logging.getLogger("karox.engine_provider_bridge")
+
+
+#: Failures that say "not now" rather than "never": a 429 concurrency or quota
+#: refusal, a 5xx, and a transport failure (refused connection, a stream the
+#: gateway cut, a read that hung past its deadline). Before this, one of them
+#: ended the whole run as ``provider_error:*`` -- four arena runs died that way
+#: with minutes of budget left -- because the direct ``--model/--base-url``
+#: route has no router behind it to retry. A rejected payload, an
+#: authentication failure or a missing model repeat identically and still end
+#: the run at once.
+_RETRYABLE_PROVIDER_ERRORS = frozenset(
+    {
+        ProviderErrorKind.RATE_LIMIT,
+        ProviderErrorKind.PROVIDER_INTERNAL,
+        ProviderErrorKind.TRANSPORT,
+    }
+)
+#: Retries per model call. With the delays below a call waits at most about
+#: two minutes in total before the failure is reported.
+_PROVIDER_RETRY_ATTEMPTS = 6
+_PROVIDER_RETRY_BASE_SECONDS = 2.0
+_PROVIDER_RETRY_MAX_SECONDS = 30.0
+#: A retry is only worth sending when the call still has this long to run
+#: after the wait; otherwise the run is better served by reporting the failure
+#: while it can still record its proof.
+_PROVIDER_RETRY_MIN_WINDOW_SECONDS = 20.0
+
+
+def provider_retry_delay(
+    error: BaseException,
+    attempt: int,
+    window_seconds: float,
+    *,
+    jitter: float = 0.0,
+) -> Optional[float]:
+    """Return the wait before re-sending one failed model call, or None.
+
+    ``attempt`` counts the retries already made plus one. A provider's
+    ``Retry-After`` is the starting point when it sent one, capped so a long
+    quota reset cannot park the run; otherwise the wait doubles from
+    ``_PROVIDER_RETRY_BASE_SECONDS``. Jitter is only ever added, so parallel
+    runs that were refused together do not return together.
+    """
+
+    if not isinstance(error, ProviderError):
+        return None
+    if error.kind not in _RETRYABLE_PROVIDER_ERRORS:
+        return None
+    if attempt > _PROVIDER_RETRY_ATTEMPTS:
+        return None
+    asked = error.retry_after
+    if (
+        isinstance(asked, (int, float))
+        and not isinstance(asked, bool)
+        and asked == asked
+        and asked > 0
+    ):
+        base = float(asked)
+    else:
+        base = _PROVIDER_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+    spread = min(max(float(jitter), 0.0), 1.0)
+    delay = min(_PROVIDER_RETRY_MAX_SECONDS, base) * (1.0 + 0.25 * spread)
+    if delay + _PROVIDER_RETRY_MIN_WINDOW_SECONDS > float(window_seconds):
+        return None
+    return delay
 
 
 #: The provider-safe name of the engine's submission tool. It is not a Core
@@ -259,12 +328,18 @@ class EngineProviderModel:
         max_output_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
         event: Optional[Callable[..., None]] = None,
-        deadline_seconds: float = 120.0,
+        deadline_seconds: float | Callable[[], float] = 120.0,
         images: Tuple[ImageAttachment, ...] = (),
         format_error_template: str = _FORMAT_ERROR_TEMPLATE,
         known_names: Optional[Set[str]] = None,
+        sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         self._provider = provider
+        self._sleep = sleep
+        self._jitter = jitter
+        #: Retried provider failures of this run, newest last (bounded).
+        self.provider_retries: List[Dict[str, Any]] = []
         self._model_id = model_id
         self._tools = tools
         # What the model may call: every resolvable Core alias plus finish,
@@ -294,7 +369,7 @@ class EngineProviderModel:
             tools=self._tools,
             max_output_tokens=self._max_output_tokens,
             reasoning_effort=self._reasoning_effort,
-            deadline_seconds=self._deadline_seconds,
+            deadline_seconds=self._current_deadline(),
         )
         response = self._call(request)
         if response.budget_exceeded:
@@ -383,12 +458,16 @@ class EngineProviderModel:
                     _elide_applied_arguments(call, completed=completed, keep=keep)
                     for call in _engine_tool_calls(entry)
                 )
+                replayed = entry.get("reasoning_content")
                 converted.append(
                     ModelMessage(
                         "assistant",
                         text,
                         tool_calls=calls,
                         reasoning_blocks=_engine_reasoning_blocks(entry),
+                        reasoning_text=(
+                            replayed if isinstance(replayed, str) and replayed else None
+                        ),
                     )
                 )
                 continue
@@ -407,7 +486,67 @@ class EngineProviderModel:
             converted.append(ModelMessage("user", ""))
         return tuple(converted)
 
+    def _current_deadline(self) -> float:
+        """The time one model call may take, read when the call starts.
+
+        The kernel passes a callable so the cap shrinks with the time the run
+        has left; a fixed number taken at construction let a call started at
+        the end of the budget run its full cap past the run's own deadline.
+        """
+
+        value = self._deadline_seconds
+        if callable(value):
+            value = value()
+        # ModelRequest accepts 0.05..3600 s; clamp here rather than fail the
+        # request construction for a caller with a long fixed deadline.
+        return min(3600.0, max(0.05, float(value)))
+
     def _call(self, request: ModelRequest) -> ModelResponse:
+        attempt = 0
+        while True:
+            try:
+                return self._call_once(request)
+            except ProviderError as exc:
+                attempt += 1
+                window = self._current_deadline()
+                try:
+                    spread = float(self._jitter())
+                except Exception:
+                    spread = 0.0
+                delay = provider_retry_delay(exc, attempt, window, jitter=spread)
+                if delay is None:
+                    raise
+                record = {
+                    "attempt": attempt,
+                    "kind": exc.kind.value,
+                    "status_code": exc.status_code,
+                    "delay_seconds": round(delay, 2),
+                    "error": str(exc)[:200],
+                }
+                self.provider_retries = (self.provider_retries + [record])[-50:]
+                logger.warning(
+                    "model call failed (%s); retry %d in %.1fs",
+                    exc.kind.value,
+                    attempt,
+                    delay,
+                )
+                if self._event is not None:
+                    try:
+                        self._event(
+                            "warning",
+                            reason="provider_retry",
+                            detail=(
+                                f"model call failed ({exc.kind.value}"
+                                + (f", HTTP {exc.status_code}" if exc.status_code else "")
+                                + f"); retry {attempt} in {delay:.1f}s"
+                            ),
+                        )
+                    except Exception:
+                        logger.debug("dropping one provider_retry event", exc_info=True)
+                self._sleep(delay)
+                request = replace(request, deadline_seconds=self._current_deadline())
+
+    def _call_once(self, request: ModelRequest) -> ModelResponse:
         stream = getattr(self._provider, "stream", None)
         if callable(stream):
             try:
@@ -579,6 +718,11 @@ class EngineProviderModel:
                 }
                 for block in response.reasoning_blocks
             ]
+        elif response.reasoning:
+            # Flat deliberation from a Chat Completions gateway. Signed blocks
+            # above carry their own replay; this is the unsigned form that a
+            # thinking model expects back on the turns of its tool chain.
+            message["reasoning_content"] = response.reasoning
         message["extra"] = {
             "actions": actions,
             "response": self._persisted_response(response),

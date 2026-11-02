@@ -118,6 +118,10 @@ _MAX_VALUE_LEN = 100_000
 _MAX_JSON_BYTES = 1_000_000
 _MAX_FIND_RESULTS = 50
 _CANCEL_SLICE_SECONDS = 0.4
+#: One driver round trip before reading recorded console/network events.
+_EVENT_PUMP_MS = 50
+_IFRAME_READ_ATTEMPTS = 4
+_IFRAME_RETRY_MS = 150
 _INSTANCE_SCHEMA_VERSION = 1
 _PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ARTIFACT_NAME = re.compile(r"[A-Za-z0-9._\-]{1,128}")
@@ -544,6 +548,22 @@ class BrowserSession(SessionGuardsMixin):
         if page is None:
             raise BrowserSessionError("the active browser tab no longer exists")
         return page
+
+    def _pump_driver_events(self) -> None:
+        """Let Playwright dispatch events that arrived while the thread idled.
+
+        Event handlers run only while this thread is inside a driver call. The
+        response recorder reads a small JSON body from inside its handler, and
+        that nested read completes on the next driver round trip -- so a
+        network read straight after a click saw the request only once some
+        later browser call happened to pump the connection. A short real wait
+        is that round trip; a closed page simply has nothing to dispatch.
+        """
+
+        try:
+            self._active_page().wait_for_timeout(_EVENT_PUMP_MS)
+        except Exception:
+            pass
 
     def _timeout_ms(self, deadline_seconds: float, *, default: float = 15.0) -> int:
         return max(1000, min(int(min(default, deadline_seconds) * 1000), 30_000))
@@ -1966,6 +1986,39 @@ class BrowserSession(SessionGuardsMixin):
         frame = handle.content_frame() if handle is not None else None
         if frame is None:
             raise BrowserError("iframe target has no frame content")
+        # A child frame is attached at about:blank and navigates to its src
+        # afterwards. Evaluating in that window raced the navigation: the
+        # context was destroyed mid-call and five reads in six failed on a
+        # page that had finished loading a moment later. Wait for the frame's
+        # document, and retry a read that lost the race a bounded few times.
+        try:
+            validate_browser_url(str(frame.url), self.policy)
+        except BrowserSecurityError:
+            raise
+        except Exception:  # noqa: BLE001 - checked again once the frame loaded
+            pass
+        timeout_ms = self._timeout_ms(deadline_seconds)
+        data: Any = None
+        failure: Optional[BaseException] = None
+        for _attempt in range(_IFRAME_READ_ATTEMPTS):
+            if cancel is not None and cancel.cancelled:
+                raise BrowserCancelled("browser call cancelled")
+            try:
+                frame.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            except Exception:  # noqa: BLE001 - the read below reports the outcome
+                pass
+            try:
+                data = frame.evaluate(snapshot_probe(_MAX_SNAPSHOT_NODES))
+                failure = None
+                break
+            except Exception as exc:  # noqa: BLE001 - retried, then reported
+                failure = exc
+                try:
+                    page.wait_for_timeout(_IFRAME_RETRY_MS)
+                except Exception:  # noqa: BLE001 - a closed page fails the read
+                    break
+        if failure is not None or data is None:
+            raise BrowserError("iframe snapshot could not be captured") from failure
         try:
             frame_url = str(frame.url)
             validate_browser_url(frame_url, self.policy)
@@ -1973,10 +2026,6 @@ class BrowserSession(SessionGuardsMixin):
             raise
         except Exception:
             frame_url = ""
-        try:
-            data = frame.evaluate(snapshot_probe(_MAX_SNAPSHOT_NODES))
-        except Exception as exc:
-            raise BrowserError("iframe snapshot could not be captured") from exc
         return {
             "selector": selector,
             "url": safe_network_url(frame_url),
@@ -2704,6 +2753,7 @@ class BrowserSession(SessionGuardsMixin):
         cancel: Optional[CancelToken],
     ) -> dict[str, Any]:
         handle = self._ensure_open()
+        self._pump_driver_events()
         tab_id = payload.get("tab_id")
         entries = [
             {
@@ -2724,6 +2774,7 @@ class BrowserSession(SessionGuardsMixin):
         cancel: Optional[CancelToken],
     ) -> dict[str, Any]:
         handle = self._ensure_open()
+        self._pump_driver_events()
         entries = [
             item for item in handle.network if item.get("status", 0) >= 400 or item.get("error")
         ]
@@ -2769,6 +2820,8 @@ class BrowserSession(SessionGuardsMixin):
                 "subscription",
             }
         rows: list[dict[str, Any]] = []
+        self._ensure_open()
+        self._pump_driver_events()
         for item in self._ensure_open().network:
             if url_contains and url_contains.lower() not in str(item.get("url", "")).lower():
                 continue

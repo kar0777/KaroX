@@ -921,7 +921,7 @@ class EngineKernel:
                 max_output_tokens=self.max_output_tokens,
                 reasoning_effort=self.reasoning_effort,
                 event=self._model_event,
-                deadline_seconds=_model_request_deadline(self.remaining_seconds()),
+                deadline_seconds=lambda: _model_request_deadline(self.remaining_seconds()),
                 images=self.request_images,
             )
             environment = CoreToolEnvironment(

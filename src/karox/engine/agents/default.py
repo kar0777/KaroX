@@ -301,6 +301,7 @@ class DefaultAgent:
                 total += len(str(block.get("text") or ""))
                 total += len(str(block.get("data") or ""))
                 total += len(str(block.get("signature") or ""))
+            total += len(str(message.get("reasoning_content") or ""))
         return total // 4
 
     def _elide_tool_arguments(self, message: dict) -> bool:
@@ -309,9 +310,15 @@ class DefaultAgent:
         The call keeps its id, name and position, and its tool result keeps the
         matching ``tool_call_id``, so the transcript remains valid for every
         provider while a 1 MB ``write_file`` body stops being re-sent forever.
+        Replayed flat reasoning (``reasoning_content``) on the same message is
+        dropped at the same time.
         """
 
         changed = False
+        if message.pop("reasoning_content", None):
+            # Replayed flat deliberation of an old turn is the cheapest context
+            # to give up: the action it led to stays, only the thinking goes.
+            changed = True
         for call in message.get("tool_calls") or ():
             if not isinstance(call, dict):
                 continue

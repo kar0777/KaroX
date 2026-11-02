@@ -77,11 +77,6 @@ def _effort_scale_stops_at_high(endpoint: str) -> bool:
 #: without them keeps the required shape -- model, messages, tools,
 #: tool_choice and the output cap -- so it is the same request, not a weaker
 #: one. W&B DeepSeek is the case that made this necessary: it rejects
-#: ``reasoning_effort=medium`` while accepting low/high/xhigh/max/none.
-#: Optional tuning fields an OpenAI-compatible gateway may reject. A retry
-#: without them keeps the required shape -- model, messages, tools,
-#: tool_choice and the output cap -- so it is the same request, not a weaker
-#: one. W&B DeepSeek is the case that made this necessary: it rejects
 #: ``reasoning_effort=medium`` while accepting low/high/xhigh/max/none. Older
 #: Azure api-versions and several proxies reject ``stream_options`` instead.
 _OPTIONAL_TUNING_KEYS = (
@@ -94,8 +89,27 @@ _OPTIONAL_TUNING_KEYS = (
 )
 
 
+#: The message key that hands a thinking model its own earlier deliberation.
+#: DeepSeek documents it as required on the assistant turns of a thinking-mode
+#: tool chain; a gateway with a stricter message schema may refuse it, so it is
+#: optional in the same sense as the tuning keys above.
+_REPLAYED_REASONING_KEY = "reasoning_content"
+
+
+def _replays_reasoning(payload: Mapping[str, Any]) -> bool:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(item, Mapping) and _REPLAYED_REASONING_KEY in item
+        for item in messages
+    )
+
+
 def _has_optional_tuning(payload: Mapping[str, Any]) -> bool:
-    return any(key in payload for key in _OPTIONAL_TUNING_KEYS)
+    return any(key in payload for key in _OPTIONAL_TUNING_KEYS) or _replays_reasoning(
+        payload
+    )
 
 
 def _without_optional_tuning(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -106,6 +120,19 @@ def _without_optional_tuning(payload: Mapping[str, Any]) -> Dict[str, Any]:
     # `required` choice is part of the request's meaning and stays.
     if reduced.get("tool_choice") == "auto":
         reduced.pop("tool_choice", None)
+    if _replays_reasoning(reduced):
+        reduced["messages"] = [
+            (
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key != _REPLAYED_REASONING_KEY
+                }
+                if isinstance(item, Mapping)
+                else item
+            )
+            for item in reduced["messages"]
+        ]
     return reduced
 
 
@@ -277,6 +304,11 @@ class ModelMessage:
     # ModelMessage(role, content, tool_calls, ...) call sites retain their exact
     # meaning; new code passes images by keyword.
     images: tuple[ImageAttachment, ...] = ()
+    # Flat deliberation text from a gateway that streams it on its own key
+    # (``reasoning_content``) with no signed blocks. Thinking models on the
+    # Chat Completions wire (DeepSeek, Qwen and their hosts) expect it back on
+    # the assistant turns of the current tool chain; it is never content.
+    reasoning_text: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.role not in {"system", "user", "assistant", "tool"}:
@@ -293,6 +325,10 @@ class ModelMessage:
             raise ValueError("only assistant messages may contain tool calls")
         if self.role != "assistant" and self.reasoning_blocks:
             raise ValueError("only assistant messages may carry reasoning blocks")
+        if self.reasoning_text is not None and (
+            self.role != "assistant" or not isinstance(self.reasoning_text, str)
+        ):
+            raise ValueError("only assistant messages may carry reasoning text")
 
 
 @dataclass(frozen=True)
@@ -593,10 +629,13 @@ class OpenAIChatCompletionsProvider:
     MAX_SSE_LINE_CHARS = 1_048_576
     # Reasoning-heavy gateways can legitimately emit one tiny SSE frame per
     # reasoning token/fragment. Ox Alpha on ultra exceeded the old 10k ceiling
-    # before producing its first tool call. Keep a generous event-count bound,
-    # while the independent 16 MiB byte ceiling remains the hard resource cap.
-    MAX_SSE_EVENTS = 100_000
-    MAX_SSE_TOTAL_CHARS = 16_777_216
+    # before producing its first tool call. The bounds follow the largest
+    # answer a run may ask for: W&B frames one DeepSeek token in ~250 bytes of
+    # JSON, so the old 16 MiB ceiling failed a single ~65k-token reply as
+    # "malformed" -- a quarter of the 384k output cap the arena requests --
+    # and ended the run. These still bound a pathological stream.
+    MAX_SSE_EVENTS = 1_000_000
+    MAX_SSE_TOTAL_CHARS = 201_326_592
 
     def __init__(
         self,
@@ -734,7 +773,9 @@ class OpenAIChatCompletionsProvider:
         return safe
 
     @staticmethod
-    def _message_payload(message: ModelMessage) -> Dict[str, Any]:
+    def _message_payload(
+        message: ModelMessage, *, replay_reasoning: bool = False
+    ) -> Dict[str, Any]:
         if message.images:
             content: list[Dict[str, Any]] = []
             if message.content:
@@ -763,13 +804,32 @@ class OpenAIChatCompletionsProvider:
             ]
         if message.tool_call_id:
             payload["tool_call_id"] = message.tool_call_id
+        if replay_reasoning and message.role == "assistant" and message.reasoning_text:
+            payload[_REPLAYED_REASONING_KEY] = message.reasoning_text
         return payload
 
     @classmethod
     def _request_payload(cls, request: ModelRequest) -> Dict[str, Any]:
+        # A thinking model's chat template keeps the deliberation of the turns
+        # after the latest user message -- the tool chain in progress -- and
+        # drops everything older. DeepSeek requires those turns' reasoning back
+        # in thinking mode; without it each step saw its own earlier tool calls
+        # stripped of the plan that produced them. Older turns would only be
+        # discarded server-side, so they are not sent.
+        last_user = max(
+            (
+                index
+                for index, item in enumerate(request.messages)
+                if item.role == "user"
+            ),
+            default=-1,
+        )
         payload: Dict[str, Any] = {
             "model": request.model,
-            "messages": [cls._message_payload(item) for item in request.messages],
+            "messages": [
+                cls._message_payload(item, replay_reasoning=index > last_user)
+                for index, item in enumerate(request.messages)
+            ],
             "stream": True,
             "stream_options": {"include_usage": True},
         }

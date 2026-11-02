@@ -27,6 +27,11 @@ pytestmark = [
     ),
 ]
 
+if os.name != "nt":
+    # The harness window helper builds Win32 callback types at import time, so
+    # a skip mark alone still fails collection on Linux and macOS.
+    pytest.skip("live desktop evidence requires Windows", allow_module_level=True)
+
 from _desktop_test_window import TestWindow  # noqa: E402
 from test_computer_use import _decode_png_chunks  # noqa: E402
 
