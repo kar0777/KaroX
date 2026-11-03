@@ -48,6 +48,9 @@ from karox.tui.widgets import (
     welcome_text,
 )
 
+#: The check AppTests' user approved before the test starts (see ``app()``).
+APPROVED_CHECK = ("python", "-m", "pytest", "-q")
+
 
 class _FakeBackend:
     def __init__(
@@ -1044,13 +1047,28 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         saver.start()
         self.addCleanup(saver.stop)
 
-    def app(self, backend: _FakeBackend | None = None, language: str = "en") -> KaroxApp:
+    def app(
+        self,
+        backend: _FakeBackend | None = None,
+        language: str = "en",
+        *,
+        approved: bool = True,
+    ) -> KaroxApp:
+        """An app whose user already approved one check, unless ``approved=False``.
+
+        The runtime starts an agent only with a user-approved verification
+        command; most tests are about what happens after that decision.
+        """
+
         with patch.object(app_module.prefs, "load_preferences", return_value={}):
-            return KaroxApp(
+            app = KaroxApp(
                 self.repository,
                 backend=backend or _FakeBackend(self.repository),
                 language=language,
             )
+        if approved:
+            app._verification = (APPROVED_CHECK,)
+        return app
 
     async def settle(self, pilot, app: KaroxApp, timeout: float = 5.0) -> None:
         """Wait until the run and every background CLI call have finished."""
@@ -1093,7 +1111,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         return "\n".join(parts)
 
     async def test_welcome_shows_the_loaded_model_and_suggested_checks(self) -> None:
-        app = self.app()
+        app = self.app(approved=False)
         async with app.run_test(size=(100, 30)) as pilot:
             await self.settle(pilot, app)
             cards = self.chat_widgets(app, WelcomeCard)
@@ -1110,7 +1128,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         The TUI used to pass its own detected commands through that flag, which
         silently turned repository discovery into approval.
         """
-        app = self.app()
+        app = self.app(approved=False)
         async with app.run_test(size=(100, 30)) as pilot:
             await self.settle(pilot, app)
             self.assertTrue(app._detected_verification)
@@ -1121,6 +1139,86 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
             await self.submit(pilot, app, "/unverify")
             self.assertEqual(app._verification, ())
+
+    async def test_a_task_without_an_approved_check_asks_for_one_first(self) -> None:
+        """No approved check: a picker of detected commands, not a failed run.
+
+        The runtime refuses an agent without a user-approved verification
+        command, so the TUI used to start a run that failed at once with
+        "native agents require at least one user-approved verification
+        command". Now the task waits; nothing reaches the backend until the
+        user picks a check, and the pick is the approval.
+        """
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend, approved=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "fix the bug")
+            self.assertEqual(backend.requests, [])
+            self.assertEqual(app.menu.kind, "verify")
+            self.assertTrue(app.menu.active)
+            self.assertEqual(self.chat_widgets(app, UserMessage), [])
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertFalse(app.menu.active)
+            self.assertEqual(app._verification, (app._detected_verification[0],))
+            self.assertEqual(len(backend.requests), 1)
+            request = backend.requests[0]
+            self.assertEqual(request.task, "fix the bug")
+            self.assertEqual(request.verification, (app._detected_verification[0],))
+            self.assertIn("fix the bug", [widget.text for widget in self.chat_widgets(app, UserMessage)])
+
+    async def test_a_pasted_verify_command_in_the_check_picker_is_run(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend, approved=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "fix the bug")
+            self.assertEqual(app.menu.kind, "verify")
+            composer = app.query_one("#composer")
+            composer.text = "/verify python -m unittest -q"
+            await pilot.pause()
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(app._verification, (("python", "-m", "unittest", "-q"),))
+            self.assertEqual([request.task for request in backend.requests], ["fix the bug"])
+
+    async def test_cancelling_the_check_picker_gives_the_task_back(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend, approved=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "fix the bug")
+            self.assertEqual(app.menu.kind, "verify")
+            await pilot.press("escape")
+            await self.settle(pilot, app)
+            self.assertFalse(app.menu.active)
+            self.assertEqual(str(app.composer.text), "fix the bug")
+            self.assertEqual(backend.requests, [])
+            self.assertEqual(app._verification, ())
+            self.assertIsNone(app._verify_task)
+
+    async def test_a_custom_check_typed_with_verify_starts_the_waiting_task(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend, approved=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "fix the bug")
+            keys = app.menu.keys()
+            self.assertEqual(keys[-1], "custom")
+            app.menu.move(len(keys))
+            self.assertEqual(app.menu.highlighted_key(), "custom")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(str(app.composer.text), "/verify ")
+            self.assertEqual(backend.requests, [])
+            await self.submit(pilot, app, "/verify python -m unittest -q")
+            self.assertEqual(app._verification, (("python", "-m", "unittest", "-q"),))
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(backend.requests[0].task, "fix the bug")
+            self.assertEqual(
+                backend.requests[0].verification, (("python", "-m", "unittest", "-q"),)
+            )
 
     async def test_a_stray_print_while_running_does_not_crash_the_app(self) -> None:
         """Textual routes every print() made while the app runs to App._print.

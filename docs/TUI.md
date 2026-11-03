@@ -139,7 +139,7 @@ lines.
 /status                model, session, checks, counters
 /mcp [add]             MCP servers: probe, allow tools, remove, add
 /skills                repository skills; Enter prints one
-/verify <command>      add a verification command for this window
+/verify <command>      approve a verification command for this window
 /unverify              clear the verification list
 /effort [level]        auto | low | medium | high | extra-high | ultra
 /mode [mode]           build | plan | ideate
@@ -179,7 +179,17 @@ model id and key by hand (`provider setup`). `/connect ID` skips the list.
 ## One run
 
 1. The app picks a session id (or the one passed with `--session-id`).
-2. On submit it starts:
+2. The runtime starts an agent only with a verification command the user
+   approved; a command found in the repository (`package.json` scripts,
+   pytest, `cargo test`, …) is a suggestion, never an approval. So when no
+   check has been approved in this window yet, a submitted task waits and a
+   picker asks "How should the changes be checked?": the detected commands
+   by name, plus "Another command…" (which leaves `/verify ` in the
+   composer). Picking one approves it — the same as typing
+   `/verify <command>` — and the task starts right away; Esc gives the task
+   back to the composer. A `/command` pasted while any picker is open runs
+   as a command.
+3. On submit it starts:
 
    ```text
    python -m karox.cli agent run --repository R --session-id S --task T \
@@ -187,13 +197,13 @@ model id and key by hand (`provider setup`). `/connect ID` skips the list.
        [--verification-command JSON]... [--mcp-server ID=read|all]...
    ```
 
-3. It reads stdout line by line. Each line is one JSON document:
+4. It reads stdout line by line. Each line is one JSON document:
    `{"type": "event", ...}` during the run and
    `{"type": "result", "report": {...}}` at the end. A document may carry
    `"v": <int>`; the client speaks version 1, decodes newer versions
    best-effort and ignores unknown fields and kinds, so a kernel that extends
    the stream never breaks an older screen.
-4. Text deltas stream into the open answer stretch behind a caret; tool starts
+5. Text deltas stream into the open answer stretch behind a caret; tool starts
    add one tool line that is updated when the matching `tool_finished`
    arrives; `test_started`/`test_finished` drive the live check tally;
    `step_finished` usage drives the token counter and the context note;
@@ -203,10 +213,10 @@ model id and key by hand (`provider setup`). `/connect ID` skips the list.
    path, pattern, command or MCP arguments, bounded and redacted) and
    `tool_finished` carries its `summary` plus a short preview (diff hunks,
    output tail or MCP text) in `detail`.
-5. After the run the client re-reads `session show --json` in the background:
+6. After the run the client re-reads `session show --json` in the background:
    the durable record is the checkpoint state, and the status line shows when
    it was saved.
-6. Esc or Ctrl+C stops the child. The session is durable, so the next task
+7. Esc or Ctrl+C stops the child. The session is durable, so the next task
    with `--continue-task` resumes it.
 
 Every other CLI call (model list, catalog, sessions, skills, MCP, doctor,

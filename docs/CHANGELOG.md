@@ -25,6 +25,17 @@
   Reasoning is a dim "Thought for 4s" line; harness warnings become readable
   notices; result counts are pluralised ("3 steps · 1 file").
 
+### Fixed — a first task in the TUI no longer fails for want of a check
+
+- The runtime starts an agent only with a user-approved verification
+  command, and the TUI (rightly) never approves a detected one by itself, so
+  a first task without `/verify` failed at once with "native agents require
+  at least one user-approved verification command". Now the task waits and a
+  picker offers the detected commands by name plus "Another command…";
+  picking one is the approval and the task starts; Esc returns the task to
+  the composer. A `/command` pasted while a picker is open now runs instead
+  of being taken as filter text.
+
 ### Changed — MCP from the TUI works without a prior run
 
 - `/mcp` → a server → "Use in this session: all tools" or "read-only tools".

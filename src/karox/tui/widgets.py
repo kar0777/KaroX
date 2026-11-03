@@ -956,8 +956,12 @@ class ChatInput(TextArea):
             elif event.key == "enter":
                 # The palette falls through to a plain submit when nothing
                 # matches (so an unknown /command is reported); a picker's
-                # filter text is never a task.
-                handled = menu.accept() or menu.kind != "commands"
+                # filter text is never a task, but a pasted /command still
+                # runs (e.g. "/verify <command>" while the check picker waits).
+                draft = str(self.text).strip()  # type: ignore[has-type]
+                handled = menu.accept() or (
+                    menu.kind != "commands" and not draft.startswith("/")
+                )
             elif event.key == "escape":
                 menu.cancel()
             else:

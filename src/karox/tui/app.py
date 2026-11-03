@@ -203,6 +203,8 @@ class KaroxApp(App[int]):
         self._plan_rows: list[tuple[str, str]] = []
         self._retry_note = ""
         self._queue: list[str] = []
+        #: A task submitted before any check was approved; it starts once one is.
+        self._verify_task: str | None = None
         self._lookups = 0
         self._lookup_text = ""
         #: Ctrl+O: every tool line shows its whole preview and raw facts.
@@ -508,6 +510,7 @@ class KaroxApp(App[int]):
             "mcp": self._mcp_server_chosen,
             "mcp-action": self._mcp_action_chosen,
             "mcp-confirm": self._mcp_confirmed,
+            "verify": self._verify_chosen,
             "skills": self._skill_chosen,
             "effort": lambda value, _: self._set_effort(value),
             "mode": lambda value, _: self._set_mode(value),
@@ -521,7 +524,12 @@ class KaroxApp(App[int]):
     def menu_cancelled(self, event: InlineMenu.Cancelled) -> None:
         event.stop()
         self._menu_context = {}
-        if event.kind != "commands":
+        if event.kind == "verify" and self._verify_task:
+            # The task is not lost: it goes back to the composer as typed.
+            self.composer.set_text(self._verify_task)
+            self._verify_task = None
+            self._notice(tr(self.language, "notice.cancelled"), "info")
+        elif event.kind != "commands":
             self.composer.set_text("")
 
     @on(ChatInput.Submitted)
@@ -719,12 +727,47 @@ class KaroxApp(App[int]):
             return
         if not command:
             return
+        self._approve_check(command)
+
+    def _approve_check(self, command: tuple[str, ...]) -> None:
         if command not in self._verification:
             self._verification = (*self._verification, command)
         self._notice(
             tr(self.language, "notice.verify_added", command=" ".join(command)), "success"
         )
         self._refresh_welcome()
+        task, self._verify_task = self._verify_task, None
+        if task:
+            self._start_task(task)
+
+    def _ask_for_check(self, task: str) -> None:
+        """No check approved yet: offer the detected ones, one key to approve.
+
+        The runtime starts an agent only with a verification command the user
+        approved, and a command found in the repository is only a suggestion
+        (a hostile package.json must not approve itself). So instead of a run
+        that fails at once, the detected commands are offered by name; picking
+        one is the approval, and the task starts right after it.
+        """
+
+        lang = self.language
+        self._verify_task = task
+        items = [
+            MenuItem(f"cmd:{index}", " ".join(command), tr(lang, "verify.detected"))
+            for index, command in enumerate(self._detected_verification)
+        ]
+        items.append(MenuItem("custom", tr(lang, "verify.custom"), tr(lang, "verify.custom_detail")))
+        self._open_picker("verify", tr(lang, "verify.title"), items)
+
+    def _verify_chosen(self, key: str, context: dict[str, Any]) -> None:
+        del context
+        if key == "custom":
+            self.composer.set_text("/verify ")
+            self._notice(tr(self.language, "notice.verify_custom"), "info")
+            return
+        index = int(key.partition(":")[2] or -1) if key.startswith("cmd:") else -1
+        if 0 <= index < len(self._detected_verification):
+            self._approve_check(self._detected_verification[index])
 
     def _cmd_unverify(self, argument: str) -> None:
         del argument
@@ -1356,6 +1399,9 @@ class KaroxApp(App[int]):
             self._model_loaded = True
         if self._model is None:
             self._notice(tr(self.language, "notice.no_model"), "warning")
+            return
+        if not self._verification:
+            self._ask_for_check(task)
             return
         self._show_shortcuts(False)
         self.chat.add(UserMessage(task))

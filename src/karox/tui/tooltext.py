@@ -342,4 +342,3 @@ __all__ = [
     "tool_title",
     "working_text",
 ]
-
