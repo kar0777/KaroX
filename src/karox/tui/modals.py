@@ -1,142 +1,25 @@
-"""Modal surfaces: pick a model or session, connect a provider, manage MCP.
+"""The two forms that need more than one line: a custom endpoint and an MCP server.
 
-A modal returns one value and the app decides what it means. No modal mutates
-app state directly, which is what keeps the screens small and testable.
+Everything else -- choosing a model, a session, a catalog provider, an MCP
+action -- is an inline list above the composer. A form returns one value and
+the app decides what it means; no form mutates app state directly.
 """
 
 from __future__ import annotations
 
-import time
-from typing import Any, Iterable
+from typing import Any
 
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, OptionList, Select, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Button, Input, Select, Static
 
 from .backend import BackendError, CLIBackend
 from .i18n import tr
-from .protocol import SessionState
-from .widgets import DIM, GOLD, GREEN, MUTED, RED, TEXT
-
-
-class ListScreen(ModalScreen[str | None]):
-    """A titled list with stable ids; Enter returns the id, Esc returns None."""
-
-    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
-
-    def __init__(self, title: str, options: Iterable[tuple[str, str]], hint: str = "") -> None:
-        super().__init__()
-        self._title = title
-        self._options = list(options)
-        self._hint = hint
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal"):
-            yield Static(self._title, classes="modal-title")
-            yield OptionList(
-                *[Option(label, id=key) for key, label in self._options],
-                id="choices",
-            )
-            if self._hint:
-                yield Static(self._hint, classes="modal-hint")
-
-    def on_mount(self) -> None:
-        self.query_one(OptionList).focus()
-
-    @on(OptionList.OptionSelected, "#choices")
-    def choose(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-
-class HelpScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
-
-    def __init__(self, title: str, body: str) -> None:
-        super().__init__()
-        self._title = title
-        self._body = body
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal help-modal"):
-            yield Static(self._title, classes="modal-title")
-            with VerticalScroll(classes="help-scroll"):
-                yield Static(Text(self._body, style=TEXT), markup=False)
-            yield Static("Esc", classes="modal-hint")
-
-    def on_mount(self) -> None:
-        self.query_one(VerticalScroll).focus()
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-
-class TextViewerScreen(ModalScreen[None]):
-    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
-
-    def __init__(self, title: str, body: str) -> None:
-        super().__init__()
-        self._title = title
-        self._body = body
-
-    def body_text(self) -> str:
-        return self._body
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal help-modal"):
-            yield Static(self._title, classes="modal-title")
-            with VerticalScroll(classes="help-scroll"):
-                yield Static(Text(self._body, style=MUTED), markup=False)
-            yield Static("Esc", classes="modal-hint")
-
-    def on_mount(self) -> None:
-        self.query_one(VerticalScroll).focus()
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-
-class ConfirmScreen(ModalScreen[bool]):
-    BINDINGS = [
-        Binding("y", "yes", "Yes", priority=True),
-        Binding("n", "no", "No", priority=True),
-        Binding("escape", "no", "No", priority=True),
-    ]
-
-    def __init__(self, title: str, body: str) -> None:
-        super().__init__()
-        self._title = title
-        self._body = body
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal confirm-modal"):
-            yield Static(self._title, classes="modal-title")
-            yield Static(Text(self._body, style=TEXT), markup=False)
-            with Horizontal(classes="modal-buttons"):
-                yield Button("Yes", variant="primary", id="yes")
-                yield Button("No", id="no")
-            yield Static("y / n", classes="modal-hint")
-
-    @on(Button.Pressed, "#yes")
-    def yes_pressed(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#no")
-    def no_pressed(self) -> None:
-        self.dismiss(False)
-
-    def action_yes(self) -> None:
-        self.dismiss(True)
-
-    def action_no(self) -> None:
-        self.dismiss(False)
+from .widgets import MUTED, RED
 
 
 class ProviderSetupScreen(ModalScreen[dict[str, Any] | None]):
@@ -185,7 +68,7 @@ class ProviderSetupScreen(ModalScreen[dict[str, Any] | None]):
             str(item.get("preset_id")): item for item in presets if item.get("preset_id")
         }
         if not self._presets:
-            self._error(tr(self.language, "provider.failed", error="no installable presets"))
+            self._error(tr(self.language, "provider.no_presets"))
             return
         select = self.query_one("#preset", Select)
         select.set_options(
@@ -249,7 +132,7 @@ class ProviderSetupScreen(ModalScreen[dict[str, Any] | None]):
         self._error("")
         self.query_one("#save", Button).disabled = True
         self.query_one("#provider-status", Static).update(
-            Text("testing the endpoint…", style=MUTED)
+            Text(tr(self.language, "provider.testing"), style=MUTED)
         )
         self.run_worker(
             lambda: self._persist(preset, provider_id, base_url, model, api_key),
@@ -324,7 +207,7 @@ class McpAddScreen(ModalScreen[str | None]):
             yield Input(id="credential-target", placeholder="Authorization")
             yield Static(tr(self.language, "mcp.oauth"), classes="field-label")
             yield Select(
-                [("no", "no"), ("yes", "yes")],
+                [(tr(self.language, "form.no"), "no"), (tr(self.language, "form.yes"), "yes")],
                 value="no",
                 allow_blank=False,
                 id="oauth",
@@ -335,8 +218,8 @@ class McpAddScreen(ModalScreen[str | None]):
             yield Input(id="timeout", value="30")
             yield Static("", id="mcp-error", classes="form-error")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Save", variant="primary", id="save")
-                yield Button("Cancel", id="cancel")
+                yield Button(tr(self.language, "form.save"), variant="primary", id="save")
+                yield Button(tr(self.language, "form.cancel"), id="cancel")
             yield Static("", id="mcp-status", classes="modal-hint")
 
     def on_mount(self) -> None:
@@ -355,13 +238,13 @@ class McpAddScreen(ModalScreen[str | None]):
         url = self.query_one("#url", Input).value.strip()
         raw_args = self.query_one("#arguments", Input).value.strip()
         if not server_id or not namespace:
-            self._error("server id and namespace are required")
+            self._error(tr(self.language, "mcp.error_id"))
             return
         if transport == "stdio" and not command:
-            self._error("a stdio server needs a command")
+            self._error(tr(self.language, "mcp.error_command"))
             return
         if transport != "stdio" and not url:
-            self._error("a remote server needs a URL")
+            self._error(tr(self.language, "mcp.error_url"))
             return
         arguments = raw_args.split() if raw_args else []
         env = self.query_one("#env", Input).value.strip()
@@ -377,10 +260,10 @@ class McpAddScreen(ModalScreen[str | None]):
         try:
             timeout = float(self.query_one("#timeout", Input).value.strip() or "30")
         except ValueError:
-            self._error("timeout must be a number")
+            self._error(tr(self.language, "mcp.error_timeout"))
             return
         self.query_one("#save", Button).disabled = True
-        self.query_one("#mcp-status", Static).update(Text("saving…", style=MUTED))
+        self.query_one("#mcp-status", Static).update(Text(tr(self.language, "form.saving"), style=MUTED))
         self.run_worker(
             lambda: self._persist(
                 server_id,
@@ -464,358 +347,4 @@ class McpAddScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class McpScreen(ModalScreen[str | None]):
-    """The server list plus the four actions that matter."""
-
-    BINDINGS = [
-        Binding("escape", "close", "Close", priority=True),
-        Binding("a", "add_server", "Add", priority=True),
-        Binding("d", "remove_server", "Remove", priority=True),
-        Binding("p", "probe_server", "Probe", priority=True),
-        Binding("s", "select_server", "Select", priority=True),
-    ]
-
-    def __init__(self, backend: CLIBackend, language: str, session_id: str) -> None:
-        super().__init__()
-        self.backend = backend
-        self.language = language
-        self.session_id = session_id
-        self._entries: list[dict[str, Any]] = []
-        self._notice = ""
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal mcp-modal"):
-            yield Static(tr(self.language, "mcp.title"), classes="modal-title")
-            yield OptionList(id="servers")
-            yield Static(tr(self.language, "mcp.hint"), classes="modal-hint")
-            yield Static("", id="mcp-footer", classes="modal-hint")
-
-    def on_mount(self) -> None:
-        self._refresh()
-        self.query_one("#servers", OptionList).focus()
-
-    def _refresh(self) -> None:
-        try:
-            payload = self.backend.mcp_status(self.session_id or None)
-        except BackendError as exc:
-            self._footer(str(exc), error=True)
-            self._entries = []
-            return
-        self._entries = [
-            item for item in payload.get("servers", []) if isinstance(item, dict)
-        ]
-        options = []
-        for item in self._entries:
-            limits = item.get("liveness") or {}
-            selection = item.get("selection") or {}
-            counts = selection.get("counts") or {}
-            live = str(limits.get("state") or "not_probed")
-            selected = str(selection.get("state") or "not_selected")
-            allowed = counts.get("allowed", 0) if isinstance(counts, dict) else 0
-            label = (
-                f"{item.get('server_id', '?')}  ·  {item.get('transport', '?')}"
-                f"  ·  {selected}  ·  {live}  ·  tools {allowed}"
-            )
-            options.append(Option(label, id=str(item.get("server_id") or "")))
-        listing = self.query_one("#servers", OptionList)
-        listing.clear_options()
-        if options:
-            listing.add_options(options)
-        else:
-            listing.add_option(
-                Option(tr(self.language, "notice.mcp_empty"), disabled=True)
-            )
-
-    def _highlighted(self) -> dict[str, Any] | None:
-        listing = self.query_one("#servers", OptionList)
-        index = listing.highlighted
-        if index is None or not self._entries:
-            return None
-        if index < 0 or index >= len(self._entries):
-            return None
-        return self._entries[index]
-
-    def _footer(self, text: str, *, error: bool = False) -> None:
-        colour = RED if error else MUTED
-        self.query_one("#mcp-footer", Static).update(Text(text, style=colour))
-
-    def action_close(self) -> None:
-        self.dismiss(self._notice)
-
-    def action_add_server(self) -> None:
-        self.app.push_screen(
-            McpAddScreen(self.backend, self.language), self._added
-        )
-
-    def _added(self, result: str | None) -> None:
-        if result:
-            self._notice = tr(self.language, "mcp.added", server=result)
-        self._refresh()
-
-    def action_remove_server(self) -> None:
-        entry = self._highlighted()
-        if entry is None:
-            return
-        server = str(entry.get("server_id") or "")
-        self.app.push_screen(
-            ConfirmScreen(
-                tr(self.language, "mcp.title"),
-                f"Remove MCP server {server}?",
-            ),
-            lambda confirmed: self._remove(server) if confirmed else None,
-        )
-
-    def _remove(self, server: str) -> None:
-        try:
-            self.backend.mcp_remove(server)
-        except BackendError as exc:
-            self._footer(str(exc), error=True)
-            return
-        self._notice = tr(self.language, "mcp.removed", server=server)
-        self._refresh()
-
-    def action_probe_server(self) -> None:
-        entry = self._highlighted()
-        if entry is None:
-            return
-        server = str(entry.get("server_id") or "")
-        self._footer(tr(self.language, "notice.mcp_probe", server=server))
-        self.run_worker(lambda: self._probe(server), thread=True, exclusive=False)
-
-    def _probe(self, server: str) -> None:
-        try:
-            payload = self.backend.mcp_probe(server)
-        except BackendError as exc:
-            self.app.call_from_thread(
-                self._footer, tr(self.language, "notice.mcp_probe_failed", server=server, error=str(exc)), error=True
-            )
-            return
-        count = payload.get("tool_count", 0)
-        self.app.call_from_thread(
-            self._footer,
-            tr(self.language, "notice.mcp_probe_ok", server=server, count=count),
-        )
-        self.app.call_from_thread(self._refresh)
-
-    def action_select_server(self) -> None:
-        entry = self._highlighted()
-        if entry is None:
-            return
-        server = str(entry.get("server_id") or "")
-        if not self.session_id or self.backend.session(self.session_id) is None:
-            self._footer("Run one task in this window first; MCP selection is per session.")
-            return
-        self.app.push_screen(
-            ConfirmScreen(
-                tr(self.language, "mcp.select_confirm", server=server),
-                tr(self.language, "mcp.select_confirm_body"),
-            ),
-            lambda confirmed: self._select(server, confirmed),
-        )
-
-    def _select(self, server: str, confirmed: bool | None) -> None:
-        if not confirmed:
-            return
-        self._footer(f"selecting {server}…")
-        self.run_worker(lambda: self._select_worker(server), thread=True)
-
-    def _select_worker(self, server: str) -> None:
-        try:
-            payload = self.backend.mcp_select_all(server, self.session_id)
-        except BackendError as exc:
-            self.app.call_from_thread(self._footer, str(exc), error=True)
-            return
-        selection = payload.get("selection") or {}
-        tools = selection.get("tools") if isinstance(selection, dict) else {}
-        count = len(tools) if isinstance(tools, dict) else 0
-        self.app.call_from_thread(
-            self._footer,
-            tr(self.language, "notice.mcp_selected", server=server, count=count),
-        )
-        self.app.call_from_thread(self._refresh)
-
-def _clock(value: float) -> str:
-    if not value:
-        return "?"
-    try:
-        return time.strftime("%m-%d %H:%M", time.localtime(float(value)))
-    except (OverflowError, OSError, ValueError):
-        return "?"
-
-
-class SessionPanel(ModalScreen[None]):
-    """The durable record behind the window: every state the run persists.
-
-    One read-only projection of ``karox session show <id> --json``: task and
-    turn history, the model's plan, rollback checkpoints, verification checks,
-    provider usage, MCP selection, loaded skills and subagent jobs. Sections
-    whose record list is empty say so instead of inventing content.
-    """
-
-    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
-
-    def __init__(
-        self, state: SessionState | None, language: str, session_id: str
-    ) -> None:
-        super().__init__()
-        self._state = state
-        self.language = language
-        self.session_id = session_id
-        self._lines: list[tuple[str, str]] = self._build()
-
-    def body_text(self) -> str:
-        return "\n".join(text for text, _style in self._lines)
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal session-modal"):
-            yield Static(tr(self.language, "session.title"), classes="modal-title")
-            with VerticalScroll(classes="session-scroll"):
-                yield Static(Text.assemble(*self._assemble()), markup=False)
-            yield Static("Esc", classes="modal-hint")
-
-    def on_mount(self) -> None:
-        self.query_one(VerticalScroll).focus()
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-    def _assemble(self) -> list[tuple[str, str]]:
-        pieces: list[tuple[str, str]] = []
-        for index, (text, style) in enumerate(self._lines):
-            if index:
-                pieces.append(("\n", style))
-            pieces.append((text, style))
-        return pieces or [("", MUTED)]
-
-    def _build(self) -> list[tuple[str, str]]:
-        lines: list[tuple[str, str]] = []
-        state = self._state
-        lang = self.language
-        if state is None or not state.session_id:
-            lines.append((tr(lang, "session.empty"), MUTED))
-            return lines
-
-        def section(key: str) -> None:
-            lines.append(("", MUTED))
-            lines.append((tr(lang, key).upper(), f"bold {GOLD}"))
-
-        def value(text: str, style: str = TEXT) -> None:
-            if text:
-                lines.append((text, style))
-
-        section("session.section.meta")
-        meta = f"{state.session_id}"
-        if state.name:
-            meta += f"  ·  {state.name}"
-        meta += f"  ·  {state.status or '?'}  ·  {state.phase or '?'}"
-        value(meta)
-        detail = f"rev {state.revision} · updated {_clock(state.updated_at)}"
-        if state.branch:
-            detail += f" · branch {state.branch}"
-        value(detail, MUTED)
-
-        section("session.section.task")
-        value(" ".join(state.task.split()) or "—")
-        if len(state.task_history) > 1:
-            value(
-                tr(lang, "session.history", count=len(state.task_history) - 1), DIM
-            )
-
-        section("session.section.plan")
-        todo, doing, done = state.plan_tally
-        if state.plan_items:
-            value(tr(lang, "session.plan_tally", todo=todo, doing=doing, done=done), MUTED)
-            for item in state.plan_items[:20]:
-                status = str(item.get("status") or "todo")
-                icon = {"done": "✓", "doing": "●"}.get(status, "○")
-                colour = {"done": GREEN, "doing": GOLD}.get(status, MUTED)
-                text = " ".join(str(item.get("text") or "").split())
-                if len(text) > 70:
-                    text = text[:69] + "…"
-                value(f"{icon} {text}", colour)
-        else:
-            value(tr(lang, "session.none"), DIM)
-
-        section("session.section.checkpoints")
-        if state.has_checkpoint:
-            value(
-                tr(
-                    lang,
-                    "session.checkpoints_line",
-                    count=state.checkpoint_count,
-                    when=_clock(state.last_checkpoint_at),
-                )
-            )
-            last = state.checkpoints[-1] if state.checkpoints else {}
-            tracked = last.get("tracked_count")
-            untracked = last.get("untracked_count")
-            if isinstance(tracked, int) or isinstance(untracked, int):
-                value(
-                    tr(
-                        lang,
-                        "session.checkpoint_files",
-                        tracked=tracked if isinstance(tracked, int) else 0,
-                        untracked=untracked if isinstance(untracked, int) else 0,
-                    ),
-                    DIM,
-                )
-        else:
-            value(tr(lang, "session.none"), DIM)
-
-        section("session.section.verification")
-        passed, total = state.check_tally
-        if total:
-            colour = GREEN if passed == total else RED
-            value(tr(lang, "session.checks_line", passed=passed, total=total), colour)
-            for check in state.checks[-4:]:
-                argv = check.get("argv")
-                command = (
-                    " ".join(str(part) for part in argv) if isinstance(argv, list) else "?"
-                )
-                ok = check.get("ok")
-                icon = "✓" if ok is True else "✗" if ok is False else "?"
-                exit_code = check.get("exit_code")
-                suffix = f" · exit {exit_code}" if isinstance(exit_code, int) else ""
-                value(f"{icon} {command}{suffix}", GREEN if ok is True else RED)
-            if state.verified_step:
-                value(tr(lang, "session.verified_at", step=state.verified_step), GREEN)
-        else:
-            value(tr(lang, "session.none"), DIM)
-
-        section("session.section.provider")
-        value(
-            tr(
-                lang,
-                "session.provider_line",
-                requests=state.requests,
-                tokens=f"{state.token_total:,}",
-            )
-        )
-        if state.costs:
-            costs = " · ".join(
-                f"{currency} {amount:.4f}".rstrip("0").rstrip(".")
-                for currency, amount in sorted(state.costs.items())
-            )
-            value(tr(lang, "session.cost", cost=costs), MUTED)
-        if state.cost_unknown:
-            value(
-                tr(lang, "session.cost_unknown", reason=state.cost_unknown),
-                MUTED,
-            )
-
-        section("session.section.mcp")
-        value(", ".join(state.mcp_server_ids) or tr(lang, "session.none"),
-              TEXT if state.mcp_server_ids else DIM)
-
-        section("session.section.skills")
-        value(", ".join(state.skill_names) or tr(lang, "session.none"),
-              TEXT if state.skill_names else DIM)
-
-        section("session.section.files")
-        if state.changed_files:
-            value(tr(lang, "session.files_line", count=len(state.changed_files)), MUTED)
-            for path in state.changed_files[:8]:
-                value(f"· {path}")
-        else:
-            value(tr(lang, "session.none"), DIM)
-        return lines
+__all__ = ["McpAddScreen", "ProviderSetupScreen"]

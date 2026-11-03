@@ -607,6 +607,23 @@ class ProviderRegistry:
         self._save(providers.values(), retained, selected)
         return record
 
+    def put_models(self, records: Iterable[ModelRecord]) -> list[ModelRecord]:
+        """Upsert many models in one atomic write (catalog installs add hundreds)."""
+        items = list(records)
+        if not items:
+            return []
+        providers, models, selected = self._load()
+        missing = sorted({item.provider_id for item in items} - set(providers))
+        if missing:
+            raise RegistryError(f"provider does not exist: {missing[0]}")
+        replaced = {(item.provider_id, item.model_id) for item in items}
+        retained = [
+            item for item in models if (item.provider_id, item.model_id) not in replaced
+        ]
+        retained.extend(items)
+        self._save(providers.values(), retained, selected)
+        return items
+
     def map_alias(self, provider_id: str, alias: str, model_id: str) -> ModelRecord:
         """Move one provider-scoped alias to a model, creating it when needed."""
         _safe_id(alias, "model alias")

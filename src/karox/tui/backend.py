@@ -68,10 +68,16 @@ class CLIBackend:
         timeout: float = 60.0,
     ) -> Any:
         command = self._argv(arguments)
+        # Without input the child must not inherit the terminal: a CLI surface
+        # that falls back to an interactive prompt would otherwise wait on a
+        # keyboard the TUI owns and hang until the timeout.
+        streams: dict[str, Any] = (
+            {"input": input_text} if input_text is not None else {"stdin": subprocess.DEVNULL}
+        )
         try:
             completed = subprocess.run(
                 command,
-                input=input_text,
+                **streams,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -232,6 +238,47 @@ class CLIBackend:
         payload = self.call("provider", "presets", "--json")
         return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
 
+    def provider_catalog(self, query: str = "") -> list[dict[str, Any]]:
+        """Connectable providers of the bundled models.dev catalog."""
+
+        arguments = ["provider", "catalog", "--json"]
+        if query:
+            arguments.insert(2, query)
+        payload = self.call(*arguments)
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    def provider_connect(
+        self,
+        catalog_id: str,
+        *,
+        api_key: str = "",
+        provider_id: str = "",
+        model: str = "",
+        variables: Sequence[tuple[str, str]] = (),
+    ) -> dict[str, Any]:
+        """``provider connect``: the key travels on stdin, never in argv.
+
+        Without a key the CLI reuses the credential already saved for the
+        provider and refuses otherwise; it never prompts, because stdin is not
+        a terminal here.
+        """
+
+        arguments = ["provider", "connect", catalog_id, "--json"]
+        if provider_id:
+            arguments.extend(("--provider-id", provider_id))
+        if model:
+            arguments.extend(("--model", model))
+        for name, value in variables:
+            arguments.extend(("--var", f"{name}={value}"))
+        if api_key:
+            arguments.append("--stdin-key")
+        payload = self.call(
+            *arguments,
+            input_text=(api_key + "\n") if api_key else None,
+            timeout=120.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+
     def provider_setup(
         self,
         preset_id: str,
@@ -261,14 +308,6 @@ class CLIBackend:
             timeout=120.0,
         )
         return payload if isinstance(payload, dict) else {}
-
-    def bridge_profiles(self) -> list[dict[str, Any]]:
-        payload = self.call("bridge", "saved", "list", "--json")
-        return (
-            [item for item in payload if isinstance(item, dict)]
-            if isinstance(payload, list)
-            else []
-        )
 
     def skill_list(self) -> list[dict[str, Any]]:
         payload = self.call(

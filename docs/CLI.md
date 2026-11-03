@@ -25,6 +25,11 @@ or keyring is data for the caller, not a broken command.
 ## Model provider
 
 ```text
+karox provider catalog [QUERY] [--all] [--json]       # models.dev snapshot
+karox provider catalog --provider ID [--json]         # one provider + models, prices
+karox provider connect ID [--model M] [--stdin-key | --env-key | --credential-ref REF]
+    [--provider-id ID] [--base-url URL] [--var NAME=VALUE] [--no-test] [--no-activate]
+karox provider catalog-sync [ID ...] [--json]         # fill missing prices/limits
 karox provider presets [--json]
 karox provider setup <preset> --model <id> [--stdin-key] [--base-url URL]
     [--provider-id ID] [--context-window N] [--max-output-tokens N]
@@ -43,6 +48,19 @@ karox provider list|show|details|test ...
 karox provider credential-set <id> [--stdin] [--name NAME]
 karox provider credential-clear <id> [--delete-stored]
 ```
+
+`provider connect` is the key-only path: the built-in catalog (a dated
+[models.dev](https://models.dev) snapshot, the one OpenCode uses) supplies the
+endpoint, protocol, model list, context windows and published prices. The key
+is checked against the provider's `/models` list (a 401/403 fails before
+anything is saved), models are narrowed to what the account lists, and the
+provider's own metadata wins over the catalog's. `--env-key` uses
+`KAROX_PROVIDER_<ID>_API_KEY` when set, otherwise imports the provider's usual
+variable (for example `WANDB_API_KEY`) into the OS keyring once. Providers that
+need more than a key (Bedrock, Vertex, Azure, Copilot, ...) are listed with
+`--all` and the reason. `catalog-sync` only fills fields that are empty, so it
+gives existing providers prices (and makes `--max-cost` usable) without
+touching anything entered by hand.
 
 `provider setup` reuses an existing saved credential for the same provider ID.
 A loopback endpoint (`localhost`, `127.0.0.1`, `::1`) needs no key. A remote
@@ -77,7 +95,7 @@ karox agent run --task TEXT [--repository PATH]
     [--model ID --base-url URL [--api-key-env NAME]]
     [--route PROVIDER/MODEL]... [--route-strategy ordered|cheapest]
     [--privacy-limit local|private|public]
-    [--max-total-tokens N] [--max-cost N --currency USD]
+    [--max-total-tokens N] [--max-cost N [--currency USD]]
     [--verification-command JSON_OR_SHELL]... [--accept-discovered-checks]
     [--browser-plain-credentials]
     [--access-profile read_only|browser_control|workspace_write|elevated]
@@ -114,6 +132,9 @@ karox agent run --task TEXT [--repository PATH]
   enforced when the gateway omits usage counters or the model has no pricing
   record: the run stops with `budget_exceeded:cost_unknown` instead of
   treating the missing amount as zero, and the report says `costs: unknown`.
+  Without `--currency` the budget is in the routes' pricing currency; a route
+  with no price is refused before the session starts, naming the route
+  (`karox provider catalog-sync` fills catalog prices).
 - Direct mode (`--model` plus `--base-url`) is for a one-off endpoint and
   persists no provider record. It cannot be combined with routed options or
   image attachments.

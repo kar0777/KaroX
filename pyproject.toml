@@ -73,6 +73,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "karox.tui" = ["*.tcss"]
+# models.dev provider catalog snapshot (MIT, see karox/data/NOTICE.md).
+"karox.data" = ["*.json.gz", "NOTICE.md"]
 "karox.prompts" = ["*.md"]
 "karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
 # The vendored engine ships its license and typing marker only.

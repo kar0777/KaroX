@@ -12,6 +12,7 @@ import contextlib
 import getpass
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -467,6 +468,38 @@ def _run_vision_capability(args: argparse.Namespace) -> bool:
     return selected is not None and selected.vision == "true"
 
 
+def _budget_currency(registry: Any, routes: Sequence[RouteTarget]) -> str:
+    """The currency a ``--max-cost`` given without ``--currency`` is meant in.
+
+    A budget is only enforceable on priced models, so an unpriced route is
+    reported here, before a session starts, with the command that fixes it,
+    instead of failing the first model call with a bare "requires pricing".
+    """
+
+    unpriced: list[str] = []
+    currencies: set[str] = set()
+    for target in routes:
+        pricing = registry.model(target.provider_id, target.model).pricing
+        if pricing is None:
+            unpriced.append(f"{target.provider_id}/{target.model}")
+        else:
+            currencies.add(pricing.currency)
+    if unpriced:
+        raise ValueError(
+            "--max-cost needs model prices and "
+            + ", ".join(unpriced)
+            + " has none; run karox provider catalog-sync to fill them from the "
+            "catalog, or set them with karox model add ... --input-per-million "
+            "--output-per-million"
+        )
+    if len(currencies) != 1:
+        raise ValueError(
+            "--max-cost needs --currency: the routes are priced in "
+            + ", ".join(sorted(currencies))
+        )
+    return currencies.pop()
+
+
 def _resolve_runtime(
     args: argparse.Namespace,
     *,
@@ -545,6 +578,10 @@ def _resolve_runtime(
     )
     usage = record.usage if record is not None and isinstance(record.usage, dict) else {}
     costs = usage.get("costs")
+    max_cost = getattr(args, "max_cost", None)
+    currency = getattr(args, "currency", None)
+    if max_cost is not None and currency is None:
+        currency = _budget_currency(registry, routes)
     provider = RoutedProvider(
         registry,
         ProviderFactory(),
@@ -553,8 +590,8 @@ def _resolve_runtime(
             privacy_limit=getattr(args, "privacy_limit", None) or "public",
             route_strategy=getattr(args, "route_strategy", "ordered"),
             max_total_tokens=getattr(args, "max_total_tokens", None),
-            max_cost=getattr(args, "max_cost", None),
-            currency=getattr(args, "currency", None),
+            max_cost=max_cost,
+            currency=currency,
         ),
         initial_usage=usage,
         initial_costs=costs if isinstance(costs, dict) else {},
@@ -1323,6 +1360,131 @@ def _handle_provider_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_provider_catalog(args: argparse.Namespace) -> int:
+    from .provider_catalog import provider_catalog
+    from .provider_connect import connected_catalog_ids
+
+    catalog = provider_catalog()
+    connected = connected_catalog_ids(_registry(), catalog)
+    if args.provider:
+        entry = catalog.provider(args.provider)
+        payload = entry.to_dict(include_models=True)
+        payload["connected_as"] = connected.get(entry.provider_id)
+        payload["snapshot"] = catalog.fetched_at
+        if args.json:
+            _emit(payload, json_output=True)
+            return 0
+        print(f"{entry.display_name} ({entry.provider_id}) - models.dev snapshot {catalog.fetched_at}")
+        print(f"  endpoint: {entry.base_url or '-'}")
+        print(f"  key: {', '.join(entry.env) or '-'}")
+        if entry.unsupported_reason:
+            print(f"  cannot connect: {entry.unsupported_reason}")
+        for item in entry.models:
+            price = (
+                f"${item.input_per_million:g}/${item.output_per_million:g} per 1M"
+                if item.priced else "no published price"
+            )
+            context = f"{item.context_window // 1000}k" if item.context_window else "?"
+            flag = " (deprecated)" if item.deprecated else ""
+            print(f"  {item.model_id:<48} {context:>6}  {price}{flag}")
+        return 0
+    rows = []
+    for entry in catalog.search(args.query, installable_only=not args.all):
+        row = entry.to_dict()
+        row["connected_as"] = connected.get(entry.provider_id)
+        rows.append(row)
+    if args.json:
+        _emit(rows, json_output=True)
+        return 0
+    print(f"models.dev snapshot {catalog.fetched_at}: {len(rows)} providers")
+    for row in rows:
+        state = "connected" if row["connected_as"] else (
+            "ready" if row["installable"] else "unsupported"
+        )
+        note = row["unsupported_reason"] or ", ".join(row["env"][:1])
+        print(f"  {row['provider_id']:<28} {state:<11} {row['model_count']:>4} models  {note}")
+    print("Connect one with: karox provider connect <id>")
+    return 0
+
+
+def _handle_provider_connect(args: argparse.Namespace) -> int:
+    from .provider_catalog import provider_catalog
+    from .provider_connect import ConnectError, connect_from_catalog
+
+    catalog = provider_catalog()
+    entry = catalog.provider(args.catalog_id)
+    controller = _controller()
+    registry_id = (args.provider_id or entry.provider_id).strip()
+    existing: Optional[ProviderRecord] = None
+    with contextlib.suppress(RegistryError, ValueError):
+        existing = controller.registry.provider(registry_id)
+    secret: Optional[str] = None
+    credential_ref: Optional[str] = args.credential_ref
+    if args.stdin_key:
+        secret = sys.stdin.readline().strip()
+        if not secret:
+            raise ValueError("stdin did not contain an API key")
+    elif args.env_key:
+        # Runtime references stay in KaroX's own namespace (see credentials.py);
+        # the provider's conventional variable is imported once into the keyring.
+        own = "KAROX_PROVIDER_" + re.sub(r"[^A-Z0-9]+", "_", registry_id.upper()).strip("_") + "_API_KEY"
+        variable = next((name for name in entry.env if os.environ.get(name)), None)
+        if os.environ.get(own):
+            credential_ref = f"env:{own}"
+        elif variable is not None:
+            secret = os.environ[variable].strip()
+        else:
+            raise ValueError(
+                "none of these environment variables is set: "
+                + ", ".join([own, *entry.env])
+            )
+    elif not credential_ref and not (existing and existing.credential_ref) and entry.env:
+        if not sys.stdin.isatty():
+            raise ValueError("pass --stdin-key, --credential-ref or --env-key")
+        secret = getpass.getpass(f"{entry.display_name} API key: ").strip()
+        if not secret:
+            raise ValueError("no API key entered")
+    try:
+        result = connect_from_catalog(
+            controller,
+            entry.provider_id,
+            secret=secret,
+            credential_ref=credential_ref,
+            provider_id=registry_id,
+            base_url=args.base_url,
+            variables=_pairs(args.var, "var"),
+            model=args.model,
+            include_deprecated=bool(args.include_deprecated),
+            test=not args.no_test,
+            activate=False if args.no_activate else None,
+            catalog=catalog,
+            probe=_probe_candidate,
+        )
+    except ConnectError as exc:
+        raise ValueError(str(exc)) from None
+    payload = result.to_dict()
+    if args.json:
+        _emit(payload, json_output=True)
+        return 0
+    print(
+        f"Connected {result.display_name} as '{result.provider_id}': "
+        f"{result.models_installed} models ({result.priced_models} with published prices)."
+    )
+    if result.activated:
+        print(f"Selected model: {result.provider_id}/{result.model_id}")
+    else:
+        print(f"Select a model with: karox model select {result.provider_id} <model>")
+    return 0
+
+
+def _handle_provider_catalog_sync(args: argparse.Namespace) -> int:
+    from .provider_connect import sync_from_catalog
+
+    payload = sync_from_catalog(_registry(), args.provider_ids or ())
+    _emit(payload, json_output=args.json)
+    return 0
+
+
 def _handle_provider(args: argparse.Namespace) -> int:
     controller = _controller()
     command = args.provider_command
@@ -1331,6 +1493,12 @@ def _handle_provider(args: argparse.Namespace) -> int:
         return 0
     if command == "setup":
         return _handle_provider_setup(args)
+    if command == "catalog":
+        return _handle_provider_catalog(args)
+    if command == "connect":
+        return _handle_provider_connect(args)
+    if command == "catalog-sync":
+        return _handle_provider_catalog_sync(args)
     if command == "add":
         provider = ProviderRecord(
             provider_id=args.provider_id,
@@ -1813,24 +1981,54 @@ _BRIDGE_WRITE_TOOLS = (
     "karox.repo.write_file",
     "karox.repo.edit_file",
     "karox.repo.command",
-    "karox.command.run",
     "karox.checks.run",
+    "karox.checks.start",
+    "karox.checks.status",
+    "karox.checks.logs",
+    "karox.checks.cancel",
     "karox.tests.run",
     "karox.git.commit",
 )
+# Developer commands need Full developer access (the elevated profile); a
+# workspace-write session would only ever see them refused, so they are not
+# advertised there.
+_BRIDGE_DEVELOPER_TOOLS = (
+    "karox.command.run",
+    "karox.command.start",
+    "karox.command.status",
+    "karox.command.logs",
+    "karox.command.cancel",
+)
+_BRIDGE_CHECK_TOOLS = frozenset(
+    {"karox.checks.run", "karox.checks.start", "karox.checks.status", "karox.checks.logs", "karox.checks.cancel"}
+)
+
+
+def _bridge_access_profile(args: argparse.Namespace) -> AccessProfile:
+    requested = getattr(args, "access_profile", None)
+    if requested:
+        return AccessProfile(requested)
+    return AccessProfile.WORKSPACE_WRITE if args.write else AccessProfile.READ_ONLY
 
 
 def _bridge_tools(
-    selected: Sequence[str], *, write: bool, verification: Sequence[Sequence[str]]
+    selected: Sequence[str],
+    *,
+    write: bool,
+    verification: Sequence[Sequence[str]],
+    access_profile: Optional[AccessProfile] = None,
 ) -> tuple[str, ...]:
     from .bridge_launcher import DEFAULT_BRIDGE_TOOLS, core_bridge_tool_names
 
     tools = list(selected) or list(DEFAULT_BRIDGE_TOOLS)
-    if write:
-        known = core_bridge_tool_names()
+    known = core_bridge_tool_names()
+    elevated = access_profile == AccessProfile.ELEVATED
+    if write or elevated:
         tools.extend(name for name in _BRIDGE_WRITE_TOOLS if name in known)
-    if "karox.checks.run" in tools and not verification:
-        tools.remove("karox.checks.run")
+    if elevated:
+        tools.extend(name for name in _BRIDGE_DEVELOPER_TOOLS if name in known)
+    if not verification:
+        tools = [name for name in tools if name not in _BRIDGE_CHECK_TOOLS]
     return tuple(dict.fromkeys(tools))
 
 
@@ -1922,19 +2120,23 @@ def _handle_bridge(args: argparse.Namespace) -> int:
 
         verification = _bridge_verification(args)
         repository = args.repository.expanduser().resolve(strict=True)
+        access_profile = _bridge_access_profile(args)
         profile = SavedBridgeProfile(
             name=args.name,
             target_profile=args.target_profile,
-            tools=_bridge_tools(args.tool, write=args.write, verification=verification),
+            tools=_bridge_tools(
+                args.tool,
+                write=args.write,
+                verification=verification,
+                access_profile=access_profile,
+            ),
             repository=str(repository),
             verification_commands=verification,
             deadline_seconds=args.deadline_seconds,
             tunnel=args.tunnel,
             public_url=args.public_url,
             language=args.language,
-            access_profile=(
-                AccessProfile.WORKSPACE_WRITE if args.write else AccessProfile.READ_ONLY
-            ),
+            access_profile=access_profile,
             port=args.port,
             tunnel_timeout_seconds=args.tunnel_timeout_seconds,
         )
@@ -1960,23 +2162,19 @@ def _handle_bridge(args: argparse.Namespace) -> int:
             if args.profile not in WEB_BRIDGE_PROFILES:
                 raise ValueError(f"unknown web bridge profile: {args.profile}")
             verification = _bridge_verification(args)
+            access_profile = _bridge_access_profile(args)
             config = WebBridgeConnectConfig(
                 profile=args.profile,
                 repository=args.repository.expanduser().resolve(strict=True),
                 port=args.port,
                 tools=_bridge_tools(
-                    args.tool, write=args.write, verification=verification
+                    args.tool,
+                    write=args.write,
+                    verification=verification,
+                    access_profile=access_profile,
                 ),
                 session_id=args.session_id,
-                access_profile=(
-                    AccessProfile(args.access_profile)
-                    if args.access_profile
-                    else (
-                        AccessProfile.WORKSPACE_WRITE
-                        if args.write
-                        else AccessProfile.READ_ONLY
-                    )
-                ),
+                access_profile=access_profile,
                 tunnel=args.tunnel,
                 public_url=args.public_url,
                 tailscale=args.tailscale,

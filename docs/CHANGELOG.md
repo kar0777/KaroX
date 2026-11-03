@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### Changed — the TUI is a plain chat transcript with an inline command line
+
+- The terminal UI no longer has tabs, F-key screens or a ChatGPT/Claude web
+  section. It is one transcript, a composer and a one-line status, the way
+  coding CLIs work: `/` opens an inline command palette above the composer,
+  and the same inline list picks a model, a session, a provider, an MCP server,
+  a skill, the effort, the mode and the language. Arrows move, Enter or Tab
+  choose (Tab completes a command that takes an argument), Esc closes; Esc
+  with nothing open stops the run. Ctrl+C undoes one thing at a time (a form,
+  the key prompt, the run, the menu, the draft) and quits on an empty
+  composer.
+- `/connect` lists the provider catalog, asks for the key in a masked line
+  (an empty answer keeps a saved key), asks for any URL variables the provider
+  needs, tests the key and opens the model picker on that provider. The full
+  form is still there as "custom endpoint".
+- Every slash command is echoed into the transcript, so the history shows what
+  was asked; `/help`, `/status`, `/session`, `/doctor` print into it instead of
+  opening a screen. The status line keeps the run state on the right and drops
+  the least useful facts first on narrow terminals.
+- Fixed: an assistant reply split by a tool call no longer runs into the next
+  one ("working on itdone"); each step gets its own block and an empty block is
+  removed. A backend command that takes no input runs with stdin closed, so a
+  subprocess cannot hang on a key that was never going to be typed.
+
+### Fixed — smaller paper cuts found while porting
+
+- `--max-cost` without `--currency` takes the currency of the routes' prices
+  instead of failing with "cost budget requires a currency"; an unpriced route
+  is refused before the session starts, by name, with the command that prices
+  it.
+- A provider's HTTP error names the vendor's machine codes
+  (`HTTP 400: Bad Request (context_length_exceeded, param=max_tokens)`).
+  The message text of the body still never reaches the error, since it can
+  echo the request.
+- The check report makes Windows traceback paths repository-relative on any
+  system, not only on Windows.
+
+### Added — a provider is connected with its API key alone
+
+- `karox provider catalog` and `provider connect ID` read a dated
+  [models.dev](https://models.dev) snapshot (the catalog OpenCode uses) that
+  ships with KaroX: endpoint, protocol, models, context windows and prices.
+  The key is tested against the provider's `/models` list before anything is
+  saved; the model list is narrowed to what the account sees. Providers that
+  need more than a key are listed with `--all` and the reason.
+- `provider catalog-sync` fills prices and limits that are still empty on the
+  configured providers (so `--max-cost` works on them) and never overwrites
+  a value entered by hand. `scripts/update_provider_catalog.py` refreshes the
+  snapshot.
+
+### Added — long commands run as background jobs over the bridge
+
+- A hosted call has a deadline of about a minute, so builds and long suites
+  timed out or died with the tunnel. `karox.command.start/status/logs/cancel`
+  (elevated sessions) and `karox.checks.start/...` (approved checks) start a
+  detached runner that owns the process tree and survives a dropped connection
+  or a bridge restart. A retried `start` with the same `request_id` returns the
+  same job; logs are bounded, read incrementally and redacted; a runner that
+  died without an outcome is reported as `lost`.
+- A refused hosted call now carries KaroX's own reason (first line, with paths,
+  URLs and secrets replaced) instead of only a fixed error code, so the caller
+  can correct the request instead of guessing.
+
 ### Fixed — a probe written after the last check no longer leaves the run unverified
 
 - Measured on `5626c35`, `3d-game` r2: its second refused finish asked for

@@ -934,6 +934,56 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                 if status == 429:
                     self.assertEqual(raised.exception.retry_after, 2.5)
 
+    def test_http_error_names_the_vendor_code_but_not_the_message(self) -> None:
+        echoed = "your prompt said: please keep this private"
+        bodies = {
+            "openai": (
+                {
+                    "error": {
+                        "message": echoed,
+                        "type": "invalid_request_error",
+                        "param": "max_tokens",
+                        "code": "context_length_exceeded",
+                    }
+                },
+                ("context_length_exceeded", "invalid_request_error", "param=max_tokens"),
+            ),
+            "vllm": (
+                {
+                    "object": "error",
+                    "message": echoed,
+                    "type": "BadRequestError",
+                    "param": None,
+                    "code": 400,
+                },
+                ("BadRequestError",),
+            ),
+            "secret-shaped": (
+                {"error": {"code": "sk-abcdefghijklmnopqrstuvwxyz123456", "message": echoed}},
+                (),
+            ),
+            "not-json": ("<html>" + echoed + "</html>", ()),
+        }
+        for name, (body, expected) in bodies.items():
+            with self.subTest(body=name):
+                text = body if isinstance(body, str) else json.dumps(body)
+                client = FakeClient([error_response(400, text) for _ in range(2)])
+                provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+                with (
+                    patch("karox.providers.httpx.Client", return_value=client),
+                    self.assertRaises(ProviderError) as raised,
+                ):
+                    provider.complete(self.request())
+                message = raised.exception.safe_message
+                self.assertEqual(raised.exception.kind, ProviderErrorKind.INVALID_REQUEST)
+                self.assertIn("HTTP 400: Bad Request", message)
+                for code in expected:
+                    self.assertIn(code, message)
+                if not expected:
+                    self.assertTrue(message.endswith("Bad Request"), message)
+                self.assertNotIn("private", message)
+                self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", message)
+
     def test_an_empty_type_is_a_fragment_not_a_foreign_tool_call(self) -> None:
         # Measured on StepFun's Step Plan endpoint: one tool call streams as a
         # first chunk carrying id/type/name and later chunks carrying

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -28,12 +29,19 @@ from karox.tui.protocol import (
     decode_line,
     tool_category,
 )
+from karox.tui import commands as slash
+from karox.tui import views
 from karox.tui.widgets import (
     CATEGORY_ICONS,
     AssistantMessage,
+    InlineMenu,
     Notice,
+    SecretPrompt,
+    StatusLine,
+    TextBlock,
     ToolCard,
     UserMessage,
+    WelcomeCard,
     header_segments,
     tool_card_text,
     welcome_text,
@@ -62,7 +70,33 @@ class _FakeBackend:
         self._record_after_run = record_after_run
         self.skills = skills or []
         self.skill_details: dict[str, dict[str, object]] = {}
-        self.sessions: list[dict[str, object]] = []
+        self.session_rows: list[dict[str, object]] = []
+        self.catalog_rows: list[dict[str, object]] = [
+            {
+                "provider_id": "wandb",
+                "display_name": "Weights & Biases",
+                "env": ["WANDB_API_KEY"],
+                "url_variables": [],
+                "model_count": 2,
+                "installable": True,
+                "connected_as": None,
+            },
+            {
+                "provider_id": "deepseek",
+                "display_name": "DeepSeek",
+                "env": ["DEEPSEEK_API_KEY"],
+                "url_variables": [],
+                "model_count": 2,
+                "installable": True,
+                "connected_as": None,
+            },
+        ]
+        self.connect_calls: list[dict[str, object]] = []
+        self.connect_activates = False
+        self.extra_models: list[dict[str, object]] = []
+        self.servers: list[dict[str, object]] = []
+        self.probes: list[str] = []
+        self.removed: list[str] = []
 
     def session(self, session_id: str) -> dict[str, object] | None:
         if self.record is not None and self.record.get("session_id") == session_id:
@@ -70,7 +104,40 @@ class _FakeBackend:
         return self.record if self.record is not None and session_id else None
 
     def sessions(self) -> list[dict[str, object]]:
-        return self.sessions
+        return self.session_rows
+
+    def provider_catalog(self, query: str = "") -> list[dict[str, object]]:
+        return list(self.catalog_rows)
+
+    def provider_connect(
+        self,
+        catalog_id: str,
+        *,
+        api_key: str = "",
+        provider_id: str = "",
+        model: str = "",
+        variables: tuple[tuple[str, str], ...] = (),
+    ) -> dict[str, object]:
+        self.connect_calls.append(
+            {
+                "catalog_id": catalog_id,
+                "api_key": api_key,
+                "provider_id": provider_id,
+                "variables": tuple(variables),
+            }
+        )
+        self.extra_models = [
+            {"provider_id": catalog_id, "model_id": "big-model", "selected": False},
+            {"provider_id": catalog_id, "model_id": "small-model", "selected": False},
+        ]
+        return {
+            "provider_id": catalog_id,
+            "display_name": catalog_id,
+            "selected_model": "big-model",
+            "activated": self.connect_activates,
+            "models_installed": 2,
+            "priced_models": 1,
+        }
 
     def selected_model(self) -> dict[str, object]:
         return {
@@ -94,6 +161,7 @@ class _FakeBackend:
                 "selected": False,
                 "context_window": 64000,
             },
+            *self.extra_models,
         ]
 
     def select_model(self, provider: str, model: str) -> dict[str, object]:
@@ -119,17 +187,16 @@ class _FakeBackend:
     def doctor(self) -> dict[str, object]:
         return {"status": "ok", "checks": {}}
 
-    def bridge_profiles(self) -> list[dict[str, object]]:
-        return []
-
     def mcp_status(self, session_id: str | None = None) -> dict[str, object]:
-        return {"servers": []}
+        return {"servers": list(self.servers)}
 
     def mcp_remove(self, server_id: str) -> dict[str, object]:
+        self.removed.append(server_id)
         return {"status": "removed"}
 
     def mcp_probe(self, server_id: str) -> dict[str, object]:
-        return {"status": "ok", "tool_count": 0}
+        self.probes.append(server_id)
+        return {"status": "ok", "tool_count": 4}
 
     def mcp_select_all(self, server_id: str, session_id: str) -> dict[str, object]:
         return {"selection": {"tools": {}}}
@@ -536,15 +603,21 @@ class WidgetTests(unittest.TestCase):
         text = str(running)
         self.assertIn("mcp.github.list_issues", text)
         self.assertIn("⬢", text)
+        self.assertIn("running", text)
         done = str(tool_card_text("mcp.github.list_issues", "mcp", True, "3 issues", 0.9))
         self.assertIn("✓", done)
-        self.assertIn("ok", done)
         self.assertIn("3 issues", done)
+        self.assertNotIn("running", done)
 
     def test_tool_card_failure_is_red_and_marked(self) -> None:
         text = str(tool_card_text("repo.edit_file", "edit", False, "denied by policy", 0.1))
         self.assertIn("✗", text)
         self.assertIn("failed", text)
+        russian = str(
+            tool_card_text("repo.edit_file", "edit", False, "denied", 0.1, language="ru")
+        )
+        self.assertIn("ошибка", russian)
+        self.assertNotIn("failed", russian)
 
     def test_every_category_has_an_icon(self) -> None:
         for category in (
@@ -665,25 +738,200 @@ class StreamJsonTests(unittest.TestCase):
         self.assertEqual(step_done.event.usage.get("prompt_tokens"), 900)
 
 
+class SlashCommandTests(unittest.TestCase):
+    def test_prefix_matches_come_first_and_aliases_resolve(self) -> None:
+        self.assertEqual(slash.match("mo")[0].name, "model")
+        self.assertEqual(slash.match("")[0].name, "help")
+        self.assertEqual(len(slash.match("")), len(slash.COMMANDS))
+        self.assertEqual(slash.resolve("resume").name, "sessions")  # type: ignore[union-attr]
+        self.assertEqual(slash.resolve("Q").name, "quit")  # type: ignore[union-attr]
+        self.assertIsNone(slash.resolve("bridge"))
+        # Substring matches follow the prefix ones.
+        names = [command.name for command in slash.match("ss")]
+        self.assertIn("sessions", names)
+        self.assertIn("session", names)
+
+    def test_every_command_has_both_descriptions_and_a_handler(self) -> None:
+        for command in slash.COMMANDS:
+            self.assertIn(command.description, _RU)
+            self.assertIn(command.description, _EN)
+            self.assertTrue(
+                hasattr(KaroxApp, "_cmd_" + command.name), f"no handler for /{command.name}"
+            )
+
+    def test_help_lists_every_command(self) -> None:
+        text = views.help_text("en").plain
+        for command in slash.COMMANDS:
+            self.assertIn(f"/{command.name}", text)
+        self.assertNotIn("F1", text)
+
+
+class ViewTests(unittest.TestCase):
+    def test_model_items_mark_the_current_model_and_price(self) -> None:
+        items, current = views.model_items(
+            [
+                {
+                    "provider_id": "demo",
+                    "model_id": "a",
+                    "selected": True,
+                    "context_window": 128000,
+                    "pricing": {"input_per_million": 0.55, "output_per_million": 1.65},
+                },
+                {"provider_id": "demo", "model_id": "b", "selected": False},
+                {"provider_id": "", "model_id": "broken"},
+            ],
+            "en",
+        )
+        self.assertEqual(current, "demo/a")
+        self.assertEqual([item.key for item in items], ["demo/a", "demo/b"])
+        self.assertTrue(items[0].marked)
+        self.assertIn("128.0k", items[0].detail)
+        self.assertIn("$0.55/$1.65", items[0].detail)
+        self.assertIn("no published price", items[1].detail)
+
+    def test_catalog_items_put_connected_first_and_end_with_custom(self) -> None:
+        rows = [
+            {"provider_id": "a", "display_name": "A", "env": ["A_KEY"], "model_count": 3},
+            {"provider_id": "b", "display_name": "B", "env": [], "connected_as": "b", "model_count": 1},
+            {"provider_id": "c", "display_name": "C", "installable": False},
+        ]
+        items = views.catalog_items(rows, "ru")
+        self.assertEqual([item.key for item in items], ["b", "a", views.CUSTOM_PROVIDER_KEY])
+        self.assertIn("подключён", items[0].detail)
+        self.assertIn("A_KEY", items[1].detail)
+
+    def test_session_items_keep_this_repository_newest_first(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        rows = [
+            {"session_id": "old", "repository": str(repository), "updated_at": 1.0, "task": "first"},
+            {"session_id": "new", "repository": str(repository), "updated_at": 2.0, "task": "second"},
+            {"session_id": "other", "repository": "/elsewhere", "updated_at": 3.0},
+        ]
+        items = views.session_items(rows, repository, "new", "en")
+        self.assertEqual([item.key for item in items], ["new", "old"])
+        self.assertTrue(items[0].marked)
+
+    def test_session_lines_cover_every_section(self) -> None:
+        state = SessionState.from_record(_session_record())
+        text = views.lines_text(views.session_state_lines(state, "en")).plain
+        for needle in ("make it work", "threejs_scene", "github", "src/app.py", "1/2"):
+            self.assertIn(needle, text)
+        empty = views.lines_text(views.session_state_lines(None, "ru")).plain
+        self.assertIn("Сохранённой сессии пока нет", empty)
+
+
+class BackendCommandLineTests(unittest.TestCase):
+    def test_connect_sends_the_key_on_stdin_only(self) -> None:
+        backend = CLIBackend(Path("."))
+        calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+        def fake_call(*arguments: str, **kwargs: object) -> object:
+            calls.append((arguments, kwargs))
+            return {"provider_id": "wandb"}
+
+        with patch.object(backend, "call", side_effect=fake_call):
+            backend.provider_connect(
+                "cloudflare-workers-ai",
+                api_key="sk-secret",
+                provider_id="cf",
+                variables=(("CLOUDFLARE_ACCOUNT_ID", "abc"),),
+            )
+            backend.provider_connect("wandb")
+        arguments, kwargs = calls[0]
+        self.assertNotIn("sk-secret", " ".join(arguments))
+        self.assertEqual(kwargs.get("input_text"), "sk-secret\n")
+        self.assertIn("--stdin-key", arguments)
+        self.assertIn("CLOUDFLARE_ACCOUNT_ID=abc", arguments)
+        self.assertIn("cf", arguments)
+        reuse_arguments, reuse_kwargs = calls[1]
+        self.assertNotIn("--stdin-key", reuse_arguments)
+        self.assertIsNone(reuse_kwargs.get("input_text"))
+
+    def test_calls_without_input_do_not_inherit_the_terminal(self) -> None:
+        backend = CLIBackend(Path("."))
+        seen: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+            seen.update(kwargs)
+
+            class Completed:
+                returncode = 0
+                stdout = "[]"
+                stderr = ""
+
+            return Completed()
+
+        with patch("karox.tui.backend.subprocess.run", side_effect=fake_run):
+            self.assertEqual(backend.provider_catalog(), [])
+        self.assertIs(seen.get("stdin"), __import__("subprocess").DEVNULL)
+        self.assertNotIn("input", seen)
+
+
 class AppTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.repository = Path(__file__).resolve().parent.parent
+        saver = patch.object(app_module.prefs, "save_preferences")
+        saver.start()
+        self.addCleanup(saver.stop)
 
-    def app(self, backend: _FakeBackend | None = None) -> KaroxApp:
+    def app(self, backend: _FakeBackend | None = None, language: str = "en") -> KaroxApp:
         with patch.object(app_module.prefs, "load_preferences", return_value={}):
             return KaroxApp(
                 self.repository,
                 backend=backend or _FakeBackend(self.repository),
-                language="en",
+                language=language,
             )
 
-    async def wait_idle(self, pilot, app: KaroxApp, timeout: float = 3.0) -> None:
-        waited = 0.0
-        while app._agent_running and waited < timeout:
-            await pilot.pause(0.05)
-            waited += 0.05
-        await pilot.pause(0.1)
-        await pilot.pause(0.1)
+    async def settle(self, pilot, app: KaroxApp, timeout: float = 5.0) -> None:
+        """Wait until the run and every background CLI call have finished."""
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await pilot.pause(0.02)
+            busy = app._agent_running or any(not worker.is_finished for worker in app.workers)
+            if not busy:
+                break
+        await pilot.pause()
+        await pilot.pause()
+
+    async def submit(self, pilot, app: KaroxApp, text: str) -> None:
+        composer = app.query_one("#composer")
+        composer.focus()
+        composer.text = text
+        await pilot.pause()
+        if app.menu.active:
+            # Typing a full command leaves the palette open on it; submitting
+            # is the same Enter either way.
+            app.menu.close()
+        await pilot.press("enter")
+        await self.settle(pilot, app)
+
+    def chat_widgets(self, app: KaroxApp, kind: type) -> list:
+        return [widget for widget in app.query_one("#chat").children if isinstance(widget, kind)]
+
+    def transcript(self, app: KaroxApp) -> str:
+        parts: list[str] = []
+        for widget in app.query_one("#chat").children:
+            if isinstance(widget, AssistantMessage):
+                parts.append(widget.answer_text())
+            elif isinstance(widget, TextBlock):
+                parts.append(widget.plain_text())
+            elif isinstance(widget, (Notice, UserMessage)):
+                parts.append(widget.text)
+            elif isinstance(widget, (ToolCard, WelcomeCard)):
+                parts.append(str(widget.render()))
+        return "\n".join(parts)
+
+    async def test_welcome_shows_the_loaded_model_and_suggested_checks(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            cards = self.chat_widgets(app, WelcomeCard)
+            self.assertEqual(len(cards), 1)
+            welcome = str(cards[0].render())
+            self.assertIn("demo/demo-1", welcome)
+            self.assertIn("/verify", welcome)
+            self.assertIn("demo/demo-1", app.query_one(StatusLine).current_text())
 
     async def test_detected_checks_are_a_suggestion_not_user_approval(self) -> None:
         """Detection may be shown; only /verify may approve.
@@ -694,107 +942,344 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         """
         app = self.app()
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
+            await self.settle(pilot, app)
             self.assertTrue(app._detected_verification)
             self.assertEqual(app._verification, ())
-            app._add_verification("python -m pytest -q")
+            await self.submit(pilot, app, "/verify python -m pytest -q")
             self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
-            app._add_verification("")
+            await self.submit(pilot, app, "/verify")
             self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
+            await self.submit(pilot, app, "/unverify")
+            self.assertEqual(app._verification, ())
 
-    async def test_welcome_and_help(self) -> None:
+    async def test_help_prints_into_the_transcript(self) -> None:
         app = self.app()
         async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/help")
+            self.assertEqual(len(app.screen_stack), 1)
+            blocks = self.chat_widgets(app, TextBlock)
+            self.assertEqual(len(blocks), 1)
+            text = blocks[0].plain_text()
+            self.assertIn("/connect", text)
+            self.assertIn("/model", text)
+            echoes = [item for item in self.chat_widgets(app, UserMessage) if item.command]
+            self.assertEqual([item.text for item in echoes], ["/help"])
+
+    async def test_slash_opens_the_palette_and_typing_filters_it(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            composer = app.query_one("#composer")
+            composer.focus()
+            await pilot.press("slash")
             await pilot.pause()
-            self.assertEqual(len(app.query_one("#chat").children), 1)
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "/help"
-            await pilot.press("enter")
+            menu = app.menu
+            self.assertTrue(menu.active)
+            self.assertEqual(menu.kind, "commands")
+            self.assertEqual(len(menu.keys()), len(slash.COMMANDS))
+            await pilot.press("m", "o")
             await pilot.pause()
-            self.assertEqual(len(app.screen_stack), 2)
+            self.assertEqual(menu.keys()[0], "model")
+            await pilot.press("tab")
+            await pilot.pause()
+            self.assertEqual(composer.text, "/model ")
+            self.assertFalse(menu.active)
+            composer.text = "/he"
+            await pilot.pause()
+            self.assertTrue(menu.active)
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(len(app.screen_stack), 1)
+            self.assertFalse(menu.active)
+            self.assertFalse(app._agent_running)
 
-    async def test_task_streams_answer_and_tool_card(self) -> None:
+    async def test_enter_on_the_palette_runs_the_highlighted_command(self) -> None:
         app = self.app()
         async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            composer = app.query_one("#composer")
+            composer.focus()
+            composer.text = "/hel"
             await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "inspect the repo"
             await pilot.press("enter")
-            await self.wait_idle(pilot, app)
-            chat = app.query_one("#chat")
-            kinds = [type(widget) for widget in chat.children]
-            self.assertIn(UserMessage, kinds)
-            self.assertIn(AssistantMessage, kinds)
-            self.assertIn(ToolCard, kinds)
-            self.assertTrue(any(kind is Notice for kind in kinds))
-            assistant = next(
-                widget for widget in chat.children if isinstance(widget, AssistantMessage)
-            )
-            self.assertEqual(assistant.answer_text(), "Hello world")
-            self.assertEqual(app._tokens, 1234)
-            self.assertTrue(app._continue)
+            await self.settle(pilot, app)
+            self.assertEqual(composer.text, "")
+            self.assertEqual(len(self.chat_widgets(app, TextBlock)), 1)
+            self.assertIn("/help", composer.submitted_lines())
 
-    async def test_model_picker_updates_the_selection(self) -> None:
+    async def test_model_picker_opens_inline_and_selects_with_keys(self) -> None:
         backend = _FakeBackend(self.repository)
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            await pilot.press("f2")
-            await pilot.pause()
-            self.assertEqual(len(app.screen_stack), 2)
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/model")
+            menu = app.menu
+            self.assertTrue(menu.active)
+            self.assertEqual(menu.kind, "model")
+            self.assertEqual(len(app.screen_stack), 1)
+            self.assertEqual(menu.highlighted_key(), "demo/demo-1")
             await pilot.press("down", "enter")
-            await self.wait_idle(pilot, app)
+            await self.settle(pilot, app)
             self.assertEqual(backend.selected, [("demo", "demo-2")])
+            self.assertFalse(menu.active)
+            self.assertIn("demo/demo-2", self.transcript(app))
 
-    async def test_unknown_command_is_a_notice_not_a_run(self) -> None:
-        app = self.app()
+    async def test_picker_filter_is_never_sent_as_a_task(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/model")
+            await pilot.press("d", "e", "m", "o", "-", "2")
             await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "/nope"
+            self.assertEqual(app.menu.keys(), ["demo/demo-2"])
+            await pilot.press("z", "z", "z")
+            await pilot.pause()
+            self.assertEqual(app.menu.keys(), [])
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertFalse(app._agent_running)
+            self.assertFalse(
+                [item for item in self.chat_widgets(app, UserMessage) if not item.command]
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(app.menu.active)
+            self.assertEqual(app.query_one("#composer").text, "")
+
+    async def test_model_argument_selects_directly(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/model demo/demo-2")
+            self.assertEqual(backend.selected, [("demo", "demo-2")])
+            self.assertFalse(app.menu.active)
+
+    async def test_connect_keeps_the_key_out_of_transcript_and_history(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/connect")
+            menu = app.menu
+            self.assertEqual(menu.kind, "connect")
+            self.assertEqual(menu.keys()[-1], views.CUSTOM_PROVIDER_KEY)
+            self.assertEqual(menu.highlighted_key(), "wandb")
             await pilot.press("enter")
             await pilot.pause()
-            notices = [
-                widget for widget in app.query_one("#chat").children if isinstance(widget, Notice)
-            ]
-            self.assertEqual(len(notices), 1)
+            secret = app.query_one("#secret", SecretPrompt)
+            composer = app.query_one("#composer")
+            self.assertTrue(secret.display)
+            self.assertTrue(secret.password)
+            self.assertFalse(composer.display)
+            self.assertIn("WANDB_API_KEY", secret.placeholder)
+            for character in "sk-test-123":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(len(backend.connect_calls), 1)
+            self.assertEqual(backend.connect_calls[0]["catalog_id"], "wandb")
+            self.assertEqual(backend.connect_calls[0]["api_key"], "sk-test-123")
+            self.assertFalse(secret.display)
+            self.assertTrue(composer.display)
+            self.assertEqual(secret.value, "")
+            transcript = self.transcript(app)
+            self.assertNotIn("sk-test-123", transcript)
+            self.assertNotIn("sk-test-123", " ".join(composer.submitted_lines()))
+            self.assertIn("Weights & Biases", transcript)
+            # Another model was active, so the new provider's models are offered.
+            self.assertEqual(menu.kind, "model")
+            self.assertEqual(menu.keys(), ["wandb/big-model", "wandb/small-model"])
+            self.assertEqual(menu.highlighted_key(), "wandb/big-model")
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.selected, [("wandb", "big-model")])
 
-    async def test_provider_modal_opens_in_a_small_terminal(self) -> None:
+    async def test_connect_by_id_goes_straight_to_the_key(self) -> None:
+        backend = _FakeBackend(self.repository)
+        backend.connect_activates = True
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/connect deepseek")
+            secret = app.query_one("#secret", SecretPrompt)
+            self.assertTrue(secret.display)
+            self.assertIn("DEEPSEEK_API_KEY", secret.placeholder)
+            await pilot.press("escape")
+            await self.settle(pilot, app)
+            self.assertFalse(secret.display)
+            self.assertEqual(backend.connect_calls, [])
+            self.assertIn("Cancelled", self.transcript(app))
+            # An empty key for a provider without a saved one is refused.
+            await self.submit(pilot, app, "/connect deepseek")
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.connect_calls, [])
+            # A provider that is already connected may keep its saved key.
+            backend.catalog_rows[1]["connected_as"] = "deepseek"
+            await self.submit(pilot, app, "/connect deepseek")
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(len(backend.connect_calls), 1)
+            self.assertEqual(backend.connect_calls[0]["api_key"], "")
+            self.assertEqual(backend.connect_calls[0]["provider_id"], "deepseek")
+            self.assertFalse(app.menu.active)
+
+    async def test_endpoint_variables_are_asked_in_plain_text(self) -> None:
+        backend = _FakeBackend(self.repository)
+        backend.catalog_rows.append(
+            {
+                "provider_id": "cloudflare-workers-ai",
+                "display_name": "Cloudflare Workers AI",
+                "env": ["CLOUDFLARE_API_KEY"],
+                "url_variables": ["CLOUDFLARE_ACCOUNT_ID"],
+                "model_count": 5,
+                "installable": True,
+                "connected_as": None,
+            }
+        )
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            with patch.dict("os.environ", {"CLOUDFLARE_ACCOUNT_ID": ""}):
+                await self.submit(pilot, app, "/connect cloudflare-workers-ai")
+                await pilot.press("k", "e", "y", "enter")
+                await pilot.pause()
+                secret = app.query_one("#secret", SecretPrompt)
+                self.assertTrue(secret.display)
+                self.assertFalse(secret.password)
+                self.assertIn("CLOUDFLARE_ACCOUNT_ID", secret.placeholder)
+                await pilot.press("a", "c", "c", "1", "enter")
+                await self.settle(pilot, app)
+            self.assertEqual(
+                backend.connect_calls[0]["variables"], (("CLOUDFLARE_ACCOUNT_ID", "acc1"),)
+            )
+            self.assertEqual(backend.connect_calls[0]["api_key"], "key")
+
+    async def test_custom_endpoint_opens_the_form(self) -> None:
+        from karox.tui.modals import ProviderSetupScreen
+
         app = self.app()
         async with app.run_test(size=(80, 24)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/connect")
+            for character in "custom":
+                await pilot.press(character)
             await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "/provider"
+            self.assertEqual(app.menu.keys(), [views.CUSTOM_PROVIDER_KEY])
             await pilot.press("enter")
             await pilot.pause()
-            self.assertEqual(len(app.screen_stack), 2)
-            from karox.tui.modals import ProviderSetupScreen
-
             self.assertIsInstance(app.screen, ProviderSetupScreen)
             await pilot.press("escape")
             await pilot.pause()
             self.assertEqual(len(app.screen_stack), 1)
 
+    async def test_answer_segments_follow_the_tool_lines(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "inspect the repo")
+            kinds = [type(widget).__name__ for widget in app.query_one("#chat").children]
+            start = kinds.index("UserMessage")
+            self.assertEqual(
+                kinds[start : start + 5],
+                ["UserMessage", "AssistantMessage", "ToolCard", "AssistantMessage", "Notice"],
+            )
+            segments = self.chat_widgets(app, AssistantMessage)
+            self.assertEqual([item.answer_text() for item in segments], ["Hello", " world"])
+            self.assertEqual("".join(item.answer_text() for item in segments), "Hello world")
+            self.assertEqual(app._tokens, 1234)
+            self.assertTrue(app._continue)
+
+    async def test_text_of_two_steps_is_never_glued(self) -> None:
+        backend = _FakeBackend(self.repository, script=_rich_script())
+        app = self.app(backend)
+        async with app.run_test(size=(110, 32)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "do the whole thing")
+            answers = [item.answer_text() for item in self.chat_widgets(app, AssistantMessage)]
+            self.assertIn("working on it", answers)
+            self.assertIn("done", answers)
+            self.assertFalse(any("itdone" in item for item in answers))
+
+    async def test_report_message_is_shown_only_when_nothing_streamed(self) -> None:
+        outcome = Outcome(
+            session_id="s-1",
+            status="answered",
+            reason="answer",
+            steps=1,
+            provider_message="Final answer from the report",
+        )
+        script = [
+            Event(kind="step_started", step=1),
+            Event(kind="tool_started", step=1, tool="repo.read_file", call_id="c"),
+            Event(kind="tool_finished", step=1, tool="repo.read_file", call_id="c", ok=True),
+        ]
+        backend = _FakeBackend(self.repository, script=script, outcome=outcome)
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "answer me")
+            answers = [item.answer_text() for item in self.chat_widgets(app, AssistantMessage)]
+            self.assertEqual(answers, ["Final answer from the report"])
+        streamed = _FakeBackend(self.repository)
+        app = self.app(streamed)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "answer me")
+            answers = [item.answer_text() for item in self.chat_widgets(app, AssistantMessage)]
+            self.assertEqual(answers, ["Hello", " world"])
+
+    async def test_tool_line_expands_in_place_on_click(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "inspect the repo")
+            card = self.chat_widgets(app, ToolCard)[0]
+            self.assertFalse(card.expanded)
+            await pilot.click(ToolCard)
+            await pilot.pause()
+            self.assertTrue(card.expanded)
+            self.assertEqual(len(app.screen_stack), 1)
+            self.assertIn("call-1", str(card.render()))
+
+    async def test_unknown_command_is_a_notice_not_a_run(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/nope")
+            notices = self.chat_widgets(app, Notice)
+            self.assertEqual(len(notices), 1)
+            self.assertIn("/nope", notices[0].text)
+            self.assertFalse(app._agent_running)
+
     async def test_stop_before_any_run_is_harmless(self) -> None:
         backend = _FakeBackend(self.repository)
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
+            await self.settle(pilot, app)
             app.action_stop()
             self.assertEqual(backend.stops, 0)
+
+    async def test_ctrl_c_clears_the_draft_before_it_quits(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            composer = app.query_one("#composer")
+            composer.focus()
+            await pilot.press("a", "b", "c")
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            self.assertEqual(composer.text, "")
+            self.assertTrue(app.is_running)
 
     async def test_run_exposes_state_counters(self) -> None:
         backend = _FakeBackend(self.repository, script=_rich_script())
         app = self.app(backend)
         async with app.run_test(size=(110, 32)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "do the whole thing"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "do the whole thing")
             state = app.run_state
             self.assertEqual(state.state, "done")
             self.assertEqual(state.step, 2)
@@ -809,95 +1294,92 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             # 1500 + 800 per-step totals, then the report's 1234 wins at the end.
             self.assertEqual(app._tokens, 1234)
             self.assertEqual(state.prompt_tokens, 90000)
-            self.assertIsNotNone(state.context_fraction)
             self.assertAlmostEqual(state.context_fraction or 0.0, 90000 / 128000, places=3)
-            # The chat holds one card per tool call in the script.
-            cards = [
-                widget
-                for widget in app.query_one("#chat").children
-                if isinstance(widget, ToolCard)
-            ]
+            cards = self.chat_widgets(app, ToolCard)
             self.assertEqual(len(cards), 5)
             categories = {card.tool: card.category for card in cards}
             self.assertEqual(categories["mcp.github.list_issues"], "mcp")
             self.assertEqual(categories["skill.load"], "skill")
             self.assertEqual(categories["repo.inspect"], "inspect")
+            await self.submit(pilot, app, "/status")
+            status = self.chat_widgets(app, TextBlock)[-1].plain_text()
+            self.assertIn("demo/demo-1", status)
+            self.assertIn(app.session_id, status)
+            self.assertIn("reads 1", status)
 
     async def test_context_note_appears_near_the_window_limit(self) -> None:
         script = [
             Event(kind="step_started", step=1),
-            Event(
-                kind="step_finished",
-                step=1,
-                usage={"prompt_tokens": 120000, "total_tokens": 500},
-            ),
+            Event(kind="step_finished", step=1, usage={"prompt_tokens": 120000, "total_tokens": 500}),
             Event(kind="text_delta", step=1, text="tight"),
         ]
         backend = _FakeBackend(self.repository, script=script)
         app = self.app(backend)
         async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "nearly full context"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "nearly full context")
             self.assertGreaterEqual(app.run_state.context_fraction or 0.0, 0.9)
+            self.assertIn("ctx 93%", app.query_one(StatusLine).current_text())
 
     async def test_checkpoint_state_refreshes_after_a_run(self) -> None:
         record = _session_record()
         backend = _FakeBackend(self.repository, record_after_run=record)
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
+            await self.settle(pilot, app)
             self.assertIsNone(app.checkpoint)
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "run and save"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
+            await self.submit(pilot, app, "run and save")
             self.assertIsNotNone(app.checkpoint)
             assert app.checkpoint is not None
             self.assertEqual(app.checkpoint.checkpoint_count, 1)
             self.assertEqual(app.checkpoint.check_tally, (1, 2))
 
-    async def test_session_panel_opens_with_record_and_empty_state(self) -> None:
-        from karox.tui.modals import SessionPanel
-
+    async def test_session_command_prints_the_record_or_its_empty_state(self) -> None:
         record = _session_record()
         backend = _FakeBackend(self.repository, record=record)
         app = self.app(backend)
         async with app.run_test(size=(110, 34)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "do it"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
-            await pilot.press("f5")
-            await pilot.pause()
-            self.assertIsInstance(app.screen, SessionPanel)
-            panel = app.screen
-            assert isinstance(panel, SessionPanel)
-            body = panel.body_text()
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/session")
+            self.assertEqual(len(app.screen_stack), 1)
+            body = self.chat_widgets(app, TextBlock)[-1].plain_text()
             self.assertIn("make it work", body)
             self.assertIn("threejs_scene", body)
             self.assertIn("github", body)
-            await pilot.press("escape")
-            await pilot.pause()
-            self.assertEqual(len(app.screen_stack), 1)
 
-        empty_backend = _FakeBackend(self.repository)
-        empty_app = self.app(empty_backend)
+        empty_app = self.app(_FakeBackend(self.repository))
         async with empty_app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            await pilot.press("f5")
-            await pilot.pause()
-            self.assertIsInstance(empty_app.screen, SessionPanel)
-            panel = empty_app.screen
-            assert isinstance(panel, SessionPanel)
-            self.assertTrue(panel.body_text())
+            await self.settle(pilot, empty_app)
+            await self.submit(pilot, empty_app, "/session")
+            body = self.chat_widgets(empty_app, TextBlock)[-1].plain_text()
+            self.assertIn("No durable session record yet", body)
 
-    async def test_skills_command_lists_and_handles_empty(self) -> None:
-        from karox.tui.modals import ListScreen
+    async def test_sessions_picker_resumes_one(self) -> None:
+        record = _session_record()
+        record["repository"] = str(self.repository)
+        backend = _FakeBackend(self.repository, record=record)
+        backend.session_rows = [
+            {
+                "session_id": "tui-test-1",
+                "repository": str(self.repository),
+                "task": "make it work",
+                "status": "active",
+                "updated_at": 1761382800.0,
+            }
+        ]
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/sessions")
+            self.assertEqual(app.menu.kind, "session")
+            self.assertEqual(app.menu.keys(), ["tui-test-1"])
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(app.session_id, "tui-test-1")
+            self.assertTrue(app._continue)
+            self.assertIn("make it work", self.transcript(app))
 
+    async def test_skills_picker_then_detail_block(self) -> None:
         backend = _FakeBackend(
             self.repository,
             skills=[
@@ -914,58 +1396,98 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         }
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "/skills"
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/skills")
+            self.assertEqual(app.menu.kind, "skills")
+            self.assertEqual(app.menu.keys(), ["alpha", "beta"])
             await pilot.press("enter")
-            await pilot.pause()
-            self.assertIsInstance(app.screen, ListScreen)
-            await pilot.press("enter")
-            await pilot.pause()
-            from karox.tui.modals import TextViewerScreen
-
-            self.assertIsInstance(app.screen, TextViewerScreen)
-            viewer = app.screen
-            assert isinstance(viewer, TextViewerScreen)
-            self.assertIn("use it wisely", viewer.body_text())
-            await pilot.press("escape")
-            await pilot.pause()
+            await self.settle(pilot, app)
+            self.assertIn("use it wisely", self.chat_widgets(app, TextBlock)[-1].plain_text())
             self.assertEqual(len(app.screen_stack), 1)
 
         empty_app = self.app(_FakeBackend(self.repository))
         async with empty_app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            empty_app.query_one("#composer").focus()
-            empty_app.query_one("#composer").text = "/skills"
+            await self.settle(pilot, empty_app)
+            await self.submit(pilot, empty_app, "/skills")
+            notices = self.chat_widgets(empty_app, Notice)
+            self.assertTrue(any(notice.level == "warning" for notice in notices))
+
+    async def test_mcp_list_actions_and_add_form(self) -> None:
+        from karox.tui.modals import McpAddScreen
+
+        backend = _FakeBackend(self.repository)
+        backend.servers = [
+            {
+                "server_id": "github",
+                "transport": "stdio",
+                "selection": {"state": "not_selected", "counts": {"allowed": 0}},
+                "liveness": {"state": "not_probed"},
+            }
+        ]
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/mcp")
+            self.assertEqual(app.menu.keys(), ["github", views.ADD_SERVER_KEY])
             await pilot.press("enter")
             await pilot.pause()
-            notices = [
-                widget
-                for widget in empty_app.query_one("#chat").children
-                if isinstance(widget, Notice)
-            ]
-            self.assertTrue(notices)
+            self.assertEqual(app.menu.kind, "mcp-action")
+            self.assertEqual(app.menu.keys(), ["probe", "select", "remove"])
+            await pilot.press("enter")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.probes, ["github"])
+            self.assertIn("4 tools", self.transcript(app))
+            await self.submit(pilot, app, "/mcp")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("down", "down", "enter")
+            await pilot.pause()
+            self.assertEqual(app.menu.kind, "mcp-confirm")
+            self.assertEqual(app.menu.highlighted_key(), "no")
+            await pilot.press("down", "enter")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.removed, ["github"])
+            await self.submit(pilot, app, "/mcp add")
+            self.assertIsInstance(app.screen, McpAddScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+
+    async def test_effort_mode_and_language_pickers(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/effort")
+            self.assertEqual(app.menu.keys(), list(app_module.EFFORT_LEVELS))
+            for character in "high":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.effort, "high")
+            await self.submit(pilot, app, "/mode plan")
+            self.assertEqual(app.mode, "plan")
+            facts = app.query_one(StatusLine).current_text()
+            self.assertIn("plan", facts)
+            self.assertIn("effort high", facts)
+            await self.submit(pilot, app, "/mode nonsense")
+            self.assertEqual(app.mode, "plan")
+            await self.submit(pilot, app, "/lang ru")
+            self.assertEqual(app.language, "ru")
+            self.assertIn("Опишите задачу", app.query_one("#composer").placeholder)
 
     async def test_backend_failure_is_an_error_state_not_a_crash(self) -> None:
         backend = _FakeBackend(self.repository, fail_stream=True)
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "this will fail"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "this will fail")
             self.assertEqual(app.run_state.state, "failed")
             self.assertFalse(app._agent_running)
-            notices = [
-                widget
-                for widget in app.query_one("#chat").children
-                if isinstance(widget, Notice)
-            ]
+            notices = self.chat_widgets(app, Notice)
             self.assertTrue(any(notice.level == "error" for notice in notices))
             self.assertTrue(any("provider exploded" in notice.text for notice in notices))
 
-    async def test_verification_tally_reaches_the_result_notice(self) -> None:
+    async def test_result_notice_is_compact_and_carries_tally_and_cost(self) -> None:
         outcome = Outcome(
             session_id="s-x",
             status="failed",
@@ -974,71 +1496,57 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             steps=2,
             changed_files=("a.py",),
             checks=({"ok": True}, {"ok": False}),
-            usage={"total_tokens": 99},
+            usage={"total_tokens": 99, "costs": {"USD": 0.0123}},
         )
         backend = _FakeBackend(self.repository, outcome=outcome)
         app = self.app(backend)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "break things"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
-            notices = [
-                widget
-                for widget in app.query_one("#chat").children
-                if isinstance(widget, Notice)
-            ]
-            self.assertTrue(any("1/2" in notice.text for notice in notices))
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "break things")
+            result = self.chat_widgets(app, Notice)[-1].text
+            first = result.splitlines()[0]
+            self.assertIn("1/2", first)
+            self.assertIn("$0.01", first)
+            self.assertIn("check_failed", result)
             self.assertEqual(app.run_state.state, "failed")
 
-    async def test_narrow_terminal_completes_a_run(self) -> None:
+    async def test_narrow_terminal_keeps_a_one_line_status(self) -> None:
         app = self.app()
         async with app.run_test(size=(48, 16)) as pilot:
-            await pilot.pause()
-            app.query_one("#composer").focus()
-            app.query_one("#composer").text = "narrow run"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
-            assistant = [
-                widget
-                for widget in app.query_one("#chat").children
-                if isinstance(widget, AssistantMessage)
-            ]
-            self.assertTrue(assistant)
-            self.assertEqual(assistant[0].answer_text(), "Hello world")
-            header = app.query_one("#header")
-            self.assertEqual(header.size.height, 1)
-            self.assertNotIn("\n", header.current_text())
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "narrow run")
+            answers = "".join(
+                item.answer_text() for item in self.chat_widgets(app, AssistantMessage)
+            )
+            self.assertEqual(answers, "Hello world")
+            status = app.query_one(StatusLine)
+            self.assertEqual(status.size.height, 1)
+            self.assertIn("demo/demo-1", status.current_text())
+            self.assertNotIn("\n", status.current_text())
 
-    async def test_composer_recalls_submitted_tasks(self) -> None:
+    async def test_composer_recalls_lines_without_reopening_the_palette(self) -> None:
         app = self.app()
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
+            await self.settle(pilot, app)
             composer = app.query_one("#composer")
-            composer.focus()
-            composer.text = "first task"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
-            composer.focus()
-            composer.text = "second task"
-            await pilot.press("enter")
-            await self.wait_idle(pilot, app)
+            await self.submit(pilot, app, "first task")
+            await self.submit(pilot, app, "/status")
             composer.focus()
             await pilot.press("up")
             await pilot.pause()
-            self.assertEqual(composer.text, "second task")
+            self.assertEqual(composer.text, "/status")
+            self.assertFalse(app.menu.active)
             await pilot.press("up")
             await pilot.pause()
             self.assertEqual(composer.text, "first task")
             await pilot.press("down")
             await pilot.pause()
-            self.assertEqual(composer.text, "second task")
+            self.assertEqual(composer.text, "/status")
 
-    async def test_pageup_scrolls_the_chat_log(self) -> None:
+    async def test_pageup_scrolls_the_transcript_from_the_composer(self) -> None:
         app = self.app()
         async with app.run_test(size=(90, 20)) as pilot:
-            await pilot.pause()
+            await self.settle(pilot, app)
             for index in range(60):
                 app._notice(f"line {index}", "info")
             await pilot.pause()
@@ -1047,6 +1555,32 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             before = chat.scroll_y
             self.assertGreater(before, 0)
+            app.query_one("#composer").focus()
             await pilot.press("pageup")
             await pilot.pause()
             self.assertLess(chat.scroll_y, before)
+            self.assertIs(app.focused, app.query_one("#composer"))
+
+    async def test_russian_screen_has_no_english_leftovers(self) -> None:
+        app = self.app(language="ru")
+        async with app.run_test(size=(110, 34)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/help")
+            await self.submit(pilot, app, "/status")
+            composer = app.query_one("#composer")
+            composer.text = "/"
+            await pilot.pause()
+            palette = " ".join(str(option.prompt) for option in app.menu.query_one("#menu-options").options)
+            app.menu.close()
+            screen = "\n".join(
+                [
+                    self.transcript(app),
+                    palette,
+                    app.query_one(StatusLine).current_text(),
+                    composer.placeholder,
+                ]
+            )
+            for leftover in ("selected", "F1", "F2", "ChatGPT", "Claude", "HyperAgent", "Press ", "Unknown"):
+                self.assertNotIn(leftover, screen)
+            self.assertIn("Команды", screen)
+            self.assertIn("подключить провайдера", screen)

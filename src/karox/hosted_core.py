@@ -232,6 +232,22 @@ CORE_TOOL_NAMES: dict[str, str] = {
     "karox.git.log": "git.log",
     "karox.git.commit": "git.commit",
     "karox.git.push": "git.push",
+    # Background jobs: a web chat's call has a transport deadline, so anything
+    # longer than a minute runs as a job that is polled (see command_jobs.py).
+    "karox.command.start": "dev.command_start",
+    "karox.command.status": "dev.command_status",
+    "karox.command.logs": "dev.command_logs",
+    "karox.command.cancel": "dev.command_cancel",
+    "karox.checks.start": "checks.start",
+    "karox.checks.status": "checks.status",
+    "karox.checks.logs": "checks.logs",
+    "karox.checks.cancel": "checks.cancel",
+}
+
+# The synchronous tool and its background job twin.
+_BACKGROUND_VARIANTS: dict[str, str] = {
+    "karox.command.run": "karox.command.start",
+    "karox.checks.run": "karox.checks.start",
 }
 
 # Tools that are NOT Core commands but are still part of a hosted bridge
@@ -390,6 +406,7 @@ class CoreToolBridge:
             bypass_mode=self._bypass_mode,
             events=self._events,
             session_repository_validator=self._validate_project_session,
+            command_jobs=True,
         )
         self._runtime_cache[anchor_project.project_id] = self._runtime
         self._definition_cache = {item.name: item for item in self._runtime.tools()}
@@ -490,6 +507,7 @@ class CoreToolBridge:
                 checkpoint_factory=self._checkpoint_factory_for(Path(entry.path)),
                 events=self._events,
                 session_repository_validator=self._validate_project_session,
+                command_jobs=True,
             )
             self._runtime_cache[entry.project_id] = runtime
             return runtime
@@ -565,6 +583,15 @@ class CoreToolBridge:
         descriptors: list[ProxyToolDescriptor] = []
         for public_name in self._allowed:
             definition = definitions[CORE_TOOL_NAMES[public_name]]
+            description = definition.description
+            background = _BACKGROUND_VARIANTS.get(public_name)
+            if background is not None and background in self._allowed:
+                # Only the hosted wire has a call deadline, so only it is told
+                # where a long command goes instead.
+                description += (
+                    " A hosted call times out after about a minute: start "
+                    f"anything longer with {background.replace('.', '_')} and poll it."
+                )
             schema = dict(definition.input_schema)
             properties = dict(schema.get("properties", {}))
             properties["workstream_id"] = {
@@ -577,7 +604,7 @@ class CoreToolBridge:
             descriptors.append(
                 ProxyToolDescriptor(
                     name=public_name,
-                    description=definition.description,
+                    description=description,
                     input_schema=schema,
                     read_only=not definition.mutates,
                 )

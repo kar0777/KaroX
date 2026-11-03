@@ -119,9 +119,42 @@ karox bridge stop --saved chatgpt-dev
 ```
 
 Without `--write`, the bridge exposes a read-only repository/Git/runtime
-catalogue. `--write` adds repository mutation, commands, checks/tests and
-`git.commit`. `git.push`, publish, deploy and auth mutations are not exposed by
-any profile.
+catalogue. `--write` adds repository mutation, the approved checks
+(`--verification-command`, each a `checks.run` and a background
+`checks.start`), tests and `git.commit`. `--access-profile elevated` (Full
+developer access) also adds repository-scoped developer commands:
+`karox.command.run` and its background twin `karox.command.start`. `git.push`,
+publish, deploy and auth mutations are not exposed by any profile.
+
+### Background jobs
+
+A hosted call has a deadline of about a minute and the tunnel can drop, so a
+build, a long test suite or a dev server runs as a job:
+
+```text
+karox_command_start {"argv": ["npm", "run", "build"], "request_id": "build-1"}
+karox_command_status {"job_id": "dev-..."}          # running / passed / failed / timed_out / cancelled / lost
+karox_command_logs   {"job_id": "dev-...", "offset": 0}   # pass next_offset to read only new output
+karox_command_cancel {"job_id": "dev-..."}
+```
+
+`karox_checks_start/status/logs/cancel` do the same for the approved
+verification set. A job returns at once; its runner is a detached process that
+owns the command's whole process tree, so a dropped connection or a bridge
+restart does not stop it. Retrying `start` with the same `request_id` returns
+the same job instead of running the command twice. The default timeout is 30
+minutes (`timeout_seconds`, at most 24 hours); the log keeps the last 16 MiB
+and is redacted when read. The argv given to the runner is never written to
+disk; `job.json` keeps a redacted copy. Jobs live in
+`<runtime>/command-jobs/<repository digest>/`, and the 50 most recent finished
+jobs are kept. A job whose runner died without recording an outcome (the
+machine restarted) is reported as `lost`; cancelling it stops the command if it
+is still running.
+
+A refused call carries KaroX's own reason (`request_id must be ...`, the
+approved verification commands, `session profile does not allow ...`), first
+line only, with paths, URLs and secrets replaced. Errors raised by libraries
+are still reported by their fixed code only.
 
 The launch flow:
 

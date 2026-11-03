@@ -934,6 +934,52 @@ class BridgeErrorVocabularyTests(unittest.TestCase):
             self.assertIn(code, BRIDGE_ERROR_MESSAGES)
         self.assertNotIn("{", BRIDGE_ERROR_MESSAGES["internal"])
 
+    def test_karox_refusals_are_explained_without_machine_details(self) -> None:
+        from karox.bridge_proxy import caller_safe_detail
+        from karox.core_types import InvalidCommand, InvalidPath
+
+        self.assertEqual(
+            caller_safe_detail(InvalidCommand("request_id must be 1-128 characters")),
+            "request_id must be 1-128 characters",
+        )
+        detail = caller_safe_detail(
+            InvalidPath(
+                "path escapes the repository: C:\\Users\\someone\\x.txt, "
+                "/home/someone/y and \\\\server\\share; see https://example.invalid/a?b=c"
+            )
+        )
+        for fragment in ("Users", "someone", "home", "server", "example.invalid"):
+            self.assertNotIn(fragment, detail)
+        self.assertIn("<path>", detail)
+        self.assertIn("<url>", detail)
+        token = "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
+        self.assertNotIn(token, caller_safe_detail(InvalidCommand(f"bad {token}\nsecond")))
+        self.assertNotIn("second", caller_safe_detail(InvalidCommand("first\nsecond")))
+        self.assertEqual(
+            caller_safe_detail(InvalidCommand("use karox.command.run/start, not 1/2")),
+            "use karox.command.run/start, not 1/2",
+        )
+        self.assertLessEqual(len(caller_safe_detail(InvalidCommand("x" * 2000))), 400)
+        # Library exceptions are never echoed: their text is not KaroX's.
+        self.assertIsNone(caller_safe_detail(ValueError("/home/someone/secret")))
+        self.assertIsNone(caller_safe_detail(OSError("C:\\Users\\someone")))
+
+    def test_the_wire_carries_the_sanitized_refusal(self) -> None:
+        from karox.core_types import InvalidCommand
+
+        token = "wire-test-token-" + "0" * 32
+        app = build_proxy_asgi_app(
+            _RaisingRuntime(InvalidCommand("limit must be an integer; see /home/someone/x")),
+            token,
+        )
+        (response,) = _wire_requests(
+            app, [_jsonrpc_call(token, "karox.repo.read_file", {"path": "sample.txt"})]
+        )
+        result = _jsonrpc_result(response)
+        self.assertEqual(result["structuredContent"]["error_code"], "invalid_request")
+        self.assertIn("limit must be an integer", result["structuredContent"]["error"])
+        self.assertNotIn("someone", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

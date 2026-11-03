@@ -25,7 +25,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Mapping, Optional, Sequence
 from urllib.parse import unquote
 
@@ -269,6 +269,9 @@ def _positive_count(value: object) -> int:
     return count if count is not None and count > 0 else 1
 
 
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
 def _relative(path: str, root: Optional[Path | str]) -> str:
     raw = (path or "").strip().strip("\"'`")
     if raw.startswith("file://"):
@@ -284,6 +287,16 @@ def _relative(path: str, root: Optional[Path | str]) -> str:
                 return candidate.resolve(strict=False).relative_to(base).as_posix()
         except (OSError, ValueError):
             pass
+        if _DRIVE_PATH.match(raw) and _DRIVE_PATH.match(str(root)):
+            # A Windows log read on another system (or a root given in Windows
+            # form): the native Path above does not see a drive path as
+            # absolute there, so compare the two as Windows paths.
+            try:
+                return (
+                    PureWindowsPath(raw).relative_to(PureWindowsPath(str(root))).as_posix()
+                )
+            except ValueError:
+                pass
     return raw.replace("\\", "/")
 
 

@@ -1,13 +1,22 @@
 # Terminal client
 
-`karox` or `karox tui` opens the compact client. It is a Textual application
-made of a small widget set and one stylesheet:
+`karox` or `karox tui` opens the terminal client. It reads like a CLI session:
+one transcript that only grows, a composer at the bottom and one status line
+under it. There are no tabs, no function-key screens and no side panels. A line
+that starts with `/` is a command; typing `/` opens the command list right
+above the composer, and every picker (model, session, provider, MCP server,
+skill, effort, mode, language) opens in the same place and is filtered by
+typing. Command output — `/help`, `/status`, `/session`, `/doctor`, a skill's
+detail, the last reasoning — is printed into the transcript like any CLI
+prints it.
 
 | File | Role |
 | --- | --- |
-| `tui/app.py` | application, layout, commands, run state, worker that runs one task |
-| `tui/widgets.py` | header, chat log, user/assistant messages, tool card, notice, composer, footer |
-| `tui/modals.py` | model picker, session picker, session panel, provider setup, MCP panel, skills, help, confirmation |
+| `tui/app.py` | application, layout, slash-command dispatch, run state, background CLI calls |
+| `tui/commands.py` | the one table of slash commands (palette, `/help` and dispatcher share it) |
+| `tui/views.py` | pure builders: help/status/session/doctor text, picker rows |
+| `tui/widgets.py` | transcript lines, tool line, inline menu, composer, key prompt, status line |
+| `tui/modals.py` | the two multi-field forms: custom endpoint and MCP server |
 | `tui/backend.py` | subprocess bridge and the `--json` CLI calls |
 | `tui/protocol.py` | versioned event/report decoding, tool categories, session-state parsing |
 | `tui/i18n.py` | English/Russian message catalogue |
@@ -17,77 +26,124 @@ made of a small widget set and one stylesheet:
 ## Layout
 
 ```text
-KaroX · provider/model · 45.2k tok · ctx 82% · plan · effort high · proj · main · ● live
-──────────────────────────────────────────────────────────────
-  ▌ the task
-    ✳ reasoning · 10.7k chars
-    answer, streamed behind a caret, then rendered as markdown
-    ○ repo.read_file · ok · 0.12s · read 12 lines
-    ✎ repo.edit_file · ok · 0.42s · path=app.py
-    ⬢ mcp.github.list_issues · running
-  ────────────────────────────────────────────────────────────
-  done · verified · 6 steps · files: 1 · checks: 2/2 · 44.0k · 35.3s
-──────────────────────────────────────────────────────────────
-  ⠋ › step 3 · checks.run · running
-  Enter send · Ctrl+J newline · /help · Esc stop     working · step 3 · 12s · ✓1/✗0 · 45.2k tok
+◆ KaroX
+  proj · main
+  wandb/deepseek-ai/DeepSeek-V3.1
+  session tui-1762190000-3fa2c1
+  detected checks: python -m pytest -q · enable with /verify <command>
+
+› fix the failing test in calc.py
+  ◇ reasoning · 1,234 chars
+  I'll read calc.py first.
+  ✓ repo.read_file  0.05s  read 40 lines
+  ✎ repo.edit_file  running…
+  ✓ checks.run  2.31s  exit 0
+  Fixed the sign in add(); the suite passes.
+✓ done · verified · 4 steps · files: 1 · checks: 1/1 · tokens: 18.2k · cost $0.0031 · 35.3s
+  changed: calc.py
+
+› /model
+  ┌ Model ─────────────────────────────────────────────────────┐   ← inline list,
+  ● wandb/deepseek-ai/DeepSeek-V3.1  current · ctx 128.0k · $0.55/$1.65 per 1M
+    wandb/Qwen/Qwen3-Coder-480B      ctx 262.1k · $1/$1.5 per 1M
+  ↑↓ choose · Enter confirm · Esc cancel
+╭──────────────────────────────────────────────────────────────╮
+│ Describe a task…   / commands · Ctrl+J newline               │
+╰──────────────────────────────────────────────────────────────╯
+  wandb/deepseek-ai/DeepSeek-V3.1 · 18.2k tok · proj        idle · saved 11-03 14:22
 ```
 
-Nothing is boxed unless the user must act on it: a notice or a modal has a
-border and a colour; ordinary prose does not. Tool cards carry a quiet left
-border in the colour of their category (gold mutates, green proves, violet
-leaves the process), and the header keeps the classic rule: the model is the
-primary fact and is never dropped, non-defaults are stated and defaults are
-not, the context note appears only near the window limit, and a field that no
-longer fits disappears whole instead of being cut into a different-looking
-value.
+- The answer of one turn is a sequence of text stretches interleaved with tool
+  lines in the order they happened: a new model step, a tool call or a context
+  compaction closes the current stretch, so text written after a tool appears
+  after it instead of being glued to the text before it. The report's final
+  message is shown only when nothing streamed.
+- A tool line runs behind its category icon (`○` read, `✎` edit, `≡` test,
+  `⬢` MCP, `★` skill, `▤` plan, `◎` web, `⊙` inspect) and switches to `✓`/`✗`
+  on finish. A click expands it in place with its unclipped observation; a
+  second click folds it.
+- A finished run adds one compact result line: outcome, steps, files, checks,
+  tokens, cost (when the model is priced), elapsed time; the reason, unmet
+  requirements, the failure map and the changed files follow on their own
+  lines only when there are any.
+- The status line keeps the model as the primary fact at every width; tokens,
+  the context note (only near the window limit), mode and effort (only when
+  not the default), repository and branch follow and drop whole, least
+  important first, when they no longer fit. The run state sits on the right:
+  `idle · saved <time>`, `working · step 3 · 12s · ✓1/✗0`, `stopping…`.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| Enter | send the task |
-| Up / Down | recall submitted tasks (at the document edges) |
+| Enter | send the task; in a list, run or choose the highlighted row |
+| `/` | open the command list (typing filters it) |
+| Tab | in the command list, complete the command and keep typing its argument |
+| ↑ / ↓ | move in a list; otherwise recall submitted lines (at the document edges) |
+| Esc | close the list or the key prompt; otherwise stop the running agent |
 | Ctrl+J | insert a newline |
-| Esc | stop the running agent |
-| F1 | help |
-| F2 | model picker |
-| F3 | session picker |
-| F4 | MCP panel |
-| F5 | session state panel |
-| PageUp / PageDown | scroll the conversation |
+| PageUp / PageDown | scroll the transcript (move by a page in a list) |
 | Ctrl+N | new session |
-| Ctrl+R | show the last turn's reasoning |
-| Ctrl+L | clear the conversation |
-| Ctrl+C | stop a running agent, otherwise exit |
+| Ctrl+R | print the last answer's reasoning |
+| Ctrl+L | clear the screen |
+| Ctrl+C | close what is open, else stop the agent, else clear the draft, else exit |
 | Ctrl+Q | exit |
 
-Mouse: the conversation scrolls under the wheel, a tool card opens its
-unclipped detail on click, and every list, button and option in the modals is
-clickable.
+The keyboard never leaves the composer: while a list is open, the composer
+forwards ↑/↓, PageUp/PageDown, Tab, Enter and Esc to it and what you type
+filters it. Enter in a picker never sends its filter text as a task. A
+recalled `/command` does not pop the list open, so ↑ keeps walking the
+history. The mouse scrolls the transcript, clicks list rows and expands tool
+lines.
 
 ## Slash commands
 
 ```text
-/provider        connect a provider and model
-/model           choose a model
-/sessions        list and continue sessions
-/resume <id>     continue a specific session
-/new             start a fresh session
-/session         session state panel (also F5)
-/mcp             MCP servers and tools
-/skills          discovered repository skills and their detail
-/verify <cmd>    add a verification command for this window
-/unverify        clear the verification list
-/effort <level>  auto | low | medium | high | extra-high | ultra
-/mode <mode>     build | plan | ideate
-/lang ru|en      interface language
-/status          repository, model, session, effort, checks, run counters
-/doctor          provider, credential, MCP and session health
-/bridge          saved ChatGPT/Claude/HyperAgent bridges
-/clear           clear the screen
-/stop            stop the agent
-/quit            exit
+/help                  commands and keys                         (/?)
+/connect [provider]    connect a provider with its API key       (/provider, /login)
+/model [provider/model] choose a model; with an argument, select it directly
+/sessions [id]         this repository's sessions; resume one    (/resume)
+/new                   new session
+/session               the saved session state
+/status                model, session, checks, counters
+/mcp [add]             MCP servers: probe, allow tools, remove, add
+/skills                repository skills; Enter prints one
+/verify <command>      add a verification command for this window
+/unverify              clear the verification list
+/effort [level]        auto | low | medium | high | extra-high | ultra
+/mode [mode]           build | plan | ideate
+/lang [ru|en]          interface language
+/reasoning             the model's reasoning for the last answer
+/doctor                provider, credential, MCP and session health
+/clear                 clear the screen
+/stop                  stop the agent
+/quit                  exit                                      (/exit, /q)
 ```
+
+A command with an optional argument opens its picker when it is given none.
+The table lives in `tui/commands.py`; the palette, `/help` and the dispatcher
+read the same rows, and a test pins that every row has a handler and both
+translations.
+
+## Connecting a provider
+
+`/connect` lists the bundled models.dev catalog (`karox provider catalog
+--json`): connected providers first, each row with its model count and the
+environment variable its key usually lives in. Choosing one swaps the composer
+for a masked one-line key prompt; the question stays on the line above it.
+Enter connects, Esc cancels. The key goes to `karox provider connect ID --json
+--stdin-key` on stdin — never into argv, the transcript, the composer history
+or the screen. For a provider that is already connected an empty Enter keeps
+the saved credential. Endpoints with placeholders (Cloudflare account ID,
+Databricks host, …) are asked next in plain text, pre-filled from the
+environment when the variable is set, and passed as `--var NAME=VALUE`.
+
+`provider connect` installs every tool-capable model with its published
+price and limits and tests the key live. When no other model was active the
+new provider's recommended model becomes the selection; otherwise the model
+list opens filtered to the new provider with that model highlighted. The last
+row, "Custom OpenAI-compatible endpoint…", opens the one form for a base URL,
+model id and key by hand (`provider setup`). `/connect ID` skips the list.
 
 ## One run
 
@@ -106,38 +162,37 @@ clickable.
    `"v": <int>`; the client speaks version 1, decodes newer versions
    best-effort and ignores unknown fields and kinds, so a kernel that extends
    the stream never breaks an older screen.
-4. Text deltas stream into the answer card behind a caret; tool starts create
-   one-line cards, categorised by canonical tool name (`read`, `edit`, `test`,
-   `mcp`, `skill`, `plan`, `web`, `inspect`), that are updated when
-   the matching `tool_finished` arrives; `test_started`/`test_finished` drive
-   the live verification tally; `step_finished` usage drives the token counter
-   and the context-occupancy note; `phase_changed` and `compacted` (a context
-   checkpoint) surface on the activity line; warnings update the activity
-   line; errors and compaction add a notice.
-5. The result card is built from the report: status, steps, files, checks,
-   tokens, elapsed time, and the reason when the run is not verified.
-6. After the run the client re-reads `session show --json` once: the durable
-   record is the checkpoint state, and the footer shows when it was saved.
-7. The child is stopped with Ctrl+C or Esc. The session is durable, so the
-   next task with `--continue-task` resumes it.
+4. Text deltas stream into the open answer stretch behind a caret; tool starts
+   add one tool line that is updated when the matching `tool_finished`
+   arrives; `test_started`/`test_finished` drive the live check tally;
+   `step_finished` usage drives the token counter and the context note;
+   `phase_changed`, warnings and file events surface on the activity line;
+   errors and compaction add a notice.
+5. After the run the client re-reads `session show --json` in the background:
+   the durable record is the checkpoint state, and the status line shows when
+   it was saved.
+6. Esc or Ctrl+C stops the child. The session is durable, so the next task
+   with `--continue-task` resumes it.
 
-The client never parses human progress text, so changing a CLI message cannot
-break a screen.
+Every other CLI call (model list, catalog, sessions, skills, MCP, doctor,
+connect) runs in a worker thread with its stdin closed, so a slow provider
+never freezes the screen and a CLI fallback prompt can never wait on a
+keyboard the TUI owns. The client never parses human progress text, so
+changing a CLI message cannot break a screen.
 
 ## Run and session state
 
 `app.RunState` holds the live facts of the current or latest run — state word
 (`idle | running | stopping | done | failed | stopped`), step, phase, elapsed,
 tokens, context occupancy, and per-category tool counters (reads, edits,
-checks passed/failed, MCP calls, skill loads, inspections,
-edited paths). Every field comes from a typed stream event or the final
-report; nothing is inferred from prose.
+checks passed/failed, MCP calls, skill loads, inspections, edited paths).
+Every field comes from a typed stream event or the final report.
 
 `protocol.SessionState` is the bounded, total parse of the durable session
-record behind F5 `/session`: task and turn history, the model's plan
+record printed by `/session`: task and turn history, the model's plan
 (todo/doing/done), rollback checkpoints, verification checks and the verified
 snapshot step, provider usage and costs, MCP servers selected for the session,
-loaded skills. Sections whose record list is empty say
+loaded skills and changed files. Sections whose record list is empty say
 "none" instead of inventing content.
 
 ## Event fields
@@ -150,45 +205,36 @@ tool, call_id, ok, summary, duration_seconds, reason, status, phase,
 path, detail, usage
 ```
 
-Private reasoning is counted, never shown as the answer. Ctrl+R opens it only
-because the user explicitly asked.
+Private reasoning is counted on a dim line, never shown as the answer.
+`/reasoning` (Ctrl+R) prints it only because the user explicitly asked.
 
-## Modals
+## MCP
 
-- **Session panel** (F5) projects the durable record described above. It is
-  read-only and stays available during a live run.
-- **Provider setup** selects a preset, fills the endpoint, provider id, model
-  and key, then verifies live before saving. A loopback endpoint needs no key;
-  a saved credential is reused when the CLI has one. A new key is sent to the
-  CLI on stdin and stored by the OS keyring.
-- **Model picker** lists registered models with the selected one marked. Model
-  catalogs are refreshed from the CLI with `karox model discover --save`.
-- **Session picker** lists only sessions bound to this repository; selecting
-  one clears the screen, loads its checkpoint state and shows its task.
-- **Skills** lists `karox skill list --json` discoveries; Enter opens the
-  skill's description, when-to-use, permissions and files from `skill show`.
-- **MCP panel** lists configured servers with transport, selection and liveness.
-  `a` adds a stdio or Streamable HTTP server (environment, headers, credential
-  reference, OAuth, read-only tools, timeout), `d` removes, `p` probes, and `s`
-  selects the server: read-only tools become `allow`, mutating tools become
-  `ask`. Exact per-tool decisions stay in `karox mcp session select`.
-- `/bridge` lists saved inbound bridge profiles. Starting a bridge is a
-  foreground process that owns a tunnel, so the modal points to the exact
-  `karox bridge connect --saved NAME` command instead of hiding it in a worker.
+`/mcp` lists configured servers with transport, selection, liveness and the
+number of allowed tools. Choosing a server offers three actions: probe the
+connection, allow its tools for this session (read-only tools become `allow`,
+mutating tools `ask`; exact per-tool decisions stay in `karox mcp session
+select`) and remove it, which asks for confirmation in the same list. The last
+row — or `/mcp add` — opens the form for a stdio command or a Streamable HTTP
+URL with environment, headers, credential reference, OAuth, read-only tools
+and timeout.
 
 ## Testing
 
 The client is tested through Textual's pilot with a recorded backend:
 `tests/test_tui.py` feeds `Event` and `Outcome` objects and asserts on the
-widgets, the run-state counters, the checkpoint refresh, the session panel,
-responsive header fitting, narrow terminals, error and empty states, and the
-emitter→decoder round trip against `cli._stream_json`. No model, public
-network or real keyring write is involved. The live check is a separate smoke
-run documented in [DEVELOPMENT.md](DEVELOPMENT.md).
+transcript widgets, the palette (open, filter, Tab completion, Esc), every
+picker, the `/connect` key flow (the key never reaches the transcript or the
+history), segment ordering around tool lines, the run-state counters, the
+checkpoint refresh, status-line fitting, narrow terminals, a Russian screen
+with no English leftovers, error and empty states, and the emitter→decoder
+round trip against `cli._stream_json`. No model, public network or real
+keyring write is involved. The live check is a separate smoke run documented
+in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Language
 
-The catalog is `tui/i18n.py`; keys fall back to English and then to the key
+The catalogue is `tui/i18n.py`; keys fall back to English and then to the key
 itself, so a missing translation is visible instead of crashing a screen. A
 test pins the two catalogues to the same key set. The choice is stored in
 `vnext/ui.json` under `language` and is shared with the CLI and the next

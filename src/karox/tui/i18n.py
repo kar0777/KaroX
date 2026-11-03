@@ -3,7 +3,8 @@
 The classic shell chose between English and Russian at every call site, which
 doubled the size of every screen and let the two languages drift. Here the
 choice is made once per render and a missing key falls back to English, then to
-the key itself, so a typo is visible and never crashes a screen.
+the key itself, so a typo is visible and never crashes a screen. Every string
+the screen shows comes from here, so a Russian screen has no English leftovers.
 """
 
 from __future__ import annotations
@@ -14,63 +15,156 @@ from typing import Any
 
 _RU: dict[str, str] = {
     "app.title": "KaroX",
-    "app.tagline": "локальный агент",
-    "welcome.title": "Готов к работе",
+    # ------------------------------------------------------------ welcome
+    "welcome.title": "KaroX",
     "welcome.body": (
-        "Опишите задачу обычным текстом и нажмите Enter.\n"
-        "Агент читает репозиторий, правит файлы и проверяет результат.\n\n"
-        "F1 справка · F2 модели · F3 сессии · F4 MCP · F5 состояние сессии\n"
-        "/provider подключить модель · /skills навыки репозитория"
+        "Опишите задачу и нажмите Enter. «/» — список команд, "
+        "/connect — подключить провайдера по API-ключу, /model — выбрать модель."
     ),
-    "composer.placeholder": "Опишите задачу…  (/help — команды)",
+    "welcome.facts.session": "сессия {id}",
+    "welcome.facts.verification": "проверки: {commands}",
+    "welcome.facts.suggested": "найдены проверки: {commands} · включить: /verify <команда>",
+    # ----------------------------------------------------------- composer
+    "composer.placeholder": "Опишите задачу…   / команды · Ctrl+J новая строка",
+    "composer.filter": "Печатайте для поиска · ↑↓ выбрать · Enter подтвердить · Esc отмена",
+    "secret.placeholder": "API-ключ {provider} ({env}) · Enter подключить · Esc отмена",
+    "secret.placeholder_plain": "API-ключ {provider} · Enter подключить · Esc отмена",
+    "secret.placeholder_saved": (
+        "API-ключ {provider} · пустой Enter — оставить сохранённый · Esc отмена"
+    ),
+    "secret.variable": "{name} для {provider} · Enter далее · Esc отмена",
+    "menu.palette_hint": "Tab дополнить · Enter выполнить · Esc закрыть",
+    "menu.picker_hint": "↑↓ выбрать · Enter подтвердить · Esc отмена",
+    "menu.empty": "ничего не найдено",
+    "menu.more": "ещё {count} — уточните поиск",
+    # ------------------------------------------------------------- status
     "status.idle": "готов",
     "status.running": "работаю",
     "status.stopping": "останавливаю…",
-    "status.hint": "Enter отправить · Ctrl+J новая строка · /help · Esc стоп",
-    "status.tokens": "{count} ток.",
-    "status.session": "сессия {id}",
+    "status.failed": "ошибка",
+    "status.stopped": "остановлено",
+    "status.loading": "загружаю…",
     "status.no_model": "модель не выбрана",
+    "status.step": "шаг {n}",
+    "status.seconds": "{seconds:.0f} с",
+    "status.checks_live": "✓{ok}/✗{bad}",
+    "status.saved": "сохранено {when}",
+    # ----------------------------------------------------------- commands
+    "cmd.help": "команды и клавиши",
+    "cmd.connect": "подключить провайдера по API-ключу",
+    "cmd.model": "выбрать модель",
+    "cmd.sessions": "сессии этого репозитория, продолжить",
+    "cmd.new": "новая сессия",
+    "cmd.session": "сохранённое состояние сессии",
+    "cmd.status": "модель, сессия, проверки, счётчики",
+    "cmd.mcp": "MCP-серверы: проверить, разрешить, удалить, добавить",
+    "cmd.skills": "навыки репозитория",
+    "cmd.verify": "добавить команду проверки",
+    "cmd.unverify": "сбросить проверки",
+    "cmd.effort": "глубина рассуждений",
+    "cmd.mode": "режим: build, plan, ideate",
+    "cmd.lang": "язык интерфейса",
+    "cmd.reasoning": "размышления модели за последний ответ",
+    "cmd.doctor": "диагностика провайдера, ключей, MCP и сессий",
+    "cmd.clear": "очистить экран",
+    "cmd.stop": "остановить агента",
+    "cmd.quit": "выйти",
+    # -------------------------------------------------------------- help
+    "help.title": "Команды",
+    "help.keys_title": "Клавиши",
+    "help.keys": (
+        "Enter отправить · Ctrl+J новая строка · ↑↓ история\n"
+        "/ список команд · Tab дополнить · Esc закрыть список или остановить агента\n"
+        "PageUp/PageDown прокрутка · Ctrl+N новая сессия · Ctrl+R размышления\n"
+        "Ctrl+L очистить · Ctrl+C остановить или выйти · Ctrl+Q выйти\n"
+        "Щелчок по строке инструмента раскрывает подробности."
+    ),
+    # ----------------------------------------------------------- notices
     "notice.no_model": (
-        "Модель не настроена. Откройте /provider, чтобы добавить провайдера, "
-        "или выполните karox provider setup."
+        "Модель не выбрана. /connect — подключить провайдера по API-ключу, "
+        "/model — выбрать модель."
     ),
     "notice.already_running": "Агент уже работает. Esc — остановить.",
     "notice.stopped": "Остановлено. Сессию можно продолжить позже.",
     "notice.backend_error": "Ошибка запуска: {error}",
-    "notice.no_repository": "Каталог не существует: {path}",
     "notice.session_repo": "Эта сессия привязана к другому репозиторию: {repository}",
-    "notice.clear": "Диалог очищен.",
+    "notice.session_missing": "Сессия не найдена: {id}",
+    "notice.clear": "Экран очищен.",
     "notice.new_session": "Новая сессия {id}.",
     "notice.session_selected": "Сессия {id} выбрана. Следующая задача продолжится в ней.",
+    "notice.session_task": "задача: {task}",
     "notice.no_sessions": "Сохранённых сессий для этого репозитория нет.",
-    "notice.models_empty": "Модели не настроены. Добавьте провайдера через /provider.",
-    "notice.mcp_empty": "MCP-серверы не настроены. Нажмите a, чтобы добавить.",
-    "notice.mcp_selected": "MCP-сервер {server} выбран; разрешено инструментов: {count}.",
+    "notice.models_empty": "Моделей нет. Подключите провайдера: /connect.",
+    "notice.unknown_command": "Неизвестная команда /{command}. Наберите «/» — появится список.",
+    "notice.verify_added": "Проверка добавлена: {command}",
+    "notice.verify_cleared": "Список проверок сброшен.",
+    "notice.verify_none": "Проверок нет. Добавьте: /verify <команда>.",
+    "notice.verify_list": "Проверки: {commands}",
+    "notice.verify_parse": "Не удалось разобрать команду: {error}",
+    "notice.effort": "Глубина рассуждений: {level}",
+    "notice.effort_invalid": "Допустимые уровни: {levels}",
+    "notice.mode": "Режим: {mode}",
+    "notice.mode_invalid": "Допустимые режимы: {modes}",
+    "notice.language": "Язык: {language}",
+    "notice.language_invalid": "Язык: ru или en",
+    "notice.compacted": "Контекст сжат: {summary}",
+    "notice.no_reasoning": "Для последнего ответа размышлений нет.",
+    "notice.skills_empty": "Навыки для этого репозитория не найдены.",
+    "notice.skill_failed": "Не удалось прочитать навык {name}.",
+    "notice.mcp_empty": "MCP-серверов нет. Добавьте: /mcp add.",
     "notice.mcp_probe": "Проверяю {server}…",
     "notice.mcp_probe_ok": "{server}: доступен, инструментов {count}.",
     "notice.mcp_probe_failed": "{server}: ошибка — {error}",
-    "notice.verify_added": "Проверка добавлена: {command}",
-    "notice.verify_cleared": "Список проверок сброшен.",
-    "notice.effort": "Effort: {level}",
-    "notice.mode": "Режим: {mode}",
-    "notice.language": "Язык: {language}",
-    "result.verified": "готово · проверено",
-    "result.answer": "готово · ответ",
-    "result.failed": "не завершено",
-    "result.steps": "{count} шаг(ов)",
-    "result.files": "файлов: {count}",
-    "result.checks": "проверки: {passed}/{total}",
-    "result.tokens": "токенов: {count}",
-    "result.duration": "{seconds:.1f} с",
-    "result.reason": "причина: {reason}",
-    "result.changed": "изменено: {files}",
-    "tool.running": "выполняется",
-    "tool.ok": "готово",
-    "tool.failed": "ошибка",
-    "reasoning": "размышление · {count} симв.",
-    "reasoning.title": "Размышление модели",
+    "notice.mcp_selected": "MCP-сервер {server} выбран; разрешено инструментов: {count}.",
+    "notice.mcp_selecting": "Выбираю инструменты {server}…",
+    "notice.mcp_needs_session": "Сначала выполните одну задачу в этом окне: выбор MCP хранится в сессии.",
+    "notice.mcp_added": "MCP-сервер {server} сохранён.",
+    "notice.mcp_removed": "MCP-сервер {server} удалён.",
+    "notice.catalog_failed": "Каталог провайдеров недоступен: {error}",
+    "notice.connecting": "Подключаю {provider}…",
+    "notice.connected": "{provider} подключён как {id}: моделей {models}, с ценами {priced}.",
+    "notice.connect_failed": "Не удалось подключить {provider}: {error}",
+    "notice.connect_pick_model": "Выберите модель {id}.",
+    "notice.key_empty": "Ключ не введён — подключение отменено.",
+    "notice.variable_empty": "{name} не указан — подключение отменено.",
+    "notice.cancelled": "Отменено.",
+    "notice.provider_saved": "Провайдер сохранён, модель {model} выбрана.",
+    # ------------------------------------------------------------ pickers
+    "models.title": "Модель",
+    "models.current": "текущая",
+    "models.selected": "Модель: {model}",
+    "models.context": "контекст {tokens}",
+    "models.price": "${input}/${output} за 1M",
+    "models.no_price": "цена неизвестна",
+    "sessions.title": "Сессии этого репозитория",
+    "sessions.current": "текущая",
+    "connect.title": "Подключить провайдера",
+    "connect.models": "моделей {count}",
+    "connect.connected": "подключён",
+    "connect.key_env": "ключ {env}",
+    "connect.no_key": "без ключа",
+    "connect.custom": "Свой OpenAI-совместимый endpoint…",
+    "connect.custom_detail": "base URL, модель и ключ вручную",
+    "effort.title": "Глубина рассуждений",
+    "mode.title": "Режим",
+    "mode.build": "правит файлы и проверяет результат",
+    "mode.plan": "только план, без правок",
+    "mode.ideate": "идеи и варианты, без правок",
+    "lang.title": "Язык интерфейса",
+    "skills.title": "Навыки репозитория",
     "mcp.title": "MCP-серверы",
-    "mcp.hint": "a добавить · d удалить · p проверить · s выбрать для сессии · Esc закрыть",
+    "mcp.add_item": "Добавить сервер…",
+    "mcp.add_detail": "stdio-команда или Streamable HTTP URL",
+    "mcp.tools": "инструментов {count}",
+    "mcp.actions_title": "MCP · {server}",
+    "mcp.action.probe": "Проверить подключение",
+    "mcp.action.select": "Разрешить инструменты для этой сессии",
+    "mcp.action.select_detail": "read-only — allow, изменяющие — ask",
+    "mcp.action.remove": "Удалить сервер",
+    "mcp.confirm_remove": "Удалить {server}?",
+    "mcp.confirm_yes": "Да, удалить",
+    "mcp.confirm_no": "Отмена",
+    # ---------------------------------------------------- MCP add form
     "mcp.add_title": "Новый MCP-сервер",
     "mcp.server_id": "ID сервера",
     "mcp.namespace": "Пространство имён",
@@ -82,24 +176,21 @@ _RU: dict[str, str] = {
     "mcp.headers": "HTTP-заголовки (NAME=VALUE; …)",
     "mcp.credential_ref": "Ссылка на секрет (os-keyring:mcp/name)",
     "mcp.credential_target": "Куда подставлять секрет (header/env)",
-    "mcp.oauth": "OAuth для streamable_http (да/нет)",
+    "mcp.oauth": "OAuth для streamable_http",
     "mcp.read_only": "Read-only инструменты, через запятую",
     "mcp.timeout": "Таймаут, сек",
-    "mcp.added": "MCP-сервер {server} сохранён.",
-    "mcp.removed": "MCP-сервер {server} удалён.",
-    "mcp.select_confirm": "Выбрать инструменты сервера {server}?",
-    "mcp.select_confirm_body": (
-        "Read-only инструменты будут разрешены, изменяющие — помечены ask и "
-        "потребуют отдельного решения. Точный выбор: karox mcp session select."
-    ),
-    "models.title": "Модели",
-    "models.hint": "Enter выбрать · Esc закрыть",
-    "models.selected": "Модель: {model}",
-    "sessions.title": "Сессии этого репозитория",
-    "sessions.hint": "Enter продолжить · n новая · Esc закрыть",
-    "sessions.created": "обновлена {when}",
-    "provider.title": "Подключение провайдера",
-    "provider.preset": "Провайдер",
+    "mcp.error_id": "Нужны ID сервера и пространство имён.",
+    "mcp.error_command": "Для stdio-сервера нужна команда.",
+    "mcp.error_url": "Для удалённого сервера нужен URL.",
+    "mcp.error_timeout": "Таймаут должен быть числом.",
+    "form.save": "Сохранить",
+    "form.cancel": "Отмена",
+    "form.saving": "сохраняю…",
+    "form.yes": "да",
+    "form.no": "нет",
+    # ------------------------------------------------ custom provider form
+    "provider.title": "Свой провайдер",
+    "provider.preset": "Тип",
     "provider.id": "ID провайдера",
     "provider.base_url": "Base URL",
     "provider.model": "ID модели",
@@ -108,31 +199,23 @@ _RU: dict[str, str] = {
     "provider.cancel": "Отмена",
     "provider.required": "Заполните обязательные поля.",
     "provider.key_required": "Для удалённого провайдера нужен API-ключ.",
-    "provider.saved": "Провайдер сохранён, модель {model} выбрана.",
     "provider.failed": "Не удалось сохранить: {error}",
-    "help.title": "Команды и клавиши",
-    "help.body": (
-        "/provider        подключить провайдера и модель\n"
-        "/model           выбрать модель\n"
-        "/sessions        список сессий и продолжение\n"
-        "/new             начать новую сессию\n"
-        "/mcp             MCP-серверы и инструменты\n"
-        "/skills          навыки репозитория\n"
-        "/session         состояние сохранённой сессии\n"
-        "/verify <cmd>    добавить команду проверки\n"
-        "/unverify        сбросить проверки\n"
-        "/effort <level>  уровень усилий\n"
-        "/mode <mode>     build | plan | ideate\n"
-        "/lang ru|en      язык интерфейса\n"
-        "/status          состояние сессии\n"
-        "/doctor          проверить провайдера, ключи, MCP и сессии\n"
-        "/bridge          сохранённые мосты ChatGPT/Claude/HyperAgent\n"
-        "/clear           очистить экран\n"
-        "/stop            остановить агента\n"
-        "/quit            выйти\n\n"
-        "F1 справка · F2 модели · F3 сессии · F4 MCP · F5 состояние\n"
-        "Enter отправить · Ctrl+J новая строка · Esc остановить · Ctrl+Q выход"
-    ),
+    "provider.testing": "проверяю endpoint…",
+    "provider.no_presets": "нет доступных типов провайдеров",
+    # ------------------------------------------------------------- result
+    "result.verified": "готово · проверено",
+    "result.answer": "готово · ответ",
+    "result.failed": "не завершено",
+    "result.steps": "шагов: {count}",
+    "result.files": "файлов: {count}",
+    "result.checks": "проверки: {passed}/{total}",
+    "result.tokens": "токенов: {count}",
+    "result.duration": "{seconds:.1f} с",
+    "result.cost": "стоимость {cost}",
+    "result.reason": "причина: {reason}",
+    "result.changed": "изменено: {files}",
+    "result.unmet": "не выполнено: {items}",
+    # ----------------------------------------------------------- activity
     "activity.step": "шаг {n} · жду модель",
     "activity.running": "{tool} · выполняется",
     "activity.ok": "{tool} · готово",
@@ -145,19 +228,34 @@ _RU: dict[str, str] = {
     "activity.test_ok": "проверка · {tool} пройдена",
     "activity.test_failed": "проверка · {tool} провалена",
     "activity.artifact": "артефакт · {name}",
-    "notice.compacted": "Контрольная точка контекста: {summary}",
-    "status.saved": "сохранено {when}",
-    "status.step": "шаг {n}",
-    "status.seconds": "{seconds:.0f} с",
-    "status.checks_live": "✓{ok}/✗{bad}",
-    "status.failed": "ошибка",
-    "status.stopped": "остановлено",
-    "status.checkpoint": "контрольная точка: {when}",
-    "status.no_checkpoint": "сессия ещё не сохранена",
-    "status.run_counters": (
-        "прошлый запуск: чтения {reads} · правки {edits} · проверки ✓{ok}/✗{bad} · "
-        "mcp {mcp} · навыки {skills} · суб-агенты {sub}"
+    "activity.connecting": "подключаю {provider}…",
+    # --------------------------------------------------------- tool lines
+    "tool.running": "выполняется",
+    "tool.failed": "ошибка",
+    "tool.call": "вызов {id}",
+    "tool.category": "тип {category}",
+    "reasoning.line": "размышления · {count} симв.",
+    "reasoning.title": "Размышления модели",
+    # ------------------------------------------------------- status block
+    "info.title": "Состояние",
+    "info.repository": "репозиторий",
+    "info.branch": "ветка",
+    "info.model": "модель",
+    "info.session": "сессия",
+    "info.settings": "глубина {effort} · режим {mode} · язык {language}",
+    "info.tokens": "токены",
+    "info.verification": "проверки",
+    "info.suggested": "предложенные проверки",
+    "info.none": "нет",
+    "info.checkpoint": "сохранено: {when}",
+    "info.no_checkpoint": "сессия ещё не сохранена",
+    "info.run_counters": (
+        "последний запуск: чтения {reads} · правки {edits} · проверки ✓{ok}/✗{bad} · "
+        "mcp {mcp} · навыки {skills}"
     ),
+    "doctor.title": "Диагностика",
+    "doctor.running": "проверяю провайдера, ключи, MCP и сессии…",
+    # ------------------------------------------------------ session state
     "session.title": "Состояние сессии",
     "session.empty": (
         "Сохранённой сессии пока нет. Выполните одну задачу — KaroX сохраняет "
@@ -173,6 +271,8 @@ _RU: dict[str, str] = {
     "session.section.skills": "навыки",
     "session.section.files": "изменённые файлы",
     "session.none": "нет",
+    "session.meta_detail": "ревизия {revision} · обновлена {when}",
+    "session.meta_branch": "ветка {branch}",
     "session.history": "+{count} предыдущих хода",
     "session.plan_tally": "к выполнению {todo} · выполняется {doing} · готово {done}",
     "session.checkpoints_line": "{count} сохранено · последняя {when}",
@@ -183,81 +283,164 @@ _RU: dict[str, str] = {
     "session.cost": "стоимость {cost}",
     "session.cost_unknown": "стоимость неизвестна ({reason})",
     "session.files_line": "изменено файлов: {count}",
-    "skills.title": "Навыки репозитория",
-    "skills.hint": "Enter открыть · Esc закрыть",
-    "notice.skills_empty": "Навыки для этого репозитория не найдены.",
-    "notice.skill_failed": "Не удалось прочитать навык {name}.",
+    # -------------------------------------------------------------- skills
     "skill.detail_title": "Навык {name}",
     "skill.version": "версия",
     "skill.when_to_use": "Когда использовать",
     "skill.permissions": "Права",
     "skill.files": "Файлы",
-    "tool.detail_title": "Вызов инструмента",
-    "welcome.facts.session": "сессия {id}",
-    "welcome.facts.verification": "проверки: {commands}",
-    "language.ru": "ru",
-    "language.en": "en",
 }
 
 _EN: dict[str, str] = {
     "app.title": "KaroX",
-    "app.tagline": "local agent",
-    "welcome.title": "Ready",
+    # ------------------------------------------------------------ welcome
+    "welcome.title": "KaroX",
     "welcome.body": (
-        "Describe a task in plain text and press Enter.\n"
-        "The agent reads the repository, edits files and verifies the result.\n\n"
-        "F1 help · F2 models · F3 sessions · F4 MCP · F5 session state\n"
-        "/provider connect a model · /skills repository skills"
+        "Describe a task and press Enter. Type / for commands, /connect to add "
+        "a provider with its API key, /model to pick a model."
     ),
-    "composer.placeholder": "Describe a task…  (/help for commands)",
+    "welcome.facts.session": "session {id}",
+    "welcome.facts.verification": "verification: {commands}",
+    "welcome.facts.suggested": "detected checks: {commands} · enable with /verify <command>",
+    # ----------------------------------------------------------- composer
+    "composer.placeholder": "Describe a task…   / commands · Ctrl+J newline",
+    "composer.filter": "Type to search · ↑↓ move · Enter choose · Esc cancel",
+    "secret.placeholder": "{provider} API key ({env}) · Enter connect · Esc cancel",
+    "secret.placeholder_plain": "{provider} API key · Enter connect · Esc cancel",
+    "secret.placeholder_saved": "{provider} API key · empty Enter keeps the saved key · Esc cancel",
+    "secret.variable": "{name} for {provider} · Enter next · Esc cancel",
+    "menu.palette_hint": "Tab complete · Enter run · Esc close",
+    "menu.picker_hint": "↑↓ move · Enter choose · Esc cancel",
+    "menu.empty": "no matches",
+    "menu.more": "{count} more — narrow the search",
+    # ------------------------------------------------------------- status
     "status.idle": "idle",
     "status.running": "working",
     "status.stopping": "stopping…",
-    "status.hint": "Enter send · Ctrl+J newline · /help · Esc stop",
-    "status.tokens": "{count} tok",
-    "status.session": "session {id}",
+    "status.failed": "failed",
+    "status.stopped": "stopped",
+    "status.loading": "loading…",
     "status.no_model": "no model selected",
+    "status.step": "step {n}",
+    "status.seconds": "{seconds:.0f}s",
+    "status.checks_live": "✓{ok}/✗{bad}",
+    "status.saved": "saved {when}",
+    # ----------------------------------------------------------- commands
+    "cmd.help": "commands and keys",
+    "cmd.connect": "connect a provider with its API key",
+    "cmd.model": "choose a model",
+    "cmd.sessions": "sessions in this repository, continue one",
+    "cmd.new": "start a new session",
+    "cmd.session": "durable session state",
+    "cmd.status": "model, session, checks, counters",
+    "cmd.mcp": "MCP servers: probe, allow, remove, add",
+    "cmd.skills": "repository skills",
+    "cmd.verify": "add a verification command",
+    "cmd.unverify": "clear verification commands",
+    "cmd.effort": "reasoning effort",
+    "cmd.mode": "mode: build, plan, ideate",
+    "cmd.lang": "interface language",
+    "cmd.reasoning": "the model's reasoning for the last answer",
+    "cmd.doctor": "check provider, keys, MCP and sessions",
+    "cmd.clear": "clear the screen",
+    "cmd.stop": "stop the agent",
+    "cmd.quit": "exit",
+    # -------------------------------------------------------------- help
+    "help.title": "Commands",
+    "help.keys_title": "Keys",
+    "help.keys": (
+        "Enter send · Ctrl+J newline · ↑↓ history\n"
+        "/ command list · Tab complete · Esc close the list or stop the agent\n"
+        "PageUp/PageDown scroll · Ctrl+N new session · Ctrl+R reasoning\n"
+        "Ctrl+L clear · Ctrl+C stop or exit · Ctrl+Q exit\n"
+        "Click a tool line to expand its detail."
+    ),
+    # ----------------------------------------------------------- notices
     "notice.no_model": (
-        "No model is configured. Open /provider to add one, "
-        "or run karox provider setup."
+        "No model selected. /connect adds a provider with its API key, "
+        "/model picks a model."
     ),
     "notice.already_running": "The agent is already running. Press Esc to stop it.",
     "notice.stopped": "Stopped. The session can be resumed later.",
     "notice.backend_error": "Run failed: {error}",
-    "notice.no_repository": "Directory does not exist: {path}",
     "notice.session_repo": "That session belongs to another repository: {repository}",
-    "notice.clear": "Conversation cleared.",
+    "notice.session_missing": "Session not found: {id}",
+    "notice.clear": "Screen cleared.",
     "notice.new_session": "New session {id}.",
     "notice.session_selected": "Session {id} selected. The next task continues in it.",
+    "notice.session_task": "task: {task}",
     "notice.no_sessions": "No saved sessions for this repository.",
-    "notice.models_empty": "No models configured. Add a provider through /provider.",
-    "notice.mcp_empty": "No MCP servers configured. Press a to add one.",
-    "notice.mcp_selected": "MCP server {server} selected; tools allowed: {count}.",
+    "notice.models_empty": "No models yet. Connect a provider: /connect.",
+    "notice.unknown_command": "Unknown command /{command}. Type / to see the list.",
+    "notice.verify_added": "Verification added: {command}",
+    "notice.verify_cleared": "Verification list cleared.",
+    "notice.verify_none": "No verification commands. Add one: /verify <command>.",
+    "notice.verify_list": "Verification: {commands}",
+    "notice.verify_parse": "Cannot parse the command: {error}",
+    "notice.effort": "Reasoning effort: {level}",
+    "notice.effort_invalid": "Effort levels: {levels}",
+    "notice.mode": "Mode: {mode}",
+    "notice.mode_invalid": "Modes: {modes}",
+    "notice.language": "Language: {language}",
+    "notice.language_invalid": "Language: ru or en",
+    "notice.compacted": "Context compacted: {summary}",
+    "notice.no_reasoning": "No reasoning recorded for the last answer.",
+    "notice.skills_empty": "No skills discovered for this repository.",
+    "notice.skill_failed": "Could not read skill {name}.",
+    "notice.mcp_empty": "No MCP servers. Add one: /mcp add.",
     "notice.mcp_probe": "Probing {server}…",
     "notice.mcp_probe_ok": "{server}: reachable, {count} tools.",
     "notice.mcp_probe_failed": "{server}: failed — {error}",
-    "notice.verify_added": "Verification added: {command}",
-    "notice.verify_cleared": "Verification list cleared.",
-    "notice.effort": "Effort: {level}",
-    "notice.mode": "Mode: {mode}",
-    "notice.language": "Language: {language}",
-    "result.verified": "done · verified",
-    "result.answer": "done · answer",
-    "result.failed": "not completed",
-    "result.steps": "{count} step(s)",
-    "result.files": "files: {count}",
-    "result.checks": "checks: {passed}/{total}",
-    "result.tokens": "tokens: {count}",
-    "result.duration": "{seconds:.1f}s",
-    "result.reason": "reason: {reason}",
-    "result.changed": "changed: {files}",
-    "tool.running": "running",
-    "tool.ok": "ok",
-    "tool.failed": "failed",
-    "reasoning": "reasoning · {count} chars",
-    "reasoning.title": "Model reasoning",
+    "notice.mcp_selected": "MCP server {server} selected; tools allowed: {count}.",
+    "notice.mcp_selecting": "Selecting the tools of {server}…",
+    "notice.mcp_needs_session": "Run one task in this window first: MCP selection is stored in the session.",
+    "notice.mcp_added": "MCP server {server} saved.",
+    "notice.mcp_removed": "MCP server {server} removed.",
+    "notice.catalog_failed": "The provider catalog is unavailable: {error}",
+    "notice.connecting": "Connecting {provider}…",
+    "notice.connected": "{provider} connected as {id}: {models} models, {priced} with prices.",
+    "notice.connect_failed": "Could not connect {provider}: {error}",
+    "notice.connect_pick_model": "Choose a {id} model.",
+    "notice.key_empty": "No key entered — connection cancelled.",
+    "notice.variable_empty": "{name} is empty — connection cancelled.",
+    "notice.cancelled": "Cancelled.",
+    "notice.provider_saved": "Provider saved, model {model} selected.",
+    # ------------------------------------------------------------ pickers
+    "models.title": "Model",
+    "models.current": "current",
+    "models.selected": "Model: {model}",
+    "models.context": "{tokens} context",
+    "models.price": "${input}/${output} per 1M",
+    "models.no_price": "no published price",
+    "sessions.title": "Sessions in this repository",
+    "sessions.current": "current",
+    "connect.title": "Connect a provider",
+    "connect.models": "{count} models",
+    "connect.connected": "connected",
+    "connect.key_env": "key {env}",
+    "connect.no_key": "no key",
+    "connect.custom": "Custom OpenAI-compatible endpoint…",
+    "connect.custom_detail": "base URL, model and key by hand",
+    "effort.title": "Reasoning effort",
+    "mode.title": "Mode",
+    "mode.build": "edits files and verifies the result",
+    "mode.plan": "a plan only, no edits",
+    "mode.ideate": "ideas and options, no edits",
+    "lang.title": "Interface language",
+    "skills.title": "Repository skills",
     "mcp.title": "MCP servers",
-    "mcp.hint": "a add · d remove · p probe · s select for session · Esc close",
+    "mcp.add_item": "Add a server…",
+    "mcp.add_detail": "stdio command or Streamable HTTP URL",
+    "mcp.tools": "{count} tools",
+    "mcp.actions_title": "MCP · {server}",
+    "mcp.action.probe": "Probe the connection",
+    "mcp.action.select": "Allow its tools in this session",
+    "mcp.action.select_detail": "read-only allow, mutating ask",
+    "mcp.action.remove": "Remove the server",
+    "mcp.confirm_remove": "Remove {server}?",
+    "mcp.confirm_yes": "Yes, remove",
+    "mcp.confirm_no": "Cancel",
+    # ---------------------------------------------------- MCP add form
     "mcp.add_title": "New MCP server",
     "mcp.server_id": "Server ID",
     "mcp.namespace": "Namespace",
@@ -269,24 +452,21 @@ _EN: dict[str, str] = {
     "mcp.headers": "HTTP headers (NAME=VALUE; …)",
     "mcp.credential_ref": "Secret reference (os-keyring:mcp/name)",
     "mcp.credential_target": "Injection target (header/env)",
-    "mcp.oauth": "OAuth for streamable_http (yes/no)",
+    "mcp.oauth": "OAuth for streamable_http",
     "mcp.read_only": "Read-only tools, comma separated",
     "mcp.timeout": "Timeout, seconds",
-    "mcp.added": "MCP server {server} saved.",
-    "mcp.removed": "MCP server {server} removed.",
-    "mcp.select_confirm": "Select tools of {server}?",
-    "mcp.select_confirm_body": (
-        "Read-only tools are allowed; mutating tools are marked ask and need a "
-        "separate decision. Exact choices: karox mcp session select."
-    ),
-    "models.title": "Models",
-    "models.hint": "Enter select · Esc close",
-    "models.selected": "Model: {model}",
-    "sessions.title": "Sessions in this repository",
-    "sessions.hint": "Enter continue · n new · Esc close",
-    "sessions.created": "updated {when}",
-    "provider.title": "Connect a provider",
-    "provider.preset": "Provider",
+    "mcp.error_id": "Server ID and namespace are required.",
+    "mcp.error_command": "A stdio server needs a command.",
+    "mcp.error_url": "A remote server needs a URL.",
+    "mcp.error_timeout": "The timeout must be a number.",
+    "form.save": "Save",
+    "form.cancel": "Cancel",
+    "form.saving": "saving…",
+    "form.yes": "yes",
+    "form.no": "no",
+    # ------------------------------------------------ custom provider form
+    "provider.title": "Custom provider",
+    "provider.preset": "Kind",
     "provider.id": "Provider ID",
     "provider.base_url": "Base URL",
     "provider.model": "Model ID",
@@ -295,31 +475,23 @@ _EN: dict[str, str] = {
     "provider.cancel": "Cancel",
     "provider.required": "Fill the required fields.",
     "provider.key_required": "A remote provider needs an API key.",
-    "provider.saved": "Provider saved, model {model} selected.",
     "provider.failed": "Could not save: {error}",
-    "help.title": "Commands and keys",
-    "help.body": (
-        "/provider        connect a provider and model\n"
-        "/model           choose a model\n"
-        "/sessions        list and continue sessions\n"
-        "/new             start a new session\n"
-        "/mcp             MCP servers and tools\n"
-        "/skills          repository skills\n"
-        "/session         durable session state\n"
-        "/verify <cmd>    add a verification command\n"
-        "/unverify        clear verification commands\n"
-        "/effort <level>  effort level\n"
-        "/mode <mode>     build | plan | ideate\n"
-        "/lang ru|en      interface language\n"
-        "/status          session state\n"
-        "/doctor          check provider, keys, MCP and sessions\n"
-        "/bridge          saved ChatGPT/Claude/HyperAgent bridges\n"
-        "/clear           clear the screen\n"
-        "/stop            stop the agent\n"
-        "/quit            exit\n\n"
-        "F1 help · F2 models · F3 sessions · F4 MCP · F5 session state\n"
-        "Enter send · Ctrl+J newline · Esc stop · Ctrl+Q quit"
-    ),
+    "provider.testing": "testing the endpoint…",
+    "provider.no_presets": "no installable provider kinds",
+    # ------------------------------------------------------------- result
+    "result.verified": "done · verified",
+    "result.answer": "done · answer",
+    "result.failed": "not completed",
+    "result.steps": "{count} step(s)",
+    "result.files": "files: {count}",
+    "result.checks": "checks: {passed}/{total}",
+    "result.tokens": "tokens: {count}",
+    "result.duration": "{seconds:.1f}s",
+    "result.cost": "cost {cost}",
+    "result.reason": "reason: {reason}",
+    "result.changed": "changed: {files}",
+    "result.unmet": "unmet: {items}",
+    # ----------------------------------------------------------- activity
     "activity.step": "step {n} · waiting for the model",
     "activity.running": "{tool} · running",
     "activity.ok": "{tool} · ok",
@@ -332,19 +504,34 @@ _EN: dict[str, str] = {
     "activity.test_ok": "test · {tool} ok",
     "activity.test_failed": "test · {tool} failed",
     "activity.artifact": "artifact · {name}",
-    "notice.compacted": "Context checkpoint: {summary}",
-    "status.saved": "saved {when}",
-    "status.step": "step {n}",
-    "status.seconds": "{seconds:.0f}s",
-    "status.checks_live": "✓{ok}/✗{bad}",
-    "status.failed": "failed",
-    "status.stopped": "stopped",
-    "status.checkpoint": "session checkpoint: {when}",
-    "status.no_checkpoint": "no session checkpoint yet",
-    "status.run_counters": (
+    "activity.connecting": "connecting {provider}…",
+    # --------------------------------------------------------- tool lines
+    "tool.running": "running",
+    "tool.failed": "failed",
+    "tool.call": "call {id}",
+    "tool.category": "kind {category}",
+    "reasoning.line": "reasoning · {count} chars",
+    "reasoning.title": "Model reasoning",
+    # ------------------------------------------------------- status block
+    "info.title": "Status",
+    "info.repository": "repository",
+    "info.branch": "branch",
+    "info.model": "model",
+    "info.session": "session",
+    "info.settings": "effort {effort} · mode {mode} · language {language}",
+    "info.tokens": "tokens",
+    "info.verification": "verification",
+    "info.suggested": "detected checks",
+    "info.none": "none",
+    "info.checkpoint": "saved: {when}",
+    "info.no_checkpoint": "no session checkpoint yet",
+    "info.run_counters": (
         "last run: reads {reads} · edits {edits} · checks ✓{ok}/✗{bad} · "
         "mcp {mcp} · skills {skills}"
     ),
+    "doctor.title": "Diagnostics",
+    "doctor.running": "checking provider, keys, MCP and sessions…",
+    # ------------------------------------------------------ session state
     "session.title": "Session state",
     "session.empty": (
         "No durable session record yet. Run one task; KaroX saves a resumable "
@@ -360,6 +547,8 @@ _EN: dict[str, str] = {
     "session.section.skills": "skills",
     "session.section.files": "changed files",
     "session.none": "none",
+    "session.meta_detail": "rev {revision} · updated {when}",
+    "session.meta_branch": "branch {branch}",
     "session.history": "+{count} earlier turn(s)",
     "session.plan_tally": "todo {todo} · doing {doing} · done {done}",
     "session.checkpoints_line": "{count} saved · last {when}",
@@ -370,20 +559,12 @@ _EN: dict[str, str] = {
     "session.cost": "cost {cost}",
     "session.cost_unknown": "cost unknown ({reason})",
     "session.files_line": "changed files: {count}",
-    "skills.title": "Repository skills",
-    "skills.hint": "Enter open · Esc close",
-    "notice.skills_empty": "No skills discovered for this repository.",
-    "notice.skill_failed": "Could not read skill {name}.",
+    # -------------------------------------------------------------- skills
     "skill.detail_title": "Skill {name}",
     "skill.version": "version",
     "skill.when_to_use": "When to use",
     "skill.permissions": "Permissions",
     "skill.files": "Files",
-    "tool.detail_title": "Tool call",
-    "welcome.facts.session": "session {id}",
-    "welcome.facts.verification": "verification: {commands}",
-    "language.ru": "ru",
-    "language.en": "en",
 }
 
 _CATALOGUE: dict[str, dict[str, str]] = {"ru": _RU, "en": _EN}

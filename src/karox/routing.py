@@ -387,7 +387,9 @@ class RoutedProvider:
             if model.pricing is None:
                 raise ProviderError(
                     ProviderErrorKind.BUDGET_EXCEEDED,
-                    "cost budget requires model pricing",
+                    "cost budget requires model pricing; "
+                    f"{target.provider_id}/{target.model} has none "
+                    "(karox provider catalog-sync fills catalog prices)",
                 )
             assert self.policy.currency is not None
             if model.pricing.currency != self.policy.currency:

@@ -7,8 +7,146 @@ visual-check tools when the runtime was given a catalogue or a checker.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from .core_types import ToolDefinition
 from .models import Capability
+
+
+_REQUEST_ID_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 128,
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    "description": (
+        "Names this run. Retrying with the same request_id returns the same job "
+        "instead of starting the command twice; use a new one for a new run."
+    ),
+}
+_JOB_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 64}
+
+
+def _job_lookup_tools(
+    name: Callable[[str], str], label: str, capability: Capability
+) -> dict[str, ToolDefinition]:
+    return {
+        name("status"): ToolDefinition(
+            name("status"),
+            f"Status of a background {label}: running, passed, failed, timed_out, "
+            "cancelled or lost, with exit code and elapsed time. Without job_id, "
+            "lists the most recent jobs.",
+            capability,
+            False,
+            {
+                "type": "object",
+                "properties": {"job_id": _JOB_ID_SCHEMA},
+                "additionalProperties": False,
+            },
+        ),
+        name("logs"): ToolDefinition(
+            name("logs"),
+            f"Read the combined stdout/stderr of a background {label}, redacted. "
+            "Without offset it returns the last `limit` bytes; pass the previous "
+            "next_offset to read only what was written since.",
+            capability,
+            False,
+            {
+                "type": "object",
+                "properties": {
+                    "job_id": _JOB_ID_SCHEMA,
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1048576},
+                    "offset": {"type": "integer", "minimum": 0},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+        ),
+        name("cancel"): ToolDefinition(
+            name("cancel"),
+            f"Stop a background {label} and its whole process tree. Idempotent: "
+            "a finished job is reported as already finished.",
+            capability,
+            True,
+            {
+                "type": "object",
+                "properties": {"job_id": _JOB_ID_SCHEMA},
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            replayable=False,
+        ),
+    }
+
+
+def command_job_tool_definitions() -> dict[str, ToolDefinition]:
+    """Background job tools; offered to hosted clients, not to native agents.
+
+    A native agent's turn has no transport deadline, so it keeps the
+    synchronous tools. A web chat's call does, and without these a long build
+    or suite could only fail with a timeout.
+    """
+
+    timeout = {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 86400,
+        "description": "Stop the job after this many seconds (default 1800).",
+    }
+    tools = {
+        "dev.command_start": ToolDefinition(
+            "dev.command_start",
+            "Start a repository-scoped developer command in the background and "
+            "return at once with a job_id; poll dev.command_status / "
+            "dev.command_logs. It survives a dropped connection or a bridge "
+            "restart. Same rules as dev.command: no shell, no publish/auth/"
+            "remote Git. Use it for builds, long tests, benchmarks and dev "
+            "servers (cancel stops a server).",
+            Capability.DEV_COMMAND,
+            True,
+            {
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Executable and arguments. Shell syntax is not supported.",
+                    },
+                    "request_id": _REQUEST_ID_SCHEMA,
+                    "timeout_seconds": timeout,
+                },
+                "required": ["argv", "request_id"],
+                "additionalProperties": False,
+            },
+            (Capability.PROCESS_RUN,),
+        ),
+        "checks.start": ToolDefinition(
+            "checks.start",
+            "Start one user-approved verification command (the same set as "
+            "checks.run) in the background and return at once with a job_id; "
+            "poll checks.status / checks.logs. Use it for suites that take "
+            "longer than a minute.",
+            Capability.CHECKS_RUN,
+            True,
+            {
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "request_id": _REQUEST_ID_SCHEMA,
+                    "timeout_seconds": timeout,
+                },
+                "required": ["argv", "request_id"],
+                "additionalProperties": False,
+            },
+            (Capability.PROCESS_RUN,),
+        ),
+    }
+    tools.update(
+        _job_lookup_tools(lambda suffix: f"dev.command_{suffix}", "developer command", Capability.DEV_COMMAND)
+    )
+    tools.update(
+        _job_lookup_tools(lambda suffix: f"checks.{suffix}", "verification check", Capability.CHECKS_RUN)
+    )
+    return tools
 
 
 def additional_tool_definitions(
@@ -18,6 +156,7 @@ def additional_tool_definitions(
     max_plan_item_chars: int,
     include_skill_tools: bool,
     include_visual_check: bool,
+    include_command_jobs: bool = False,
 ) -> dict[str, ToolDefinition]:
     """The extended runtime's extra tool definitions, keyed by Core name."""
 
@@ -548,4 +687,6 @@ def additional_tool_definitions(
             replayable=False,
         )
 
+    if include_command_jobs:
+        additional.update(command_job_tool_definitions())
     return additional

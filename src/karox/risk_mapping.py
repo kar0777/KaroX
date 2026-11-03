@@ -57,6 +57,16 @@ COMMAND_RISK_KINDS: Mapping[str, str] = {
     # workspace-local action merely because the bytes may land in a file.
     "web.fetch": "network.request",
     "dev.command": "process.run_dev",
+    "dev.command_start": "process.run_dev",
+    # Reading or stopping a job KaroX itself started observes or ends a
+    # process the user already approved; it starts nothing new.
+    "dev.command_status": "status.read",
+    "dev.command_logs": "status.read",
+    "dev.command_cancel": "status.read",
+    "checks.start": "checks.run",
+    "checks.status": "status.read",
+    "checks.logs": "status.read",
+    "checks.cancel": "status.read",
     "process.run": "process.run_unknown",
     # A skill script is a repository-owned recipe the catalogue already
     # validated; running it is the same trust level as running the project's
@@ -450,7 +460,7 @@ def command_requests_deletion(name: str, arguments: Mapping[str, Any]) -> bool:
         return True
     if name == "repo.command":
         return _repo_command_kind(arguments) == "repo.delete"
-    if name not in {"dev.command", "process.run"}:
+    if name not in {"dev.command", "dev.command_start", "process.run"}:
         return False
     argv = _strings(arguments.get("argv")) or _strings(arguments.get("command"))
     if not argv:
@@ -501,7 +511,7 @@ def risk_kind_for(name: str, arguments: Mapping[str, Any]) -> str:
 
     if name == "browser.command":
         return _browser_kind(arguments)
-    if name in {"process.run", "dev.command"}:
+    if name in {"process.run", "dev.command", "dev.command_start"}:
         # Full developer access changes *capability*, not the consequence of
         # the argv. A git push, package publish or destructive Git command must
         # keep its semantic kind even when it travels through dev.command.

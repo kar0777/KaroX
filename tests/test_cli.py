@@ -347,3 +347,54 @@ def test_explicit_vision_off_wins_for_a_vision_model(monkeypatch) -> None:
     args = _vision_args(route=("wandb/vision-model",), vision="off")
 
     assert cli._run_vision_capability(args) is False
+
+
+def _priced(provider_id: str, model_id: str, currency):
+    from karox.registry import ModelPricing, ModelRecord
+
+    pricing = (
+        None
+        if currency is None
+        else ModelPricing(
+            version="v1",
+            currency=currency,
+            input_per_million=1.0,
+            output_per_million=2.0,
+            source="test",
+        )
+    )
+    return ModelRecord(provider_id=provider_id, model_id=model_id, pricing=pricing)
+
+
+def test_max_cost_without_currency_uses_the_route_pricing_currency() -> None:
+    from karox.routing import RouteTarget
+
+    registry = _VisionRegistry([_priced("wandb", "deepseek", "USD")], None)
+
+    assert cli._budget_currency(registry, (RouteTarget("wandb", "deepseek"),)) == "USD"
+
+
+def test_max_cost_on_an_unpriced_route_names_the_route_and_the_fix() -> None:
+    from karox.routing import RouteTarget
+
+    registry = _VisionRegistry(
+        [_priced("wandb", "deepseek", "USD"), _priced("local", "llama", None)], None
+    )
+    routes = (RouteTarget("wandb", "deepseek"), RouteTarget("local", "llama"))
+
+    with pytest.raises(ValueError) as raised:
+        cli._budget_currency(registry, routes)
+    assert "local/llama" in str(raised.value)
+    assert "catalog-sync" in str(raised.value)
+
+
+def test_max_cost_across_currencies_still_needs_an_explicit_currency() -> None:
+    from karox.routing import RouteTarget
+
+    registry = _VisionRegistry(
+        [_priced("a", "m", "USD"), _priced("b", "m", "EUR")], None
+    )
+    routes = (RouteTarget("a", "m"), RouteTarget("b", "m"))
+
+    with pytest.raises(ValueError, match="--currency"):
+        cli._budget_currency(registry, routes)

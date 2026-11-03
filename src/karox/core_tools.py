@@ -325,6 +325,10 @@ class ExtendedCoreRuntime(CoreRuntime):
         # returns a bounded verdict.
         visual_checker = kwargs.pop("visual_checker", None)
         self._visual_checker = visual_checker
+        # Background jobs exist for hosted clients, whose calls have a
+        # transport deadline; a native agent keeps the synchronous tools, so
+        # its tool list (and prompt cache) does not change.
+        self._command_jobs = bool(kwargs.pop("command_jobs", False))
         super().__init__(*args, **kwargs)
         handlers = dict(self._handlers)
         handlers["repo.edit_file"] = self._edit_file
@@ -346,6 +350,15 @@ class ExtendedCoreRuntime(CoreRuntime):
             handlers["skill.read"] = self._skill_read
         if self._visual_checker is not None:
             handlers["visual.check"] = self._visual_check
+        if self._command_jobs:
+            handlers["dev.command_start"] = self._dev_command_start
+            handlers["dev.command_status"] = self._dev_command_status
+            handlers["dev.command_logs"] = self._dev_command_logs
+            handlers["dev.command_cancel"] = self._dev_command_cancel
+            handlers["checks.start"] = self._checks_start
+            handlers["checks.status"] = self._checks_status
+            handlers["checks.logs"] = self._checks_logs
+            handlers["checks.cancel"] = self._checks_cancel
         self._handlers = handlers
         additional = additional_tool_definitions(
             max_edit_batch=self.MAX_EDIT_BATCH,
@@ -353,6 +366,7 @@ class ExtendedCoreRuntime(CoreRuntime):
             max_plan_item_chars=self.MAX_PLAN_ITEM_CHARS,
             include_skill_tools=self._skill_catalog is not None,
             include_visual_check=self._visual_checker is not None,
+            include_command_jobs=self._command_jobs,
         )
         collisions = set(additional).intersection(self._definitions)
         if collisions:
@@ -606,6 +620,128 @@ class ExtendedCoreRuntime(CoreRuntime):
     def _tests_run(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
         return hot_worker_supervisor().execute_tests(self, arguments, deadline_seconds)
 
+    # -- background jobs (hosted clients) ----------------------------------
+
+    def _job_store(self) -> Any:
+        from .command_jobs import CommandJobStore, repository_job_root
+        from .paths import runtime_dir
+
+        return CommandJobStore(repository_job_root(runtime_dir(), self.repository))
+
+    @staticmethod
+    def _job_launch_argv(argv: List[str]) -> List[str]:
+        from .core_process import _is_karox_module_command, _karox_module_launch
+        from .process_launcher import resolve_executable
+
+        source = _karox_module_launch(argv) if _is_karox_module_command(argv) else list(argv)
+        return resolve_executable(source)
+
+    def _prepare_dev_command_start(self, arguments: Dict[str, Any]) -> tuple[List[str], float]:
+        from .command_jobs import job_timeout
+
+        raw_argv = arguments.get("argv")
+        if not isinstance(raw_argv, list) or not raw_argv:
+            raise InvalidCommand("dev.command_start argv must be a non-empty array")
+        try:
+            argv = list(validate_developer_command_argv(raw_argv))
+        except DeveloperCommandBlocked as exc:
+            raise InvalidCommand(str(exc)) from exc
+        return argv, job_timeout(arguments.get("timeout_seconds"))
+
+    def _dev_command_start(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        import os
+
+        del deadline_seconds
+        argv, timeout = self._prepare_dev_command_start(arguments)
+        # Same environment as dev.command: Full developer access behaves like
+        # a terminal this KaroX process opened.
+        environment = os.environ.copy()
+        environment.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+        payload = self._job_store().start(
+            kind="dev",
+            request_id=arguments.get("request_id"),
+            argv=argv,
+            launch_argv=self._job_launch_argv(argv),
+            cwd=self.repository,
+            timeout_seconds=timeout,
+            environment=environment,
+        )
+        payload["next"] = "poll dev.command_status or dev.command_logs with this job_id"
+        return payload
+
+    def _prepare_checks_start(self, arguments: Dict[str, Any]) -> tuple[List[str], float]:
+        from .command_jobs import MAX_TIMEOUT_SECONDS, job_timeout
+
+        plan = self._prepare_check({"argv": arguments.get("argv")}, MAX_TIMEOUT_SECONDS)
+        if plan.inline_code is not None:
+            raise InvalidCommand(
+                "checks.start does not run inline interpreter code; write the snippet "
+                "to a scratch file in the repository and start '<interpreter> <file>'"
+            )
+        return list(plan.argv), job_timeout(arguments.get("timeout_seconds"))
+
+    def _checks_start(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        from .core_process import _is_karox_module_command
+        from .security import child_process_environment
+
+        del deadline_seconds
+        argv, timeout = self._prepare_checks_start(arguments)
+        environment = child_process_environment()
+        if _is_karox_module_command(argv):
+            environment["PYTHONSAFEPATH"] = "1"
+        payload = self._job_store().start(
+            kind="check",
+            request_id=arguments.get("request_id"),
+            argv=argv,
+            launch_argv=self._job_launch_argv(argv),
+            cwd=self.repository,
+            timeout_seconds=timeout,
+            environment=environment,
+        )
+        payload["next"] = "poll checks.status or checks.logs with this job_id"
+        return payload
+
+    def _job_status(self, kind: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        job_id = arguments.get("job_id")
+        store = self._job_store()
+        if job_id is None:
+            return {"jobs": store.list(kind=kind)}
+        return store.status(job_id, kind=kind)
+
+    def _dev_command_status(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_status("dev", arguments)
+
+    def _checks_status(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_status("check", arguments)
+
+    def _job_logs(self, kind: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        from .command_jobs import DEFAULT_LOG_LIMIT
+
+        return self._job_store().logs(
+            arguments.get("job_id"),
+            kind=kind,
+            limit=arguments.get("limit", DEFAULT_LOG_LIMIT),
+            offset=arguments.get("offset"),
+        )
+
+    def _dev_command_logs(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_logs("dev", arguments)
+
+    def _checks_logs(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_logs("check", arguments)
+
+    def _dev_command_cancel(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_store().cancel(arguments.get("job_id"), kind="dev")
+
+    def _checks_cancel(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
+        del deadline_seconds
+        return self._job_store().cancel(arguments.get("job_id"), kind="check")
+
     def _runtime_status(self, arguments: Dict[str, Any], deadline_seconds: float) -> Dict[str, Any]:
         del deadline_seconds
         if arguments:
@@ -774,6 +910,12 @@ class ExtendedCoreRuntime(CoreRuntime):
             return
         if command_name == "dev.command":
             self._prepare_dev_command(arguments, deadline_seconds)
+            return
+        if command_name == "dev.command_start":
+            self._prepare_dev_command_start(arguments)
+            return
+        if command_name == "checks.start":
+            self._prepare_checks_start(arguments)
             return
         if command_name == "tests.run":
             self._prepare_tests_run(arguments)

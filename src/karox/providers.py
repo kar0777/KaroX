@@ -188,6 +188,53 @@ class ProviderErrorKind(str, Enum):
     BUDGET_EXCEEDED = "budget_exceeded"
 
 
+_ERROR_BODY_LIMIT = 16_384
+_VENDOR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+
+
+def _vendor_error_codes(response: httpx.Response) -> tuple[str, ...]:
+    """Machine-readable codes from a JSON error body, never its free text.
+
+    "HTTP 400: Bad Request" does not say which part of the request was
+    refused; the body's ``code``/``type``/``param`` usually do
+    (``context_length_exceeded``, ``unsupported_parameter``, ``max_tokens``).
+    Only short identifier-shaped strings from an error object are kept: the
+    message, a bare string error or anything else free-form can echo the
+    request, so it stays out of the error, the event log and the session.
+    """
+
+    try:
+        raw = bytearray()
+        for chunk in response.iter_bytes():
+            raw.extend(chunk)
+            if len(raw) >= _ERROR_BODY_LIMIT:
+                break
+        body = json.loads(bytes(raw[:_ERROR_BODY_LIMIT]).decode("utf-8"))
+    except (httpx.HTTPError, httpx.StreamError, UnicodeDecodeError, ValueError):
+        return ()
+    if not isinstance(body, dict):
+        return ()
+    error = body.get("error")
+    if not isinstance(error, dict):
+        # vLLM-style gateways put the error object at the top level.
+        if body.get("object") != "error":
+            return ()
+        error = body
+    codes: list[str] = []
+    for key in ("code", "type", "param"):
+        value = error.get(key)
+        if (
+            isinstance(value, str)
+            and _VENDOR_CODE.fullmatch(value)
+            and value.lower() != "error"
+            and not contains_credential(value)
+        ):
+            text = value if key != "param" else f"param={value}"
+            if text not in codes:
+                codes.append(text)
+    return tuple(codes)
+
+
 class ProviderError(RuntimeError):
     """A secret-safe, classified provider failure."""
 
@@ -1458,6 +1505,9 @@ class OpenAIChatCompletionsProvider:
             kind = ProviderErrorKind.INVALID_REQUEST
         retry_after = cls._retry_after(response.headers.get("Retry-After"))
         detail = response.reason_phrase or "provider request failed"
+        codes = _vendor_error_codes(response)
+        if codes:
+            detail = f"{detail} ({', '.join(codes)})"
         return ProviderError(
             kind,
             f"HTTP {status}: {detail}",

@@ -152,6 +152,34 @@ def _parser() -> argparse.ArgumentParser:
     provider = commands.add_parser("provider", help="manage API providers")
     providers = provider.add_subparsers(dest="provider_command", required=True)
     providers.add_parser("presets").add_argument("--json", action="store_true")
+    catalog = providers.add_parser(
+        "catalog", help="list the built-in models.dev provider catalog"
+    )
+    catalog.add_argument("query", nargs="?", default="")
+    catalog.add_argument("--provider", help="show one provider with its models")
+    catalog.add_argument("--all", action="store_true", help="include providers KaroX cannot connect")
+    catalog.add_argument("--json", action="store_true")
+    connect = providers.add_parser(
+        "connect", help="connect a catalog provider with only its API key"
+    )
+    connect.add_argument("catalog_id")
+    connect.add_argument("--provider-id", help="registry ID (defaults to the catalog ID)")
+    connect.add_argument("--model", help="model to select (defaults to the current selection)")
+    connect_key = connect.add_mutually_exclusive_group()
+    connect_key.add_argument("--stdin-key", action="store_true", help="read the API key from stdin")
+    connect_key.add_argument("--credential-ref", help="use an existing os-keyring:NAME or env:NAME reference")
+    connect_key.add_argument("--env-key", action="store_true", help="read the key from the catalog's environment variable at run time")
+    connect.add_argument("--base-url", help="override the catalog endpoint")
+    connect.add_argument("--var", action="append", default=[], help="endpoint placeholder NAME=VALUE")
+    connect.add_argument("--include-deprecated", action="store_true")
+    connect.add_argument("--no-test", action="store_true")
+    connect.add_argument("--no-activate", action="store_true")
+    connect.add_argument("--json", action="store_true")
+    catalog_sync = providers.add_parser(
+        "catalog-sync", help="fill missing prices and limits from the catalog"
+    )
+    catalog_sync.add_argument("provider_ids", nargs="*")
+    catalog_sync.add_argument("--json", action="store_true")
     add = providers.add_parser("add")
     add.add_argument("provider_id")
     add.add_argument("--adapter", required=True, choices=sorted(ADAPTER_KINDS))
@@ -399,6 +427,11 @@ def _parser() -> argparse.ArgumentParser:
     saved_create.add_argument("--repository", type=Path, default=Path.cwd())
     saved_create.add_argument("--tool", action="append", default=[])
     saved_create.add_argument("--write", action="store_true")
+    saved_create.add_argument(
+        "--access-profile",
+        choices=[item.value for item in AccessProfile],
+        help="elevated adds background developer commands (karox.command.*)",
+    )
     saved_create.add_argument("--verification-command", action="append", default=[])
     saved_create.add_argument("--deadline-seconds", type=float, default=600.0)
     saved_create.add_argument(

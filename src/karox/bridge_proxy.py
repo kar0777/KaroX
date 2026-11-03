@@ -30,6 +30,7 @@ from starlette.responses import JSONResponse, Response
 
 from .artifacts import ArtifactStore
 from .core import CoreError
+from .command_guard import DeveloperCommandBlocked
 from .core_types import VerificationCommandNotApproved
 from .hosted_core import (
     DEFAULT_HOSTED_DEADLINE_SECONDS,
@@ -587,7 +588,7 @@ def bridge_denied_detail(exc: BaseException) -> Optional[str]:
                 "after it finishes"
             )
         return prefix
-    return None
+    return caller_safe_detail(exc)
 
 
 def bridge_error_detail(exc: BaseException) -> Optional[str]:
@@ -598,7 +599,54 @@ def bridge_error_detail(exc: BaseException) -> Optional[str]:
     for prefix in _SAFE_INVALID_REQUEST_PREFIXES:
         if text.startswith(prefix):
             return text[:300]
-    return None
+    return caller_safe_detail(exc)
+
+
+# Exceptions whose message KaroX itself wrote for the caller: a validation
+# refusal ("request_id must be ...", "unknown job: ...", "session profile does
+# not allow dev.command"). A bare "the call was rejected as invalid" sends a
+# hosted model guessing, so their first line is passed on -- with anything that
+# could describe the machine taken out. Library exceptions (a TypeError from a
+# dependency, an OSError) never qualify: their text is not ours to vouch for.
+_CALLER_AUTHORED_ERRORS: tuple[type[BaseException], ...] = (
+    CoreError,
+    HostedBridgeError,
+    SessionError,
+    DeveloperCommandBlocked,
+)
+_DETAIL_LIMIT = 400
+_URL_TEXT = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+_UNC_PATH_TEXT = re.compile(r"\\\\[^\s'\";,()<>]+")
+_WINDOWS_PATH_TEXT = re.compile(r"(?<![\w])[A-Za-z]:[\\/][^\s'\";,()<>]*")
+_HOME_PATH_TEXT = re.compile(r"(?<![\w])~[\\/][^\s'\";,()<>]*")
+_POSIX_PATH_TEXT = re.compile(r"(?<![\w.~:/\\-])/(?=[^\s/])[^\s'\";,()<>]*")
+
+
+def caller_safe_detail(exc: BaseException) -> Optional[str]:
+    """First line of a KaroX-authored refusal, without paths, URLs or secrets."""
+    from .security import redact
+
+    if not isinstance(exc, _CALLER_AUTHORED_ERRORS):
+        return None
+    lines = str(exc).strip().splitlines()
+    if not lines:
+        return None
+    text = lines[0].strip()
+    try:
+        home = os.path.expanduser("~")
+    except Exception:  # noqa: BLE001 - a missing home only skips a replacement
+        home = ""
+    if home and len(home) > 3:
+        text = text.replace(home, "~")
+    text = _URL_TEXT.sub("<url>", text)
+    for pattern in (_UNC_PATH_TEXT, _WINDOWS_PATH_TEXT, _HOME_PATH_TEXT, _POSIX_PATH_TEXT):
+        text = pattern.sub("<path>", text)
+    text = str(redact(text)).strip()
+    if not text:
+        return None
+    if len(text) > _DETAIL_LIMIT:
+        text = text[: _DETAIL_LIMIT - 3].rstrip() + "..."
+    return text
 
 
 def bridge_error_code(exc: BaseException) -> str:
@@ -1471,6 +1519,10 @@ def build_proxy_asgi_app(
                 detail = bridge_error_detail(exc)
             elif code == "denied":
                 detail = bridge_denied_detail(exc)
+            elif code == "verification_not_approved":
+                # Names the refused argv and the approved set, so the next call
+                # picks a command that runs instead of guessing variants.
+                detail = caller_safe_detail(exc)
             else:
                 detail = None
             result = bridge_error_result(code, detail=detail)

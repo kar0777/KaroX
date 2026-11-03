@@ -1,8 +1,9 @@
-/* KaroX compact client -- v5 rc4 palette.
+/* KaroX terminal client -- v5 rc4 palette.
  *
  * Warm near-black ground, one gold accent for position and action, green/red
- * reserved for outcomes. No box is drawn around ordinary prose, so a border
- * always means "this needs attention".
+ * reserved for outcomes. The transcript is plain lines like a CLI session: no
+ * box is drawn around prose, so the only frames on screen are the composer
+ * and the two forms.
  */
 
 Screen {
@@ -10,46 +11,40 @@ Screen {
     color: #e5e5e5;
 }
 
-#header {
-    height: 1;
-    padding: 0 2;
-    background: #1a1712;
-    color: #e5e5e5;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
-}
-
 #chat {
     height: 1fr;
     padding: 1 2 0 2;
+    scrollbar-size-vertical: 1;
     scrollbar-color: #4a4338;
+    scrollbar-color-hover: #6f6656;
     scrollbar-background: #0e0c08;
 }
 
 .welcome {
     width: 100%;
     margin: 0 0 1 0;
-    padding: 1 2;
-    background: #15120c;
-    border: round #4a4338;
 }
 
 .user-message {
     width: 100%;
     margin: 1 0 0 0;
-    padding: 0;
+}
+
+.command-echo {
+    width: 100%;
+    margin: 1 0 0 0;
+    color: #8a7e6a;
 }
 
 .assistant-message {
     width: 100%;
-    margin: 0 0 1 0;
+    height: auto;
+    margin: 0;
     padding: 0 0 0 2;
-    border-left: thick #4a4338;
 }
 
 .reasoning-line {
-    color: #8a7e6a;
-    margin-bottom: 0;
+    color: #6f6656;
 }
 
 .live-answer {
@@ -59,57 +54,33 @@ Screen {
 .final-answer {
     color: #e5e5e5;
     margin: 0;
+    padding: 0;
+    background: #0e0c08;
 }
 
 .tool-card {
     width: 100%;
     margin: 0 0 0 2;
-    padding: 0 1;
-    background: #16130d;
-    border-left: thick #4a4338;
+    padding: 0;
 }
 
 .tool-card:hover {
-    background: #1d1810;
+    background: #16130d;
 }
-
-/* One quiet colour per kind of work, so a scrolling log can be read at a
-   glance: gold mutates, green proves, amber leaves the process. */
-.tool-read { border-left: thick #8a7e6a; }
-.tool-edit { border-left: thick #d4b676; }
-.tool-test { border-left: thick #8aab7e; }
-.tool-mcp { border-left: thick #c6a56b; }
-.tool-skill { border-left: thick #d4b676; }
-.tool-plan { border-left: thick #8a7e6a; }
-.tool-web { border-left: thick #c6a56b; }
-.tool-inspect { border-left: thick #8a7e6a; }
-.tool-subagent { border-left: thick #c6a56b; }
-.tool-other { border-left: thick #4a4338; }
 
 .notice {
     width: 100%;
-    margin: 1 0;
-    padding: 0 1;
-    border: round #4a4338;
-    background: #15120c;
+    margin: 0;
 }
 
-.notice-success {
-    border: round #3f4d38;
-}
-
-.notice-warning {
-    border: round #584a26;
-}
-
-.notice-error {
-    border: round #5c3a3a;
+.text-block {
+    width: 100%;
+    margin: 0 0 0 2;
 }
 
 #activity {
     height: 1;
     padding: 0 2;
-    background: #0e0c08;
 }
 
 #activity LoadingIndicator {
@@ -127,44 +98,112 @@ Screen {
     text-overflow: ellipsis;
 }
 
-#composer {
-    height: 3;
+/* The inline list: the slash palette and every picker open here, right above
+   the composer, and close back to nothing. */
+#menu {
+    height: auto;
     margin: 0 2;
     padding: 0 1;
-    background: #1a1712;
+    background: #15120c;
+}
+
+#menu-title {
+    height: 1;
+    color: #d4b676;
+    text-style: bold;
+}
+
+#menu-options {
+    height: auto;
+    max-height: 10;
+    padding: 0;
+    border: none;
+    background: #15120c;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #4a4338;
+    scrollbar-background: #15120c;
+}
+
+#menu-options:focus {
+    border: none;
+}
+
+#menu-options > .option-list--option-highlighted {
+    background: #2a2418;
+    color: #f0e6cf;
+}
+
+#menu-options > .option-list--option-hover {
+    background: #211c13;
+}
+
+#menu-hint {
+    height: 1;
+    color: #6f6656;
+}
+
+#composer {
+    height: auto;
+    min-height: 3;
+    max-height: 10;
+    margin: 0 2;
+    padding: 0 1;
+    background: #0e0c08;
     color: #e5e5e5;
     border: round #4a4338;
 }
 
-#composer:hover {
-    border: round #c6a56b;
-}
-
 #composer:focus {
-    border: round #d4b676;
+    border: round #8a7e6a;
 }
 
 #composer .text-area--placeholder {
-    color: #8a7e6a;
+    color: #6f6656;
+}
+
+#composer .text-area--cursor-line {
+    background: #0e0c08;
+}
+
+#prompt-label {
+    height: 1;
+    margin: 0 3;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#secret {
+    height: 3;
+    margin: 0 2;
+    padding: 0 1;
+    background: #0e0c08;
+    border: round #d4b676;
+}
+
+#secret:focus {
+    background: #0e0c08;
+    background-tint: #0e0c08 0%;
 }
 
 #status {
     height: 1;
-    padding: 0 2;
-    background: #1a1712;
+    padding: 0 3;
 }
 
-#status #hint {
+#status #facts {
     width: 1fr;
-    content-align: left middle;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #status #state {
     width: auto;
-    content-align: right middle;
+    height: 1;
+    margin: 0 0 0 2;
 }
 
-/* ------------------------------------------------------------------ modals */
+/* ------------------------------------------------------------------- forms */
 
 .modal {
     width: 84;
@@ -220,63 +259,6 @@ Screen {
     width: 100%;
 }
 
-.help-modal {
-    width: 86;
-}
-
-.help-scroll {
-    height: auto;
-    max-height: 24;
-}
-
-.confirm-modal {
-    width: 64;
-}
-
-.mcp-modal {
-    width: 100;
-    max-width: 96%;
-}
-
-.session-modal {
-    width: 96;
-    max-width: 96%;
-}
-
-.session-scroll {
-    height: auto;
-    max-height: 26;
-}
-
-.mcp-modal OptionList {
-    height: auto;
-    max-height: 20;
-    background: #1a1712;
-    border: round #4a4338;
-}
-
-.mcp-modal OptionList:focus {
-    border: round #d4b676;
-}
-
-OptionList {
-    background: #1a1712;
-    border: round #4a4338;
-}
-
-OptionList:focus {
-    border: round #d4b676;
-}
-
-OptionList > .option-list--option-highlighted {
-    background: #2a2418;
-    color: #f0e6cf;
-}
-
-OptionList > .option-list--option-hover {
-    background: #241e14;
-}
-
 SelectCurrent {
     background: #1a1712;
     border: round #4a4338;
@@ -284,6 +266,11 @@ SelectCurrent {
 
 SelectCurrent:focus {
     border: round #d4b676;
+}
+
+SelectOverlay {
+    background: #1a1712;
+    border: round #4a4338;
 }
 
 Button {
