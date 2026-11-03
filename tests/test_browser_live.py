@@ -199,6 +199,10 @@ def test_open_snapshot_and_text_extraction(site, make_session):
     assert found["count"] >= 1
     assert found["matches"][0]["tag"] == "a"
 
+    # ``open`` returns at DOMContentLoaded; the page's iframe may still be
+    # loading then, so "complete" is only certain once the network is idle
+    # (a loaded sandbox saw "interactive" here about one run in three).
+    _call(session, "wait_network_idle", {})
     info = _call(session, "page_info")
     assert info["ready_state"] == "complete"
     assert info["title"] == "KaroX Browser Test Site"
