@@ -90,9 +90,10 @@ prints it.
 - Reasoning is never mixed into the answer: a dim `∴ Thought for 4s ·
   ctrl+r to show` line stands for it, and `ctrl+r` prints it.
 - A finished run adds one compact result line: outcome, steps, files, checks,
-  tokens, cost (when the model is priced), elapsed time; the reason, unmet
-  requirements, the failure map and the changed files follow on their own
-  lines only when there are any. Harness warnings (a repair prompt, the final
+  tokens, cost (when the model is priced), elapsed time; the reason (in
+  words: "step limit reached", "the check failed"), unmet requirements, the
+  failure map and the changed files follow on their own lines only when there
+  are any. Harness warnings (a repair prompt, the final
   checks, a restored regression, a refused command) become one readable
   notice each.
 - The footer has a hint on the left (`? for shortcuts`, or the mode when it

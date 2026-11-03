@@ -38,7 +38,7 @@ from ..detached_process import windowless_flags
 from . import commands as slash
 from . import prefs
 from .backend import AgentRequest, CLIBackend
-from .i18n import detect_language, normalise_language, plural, tr
+from .i18n import detect_language, normalise_language, plural, reason_text, tr
 from .modals import McpAddScreen, ProviderSetupScreen
 from .protocol import Event, Outcome, SessionState, tool_category
 from .tooltext import duration_text, plan_rows, plan_step, short_tokens, working_text
@@ -1727,7 +1727,7 @@ class KaroxApp(App[int]):
             parts.append(tr(lang, "result.duration", seconds=elapsed))
         lines = [" · ".join(parts)]
         if not outcome.verified and outcome.reason and outcome.reason != "answer":
-            lines.append(tr(lang, "result.reason", reason=outcome.reason))
+            lines.append(tr(lang, "result.reason", reason=reason_text(lang, outcome.reason)))
         unmet = outcome.raw.get("unmet")
         if isinstance(unmet, list) and unmet:
             shown = "; ".join(str(item) for item in unmet[:3])

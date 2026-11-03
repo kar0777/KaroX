@@ -41,6 +41,19 @@
   result line were below the screen). The view now stays at the end through
   growth too, until you scroll up; scrolling back to the end resumes it.
 
+### Fixed — an answer read from a read-only MCP tool is verified
+
+- "Read issue #7 and tell me the codeword" ended "Not finished · reason:
+  no_changes" although the model read the issue and answered: only file,
+  browser and desktop inspections could back an answer. A successful call of
+  an MCP tool the selection classified read-only now counts as the answer's
+  basis (it is listed with its server in `answer_basis`). A call of a tool
+  that may change the server never does — not even when it failed, since its
+  effect is unknown — so such a run still ends unverified.
+- The TUI's result line says why a run stopped in words ("step limit
+  reached", "the check failed", "no file changed and nothing confirms the
+  answer") instead of the internal code; the report keeps the code.
+
 ### Changed — MCP from the TUI works without a prior run
 
 - `/mcp` → a server → "Use in this session: all tools" or "read-only tools".

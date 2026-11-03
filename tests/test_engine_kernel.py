@@ -575,6 +575,170 @@ def test_engine_answer_task_verifies_from_inspection_basis(
     assert report.answer_basis[0]["tool"] == "repo.read_file"
 
 
+class _TrackerBinding:
+    """An MCP binding with a read-only lookup and a mutating close.
+
+    The real binding authorizes against the session's server selection and
+    talks to a server; the kernel only sees definitions and results, so this
+    stand-in returns what ``McpClient.call_record`` returns.
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {"number": {"type": "integer"}},
+        "required": ["number"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, failing: frozenset[str] = frozenset()) -> None:
+        self.calls: List[tuple[str, dict]] = []
+        self.failing = failing
+
+    def definitions(self) -> list:
+        from karox.core_types import ToolDefinition
+
+        return [
+            ToolDefinition(
+                "mcp.tracker.close_issue",
+                "Close an issue.",
+                Capability.MCP_CALL,
+                True,
+                self.SCHEMA,
+                external_schema=True,
+            ),
+            ToolDefinition(
+                "mcp.tracker.get_issue",
+                "Read an issue.",
+                Capability.MCP_CALL,
+                False,
+                self.SCHEMA,
+                external_schema=True,
+            ),
+        ]
+
+    def execute(self, name: str, arguments: dict, record: Any, progress: Any = None) -> dict:
+        self.calls.append((name, dict(arguments)))
+        if name in self.failing:
+            raise RuntimeError("tracker database is locked")
+        text = "issue 7: the codeword is PELICAN-42"
+        return {
+            "server_id": "tracker",
+            "tool": name,
+            "result": {"content": [{"type": "text", "text": text}]},
+            "bytes": len(text),
+        }
+
+
+def _mcp_harness(
+    repository: Path,
+    tmp_path: Path,
+    binding: _TrackerBinding,
+    responses: List[ModelResponse],
+) -> Harness:
+    class _Runtime(CoreRuntime):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, mcp_binding=binding, **kwargs)
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        responses,
+        grants={
+            Capability.REPO_READ,
+            Capability.REPO_WRITE,
+            Capability.CHECKS_RUN,
+            Capability.PROCESS_RUN,
+            Capability.GIT_READ,
+            Capability.MCP_CALL,
+        },
+        runtime_cls=_Runtime,
+    )
+    with harness.store.mutate("s1", "test", ttl_seconds=30.0) as record:
+        record.task = "what is the codeword in issue #7?"
+    return harness
+
+
+def test_engine_answer_from_a_read_only_mcp_tool_is_verified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Reading a tracker issue backs an answer the way reading a file does."""
+
+    binding = _TrackerBinding()
+    harness = _mcp_harness(
+        repository,
+        tmp_path,
+        binding,
+        [
+            _response(
+                (_tool_call("c1", "mcp_tracker_get_issue", {"number": 7}),),
+                content="reading the issue",
+            ),
+            _response((_finish_call("c2", "the codeword is PELICAN-42"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert binding.calls == [("mcp.tracker.get_issue", {"number": 7})]
+    assert report.verified is True, report.reason
+    assert report.reason == "answer"
+    assert report.answer_basis[0]["tool"] == "mcp.tracker.get_issue"
+    assert report.answer_basis[0]["server_id"] == "tracker"
+    assert report.changed_files == ()
+
+
+def test_engine_answer_after_a_mutating_mcp_call_is_not_verified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A call that may have changed the server is never settled by a read."""
+
+    binding = _TrackerBinding()
+    harness = _mcp_harness(
+        repository,
+        tmp_path,
+        binding,
+        [
+            _response((_tool_call("c1", "mcp_tracker_get_issue", {"number": 7}),)),
+            _response((_tool_call("c2", "mcp_tracker_close_issue", {"number": 7}),)),
+            _response((_finish_call("c3", "closed issue 7"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert [name for name, _ in binding.calls] == [
+        "mcp.tracker.get_issue",
+        "mcp.tracker.close_issue",
+    ]
+    assert report.verified is False
+    assert report.reason == "no_changes"
+    assert report.answer_basis == ()
+
+
+def test_engine_failed_mutating_mcp_call_still_blocks_an_answer(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A failed close may still have reached the server: no answer from it."""
+
+    binding = _TrackerBinding(failing=frozenset({"mcp.tracker.close_issue"}))
+    harness = _mcp_harness(
+        repository,
+        tmp_path,
+        binding,
+        [
+            _response((_tool_call("c1", "mcp_tracker_close_issue", {"number": 7}),)),
+            _response((_tool_call("c2", "mcp_tracker_get_issue", {"number": 7}),)),
+            _response((_finish_call("c3", "the codeword is PELICAN-42"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert [name for name, _ in binding.calls] == [
+        "mcp.tracker.close_issue",
+        "mcp.tracker.get_issue",
+    ]
+    assert report.verified is False
+    assert report.reason != "answer"
+
+
 def test_engine_resume_continues_from_durable_checkpoint(
     tmp_path: Path, repository: Path
 ) -> None:

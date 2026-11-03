@@ -61,6 +61,13 @@ A selection stores the tool's name, schema digest and read-only classification.
 At call time the binding re-reads the server record and re-checks the digest.
 A changed tool schema is refused; re-select the server to approve it.
 
+The classification also decides what a run can verify. What a read-only tool
+returned backs an answer the way a file read does: a run that only read from
+MCP servers and answered is verified with reason `answer`, and `answer_basis`
+names the calls. A call of a tool that may change the server rules that out
+for the whole run, even when the call failed, because nothing in the
+repository shows what it did; such a run ends unverified (`no_changes`).
+
 ### Selecting with the run
 
 ```text

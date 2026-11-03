@@ -202,6 +202,19 @@ _RU: dict[str, str] = {
     "result.duration": "{seconds:.1f} с",
     "result.cost": "{cost}",
     "result.reason": "причина: {reason}",
+    # Why an unfinished run stopped, in words. The report keeps the code;
+    # a code without an entry here is shown as KaroX wrote it.
+    "reason.no_changes": "файлы не изменены, и ответ нечем подтвердить",
+    "reason.unverified_changes": "изменения не подтверждены проверкой",
+    "reason.verification_failed": "проверка не прошла",
+    "reason.step_limit": "достигнут лимит шагов",
+    "reason.wall_time_limit": "вышло время на задачу",
+    "reason.cancelled": "остановлено",
+    "reason.format_errors_exhausted": "модель снова и снова отвечала в неверном формате",
+    "reason.unproducible_requirement": "ни одна одобренная проверка не может это подтвердить",
+    "reason.visual_budget_exhausted": "исчерпан лимит визуальных проверок",
+    "reason.budget_exceeded": "исчерпан бюджет ({detail})",
+    "reason.provider_error": "ошибка провайдера ({detail})",
     "result.changed": "изменено: {files}",
     "result.unmet": "не выполнено: {items}",
     # ----------------------------------------------------------- activity
@@ -455,6 +468,17 @@ _EN: dict[str, str] = {
     "result.duration": "{seconds:.1f}s",
     "result.cost": "{cost}",
     "result.reason": "reason: {reason}",
+    "reason.no_changes": "no file changed and nothing confirms the answer",
+    "reason.unverified_changes": "the changes are not confirmed by a check",
+    "reason.verification_failed": "the check failed",
+    "reason.step_limit": "step limit reached",
+    "reason.wall_time_limit": "time limit reached",
+    "reason.cancelled": "stopped",
+    "reason.format_errors_exhausted": "the model kept answering in the wrong format",
+    "reason.unproducible_requirement": "no approved check can confirm this",
+    "reason.visual_budget_exhausted": "visual check limit reached",
+    "reason.budget_exceeded": "budget exhausted ({detail})",
+    "reason.provider_error": "provider error ({detail})",
     "result.changed": "changed: {files}",
     "result.unmet": "unmet: {items}",
     # ----------------------------------------------------------- activity
@@ -824,6 +848,22 @@ def detect_language() -> str:
 
 def normalise_language(value: object) -> str | None:
     return value if value in _CATALOGUE else None
+
+
+def reason_text(lang: str, reason: str) -> str:
+    """A stop reason in words; a code without an entry stays as written.
+
+    ``budget_exceeded:<what>`` and ``provider_error:<kind>`` carry their detail
+    after the colon, and the detail is kept: it names what ran out or broke.
+    """
+
+    code, _, detail = reason.partition(":")
+    key = f"reason.{code}"
+    catalogue = _CATALOGUE.get(lang, _EN)
+    template = catalogue.get(key) or _EN.get(key)
+    if not template or ("{detail}" in template) != bool(detail):
+        return reason
+    return template.format(detail=detail) if detail else template
 
 
 def tr(lang: str, key: str, **values: Any) -> str:

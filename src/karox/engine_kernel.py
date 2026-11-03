@@ -1933,7 +1933,7 @@ class EngineKernel:
     def _answer_complete(self, record: SessionRecord) -> bool:
         if self.require_change or record.changed_files:
             return False
-        if session_analysis.attempted_mutation(record):
+        if session_analysis.attempted_mutation(record, self._mutating_mcp_tools()):
             return False
         # The finish tool's answer is the model's final message; the
         # transcript only carries it in the call arguments, so a terse model
@@ -1947,6 +1947,18 @@ class EngineKernel:
         if _is_small_talk_task(record.task):
             return True
         return bool(session_analysis.answer_basis(record))
+
+    def _mutating_mcp_tools(self) -> frozenset[str]:
+        """The bound MCP tools not classified read-only: they may change a server."""
+
+        tools = getattr(self.core, "tools", None)
+        if not callable(tools):
+            return frozenset()
+        return frozenset(
+            definition.name
+            for definition in tools()
+            if definition.mutates and str(definition.name).startswith("mcp.")
+        )
 
     def _completed(self, record: SessionRecord) -> bool:
         visual_ok = (

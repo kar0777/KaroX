@@ -1799,6 +1799,23 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("check_failed", result)
             self.assertEqual(app.run_state.state, "failed")
 
+    async def test_result_notice_says_why_a_run_stopped_in_words(self) -> None:
+        cases = (
+            ("ru", "no_changes", "файлы не изменены, и ответ нечем подтвердить"),
+            ("en", "step_limit", "reason: step limit reached"),
+            ("en", "budget_exceeded:provider_budget", "budget exhausted (provider_budget)"),
+        )
+        for language, reason, expected in cases:
+            outcome = Outcome(session_id="s-r", status="stopped", reason=reason, steps=2)
+            backend = _FakeBackend(self.repository, outcome=outcome)
+            app = self.app(backend, language)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await self.settle(pilot, app)
+                await self.submit(pilot, app, "stop somewhere")
+                result = self.chat_widgets(app, Notice)[-1].text
+                self.assertIn(expected, result)
+                self.assertNotIn(reason, result.replace("(provider_budget)", ""))
+
     async def test_narrow_terminal_keeps_a_one_line_status(self) -> None:
         app = self.app()
         async with app.run_test(size=(48, 16)) as pilot:

@@ -12,7 +12,7 @@ retired v5 loop so the engine inherits its exact semantics.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import completion_gate
 from .security import redact
@@ -235,12 +235,33 @@ BROWSER_INSPECTION_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-def attempted_mutation(record: SessionRecord) -> bool:
-    """Whether any mutation tool call appears in the record."""
-    return any(
-        entry.get("role") == "tool" and entry.get("core_name") in MUTATION_TOOLS
-        for entry in record.provider_history
-    )
+def attempted_mutation(
+    record: SessionRecord, mutating_tools: Iterable[str] = ()
+) -> bool:
+    """Whether any mutation tool call appears in the record.
+
+    ``mutating_tools`` names further tools that can change something outside
+    the repository -- the session's MCP tools the user did not classify as
+    read-only. Such a call counts even when it failed: its effect on the
+    server cannot be known, so it can never back an answer. A successful call
+    Core recorded as a mutation counts as well, for a record whose binding has
+    changed since.
+    """
+    extra = frozenset(mutating_tools)
+    for entry in record.provider_history:
+        if entry.get("role") != "tool":
+            continue
+        core_name = entry.get("core_name")
+        if core_name in MUTATION_TOOLS or core_name in extra:
+            return True
+        result = entry.get("result")
+        if (
+            str(core_name or "").startswith("mcp.")
+            and isinstance(result, dict)
+            and result.get("mutation") is True
+        ):
+            return True
+    return False
 
 
 def answer_basis(record: SessionRecord) -> tuple[Dict[str, Any], ...]:
@@ -260,17 +281,32 @@ def answer_basis(record: SessionRecord) -> tuple[Dict[str, Any], ...]:
         if (
             core_name != "browser.command"
             and core_name not in INSPECTION_TOOLS
-            and not str(core_name or "").startswith("desktop.")
+            and not str(core_name or "").startswith(("desktop.", "mcp."))
         ):
             continue
         result = entry.get("result")
         if not isinstance(result, dict) or result.get("ok") is not True:
             continue
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        raw_data = result.get("data")
+        data: Dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
         item: Dict[str, Any] = {
             "tool": core_name,
             "call_id": str(entry.get("tool_call_id", "")),
         }
+        if str(core_name or "").startswith("mcp."):
+            # What a read-only MCP tool returned is something the model
+            # looked at, like a page read: "read issue #7 and tell me X" was
+            # never verifiable before, so every tracker or docs answer ended
+            # "no_changes". Core records whether the call could mutate (the
+            # user's read-only classification); a mutating call is no basis.
+            if result.get("mutation") is not False:
+                continue
+            for key in ("server_id", "bytes"):
+                value = data.get(key)
+                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                    item[key] = value
+            basis.append(item)
+            continue
         if str(core_name or "").startswith("desktop."):
             action = str(core_name).split(".", 1)[1]
             if data.get("ok") is not True or action not in DESKTOP_INSPECTION_ACTIONS:
