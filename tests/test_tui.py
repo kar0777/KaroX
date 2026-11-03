@@ -34,7 +34,6 @@ from karox.tui import views
 from karox.tui.widgets import (
     CATEGORY_ICONS,
     AssistantMessage,
-    InlineMenu,
     Notice,
     SecretPrompt,
     StatusLine,
@@ -633,6 +632,40 @@ class WidgetTests(unittest.TestCase):
         self.assertIn("model demo/x", text)
 
 
+class TextualOverrideTests(unittest.TestCase):
+    """KaroX widgets must not shadow Textual internals by accident."""
+
+    # Hooks Textual expects subclasses to define, plus overrides that are
+    # deliberate and call through to the base implementation.
+    INTENDED = {"TITLE", "CSS_PATH", "BINDINGS", "DEFAULT_CSS", "compose", "action_quit"}
+    DELIBERATE = {"ChatInput": {"_on_key"}}
+
+    def test_no_karox_widget_shadows_a_textual_member_by_accident(self) -> None:
+        import inspect
+
+        from karox.tui import modals, widgets
+
+        clashes: list[str] = []
+        for module in (app_module, widgets, modals, views, slash):
+            for name, cls in vars(module).items():
+                if not inspect.isclass(cls) or cls.__module__ != module.__name__:
+                    continue
+                textual_bases = [
+                    base for base in cls.__mro__[1:] if base.__module__.startswith("textual")
+                ]
+                if not textual_bases:
+                    continue
+                # Textual stamps these on every subclass it creates.
+                stamped = set(type("Probe", (textual_bases[0],), {}).__dict__)
+                allowed = self.INTENDED | self.DELIBERATE.get(name, set())
+                for attr in cls.__dict__:
+                    if attr.startswith("__") or attr in stamped or attr in allowed:
+                        continue
+                    if any(attr in vars(base) for base in textual_bases):
+                        clashes.append(f"{name}.{attr}")
+        self.assertEqual(clashes, [])
+
+
 class BackendSurfaceTests(unittest.TestCase):
     def test_skill_list_uses_the_json_surface(self) -> None:
         backend = CLIBackend(Path("."))
@@ -951,6 +984,22 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._verification, (("python", "-m", "pytest", "-q"),))
             await self.submit(pilot, app, "/unverify")
             self.assertEqual(app._verification, ())
+
+    async def test_a_stray_print_while_running_does_not_crash_the_app(self) -> None:
+        """Textual routes every print() made while the app runs to App._print.
+
+        KaroxApp once defined its own ``_print(title, body)``; the first print
+        from any library during a session then raised TypeError and took the
+        TUI down.
+        """
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            print("stray output from a library")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            await self.submit(pilot, app, "/help")
+            self.assertTrue(self.chat_widgets(app, TextBlock))
 
     async def test_help_prints_into_the_transcript(self) -> None:
         app = self.app()

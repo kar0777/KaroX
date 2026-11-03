@@ -47,6 +47,10 @@
   The key is tested against the provider's `/models` list before anything is
   saved; the model list is narrowed to what the account sees. Providers that
   need more than a key are listed with `--all` and the reason.
+- Connecting a provider that is already configured (a new key, a moved
+  endpoint) keeps what was entered by hand: a model's aliases, limits,
+  capabilities, price and provenance, and the provider's headers, timeouts,
+  privacy class and Bypass preference. The catalog only fills what is empty.
 - `provider catalog-sync` fills prices and limits that are still empty on the
   configured providers (so `--max-cost` works on them) and never overwrites
   a value entered by hand. `scripts/update_provider_catalog.py` refreshes the

@@ -584,12 +584,12 @@ class KaroxApp(App[int]):
 
     def _cmd_help(self, argument: str) -> None:
         del argument
-        self._print(tr(self.language, "help.title"), help_text(self.language))
+        self._print_block(tr(self.language, "help.title"), help_text(self.language))
 
     def _cmd_status(self, argument: str) -> None:
         del argument
         state = self.run_state
-        self._print(
+        self._print_block(
             tr(self.language, "info.title"),
             status_text(
                 lang=self.language,
@@ -630,7 +630,7 @@ class KaroxApp(App[int]):
             state = SessionState.from_record(record) if record is not None else None
             if state is not None:
                 self.checkpoint = state
-            self._print(
+            self._print_block(
                 tr(self.language, "session.title"),
                 lines_text(session_state_lines(state, self.language)),
             )
@@ -642,7 +642,7 @@ class KaroxApp(App[int]):
 
         def done(report: dict[str, Any]) -> None:
             text, _level = doctor_text(report if isinstance(report, dict) else {})
-            self._print(tr(self.language, "doctor.title"), text)
+            self._print_block(tr(self.language, "doctor.title"), text)
 
         self._background(
             self.backend.doctor, done, activity=tr(self.language, "doctor.running")
@@ -656,7 +656,7 @@ class KaroxApp(App[int]):
         if not reasoning.strip():
             self._notice(tr(self.language, "notice.no_reasoning"), "info")
             return
-        self._print(tr(self.language, "reasoning.title"), Text(reasoning.strip(), style=MUTED))
+        self._print_block(tr(self.language, "reasoning.title"), Text(reasoning.strip(), style=MUTED))
 
     def _cmd_verify(self, argument: str) -> None:
         if not argument:
@@ -1048,7 +1048,7 @@ class KaroxApp(App[int]):
             if skill is None:
                 self._notice(tr(self.language, "notice.skill_failed", name=key), "error")
                 return
-            self._print(
+            self._print_block(
                 tr(self.language, "skill.detail_title", name=key),
                 skill_text(skill, self.language),
             )
@@ -1426,7 +1426,7 @@ class KaroxApp(App[int]):
             self._open_segment().append_text(outcome.provider_message)
             self._close_segment()
         for segment in list(self._segments):
-            if segment.is_empty():
+            if segment.is_blank():
                 self._segments.remove(segment)
                 try:
                     segment.remove()
@@ -1667,7 +1667,9 @@ class KaroxApp(App[int]):
         if text:
             self.chat.add(Notice(text, level))
 
-    def _print(self, title: str, body: Text | str) -> None:
+    def _print_block(self, title: str, body: Text | str) -> None:
+        # Not ``_print``: Textual's App._print(text, stderr) receives every
+        # print() made while the app runs, so shadowing it crashed the TUI.
         self.chat.add(TextBlock(title, body))
 
     @staticmethod

@@ -54,7 +54,10 @@ karox provider credential-clear <id> [--delete-stored]
 endpoint, protocol, model list, context windows and published prices. The key
 is checked against the provider's `/models` list (a 401/403 fails before
 anything is saved), models are narrowed to what the account lists, and the
-provider's own metadata wins over the catalog's. `--env-key` uses
+provider's own metadata wins over the catalog's. Connecting a provider that is
+already configured keeps every model's hand-entered values (aliases, context
+window, price, provenance) and the provider's headers, timeouts and Bypass
+preference; only empty fields are filled. `--env-key` uses
 `KAROX_PROVIDER_<ID>_API_KEY` when set, otherwise imports the provider's usual
 variable (for example `WANDB_API_KEY`) into the OS keyring once. Providers that
 need more than a key (Bedrock, Vertex, Azure, Copilot, ...) are listed with

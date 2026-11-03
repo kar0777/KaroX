@@ -75,7 +75,10 @@ class CommandJobStoreTests(unittest.TestCase):
         self.assertEqual(whole["text"].replace("\r\n", "\n"), "line 0\nline 1\nline 2\n")
         self.assertFalse(whole["truncated"])
         first = self.store.logs(started["job_id"], limit=7, offset=0)
-        self.assertEqual(first["text"].replace("\r\n", "\n"), "line 0\n"[: first["next_offset"]])
+        # A page is a byte range of the raw log, and the raw log has CRLF line
+        # ends on Windows: seven bytes there end between "\r" and "\n".
+        self.assertEqual(first["next_offset"], 7)
+        self.assertEqual(first["text"], whole["text"][:7])
         rest = self.store.logs(started["job_id"], offset=first["next_offset"])
         self.assertEqual(first["next_offset"] + len(rest["text"].encode()), whole["bytes_total"])
         self.assertTrue(first["truncated"])

@@ -402,7 +402,9 @@ class AssistantMessage(Vertical):
     def reasoning_text(self) -> str:
         return "".join(self._reasoning)
 
-    def is_empty(self) -> bool:
+    def is_blank(self) -> bool:
+        # Not ``is_empty``: Textual's DOMNode.is_empty is the property behind
+        # the ``:empty`` pseudo-class, and a method there is always truthy.
         return not self.answer_text().strip() and not self._reasoning_chars
 
     def _schedule_paint(self) -> None:

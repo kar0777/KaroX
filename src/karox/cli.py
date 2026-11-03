@@ -1466,9 +1466,14 @@ def _handle_provider_connect(args: argparse.Namespace) -> int:
     if args.json:
         _emit(payload, json_output=True)
         return 0
+    kept = (
+        f"; {result.models_kept} already configured kept as entered"
+        if result.models_kept
+        else ""
+    )
     print(
         f"Connected {result.display_name} as '{result.provider_id}': "
-        f"{result.models_installed} models ({result.priced_models} with published prices)."
+        f"{result.models_installed} models ({result.priced_models} with published prices{kept})."
     )
     if result.activated:
         print(f"Selected model: {result.provider_id}/{result.model_id}")

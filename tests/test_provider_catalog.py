@@ -236,6 +236,60 @@ def test_connect_refuses_unknown_models_and_unsupported_providers(controller, ca
         connect_from_catalog(controller, "acme", catalog=catalog, test=False)
 
 
+def test_reconnect_keeps_what_was_entered_by_hand(controller, catalog) -> None:
+    """Re-connecting an existing provider must not undo hand-entered work.
+
+    A live re-connect once replaced a hand-entered model wholesale: its context
+    window jumped to the catalog's, its aliases vanished and its provenance
+    turned "discovered"; the provider lost its extra headers the same way.
+    """
+    controller.registry.put_provider(
+        ProviderRecord(
+            provider_id="acme",
+            adapter_kind="openai_compatible_chat",
+            base_url="https://api.acme.test/v1",
+            credential_ref=f"env:{KEY_ENV}",
+            headers={"X-Project": "team/agents"},
+            privacy_class="private",
+            timeout_seconds=120.0,
+            bypass=True,
+        )
+    )
+    controller.registry.put_model(
+        ModelRecord(
+            provider_id="acme",
+            model_id="acme-large",
+            aliases=("big",),
+            context_window=100000,
+            tools="true",
+        )
+    )
+    result = connect_from_catalog(
+        controller,
+        "acme",
+        catalog=catalog,
+        transport=_models_transport(["acme-large", "acme-small"]),
+    )
+    assert result.verification["status"] == "ok"
+    assert result.models_kept == 1
+    assert result.to_dict()["models_kept"] == 1
+    kept = controller.registry.model("acme", "acme-large")
+    assert kept.aliases == ("big",)
+    assert kept.context_window == 100000  # not the catalog's 200000
+    assert kept.provenance == "manual"
+    # Only what the record lacked is filled in.
+    assert kept.max_output_tokens == 32000
+    assert kept.pricing is not None and kept.pricing.input_per_million == 1.0
+    fresh = controller.registry.model("acme", "acme-small")
+    assert fresh.provenance != "manual" and fresh.context_window == 128000
+    provider = controller.registry.provider("acme")
+    assert provider.headers == {"X-Project": "team/agents"}
+    assert provider.privacy_class == "private"
+    assert provider.timeout_seconds == 120.0
+    assert provider.bypass is True
+    assert provider.credential_ref == f"env:{KEY_ENV}"
+
+
 def test_catalog_sync_fills_only_missing_fields(controller, catalog) -> None:
     controller.registry.put_provider(
         ProviderRecord(provider_id="acme", adapter_kind="openai_compatible_chat", base_url="https://api.acme.test/v1")

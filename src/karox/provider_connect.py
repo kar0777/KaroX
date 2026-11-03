@@ -9,7 +9,10 @@ registry provider plus its models:
   one, so a typo fails here instead of on the first agent turn;
 * models are narrowed to the ones the account actually lists, and each keeps
   the catalog's context window, output limit and published price, so cost
-  estimates and ``--max-cost`` work without hand-entered pricing.
+  estimates and ``--max-cost`` work without hand-entered pricing;
+* re-connecting never undoes hand-entered work: a model already in the
+  registry keeps its own values and only gains the ones it lacked, and the
+  provider keeps its headers, timeouts and Bypass preference.
 
 Nothing here prints; callers own presentation.
 """
@@ -51,6 +54,8 @@ class ConnectResult:
     models_installed: int
     priced_models: int
     snapshot: str
+    # Models that were already in the registry and kept their own values.
+    models_kept: int = 0
     verification: dict[str, Any] = field(default_factory=dict)
     mutation: dict[str, Any] = field(default_factory=dict)
 
@@ -65,6 +70,7 @@ class ConnectResult:
             "activated": self.activated,
             "models_installed": self.models_installed,
             "priced_models": self.priced_models,
+            "models_kept": self.models_kept,
             "snapshot": self.snapshot,
             "verification": dict(self.verification),
         }
@@ -145,6 +151,36 @@ def _merged(discovered: ModelRecord, listed: ModelRecord) -> ModelRecord:
         pricing=discovered.pricing or listed.pricing,
         display_name=discovered.display_name or listed.display_name,
         provenance=f"{discovered.provenance}+{listed.provenance}",
+    )
+
+
+def _kept(own: Optional[ModelRecord], offered: ModelRecord) -> ModelRecord:
+    """A model already in the registry keeps what was entered for it.
+
+    Re-connecting (a new key, a corrected endpoint) must not undo hand-entered
+    work: aliases, limits, capabilities, prices and provenance stay, and the
+    catalog or the provider's list only fills fields the record left empty --
+    the same rule as ``catalog-sync``.
+    """
+    if own is None:
+        return offered
+
+    def capability(mine: str, other: str) -> str:
+        return mine if mine != "unknown" else other
+
+    context = own.context_window or offered.context_window
+    return replace(
+        own,
+        aliases=own.aliases or offered.aliases,
+        context_window=context,
+        max_output_tokens=own.max_output_tokens
+        or plausible_output_limit(context, offered.max_output_tokens),
+        tools=capability(own.tools, offered.tools),
+        vision=capability(own.vision, offered.vision),
+        structured_output=capability(own.structured_output, offered.structured_output),
+        streaming=capability(own.streaming, offered.streaming),
+        pricing=own.pricing or offered.pricing,
+        display_name=own.display_name or offered.display_name,
     )
 
 
@@ -278,6 +314,18 @@ def connect_from_catalog(
         credential_ref=None if key is not None and secret is not None else reference,
         privacy_class=_privacy_class(endpoint),
     )
+    if existing is not None:
+        # Re-connecting keeps what the catalog knows nothing about: extra
+        # headers and query parameters, timeouts, the Bypass preference, and a
+        # privacy class chosen for this same endpoint.
+        same_endpoint = existing.base_url.rstrip("/") == endpoint
+        provider = replace(
+            existing,
+            adapter_kind=provider.adapter_kind,
+            base_url=provider.base_url,
+            credential_ref=provider.credential_ref,
+            privacy_class=existing.privacy_class if same_endpoint else provider.privacy_class,
+        )
     found, check = (None, {"status": "skipped"})
     if test:
         found, check = _discover(entry, provider, key, transport=transport)
@@ -290,6 +338,12 @@ def connect_from_catalog(
     )
     if not records:
         raise ConnectError(f"{entry.display_name} lists no tool-capable models")
+    entered = (
+        {item.model_id: item for item in controller.registry.models(registry_id)}
+        if existing is not None
+        else {}
+    )
+    records = [_kept(entered.get(item.model_id), item) for item in records]
     selected = controller.registry.selected_model()
     primary = _primary(records, entry, (model or "").strip(), selected, registry_id)
     if activate is None:
@@ -320,6 +374,7 @@ def connect_from_catalog(
         models_installed=len(records),
         priced_models=sum(1 for item in records if item.pricing is not None),
         snapshot=catalog.fetched_at,
+        models_kept=sum(1 for item in records if item.model_id in entered),
         verification=check,
         mutation=mutation.to_dict(),
     )
