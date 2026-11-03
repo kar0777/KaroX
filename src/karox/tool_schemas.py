@@ -370,9 +370,10 @@ def additional_tool_definitions(
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Paths or node ids to run (focused). When omitted, "
-                            "KaroX derives the test files that match this "
-                            "session's changed modules."
+                            "Test files or node ids to run (focused), e.g. "
+                            "tests/test_mod.py or pkg/tests/test_mod.py::test_x. "
+                            "When omitted, KaroX derives the test files that "
+                            "match this session's changed modules."
                         ),
                     },
                     "split": {
@@ -381,7 +382,7 @@ def additional_tool_definitions(
                     },
                     "part": {
                         "type": "number",
-                        "description": "Which part to run, 0-based (split).",
+                        "description": "Which part to run, from 1 to split (split).",
                     },
                     "timeout_seconds": {"type": "number"},
                 },

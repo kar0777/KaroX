@@ -56,6 +56,7 @@ from .engine.exceptions import (  # noqa: E402
 from .engine_tool_env import CoreToolEnvironment, FINISH_BATCH_MARKER  # noqa: E402
 from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
+    REWRITE_PRESSURE_TOKENS,
     EngineProviderModel,
     _response_from_engine_message,
 )
@@ -165,7 +166,16 @@ You act through typed tool calls; there is no shell.
 - Keep tool output small; observations are clipped.
 - Read before you write. KaroX runs the approved checks itself after a change
   and returns failures for repair; call checks only when the result changes
-  your next step.
+  your next step. Run the narrowest test that covers your change first and
+  the full suite once at the end; a passing check on unchanged files is not
+  run again.
+- An interactive page must behave as documented in every state a user or test
+  can reach, including right after a test hook was called and after a reset:
+  every documented key works, and behaviour that should happen on its own
+  (spawning, movement, timers) starts within the first seconds of a run.
+  Prove it the way a user would: press each named key with browser_command
+  on the deliverable page, and let time pass from a fresh reset instead of
+  forcing the behaviour.
 - When the task is complete, call the finish tool with {"answer": "<final
   answer text>"}. For a web deliverable finish also carries "requirements":
   one {"id", "status", "observed"} entry per requirement ID KaroX lists, and a
@@ -439,6 +449,7 @@ class EngineAgent(DefaultAgent):
             for message in self.messages
             if isinstance(message, dict) and message.get("role") == "tool"
         }
+        stale: List[tuple[Dict[str, Any], str]] = []
         for read_index, path, call_id in reads:
             edit_index = edits.get(path)
             if edit_index is None or edit_index <= read_index:
@@ -453,6 +464,17 @@ class EngineAgent(DefaultAgent):
                 or _STALE_READ_MARKER in content
             ):
                 continue
+            stale.append((tool_message, content))
+        if not stale:
+            return
+        # Clipping rewrites a message the provider may hold in its prompt
+        # cache; on a caching provider that re-bills the whole suffix after the
+        # read, so the model layer decides when the shrink is worth it.
+        allowed = getattr(self.model, "history_rewrite_allowed", None)
+        reclaimable = sum(len(content) - _STALE_READ_CHARS for _, content in stale)
+        if callable(allowed) and not allowed(reclaimable):
+            return
+        for tool_message, content in stale:
             tool_message["content"] = self._clip_text(
                 content, _STALE_READ_CHARS, _STALE_READ_MARKER
             )
@@ -923,6 +945,11 @@ class EngineKernel:
                 event=self._model_event,
                 deadline_seconds=lambda: _model_request_deadline(self.remaining_seconds()),
                 images=self.request_images,
+                # Half the compaction budget, capped: the history is shrunk in
+                # place well before compaction has to drop anything.
+                rewrite_pressure_tokens=min(
+                    REWRITE_PRESSURE_TOKENS, max(8_000, self._engine_context_budget() // 2)
+                ),
             )
             environment = CoreToolEnvironment(
                 core=self.core,
@@ -1853,6 +1880,13 @@ class EngineKernel:
             if message.get("role") == "assistant":
                 last_assistant = message
                 break
+        prompt = (
+            "Verification failed after your finish. Repair the work and call "
+            "finish again.\n\nFailure summary:\n"
+            f"{failure}\n\n"
+            "Fix the cause, keep changes minimal, and only then finish."
+        )
+        delivered = False
         if last_assistant is not None:
             for call in last_assistant.get("tool_calls") or ():
                 call_id = str(call.get("call_id", ""))
@@ -1866,24 +1900,28 @@ class EngineKernel:
                     # Every unanswered call gets its result: a transport that
                     # pairs tool_use with tool_result (Anthropic, Gemini)
                     # refuses the request otherwise, and the repair turn would
-                    # die before the model ever saw the failure.
+                    # die before the model ever saw the failure. The first one
+                    # -- the finish call -- carries the repair itself: a new
+                    # user turn makes a thinking model's chat template drop the
+                    # reasoning of every earlier turn, which re-bills the whole
+                    # history on a caching provider (0.18M prompt tokens over
+                    # two repairs in the W&B run) and loses the plan the model
+                    # was following.
                     agent.add_messages(
                         {
                             "role": "tool",
-                            "content": (
+                            "content": prompt
+                            if not delivered
+                            else (
                                 "the task was submitted, but KaroX verification "
                                 "failed; continue working"
                             ),
                             "tool_call_id": call_id,
                         }
                     )
-        prompt = (
-            "Verification failed after your finish. Repair the work and call "
-            "finish again.\n\nFailure summary:\n"
-            f"{failure}\n\n"
-            "Fix the cause, keep changes minimal, and only then finish."
-        )
-        agent.add_messages({"role": "user", "content": prompt, "kind": "engine_repair"})
+                    delivered = True
+        if not delivered:
+            agent.add_messages({"role": "user", "content": prompt, "kind": "engine_repair"})
 
     # -- verification ------------------------------------------------------
 

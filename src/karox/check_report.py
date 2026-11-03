@@ -22,6 +22,7 @@ that never failed, which is worse than showing the raw tail.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ __all__ = [
     "fingerprints",
     "select_test_targets",
     "rerun_targets",
+    "is_test_path",
 ]
 
 #: How many distinct failures the map keeps. A repair turn can act on a few
@@ -1011,6 +1013,44 @@ def _lint(text: str) -> list[dict[str, object]]:
 # --------------------------------------------------------------------------- #
 
 _TEST_FILE = re.compile(r"^test_.*\.py$|^.*_test\.py$")
+#: Directory names that hold tests in the layouts pytest collects: a top-level
+#: ``tests/`` tree and the package-local ``pkg/sub/tests/`` of sympy, numpy or
+#: astropy. A focused-run contract that knew only the first refused every
+#: sympy test file and cost the run two turns before it fell back.
+_TEST_DIRS = frozenset({"tests", "test", "testing"})
+#: Directories a repository-wide test search never enters: environments,
+#: build output and caches hold copies of tests that are not the project's.
+_SKIP_DIRS = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        "site-packages",
+        "build",
+        "dist",
+        "venv",
+        "env",
+    }
+)
+
+
+def is_test_path(relative: str) -> bool:
+    """Whether a repository-relative path names a Python test module.
+
+    A ``test_*.py`` / ``*_test.py`` file anywhere qualifies, and so does any
+    ``.py`` file below a ``tests``/``test``/``testing`` directory (Django's
+    ``tests/app/tests.py``). Parent references never qualify: the worker
+    resolves the path again and refuses one that leaves the repository.
+    """
+
+    text = str(relative or "").replace("\\", "/").strip("/")
+    if not text.endswith(".py"):
+        return False
+    parts = [part for part in text.split("/") if part]
+    if not parts or any(part in (".", "..") for part in parts):
+        return False
+    if _TEST_FILE.match(parts[-1]):
+        return True
+    return any(part in _TEST_DIRS for part in parts[:-1])
 _IMPORT = re.compile(
     r"^\s*import\s+(?P<modules>[\w.]+(?:\s*,\s*[\w.]+)*)"
     r"|^\s*from\s+(?P<source>[\w.]+)\s+import\s+(?P<names>[^\n]+)",
@@ -1030,49 +1070,102 @@ def select_test_targets(
     *,
     limit: int = MAX_TEST_TARGETS,
 ) -> list[str]:
-    """Test files under ``tests/`` that the changed modules can affect.
+    """Test files that the changed modules can affect.
 
-    Two signals, strongest first: the conventional name (``tests/test_mod.py``
-    for ``mod.py``) and an import of the changed module by its dotted name.
-    The result is a bounded, sorted list of repository-relative paths; an empty
-    list means "no test names this module", not "nothing can break".
+    Two signals, strongest first: the conventional name (``test_mod.py`` for
+    ``mod.py``) and an import of the changed module by its dotted name. Within
+    each signal the file closest to the changed module wins, so
+    ``sympy/core/basic.py`` selects ``sympy/core/tests/test_basic.py`` before a
+    same-named file in another package. The result is a bounded, sorted list of
+    repository-relative paths; an empty list means "no test names this
+    module", not "nothing can break".
 
-    Only ``tests/**.py`` is considered because that is the contract the pytest
-    runner enforces; returning a path it would refuse turns a useful hint into
-    a failed call.
+    Only paths that `is_test_path` accepts are returned because that is the
+    contract the pytest runner enforces; returning a path it would refuse
+    turns a useful hint into a failed call.
     """
 
     root = Path(repository).expanduser().resolve(strict=False)
-    test_root = root / "tests"
-    if not test_root.is_dir():
+    if not root.is_dir():
         return []
     changed = _changed_stems(changed_paths)
     if not changed:
         return []
-    files = _test_files(test_root)
+    files = _repository_test_files(root)
     if not files:
         return []
-    by_name: list[str] = []
-    by_import: list[str] = []
+    changed_dirs = [
+        tuple(Path(str(raw).replace("\\", "/")).parent.parts)
+        for raw in changed_paths
+        if isinstance(raw, str) and raw
+    ]
+    by_name: list[tuple[int, str]] = []
+    by_import: list[tuple[int, str]] = []
     wanted_names = set()
     for stem, _ in changed:
         wanted_names.add(f"test_{stem}")
         wanted_names.add(f"{stem}_test")
     for path in files:
         relative = path.relative_to(root).as_posix()
+        closeness = _closeness(relative, changed_dirs)
         if path.stem in wanted_names:
-            by_name.append(relative)
+            by_name.append((closeness, relative))
             continue
         imports = _imports_of(path)
         if imports and _imports_touch(imports, changed):
-            by_import.append(relative)
+            by_import.append((closeness, relative))
     selected: list[str] = []
-    for item in by_name + by_import:
-        if item not in selected:
-            selected.append(item)
+    for group in (by_name, by_import):
+        for _, item in sorted(group, key=lambda row: (-row[0], row[1])):
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= limit:
+                break
         if len(selected) >= limit:
             break
     return sorted(selected)
+
+
+def _closeness(relative: str, changed_dirs: Sequence[tuple[str, ...]]) -> int:
+    """Shared leading directories between a test file and any changed file."""
+
+    parts = tuple(relative.split("/")[:-1])
+    best = 0
+    for directory in changed_dirs:
+        shared = 0
+        for left, right in zip(parts, directory):
+            if left != right:
+                break
+            shared += 1
+        best = max(best, shared)
+    return best
+
+
+def _repository_test_files(root: Path) -> list[Path]:
+    """``test_*.py`` files anywhere a focused run accepts, bounded."""
+
+    files: list[Path] = []
+    for directory, subdirs, names in os.walk(root):
+        subdirs[:] = sorted(
+            name
+            for name in subdirs
+            if not name.startswith(".")
+            and name not in _SKIP_DIRS
+            and not name.endswith(".egg-info")
+            and not os.path.islink(os.path.join(directory, name))
+        )
+        for name in sorted(names):
+            if not _TEST_FILE.match(name):
+                continue
+            path = Path(directory) / name
+            # safe_path refuses a symlink that leaves the repository, so
+            # returning one here would make the focused run fail instead.
+            if path.is_symlink():
+                continue
+            files.append(path)
+            if len(files) >= MAX_TEST_FILES:
+                return files
+    return files
 
 
 def _changed_stems(changed_paths: Iterable[str]) -> list[tuple[str, str]]:
@@ -1095,20 +1188,6 @@ def _changed_stems(changed_paths: Iterable[str]) -> list[tuple[str, str]]:
         if item not in seen:
             seen.append(item)
     return seen
-
-
-def _test_files(test_root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in sorted(test_root.rglob("*.py")):
-        # safe_path refuses a symlink that leaves the repository, so returning
-        # one here would make the model's focused run fail instead of running.
-        if path.is_symlink():
-            continue
-        if _TEST_FILE.match(path.name):
-            files.append(path)
-        if len(files) >= MAX_TEST_FILES:
-            break
-    return files
 
 
 def _imports_of(path: Path) -> tuple[str, ...]:
@@ -1173,7 +1252,7 @@ def rerun_targets(
 
     The map's ``path`` is where the failure *raised*, which may be a source
     file; rerunning a source file is not a test. The node id still names the
-    test, so its file wins when it lies under ``tests/``.
+    test, so its file wins when `is_test_path` accepts it.
     """
 
     targets: list[str] = []
@@ -1187,11 +1266,11 @@ def rerun_targets(
             continue
         test_id = str(row.get("test_id") or "")
         node_file = test_id.split("::", 1)[0] if "::" in test_id else ""
-        if node_file.startswith("tests/") and node_file.endswith(".py"):
+        if is_test_path(node_file):
             candidate = test_id if test_id.startswith(node_file + "::") else node_file
         else:
             path = str(row.get("path") or "")
-            if not (path.startswith("tests/") and path.endswith(".py")):
+            if not is_test_path(path):
                 continue
             candidate = path
         if candidate not in targets:

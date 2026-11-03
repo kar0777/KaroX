@@ -15,6 +15,7 @@ from karox.check_report import (
     MAX_IMPORT_BYTES,
     analyze,
     fingerprints,
+    is_test_path,
     render_failure_map,
     render_targets,
     select_test_targets,
@@ -628,3 +629,72 @@ def test_checks_body_shows_a_stderr_only_report() -> None:
     assert "tests/cart.test.ts" in body
     assert "adds tax" in body
     assert "FAIL tests/cart.test.ts" in body
+
+def test_is_test_path_accepts_package_local_and_conventional_tests() -> None:
+    assert is_test_path("tests/test_alpha.py")
+    assert is_test_path("tests/deep/helpers.py")
+    assert is_test_path("sympy/core/tests/test_basic.py")
+    assert is_test_path("tests/admin_views/tests.py")
+    assert is_test_path("src/pkg/alpha_test.py")
+    assert is_test_path("pkg\\testing\\test_x.py")
+    assert not is_test_path("sympy/core/basic.py")
+    assert not is_test_path("tests/README.md")
+    assert not is_test_path("tests/../calc.py")
+    assert not is_test_path("")
+
+
+def _package_local_repository(root: Path) -> None:
+    for relative, text in {
+        "sympy/__init__.py": "",
+        "sympy/core/__init__.py": "",
+        "sympy/core/basic.py": "VALUE = 1\n",
+        "sympy/core/tests/__init__.py": "",
+        "sympy/core/tests/test_basic.py": "from sympy.core.basic import VALUE\n",
+        "sympy/physics/tests/test_basic.py": "import json\n",
+        "sympy/printing/tests/test_str.py": "from sympy.core import basic\n",
+        ".venv/lib/site-packages/sympy/core/tests/test_basic.py": "import json\n",
+        "node_modules/x/test_basic.py": "import json\n",
+    }.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def test_impacted_targets_find_package_local_tests(tmp_path: Path) -> None:
+    """sympy keeps its tests beside the package; tests/ alone found none."""
+
+    _package_local_repository(tmp_path)
+
+    selected = select_test_targets(tmp_path, ["sympy/core/basic.py"], limit=8)
+
+    assert selected == [
+        "sympy/core/tests/test_basic.py",
+        "sympy/physics/tests/test_basic.py",
+        "sympy/printing/tests/test_str.py",
+    ]
+
+
+def test_impacted_targets_prefer_the_closest_same_named_test(tmp_path: Path) -> None:
+    _package_local_repository(tmp_path)
+
+    selected = select_test_targets(tmp_path, ["sympy/core/basic.py"], limit=1)
+
+    assert selected == ["sympy/core/tests/test_basic.py"]
+
+
+def test_rerun_targets_keep_package_local_node_ids() -> None:
+    report = {
+        "failures": [
+            {
+                "test_id": "sympy/core/tests/test_basic.py::test_value",
+                "path": "sympy/core/basic.py",
+            },
+            {"test_id": "", "path": "tests/admin_views/tests.py"},
+            {"test_id": "", "path": "sympy/core/basic.py"},
+        ]
+    }
+
+    assert rerun_targets(report) == [
+        "sympy/core/tests/test_basic.py::test_value",
+        "tests/admin_views/tests.py",
+    ]

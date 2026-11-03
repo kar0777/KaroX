@@ -291,3 +291,154 @@ def test_a_diagnostic_page_edit_does_not_make_observations_stale() -> None:
     assert [p for _, _, p in coverage.judge(record)] == ["attested before the last edit"] * 3
     assert coverage.judge(record, diagnostic={"selftest.html"}) == []
     assert coverage.floor_reasons(record, diagnostic={"selftest.html"}) == []
+
+
+KEY_TASK = (
+    "Left / Right arrows or A / D: run.\n\n"
+    "The score rises over time.\n\n"
+    "Keep the page offline."
+)
+
+
+def _browser(data: Dict[str, Any], content: str = "") -> Dict[str, Any]:
+    return {
+        "role": "tool",
+        "core_name": "browser.command",
+        "content": content or json.dumps(data, sort_keys=True),
+        "result": {"ok": True, "data": data},
+    }
+
+
+def _press(key: str) -> Dict[str, Any]:
+    return _browser({"pressed": True, "key": key, "target": "page"})
+
+
+def _key_attestation() -> List[Dict[str, str]]:
+    return [
+        {"id": "R1", "status": "verified", "observed": "status running x 140"},
+        {"id": "R2", "status": "verified", "observed": "status running x 140"},
+        {"id": "R3", "status": "not_applicable", "observed": "no network request is made"},
+    ]
+
+
+def test_named_keys_are_read_only_in_a_key_context() -> None:
+    assert coverage.named_keys("Left / Right arrows or A / D: run.") == (
+        "arrowleft",
+        "arrowright",
+        "a",
+        "d",
+    )
+    assert coverage.named_keys("Space, Up arrow, or W: jump (only when on the ground).") == (
+        "arrowup",
+        "space",
+        "w",
+    )
+    assert coverage.named_keys("**←/→ or A/D** switch lanes smoothly") == (
+        "arrowleft",
+        "arrowright",
+        "a",
+        "d",
+    )
+    assert coverage.named_keys("**P** pauses and resumes") == ("p",)
+    assert coverage.named_keys("R: restart, from any state.") == ("r",)
+    assert coverage.named_keys("Arrow keys or W/A/S/D: change direction.") == (
+        "arrowup",
+        "arrowdown",
+        "arrowleft",
+        "arrowright",
+        "w",
+        "a",
+        "s",
+        "d",
+    )
+    assert coverage.named_keys("Pressing Escape closes it.") == ("escape",)
+    assert coverage.named_keys("Hit the space bar to jump") == ("space",)
+    for prose in (
+        "A HUD shows score, distance and best score.",
+        "A start overlay explains the controls.",
+        "Support A/B variants of the hero.",
+        "Enter your email to subscribe.",
+        "The status goes ready → running → over.",
+        "Option A: monthly billing.",
+        "I/O must stay fast.",
+    ):
+        assert coverage.named_keys(prose) == (), prose
+
+
+def test_a_line_that_names_keys_needs_a_real_press_of_each() -> None:
+    """Two benchmark runs attested a controls line from other keys' evidence.
+
+    The grader then pressed D and the game ignored it. The quote alone cannot
+    show that a named key was ever tried; a press of each one can.
+    """
+
+    seen = _seen("status running x 140")
+    record = _record(
+        KEY_TASK,
+        [_edit("app.js"), _browser({"url": "http://127.0.0.1:8000/index.html"}), _press("ArrowRight"), seen],
+    )
+
+    problems = coverage.judge(record, _key_attestation(), use_transcript=False)
+
+    assert [(cid, problem) for cid, _, problem in problems] == [
+        (
+            "R1",
+            "names key(s) ArrowLeft, A, D that were not pressed with browser_command "
+            "press on the deliverable page after the last edit",
+        )
+    ]
+    assert "pressed with browser_command action=press" in coverage.refusal_message(problems)
+
+    record.provider_history[3:3] = [_press("ArrowLeft"), _press("a"), _press("KeyD")]
+    assert coverage.judge(record, _key_attestation(), use_transcript=False) == []
+
+
+def test_a_press_on_a_probe_page_or_before_the_edit_does_not_count() -> None:
+    seen = _seen("status running x 140")
+    probe = _record(
+        KEY_TASK,
+        [
+            _edit("app.js"),
+            _browser({"url": "http://127.0.0.1:8000/_probe_keys.html"}),
+            *(_press(key) for key in ("ArrowLeft", "ArrowRight", "a", "d")),
+            seen,
+        ],
+    )
+    stale = _record(
+        KEY_TASK,
+        [
+            _browser({"url": "http://127.0.0.1:8000/index.html"}),
+            *(_press(key) for key in ("ArrowLeft", "ArrowRight", "a", "d")),
+            _edit("app.js"),
+            seen,
+        ],
+    )
+
+    for record in (probe, stale):
+        problems = coverage.judge(record, _key_attestation(), use_transcript=False)
+        assert [cid for cid, _, _ in problems] == ["R1"]
+        assert "ArrowLeft, ArrowRight, A, D" in problems[0][2]
+
+
+def test_a_line_that_names_keys_cannot_be_not_applicable() -> None:
+    record = _record(KEY_TASK, [_edit("app.js"), _seen("status running x 140")])
+    attestation = _key_attestation()
+    attestation[0] = {
+        "id": "R1",
+        "status": "not_applicable",
+        "observed": "running is covered by the hook tests",
+    }
+
+    problems = coverage.judge(record, attestation, use_transcript=False)
+
+    assert [cid for cid, _, _ in problems] == ["R1"]
+    assert "not not_applicable" in problems[0][2]
+
+
+def test_a_run_without_a_working_browser_owes_no_key_press() -> None:
+    record = _record(
+        KEY_TASK,
+        [_edit("app.js"), _seen("status running x 140", core_name="checks.run")],
+    )
+
+    assert coverage.judge(record, _key_attestation(), use_transcript=False) == []

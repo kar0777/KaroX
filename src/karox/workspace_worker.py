@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .check_report import analyze as analyze_check_output
+from .check_report import is_test_path
 from .core_types import InvalidCommand
 from .models import EvidenceRecord
 from .unified_patch import execute_apply_patch, expected_map, parse_unified_patch
@@ -297,13 +298,11 @@ def _validated_targets(runtime: Any, raw: Any) -> list[str]:
         path_part = item.split("::", 1)[0]
         path = runtime.safe_path(path_part)
         relative = path.relative_to(runtime.repository).as_posix()
-        if (
-            not relative.startswith("tests/")
-            or not relative.endswith(".py")
-            or not path.is_file()
-        ):
+        if not is_test_path(relative) or not path.is_file():
             raise InvalidCommand(
-                "test targets must point to existing Python files under tests/"
+                "test targets must point to existing Python test files "
+                "(test_*.py or *_test.py, or files under a tests/ directory); "
+                f"{relative!r} is not one"
             )
         normalized = relative
         if "::" in item:

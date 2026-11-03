@@ -1176,6 +1176,166 @@ def test_engine_model_bridge_elides_applied_large_arguments(repository: Path) ->
     assert calls["c6"].raw_arguments == answer
 
 
+def _cached_response(
+    tool_calls: tuple[ToolCall, ...] = (), *, prompt: int = 5_000, cached: int = 4_000
+) -> ModelResponse:
+    return ModelResponse(
+        content=None,
+        tool_calls=tool_calls,
+        finish_reason="stop",
+        usage={"prompt_tokens": prompt, "completion_tokens": 5, "cache_read_tokens": cached},
+    )
+
+
+def _large_writes(count: int, chars: int) -> List[dict]:
+    body = json.dumps({"content": "x" * chars})
+    messages: List[dict] = [{"role": "user", "content": "task"}]
+    for index in range(1, count + 1):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "wrote",
+                "tool_calls": [
+                    {"call_id": f"w{index}", "name": "repo_write_file", "raw_arguments": body}
+                ],
+            }
+        )
+        messages.append(
+            {"role": "tool", "content": "<returncode>0</returncode>", "tool_call_id": f"w{index}"}
+        )
+    return messages
+
+
+def _sent_arguments(provider: "ScriptedProvider", index: int) -> dict:
+    return {
+        call.call_id: call.raw_arguments
+        for message in provider.requests[index].messages
+        for call in message.tool_calls
+    }
+
+
+def test_a_caching_provider_keeps_old_write_arguments_until_the_prompt_is_large(
+    repository: Path,
+) -> None:
+    """Eliding an old write re-bills every later message on a caching provider.
+
+    The W&B run paid 0.62M full-price prompt tokens for elisions that saved
+    1.41M cached ones. After the first reported cache hit the history is sent
+    unchanged until the prompt crosses the pressure line, and then the old
+    arguments go in one batch -- which stays elided on every later request.
+    """
+    from karox.engine_kernel import EngineProviderModel
+
+    provider = ScriptedProvider(
+        [
+            _cached_response((_finish_call("a", "x"),)),
+            _cached_response((_finish_call("b", "x"),), prompt=150_000),
+            _cached_response((_finish_call("c", "x"),), prompt=150_000),
+            _cached_response((_finish_call("d", "x"),), prompt=150_000),
+        ]
+    )
+    model = EngineProviderModel(
+        provider=provider,
+        model_id="test-model",
+        tools=(),
+        deadline_seconds=30.0,
+        rewrite_pressure_tokens=100_000,
+    )
+    full = json.dumps({"content": "x" * 30_000})
+
+    model.query(_large_writes(2, 30_000))
+    assert model.prompt_cache_seen is True
+    # A third write makes w1 eligible, but the prompt is small: keep it as sent.
+    model.query(_large_writes(3, 30_000))
+    assert _sent_arguments(provider, 1)["w1"] == full
+    # Above the pressure line the whole eligible batch is elided at once.
+    model.query(_large_writes(4, 30_000))
+    sent = _sent_arguments(provider, 2)
+    assert json.loads(sent["w1"])["_karo_context_manager"]
+    assert json.loads(sent["w2"])["_karo_context_manager"]
+    assert sent["w3"] == full and sent["w4"] == full
+    # Once elided, always elided: the next request repeats the same prefix.
+    model.query(_large_writes(4, 30_000))
+    assert _sent_arguments(provider, 3) == sent
+
+
+def test_a_caching_provider_defers_a_batch_too_small_to_repay_the_break(
+    repository: Path,
+) -> None:
+    from karox.engine_kernel import EngineProviderModel
+
+    provider = ScriptedProvider(
+        [
+            _cached_response((_finish_call("a", "x"),), prompt=150_000),
+            _cached_response((_finish_call("b", "x"),), prompt=150_000),
+        ]
+    )
+    model = EngineProviderModel(
+        provider=provider,
+        model_id="test-model",
+        tools=(),
+        deadline_seconds=30.0,
+        rewrite_pressure_tokens=100_000,
+    )
+    small = json.dumps({"content": "x" * 5_000})
+    model.query(_large_writes(2, 5_000))
+    model.query(_large_writes(3, 5_000))
+    # 5k chars of reclaimable arguments do not repay re-billing the suffix.
+    assert _sent_arguments(provider, 1)["w1"] == small
+
+
+def test_a_provider_without_cache_hits_keeps_the_sliding_elision(repository: Path) -> None:
+    from karox.engine_kernel import EngineProviderModel
+
+    provider = ScriptedProvider([_response((_finish_call("a", "x"),))])
+    model = EngineProviderModel(
+        provider=provider, model_id="test-model", tools=(), deadline_seconds=30.0
+    )
+    model.query(_large_writes(3, 5_000))
+    assert model.prompt_cache_seen is False
+    assert json.loads(_sent_arguments(provider, 0)["w1"])["_karo_context_manager"]
+
+
+def test_a_caching_provider_keeps_a_superseded_read_as_sent(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Clipping a read after an edit re-bills the suffix; a small prompt keeps it."""
+
+    _big_file(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _cached_response((_tool_call("c1", "repo_read_file", {"path": "big.py"}),)),
+            _cached_response(
+                (
+                    _tool_call(
+                        "c2",
+                        "repo_edit_file",
+                        {
+                            "path": "big.py",
+                            "old_string": "value = 1",
+                            "new_string": "value = 2",
+                        },
+                    ),
+                )
+            ),
+            _cached_response((_finish_call("c3", "fixed"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    final_tools = "\n".join(
+        str(message.content or "")
+        for message in harness.provider.requests[-1].messages
+        if message.role == "tool"
+    )
+    assert "predates a later edit" not in final_tools
+    assert "# filler" in final_tools
+
+
 def test_engine_model_bridge_streams_progress_deltas(repository: Path) -> None:
     from karox.providers import ModelEvent, ModelEventKind
 
@@ -1848,10 +2008,17 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
     # The repair turn named the failing test and a copy-ready rerun.
     repair = [
         message
-        for message in _user_messages(harness)
+        for message in _tool_messages(harness)
         if "Verification failed after your finish" in message
     ]
     assert repair, "a failed check must produce a repair turn"
+    # The repair rides in the finish call's result, not in a new user turn: a
+    # user turn makes a thinking model's template drop every earlier turn's
+    # reasoning, which re-bills the whole cached history.
+    assert not any(
+        "Verification failed after your finish" in message
+        for message in _user_messages(harness)
+    )
     assert "tests/test_calc.py:5" in repair[-1]
     assert 'Targeted rerun: tests.run suite=focused targets=["tests/test_calc.py::test_add"]' in repair[-1]
 
@@ -1906,7 +2073,7 @@ def test_repeated_identical_failure_is_called_out_in_the_repair_turn(
     assert report.failure_map["failures"][0]["line"] == 5
     repairs = [
         message
-        for message in _user_messages(harness)
+        for message in _tool_messages(harness)
         if "Verification failed after your finish" in message
     ]
     assert len(repairs) >= 2
@@ -2632,3 +2799,111 @@ def test_a_web_finish_that_never_attests_ends_unverified(
     refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
     assert 1 <= len(refusals) <= 4
     assert any(item.startswith("missing requirement attestation") for item in report.unmet)
+
+
+def _check_runs(harness: "Harness") -> List[dict]:
+    return [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("core_name") == "checks.run"
+        and entry.get("result", {}).get("requested_by") is None
+    ]
+
+
+def test_an_identical_passing_check_on_unchanged_bytes_is_reused(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A repeated green check on the same bytes is answered, not rerun.
+
+    About a third of the benchmark's check and test runs repeated a call that
+    had already passed on identical bytes; a SWE suite costs a minute each.
+    The reused verdict is the earlier one, so it proves nothing new.
+    """
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c3",
+                        "checks_run",
+                        {"argv": list(check), "timeout_seconds": 30},
+                    ),
+                )
+            ),
+            _response((_finish_call("c4", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    runs = [
+        entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c3"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c3"]
+    assert "reused_from" not in runs[0]["result"]["data"]
+    assert runs[1]["result"]["data"]["reused_from"]["call_id"] == "c2"
+    assert runs[1]["result"]["data"]["exit_code"] == 0
+    assert any("[checks.run exit 0 · reused]" in m for m in _tool_messages(harness))
+
+
+def test_an_edit_between_identical_checks_runs_the_check_again(
+    tmp_path: Path, repository: Path
+) -> None:
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response(
+                (_write_call("c3", "calc.py", CALC_RIGHT + "\n\nVALUE = 1\n"),)
+            ),
+            _response((_tool_call("c4", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c5", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    runs = [
+        entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c4"}
+    ]
+    assert len(runs) == 2
+    assert all("reused_from" not in entry["result"]["data"] for entry in runs)
+    assert not any("· reused]" in m for m in _tool_messages(harness))
+
+
+def test_a_failed_check_is_never_reused(tmp_path: Path, repository: Path) -> None:
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_WRONG),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(check)}),)),
+            _response((_write_call("c4", "calc.py", CALC_RIGHT),)),
+            _response((_finish_call("c5", "fixed add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    harness.run()
+
+    runs = [
+        entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c3"}
+    ]
+    assert len(runs) == 2
+    assert all(entry["result"]["ok"] is False for entry in runs)
+    assert all("reused_from" not in entry["result"]["data"] for entry in runs)

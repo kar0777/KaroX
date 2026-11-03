@@ -212,6 +212,28 @@ def test_workspace_worker_selects_pytest_targets_and_splits(tmp_path: Path) -> N
         )
 
 
+def test_focused_targets_accept_package_local_tests(tmp_path: Path) -> None:
+    """sympy's tests live in pkg/sub/tests/; refusing them cost two turns."""
+
+    runtime = FakeRuntime(tmp_path)
+    local = tmp_path / "pkg" / "core" / "tests"
+    local.mkdir(parents=True)
+    (local / "test_basic.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    (tmp_path / "pkg" / "core" / "basic.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    focused = workspace_worker.execute_tests(
+        runtime,
+        {"suite": "focused", "targets": ["pkg/core/tests/test_basic.py::test_ok"]},
+        60.0,
+    )
+    assert focused["targets"] == ["pkg/core/tests/test_basic.py::test_ok"]
+
+    with pytest.raises(workspace_worker.InvalidCommand, match="not one"):
+        workspace_worker.execute_tests(
+            runtime, {"suite": "focused", "targets": ["pkg/core/basic.py"]}, 60.0
+        )
+
+
 def test_unified_patch_hunk_application() -> None:
     patch = (
         "--- a/hello.txt\n+++ b/hello.txt\n"

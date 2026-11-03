@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import PurePosixPath
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import unquote, urlparse
 
 from .requirements import canonical
-from .web_check import is_scratch_artifact
+from .web_check import is_scratch_artifact, is_scratch_page
 
 #: The engine's finish tool (``engine_provider_bridge.FINISH_TOOL_NAME``). Kept
 #: literal so the floor does not import the provider stack.
@@ -161,6 +163,255 @@ def clauses(entries: Sequence[Mapping[str, Any]]) -> List[Tuple[str, str]]:
             continue
         listed.extend((f"{entry_id}.{index}", part) for index, part in enumerate(parts, start=1))
     return listed
+
+
+# --------------------------------------------------------------------------- #
+# Named keys                                                                  #
+# --------------------------------------------------------------------------- #
+#
+# A requirement that names keys ("Left / Right arrows or A / D: run") is about
+# what the page does when those keys are pressed. Two benchmark runs attested
+# such a line with evidence from other keys or from synthetic events on a probe
+# page; the grader then pressed D and the game ignored it. A verified entry for
+# a line that names keys therefore needs a real browser press of every named
+# key on the deliverable page after the last edit. Detection is deliberately
+# conservative: a single capital letter is a key only in a key context ("P:",
+# "A / D", "**R**", "press W", "W key"), so "A HUD shows ..." names no key.
+
+_ARROW_SYMBOLS = {"←": "arrowleft", "→": "arrowright", "↑": "arrowup", "↓": "arrowdown"}
+_DIRECTIONS = {"left": "arrowleft", "right": "arrowright", "up": "arrowup", "down": "arrowdown"}
+_NAMED_KEYS = {
+    "space": "space",
+    "spacebar": "space",
+    "enter": "enter",
+    "return": "enter",
+    "esc": "escape",
+    "escape": "escape",
+    "tab": "tab",
+    "backspace": "backspace",
+    "shift": "shift",
+}
+_KEY_DISPLAY = {
+    "arrowleft": "ArrowLeft",
+    "arrowright": "ArrowRight",
+    "arrowup": "ArrowUp",
+    "arrowdown": "ArrowDown",
+    "space": "Space",
+    "enter": "Enter",
+    "escape": "Escape",
+    "tab": "Tab",
+    "backspace": "Backspace",
+    "shift": "Shift",
+}
+_KEY_CONTEXT = re.compile(
+    r"\b(?:keys?|keyboard|press(?:es|ed|ing)?|arrows?|wasd|controls?)\b", re.I
+)
+_PRESS_WORDS = frozenset({"press", "presses", "pressing", "pressed", "hit", "tap", "hold"})
+_ARROW_PHRASE = re.compile(
+    r"\b((?:left|right|up|down)(?:\s*(?:/|,|or|and|&)\s*(?:left|right|up|down))*)"
+    r"[\s-]*arrows?\b",
+    re.I,
+)
+_ARROW_NAME = re.compile(r"\bArrow(Left|Right|Up|Down)\b")
+_ARROW_KEYS = re.compile(r"\barrow[\s-]+keys\b", re.I)
+_KEY_TOKEN = re.compile(r"\*\*|[A-Za-z]+|[←→↑↓]|[/,:]")
+_KEY_SEPARATORS = frozenset({"/", ",", "**", "or"})
+
+
+def _key_text(text: str) -> str:
+    """Clause text with short code spans unwrapped and long ones dropped."""
+
+    def unwrap(match: "re.Match[str]") -> str:
+        inner = match.group(0)[1:-1]
+        return f" {inner} " if len(inner) <= 12 else " "
+
+    return _CODE_SPAN.sub(unwrap, text)
+
+
+def named_keys(text: str) -> Tuple[str, ...]:
+    """Canonical names of the keys a requirement clause names, in order."""
+
+    source = _key_text(str(text or ""))
+    found: List[str] = []
+
+    def add(name: str) -> None:
+        if name not in found:
+            found.append(name)
+
+    tokens = _KEY_TOKEN.findall(source)
+    lowered = [token.lower() for token in tokens]
+    arrow_keys: List[int] = []
+    for index, token in enumerate(tokens):
+        if token not in _ARROW_SYMBOLS:
+            continue
+        before = lowered[index - 1] if index > 0 else ""
+        after = lowered[index + 1] if index + 1 < len(tokens) else ""
+        if (
+            before in _KEY_SEPARATORS
+            or after in _KEY_SEPARATORS
+            or before in _ARROW_SYMBOLS
+            or after in _ARROW_SYMBOLS
+            or before in _PRESS_WORDS
+            or after in {"key", "keys"}
+        ):
+            arrow_keys.append(index)
+    context = bool(_KEY_CONTEXT.search(source)) or bool(arrow_keys)
+    covered: List[Tuple[int, int]] = []
+    for match in _ARROW_PHRASE.finditer(source):
+        covered.append(match.span())
+        for direction in re.findall(r"left|right|up|down", match.group(1), re.I):
+            add(_DIRECTIONS[direction.lower()])
+    for match in _ARROW_KEYS.finditer(source):
+        # "Arrow keys: change direction" names all four.
+        if not any(start <= match.start() < end for start, end in covered):
+            for arrow in ("arrowup", "arrowdown", "arrowleft", "arrowright"):
+                add(arrow)
+    for match in _ARROW_NAME.finditer(source):
+        add(_DIRECTIONS[match.group(1).lower()])
+    if re.search(r"\bWASD\b", source):
+        for letter in "wasd":
+            add(letter)
+    for index, token in enumerate(tokens):
+        before = lowered[index - 1] if index > 0 else ""
+        after = lowered[index + 1] if index + 1 < len(tokens) else ""
+        if index in arrow_keys:
+            add(_ARROW_SYMBOLS[token])
+            continue
+        if len(token) == 1 and "A" <= token <= "Z":
+            first = index == 0 or (index == 1 and before == "**")
+            if (
+                (first and after == ":")
+                or (before == "**" and after == "**")
+            ) or (
+                context
+                and (
+                    after in {":", "/", "key", "keys"}
+                    or before == "/"
+                    or (before == "**" and after == "**")
+                    or before in _PRESS_WORDS
+                    or (before in {",", "or"} and after in {":", ",", "/", "**"})
+                )
+            ):
+                add(token.lower())
+            continue
+        name = _NAMED_KEYS.get(token.lower())
+        if name is None:
+            continue
+        if (
+            before in _PRESS_WORDS
+            or after in {"key", "keys", "bar"}
+            or (
+                context
+                and token[0].isupper()
+                and (
+                    after in {":", "/", ",", "or"}
+                    or before in {"/", ",", "**", "or"}
+                )
+            )
+        ):
+            add(name)
+    return tuple(found)
+
+
+def _pressed_key(raw: Any) -> str:
+    """A browser press result's key in the canonical form of `named_keys`."""
+
+    key = str(raw or "")
+    final = key.split("+")[-1] if key not in ("+",) else key
+    if final == " ":
+        return "space"
+    if len(final) == 1:
+        return final.lower()
+    lowered = final.lower()
+    code = re.fullmatch(r"key([a-z])", lowered)
+    if code:
+        return code.group(1)
+    digit = re.fullmatch(r"digit([0-9])", lowered)
+    if digit:
+        return digit.group(1)
+    if lowered in {"numpadenter", "return"}:
+        return "enter"
+    if lowered in {"esc"}:
+        return "escape"
+    if lowered in {"spacebar"}:
+        return "space"
+    return lowered
+
+
+def key_display(name: str) -> str:
+    return _KEY_DISPLAY.get(name, name.upper() if len(name) == 1 else name)
+
+
+def _probe_url(url: str, diagnostic: Collection[str]) -> bool:
+    """Whether a browser URL shows a scratch or harness page, not the deliverable."""
+
+    try:
+        path = unquote(urlparse(url).path or "")
+    except ValueError:
+        return False
+    name = PurePosixPath(path).name
+    if not name:
+        return False
+    if is_scratch_page(name):
+        return True
+    normalized = path.replace("\\", "/")
+    return any(
+        normalized == item or normalized.endswith("/" + item.lstrip("/"))
+        for item in (str(entry).replace("\\", "/") for entry in diagnostic)
+        if item
+    )
+
+
+def fresh_presses(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    before: Optional[int] = None,
+    diagnostic: Collection[str] = (),
+) -> set[str]:
+    """Keys really pressed on a deliverable page after the last deliverable edit.
+
+    The page a press reached is the last URL a browser result reported before
+    it; a press on a probe or harness page proves nothing about the
+    deliverable. A press whose page is unknown counts: the page was opened
+    before this window, and the edit window already bounds it.
+    """
+
+    end = len(history) if before is None or before < 0 else before
+    edit = last_deliverable_edit(history[:end], diagnostic)
+    pressed: set[str] = set()
+    current_url = ""
+    for index, entry in enumerate(history[:end]):
+        if entry.get("role") != "tool" or entry.get("core_name") != "browser.command":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, Mapping) or result.get("ok") is not True:
+            continue
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        url = data.get("url")
+        if isinstance(url, str) and url:
+            current_url = url
+        if index <= edit or data.get("pressed") is not True:
+            continue
+        if current_url and _probe_url(current_url, diagnostic):
+            continue
+        key = _pressed_key(data.get("key"))
+        if key:
+            pressed.add(key)
+    return pressed
+
+
+def browser_worked(history: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether this run could press keys: one browser call succeeded."""
+
+    for entry in history:
+        if entry.get("role") != "tool" or entry.get("core_name") != "browser.command":
+            continue
+        result = entry.get("result")
+        if isinstance(result, Mapping) and result.get("ok") is True:
+            return True
+    return False
 
 
 def _unescape(text: str) -> str:
@@ -326,6 +577,7 @@ def judge(
     *,
     use_transcript: bool = True,
     diagnostic: Collection[str] = (),
+    require_presses: Optional[bool] = None,
 ) -> List[Tuple[str, str, str]]:
     """Every clause the attestation does not discharge: ``(id, text, problem)``.
 
@@ -333,6 +585,8 @@ def judge(
     durable transcript and quotes must predate it; otherwise ``attestation``
     is the call being made now and every result so far is available to it.
     ``diagnostic`` names pages whose edits do not make observations stale.
+    ``require_presses`` (default: whether a browser call succeeded in this
+    run) makes a clause that names keys owe a real press of each of them.
     """
 
     checklist = clauses(getattr(record, "requirements", None) or ())
@@ -350,6 +604,13 @@ def judge(
     attested = parse_attestation(attestation)
     observations = fresh_observations(history, before=before, diagnostic=diagnostic)
     runs = _copied_runs(observations)
+    if require_presses is None:
+        require_presses = browser_worked(history if before is None else history[:before])
+    pressed = (
+        fresh_presses(history, before=before, diagnostic=diagnostic)
+        if require_presses
+        else set()
+    )
     problems: List[Tuple[str, str, str]] = []
     for cid, text in checklist:
         item = attested.get(cid)
@@ -357,8 +618,10 @@ def judge(
             problems.append((cid, text, "not attested"))
             continue
         status, observed = item["status"], item["observed"]
+        keys = named_keys(text) if require_presses else ()
         if status == STATUS_VERIFIED:
             quote = normalize(observed)
+            missing = [key for key in keys if key not in pressed]
             if len(quote.split()) < _MIN_QUOTE_TOKENS or len(quote) < _MIN_QUOTE_CHARS:
                 problems.append((cid, text, "observed text too short to identify a result"))
             elif not _quoted(quote, observations, runs):
@@ -369,8 +632,27 @@ def judge(
                         "observed text is not in any browser, check or visual result after the last edit",
                     )
                 )
+            elif missing:
+                listed = ", ".join(key_display(key) for key in missing)
+                problems.append(
+                    (
+                        cid,
+                        text,
+                        f"names key(s) {listed} that were not pressed with "
+                        "browser_command press on the deliverable page after the last edit",
+                    )
+                )
         elif status == STATUS_NOT_APPLICABLE:
-            if len(_WORD.findall(observed)) < _MIN_REASON_WORDS:
+            if keys:
+                problems.append(
+                    (
+                        cid,
+                        text,
+                        "names keys the page must handle, so it is not not_applicable: "
+                        "press them, or report unmet",
+                    )
+                )
+            elif len(_WORD.findall(observed)) < _MIN_REASON_WORDS:
                 problems.append((cid, text, "not_applicable needs a reason"))
         elif status == STATUS_UNMET:
             problems.append((cid, text, "reported unmet"))
@@ -409,6 +691,11 @@ def refusal_message(problems: Sequence[Tuple[str, str, str]]) -> str:
         'asks nothing of the deliverable (a process note or context), and "unmet" '
         "for a requirement that is not met. Exercise or fix a requirement before "
         "you attest it; one browser call can return several facts at once.",
+        "A line that names keys is verified only after each of those keys was "
+        "pressed with browser_command action=press on the deliverable page after "
+        "your last edit, in the state the line describes (synthetic events on a "
+        "probe page do not count); several presses and reads can share one "
+        "response.",
         "",
         "Open requirements:",
     ]

@@ -127,6 +127,17 @@ _ELIDED_ARGUMENT_CHARS = 2_000
 #: ones whose carried cost matters. Small calls (reads, checks) never take
 #: these slots.
 _ELIDED_ARGUMENT_KEEP = 2
+#: A provider that bills a cached prompt prefix at a fraction of the input
+#: price turns every rewrite of an old message into a re-bill of everything
+#: after it, plus the prefill latency of that suffix. Measured on the W&B
+#: DeepSeek route (17 tasks, r2): the sliding elision re-billed 0.62M prompt
+#: tokens to save 1.41M cached ones -- a net loss at a 0.15 cache-hit price
+#: ratio -- and clipping superseded reads re-billed another 0.60M. Once the
+#: provider has reported a cache hit, old history is rewritten only while the
+#: prompt is large, and then in one batch, so a long run pays one cache break
+#: per batch instead of one per write.
+REWRITE_PRESSURE_TOKENS = 96_000
+REWRITE_BATCH_CHARS = 24_000
 
 
 def _elided_argument_marker(name: str) -> str:
@@ -179,12 +190,9 @@ def _completed_calls(
     return completed
 
 
-def _elide_applied_arguments(
-    call: ToolCall, *, completed: Set[str], keep: Set[str]
-) -> ToolCall:
+def _elide_applied_arguments(call: ToolCall, *, elided: Set[str]) -> ToolCall:
     if (
-        call.call_id in completed
-        and call.call_id not in keep
+        call.call_id in elided
         and call.name in _ELIDABLE_ARGUMENT_TOOLS
         and len(call.raw_arguments) > _ELIDED_ARGUMENT_CHARS
     ):
@@ -334,6 +342,7 @@ class EngineProviderModel:
         known_names: Optional[Set[str]] = None,
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
+        rewrite_pressure_tokens: int = REWRITE_PRESSURE_TOKENS,
     ) -> None:
         self._provider = provider
         self._sleep = sleep
@@ -358,6 +367,17 @@ class EngineProviderModel:
         self.config = SimpleNamespace(model_name=model_id, output_char_limit=50_000)
         #: The engine step this call belongs to; the agent keeps it current.
         self.step = 0
+        #: Set once a response reports cached prompt tokens: this provider
+        #: caches prefixes, so an unchanged history is cheap and a rewritten
+        #: one is re-billed from the first changed message on.
+        self.prompt_cache_seen = False
+        #: Prompt tokens of the latest response: the size the next request
+        #: starts from, measured by the provider rather than estimated.
+        self.last_prompt_tokens = 0
+        self.rewrite_pressure_tokens = max(1, int(rewrite_pressure_tokens))
+        #: Calls whose arguments the wire replaces with a marker. The set only
+        #: grows, so a message is sent the same way on every later request.
+        self._elided_calls: Set[str] = set()
 
     # -- Model protocol ---------------------------------------------------
 
@@ -372,6 +392,7 @@ class EngineProviderModel:
             deadline_seconds=self._current_deadline(),
         )
         response = self._call(request)
+        self._note_usage(response.usage)
         if response.budget_exceeded:
             message = self._engine_message(response, [])
             message["extra"]["budget_exceeded"] = True
@@ -379,6 +400,35 @@ class EngineProviderModel:
             return message
         actions = self._parse_actions(response)
         return self._engine_message(response, actions)
+
+    def history_rewrite_allowed(self, reclaimable_chars: int) -> bool:
+        """Whether shrinking old history now is worth the cache it breaks.
+
+        Without a cache every request pays its whole prompt, so any shrink is
+        a saving. With one, the unchanged prefix is nearly free and a rewrite
+        re-bills the suffix after it: shrink only a large prompt, by a batch
+        big enough to repay that one break.
+        """
+
+        if not self.prompt_cache_seen:
+            return True
+        return (
+            self.last_prompt_tokens >= self.rewrite_pressure_tokens
+            and int(reclaimable_chars) >= REWRITE_BATCH_CHARS
+        )
+
+    def _note_usage(self, usage: Any) -> None:
+        if not isinstance(usage, Mapping):
+            return
+        try:
+            prompt = int(usage.get("prompt_tokens") or 0)
+            cached = int(usage.get("cache_read_tokens") or 0)
+        except (TypeError, ValueError):
+            return
+        if prompt > 0:
+            self.last_prompt_tokens = prompt
+        if cached > 0:
+            self.prompt_cache_seen = True
 
     def format_message(self, **kwargs: Any) -> Dict[str, Any]:
         role = str(kwargs.get("role", "user"))
@@ -437,14 +487,19 @@ class EngineProviderModel:
 
     def _request_messages(self, messages: Iterable[Mapping[str, Any]]) -> Tuple[ModelMessage, ...]:
         entries = list(messages)
-        completed_calls = _completed_calls(entries)
-        completed = {call_id for call_id, _, _ in completed_calls}
         large = [
-            call_id
-            for call_id, name, size in completed_calls
+            (call_id, size)
+            for call_id, name, size in _completed_calls(entries)
             if name in _ELIDABLE_ARGUMENT_TOOLS and size > _ELIDED_ARGUMENT_CHARS
         ]
-        keep = set(large[-_ELIDED_ARGUMENT_KEEP:])
+        keep = {call_id for call_id, _ in large[-_ELIDED_ARGUMENT_KEEP:]}
+        pending = [
+            (call_id, size)
+            for call_id, size in large
+            if call_id not in keep and call_id not in self._elided_calls
+        ]
+        if pending and self.history_rewrite_allowed(sum(size for _, size in pending)):
+            self._elided_calls.update(call_id for call_id, _ in pending)
         first_user_seen = False
         converted: List[ModelMessage] = []
         for entry in entries:
@@ -455,7 +510,7 @@ class EngineProviderModel:
             text = None if content is None else str(content)
             if role == "assistant":
                 calls = tuple(
-                    _elide_applied_arguments(call, completed=completed, keep=keep)
+                    _elide_applied_arguments(call, elided=self._elided_calls)
                     for call in _engine_tool_calls(entry)
                 )
                 replayed = entry.get("reasoning_content")

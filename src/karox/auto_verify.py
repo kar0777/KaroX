@@ -19,6 +19,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -32,7 +34,9 @@ NODE_EXTENSIONS = frozenset({".js", ".mjs", ".cjs"})
 TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx"})
 HTML_EXTENSIONS = frozenset({".html", ".htm"})
 LSP_MIN_TIMEOUT_S = 1.0
-CONCISE_LINE = re.compile(r"^.+?:(?P<line>\d+):\d+:\s*(?P<code>[A-Za-z]+[0-9]+)\b")
+CONCISE_LINE = re.compile(
+    r"^.+?:(?P<line>\d+):\d+:\s*(?P<code>[A-Za-z]+[0-9]+)\b(?P<message>.*)$"
+)
 MAX_LISTED_ISSUES = 5
 
 
@@ -180,11 +184,19 @@ def _python() -> str:
     return str(sys.executable)
 
 
-def _bounded(argv: Sequence[str], cwd: Path, timeout_s: float) -> subprocess.CompletedProcess:
+def _bounded(
+    argv: Sequence[str],
+    cwd: Path,
+    timeout_s: float,
+    *,
+    stdin_text: Optional[str] = None,
+) -> subprocess.CompletedProcess:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     return subprocess.run(
         list(argv),
         cwd=str(cwd),
+        input=stdin_text,
+        stdin=None if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -221,6 +233,7 @@ def _py_compile(path: Path, timeout_s: float) -> QuickCheck:
 
 
 def _ruff(path: Path, timeout_s: float) -> QuickCheck:
+    started = time.monotonic()
     try:
         completed = _bounded(
             [_python(), "-m", "ruff", "check", "--output-format", "concise", str(path)],
@@ -231,17 +244,125 @@ def _ruff(path: Path, timeout_s: float) -> QuickCheck:
         return QuickCheck("ruff", True, "skipped: timeout")
     if completed.returncode == 0:
         return QuickCheck("ruff", True, "ok")
-    issues: list[str] = []
-    for line in completed.stdout.splitlines():
-        match = CONCISE_LINE.match(line.strip())
-        if match:
-            issues.append(f"{match.group('code')} line {match.group('line')}")
+    issues = _ruff_issues(completed.stdout)
     if not issues:
         # An error ruff could not attribute to a line (a config problem, a
         # crashed run) still has to reach the model as a failure, not as "ok".
         return QuickCheck("ruff", False, _first_line(completed.stdout) or "failed")
-    listed = ", ".join(issues[:MAX_LISTED_ISSUES])
+    # Only what the change introduced is the change's problem. swe-requests
+    # had an unused import at line 29 long before the edit; reporting it as a
+    # failed quick check kept the completion floor shut on a correct patch and
+    # cost two repair loops and two full-suite reruns. Issues are matched to
+    # the committed file by code and message, never by line: an edit above
+    # the old issue moves it without changing it.
+    baseline = _ruff_baseline(path, timeout_s - (time.monotonic() - started))
+    if baseline is not None:
+        remaining = Counter(baseline)
+        introduced: list[tuple[str, str, str]] = []
+        for issue in issues:
+            key = (issue[0], issue[2])
+            if remaining[key] > 0:
+                remaining[key] -= 1
+                continue
+            introduced.append(issue)
+        if not introduced:
+            return QuickCheck(
+                "ruff", True, f"ok ({len(issues)} pre-existing issue(s), none new)"
+            )
+        listed = ", ".join(
+            f"{code} line {line}" for code, line, _ in introduced[:MAX_LISTED_ISSUES]
+        )
+        summary = f"{len(introduced)} new issues: {listed}"
+        if len(introduced) < len(issues):
+            summary += f" ({len(issues) - len(introduced)} pre-existing not counted)"
+        return QuickCheck("ruff", False, summary[:SUMMARY_CHARS])
+    listed = ", ".join(f"{code} line {line}" for code, line, _ in issues[:MAX_LISTED_ISSUES])
     return QuickCheck("ruff", False, f"{len(issues)} issues: {listed}"[:SUMMARY_CHARS])
+
+
+def _ruff_issues(output: str) -> list[tuple[str, str, str]]:
+    """(code, line, message) for every concise ruff line."""
+    issues: list[tuple[str, str, str]] = []
+    for line in output.splitlines():
+        match = CONCISE_LINE.match(line.strip())
+        if match:
+            issues.append(
+                (
+                    match.group("code"),
+                    match.group("line"),
+                    " ".join(match.group("message").split()),
+                )
+            )
+    return issues
+
+
+def _ruff_baseline(path: Path, timeout_s: float) -> Optional[list[tuple[str, str]]]:
+    """The (code, message) issues of the committed version of ``path``.
+
+    ``None`` means "no baseline could be read" (not a git checkout, git or the
+    budget missing) and keeps every issue counted. A file git does not know
+    yet has an empty baseline: everything in a new file is new.
+    """
+
+    if timeout_s <= 0.05 or shutil.which("git") is None:
+        return None
+    started = time.monotonic()
+    try:
+        inside = _bounded(
+            ["git", "rev-parse", "--is-inside-work-tree"], path.parent, timeout_s
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"HEAD:./{path.name}"],
+            cwd=str(path.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(0.05, timeout_s - (time.monotonic() - started)),
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if sys.platform == "win32"
+                else 0
+            ),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if shown.returncode != 0:
+        return []
+    committed = shown.stdout.decode("utf-8", errors="replace")
+    left = timeout_s - (time.monotonic() - started)
+    if left <= 0.05:
+        return None
+    try:
+        completed = _bounded(
+            [
+                _python(),
+                "-m",
+                "ruff",
+                "check",
+                "--output-format",
+                "concise",
+                "--stdin-filename",
+                str(path),
+                "-",
+            ],
+            path.parent,
+            left,
+            stdin_text=committed,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if completed.returncode == 0:
+        return []
+    issues = _ruff_issues(completed.stdout)
+    if not issues:
+        return None
+    return [(code, message) for code, _, message in issues]
 
 
 def _node_check(path: Path, timeout_s: float) -> QuickCheck:

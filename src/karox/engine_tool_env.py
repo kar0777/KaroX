@@ -51,6 +51,34 @@ if TYPE_CHECKING:
 _READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
 _TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
 _PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
+#: Runs whose verdict depends only on the repository bytes. On the W&B
+#: benchmark about 28 of 92 check and test runs repeated an identical call that
+#: had already passed on identical bytes; a SWE suite costs a minute each time.
+_REUSABLE_RUNS = frozenset({"checks.run", "tests.run"})
+#: Tools that cannot change what a check or test run would see. Anything else
+#: (an edit, a shell command, a dev server, a browser action, a fetch) ends
+#: every reuse: the next identical run executes again.
+_RUN_NEUTRAL_TOOLS = frozenset(
+    {
+        "repo.read_file",
+        "repo.read_lines",
+        "repo.list_files",
+        "repo.search",
+        "repo.inspect",
+        "git.status",
+        "git.diff",
+        "git.log",
+        "lsp.diagnostics",
+        "plan.update",
+        "runtime.status",
+        "skill.list",
+        "skill.load",
+        "skill.read",
+        "checks.run",
+        "tests.run",
+        "visual.check",
+    }
+)
 #: Proof bookkeeping, not an observation. ``completion_identity`` carries the
 #: whole task text and every file hash; the completion gate reads it from the
 #: durable result, so putting it in the model-facing body only makes every later
@@ -78,8 +106,8 @@ _MUTATION_TOOLS = {"repo.edit_file", "repo.write_file", "repo.apply_patch", "rep
 REFUSAL_GUIDANCE_AFTER = 2
 REFUSAL_DISABLE_AFTER = 6
 #: Some tools are cheap to stop early: a patch that fails to parse twice will
-#: not parse on the third try, and ``tests.run`` with a target outside
-#: ``tests/`` keeps the same bad path. In the sympy run these two shapes used
+#: not parse on the third try, and ``tests.run`` with a target that is not a
+#: test file keeps the same bad path. In the sympy run these two shapes used
 #: seven turns. The refusal message names the working alternative.
 TOOL_FAILURE_LIMITS = {"repo.apply_patch": 2, "tests.run": 2}
 _TOOL_ALTERNATIVE = {
@@ -89,7 +117,8 @@ _TOOL_ALTERNATIVE = {
     ),
     "tests.run": (
         "Use checks.run with the approved command, or point targets at "
-        "existing Python files under tests/."
+        "existing test files (test_*.py, *_test.py, or files under a tests/ "
+        "directory)."
     ),
 }
 #: A browser can turn verification into an unbounded exploration: the two 3D
@@ -104,6 +133,12 @@ BROWSER_CALLS_EXHAUSTED = 36
 #: click is cheap; the churn was repeated open/screenshot/wait. A separate cap
 #: keeps a click loop from replacing the observation loop.
 BROWSER_INPUT_LIMIT = 12
+#: Key presses have their own cap. A line that names keys is verified only by
+#: pressing each of them on the deliverable after the last edit; a platformer's
+#: controls name nine keys, so counting presses against the click cap (or the
+#: observation budget) made honest verification of one line cost the whole
+#: input budget. A press loop is still bounded.
+BROWSER_PRESS_LIMIT = 30
 #: A web deliverable's finish must attest every requirement against results
 #: observed after the last edit. A refused finish says which are open; after
 #: this many refusals the submission is accepted and the completion floor
@@ -115,7 +150,7 @@ COVERAGE_REFUSAL_LIMIT = 4
 COVERAGE_BROWSER_GRANT = 6
 COVERAGE_INPUT_GRANT = 3
 _BROWSER_INPUT_ACTIONS = frozenset(
-    {"click", "dblclick", "press", "fill", "select", "type", "hover"}
+    {"click", "dblclick", "fill", "select", "type", "hover"}
 )
 #: Once this little wall time remains, every observation carries one line: stop
 #: exploring and finish. The kernel also reserves this window for final proof.
@@ -160,6 +195,19 @@ def _counts_as_repository_change(
     )
 
 
+def _run_key(core_name: str, arguments: Mapping[str, Any]) -> str:
+    """The exact call a passed run answers; a timeout is not part of it."""
+
+    material = {
+        key: value for key, value in arguments.items() if key != "timeout_seconds"
+    }
+    try:
+        encoded = json.dumps(material, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+    return f"{core_name}\0{encoded}"
+
+
 def _batch_tail(action: Mapping[str, Any] | None) -> bool:
     """True when this action ends a batched response (or carries no batch data)."""
 
@@ -187,6 +235,7 @@ class CoreToolEnvironment:
     #: class default keeps environments built without ``__init__`` (tests,
     #: adapters) on the unextended browser budget.
     _coverage_refusals: int = 0
+    _browser_presses: int = 0
 
     def __init__(
         self,
@@ -226,6 +275,11 @@ class CoreToolEnvironment:
         #: milestones already delivered in this run.
         self._last_mutation_step = 0
         self._research_notices: set[int] = set()
+        #: Passing check/test runs by their exact call, with the repository
+        #: identity they ran on and the state epoch. Any call that may change
+        #: what a run sees bumps the epoch and so ends every reuse.
+        self._state_epoch = 0
+        self._passed_runs: Dict[str, Dict[str, Any]] = {}
         #: A code task gets the research budget; a question or a plan does not.
         self._research_applies = self._task_expects_change()
         #: The task names a control whose state a screenshot cannot prove.
@@ -298,6 +352,9 @@ class CoreToolEnvironment:
         if name == FINISH_TOOL_NAME:
             return self._finish(action)
         if name is None:
+            # An approved command run from text can write anything a check
+            # would read; no earlier verdict survives it.
+            self._state_epoch += 1
             return self._fenced_command(action)
         core_name = self._aliases.get(str(name))
         if core_name is None:
@@ -333,6 +390,18 @@ class CoreToolEnvironment:
                     arguments["targets"] = derived_targets
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
+        reuse_key = (
+            _run_key(core_name, arguments)
+            if core_name in _REUSABLE_RUNS and requested_by == "model"
+            else ""
+        )
+        if reuse_key:
+            reused = self._reuse_passed_run(reuse_key, core_name, str(name), call_id)
+            if reused is not None:
+                return reused
+        if core_name not in _RUN_NEUTRAL_TOOLS:
+            self._state_epoch += 1
+        epoch_before = self._state_epoch
         started = self._kernel.monotonic()
         self._kernel._emit(AgentEventKind.TOOL_STARTED, tool=display, call_id=call_id or None)
         if core_name in _TEST_TOOLS:
@@ -353,6 +422,13 @@ class CoreToolEnvironment:
             completion_gate.identity(self._core, self._core.sessions.load(self._session_id))
             if core_name in _PROOF_TOOLS
             else None
+        )
+        run_identity_before = (
+            proof_before
+            if proof_before is not None or not reuse_key
+            else completion_gate.identity(
+                self._core, self._core.sessions.load(self._session_id)
+            )
         )
         try:
             result = self._core.execute(
@@ -384,9 +460,13 @@ class CoreToolEnvironment:
             return self._observation(message, 1, "refused")
         self._refusals.pop(core_name, None)
         if core_name == "browser.command":
-            self._browser_calls += 1
-            if str(arguments.get("action") or "") in _BROWSER_INPUT_ACTIONS:
-                self._browser_inputs += 1
+            browser_action = str(arguments.get("action") or "")
+            if browser_action == "press":
+                self._browser_presses += 1
+            else:
+                self._browser_calls += 1
+                if browser_action in _BROWSER_INPUT_ACTIONS:
+                    self._browser_inputs += 1
         data = result.data if isinstance(result.data, dict) else {}
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
@@ -411,6 +491,10 @@ class CoreToolEnvironment:
                 )
             for item in result.evidence:
                 item.metadata["completion_identity"] = proof
+        if reuse_key:
+            self._remember_passed_run(
+                reuse_key, result, run_identity_before, epoch_before, call_id
+            )
         self._attach_quick_checks(result)
         self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
@@ -669,6 +753,7 @@ class CoreToolEnvironment:
         if (
             not self._interaction_task
             or self._browser_inputs
+            or self._browser_presses
             or self._interaction_hint_sent
         ):
             return ""
@@ -679,16 +764,126 @@ class CoreToolEnvironment:
             "The run cannot be verified without that input."
         )
 
+    def _remember_passed_run(
+        self,
+        key: str,
+        result: CoreResult,
+        identity_before: Optional[Dict[str, Any]],
+        epoch_before: int,
+        call_id: str,
+    ) -> None:
+        data = result.data if isinstance(result.data, dict) else {}
+        passed = (
+            result.ok
+            and data.get("exit_code") == 0
+            and not data.get("timed_out")
+        )
+        if not passed or not identity_before or self._state_epoch != epoch_before:
+            self._passed_runs.pop(key, None)
+            return
+        try:
+            identity_after = completion_gate.identity(
+                self._core, self._core.sessions.load(self._session_id)
+            )
+        except Exception:  # noqa: BLE001 - no identity means no reuse
+            return
+        if identity_after != identity_before:
+            # Something changed while it ran: the verdict belongs to neither
+            # state, so it cannot stand in for a later run.
+            self._passed_runs.pop(key, None)
+            return
+        try:
+            kept = CoreResult.from_dict(result.to_dict())
+        except Exception:  # noqa: BLE001 - an uncopyable result is simply rerun
+            self._passed_runs.pop(key, None)
+            return
+        self._passed_runs[key] = {
+            "identity": identity_after,
+            "epoch": epoch_before,
+            "step": int(getattr(self._kernel, "_step", 0) or 0),
+            "call_id": call_id,
+            "result": kept,
+        }
+
+    def _reuse_passed_run(
+        self, key: str, core_name: str, alias: str, call_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """The earlier verdict of this exact call, when nothing has changed.
+
+        Identity equality is the same test the completion gate applies to the
+        earlier result, so reusing it proves nothing the earlier run did not.
+        A failed or timed-out run is never reused: a retry there may be the
+        point (a flaky test, a dependency installed in between).
+        """
+
+        entry = self._passed_runs.get(key)
+        if entry is None or entry["epoch"] != self._state_epoch:
+            return None
+        try:
+            current = completion_gate.identity(
+                self._core, self._core.sessions.load(self._session_id)
+            )
+        except Exception:  # noqa: BLE001 - when in doubt, run it
+            return None
+        if not current or current != entry["identity"]:
+            return None
+        prior: CoreResult = entry["result"]
+        result = CoreResult.from_dict(prior.to_dict())
+        result.data["reused_from"] = {
+            "call_id": entry["call_id"],
+            "step": entry["step"],
+        }
+        step = entry["step"]
+        text = (
+            f"[{core_name} exit 0 · reused]\n"
+            f"This exact call already passed at step {step} and nothing that a "
+            "run can see has changed since, so it was not run again; that "
+            "result stands. Run it again only after an edit."
+        )
+        output = {
+            "output": text,
+            "observation": text,
+            "returncode": 0,
+            "exception_info": "",
+        }
+        self._kernel._emit(AgentEventKind.TOOL_STARTED, tool=core_name, call_id=call_id or None)
+        self._kernel._persist_engine_tool_result(
+            call_id=call_id,
+            alias=alias,
+            core_name=core_name,
+            result=result,
+            output=output,
+            requested_by="model",
+        )
+        self._kernel._emit(
+            AgentEventKind.TOOL_FINISHED,
+            tool=core_name,
+            call_id=call_id or None,
+            ok=True,
+            summary="reused: unchanged since step " + str(step),
+            duration_seconds=0.0,
+        )
+        return output
+
     def _browser_budget_exhausted(self, core_name: str, action: str = "") -> str:
         if core_name != "browser.command":
             return ""
+        if action == "press":
+            limit = BROWSER_PRESS_LIMIT + COVERAGE_INPUT_GRANT * self._coverage_refusals
+            if self._browser_presses < limit:
+                return ""
+            return (
+                f"browser key presses are disabled for the rest of this run after "
+                f"{self._browser_presses} presses. Stop pressing, run the final "
+                "check and visual review, and finish."
+            )
         if action in _BROWSER_INPUT_ACTIONS:
             limit = BROWSER_INPUT_LIMIT + COVERAGE_INPUT_GRANT * self._coverage_refusals
             if self._browser_inputs < limit:
                 return ""
             return (
                 f"browser input is disabled for the rest of this run after "
-                f"{self._browser_inputs} click/press/fill actions. Stop "
+                f"{self._browser_inputs} click/fill actions. Stop "
                 "interacting, run the final check and visual review, and finish."
             )
         limit = BROWSER_CALLS_EXHAUSTED + COVERAGE_BROWSER_GRANT * self._coverage_refusals
@@ -943,6 +1138,11 @@ class CoreToolEnvironment:
             text = f"[{core_name} {detail}]\n{text}".strip()
             if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
                 returncode = exit_code if exit_code > 0 else 1
+                if core_name == "tests.run" and _pytest_missing(data):
+                    # The django venv has no pytest: every tests.run there is
+                    # the same red "No module named pytest", and a model that
+                    # reads it as a test verdict keeps retrying.
+                    text = f"{PYTEST_MISSING_HINT}\n{text}"
         elif core_name == "repo.read_lines" and result.ok:
             text = _read_lines_body(data)
         elif core_name in _READABLE_TOOLS and result.ok:
@@ -985,6 +1185,23 @@ class CoreToolEnvironment:
             "returncode": returncode,
             "exception_info": "",
         }
+
+
+PYTEST_MISSING_HINT = (
+    "pytest is not installed in this project's interpreter, so tests.run "
+    "cannot run here. This is not a test failure. Use checks.run with the "
+    "approved command (it uses the project's own runner) and do not retry "
+    "tests.run."
+)
+_PYTEST_MISSING = re.compile(r"No module named '?pytest'?(?:\s|$)")
+
+
+def _pytest_missing(data: Mapping[str, Any]) -> bool:
+    for key in ("stderr", "stdout"):
+        value = data.get(key)
+        if isinstance(value, str) and _PYTEST_MISSING.search(value[-4_000:]):
+            return True
+    return False
 
 
 def _read_lines_body(data: Mapping[str, Any]) -> str:
