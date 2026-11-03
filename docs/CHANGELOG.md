@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Changed — the TUI reads like Claude Code, with KaroX's working dots
+
+- Every step and tool call is one `●` line in order: `Read(calc.py)`,
+  `Update(calc.py)`, `Run(make lint)`, `github · list_issues (MCP)(…)`, with
+  the result in words on a `⎿` line under it ("Read 42 lines", "Updated: +3
+  −1", "Tests passed · 3s") instead of raw `key=value` summaries. Edits show
+  their numbered diff, commands and checks the tail of their output, MCP calls
+  their text, folded to a few rows; `ctrl+o` expands everything. The runtime
+  now emits that detail: `tool_started` carries what the call is about and
+  `tool_finished` a bounded, redacted preview (`--stream` prints `-> tool
+  detail` too).
+- While the agent works, KaroX's pulsing dots sit above the composer with
+  what it is doing in words, elapsed time, tokens and "esc to interrupt";
+  under it the plan step ("Step 2 of 3: …"), a model-call retry, and the
+  tasks typed meanwhile — Enter queues them and they run one after another.
+  A stop marks unfinished tool lines "Interrupted" and returns queued tasks
+  to the composer.
+- Less on screen: the welcome box shows only the folder (with branch), the
+  model and one tip; the footer is a hint plus model, tokens and the context
+  share near the limit. `?` shows the shortcuts, `shift+tab` cycles the mode.
+  Reasoning is a dim "Thought for 4s" line; harness warnings become readable
+  notices; result counts are pluralised ("3 steps · 1 file").
+
+### Changed — MCP from the TUI works without a prior run
+
+- `/mcp` → a server → "Use in this session: all tools" or "read-only tools".
+  The TUI never writes `ask` (a mid-run question nobody can answer was a
+  silent refusal); tools are `allow` or `deny`. Before the window's first task
+  the choice is remembered and sent with that task.
+- New `karox agent run --mcp-server SERVER[=read|all]` (repeatable) selects a
+  server for the session right before the run; an unreachable server fails up
+  front with its own error.
+- A tool result flagged `isError` now carries the server's text in the error
+  ("MCP tool X returned an error result: repository not found") instead of a
+  bare failure.
+
 ### Changed — the TUI is a plain chat transcript with an inline command line
 
 - The terminal UI no longer has tabs, F-key screens or a ChatGPT/Claude web

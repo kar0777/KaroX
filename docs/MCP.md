@@ -61,6 +61,21 @@ A selection stores the tool's name, schema digest and read-only classification.
 At call time the binding re-reads the server record and re-checks the digest.
 A changed tool schema is refused; re-select the server to approve it.
 
+### Selecting with the run
+
+```text
+karox agent run --task T --session-id S --mcp-server github=read --mcp-server docs=all
+```
+
+`--mcp-server SERVER[=read|all]` is the one-step form the TUI uses: before the
+run binds its tools, the server is inspected and the session selection is
+written — `all` allows every listed tool, `read` (the default) allows the
+read-only ones and denies the rest. Neither scope writes `ask`, because nothing
+could answer it mid-run. An unreachable server fails the run up front with the
+server's own error. In the TUI, `/mcp` → a server → "Use in this session" does
+the same; before the window's first task the choice waits and rides along with
+that task.
+
 ## Status
 
 ```text
@@ -105,6 +120,11 @@ A mutating tool still requires an idempotency key; a repeated key with the
 same input replays the recorded outcome, a key reused for different input
 conflicts, and a call that fails after reserving its intent stays pending
 until the outcome is reconciled.
+
+A tool result the server flags with `isError` is reported as a failed call
+that carries the server's own text (flattened and bounded, text content only),
+so the model and the transcript see why it failed — "repository not found" —
+instead of a bare "returned an error result".
 
 ## Hosted bridge for ChatGPT Web / Claude Web / HyperAgent
 

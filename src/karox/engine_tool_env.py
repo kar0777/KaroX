@@ -38,6 +38,7 @@ from .engine.exceptions import Submitted  # noqa: E402
 from .engine_provider_bridge import FINISH_TOOL_NAME  # noqa: E402
 from .models import CoreCommand, CoreResult, EvidenceRecord, Origin  # noqa: E402
 from .security import redact  # noqa: E402
+from .tool_display import call_detail, result_preview, result_summary  # noqa: E402
 from .sessions import MutationLease  # noqa: E402
 from .test_output import (  # noqa: E402
     CONDENSED_MAX_CHARS_WITH_MAP,
@@ -396,14 +397,21 @@ class CoreToolEnvironment:
             else ""
         )
         if reuse_key:
-            reused = self._reuse_passed_run(reuse_key, core_name, str(name), call_id)
+            reused = self._reuse_passed_run(
+                reuse_key, core_name, str(name), call_id, call_detail(core_name, arguments)
+            )
             if reused is not None:
                 return reused
         if core_name not in _RUN_NEUTRAL_TOOLS:
             self._state_epoch += 1
         epoch_before = self._state_epoch
         started = self._kernel.monotonic()
-        self._kernel._emit(AgentEventKind.TOOL_STARTED, tool=display, call_id=call_id or None)
+        self._kernel._emit(
+            AgentEventKind.TOOL_STARTED,
+            tool=display,
+            call_id=call_id or None,
+            detail=call_detail(core_name, arguments) or None,
+        )
         if core_name in _TEST_TOOLS:
             self._kernel._emit(AgentEventKind.TEST_STARTED, tool=display, call_id=call_id or None)
         remaining = max(0.1, self._kernel.remaining_seconds())
@@ -537,7 +545,8 @@ class CoreToolEnvironment:
             tool=display,
             call_id=call_id or None,
             ok=result.ok,
-            summary=_result_summary(core_name, result),
+            summary=result_summary(core_name, data, result.ok, arguments),
+            detail=result_preview(core_name, data, result.ok, arguments) or None,
             duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
         )
         if core_name == "visual.check" and isinstance(result.data, dict):
@@ -806,7 +815,7 @@ class CoreToolEnvironment:
         }
 
     def _reuse_passed_run(
-        self, key: str, core_name: str, alias: str, call_id: str
+        self, key: str, core_name: str, alias: str, call_id: str, detail: str = ""
     ) -> Optional[Dict[str, Any]]:
         """The earlier verdict of this exact call, when nothing has changed.
 
@@ -846,7 +855,12 @@ class CoreToolEnvironment:
             "returncode": 0,
             "exception_info": "",
         }
-        self._kernel._emit(AgentEventKind.TOOL_STARTED, tool=core_name, call_id=call_id or None)
+        self._kernel._emit(
+            AgentEventKind.TOOL_STARTED,
+            tool=core_name,
+            call_id=call_id or None,
+            detail=detail or None,
+        )
         self._kernel._persist_engine_tool_result(
             call_id=call_id,
             alias=alias,
@@ -1405,20 +1419,3 @@ def _failed_check_report(record: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _result_summary(core_name: str, result: CoreResult) -> str:
-    del core_name
-    data = result.data if isinstance(result.data, dict) else {}
-    parts: List[str] = []
-    exit_code = data.get("exit_code")
-    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-        parts.append(f"exit {exit_code}")
-    path = data.get("path")
-    if isinstance(path, str) and path:
-        parts.append(path)
-    for key in ("matches", "files", "entries"):
-        value = data.get(key)
-        if isinstance(value, (list, tuple)):
-            parts.append(f"{key}={len(value)}")
-    if not parts:
-        parts.append("ok" if result.ok else "failed")
-    return str(redact(", ".join(parts)))

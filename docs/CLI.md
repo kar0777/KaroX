@@ -107,8 +107,17 @@ karox agent run --task TEXT [--repository PATH]
     [--image PATH]... [--vision auto|on|off] [--no-project-context] [--no-memory]
     [--max-steps N] [--max-seconds S]
     [--context-window N] [--max-output-tokens N]
+    [--mcp-server SERVER[=read|all]]...
     [--stream] [--stream-json] [--json]
 ```
+
+- `--mcp-server SERVER[=read|all]` selects a configured MCP server for the
+  session before the run starts (repeatable). `all` allows every tool the
+  server lists; `read` (the default) allows the tools marked read-only and
+  denies the rest. The server is inspected first, so an unreachable one fails
+  the run up front with the server's own error instead of mid-task. Existing
+  per-tool decisions from `karox mcp session select` are replaced for that
+  server only.
 
 - The runtime is the vendored karo-core engine (`karox.engine`): one
   bash action per model turn, executed repository-scoped behind the capability

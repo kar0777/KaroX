@@ -985,8 +985,12 @@ class McpClient:
         if len(result_bytes) > record.max_result_bytes:
             raise McpProtocolError("MCP tool result exceeds the configured result limit")
         if result.isError:
+            # The server's own words are the useful part: without them the
+            # agent only learns that something failed and retries blindly.
+            detail = _error_result_text(payload)
             raise McpRemoteToolError(
                 f"MCP tool {descriptor.name} returned an error result"
+                + (f": {detail}" if detail else "")
             )
         return {
             "server_id": descriptor.server_id,
@@ -1049,6 +1053,27 @@ class McpClient:
             repository,
             progress,
         )
+
+
+def _error_result_text(payload: Mapping[str, Any], limit: int = 1200) -> str:
+    """The text a server put into an ``isError`` result, flattened and bounded.
+
+    ``payload`` is the already-redacted result document, so nothing here can
+    reintroduce a credential.
+    """
+
+    parts: list[str] = []
+    content = payload.get("content")
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, Mapping) and item.get("type") == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    structured = payload.get("structuredContent")
+    if not parts and isinstance(structured, Mapping) and structured:
+        parts.append(json.dumps(structured, ensure_ascii=False, sort_keys=True))
+    flat = " ".join(" ".join(parts).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def mcp_selection(

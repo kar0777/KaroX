@@ -1,16 +1,18 @@
 """The widgets the terminal client is made of.
 
-The screen reads like a terminal session: one transcript that only grows, a
-composer at the bottom and one status line under it. Each widget owns exactly
-one kind of line -- a user turn, a streamed answer, a tool line, a notice, a
-printed block -- so a fact cannot render two different ways. Lists (the slash
-palette, a model or session picker) open inline above the composer instead of
-on a screen of their own, and the keyboard never leaves the composer.
+The screen reads like a coding-agent CLI session: one transcript that only
+grows, a working line with KaroX's animated dots while the agent works, a
+framed composer and one quiet footer under it. Each widget owns exactly one
+kind of line -- a user turn, a streamed answer, a tool call with its ``⎿``
+result, a notice, a printed block -- so a fact cannot render two different
+ways. Lists (the slash palette, a model or session picker) open inline above
+the composer instead of on a screen of their own, and the keyboard never
+leaves the composer.
 
-The status line follows the rule the classic shell proved: the model is the
-primary fact and is never dropped, non-defaults are stated and defaults are
-not, and a field that no longer fits disappears whole instead of being cut into
-a different-looking value.
+The footer follows the rule the classic shell proved: the model is the primary
+fact and is never dropped, non-defaults are stated and defaults are not, and a
+field that no longer fits disappears whole instead of being cut into a
+different-looking value.
 """
 
 from __future__ import annotations
@@ -28,6 +30,16 @@ from textual.message import Message
 from textual.widgets import Input, LoadingIndicator, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from .i18n import plural, tr
+from .tooltext import (
+    call_line,
+    diff_rows,
+    duration_text,
+    looks_like_diff,
+    plan_rows,
+    result_line,
+)
+
 GOLD = "#d4b676"
 MUTED = "#8a7e6a"
 TEXT = "#e5e5e5"
@@ -35,25 +47,20 @@ GREEN = "#8aab7e"
 RED = "#e0a3a3"
 AMBER = "#c6a56b"
 DIM = "#6f6656"
+ADDED_BG = "#1d2b1a"
+REMOVED_BG = "#33201d"
 
-#: One icon per tool category, so a running line says what kind of work it is
-#: before the name is read. The finished line switches to the outcome mark.
-CATEGORY_ICONS = {
-    "read": "○",
-    "edit": "✎",
-    "test": "≡",
-    "mcp": "⬢",
-    "skill": "★",
-    "plan": "▤",
-    "web": "◎",
-    "inspect": "⊙",
-    "subagent": "⧉",
-    "other": "→",
-}
+#: The transcript's two marks: a bullet opens an answer or a tool call, the
+#: elbow hangs a result under it.
+BULLET = "●"
+ELBOW = "⎿"
 
 _FACTS_WIDE = 100
 _FACTS_MEDIUM = 60
 CONTEXT_WARNING_FRACTION = 0.8
+#: Rows a folded tool line shows of its preview before "… +N".
+FOLDED_DIFF_ROWS = 8
+FOLDED_OUTPUT_ROWS = 4
 
 
 def _clip(value: str, limit: int) -> str:
@@ -61,12 +68,13 @@ def _clip(value: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-def _token_text(value: int) -> str:
+def _token_text(value: int, language: str = "en") -> str:
+    unit = "ток." if language == "ru" else "tok"
     if value >= 1_000_000:
-        return f"{value / 1_000_000:.2f}M tok"
+        return f"{value / 1_000_000:.2f}M {unit}"
     if value >= 1_000:
-        return f"{value / 1_000:.1f}k tok"
-    return f"{value} tok"
+        return f"{value / 1_000:.1f}k {unit}"
+    return f"{value} {unit}"
 
 
 def header_segments(
@@ -83,7 +91,7 @@ def header_segments(
     width: int = _FACTS_WIDE,
     language: str = "en",
 ) -> list[tuple[str, str]]:
-    """The status line's facts in display order, already fitted to ``width``.
+    """The footer's facts in display order, already fitted to ``width``.
 
     Pure so a test can assert the fitting rules without a screen: the model is
     kept at every width, effort/mode appear only when they diverge from the
@@ -93,9 +101,9 @@ def header_segments(
 
     candidates: dict[str, tuple[str, str]] = {}
     no_model = "модель не выбрана" if language == "ru" else "no model"
-    candidates["model"] = (model or no_model, AMBER if model else RED)
+    candidates["model"] = (model or no_model, MUTED if model else RED)
     if tokens > 0:
-        candidates["tokens"] = (_token_text(tokens), MUTED)
+        candidates["tokens"] = (_token_text(tokens, language), DIM)
     if context_fraction is not None and context_fraction >= CONTEXT_WARNING_FRACTION:
         label = "контекст" if language == "ru" else "ctx"
         candidates["ctx"] = (f"{label} {int(context_fraction * 100)}%", GOLD)
@@ -104,9 +112,9 @@ def header_segments(
     if effort and effort != "auto":
         candidates["effort"] = (f"effort {effort}" if language != "ru" else f"глубина {effort}", MUTED)
     if repository:
-        candidates["repo"] = (repository, TEXT)
+        candidates["repo"] = (repository, MUTED)
     if branch:
-        candidates["branch"] = (branch, MUTED)
+        candidates["branch"] = (branch, DIM)
     if activity:
         candidates["activity"] = (activity, GOLD)
     if running:
@@ -141,60 +149,125 @@ def header_segments(
     return [candidates[key] for key in kept]
 
 
-#: The facts on the status line are the classic header's facts.
+#: The facts on the footer are the classic header's facts.
 status_segments = header_segments
 
-_TOOL_WORDS = {
-    "en": {"running": "running", "failed": "failed"},
-    "ru": {"running": "выполняется", "failed": "ошибка"},
-}
+
+def _preview_rows(preview: str, expanded: bool, lang: str) -> list[tuple[str, str]]:
+    """The preview under a tool line as ``(text, style)`` rows, folded or whole."""
+
+    rows: list[tuple[str, str]] = []
+    if looks_like_diff(preview):
+        parsed = diff_rows(preview)
+        width = max((len(str(number)) for _kind, number, _text in parsed if number), default=1)
+        shown = parsed if expanded else parsed[:FOLDED_DIFF_ROWS]
+        for kind, number, text in shown:
+            if kind == "…":
+                rows.append((" " * width + "  ⋮", DIM))
+                continue
+            label = str(number).rjust(width)
+            if kind == "+":
+                rows.append((f"{label} + {text}", f"{TEXT} on {ADDED_BG}"))
+            elif kind == "-":
+                rows.append((f"{label} - {text}", f"{TEXT} on {REMOVED_BG}"))
+            else:
+                rows.append((f"{label}   {text}", DIM))
+        hidden = len(parsed) - len(shown)
+    else:
+        lines = preview.splitlines()
+        shown_lines = lines if expanded else lines[:FOLDED_OUTPUT_ROWS]
+        rows.extend((line, MUTED) for line in shown_lines)
+        hidden = len(lines) - len(shown_lines)
+    if hidden > 0:
+        rows.append((tr(lang, "toolres.more", lines=plural(lang, hidden, "line")), DIM))
+    return rows
 
 
 def tool_card_text(
     tool: str,
-    category: str,
-    ok: bool | None,
-    summary: str,
-    duration: float,
+    category: str = "other",
+    ok: bool | None = None,
+    summary: str = "",
+    duration: float = 0.0,
     *,
     language: str = "en",
+    detail: str = "",
+    preview: str = "",
+    error: str = "",
+    expanded: bool = False,
+    blink: bool = False,
+    call_id: str = "",
+    interrupted: bool = False,
 ) -> Text:
-    """The one tool line, pure so the exact render is testable headless.
+    """One tool call as the transcript shows it; pure so the render is testable.
 
-    The category icon runs while the call is open; the outcome mark replaces it
-    on finish. A success needs no word -- the mark says it -- so the line keeps
-    its width for the observation.
+        ● Read(src/app.py)
+          ⎿  Read 40 lines
+
+    The bullet is the state: gold and blinking while the call runs, green when
+    it succeeded, red when it failed. Under the elbow: the result in words,
+    then a short preview -- a numbered diff for an edit, the last lines of a
+    command -- folded to a few rows unless the line is expanded.
     """
 
-    words = _TOOL_WORDS.get(language, _TOOL_WORDS["en"])
-    pieces: list[tuple[str, str]] = []
+    del category  # the title already says what kind of work it is
     if ok is True:
-        pieces.append(("✓ ", GREEN))
+        bullet = GREEN
     elif ok is False:
-        pieces.append(("✗ ", RED))
+        bullet = RED
+    elif interrupted:
+        bullet = DIM
     else:
-        pieces.append((CATEGORY_ICONS.get(category, "→") + " ", GOLD))
-    pieces.append((tool or "tool", f"bold {TEXT}"))
-    if ok is False:
-        pieces.append(("  " + words["failed"], RED))
-    elif ok is None:
-        pieces.append(("  " + words["running"] + "…", GOLD))
-    if duration:
-        pieces.append((f"  {duration:.2f}s", DIM))
-    if summary:
-        pieces.append(("  " + _clip(summary, 110), MUTED))
+        bullet = DIM if blink else GOLD
+    head = call_line(tool, detail)
+    title, paren, rest = head.partition("(")
+    pieces: list[tuple[str, str]] = [(BULLET + " ", bullet), (title, f"bold {TEXT}")]
+    if paren:
+        pieces.append(("(" + rest, TEXT))
+    plan = plan_rows(detail) if tool == "plan.update" else []
+    if plan and ok is not False:
+        marks = {"done": ("☒ ", GREEN), "doing": ("◼ ", GOLD)}
+        for index, (status, text) in enumerate(plan):
+            mark, colour = marks.get(status, ("☐ ", MUTED))
+            lead = f"\n  {ELBOW}  " if index == 0 else "\n     "
+            style = f"strike {DIM}" if status == "done" else (f"bold {TEXT}" if status == "doing" else TEXT)
+            pieces.extend([(lead, DIM), (mark, colour), (text, style)])
+    else:
+        result = result_line(tool, ok, summary, language)
+        if ok is False and error:
+            result = tr(language, "toolres.error", detail=_clip(error, 300))
+        elif ok is None and interrupted:
+            result = tr(language, "toolres.interrupted")
+        colour = RED if ok is False else MUTED
+        pieces.append((f"\n  {ELBOW}  ", DIM))
+        pieces.append((result, colour))
+        if ok is not None and duration >= 2.0:
+            pieces.append((" · " + duration_text(duration, language), DIM))
+        if preview and ok is not None:
+            for text, style in _preview_rows(preview, expanded, language):
+                pieces.append(("\n     ", DIM))
+                pieces.append((text, style))
+    if expanded:
+        # One quiet row of raw facts for cross-checking with the session log.
+        extras = [tr(language, "tool.call", id=call_id)] if call_id else []
+        if summary and ok is not None:
+            extras.append(summary)
+        if extras:
+            pieces.append(("\n     " + " · ".join(extras), DIM))
     return Text.assemble(*pieces)
 
 
 def welcome_text(title: str, body: str, facts: Sequence[str] = ()) -> Text:
-    """The opening lines: title, the window's facts, dim, then the body."""
+    """The welcome box's content: the title, the one-line help, then the facts."""
 
-    pieces: list[tuple[str, str]] = [("◆ ", GOLD), (title, f"bold {GOLD}")]
-    for fact in facts:
-        if fact:
-            pieces.append(("\n  " + fact, MUTED))
+    pieces: list[tuple[str, str]] = [("◆ ", GOLD), (title, f"bold {TEXT}")]
     if body:
-        pieces.append(("\n\n" + body, DIM))
+        pieces.append(("\n\n  " + body, MUTED))
+    shown = [fact for fact in facts if fact]
+    if shown:
+        pieces.append(("\n", DIM))
+        for fact in shown:
+            pieces.append(("\n  " + fact, DIM))
     return Text.assemble(*pieces)
 
 
@@ -220,17 +293,20 @@ class MenuItem:
 
 
 class StatusLine(Horizontal):
-    """Footer: the window's facts on the left, the run state on the right."""
+    """Footer: a quiet hint on the left, the window's facts on the right."""
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="hint")
         yield Static("", id="facts")
-        yield Static("", id="state")
 
     def on_mount(self) -> None:
         self._facts_text = ""
+        self._hint_text = ""
 
     def current_text(self) -> str:
-        return getattr(self, "_facts_text", "")
+        hint = getattr(self, "_hint_text", "")
+        facts = getattr(self, "_facts_text", "")
+        return " · ".join(part for part in (hint, facts) if part)
 
     def set_facts(self, segments: Sequence[tuple[str, str]]) -> None:
         pieces: list[tuple[str, str]] = []
@@ -243,31 +319,62 @@ class StatusLine(Horizontal):
         self._facts_text = " · ".join(plain)
         self.query_one("#facts", Static).update(Text.assemble(*pieces) if pieces else Text(""))
 
-    def set_state(self, text: str, level: str = "") -> None:
-        colour = {"error": RED, "warning": GOLD, "success": GREEN}.get(level, MUTED)
-        self.query_one("#state", Static).update(Text(text, style=colour))
+    def set_hint(self, text: str, level: str = "") -> None:
+        colour = {"error": RED, "warning": GOLD, "success": GREEN, "mode": AMBER}.get(level, DIM)
+        self._hint_text = text
+        self.query_one("#hint", Static).update(Text(text, style=colour))
+
+    #: The run state used to sit here; the hint took its place.
+    set_state = set_hint
 
 
-class ActivityBar(Horizontal):
-    """The one moving line: a real spinner plus the latest typed fact.
+class WorkingLine(Vertical):
+    """KaroX's animated dots and what the agent is doing right now.
 
-    Hidden whenever nothing is happening, so an empty screen stays empty.
+        ● ● ● ● ●  Reading src/app.py… (12s · 1.2k tokens · esc to interrupt)
+                   ⎿ Next: fix the parser
+
+    Hidden whenever nothing is happening, so a finished screen stays still.
     """
 
     def compose(self) -> ComposeResult:
-        yield LoadingIndicator(id="activity-spin")
-        yield Static("", id="activity-line")
+        with Horizontal(id="working-row"):
+            yield LoadingIndicator(id="spinner")
+            yield Static("", id="working-text")
+        yield Static("", id="working-sub")
 
     def on_mount(self) -> None:
         self.display = False
+        self.query_one("#working-sub", Static).display = False
+        # The indicator turns its own timer on when it mounts, which can be
+        # after this handler; settle it once the first frame is drawn.
+        self.call_after_refresh(lambda: self._spin(self.display))
 
-    def set_activity(self, text: str, level: str = "") -> None:
+    def _spin(self, on: bool) -> None:
+        # The dots repaint 16 times a second; a hidden line must not.
+        spinner = self.query_one("#spinner", LoadingIndicator)
+        spinner.auto_refresh = (1 / 16) if on else None
+
+    def set_working(
+        self, text: str, facts: str = "", sub: str = "", level: str = ""
+    ) -> None:
         if not text:
             self.display = False
+            self._spin(False)
             return
-        colour = {"error": RED, "warning": GOLD, "success": GREEN}.get(level, MUTED)
-        self.display = True
-        self.query_one("#activity-line", Static).update(Text(text, style=colour))
+        colour = {"error": RED, "warning": GOLD, "success": GREEN}.get(level, GOLD)
+        line = Text.assemble((text, f"bold {colour}"), ((" " + facts) if facts else "", DIM))
+        self.query_one("#working-text", Static).update(line)
+        below = self.query_one("#working-sub", Static)
+        below.update(Text(sub, style=DIM))
+        below.display = bool(sub)
+        if not self.display:
+            self.display = True
+            self._spin(True)
+
+    def current_text(self) -> str:
+        widget = self.query_one("#working-text", Static)
+        return str(widget.render()) if self.display else ""
 
 
 class ChatLog(VerticalScroll):
@@ -297,15 +404,15 @@ class ChatLog(VerticalScroll):
 
 
 class UserMessage(Static):
-    """A submitted line; a ``/command`` is echoed dim, like a shell prompt."""
+    """A submitted line behind ``>``; a ``/command`` is echoed dim, like a shell."""
 
     def __init__(self, text: str, *, command: bool = False) -> None:
         self.text = text
         self.command = command
         if command:
-            content = Text.assemble(("› ", MUTED), (text, MUTED))
+            content = Text.assemble(("> ", DIM), (text, MUTED))
         else:
-            content = Text.assemble(("› ", f"bold {GOLD}"), (text, f"bold {TEXT}"))
+            content = Text.assemble(("> ", MUTED), (text, TEXT))
         super().__init__(
             content,
             classes="command-echo" if command else "user-message",
@@ -313,15 +420,13 @@ class UserMessage(Static):
         )
 
 
-_REASONING_WORDS = {"en": "reasoning · {count:,} chars", "ru": "размышления · {count:,} симв."}
-
-
 class AssistantMessage(Vertical):
-    """One stretch of the answer: streams behind a caret, then renders markdown.
+    """One stretch of the answer: ``●`` then text that streams, then markdown.
 
     A turn is a sequence of these and tool lines in the order they happened, so
     text written after a tool call appears after it instead of being glued to
-    the text before it.
+    the text before it. The model's reasoning gets its own ``∴`` line above the
+    answer: a live tail while it streams, folded to one line afterwards.
     """
 
     def __init__(self, language: str = "en") -> None:
@@ -330,16 +435,23 @@ class AssistantMessage(Vertical):
         self._parts: list[str] = []
         self._reasoning: list[str] = []
         self._reasoning_chars = 0
+        self._summary_mode = False
+        self._thought_from = 0.0
+        self._thought_until = 0.0
         self._paint_scheduled = False
         self._finished = False
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="reasoning", classes="reasoning-line")
-        yield Static("", id="live", classes="live-answer", markup=False)
-        yield Markdown("", id="final", classes="final-answer")
+        yield Static("", id="reasoning", classes="thinking-line", markup=False)
+        with Horizontal(id="answer-row", classes="answer-row"):
+            yield Static(BULLET, classes="answer-bullet", markup=False)
+            with Vertical(classes="answer-body"):
+                yield Static("", id="live", classes="live-answer", markup=False)
+                yield Markdown("", id="final", classes="final-answer")
 
     def on_mount(self) -> None:
         self.query_one("#reasoning", Static).display = False
+        self.query_one("#answer-row", Horizontal).display = False
         self.query_one("#live", Static).display = False
         self.query_one("#final", Markdown).display = False
         if self._finished:
@@ -357,6 +469,10 @@ class AssistantMessage(Vertical):
     def append_text(self, delta: str) -> None:
         if not delta or self._finished:
             return
+        if self._reasoning_chars and not self._thought_until:
+            self._thought_until = time.monotonic()
+            if self.is_mounted:
+                self._paint_reasoning()
         self._parts.append(delta)
         if self.is_mounted:
             self._schedule_paint()
@@ -364,16 +480,21 @@ class AssistantMessage(Vertical):
     def append_reasoning(self, delta: str, *, summary: bool = False) -> None:
         if not delta or self._finished:
             return
+        if not self._thought_from:
+            self._thought_from = time.monotonic()
         self._reasoning_chars += len(delta)
+        self._summary_mode = self._summary_mode or summary
         if len(self._reasoning) < 400:
-            self._reasoning.append(delta if not summary else f"\n[summary] {delta}")
+            self._reasoning.append(delta)
         if self.is_mounted:
-            self._paint_reasoning()
+            self._schedule_paint()
 
     def finish(self, fallback: str = "") -> None:
         if self._finished:
             return
         self._finished = True
+        if self._reasoning_chars and not self._thought_until:
+            self._thought_until = time.monotonic()
         if fallback and not "".join(self._parts).strip():
             self._parts = [fallback]
         if self.is_mounted:
@@ -383,12 +504,15 @@ class AssistantMessage(Vertical):
         text = "".join(self._parts).strip("\n")
         live = self.query_one("#live", Static)
         final = self.query_one("#final", Markdown)
+        row = self.query_one("#answer-row", Horizontal)
         live.display = False
         if text.strip():
             final.update(text)
             final.display = True
+            row.display = True
         else:
             final.display = False
+            row.display = False
         if self._reasoning_chars:
             self._paint_reasoning()
         self.call_after_refresh(self.refresh)
@@ -396,11 +520,14 @@ class AssistantMessage(Vertical):
     def answer_text(self) -> str:
         return "".join(self._parts)
 
-    def reasoning_chars(self) -> int:
-        return self._reasoning_chars
-
     def reasoning_text(self) -> str:
         return "".join(self._reasoning)
+
+    def thought_seconds(self) -> float:
+        if not self._thought_from:
+            return 0.0
+        end = self._thought_until or time.monotonic()
+        return max(0.0, end - self._thought_from)
 
     def is_blank(self) -> bool:
         # Not ``is_empty``: Textual's DOMNode.is_empty is the property behind
@@ -417,105 +544,173 @@ class AssistantMessage(Vertical):
         self._paint_scheduled = False
         if not self.is_mounted or self._finished:
             return
+        if self._reasoning_chars:
+            self._paint_reasoning()
         text = "".join(self._parts).lstrip("\n")
         live = self.query_one("#live", Static)
+        row = self.query_one("#answer-row", Horizontal)
         live.display = bool(text)
+        row.display = bool(text)
         live.update(Text.assemble((text, TEXT), ("▌", GOLD)) if text else Text(""))
 
     def _paint_reasoning(self) -> None:
         line = self.query_one("#reasoning", Static)
         line.display = True
-        template = _REASONING_WORDS.get(self.language, _REASONING_WORDS["en"])
-        line.update(Text("◇ " + template.format(count=self._reasoning_chars), style=DIM))
+        lang = self.language
+        if self._finished or self._thought_until:
+            if self._summary_mode:
+                summary = " ".join(self.reasoning_text().split())
+                line.update(
+                    Text.assemble(
+                        ("∴ ", DIM),
+                        (_clip(summary, 600), f"italic {MUTED}"),
+                    )
+                )
+                return
+            elapsed = duration_text(self.thought_seconds(), lang)
+            line.update(Text("∴ " + tr(lang, "thinking.done", elapsed=elapsed), style=f"italic {DIM}"))
+            return
+        tail = " ".join(self.reasoning_text()[-400:].split())
+        if len(tail) > 160:
+            tail = "…" + tail[-159:]
+        line.update(
+            Text.assemble(
+                ("∴ " + tr(lang, "thinking.live"), f"italic {MUTED}"),
+                (("\n  " + tail) if tail else "", f"italic {DIM}"),
+            )
+        )
 
 
 class ToolCard(Static):
-    """One line per tool call; the summary is the observation, not decoration.
+    """One tool call: ``● Title(target)`` and its ``⎿`` result under it.
 
-    The category icon runs while the call is open and the outcome mark replaces
-    it on finish. A click expands the line in place with its unclipped detail
-    and a second click folds it again -- no screen of its own.
+    The bullet blinks while the call runs and turns green or red on finish. A
+    click expands the line in place with its whole preview and raw facts, and
+    a second click folds it again -- no screen of its own.
     """
 
     def __init__(
-        self, tool: str, call_id: str = "", category: str = "other", *, language: str = "en"
+        self,
+        tool: str,
+        call_id: str = "",
+        category: str = "other",
+        *,
+        language: str = "en",
+        detail: str = "",
+        expanded: bool = False,
     ) -> None:
         self.tool = tool
         self.call_id = call_id
         self.category = category
         self.language = language
-        self._started = time.monotonic()
+        self.detail = detail
+        self._started_at = time.monotonic()
         self._ok: bool | None = None
         self._summary = ""
+        self._preview = ""
+        self._error = ""
         self._duration = 0.0
-        self.expanded = False
+        self._interrupted = False
+        self._blink_on = False
+        self._blinker: Any = None
+        self.expanded = expanded
         super().__init__(
             self._tool_text(),
             classes=f"tool-card tool-{category}",
             markup=False,
         )
 
+    def on_mount(self) -> None:
+        if self._ok is None:
+            self._blinker = self.set_interval(0.5, self._blink_tick)
+
+    def _blink_tick(self) -> None:
+        if self._ok is not None or self._interrupted:
+            if self._blinker is not None:
+                self._blinker.stop()
+                self._blinker = None
+            return
+        self._blink_on = not self._blink_on
+        self.update(self._tool_text())
+
     @property
     def ok(self) -> bool | None:
         return self._ok
 
-    def finish(self, ok: bool | None, summary: str = "", duration: float = 0.0) -> None:
+    def finish(
+        self, ok: bool | None, summary: str = "", duration: float = 0.0, preview: str = ""
+    ) -> None:
         self._ok = ok
         self._summary = summary
-        self._duration = duration or (time.monotonic() - self._started)
+        self._preview = preview
+        self._duration = duration or (time.monotonic() - self._started_at)
+        if self._blinker is not None:
+            self._blinker.stop()
+            self._blinker = None
         self.update(self._tool_text())
 
-    def detail_text(self) -> str:
-        lines = [self.tool or "tool"]
-        if self.call_id:
-            lines.append(("вызов " if self.language == "ru" else "call ") + self.call_id)
-        if self._duration:
-            lines.append(f"{self._duration:.2f}s")
-        if self._summary:
-            lines.append(self._summary)
-        return "\n".join(lines)
+    def note_error(self, message: str) -> None:
+        """The refusal or failure text of this call, shown on its ``⎿`` line."""
+
+        self._error = message
+        self.update(self._tool_text())
+
+    def interrupt(self) -> None:
+        """The run ended before this call reported back: stop the blinking."""
+
+        if self._ok is not None:
+            return
+        self._interrupted = True
+        self._duration = time.monotonic() - self._started_at
+        if self._blinker is not None:
+            self._blinker.stop()
+            self._blinker = None
+        self._blink_on = False
+        self.update(self._tool_text())
+
+    def set_expanded(self, value: bool) -> None:
+        if self.expanded != value:
+            self.expanded = value
+            self.update(self._tool_text())
 
     def toggle(self) -> None:
-        self.expanded = not self.expanded
-        self.update(self._tool_text())
+        self.set_expanded(not self.expanded)
 
     def on_click(self, event: events.Click) -> None:
         self.toggle()
         event.stop()
 
     def _tool_text(self) -> Text:
-        line = tool_card_text(
+        return tool_card_text(
             self.tool,
             self.category,
             self._ok,
             self._summary,
             self._duration,
             language=self.language,
+            detail=self.detail,
+            preview=self._preview,
+            error=self._error,
+            expanded=self.expanded,
+            blink=self._blink_on,
+            call_id=self.call_id,
+            interrupted=self._interrupted,
         )
-        if not self.expanded:
-            return line
-        extra: list[tuple[str, str]] = []
-        if self.call_id:
-            extra.append(("\n    " + ("вызов " if self.language == "ru" else "call ") + self.call_id, DIM))
-        if self._summary:
-            for row in self._summary[:4000].splitlines() or [""]:
-                extra.append(("\n    " + row, MUTED))
-        return Text.assemble(line, *extra)
 
 
 class Notice(Static):
-    """A one-off fact from KaroX itself, marked by level, never boxed."""
+    """A one-off fact from KaroX itself, hung under the turn, never boxed."""
 
     def __init__(self, text: str, level: str = "info") -> None:
         self.text = text
         self.level = level
-        icon = {"info": "·", "success": "✓", "warning": "!", "error": "✗"}.get(level, "·")
-        colour = {"info": MUTED, "success": GREEN, "warning": GOLD, "error": RED}.get(level, MUTED)
+        icon = {"info": ELBOW, "success": "✓", "warning": "!", "error": "✗"}.get(level, ELBOW)
+        colour = {"info": DIM, "success": GREEN, "warning": GOLD, "error": RED}.get(level, DIM)
         body = TEXT if level in {"warning", "error"} else MUTED
         lines = text.splitlines() or [""]
-        pieces: list[tuple[str, str]] = [(f"{icon} ", colour), (lines[0], body)]
+        pieces: list[tuple[str, str]] = [(f"{icon}  ", colour), (lines[0], body)]
         for line in lines[1:]:
-            pieces.append(("\n  " + line, MUTED))
+            pieces.append(("\n   " + line, MUTED))
         super().__init__(Text.assemble(*pieces), classes=f"notice notice-{level}", markup=False)
 
 
@@ -695,7 +890,9 @@ class ChatInput(TextArea):
 
     While an inline menu is open, ↑/↓, PageUp/PageDown, Tab, Enter and Esc
     drive the menu and typing filters it; Enter in a picker never sends the
-    filter text as a task. Otherwise PageUp/PageDown scroll the transcript.
+    filter text as a task. Otherwise PageUp/PageDown scroll the transcript,
+    Shift+Tab cycles the mode, and ``?`` typed into an empty composer toggles
+    the shortcut list instead of being inserted.
     History navigation only engages at the document edges, so editing a
     multi-line draft never loses it: the draft is restored on the way down.
     ``recalled`` is the text the last recall loaded, so the app can tell a
@@ -706,6 +903,12 @@ class ChatInput(TextArea):
         def __init__(self, value: str) -> None:
             super().__init__()
             self.value = value
+
+    class ShortcutsToggled(Message):
+        pass
+
+    class ModeCycled(Message):
+        pass
 
     _HISTORY_LIMIT = 100
 
@@ -763,6 +966,16 @@ class ChatInput(TextArea):
                 event.prevent_default()
                 event.stop()
                 return
+        if event.key == "shift+tab":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.ModeCycled())
+            return
+        if event.character == "?" and not str(self.text):  # type: ignore[has-type]
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.ShortcutsToggled())
+            return
         if event.key in {"pageup", "pagedown"} and self.scroller is not None:
             event.prevent_default()
             event.stop()

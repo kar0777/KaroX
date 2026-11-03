@@ -98,6 +98,17 @@ def _parser() -> argparse.ArgumentParser:
         help="treat repository-discovered checks as approved verification evidence",
     )
     run.add_argument(
+        "--mcp-server",
+        action="append",
+        default=[],
+        metavar="SERVER[=read|all]",
+        help=(
+            "attach a registered MCP server to the session before the run "
+            "(repeatable): =read (default) allows the tools the server marks "
+            "read-only and denies the rest, =all allows every tool"
+        ),
+    )
+    run.add_argument(
         "--browser-plain-credentials",
         action="store_true",
         help=(

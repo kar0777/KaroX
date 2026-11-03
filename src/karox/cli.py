@@ -308,7 +308,10 @@ def _stream_progress() -> Any:
         elif event.kind is AgentEventKind.COMPACTED:
             line(f"[context: {event.summary}]")
         elif event.kind is AgentEventKind.TOOL_STARTED:
-            line(f"  -> {event.tool}")
+            detail = event.detail or ""
+            if "\t" in detail:
+                detail = f"{len(detail.splitlines())} items"
+            line(f"  -> {event.tool} {detail}".rstrip())
         elif event.kind is AgentEventKind.TOOL_FINISHED:
             mark = "ok" if event.ok else "failed"
             line(f"  <- {event.tool} {mark} ({event.summary})")
@@ -697,6 +700,52 @@ def _selected_mcp_runtime(
     return McpRuntimeBinding(client, repository, descriptors, servers), descriptors
 
 
+def _mcp_server_request(value: str) -> tuple[str, str]:
+    server_id, _, scope = str(value).partition("=")
+    server_id, scope = server_id.strip(), (scope.strip().lower() or "read")
+    if not server_id:
+        raise ValueError("--mcp-server needs a server ID")
+    if scope not in {"read", "all"}:
+        raise ValueError(f"--mcp-server scope must be read or all, not {scope!r}")
+    return server_id, scope
+
+
+def _attach_mcp_servers(
+    store: SessionStore, record: Any, repository: Path, requests: Sequence[str]
+) -> Any:
+    """Store ``--mcp-server`` choices in the session before the run binds tools.
+
+    The flag is the caller's explicit approval, so each chosen tool is
+    ``allow`` and every other tool ``deny``; ``ask`` is never written, since
+    nothing can answer it in the middle of a run. A server that cannot be
+    reached fails the run here, before any model call, instead of silently
+    running without the tools the caller asked for.
+    """
+
+    wanted = dict(_mcp_server_request(item) for item in requests)
+    registry = _mcp_registry()
+    client = McpClient(registry)
+    for server_id, scope in sorted(wanted.items()):
+        server = registry.get(server_id)
+        tools = client.discover_record(server, repository)
+        decisions = {
+            item.remote_name: "allow" if scope == "all" or item.read_only else "deny"
+            for item in tools
+        }
+        with store.mutate(
+            record.session_id, f"mcp-attach-{os.getpid()}", ttl_seconds=5.0
+        ) as current:
+            store.validate_repository(current, repository)
+            selection = mcp_selection(
+                server,
+                tools,
+                decisions,
+                previous=_stored_mcp(current, server.server_id),
+            )
+            _replace_stored_mcp(current, server.server_id, selection)
+    return store.load(record.session_id)
+
+
 def _project_instructions(
     repository: Path,
 ) -> tuple[str, dict[str, Any]]:
@@ -871,6 +920,8 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     policy.set_grants(origin, _agent_grants(profile, args.mode))
     risk = RiskEngine()
     decisions = ActionDecisionEngine(risk)
+    if getattr(args, "mcp_server", None):
+        record = _attach_mcp_servers(store, record, repository, args.mcp_server)
     mcp_binding, _ = _selected_mcp_runtime(record, repository)
     catalog, skill_block = _skill_catalog(repository)
     visual_checker = None

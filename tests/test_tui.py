@@ -10,10 +10,13 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from textual.widgets import Static
 
 from karox import cli
 from karox.agent import AgentEvent, AgentEventKind
@@ -32,7 +35,6 @@ from karox.tui.protocol import (
 from karox.tui import commands as slash
 from karox.tui import views
 from karox.tui.widgets import (
-    CATEGORY_ICONS,
     AssistantMessage,
     Notice,
     SecretPrompt,
@@ -96,6 +98,19 @@ class _FakeBackend:
         self.servers: list[dict[str, object]] = []
         self.probes: list[str] = []
         self.removed: list[str] = []
+        self.requests: list[object] = []
+        self.mcp_selections: list[tuple[str, str, str]] = []
+        self.mcp_deselections: list[tuple[str, str]] = []
+        self.mcp_tool_rows: list[dict[str, object]] = [
+            {"remote_name": "list_issues", "read_only": True},
+            {"remote_name": "create_issue", "read_only": False},
+        ]
+        # A gate holds the stream after event ``gate_after`` until the test
+        # releases it (or the app stops the run), so a live run can be seen.
+        self.gate: threading.Event | None = None
+        self.gate_after = 0
+        self.gate_reached = threading.Event()
+        self._stop_requested = threading.Event()
 
     def session(self, session_id: str) -> dict[str, object] | None:
         if self.record is not None and self.record.get("session_id") == session_id:
@@ -197,16 +212,34 @@ class _FakeBackend:
         self.probes.append(server_id)
         return {"status": "ok", "tool_count": 4}
 
-    def mcp_select_all(self, server_id: str, session_id: str) -> dict[str, object]:
-        return {"selection": {"tools": {}}}
+    def mcp_tools(self, server_id: str) -> list[dict[str, object]]:
+        return list(self.mcp_tool_rows)
+
+    def mcp_select(
+        self, server_id: str, session_id: str, scope: str = "all"
+    ) -> dict[str, object]:
+        self.mcp_selections.append((server_id, session_id, scope))
+        tools = {
+            str(item["remote_name"]): {
+                "permission": "allow" if scope == "all" or item["read_only"] else "deny"
+            }
+            for item in self.mcp_tool_rows
+        }
+        return {"selection": {"tools": tools}}
 
     def mcp_deselect(self, server_id: str, session_id: str) -> dict[str, object]:
+        self.mcp_deselections.append((server_id, session_id))
         return {"status": "deselected"}
 
     def stop(self) -> None:
         self.stops += 1
+        self._stop_requested.set()
+        if self.gate is not None:
+            self.gate.set()
 
     def stream_agent(self, request, on_event):
+        self.requests.append(request)
+        self._stop_requested.clear()
         if self._fail_stream:
             return StreamResult(outcome=None, exit_code=1, stderr="provider exploded")
         if self._record_after_run is not None:
@@ -235,8 +268,13 @@ class _FakeBackend:
                 ),
                 Event(kind="text_delta", step=1, text=" world"),
             ]
-        for event in script:
+        for index, event in enumerate(script):
             on_event(event)
+            if self.gate is not None and index == self.gate_after:
+                self.gate_reached.set()
+                self.gate.wait(10.0)
+                if self._stop_requested.is_set():
+                    return StreamResult(outcome=None, exit_code=-15, stopped=True)
         outcome = self._outcome or Outcome(
             session_id=request.session_id,
             status="verified",
@@ -597,39 +635,138 @@ class HeaderSegmentTests(unittest.TestCase):
 
 
 class WidgetTests(unittest.TestCase):
-    def test_tool_card_shows_category_icon_while_running(self) -> None:
-        running = tool_card_text("mcp.github.list_issues", "mcp", None, "", 0.0)
-        text = str(running)
-        self.assertIn("mcp.github.list_issues", text)
-        self.assertIn("⬢", text)
-        self.assertIn("running", text)
-        done = str(tool_card_text("mcp.github.list_issues", "mcp", True, "3 issues", 0.9))
-        self.assertIn("✓", done)
-        self.assertIn("3 issues", done)
-        self.assertNotIn("running", done)
+    def test_running_tool_line_names_the_call_and_its_target(self) -> None:
+        running = str(
+            tool_card_text("repo.read_file", "read", None, language="en", detail="src/app.py")
+        )
+        self.assertTrue(running.startswith("● Read(src/app.py)"))
+        self.assertIn("⎿  Running…", running)
+        mcp = str(tool_card_text("mcp.github.list_issues", "mcp", None, language="en"))
+        self.assertIn("github · list_issues (MCP)", mcp)
+        done = str(
+            tool_card_text(
+                "mcp.github.list_issues",
+                "mcp",
+                True,
+                "bytes=120",
+                0.9,
+                language="en",
+                preview="3 open issues",
+            )
+        )
+        self.assertIn("⎿  Done", done)
+        self.assertIn("3 open issues", done)
+        self.assertNotIn("Running", done)
 
-    def test_tool_card_failure_is_red_and_marked(self) -> None:
-        text = str(tool_card_text("repo.edit_file", "edit", False, "denied by policy", 0.1))
-        self.assertIn("✗", text)
-        self.assertIn("failed", text)
+    def test_result_line_speaks_words_not_key_value_facts(self) -> None:
+        read = str(
+            tool_card_text("repo.read_file", "read", True, "src/app.py, lines=40", language="en")
+        )
+        self.assertIn("Read 40 lines", read)
+        self.assertNotIn("lines=40", read)
+        russian = str(
+            tool_card_text("repo.read_file", "read", True, "src/app.py, lines=3", language="ru")
+        )
+        self.assertIn("Прочитано 3 строки", russian)
+        search = str(
+            tool_card_text("repo.search", "read", True, "matches=5, files=2", language="ru")
+        )
+        self.assertIn("Найдено 5 совпадений · 2 файла", search)
+        command = str(tool_card_text("dev.command", "other", True, "exit 0", language="en"))
+        self.assertIn("Exit code 0", command)
+
+    def test_edit_preview_is_a_numbered_diff_folded_until_expanded(self) -> None:
+        preview = "@@ -10,3 +10,3 @@\n def f():\n-    return 1\n+    return 2\n" + "".join(
+            f"+    line {index}\n" for index in range(12)
+        )
+        folded = tool_card_text(
+            "repo.edit_file", "edit", True, "src/app.py, +13 -1", language="en",
+            detail="src/app.py", preview=preview,
+        )
+        plain = folded.plain
+        self.assertIn("● Update(src/app.py)", plain)
+        self.assertIn("Updated: +13 −1", plain)
+        self.assertIn("11 -     return 1", plain)
+        self.assertIn("11 +     return 2", plain)
+        self.assertIn("ctrl+o", plain)
+        expanded = tool_card_text(
+            "repo.edit_file", "edit", True, "src/app.py, +13 -1", language="en",
+            detail="src/app.py", preview=preview, expanded=True,
+        ).plain
+        self.assertIn("line 11", expanded)
+        self.assertNotIn("ctrl+o", expanded)
+
+    def test_failure_is_red_and_carries_the_reason(self) -> None:
+        text = str(
+            tool_card_text(
+                "repo.edit_file", "edit", False, "McpAccessDenied", 0.1,
+                language="en", error="denied by policy",
+            )
+        )
+        self.assertIn("Error: denied by policy", text)
         russian = str(
             tool_card_text("repo.edit_file", "edit", False, "denied", 0.1, language="ru")
         )
-        self.assertIn("ошибка", russian)
+        self.assertIn("Ошибка", russian)
         self.assertNotIn("failed", russian)
+        interrupted = str(
+            tool_card_text("dev.command", "other", None, language="ru", interrupted=True)
+        )
+        self.assertIn("Прервано", interrupted)
 
-    def test_every_category_has_an_icon(self) -> None:
-        for category in (
-            "read", "edit", "test", "mcp", "skill", "plan", "web", "inspect",
-            "subagent", "other",
-        ):
-            self.assertIn(category, CATEGORY_ICONS)
+    def test_plan_update_renders_a_checklist(self) -> None:
+        detail = "done\tread the repo\ndoing\tedit the file\ntodo\trun checks"
+        plain = tool_card_text(
+            "plan.update", "plan", True, "items=3, done=1", language="en", detail=detail
+        ).plain
+        self.assertTrue(plain.startswith("● Plan"))
+        self.assertIn("☒ read the repo", plain)
+        self.assertIn("◼ edit the file", plain)
+        self.assertIn("☐ run checks", plain)
 
     def test_welcome_card_renders_facts(self) -> None:
         text = str(welcome_text("Ready", "body text", ("repo proj", "model demo/x")))
         self.assertIn("Ready", text)
         self.assertIn("repo proj", text)
         self.assertIn("model demo/x", text)
+
+
+class ToolTextTests(unittest.TestCase):
+    def test_titles_follow_the_coding_cli_vocabulary(self) -> None:
+        from karox.tui.tooltext import tool_title
+
+        self.assertEqual(tool_title("repo.read_file"), "Read")
+        self.assertEqual(tool_title("repo.edit_file"), "Update")
+        self.assertEqual(tool_title("dev.command"), "Run")
+        self.assertEqual(tool_title("git.status"), "Git")
+        self.assertEqual(tool_title("mcp.github.list_issues"), "github · list_issues (MCP)")
+        self.assertEqual(tool_title("something.new"), "something.new")
+
+    def test_working_text_says_what_is_happening(self) -> None:
+        from karox.tui.tooltext import working_text
+
+        self.assertEqual(working_text("repo.read_file", "src/a.py", "en"), "Reading src/a.py…")
+        self.assertEqual(working_text("repo.read_file", "", "ru"), "Читаю файл…")
+        self.assertEqual(working_text("dev.command", "npm test", "ru"), "Запускаю npm test…")
+        self.assertIn("github · list_issues", working_text("mcp.github.list_issues", "", "en"))
+
+    def test_russian_plural_forms(self) -> None:
+        from karox.tui.i18n import plural
+
+        self.assertEqual(plural("ru", 1, "line"), "1 строка")
+        self.assertEqual(plural("ru", 3, "line"), "3 строки")
+        self.assertEqual(plural("ru", 11, "line"), "11 строк")
+        self.assertEqual(plural("ru", 21, "file"), "21 файл")
+        self.assertEqual(plural("en", 1, "file"), "1 file")
+        self.assertEqual(plural("en", 2, "match"), "2 matches")
+
+    def test_next_plan_item_prefers_the_current_one(self) -> None:
+        from karox.tui.tooltext import next_plan_item, plan_rows
+
+        rows = plan_rows("done\ta\ndoing\tb\ntodo\tc")
+        self.assertEqual(next_plan_item(rows), "b")
+        self.assertEqual(next_plan_item(plan_rows("done\ta\ntodo\tc")), "c")
+        self.assertEqual(next_plan_item(plan_rows("done\ta")), "")
 
 
 class TextualOverrideTests(unittest.TestCase):
@@ -1481,7 +1618,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(app.menu.kind, "mcp-action")
-            self.assertEqual(app.menu.keys(), ["probe", "select", "remove"])
+            self.assertEqual(app.menu.keys(), ["probe", "select", "select_read", "remove"])
             await pilot.press("enter")
             await self.settle(pilot, app)
             self.assertEqual(backend.probes, ["github"])
@@ -1489,7 +1626,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await self.submit(pilot, app, "/mcp")
             await pilot.press("enter")
             await pilot.pause()
-            await pilot.press("down", "down", "enter")
+            await pilot.press("down", "down", "down", "enter")
             await pilot.pause()
             self.assertEqual(app.menu.kind, "mcp-confirm")
             self.assertEqual(app.menu.highlighted_key(), "no")
@@ -1633,3 +1770,279 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(leftover, screen)
             self.assertIn("Команды", screen)
             self.assertIn("подключить провайдера", screen)
+
+    # ------------------------------------------------ live run, queue, keys
+
+    async def wait_for(self, pilot, condition, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not condition():
+            await pilot.pause(0.02)
+        self.assertTrue(condition(), "condition not reached in time")
+        await pilot.pause()
+        await pilot.pause()
+
+    async def type_and_send(self, pilot, app: KaroxApp, text: str) -> None:
+        composer = app.query_one("#composer")
+        composer.focus()
+        composer.text = text
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    def working_sub(self, app: KaroxApp) -> str:
+        return str(app.query_one("#working-sub", Static).render())
+
+    async def test_working_line_says_what_the_agent_is_doing(self) -> None:
+        script = [
+            Event(kind="step_started", step=1),
+            Event(
+                kind="tool_started",
+                step=1,
+                tool="repo.read_file",
+                call_id="c1",
+                detail="src/app.py",
+            ),
+            Event(
+                kind="tool_finished",
+                step=1,
+                tool="repo.read_file",
+                call_id="c1",
+                ok=True,
+                summary="src/app.py, lines=40",
+                duration_seconds=0.1,
+            ),
+            Event(kind="text_delta", step=1, text="done"),
+        ]
+        backend = _FakeBackend(self.repository, script=script)
+        backend.gate = threading.Event()
+        backend.gate_after = 1
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            self.assertFalse(app.working.display)
+            await self.type_and_send(pilot, app, "read it")
+            await self.wait_for(pilot, backend.gate_reached.is_set)
+            self.assertTrue(app.working.display)
+            line = app.working.current_text()
+            self.assertIn("Reading src/app.py…", line)
+            self.assertIn("esc to interrupt", line)
+            card = self.chat_widgets(app, ToolCard)[0]
+            self.assertIsNone(card.ok)
+            self.assertIn("Read(src/app.py)", str(card.render()))
+            backend.gate.set()
+            await self.settle(pilot, app)
+            self.assertFalse(app.working.display)
+            self.assertTrue(card.ok)
+            self.assertIn("Read 40 lines", str(card.render()))
+
+    async def test_a_task_typed_while_running_runs_next(self) -> None:
+        backend = _FakeBackend(self.repository)
+        backend.gate = threading.Event()
+        backend.gate_after = 2
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.type_and_send(pilot, app, "first task")
+            await self.wait_for(pilot, backend.gate_reached.is_set)
+            await self.type_and_send(pilot, app, "second task")
+            self.assertEqual(app._queue, ["second task"])
+            self.assertIn("Queued: second task", self.working_sub(app))
+            backend.gate.set()
+            await self.wait_for(pilot, lambda: len(backend.requests) == 2)
+            await self.settle(pilot, app)
+            self.assertEqual([request.task for request in backend.requests], ["first task", "second task"])
+            users = [item.text for item in self.chat_widgets(app, UserMessage) if not item.command]
+            self.assertEqual(users, ["first task", "second task"])
+            self.assertEqual(app._queue, [])
+            self.assertFalse(app._agent_running)
+
+    async def test_stop_hands_type_ahead_back_and_settles_running_lines(self) -> None:
+        backend = _FakeBackend(self.repository)
+        backend.gate = threading.Event()
+        backend.gate_after = 2
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.type_and_send(pilot, app, "first task")
+            await self.wait_for(pilot, backend.gate_reached.is_set)
+            await self.type_and_send(pilot, app, "do this after")
+            await pilot.press("escape")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.stops, 1)
+            self.assertEqual(app.run_state.state, "stopped")
+            self.assertEqual(app.query_one("#composer").text, "do this after")
+            self.assertEqual(app._queue, [])
+            self.assertEqual(len(backend.requests), 1)
+            card = self.chat_widgets(app, ToolCard)[0]
+            self.assertIsNone(card.ok)
+            self.assertIn("Interrupted", str(card.render()))
+
+    async def test_a_refused_call_shows_its_reason_on_its_own_line(self) -> None:
+        script = [
+            Event(kind="step_started", step=1),
+            Event(
+                kind="tool_started",
+                step=1,
+                tool="mcp.github.create_issue",
+                call_id="m1",
+                detail="title: Bug",
+            ),
+            Event(
+                kind="error",
+                step=1,
+                tool="mcp.github.create_issue",
+                call_id="m1",
+                reason="McpRemoteToolError",
+                detail="MCP tool mcp.github.create_issue returned an error result: repository not found",
+            ),
+            Event(
+                kind="tool_finished",
+                step=1,
+                tool="mcp.github.create_issue",
+                call_id="m1",
+                ok=False,
+                summary="McpRemoteToolError",
+            ),
+            Event(kind="text_delta", step=1, text="could not create it"),
+        ]
+        app = self.app(_FakeBackend(self.repository, script=script))
+        async with app.run_test(size=(110, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "file the bug")
+            card = self.chat_widgets(app, ToolCard)[0]
+            self.assertFalse(card.ok)
+            rendered = str(card.render())
+            self.assertIn("github · create_issue (MCP)(title: Bug)", rendered)
+            self.assertIn("repository not found", rendered)
+            self.assertFalse(
+                any(notice.level == "error" for notice in self.chat_widgets(app, Notice))
+            )
+
+    async def test_retries_stay_on_the_working_line_and_warnings_read_as_words(self) -> None:
+        script = [
+            Event(kind="step_started", step=1),
+            Event(
+                kind="warning",
+                step=1,
+                reason="provider_retry",
+                detail="model call failed (rate_limit, HTTP 429); retry 1 in 2.0s",
+            ),
+            Event(
+                kind="warning",
+                step=1,
+                reason="engine_repair_prompt",
+                detail="verification failed; one bounded repair turn follows",
+            ),
+            Event(kind="text_delta", step=1, text="fixed"),
+        ]
+        backend = _FakeBackend(self.repository, script=script)
+        backend.gate = threading.Event()
+        backend.gate_after = 1
+        app = self.app(backend)
+        async with app.run_test(size=(110, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.type_and_send(pilot, app, "go")
+            await self.wait_for(pilot, backend.gate_reached.is_set)
+            self.assertIn("Retrying the model call", self.working_sub(app))
+            backend.gate.set()
+            await self.settle(pilot, app)
+            texts = [notice.text for notice in self.chat_widgets(app, Notice)]
+            self.assertFalse(any("rate_limit" in text for text in texts))
+            self.assertIn("A check failed — the agent gets one more turn to fix it.", texts)
+
+    async def test_shift_tab_cycles_the_mode_without_a_transcript_line(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            before = len(self.chat_widgets(app, Notice))
+            app.query_one("#composer").focus()
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            self.assertEqual(app.mode, "plan")
+            self.assertIn("plan mode", app.query_one(StatusLine).current_text())
+            await pilot.press("shift+tab", "shift+tab")
+            await pilot.pause()
+            self.assertEqual(app.mode, "build")
+            self.assertIn("? for shortcuts", app.query_one(StatusLine).current_text())
+            self.assertEqual(len(self.chat_widgets(app, Notice)), before)
+            self.assertIs(app.focused, app.query_one("#composer"))
+
+    async def test_ctrl_o_expands_every_tool_line(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "inspect the repo")
+            card = self.chat_widgets(app, ToolCard)[0]
+            self.assertFalse(card.expanded)
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            self.assertTrue(card.expanded)
+            self.assertIn("verbose", app.query_one(StatusLine).current_text())
+            await self.submit(pilot, app, "again")
+            cards = self.chat_widgets(app, ToolCard)
+            self.assertEqual(len(cards), 2)
+            self.assertTrue(all(item.expanded for item in cards))
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            self.assertFalse(any(item.expanded for item in cards))
+
+    async def test_question_mark_on_an_empty_composer_shows_shortcuts(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            composer = app.query_one("#composer")
+            composer.focus()
+            panel = app.query_one("#shortcuts", Static)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            self.assertTrue(panel.display)
+            self.assertIn("ctrl+o", str(panel.render()))
+            self.assertEqual(composer.text, "")
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(panel.display)
+            await pilot.press("a", "question_mark")
+            await pilot.pause()
+            self.assertEqual(composer.text, "a?")
+            self.assertFalse(panel.display)
+
+    async def test_mcp_chosen_before_the_first_run_joins_with_it(self) -> None:
+        backend = _FakeBackend(self.repository, record_after_run=_session_record())
+        backend.servers = [
+            {
+                "server_id": "github",
+                "transport": "stdio",
+                "selection": {"state": "not_selected", "counts": {"allowed": 0}},
+                "liveness": {"state": "not_probed"},
+            }
+        ]
+        app = self.app(backend)
+        async with app.run_test(size=(110, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "/mcp")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await self.settle(pilot, app)
+            self.assertEqual(app._pending_mcp, {"github": "all"})
+            self.assertEqual(backend.mcp_selections, [])
+            self.assertIn("with the first task (2 tools)", self.transcript(app))
+            await self.submit(pilot, app, "/mcp")
+            rows = " ".join(
+                str(option.prompt) for option in app.menu.query_one("#menu-options").options
+            )
+            self.assertIn("joins with the first task", rows)
+            app.menu.close()
+            await self.submit(pilot, app, "use the issues")
+            self.assertEqual(backend.requests[-1].mcp_servers, (("github", "all"),))
+            self.assertEqual(app._pending_mcp, {})
+            # The session exists now: a new choice is stored in it directly.
+            await self.submit(pilot, app, "/mcp")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("down", "down", "enter")
+            await self.settle(pilot, app)
+            self.assertEqual(backend.mcp_selections, [("github", app.session_id, "read")])
+            self.assertIn("tools allowed: 1", self.transcript(app))
+            await self.submit(pilot, app, "next task")
+            self.assertEqual(backend.requests[-1].mcp_servers, ())

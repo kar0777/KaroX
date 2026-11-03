@@ -34,6 +34,10 @@ def test_parser_accepts_the_documented_agent_flags() -> None:
             "--mode",
             "plan",
             "--stream-json",
+            "--mcp-server",
+            "github=all",
+            "--mcp-server",
+            "docs",
         ]
     )
     assert args.command == "agent"
@@ -41,6 +45,15 @@ def test_parser_accepts_the_documented_agent_flags() -> None:
     assert args.effort_level == "high"
     assert args.mode == "plan"
     assert args.stream_json is True
+    assert args.mcp_server == ["github=all", "docs"]
+    assert cli._mcp_server_request("github=all") == ("github", "all")
+    assert cli._mcp_server_request("docs") == ("docs", "read")
+    for bad in ("=all", "github=everything"):
+        try:
+            cli._mcp_server_request(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
 
 
 def test_verification_argv_accepts_json_and_shell_forms() -> None:

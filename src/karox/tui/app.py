@@ -30,6 +30,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.theme import Theme
 from textual.widgets import Input, Static, TextArea
 
@@ -37,14 +38,14 @@ from ..detached_process import windowless_flags
 from . import commands as slash
 from . import prefs
 from .backend import AgentRequest, CLIBackend
-from .i18n import detect_language, normalise_language, tr
+from .i18n import detect_language, normalise_language, plural, tr
 from .modals import McpAddScreen, ProviderSetupScreen
 from .protocol import Event, Outcome, SessionState, tool_category
+from .tooltext import duration_text, plan_rows, plan_step, short_tokens, working_text
 from .views import (
     ADD_SERVER_KEY,
     CUSTOM_PROVIDER_KEY,
     catalog_items,
-    clock,
     doctor_text,
     help_text,
     lines_text,
@@ -59,7 +60,6 @@ from .views import (
 )
 from .widgets import (
     MUTED,
-    ActivityBar,
     AssistantMessage,
     ChatInput,
     ChatLog,
@@ -72,6 +72,7 @@ from .widgets import (
     ToolCard,
     UserMessage,
     WelcomeCard,
+    WorkingLine,
     status_segments,
     welcome_text,
 )
@@ -96,6 +97,8 @@ class RunState:
     phase: str = ""
     started_at: float = 0.0
     prompt_tokens: int = 0
+    #: Tokens this run has spent so far, for the working line.
+    tokens: int = 0
     context_fraction: float | None = None
     reads: int = 0
     edits: int = 0
@@ -135,6 +138,7 @@ class KaroxApp(App[int]):
     BINDINGS = [
         Binding("ctrl+n", "new_session", "New session", show=False),
         Binding("ctrl+r", "show_reasoning", "Reasoning", show=False),
+        Binding("ctrl+o", "toggle_verbose", "Tool details", show=False),
         Binding("ctrl+l", "clear", "Clear", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Stop / quit", show=False, priority=True),
@@ -191,7 +195,22 @@ class KaroxApp(App[int]):
         self._catalog: dict[str, dict[str, Any]] = {}
         self._prompt_handler: Callable[[str], None] | None = None
         self._connect_flow: dict[str, Any] | None = None
-        self._state_text = ""
+        # What the working line says: the calls still running (call id ->
+        # tool, target), the model's current phase, the plan's next item, a
+        # provider retry, and tasks typed while the agent was busy.
+        self._running_tools: dict[str, tuple[str, str]] = {}
+        self._phase_key = "working.thinking"
+        self._plan_rows: list[tuple[str, str]] = []
+        self._retry_note = ""
+        self._queue: list[str] = []
+        self._lookups = 0
+        self._lookup_text = ""
+        #: Ctrl+O: every tool line shows its whole preview and raw facts.
+        self._verbose = False
+        #: MCP servers chosen before the session exists: server -> scope
+        #: ("all" | "read"), attached by the first run's ``--mcp-server``.
+        self._pending_mcp: dict[str, str] = {}
+        self._mcp_payload: dict[str, Any] = {}
         self.register_theme(
             Theme(
                 name="karox",
@@ -212,16 +231,19 @@ class KaroxApp(App[int]):
 
     def compose(self) -> ComposeResult:
         yield ChatLog(id="chat")
-        yield ActivityBar(id="activity")
+        yield WorkingLine(id="working")
         yield InlineMenu(id="menu")
-        yield ChatInput(
-            id="composer",
-            placeholder=tr(self.language, "composer.placeholder"),
-            soft_wrap=True,
-        )
+        with Horizontal(id="composer-box"):
+            yield Static(">", id="composer-prompt", markup=False)
+            yield ChatInput(
+                id="composer",
+                placeholder=tr(self.language, "composer.placeholder"),
+                soft_wrap=True,
+            )
         yield Static("", id="prompt-label")
         yield SecretPrompt(id="secret")
         yield StatusLine(id="status")
+        yield Static("", id="shortcuts", markup=False)
 
     # --------------------------------------------------------------- lifecycle
 
@@ -237,12 +259,17 @@ class KaroxApp(App[int]):
     def chat(self) -> ChatLog:
         return self.query_one("#chat", ChatLog)
 
+    @property
+    def working(self) -> WorkingLine:
+        return self.query_one("#working", WorkingLine)
+
     def on_mount(self) -> None:
         composer = self.composer
         composer.inline_menu = self.menu
         composer.scroller = self.chat
         self.query_one("#secret", SecretPrompt).display = False
         self.query_one("#prompt-label", Static).display = False
+        self.query_one("#shortcuts", Static).display = False
         composer.focus()
         self._add_welcome()
         self._refresh_chrome()
@@ -252,7 +279,7 @@ class KaroxApp(App[int]):
 
     def _tick(self) -> None:
         if self._agent_running:
-            self._refresh_status()
+            self._refresh_working()
 
     def _load_startup(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
         record = self.backend.session(self.session_id) if self._resume_requested else None
@@ -298,8 +325,8 @@ class KaroxApp(App[int]):
     ) -> None:
         """Run one CLI call in a thread and hand its result back to the screen."""
 
-        if activity and not self._agent_running:
-            self.query_one(ActivityBar).set_activity(activity)
+        if activity:
+            self._lookup_started(activity)
 
         def runner() -> None:
             try:
@@ -320,19 +347,32 @@ class KaroxApp(App[int]):
             pass
 
     def _background_done(self, had_activity: bool, done: Callable[[Any], None], result: Any) -> None:
-        if had_activity and not self._agent_running:
-            self.query_one(ActivityBar).set_activity("")
+        if had_activity:
+            self._lookup_finished()
         done(result)
 
     def _background_failed(
         self, had_activity: bool, failed: Callable[[str], None] | None, message: str
     ) -> None:
-        if had_activity and not self._agent_running:
-            self.query_one(ActivityBar).set_activity("")
+        if had_activity:
+            self._lookup_finished()
         if failed is not None:
             failed(message)
         else:
             self._notice(message, "error")
+
+    def _lookup_started(self, text: str) -> None:
+        # A slow CLI lookup (doctor, an MCP probe, the model list) gets the
+        # same dots as the agent, so the screen never looks frozen.
+        self._lookups += 1
+        self._lookup_text = text
+        self._refresh_working()
+
+    def _lookup_finished(self) -> None:
+        self._lookups = max(0, self._lookups - 1)
+        if not self._lookups:
+            self._lookup_text = ""
+        self._refresh_working()
 
     # ---------------------------------------------------------------- welcome
 
@@ -358,18 +398,15 @@ class KaroxApp(App[int]):
         )
 
     def _welcome_facts(self) -> list[str]:
-        facts: list[str] = []
-        repository = self.repository.name or str(self.repository)
+        lang = self.language
+        path = _display_path(self.repository)
         if self._branch:
-            repository = f"{repository} · {self._branch}"
-        facts.append(repository)
-        if self._model_label():
-            facts.append(self._model_label())
-        else:
-            facts.append(
-                tr(self.language, "status.no_model" if self._model_loaded else "status.loading")
-            )
-        facts.append(tr(self.language, "welcome.facts.session", id=self.session_id[:24]))
+            path = f"{path} ({self._branch})"
+        facts = [tr(lang, "welcome.cwd", path=path)]
+        model = self._model_label() or tr(
+            lang, "status.no_model" if self._model_loaded else "status.loading"
+        )
+        facts.append(tr(lang, "welcome.model", model=model))
         if self._verification:
             commands = "; ".join(" ".join(item) for item in self._verification)
             facts.append(tr(self.language, "welcome.facts.verification", commands=commands))
@@ -385,6 +422,8 @@ class KaroxApp(App[int]):
         del event
         composer = self.composer
         text = str(composer.text)
+        if text:
+            self._show_shortcuts(False)
         menu = self.menu
         if (
             text.startswith("/")
@@ -521,7 +560,9 @@ class KaroxApp(App[int]):
         label = self.query_one("#prompt-label", Static)
         label.update(Text(placeholder, style=MUTED))
         label.display = True
+        self._show_shortcuts(False)
         self.composer.display = False
+        self.query_one("#composer-box", Horizontal).display = False
         prompt.display = True
         prompt.focus()
 
@@ -531,6 +572,7 @@ class KaroxApp(App[int]):
         prompt.display = False
         self.query_one("#prompt-label", Static).display = False
         self._prompt_handler = None
+        self.query_one("#composer-box", Horizontal).display = True
         composer = self.composer
         composer.display = True
         composer.focus()
@@ -1064,8 +1106,11 @@ class KaroxApp(App[int]):
         session_id = self.session_id
 
         def done(payload: dict[str, Any]) -> None:
+            self._mcp_payload = payload if isinstance(payload, dict) else {}
             self._open_picker(
-                "mcp", tr(self.language, "mcp.title"), mcp_items(payload, self.language)
+                "mcp",
+                tr(self.language, "mcp.title"),
+                mcp_items(self._mcp_payload, self.language, pending=self._pending_mcp),
             )
 
         self._background(
@@ -1081,23 +1126,38 @@ class KaroxApp(App[int]):
         if server:
             self._notice(tr(self.language, "notice.mcp_added", server=server), "success")
 
+    def _mcp_in_session(self, server: str) -> bool:
+        if server in self._pending_mcp:
+            return True
+        entries = self._mcp_payload.get("servers", [])
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and entry.get("server_id") == server:
+                selection = entry.get("selection")
+                state = selection.get("state") if isinstance(selection, dict) else None
+                return bool(state) and state != "not_selected"
+        return False
+
     def _mcp_server_chosen(self, key: str, context: dict[str, Any]) -> None:
         del context
         if key == ADD_SERVER_KEY:
             self._open_mcp_add()
             return
+        lang = self.language
         items = [
-            MenuItem("probe", tr(self.language, "mcp.action.probe")),
+            MenuItem("probe", tr(lang, "mcp.action.probe")),
+            MenuItem("select", tr(lang, "mcp.action.select"), tr(lang, "mcp.action.select_detail")),
             MenuItem(
-                "select",
-                tr(self.language, "mcp.action.select"),
-                tr(self.language, "mcp.action.select_detail"),
+                "select_read",
+                tr(lang, "mcp.action.select_read"),
+                tr(lang, "mcp.action.select_read_detail"),
             ),
-            MenuItem("remove", tr(self.language, "mcp.action.remove")),
         ]
+        if self._mcp_in_session(key):
+            items.append(MenuItem("deselect", tr(lang, "mcp.action.deselect")))
+        items.append(MenuItem("remove", tr(lang, "mcp.action.remove")))
         self._open_picker(
             "mcp-action",
-            tr(self.language, "mcp.actions_title", server=key),
+            tr(lang, "mcp.actions_title", server=key),
             items,
             context={"server": key},
         )
@@ -1106,58 +1166,106 @@ class KaroxApp(App[int]):
         server = str(context.get("server") or "")
         if not server:
             return
+        lang = self.language
         if key == "probe":
             self._background(
                 lambda: self.backend.mcp_probe(server),
                 lambda payload: self._notice(
                     tr(
-                        self.language,
+                        lang,
                         "notice.mcp_probe_ok",
                         server=server,
                         count=payload.get("tool_count", 0) if isinstance(payload, dict) else 0,
                     ),
                     "success",
                 ),
-                activity=tr(self.language, "notice.mcp_probe", server=server),
+                activity=tr(lang, "notice.mcp_probe", server=server),
                 failed=lambda error: self._notice(
-                    tr(self.language, "notice.mcp_probe_failed", server=server, error=error),
+                    tr(lang, "notice.mcp_probe_failed", server=server, error=error),
                     "error",
                 ),
             )
-        elif key == "select":
-            session_id = self.session_id
-
-            def work() -> dict[str, Any] | None:
-                if self.backend.session(session_id) is None:
-                    return None
-                return self.backend.mcp_select_all(server, session_id)
-
-            def done(payload: dict[str, Any] | None) -> None:
-                if payload is None:
-                    self._notice(tr(self.language, "notice.mcp_needs_session"), "warning")
-                    return
-                selection = payload.get("selection") or {}
-                tools = selection.get("tools") if isinstance(selection, dict) else {}
-                count = len(tools) if isinstance(tools, dict) else 0
-                self._notice(
-                    tr(self.language, "notice.mcp_selected", server=server, count=count),
-                    "success",
-                )
-
-            self._background(
-                work, done, activity=tr(self.language, "notice.mcp_selecting", server=server)
-            )
+        elif key in {"select", "select_read"}:
+            self._mcp_select(server, "all" if key == "select" else "read")
+        elif key == "deselect":
+            self._mcp_deselect(server)
         elif key == "remove":
             items = [
-                MenuItem("no", tr(self.language, "mcp.confirm_no")),
-                MenuItem("yes", tr(self.language, "mcp.confirm_yes")),
+                MenuItem("no", tr(lang, "mcp.confirm_no")),
+                MenuItem("yes", tr(lang, "mcp.confirm_yes")),
             ]
             self._open_picker(
                 "mcp-confirm",
-                tr(self.language, "mcp.confirm_remove", server=server),
+                tr(lang, "mcp.confirm_remove", server=server),
                 items,
                 context={"server": server},
             )
+
+    def _mcp_select(self, server: str, scope: str) -> None:
+        """Attach a server to this window's session: every tool, or read-only.
+
+        The choice is the user's explicit approval, so the chosen tools are
+        stored as ``allow`` -- a stored ``ask`` would hide them from the agent,
+        since nothing can answer a question in the middle of a run. Before the
+        first run there is no session to store it in: the server is checked
+        now and attached by that run's ``--mcp-server``.
+        """
+
+        lang = self.language
+        session_id = self.session_id
+
+        def work() -> dict[str, Any]:
+            if self.backend.session(session_id) is None:
+                discovered = self.backend.mcp_tools(server)
+                allowed = [
+                    item
+                    for item in discovered
+                    if scope == "all" or item.get("read_only") is True
+                ]
+                return {"pending": True, "count": len(allowed)}
+            payload = self.backend.mcp_select(server, session_id, scope)
+            selection = payload.get("selection") if isinstance(payload, dict) else None
+            stored = selection.get("tools") if isinstance(selection, dict) else None
+            permissions = list(stored.values()) if isinstance(stored, dict) else []
+            allowed_count = len(
+                [
+                    item
+                    for item in permissions
+                    if isinstance(item, dict) and item.get("permission") == "allow"
+                ]
+            )
+            return {"pending": False, "count": allowed_count}
+
+        def done(result: dict[str, Any]) -> None:
+            count = int(result.get("count") or 0)
+            if result.get("pending"):
+                self._pending_mcp[server] = scope
+                self._notice(
+                    tr(lang, "notice.mcp_pending", server=server, count=count), "success"
+                )
+                return
+            self._pending_mcp.pop(server, None)
+            self._notice(tr(lang, "notice.mcp_selected", server=server, count=count), "success")
+
+        self._background(
+            work,
+            done,
+            activity=tr(lang, "notice.mcp_selecting", server=server),
+            failed=lambda error: self._notice(
+                tr(lang, "notice.mcp_apply_failed", server=server, error=error), "error"
+            ),
+        )
+
+    def _mcp_deselect(self, server: str) -> None:
+        lang = self.language
+        if self._pending_mcp.pop(server, None) is not None:
+            self._notice(tr(lang, "notice.mcp_deselected", server=server), "info")
+            return
+        session_id = self.session_id
+        self._background(
+            lambda: self.backend.mcp_deselect(server, session_id),
+            lambda _: self._notice(tr(lang, "notice.mcp_deselected", server=server), "info"),
+        )
 
     def _mcp_confirmed(self, key: str, context: dict[str, Any]) -> None:
         server = str(context.get("server") or "")
@@ -1186,7 +1294,7 @@ class KaroxApp(App[int]):
         self._notice(tr(self.language, "notice.effort", level=level), "info")
         self._refresh_chrome()
 
-    def _set_mode(self, argument: str) -> None:
+    def _set_mode(self, argument: str, *, quiet: bool = False) -> None:
         mode = argument.strip().lower()
         if mode not in MODES:
             self._notice(
@@ -1195,8 +1303,29 @@ class KaroxApp(App[int]):
             return
         self.mode = mode
         _save_preference(agent_mode=mode)
-        self._notice(tr(self.language, "notice.mode", mode=mode), "info")
+        if not quiet:
+            self._notice(tr(self.language, "notice.mode", mode=mode), "info")
         self._refresh_chrome()
+
+    @on(ChatInput.ModeCycled)
+    def mode_cycled(self, event: ChatInput.ModeCycled) -> None:
+        # Shift+Tab: the footer says the new mode; a transcript line per press
+        # would only push the conversation up.
+        event.stop()
+        index = MODES.index(self.mode) if self.mode in MODES else 0
+        self._set_mode(MODES[(index + 1) % len(MODES)], quiet=True)
+
+    @on(ChatInput.ShortcutsToggled)
+    def shortcuts_toggled(self, event: ChatInput.ShortcutsToggled) -> None:
+        event.stop()
+        panel = self.query_one("#shortcuts", Static)
+        self._show_shortcuts(not panel.display)
+
+    def _show_shortcuts(self, visible: bool) -> None:
+        panel = self.query_one("#shortcuts", Static)
+        if visible:
+            panel.update(Text(tr(self.language, "shortcuts.text"), style=MUTED))
+        panel.display = visible
 
     def _set_language(self, argument: str) -> None:
         selected = normalise_language(argument)
@@ -1214,7 +1343,10 @@ class KaroxApp(App[int]):
 
     def _start_task(self, task: str) -> None:
         if self._agent_running:
-            self._notice(tr(self.language, "notice.already_running"), "warning")
+            # Typed while the agent works: it runs next, in order, the way a
+            # shell keeps type-ahead. The working line shows the queue.
+            self._queue.append(task)
+            self._refresh_working()
             return
         if self._model is None:
             try:
@@ -1225,14 +1357,13 @@ class KaroxApp(App[int]):
         if self._model is None:
             self._notice(tr(self.language, "notice.no_model"), "warning")
             return
+        self._show_shortcuts(False)
         self.chat.add(UserMessage(task))
         self._reset_turn()
         self._agent_running = True
         self._stopping = False
         self.run_state = RunState(state="running", started_at=time.monotonic())
-        self.query_one(ActivityBar).set_activity(tr(self.language, "status.running"))
         self._refresh_status()
-        self._refresh_chrome()
         # Let the user line finish mounting before the first event can arrive:
         # a fast run could otherwise paint into widgets that are still queued.
         self.call_after_refresh(self._launch_run, task)
@@ -1241,6 +1372,10 @@ class KaroxApp(App[int]):
         self._segment = None
         self._segments = []
         self._cards.clear()
+        self._running_tools.clear()
+        self._phase_key = "working.thinking"
+        self._plan_rows = []
+        self._retry_note = ""
         self._last_reasoning = ""
 
     def _launch_run(self, task: str) -> None:
@@ -1261,6 +1396,7 @@ class KaroxApp(App[int]):
             verification=self._verification,
             effort=None if self.effort == "auto" else self.effort,
             mode=None if self.mode == "build" else self.mode,
+            mcp_servers=tuple(sorted(self._pending_mcp.items())),
         )
 
         def on_event(event: Event) -> None:
@@ -1287,93 +1423,122 @@ class KaroxApp(App[int]):
             segment.finish()
 
     def _apply_event(self, event: Event) -> None:
-        activity = self.query_one(ActivityBar)
+        """Fold one typed stream event into the transcript and the working line.
+
+        The transcript gets the durable lines -- answer text, one line per tool
+        call with its result, notices that matter later. Everything that is
+        only true right now (which call is running, a provider retry, what
+        the plan says is next) goes to the working line and disappears with
+        the run.
+        """
+
         state = self.run_state
         kind = event.kind
         lang = self.language
         if kind == "text_delta":
             if event.text:
                 self._open_segment().append_text(event.text)
-        elif kind == "reasoning_delta":
-            if event.reasoning:
-                self._open_segment().append_reasoning(event.reasoning)
-        elif kind == "reasoning_summary_delta":
-            if event.reasoning_summary:
-                self._open_segment().append_reasoning(event.reasoning_summary, summary=True)
+                self._phase_key = "working.writing"
+        elif kind in {"reasoning_delta", "reasoning_summary_delta"}:
+            text = event.reasoning if kind == "reasoning_delta" else event.reasoning_summary
+            if text:
+                self._open_segment().append_reasoning(
+                    text, summary=kind == "reasoning_summary_delta"
+                )
+                self._phase_key = "working.reasoning"
         elif kind == "step_started":
             # A new model turn starts a new stretch of text: without the break
             # "working on it" and the next step's "done" render as one word.
             self._close_segment()
             state.step = max(state.step, event.step)
-            activity.set_activity(tr(lang, "activity.step", n=event.step))
-            self._refresh_status()
+            self._phase_key = "working.thinking"
+            self._retry_note = ""
         elif kind == "step_finished":
             self._absorb_usage(event.usage)
         elif kind == "tool_started":
             self._close_segment()
-            card = ToolCard(event.tool, event.call_id, tool_category(event.tool), language=lang)
+            card = ToolCard(
+                event.tool,
+                event.call_id,
+                tool_category(event.tool),
+                language=lang,
+                detail=event.detail,
+                expanded=self._verbose,
+            )
             self.chat.add(card)
-            if event.call_id:
-                self._cards[event.call_id] = card
-            activity.set_activity(tr(lang, "activity.running", tool=event.tool or "tool"))
+            key = event.call_id or f"anonymous-{id(card)}"
+            self._cards[key] = card
+            self._running_tools[key] = (event.tool, event.detail)
+            if event.tool == "plan.update":
+                rows = plan_rows(event.detail)
+                if rows:
+                    self._plan_rows = rows
+            self._retry_note = ""
         elif kind == "tool_finished":
             self._close_segment()
             category = tool_category(event.tool)
-            finished = self._cards.get(event.call_id)
+            key = event.call_id or next(
+                (
+                    name
+                    for name, (tool, _detail) in reversed(list(self._running_tools.items()))
+                    if tool == event.tool and name.startswith("anonymous-")
+                ),
+                "",
+            )
+            finished = self._cards.get(key) if key else None
             if finished is None:
-                finished = ToolCard(event.tool, event.call_id, category, language=lang)
+                finished = ToolCard(
+                    event.tool, event.call_id, category, language=lang, expanded=self._verbose
+                )
                 self.chat.add(finished)
                 if event.call_id:
                     self._cards[event.call_id] = finished
-            finished.finish(event.ok, event.summary, event.duration_seconds)
+            finished.finish(event.ok, event.summary, event.duration_seconds, preview=event.detail)
+            self._running_tools.pop(key, None)
             self._count_tool(category)
-            activity.set_activity(
-                tr(lang, "activity.ok" if event.ok else "activity.failed", tool=event.tool or "tool"),
-                "success" if event.ok else "error",
-            )
+            self._phase_key = "working.thinking"
         elif kind == "phase_changed":
             state.phase = event.phase
-            activity.set_activity(tr(lang, "activity.phase", phase=event.phase or "?"))
         elif kind == "compacted":
             self._close_segment()
             self._notice(tr(lang, "notice.compacted", summary=event.summary or "…"), "info")
-            activity.set_activity(tr(lang, "activity.compacted"))
         elif kind == "warning":
-            activity.set_activity(f"{event.reason}: {event.detail}".strip(": "), "warning")
+            warned = self._cards.get(event.call_id) if event.call_id else None
+            if event.reason == "provider_retry":
+                self._retry_note = event.detail or event.reason
+            elif warned is not None:
+                warned.note_error(event.detail or event.reason)
+            else:
+                self._close_segment()
+                self._notice(self._warning_text(event.reason, event.detail), "warning")
         elif kind == "error":
-            self._close_segment()
-            self._notice(f"{event.reason}: {event.detail}".strip(": "), "error")
-            activity.set_activity(event.reason or "error", "error")
+            failed = self._cards.get(event.call_id) if event.call_id else None
+            if failed is not None:
+                # A refused or failed call: the reason belongs on its own line.
+                failed.note_error(event.detail or event.reason)
+            else:
+                self._close_segment()
+                self._notice(f"{event.reason}: {event.detail}".strip(": "), "error")
         elif kind == "file_edited":
             if event.path and event.path not in state.files:
                 state.files.append(event.path)
-            activity.set_activity(tr(lang, "activity.edited", path=event.path or "?"))
-        elif kind == "file_read":
-            activity.set_activity(tr(lang, "activity.read", path=event.path or "?"))
-        elif kind == "test_started":
-            activity.set_activity(tr(lang, "activity.test_started", tool=event.tool or "check"))
         elif kind == "test_finished":
             if event.ok:
                 state.tests_ok += 1
             else:
                 state.tests_failed += 1
-            activity.set_activity(
-                tr(
-                    lang,
-                    "activity.test_ok" if event.ok else "activity.test_failed",
-                    tool=event.tool or "check",
-                ),
-                "success" if event.ok else "error",
-            )
-            self._refresh_status()
-        elif kind == "artifact_created":
-            activity.set_activity(
-                tr(lang, "activity.artifact", name=event.detail or event.path or "?")
-            )
-        elif kind == "finished":
-            activity.set_activity(f"{event.status} · {event.reason}".strip(" ·"), "success")
         if event.usage and kind != "step_finished":
             self._absorb_usage(event.usage)
+        self._refresh_working()
+
+    def _warning_text(self, reason: str, detail: str) -> str:
+        """A kernel warning in the reader's words; unknown reasons stay raw."""
+
+        key = f"warn.{reason}"
+        text = tr(self.language, key, detail=detail)
+        if text == key:
+            return f"{reason}: {detail}".strip(": ")
+        return text
 
     def _count_tool(self, category: str) -> None:
         state = self.run_state
@@ -1395,6 +1560,7 @@ class KaroxApp(App[int]):
         total = usage.get("total_tokens")
         if isinstance(total, int) and total > 0:
             self._tokens += total
+            state.tokens += total
         prompt = usage.get("prompt_tokens") or usage.get("input_tokens")
         if isinstance(prompt, int) and prompt > 0:
             state.prompt_tokens = prompt
@@ -1416,9 +1582,16 @@ class KaroxApp(App[int]):
     ) -> None:
         self._agent_running = False
         self._stopping = False
-        self.query_one(ActivityBar).set_activity("")
         elapsed = self.run_state.elapsed()
         self._close_segment()
+        # A call the run never reported back on (a stop in the middle of a
+        # command) must not keep blinking as if it were still running.
+        for key in list(self._running_tools):
+            card = self._cards.get(key)
+            if card is not None and card.ok is None:
+                card.interrupt()
+        self._running_tools.clear()
+        self._retry_note = ""
         answered = any(segment.answer_text().strip() for segment in self._segments)
         if not answered and not stopped and outcome is not None and outcome.provider_message.strip():
             # The report's final message is shown only when nothing streamed;
@@ -1437,23 +1610,34 @@ class KaroxApp(App[int]):
         )
         if stopped:
             self.run_state.state = "stopped"
-            self._notice(tr(self.language, "notice.stopped"), "warning")
+            self._result_notice(tr(self.language, "notice.stopped"), "warning")
             self._refresh_checkpoint()
         elif outcome is not None:
             if outcome.session_id:
                 self.session_id = outcome.session_id
             self._tokens = outcome.token_total or self._tokens
             self.run_state.state = "failed" if outcome.status in {"failed", "error"} else "done"
-            self._notice(self._result_text(outcome, elapsed), self._result_level(outcome))
+            self._result_notice(self._result_text(outcome, elapsed), self._result_level(outcome))
             self._continue = True
+            # The run created the session and stored the servers it was
+            # asked to attach; from here on /mcp edits the session directly.
+            self._pending_mcp.clear()
             self._refresh_checkpoint()
         else:
             self.run_state.state = "failed"
             lines = [line for line in stderr.strip().splitlines() if line.strip()]
             detail = lines[-1] if lines else f"exit code {exit_code}"
-            self._notice(tr(self.language, "notice.backend_error", error=detail), "error")
+            self._result_notice(tr(self.language, "notice.backend_error", error=detail), "error")
         self._refresh_status()
-        self._refresh_chrome()
+        if self._queue:
+            if outcome is not None and not stopped:
+                self.call_after_refresh(self._start_task, self._queue.pop(0))
+            else:
+                # Stopped or broken: hand the type-ahead back instead of
+                # running it on top of a turn that did not finish.
+                self.composer.set_text("\n".join(self._queue))
+                self._queue.clear()
+                self._refresh_working()
         if self.composer.display:
             self.composer.focus()
 
@@ -1480,9 +1664,9 @@ class KaroxApp(App[int]):
             head = tr(lang, "result.failed")
         parts = [head]
         if outcome.steps:
-            parts.append(tr(lang, "result.steps", count=outcome.steps))
+            parts.append(plural(lang, outcome.steps, "step"))
         if outcome.changed_files:
-            parts.append(tr(lang, "result.files", count=len(outcome.changed_files)))
+            parts.append(plural(lang, len(outcome.changed_files), "file"))
         passed, total = outcome.check_tally
         if total:
             parts.append(tr(lang, "result.checks", passed=passed, total=total))
@@ -1555,12 +1739,23 @@ class KaroxApp(App[int]):
         if self.menu.active:
             self.menu.cancel()
             return
+        if self.query_one("#shortcuts", Static).display:
+            self._show_shortcuts(False)
+            return
         if not self._agent_running or self._stopping:
             return
         self._stopping = True
         self.run_state.state = "stopping"
         self._refresh_status()
         self.run_worker(self.backend.stop, thread=True, group="stop", name="agent-stop")
+
+    def action_toggle_verbose(self) -> None:
+        """Ctrl+O: every tool line, past and future, shows all it has."""
+
+        self._verbose = not self._verbose
+        for card in self.chat.query(ToolCard):
+            card.set_expanded(self._verbose)
+        self._refresh_chrome()
 
     def action_interrupt(self) -> None:
         """Ctrl+C: close what is open, else stop the run, else clear, else quit."""
@@ -1599,57 +1794,82 @@ class KaroxApp(App[int]):
         return f"{provider}/{model}"
 
     def _refresh_chrome(self) -> None:
+        """The footer: a hint on the left, the window's facts on the right."""
+
+        lang = self.language
         width = self.size.width or 100
+        if self.mode != "build":
+            hint, level = tr(lang, "footer.mode", mode=self.mode), "mode"
+        else:
+            hint, level = tr(lang, "footer.hint"), ""
+        if self._verbose:
+            hint += " · " + tr(lang, "footer.verbose")
         model = self._model_label()
         if not model and not self._model_loaded:
-            model = tr(self.language, "status.loading")
-        self.query_one(StatusLine).set_facts(
+            model = tr(lang, "status.loading")
+        status = self.query_one(StatusLine)
+        status.set_hint(hint, level)
+        status.set_facts(
             status_segments(
                 model=model,
-                repository=self.repository.name or str(self.repository),
-                branch=self._branch,
+                repository="",
                 tokens=self._tokens,
                 context_fraction=self.run_state.context_fraction,
                 effort=self.effort,
-                mode=self.mode,
-                # The run state shares the line on the right.
-                width=max(24, width - 8 - len(self._state_text)),
-                language=self.language,
+                # The mode is the hint's business; stating it twice is noise.
+                mode="build",
+                width=max(24, width - 8 - len(hint)),
+                language=lang,
             )
         )
 
     def _refresh_status(self) -> None:
-        text, level = self._state_line()
-        width_changed = len(text) != len(self._state_text)
-        self._state_text = text
-        self.query_one(StatusLine).set_state(text, level)
-        if width_changed:
-            self._refresh_chrome()
+        self._refresh_working()
+        self._refresh_chrome()
 
-    def _state_line(self) -> tuple[str, str]:
-        state = self.run_state
+    def _refresh_working(self) -> None:
+        """KaroX's dots and one line saying what is happening right now."""
+
+        line = self.working
         lang = self.language
+        if not self._agent_running:
+            line.set_working(self._lookup_text)
+            return
+        state = self.run_state
         if self._stopping:
-            return tr(lang, "status.stopping"), "warning"
-        if self._agent_running:
-            parts = [tr(lang, "status.running")]
-            if state.step:
-                parts.append(tr(lang, "status.step", n=state.step))
-            parts.append(tr(lang, "status.seconds", seconds=state.elapsed()))
-            if state.tests_ok or state.tests_failed:
-                parts.append(
-                    tr(lang, "status.checks_live", ok=state.tests_ok, bad=state.tests_failed)
-                )
-            return " · ".join(parts), "warning"
-        if state.state == "failed":
-            word, level = tr(lang, "status.failed"), "error"
-        elif state.state == "stopped":
-            word, level = tr(lang, "status.stopped"), "warning"
+            text = tr(lang, "working.stopping")
+        elif self._running_tools:
+            tool, detail = list(self._running_tools.values())[-1]
+            text = working_text(tool, detail, lang)
         else:
-            word, level = tr(lang, "status.idle"), "success"
-        if self.checkpoint is not None and self.checkpoint.updated_at:
-            word += " · " + tr(lang, "status.saved", when=clock(self.checkpoint.updated_at))
-        return word, level
+            text = tr(lang, self._phase_key)
+        elapsed = duration_text(state.elapsed(), lang)
+        if state.tokens:
+            facts = tr(lang, "working.facts", elapsed=elapsed, tokens=short_tokens(state.tokens))
+        else:
+            facts = tr(lang, "working.facts_quiet", elapsed=elapsed)
+        below: list[str] = []
+        if self._retry_note:
+            below.append(tr(lang, "working.retry", detail=self._retry_note))
+        position, total, upcoming = plan_step(self._plan_rows)
+        if upcoming:
+            below.append(tr(lang, "working.next", item=upcoming, index=position, total=total))
+        if self._queue:
+            first = " ".join(self._queue[0].split())
+            if len(first) > 60:
+                first = first[:59] + "…"
+            if len(self._queue) > 1:
+                below.append(
+                    tr(lang, "working.queued_more", text=first, count=len(self._queue) - 1)
+                )
+            else:
+                below.append(tr(lang, "working.queued", text=first))
+        line.set_working(
+            text,
+            facts,
+            "\n".join(below),
+            "warning" if self._stopping or self._retry_note else "",
+        )
 
     def on_resize(self, event: events.Resize) -> None:
         del event  # the new size is read from self.size
@@ -1667,6 +1887,13 @@ class KaroxApp(App[int]):
         if text:
             self.chat.add(Notice(text, level))
 
+    def _result_notice(self, text: str, level: str) -> None:
+        # The end of a turn stands one row apart from the last tool line.
+        if text:
+            notice = Notice(text, level)
+            notice.add_class("run-result")
+            self.chat.add(notice)
+
     def _print_block(self, title: str, body: Text | str) -> None:
         # Not ``_print``: Textual's App._print(text, stderr) receives every
         # print() made while the app runs, so shadowing it crashed the TUI.
@@ -1675,6 +1902,17 @@ class KaroxApp(App[int]):
     @staticmethod
     def _new_session_id() -> str:
         return f"tui-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+
+def _display_path(path: Path) -> str:
+    """The folder the way a shell prompt shows it: under ``~`` when it can."""
+
+    try:
+        home = Path.home().resolve()
+        relative = path.relative_to(home)
+    except (OSError, RuntimeError, ValueError):
+        return str(path)
+    return "~" if not relative.parts else str(Path("~") / relative)
 
 
 def _cost_text(costs: dict[str, float]) -> str:

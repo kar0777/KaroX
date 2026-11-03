@@ -42,6 +42,7 @@ from karox.mcp_client import (
     McpError,
     McpProtocolError,
     McpRegistry,
+    McpRemoteToolError,
     McpRuntimeBinding,
     McpServerRecord,
     McpToolDescriptor,
@@ -1064,3 +1065,31 @@ def test_http_call_without_authorization_is_refused(
     client = McpClient(registry, credentials)
     with pytest.raises(McpError):
         client.discover_record(record, repository)
+
+def test_stdio_error_result_keeps_the_server_text(stdio_server: Any) -> None:
+    """An ``isError`` result names what went wrong, so the agent can react."""
+
+    with pytest.raises(McpRemoteToolError, match="note storage failed"):
+        stdio_server.client.call_record(
+            stdio_server.record,
+            stdio_server.note,
+            {"name": "boom", "content": "c"},
+            stdio_server.repo,
+        )
+
+
+def test_error_result_text_is_flat_bounded_and_text_only() -> None:
+    from karox.mcp_client import _error_result_text
+
+    payload = {
+        "content": [
+            {"type": "text", "text": "first line\n  second"},
+            {"type": "image", "data": "AAAA"},
+        ],
+        "isError": True,
+    }
+    assert _error_result_text(payload) == "first line second"
+    assert _error_result_text({"structuredContent": {"code": 7}}) == '{"code": 7}'
+    assert _error_result_text({"content": []}) == ""
+    long = {"content": [{"type": "text", "text": "x" * 5000}]}
+    assert len(_error_result_text(long)) == 1200

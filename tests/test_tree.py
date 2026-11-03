@@ -135,5 +135,8 @@ def test_python_line_count_stays_bounded() -> None:
     # (~3.6k lines), so the ceiling dropped from 90k to 80k. The kernel is
     # large by design; the guard is for accumulation of new surface, not for
     # the kernel itself. Raise it deliberately, never to make a stray copy
-    # pass.
-    assert lines < 80_000
+    # pass. 83k: the Claude-Code-style transcript added a deliberate display
+    # layer (tool_display.py and tui/tooltext.py turn tool calls into
+    # "Read(calc.py) / Read 42 lines" lines, ~0.9k) plus the working line,
+    # queue and MCP scopes in the TUI (~0.8k).
+    assert lines < 83_000

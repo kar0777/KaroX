@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from rich.text import Text
 
@@ -393,7 +393,24 @@ def catalog_items(rows: Sequence[dict[str, Any]], lang: str) -> list[MenuItem]:
     return items
 
 
-def mcp_items(payload: dict[str, Any], lang: str) -> list[MenuItem]:
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def mcp_items(
+    payload: dict[str, Any],
+    lang: str,
+    *,
+    pending: Mapping[str, str] | None = None,
+) -> list[MenuItem]:
+    """The MCP picker: each server with its transport, session state and reach.
+
+    ``pending`` holds the servers chosen before this window's session exists;
+    they are attached by the first run, so the row says so instead of "not in
+    this session".
+    """
+
+    waiting = dict(pending or {})
     items: list[MenuItem] = []
     for entry in payload.get("servers", []) if isinstance(payload, dict) else []:
         if not isinstance(entry, dict):
@@ -401,16 +418,25 @@ def mcp_items(payload: dict[str, Any], lang: str) -> list[MenuItem]:
         server = str(entry.get("server_id") or "")
         if not server:
             continue
-        liveness = entry.get("liveness") or {}
-        selection = entry.get("selection") or {}
-        counts = selection.get("counts") if isinstance(selection, dict) else {}
-        allowed = counts.get("allowed", 0) if isinstance(counts, dict) else 0
-        details = [
-            str(entry.get("transport") or "?"),
-            str((selection or {}).get("state") or "not_selected"),
-            str((liveness or {}).get("state") or "not_probed"),
-            tr(lang, "mcp.tools", count=allowed),
-        ]
+        liveness = _mapping(entry.get("liveness"))
+        selection = _mapping(entry.get("selection"))
+        allowed = _mapping(selection.get("counts")).get("allowed", 0)
+        state = str(selection.get("state") or "not_selected")
+        if server in waiting:
+            session_word = tr(lang, "mcp.state.pending")
+        elif state == "current":
+            session_word = tr(lang, "mcp.state.current", count=allowed)
+        elif state == "stale":
+            session_word = tr(lang, "mcp.state.stale")
+        else:
+            session_word = tr(lang, "mcp.state.not_selected")
+        live = str(liveness.get("state") or "not_probed")
+        live_key = f"mcp.live.{live}"
+        live_word = tr(lang, live_key)
+        details = [str(entry.get("transport") or "?"), session_word]
+        details.append(live if live_word == live_key else live_word)
+        if _mapping(entry.get("credential")).get("state") == "missing":
+            details.append(tr(lang, "mcp.cred.missing"))
         items.append(MenuItem(server, server, " · ".join(details)))
     items.append(MenuItem(ADD_SERVER_KEY, tr(lang, "mcp.add_item"), tr(lang, "mcp.add_detail")))
     return items

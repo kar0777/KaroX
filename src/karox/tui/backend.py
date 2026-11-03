@@ -39,6 +39,9 @@ class AgentRequest:
     verification: tuple[tuple[str, ...], ...] = ()
     effort: str | None = None
     mode: str | None = None
+    #: MCP servers to attach to the session before the run: (server, scope)
+    #: with scope "all" or "read" -- the user's choice in /mcp.
+    mcp_servers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -130,6 +133,8 @@ class CLIBackend:
             arguments.extend(
                 ("--verification-command", json.dumps(list(command), ensure_ascii=False))
             )
+        for server_id, scope in request.mcp_servers:
+            arguments.extend(("--mcp-server", f"{server_id}={scope}"))
         with self._lock:
             self._stopping = False
             try:
@@ -406,7 +411,9 @@ class CLIBackend:
         )
         return payload if isinstance(payload, dict) else {}
 
-    def mcp_select_all(self, server_id: str, session_id: str) -> dict[str, Any]:
+    def mcp_tools(self, server_id: str) -> list[dict[str, Any]]:
+        """The server's tools as discovered right now (``mcp server inspect``)."""
+
         discovery = self.call(
             "mcp",
             "server",
@@ -417,16 +424,19 @@ class CLIBackend:
             "--json",
             timeout=90.0,
         )
-        tools: list[tuple[str, str]] = []
-        if isinstance(discovery, dict):
-            tools = [
-                (
-                    str(item.get("remote_name")),
-                    "allow" if item.get("read_only") is True else "ask",
-                )
-                for item in discovery.get("tools", [])
-                if isinstance(item, dict) and item.get("remote_name")
-            ]
+        tools = discovery.get("tools") if isinstance(discovery, dict) else None
+        return [item for item in tools or [] if isinstance(item, dict) and item.get("remote_name")]
+
+    def mcp_select(self, server_id: str, session_id: str, scope: str = "all") -> dict[str, Any]:
+        """Store the user's choice: every tool allowed, or only read-only ones.
+
+        The choice made in /mcp is the explicit approval, so chosen tools are
+        ``allow`` and the rest ``deny``. ``ask`` is never written: nothing can
+        answer it during a run, so it would only hide the tool from the agent.
+        """
+
+        if scope not in {"all", "read"}:
+            raise BackendError(f"unknown MCP scope: {scope}")
         arguments = [
             "mcp",
             "session",
@@ -438,8 +448,11 @@ class CLIBackend:
             str(self.repository),
             "--json",
         ]
-        for name, permission in tools:
-            arguments.extend(("--permission", f"{name}={permission}"))
+        for item in self.mcp_tools(server_id):
+            allowed = scope == "all" or item.get("read_only") is True
+            arguments.extend(
+                ("--permission", f"{item['remote_name']}={'allow' if allowed else 'deny'}")
+            )
         payload = self.call(*arguments, timeout=120.0)
         return payload if isinstance(payload, dict) else {}
 

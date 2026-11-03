@@ -341,3 +341,68 @@ def test_cli_server_add_rejects_persisted_secret_material(cli_env: Any) -> None:
     assert payload is None
     assert "secret-like" in error
     assert not (cli_env.config / "vnext" / "mcp-servers.json").exists()
+
+def test_agent_run_mcp_server_flag_stores_the_chosen_scope(cli_env: Any) -> None:
+    """``agent run --mcp-server`` is how the TUI attaches a server to a new session.
+
+    The flag is the explicit approval: the chosen tools become ``allow`` and the
+    rest ``deny`` -- never ``ask``, which would hide them from the agent.
+    """
+
+    from karox import cli
+    from karox.paths import session_dir
+
+    code, _payload, error = cli_json(
+        [
+            "session",
+            "create",
+            "--repository",
+            str(cli_env.repo),
+            "--task",
+            "use the echo server",
+            "--id",
+            "s1",
+            "--json",
+        ]
+    )
+    assert code == 0, error
+    code, _payload, error = _add_server(
+        cli_env,
+        environment=(
+            f"KAROX_MCP_CALL_LOG={cli_env.calls}",
+            f"KAROX_MCP_PID_FILE={cli_env.pid_file}",
+        ),
+    )
+    assert code == 0, error
+    store = SessionStore(session_dir())
+    repository = cli_env.repo.resolve()
+    record = cli._attach_mcp_servers(store, store.load("s1"), repository, ["echo"])
+    tools = record.mcp_servers[0]["tools"]
+    assert tools["echo"]["permission"] == "allow"
+    assert {tools[name]["permission"] for name in ("slow_echo", "write_note", "reflect_secret")} == {
+        "deny"
+    }
+    _binding, descriptors = cli._selected_mcp_runtime(record, repository)
+    assert [item.name for item in descriptors] == ["mcp.echo.echo"]
+
+    record = cli._attach_mcp_servers(store, record, repository, ["echo=all"])
+    assert len(record.mcp_servers) == 1
+    _binding, descriptors = cli._selected_mcp_runtime(record, repository)
+    assert sorted(item.name for item in descriptors) == [
+        "mcp.echo.echo",
+        "mcp.echo.reflect_secret",
+        "mcp.echo.slow_echo",
+        "mcp.echo.write_note",
+    ]
+
+
+def test_cli_error_result_carries_the_server_text(cli_env: Any) -> None:
+    _prepare(cli_env)
+    code, _payload, error = _call(
+        cli_env,
+        MUTATING_TOOL,
+        {"name": "boom", "content": "c"},
+        idempotency_key="boom-once",
+    )
+    assert code != 0
+    assert "note storage failed" in error

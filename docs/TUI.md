@@ -26,63 +26,94 @@ prints it.
 ## Layout
 
 ```text
-◆ KaroX
-  proj · main
-  wandb/deepseek-ai/DeepSeek-V3.1
-  session tui-1762190000-3fa2c1
-  detected checks: python -m pytest -q · enable with /verify <command>
+╭───────────────────────────────────────────────────────────────╮
+│ ◆ Welcome to KaroX                                            │
+│                                                               │
+│   /help for help · /model to pick a model · /connect …        │
+│                                                               │
+│   cwd: ~/proj (main)                                          │
+│   model: wandb/deepseek-ai/DeepSeek-V3.1                      │
+│   tip: /verify python -m pytest -q to check every change …    │
+╰───────────────────────────────────────────────────────────────╯
 
-› fix the failing test in calc.py
-  ◇ reasoning · 1,234 chars
-  I'll read calc.py first.
-  ✓ repo.read_file  0.05s  read 40 lines
-  ✎ repo.edit_file  running…
-  ✓ checks.run  2.31s  exit 0
-  Fixed the sign in add(); the suite passes.
-✓ done · verified · 4 steps · files: 1 · checks: 1/1 · tokens: 18.2k · cost $0.0031 · 35.3s
-  changed: calc.py
+> fix the failing test in calc.py
 
-› /model
-  ┌ Model ─────────────────────────────────────────────────────┐   ← inline list,
-  ● wandb/deepseek-ai/DeepSeek-V3.1  current · ctx 128.0k · $0.55/$1.65 per 1M
-    wandb/Qwen/Qwen3-Coder-480B      ctx 262.1k · $1/$1.5 per 1M
-  ↑↓ choose · Enter confirm · Esc cancel
-╭──────────────────────────────────────────────────────────────╮
-│ Describe a task…   / commands · Ctrl+J newline               │
-╰──────────────────────────────────────────────────────────────╯
-  wandb/deepseek-ai/DeepSeek-V3.1 · 18.2k tok · proj        idle · saved 11-03 14:22
+● Read(calc.py)
+  ⎿  Read 42 lines
+
+● Search(divide( in tests/)
+  ⎿  Found 3 matches in 2 files
+
+● The bug is in divide: integer division and no zero check.
+
+● Plan
+  ⎿  ☒ Find why the tests fail
+     ■ Fix divide in calc.py
+     □ Run pytest
+
+● Update(calc.py)
+  ⎿  Updated: +3 −1
+      11 -     return a // b
+      11 +     if b == 0:
+      12 +         raise ZeroDivisionError("b must not be zero")
+      13 +     return a / b
+     … +1 line · ctrl+o to expand
+
+● Tests(tests/test_calc.py)
+
+● ● ● ● ●  Running tests tests/test_calc.py… (2s · 2.1k tokens · esc to interrupt)
+  ⎿ Step 2 of 3: Fix divide in calc.py
+  › Queued: then add tests for pow
+╭───────────────────────────────────────────────────────────────╮
+│ > Describe a task…                                            │
+╰───────────────────────────────────────────────────────────────╯
+  ? for shortcuts                    wandb/deepseek-ai/DeepSeek-V3.1 · 2.1k tok
 ```
 
-- The answer of one turn is a sequence of text stretches interleaved with tool
-  lines in the order they happened: a new model step, a tool call or a context
-  compaction closes the current stretch, so text written after a tool appears
-  after it instead of being glued to the text before it. The report's final
-  message is shown only when nothing streamed.
-- A tool line runs behind its category icon (`○` read, `✎` edit, `≡` test,
-  `⬢` MCP, `★` skill, `▤` plan, `◎` web, `⊙` inspect) and switches to `✓`/`✗`
-  on finish. A click expands it in place with its unclipped observation; a
-  second click folds it.
+- The transcript reads like Claude Code: every model step and tool call is
+  one `●` line in the order it happened. A tool line is `Name(what)` —
+  `Read(calc.py)`, `Search(divide( in tests/)`, `Run(make lint)`,
+  `github · list_issues (MCP)(repo: …)` — with the result hung under it on a
+  `⎿` line in plain words ("Read 42 lines", "Tests passed · 3s", "Exit code
+  2"), never raw `key=value` text. An edit shows its diff with line numbers, a
+  command or check shows the last lines it printed, an MCP call shows its text
+  content; each is folded to a few rows and `ctrl+o` expands every tool line
+  (and adds a dim row with the call id and the raw summary for cross-checking
+  the session log). A click expands one line. A running tool has a dim bullet;
+  one cut short by a stop says "Interrupted".
+- While the agent works, KaroX's five pulsing dots sit right above the
+  composer with what it is doing now in words ("Reading calc.py…", "Running
+  tests …", "Thinking…", "Writing…"), the elapsed time, the tokens so far and
+  how to interrupt. Under it: the plan step it is on ("Step 2 of 3: …"), a
+  model-call retry when one happens, and tasks typed while it runs (Enter
+  queues them; they start one after another when the run ends).
+- Reasoning is never mixed into the answer: a dim `∴ Thought for 4s ·
+  ctrl+r to show` line stands for it, and `ctrl+r` prints it.
 - A finished run adds one compact result line: outcome, steps, files, checks,
   tokens, cost (when the model is priced), elapsed time; the reason, unmet
   requirements, the failure map and the changed files follow on their own
-  lines only when there are any.
-- The status line keeps the model as the primary fact at every width; tokens,
-  the context note (only near the window limit), mode and effort (only when
-  not the default), repository and branch follow and drop whole, least
-  important first, when they no longer fit. The run state sits on the right:
-  `idle · saved <time>`, `working · step 3 · 12s · ✓1/✗0`, `stopping…`.
+  lines only when there are any. Harness warnings (a repair prompt, the final
+  checks, a restored regression, a refused command) become one readable
+  notice each.
+- The footer has a hint on the left (`? for shortcuts`, or the mode when it
+  is not `build`) and the model, the tokens and — only near the window limit
+  — the context share on the right. There is no idle/running word: the dots
+  are the running state.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| Enter | send the task; in a list, run or choose the highlighted row |
+| Enter | send the task (queue it while the agent runs); in a list, run or choose the highlighted row |
 | `/` | open the command list (typing filters it) |
+| `?` | in an empty composer, show or hide the shortcut list |
 | Tab | in the command list, complete the command and keep typing its argument |
 | ↑ / ↓ | move in a list; otherwise recall submitted lines (at the document edges) |
-| Esc | close the list or the key prompt; otherwise stop the running agent |
+| Esc | close the list, the shortcuts or the key prompt; otherwise interrupt the agent (queued tasks return to the composer) |
+| Shift+Tab | cycle the mode: build → plan → ideate |
 | Ctrl+J | insert a newline |
 | PageUp / PageDown | scroll the transcript (move by a page in a list) |
+| Ctrl+O | expand or fold every tool line (verbose) |
 | Ctrl+N | new session |
 | Ctrl+R | print the last answer's reasoning |
 | Ctrl+L | clear the screen |
@@ -153,7 +184,7 @@ model id and key by hand (`provider setup`). `/connect ID` skips the list.
    ```text
    python -m karox.cli agent run --repository R --session-id S --task T \
        --stream-json [--continue-task] [--effort-level L] [--mode M] \
-       [--verification-command JSON]...
+       [--verification-command JSON]... [--mcp-server ID=read|all]...
    ```
 
 3. It reads stdout line by line. Each line is one JSON document:
@@ -166,8 +197,12 @@ model id and key by hand (`provider setup`). `/connect ID` skips the list.
    add one tool line that is updated when the matching `tool_finished`
    arrives; `test_started`/`test_finished` drive the live check tally;
    `step_finished` usage drives the token counter and the context note;
-   `phase_changed`, warnings and file events surface on the activity line;
-   errors and compaction add a notice.
+   `phase_changed` and `provider_retry` drive the working line; warnings
+   about a tool call land on its tool line, other warnings, errors and
+   compaction add a notice. `tool_started` carries the call's `detail` (the
+   path, pattern, command or MCP arguments, bounded and redacted) and
+   `tool_finished` carries its `summary` plus a short preview (diff hunks,
+   output tail or MCP text) in `detail`.
 5. After the run the client re-reads `session show --json` in the background:
    the durable record is the checkpoint state, and the status line shows when
    it was saved.
@@ -210,14 +245,28 @@ Private reasoning is counted on a dim line, never shown as the answer.
 
 ## MCP
 
-`/mcp` lists configured servers with transport, selection, liveness and the
-number of allowed tools. Choosing a server offers three actions: probe the
-connection, allow its tools for this session (read-only tools become `allow`,
-mutating tools `ask`; exact per-tool decisions stay in `karox mcp session
-select`) and remove it, which asks for confirmation in the same list. The last
-row — or `/mcp add` — opens the form for a stdio command or a Streamable HTTP
-URL with environment, headers, credential reference, OAuth, read-only tools
-and timeout.
+`/mcp` lists configured servers with transport, whether the server is in this
+session (and how many tools are allowed), liveness and a missing secret.
+Choosing a server offers:
+
+- **Probe the connection** — `mcp server inspect`: reachable or the server's
+  own error, and the tool count.
+- **Use in this session: all tools** — every tool the server lists becomes
+  `allow`.
+- **Use in this session: read-only tools** — tools marked read-only become
+  `allow`, the rest `deny`.
+- **Remove from this session** / **Remove the server** (asks in the same
+  list).
+
+The TUI never writes `ask`: nobody would be there to answer it, so a
+mutating tool is either allowed or denied up front, and exact per-tool
+decisions stay in `karox mcp session select`. Before the first task of a
+window there is no session yet; the choice is remembered ("joins with the
+first task") and sent with that task as `--mcp-server ID=all|read`, which
+selects the server before the run starts. The last row — or `/mcp add` —
+opens the form for a stdio command or a Streamable HTTP URL with
+environment, headers, credential reference, OAuth, read-only tools and
+timeout.
 
 ## Testing
 
