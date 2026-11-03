@@ -467,13 +467,14 @@ class KaroxApp(App[int]):
         current: str | None = None,
         query: str = "",
         context: dict[str, Any] | None = None,
+        hint: str | None = None,
     ) -> None:
         self._menu_context = dict(context or {})
         self.menu.open(
             kind,
             title,
             items,
-            hint=tr(self.language, "menu.picker_hint"),
+            hint=hint or tr(self.language, "menu.picker_hint"),
             empty=tr(self.language, "menu.empty"),
             current=current,
             query=query,
@@ -757,7 +758,9 @@ class KaroxApp(App[int]):
             for index, command in enumerate(self._detected_verification)
         ]
         items.append(MenuItem("custom", tr(lang, "verify.custom"), tr(lang, "verify.custom_detail")))
-        self._open_picker("verify", tr(lang, "verify.title"), items)
+        self._open_picker(
+            "verify", tr(lang, "verify.title"), items, hint=tr(lang, "verify.hint")
+        )
 
     def _verify_chosen(self, key: str, context: dict[str, Any]) -> None:
         del context

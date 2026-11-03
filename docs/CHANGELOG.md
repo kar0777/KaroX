@@ -25,7 +25,7 @@
   Reasoning is a dim "Thought for 4s" line; harness warnings become readable
   notices; result counts are pluralised ("3 steps · 1 file").
 
-### Fixed — a first task in the TUI no longer fails for want of a check
+### Fixed — TUI: a first task asks for a check; the view keeps following
 
 - The runtime starts an agent only with a user-approved verification
   command, and the TUI (rightly) never approves a detected one by itself, so
@@ -35,6 +35,11 @@
   picking one is the approval and the task starts; Esc returns the task to
   the composer. A `/command` pasted while a picker is open now runs instead
   of being taken as filter text.
+- The transcript kept following the end only when a line was added, so a
+  streaming answer or a tool line gaining its preview pushed the end out of
+  view, and from then on the view stayed behind (the finished answer and the
+  result line were below the screen). The view now stays at the end through
+  growth too, until you scroll up; scrolling back to the end resumes it.
 
 ### Changed — MCP from the TUI works without a prior run
 

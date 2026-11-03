@@ -112,7 +112,7 @@ prints it.
 | Esc | close the list, the shortcuts or the key prompt; otherwise interrupt the agent (queued tasks return to the composer) |
 | Shift+Tab | cycle the mode: build → plan → ideate |
 | Ctrl+J | insert a newline |
-| PageUp / PageDown | scroll the transcript (move by a page in a list) |
+| PageUp / PageDown | scroll the transcript (move by a page in a list); scrolled up, the view stays put until you scroll back to the end |
 | Ctrl+O | expand or fold every tool line (verbose) |
 | Ctrl+N | new session |
 | Ctrl+R | print the last answer's reasoning |
@@ -122,10 +122,15 @@ prints it.
 
 The keyboard never leaves the composer: while a list is open, the composer
 forwards ↑/↓, PageUp/PageDown, Tab, Enter and Esc to it and what you type
-filters it. Enter in a picker never sends its filter text as a task. A
-recalled `/command` does not pop the list open, so ↑ keeps walking the
-history. The mouse scrolls the transcript, clicks list rows and expands tool
-lines.
+filters it. Enter in a picker never sends its filter text as a task (a
+pasted `/command` still runs). A recalled `/command` does not pop the list
+open, so ↑ keeps walking the history. The mouse scrolls the transcript,
+clicks list rows and expands tool lines.
+
+The transcript follows its end — new lines and lines that grow while shown
+(the streaming answer, a tool line gaining its preview) — as long as you are
+at the end. Scrolling up with the wheel or PageUp stops that; scrolling back
+to the end resumes it. A short transcript starts at the top.
 
 ## Slash commands
 

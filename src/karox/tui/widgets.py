@@ -378,7 +378,17 @@ class WorkingLine(Vertical):
 
 
 class ChatLog(VerticalScroll):
-    """Messages are only auto-scrolled while the reader is already at the end.
+    """The transcript follows its end only while the reader is at the end.
+
+    Once the transcript overflows the view it is anchored (Textual keeps an
+    anchored view at the bottom through every layout), so it follows new lines
+    *and* lines that grow while shown: a streaming answer, a tool line gaining
+    its preview. Scrolling up with the wheel or PageUp releases the anchor;
+    scrolling back to the end restores it. Scrolling only when a widget was
+    mounted let a growing line push the end out of view, after which the view
+    stopped following for good. Until it overflows it is not anchored: short
+    anchored content would sit at the bottom, and the welcome box belongs at
+    the top.
 
     It never takes the focus: the keyboard belongs to the composer, which
     forwards PageUp/PageDown here, and the mouse wheel scrolls it directly.
@@ -386,21 +396,22 @@ class ChatLog(VerticalScroll):
 
     can_focus = False
 
+    def watch_virtual_size(self) -> None:
+        # The content changed size; decide once the layout has settled.
+        if not self.is_anchored:
+            self.call_after_refresh(self._anchor_if_overflowing)
+
+    def _anchor_if_overflowing(self) -> None:
+        if not self.is_anchored and self.max_scroll_y > 0:
+            self.anchor()
+
     def add(self, widget: Any) -> Any:
-        at_end = self._at_end()
         self.mount(widget)
-        if at_end:
-            self.call_after_refresh(self.scroll_end, animate=False)
         return widget
 
     def clear_messages(self) -> None:
+        self.anchor(False)
         self.remove_children()
-
-    def _at_end(self) -> bool:
-        try:
-            return self.scroll_y >= self.max_scroll_y - 1
-        except Exception:
-            return True
 
 
 class UserMessage(Static):

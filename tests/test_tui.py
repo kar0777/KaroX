@@ -1118,6 +1118,8 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(cards), 1)
             welcome = str(cards[0].render())
             self.assertIn("demo/demo-1", welcome)
+            # A short transcript starts at the top, not anchored to the bottom.
+            self.assertLessEqual(cards[0].region.y - app.query_one("#chat").region.y, 1)
             self.assertIn("/verify", welcome)
             self.assertIn("demo/demo-1", app.query_one(StatusLine).current_text())
 
@@ -1158,6 +1160,9 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.menu.kind, "verify")
             self.assertTrue(app.menu.active)
             self.assertEqual(self.chat_widgets(app, UserMessage), [])
+            hint = str(app.query_one("#menu-hint", Static).render())
+            self.assertIn("start the task", hint)
+            self.assertIn("give the task back", hint)
             await pilot.press("enter")
             await self.settle(pilot, app)
             self.assertFalse(app.menu.active)
@@ -1826,6 +1831,93 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("down")
             await pilot.pause()
             self.assertEqual(composer.text, "/status")
+
+    def growing_script(self) -> list[Event]:
+        """A run whose lines grow after they are shown: streamed text, a preview."""
+
+        diff = "\n".join(f"@@ -{n} +{n} @@\n-old {n}\n+new {n}" for n in range(1, 9))
+        events = [Event(kind="step_started", step=1)]
+        events += [
+            Event(kind="text_delta", step=1, text=f"thinking line {n}\n\n") for n in range(12)
+        ]
+        events += [
+            Event(kind="tool_started", step=1, tool="repo.edit_file", call_id="c-edit"),
+            Event(
+                kind="tool_finished",
+                step=1,
+                tool="repo.edit_file",
+                call_id="c-edit",
+                ok=True,
+                summary="path=src/app.py",
+                detail=diff,
+                duration_seconds=0.2,
+            ),
+        ]
+        events += [
+            Event(kind="text_delta", step=1, text=f"answer line {n}\n\n") for n in range(12)
+        ]
+        events.append(Event(kind="finished", step=1, status="verified", reason="change"))
+        return events
+
+    async def test_the_transcript_follows_lines_that_grow_while_shown(self) -> None:
+        """The view stays at the end as the answer streams and tool lines grow.
+
+        ChatLog used to scroll only when a widget was mounted, so a streaming
+        answer or a tool line gaining its preview pushed the end below the view
+        and every later line was then treated as "the reader scrolled up".
+        """
+        backend = _FakeBackend(self.repository, script=self.growing_script())
+        app = self.app(backend)
+        async with app.run_test(size=(80, 16)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "grow")
+            await self.settle(pilot, app)
+            await pilot.pause(0.1)
+            chat = app.query_one("#chat")
+            self.assertGreater(chat.max_scroll_y, 0)
+            self.assertEqual(chat.scroll_y, chat.max_scroll_y)
+
+    async def test_a_reader_who_scrolled_up_is_not_pulled_down(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(90, 20)) as pilot:
+            await self.settle(pilot, app)
+            for index in range(40):
+                app._notice(f"line {index}", "info")
+            await pilot.pause()
+            chat = app.query_one("#chat")
+            self.assertEqual(chat.scroll_y, chat.max_scroll_y)
+            app.query_one("#composer").focus()
+            await pilot.press("pageup")
+            await pilot.pause()
+            reading = chat.scroll_y
+            self.assertLess(reading, chat.max_scroll_y)
+            for index in range(10):
+                app._notice(f"later {index}", "info")
+            await pilot.pause()
+            self.assertEqual(chat.scroll_y, reading)
+            # Back at the end, the view follows again.
+            chat.scroll_end(animate=False)
+            await pilot.pause()
+            app._notice("newest", "info")
+            await pilot.pause()
+            await pilot.pause()
+            self.assertEqual(chat.scroll_y, chat.max_scroll_y)
+
+    async def test_after_clear_a_short_transcript_starts_at_the_top_again(self) -> None:
+        app = self.app()
+        async with app.run_test(size=(90, 20)) as pilot:
+            await self.settle(pilot, app)
+            for index in range(40):
+                app._notice(f"line {index}", "info")
+            await pilot.pause()
+            chat = app.query_one("#chat")
+            self.assertTrue(chat.is_anchored)
+            await self.submit(pilot, app, "/clear")
+            app._notice("fresh", "info")
+            await pilot.pause()
+            await pilot.pause()
+            first = list(chat.children)[0]
+            self.assertLessEqual(first.region.y - chat.region.y, 1)
 
     async def test_pageup_scrolls_the_transcript_from_the_composer(self) -> None:
         app = self.app()
