@@ -17,10 +17,13 @@ different-looking value.
 
 from __future__ import annotations
 
+import io
 import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from rich.cells import cell_len
+from rich.console import Console
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -151,6 +154,95 @@ def header_segments(
 
 #: The facts on the footer are the classic header's facts.
 status_segments = header_segments
+
+
+# Glyphs a transcript line starts with before its text: the step and tool
+# bullet, the result elbow, notice icons, the prompt, plan checkboxes.
+_HANG_MARKERS = frozenset("●⎿✓✗!>∴◆☐☒◼")
+_WRAP_CONSOLE: Console | None = None
+
+
+def hang_indent(line: str) -> int:
+    """Where a wrapped continuation of ``line`` starts: after its markers.
+
+    ``  ⎿  Read 40 lines`` continues under ``Read``, ``> fix it`` under
+    ``fix``, a preview row under its own first character. A marker glued to
+    the text (``>>>``) is text, not a marker.
+    """
+
+    index = len(line) - len(line.lstrip(" "))
+    while index < len(line) and line[index] in _HANG_MARKERS:
+        end = index + 1
+        while end < len(line) and line[end] == " ":
+            end += 1
+        if end == index + 1 or end >= len(line):
+            break
+        index = end
+    return index
+
+
+def hang_text(text: Text, width: int) -> Text:
+    """Wrap ``text`` at ``width`` cells, each continuation under its line's text.
+
+    Textual wraps a long line back to column 0, under the bullet, which reads
+    as a new line of the transcript; a terminal agent hangs it under the text
+    instead. Lines that fit are kept as they are, so a narrow-enough text
+    comes back unchanged.
+    """
+
+    global _WRAP_CONSOLE
+    if width < 16 or text.cell_len <= width and "\n" not in text.plain:
+        return text
+    lines = text.split("\n", allow_blank=True)
+    if all(line.cell_len <= width for line in lines):
+        return text
+    if _WRAP_CONSOLE is None:
+        _WRAP_CONSOLE = Console(
+            file=io.StringIO(), width=width, color_system=None, legacy_windows=False
+        )
+    out: list[Text] = []
+    for line in lines:
+        if line.cell_len <= width:
+            out.append(line)
+            continue
+        index = hang_indent(line.plain)
+        indent = cell_len(line.plain[:index])
+        if indent > width // 2:
+            index, indent = 0, 0
+        pieces = line[index:].wrap(_WRAP_CONSOLE, width - indent)
+        for number, piece in enumerate(pieces):
+            lead = line[:index] if number == 0 else Text(" " * indent)
+            out.append(Text.assemble(lead, piece))
+    return Text("\n").join(out)
+
+
+class HangingStatic(Static):
+    """A transcript line whose wrapped rows stay under its text.
+
+    The logical text is kept and wrapped again for the width the widget has
+    now -- on mount, on every resize, on every change of the text.
+    """
+
+    def __init__(self, content: Text, **kwargs: Any) -> None:
+        self._logical = content
+        self._hung_width = 0
+        super().__init__(content, **kwargs)
+
+    def set_text(self, content: Text) -> None:
+        self._logical = content
+        self._hang()
+
+    def logical_text(self) -> Text:
+        return self._logical
+
+    def _hang(self) -> None:
+        width = self.size.width
+        self._hung_width = width
+        self.update(hang_text(self._logical, width) if width > 0 else self._logical)
+
+    def on_resize(self, event: events.Resize) -> None:
+        if event.size.width != self._hung_width:
+            self._hang()
 
 
 def _preview_rows(preview: str, expanded: bool, lang: str) -> list[tuple[str, str]]:
@@ -414,7 +506,7 @@ class ChatLog(VerticalScroll):
         self.remove_children()
 
 
-class UserMessage(Static):
+class UserMessage(HangingStatic):
     """A submitted line behind ``>``; a ``/command`` is echoed dim, like a shell."""
 
     def __init__(self, text: str, *, command: bool = False) -> None:
@@ -592,7 +684,7 @@ class AssistantMessage(Vertical):
         )
 
 
-class ToolCard(Static):
+class ToolCard(HangingStatic):
     """One tool call: ``● Title(target)`` and its ``⎿`` result under it.
 
     The bullet blinks while the call runs and turns green or red on finish. A
@@ -642,7 +734,7 @@ class ToolCard(Static):
                 self._blinker = None
             return
         self._blink_on = not self._blink_on
-        self.update(self._tool_text())
+        self.set_text(self._tool_text())
 
     @property
     def ok(self) -> bool | None:
@@ -658,13 +750,13 @@ class ToolCard(Static):
         if self._blinker is not None:
             self._blinker.stop()
             self._blinker = None
-        self.update(self._tool_text())
+        self.set_text(self._tool_text())
 
     def note_error(self, message: str) -> None:
         """The refusal or failure text of this call, shown on its ``⎿`` line."""
 
         self._error = message
-        self.update(self._tool_text())
+        self.set_text(self._tool_text())
 
     def interrupt(self) -> None:
         """The run ended before this call reported back: stop the blinking."""
@@ -677,12 +769,12 @@ class ToolCard(Static):
             self._blinker.stop()
             self._blinker = None
         self._blink_on = False
-        self.update(self._tool_text())
+        self.set_text(self._tool_text())
 
     def set_expanded(self, value: bool) -> None:
         if self.expanded != value:
             self.expanded = value
-            self.update(self._tool_text())
+            self.set_text(self._tool_text())
 
     def toggle(self) -> None:
         self.set_expanded(not self.expanded)
@@ -709,7 +801,7 @@ class ToolCard(Static):
         )
 
 
-class Notice(Static):
+class Notice(HangingStatic):
     """A one-off fact from KaroX itself, hung under the turn, never boxed."""
 
     def __init__(self, text: str, level: str = "info") -> None:

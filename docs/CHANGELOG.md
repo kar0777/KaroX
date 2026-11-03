@@ -40,6 +40,10 @@
   view, and from then on the view stayed behind (the finished answer and the
   result line were below the screen). The view now stays at the end through
   growth too, until you scroll up; scrolling back to the end resumes it.
+- A long line -- an MCP result, a command's output, the prompt, a notice --
+  wrapped back to column 0, under the bullet, where it read as a new line of
+  the transcript. Wrapped rows now stay under their text (`⎿  …` rows under
+  the result, a prompt under its first word), and wrap again on resize.
 
 ### Fixed — an answer read from a read-only MCP tool is verified
 

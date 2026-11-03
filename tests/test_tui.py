@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rich.text import Text
 from textual.widgets import Static
 
 from karox import cli
@@ -43,10 +44,47 @@ from karox.tui.widgets import (
     ToolCard,
     UserMessage,
     WelcomeCard,
+    hang_indent,
+    hang_text,
     header_segments,
     tool_card_text,
     welcome_text,
 )
+
+def test_hang_indent_continues_under_the_text_after_the_markers() -> None:
+    assert hang_indent("● Read(src/app.py)") == 2
+    assert hang_indent("  ⎿  Read 40 lines") == 5
+    assert hang_indent("     a preview row") == 5
+    assert hang_indent("  ⎿  ☐ write the test") == 7
+    assert hang_indent("> fix the bug") == 2
+    assert hang_indent(">>> print(1)") == 0
+    assert hang_indent("plain text") == 0
+
+
+def test_hang_text_keeps_wrapped_rows_under_their_text() -> None:
+    text = Text.assemble(
+        ("● ", "green"),
+        ("tracker · get_issue", "bold"),
+        ("\n  ⎿  ", "dim"),
+        ("Done", ""),
+        ("\n     ", "dim"),
+        ("calc.add(2, 3) returns -1: add() subtracts b instead of adding it.", ""),
+    )
+    hung = hang_text(text, 40)
+    rows = hung.plain.splitlines()
+    assert rows[:2] == ["● tracker · get_issue", "  ⎿  Done"]
+    assert len(rows) > 3, rows
+    assert all(len(row) <= 40 for row in rows)
+    # Every continuation of the preview starts under the preview, not at 0.
+    assert all(row.startswith("     ") and row[5] != " " for row in rows[2:])
+    assert " ".join(row.strip() for row in rows[2:]) == (
+        "calc.add(2, 3) returns -1: add() subtracts b instead of adding it."
+    )
+    # Styles survive the wrap.
+    assert any(span.style == "bold" for span in hung.spans)
+    # A text that fits comes back as it is.
+    assert hang_text(text, 200) is text
+
 
 #: The check AppTests' user approved before the test starts (see ``app()``).
 APPROVED_CHECK = ("python", "-m", "pytest", "-q")
@@ -2124,6 +2162,41 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(
                 any(notice.level == "error" for notice in self.chat_widgets(app, Notice))
             )
+
+    async def test_a_long_tool_preview_wraps_under_itself(self) -> None:
+        body = "word " * 40
+        script = [
+            Event(kind="step_started", step=1),
+            Event(kind="tool_started", step=1, tool="repo.read_file", call_id="c", detail="a.txt"),
+            Event(
+                kind="tool_finished",
+                step=1,
+                tool="repo.read_file",
+                call_id="c",
+                ok=True,
+                detail=body.strip(),
+            ),
+        ]
+        app = self.app(_FakeBackend(self.repository, script=script))
+        async with app.run_test(size=(60, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.submit(pilot, app, "read it " + "please " * 12)
+            card = self.chat_widgets(app, ToolCard)[0]
+            rows = str(card.render()).splitlines()
+            preview = [row for row in rows if "word" in row]
+            self.assertGreater(len(preview), 2, rows)
+            self.assertTrue(all(row.startswith("     word") for row in preview), rows)
+            # The logical text is unchanged; only the rendering is wrapped.
+            self.assertIn(body.strip(), card.logical_text().plain)
+            prompt = self.chat_widgets(app, UserMessage)[-1]
+            prompt_rows = str(prompt.render()).splitlines()
+            self.assertGreater(len(prompt_rows), 1)
+            self.assertTrue(all(row.startswith("  ") for row in prompt_rows[1:]), prompt_rows)
+            await pilot.resize_terminal(120, 30)
+            await pilot.pause()
+            await pilot.pause()
+            wide = [row for row in str(card.render()).splitlines() if "word" in row]
+            self.assertLess(len(wide), len(preview))
 
     async def test_retries_stay_on_the_working_line_and_warnings_read_as_words(self) -> None:
         script = [
