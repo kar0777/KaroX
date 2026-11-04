@@ -22,6 +22,7 @@ from .core_process import (
     WILDCARD_ARGUMENT,
     ProcessToolsMixin,
     is_plain_argument,
+    probe_interpreters,
 )
 from .core_search import SearchToolsMixin
 from .core_types import (
@@ -149,6 +150,7 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
         risk: Optional[RiskEngine] = None,
         events: Optional[EventBus] = None,
         session_repository_validator: Optional[Callable[[SessionRecord, Path], None]] = None,
+        allow_probes: bool = False,
     ) -> None:
         self.repository = repository.expanduser().resolve(strict=True)
         if not self.repository.is_dir():
@@ -188,6 +190,10 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
             if self._verification_rules is None
             else tuple(rule.as_tuple() for rule in self._verification_rules)
         )
+        # Reproduction probes: the approved Python interpreter may also run a
+        # snippet, a test module or a repository script through checks.run.
+        # They are never verification evidence (core_process.probe_python_command).
+        self._allow_probes = bool(allow_probes)
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]
         ] = {
@@ -429,6 +435,13 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
     def verification_command_order(self) -> tuple[tuple[str, ...], ...]:
         """The approved commands in the order the user declared them."""
         return self._verification_command_order
+
+    @property
+    def probe_interpreters(self) -> tuple[str, ...]:
+        """Approved Python interpreters that may run probes; empty when off."""
+        if not self._allow_probes or self._verification_rules is None:
+            return ()
+        return probe_interpreters(self._verification_rules)
 
     def _apply_smart_stop(self, command: CoreCommand) -> None:
         """Run the source-independent risk gate for one command.
@@ -1189,17 +1202,18 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
             ):
                 record.created_files.append(path)
         if command.name == "checks.run":
-            record.checks.append(
-                {
-                    "correlation_id": command.correlation_id,
-                    "ok": result.ok,
-                    "argv": result.data.get("argv", []),
-                    "exit_code": result.data.get("exit_code"),
-                    "timed_out": result.data.get("timed_out", False),
-                    "effective_timeout": result.data.get("effective_timeout"),
-                    "timeout_clamped_by": result.data.get("timeout_clamped_by"),
-                }
-            )
+            entry = {
+                "correlation_id": command.correlation_id,
+                "ok": result.ok,
+                "argv": result.data.get("argv", []),
+                "exit_code": result.data.get("exit_code"),
+                "timed_out": result.data.get("timed_out", False),
+                "effective_timeout": result.data.get("effective_timeout"),
+                "timeout_clamped_by": result.data.get("timeout_clamped_by"),
+            }
+            if result.data.get("probe") is True:
+                entry["probe"] = True
+            record.checks.append(entry)
 
     def _preflight_mutation(
         self,

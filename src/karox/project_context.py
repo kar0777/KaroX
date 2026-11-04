@@ -347,6 +347,7 @@ def discover_project_context(
     recursive_context: str = "off",
     max_file_bytes: int = MAX_FILE_BYTES,
     max_total_bytes: int = MAX_TOTAL_BYTES,
+    probes: Sequence[str] = (),
 ) -> ProjectContext:
     """Collect instruction files and environment facts for one repository."""
     root = repository.expanduser().resolve()
@@ -457,7 +458,10 @@ def discover_project_context(
     return ProjectContext(
         instructions=_render_instructions(read),
         environment=render_environment(
-            root, branch=branch, verification_commands=verification_commands
+            root,
+            branch=branch,
+            verification_commands=verification_commands,
+            probes=probes,
         ),
         project_map=project_map,
         project_map_metadata=project_map_metadata,
@@ -471,6 +475,7 @@ def render_environment(
     *,
     branch: Optional[str] = None,
     verification_commands: Iterable[Sequence[str]] = (),
+    probes: Sequence[str] = (),
 ) -> str:
     """State the facts the agent would otherwise spend tool calls discovering."""
     lines = [
@@ -487,10 +492,18 @@ def render_environment(
             "approved verification commands: "
             + "; ".join(" ".join(item) for item in approved)
         )
-        lines.append(
-            "Only those commands may run as a check. Asking for a different one "
-            "is refused, so choose from this list rather than inventing a command."
-        )
+        if probes:
+            # Probes are described once, in the engine contract; this line
+            # only keeps the two texts from contradicting each other.
+            lines.append(
+                "Only those commands count as verification. Any other command "
+                "is refused except the Python probes the engine contract names."
+            )
+        else:
+            lines.append(
+                "Only those commands may run as a check. Asking for a different one "
+                "is refused, so choose from this list rather than inventing a command."
+            )
         # An entry ending in `*` is a prefix rule, and a model that has not been
         # told so sends the `*` through as a literal argument -- an approved
         # command that always fails, because there is no shell to expand it.

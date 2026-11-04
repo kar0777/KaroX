@@ -1191,6 +1191,8 @@ class CoreToolEnvironment:
             detail = f"exit {exit_code}" if isinstance(exit_code, int) else "finished"
             if data.get("timed_out"):
                 detail = "timed out"
+            if data.get("probe") is True:
+                detail += " · probe (not verification evidence)"
             if core_name == "tests.run":
                 suite = data.get("suite")
                 count = data.get("target_count")

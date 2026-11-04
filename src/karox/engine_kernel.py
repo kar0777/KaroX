@@ -81,6 +81,7 @@ from .agent import (  # noqa: E402
 from .agent_modes import normalize_mode  # noqa: E402
 from .session_analysis import HARNESS_REQUESTED_BY  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
+from .core_process import probe_forms_text  # noqa: E402
 from .models import CoreResult, Origin  # noqa: E402
 from .providers import (  # noqa: E402
     REASONING_EFFORTS,
@@ -779,14 +780,26 @@ class EngineKernel:
                 "native agents require at least one user-approved verification command"
             )
         self.system_prompt = system_prompt + _ENGINE_CONTRACT
+        probes = tuple(getattr(core, "probe_interpreters", ()) or ())
         if approved_checks:
             rendered = json.dumps(
                 [list(item) for item in sorted(approved_checks)], ensure_ascii=False
             )
-            self.system_prompt += (
-                "\nOnly these user-approved checks may be executed and used as "
-                f"verification evidence: {rendered}"
-            )
+            if probes:
+                self.system_prompt += (
+                    "\nOnly these user-approved checks count as verification "
+                    f"evidence: {rendered}"
+                    "\nProbes: checks.run also runs "
+                    + probe_forms_text(probes)
+                    + ". Reproduce a reported bug with a probe before editing and "
+                    "rerun it after the fix; a probe is never verification, so "
+                    "finish on an approved check."
+                )
+            else:
+                self.system_prompt += (
+                    "\nOnly these user-approved checks may be executed and used as "
+                    f"verification evidence: {rendered}"
+                )
             if any(item and item[-1] == "*" for item in approved_checks):
                 self.system_prompt += (
                     '\nAn entry ending in "*" is a prefix: repeat the arguments '

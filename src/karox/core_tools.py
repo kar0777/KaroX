@@ -673,6 +673,11 @@ class ExtendedCoreRuntime(CoreRuntime):
         from .command_jobs import MAX_TIMEOUT_SECONDS, job_timeout
 
         plan = self._prepare_check({"argv": arguments.get("argv")}, MAX_TIMEOUT_SECONDS)
+        if plan.probe:
+            raise InvalidCommand(
+                "checks.start runs only the approved verification commands; run "
+                "a probe with checks.run"
+            )
         if plan.inline_code is not None:
             raise InvalidCommand(
                 "checks.start does not run inline interpreter code; write the snippet "

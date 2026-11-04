@@ -70,6 +70,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", default="build", choices=("build", "plan", "ideate"))
     run.add_argument("--no-project-context", action="store_true")
     run.add_argument("--no-memory", action="store_true")
+    run.add_argument(
+        "--no-probes",
+        action="store_true",
+        help=(
+            "run only the approved checks; by default the approved Python "
+            "interpreter may also run non-evidence reproduction probes"
+        ),
+    )
     run.add_argument("--expect", choices=("auto", "change"), default="auto")
     run.add_argument("--max-steps", type=int)
     run.add_argument("--max-seconds", type=float)

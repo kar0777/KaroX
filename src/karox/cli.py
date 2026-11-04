@@ -971,6 +971,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         bypass_mode=bypass,
         skill_catalog=catalog,
         visual_checker=visual_checker,
+        allow_probes=not getattr(args, "no_probes", False),
     )
     if skill_session is not None:
         # The b-skills wiring: the session-bound runtime exposes skill.run as
@@ -1021,6 +1022,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
                 verification_commands=verification,
                 goal=args.task,
                 session_id=record.session_id,
+                probes=core.probe_interpreters,
             )
             project_suffix = project.prompt_suffix
             project_metadata = {"enabled": True, **project.to_dict()}

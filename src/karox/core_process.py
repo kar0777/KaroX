@@ -155,6 +155,104 @@ def is_plain_argument(value: str) -> bool:
         return True
     return not _CODE_EXECUTION_SHORT_LETTERS.intersection(name[1:])
 
+
+# Modules a probe may run with ``-m``. Each runs or compiles Python code the
+# approved interpreter would run anyway; none installs, downloads or serves
+# anything, which is why pip, ensurepip, venv and http.server are absent.
+PROBE_MODULES = frozenset(
+    {
+        "pytest",
+        "unittest",
+        "doctest",
+        "py_compile",
+        "compileall",
+        "timeit",
+        "cProfile",
+        "json.tool",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ProbeCommand:
+    """A non-evidence Python run admitted next to the approved checks.
+
+    ``form`` is ``inline`` (``-c CODE``), ``module`` (``-m`` one of
+    :data:`PROBE_MODULES`) or ``script`` (a ``.py`` file inside the repository).
+    """
+
+    interpreter: str
+    form: str
+    code: Optional[str] = None
+    tail: tuple[str, ...] = ()
+
+
+def probe_interpreters(rules: Sequence["VerificationRule"]) -> tuple[str, ...]:
+    """Python interpreters named by approved rules, in the order given."""
+    found: List[str] = []
+    for rule in rules:
+        executable = rule.prefix[0]
+        if not os.path.basename(executable).lower().startswith("python"):
+            continue
+        if executable not in found:
+            found.append(executable)
+    return tuple(found)
+
+
+def probe_python_command(
+    rules: Sequence["VerificationRule"], argv: Sequence[str], repository: Path
+) -> Optional[ProbeCommand]:
+    """Admit a reproduction probe run by an approved Python interpreter.
+
+    An approved ``python run_tests.py`` already runs whatever repository code
+    the agent edits, so the same interpreter running a snippet, a test module
+    or a repository script grants no new reach. What it changes is cost: in the
+    sandbox SWE runs (2026-11-04) the exact rule refused every ``python -c``
+    reproduction and the model spent its steps on git and file reads instead.
+    A probe never counts as verification; the caller keeps it out of evidence.
+    """
+    if len(argv) < 2:
+        return None
+    interpreter = argv[0]
+    if interpreter not in probe_interpreters(rules):
+        return None
+    head = argv[1]
+    if head in {"-c", "-m"}:
+        if len(argv) < 3 or not argv[2].strip():
+            return None
+        tail = tuple(argv[3:])
+        if not all(is_plain_argument(item) for item in tail):
+            return None
+        if head == "-c":
+            return ProbeCommand(interpreter, "inline", argv[2], tail)
+        if argv[2] not in PROBE_MODULES:
+            return None
+        return ProbeCommand(interpreter, "module", None, tail)
+    if head.startswith("-") or not head.lower().endswith(".py"):
+        return None
+    tail = tuple(argv[2:])
+    if not all(is_plain_argument(item) for item in tail):
+        return None
+    try:
+        root = repository.resolve()
+        candidate = Path(head)
+        target = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        relative = target.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if ".git" in relative.parts or not target.is_file():
+        return None
+    return ProbeCommand(interpreter, "script", None, tail)
+
+
+def probe_forms_text(interpreters: Sequence[str]) -> str:
+    """The probe shapes, named with the interpreter the user approved."""
+    python = interpreters[0] if interpreters else "python"
+    return (
+        f"'{python} -c CODE', '{python} -m pytest|unittest|doctest ...' and "
+        f"'{python} <file>.py ...' for a .py file inside the repository"
+    )
+
 _WINDOWS_JOB_LIMIT_KILL_ON_CLOSE = 0x2000
 _WINDOWS_JOB_LIMIT_BREAKAWAY_OK = 0x0800
 _WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION = 9
@@ -492,6 +590,9 @@ class CheckPlan:
     inline_code: Optional[str] = None
     inline_tail: tuple[str, ...] = ()
     inline_prefix: tuple[str, ...] = ()
+    # A reproduction probe (see probe_python_command): it runs, its output is
+    # returned, and it is never verification evidence.
+    probe: bool = False
 
 
 class ProcessToolsMixin:
@@ -505,6 +606,8 @@ class ProcessToolsMixin:
     #: stream keeps its head and tail at MAX_OUTPUT_BYTES, but a failure block
     #: can sit in the elided middle; this is the budget for finding it.
     MAX_MAP_BYTES: int = 2_000_000
+    #: Whether checks.run admits reproduction probes (probe_python_command).
+    _allow_probes: bool = False
     MIN_PROCESS_TIMEOUT_SECONDS: float
     MAX_PROCESS_TIMEOUT_SECONDS: float
     DEFAULT_CHECK_TIMEOUT_SECONDS: float
@@ -804,6 +907,8 @@ class ProcessToolsMixin:
                 "shadows karox.web_check"
             )
         result["verification_eligible"] = plan.verification_eligible
+        if plan.probe:
+            result["probe"] = True
         # Extracted from the unelided streams: the result the model reads has
         # its middle cut, and for a many-failure suite that is exactly where
         # the FAILURES blocks live. The map keeps every failure's file, line
@@ -831,10 +936,11 @@ class ProcessToolsMixin:
                 )
             result["detail"] = detail
         display_argv = result["argv"]
+        outcome = "passed" if result["exit_code"] == 0 else "failed"
         result["_evidence"] = [
             EvidenceRecord(
-                kind="check",
-                summary=("Passed" if result["exit_code"] == 0 else "Failed")
+                kind="probe" if plan.probe else "check",
+                summary=(f"Probe {outcome}" if plan.probe else outcome.capitalize())
                 + f": {' '.join(display_argv)}",
                 command=display_argv,
                 exit_code=result["exit_code"],
@@ -889,12 +995,21 @@ class ProcessToolsMixin:
             inline = inline_python_rule(self._verification_rules, argv)
             if inline is not None:
                 eligible = True
+        probe = None
+        if (
+            self._verification_rules is not None
+            and not eligible
+            and getattr(self, "_allow_probes", False)
+        ):
+            probe = probe_python_command(
+                self._verification_rules, argv, self.repository
+            )
         # Refusing here rather than after the run keeps a rejected command from
         # reserving a durable idempotency intent that then needs reconciliation.
         # The refusal names the command and the approved set, because a model told
         # only "not approved" retries variants of the same rejected argv while a
         # model shown the list picks one that will run.
-        if self._verification_rules is not None and not eligible:
+        if self._verification_rules is not None and not eligible and probe is None:
             approved = ", ".join(
                 " ".join(rule.prefix) for rule in self._verification_rules
             )
@@ -914,6 +1029,16 @@ class ProcessToolsMixin:
                     "rule: write the snippet to a scratch .py file in the "
                     "repository, run it as '<interpreter> <file>.py', and delete "
                     "it when it has answered"
+                )
+            interpreters = (
+                probe_interpreters(self._verification_rules)
+                if getattr(self, "_allow_probes", False)
+                else ()
+            )
+            if interpreters:
+                hint = (
+                    "; probes (never verification evidence) run as "
+                    + probe_forms_text(interpreters)
                 )
             raise VerificationCommandNotApproved(
                 "check command is not in the user-approved verification set: "
@@ -949,5 +1074,18 @@ class ProcessToolsMixin:
                 inline_code=inline[1],
                 inline_tail=inline[2],
                 inline_prefix=inline[0],
+            )
+        if probe is not None:
+            inline_probe = probe.form == "inline"
+            return CheckPlan(
+                argv,
+                requested,
+                effective,
+                "+".join(causes) or None,
+                False,
+                inline_code=probe.code if inline_probe else None,
+                inline_tail=probe.tail if inline_probe else (),
+                inline_prefix=(probe.interpreter,) if inline_probe else (),
+                probe=True,
             )
         return CheckPlan(argv, requested, effective, "+".join(causes) or None, eligible)
