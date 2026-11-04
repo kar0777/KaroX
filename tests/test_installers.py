@@ -72,6 +72,7 @@ def _install(
     *,
     env: Optional[dict[str, str]] = None,
     karox_version: Optional[str] = None,
+    venvs_name: str = "venvs",
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -89,7 +90,10 @@ def _install(
         argv = ["sh", str(ROOT / "scripts" / "install.sh")]
     else:
         pipx = bin_dir / "pipx-fake.cmd"
-        pipx.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        # cmd.exe reads a batch file in the console code page: a non-ASCII
+        # interpreter path (D:\проекты\...) would not survive inside it, so
+        # the paths come from the environment, which is Unicode.
+        pipx.write_text('@"%FAKE_PIPX_PYTHON%" "%FAKE_PIPX_SCRIPT%" %*\r\n', encoding="ascii")
         if karox_version:
             (bin_dir / "karox.cmd").write_text(f"@echo karox {karox_version}\r\n", encoding="utf-8")
         windows = os.environ.get("SystemRoot", r"C:\Windows")
@@ -99,7 +103,7 @@ def _install(
         )
         argv = [str(_powershell()), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                 "-File", str(ROOT / "scripts" / "install.ps1")]
-    venvs = tmp_path / "venvs"
+    venvs = tmp_path / venvs_name
     venvs.mkdir(exist_ok=True)
     log = tmp_path / "pipx.log"
     environment = {
@@ -115,10 +119,22 @@ def _install(
             "FAKE_PIPX_LOG": str(log),
             "FAKE_PIPX_LIST": listing,
             "FAKE_PIPX_VENVS": str(venvs),
+            "FAKE_PIPX_PYTHON": sys.executable,
+            "FAKE_PIPX_SCRIPT": str(script),
         }
     )
     environment.update(env or {})
-    completed = subprocess.run(argv, capture_output=True, text=True, env=environment, timeout=180)
+    # errors="replace": a localized shell error in the console code page must
+    # fail the assertion with its text, not vanish in a decoding thread.
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        timeout=180,
+    )
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
     return completed, calls, venvs
 
@@ -197,3 +213,16 @@ def test_dry_run_changes_nothing(shell: str, tmp_path: Path) -> None:
     assert _installs(calls) == []
     assert "would run:" in completed.stdout and "--suffix 6" in completed.stdout
     assert not (venvs / "karox-runtime6").exists()
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_non_ascii_pipx_home_still_gets_the_channel(shell: str, tmp_path: Path) -> None:
+    """A profile such as C:\\Users\\<Cyrillic name>: the venv path reported by
+    pipx and the site-packages path must survive the trip through the pipe."""
+
+    completed, _, venvs = _install(
+        shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"}), venvs_name="venvs-проверка"
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    channel = _channel_file(venvs)
+    assert channel is not None, completed.stdout + completed.stderr

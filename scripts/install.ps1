@@ -60,13 +60,50 @@ function Invoke-Quiet([string[]]$Command) {
     $ErrorActionPreference = "Continue"
     $rest = @()
     if ($Command.Length -gt 1) { $rest = $Command[1..($Command.Length - 1)] }
+    # Python writes to a pipe in the ANSI code page and PowerShell decodes it
+    # with the console code page, so a path such as C:\Users\<Cyrillic name>
+    # would come back garbled. UTF-8 on both ends, restored afterwards.
+    $savedIo = $env:PYTHONIOENCODING
+    $savedEncoding = $null
+    try {
+        $savedEncoding = [Console]::OutputEncoding
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    } catch {
+        $savedEncoding = $null
+    }
+    $env:PYTHONIOENCODING = "utf-8"
     try {
         $output = & $Command[0] @rest 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
         return ($output | Out-String).Trim()
     } catch {
         return $null
+    } finally {
+        $env:PYTHONIOENCODING = $savedIo
+        if ($null -ne $savedEncoding) {
+            try { [Console]::OutputEncoding = $savedEncoding } catch { }
+        }
     }
+}
+
+function Find-VenvPython([string[]]$Pipx, [string]$Venv) {
+    $roots = @()
+    $reported = Invoke-Quiet ($Pipx + @("environment", "--value", "PIPX_LOCAL_VENVS"))
+    if ($reported) { $roots += $reported }
+    # Fallbacks: an older pipx without "environment", or a reply that did not
+    # survive the console code page.
+    if ($env:PIPX_HOME) { $roots += (Join-Path $env:PIPX_HOME "venvs") }
+    $roots += @((Join-Path $HOME "pipx\venvs"), (Join-Path $HOME ".local\pipx\venvs"))
+    if ($env:LOCALAPPDATA) { $roots += (Join-Path $env:LOCALAPPDATA "pipx\pipx\venvs") }
+    foreach ($root in $roots) {
+        try {
+            $candidate = Join-Path (Join-Path $root $Venv) "Scripts\python.exe"
+            if ([System.IO.File]::Exists($candidate)) { return $candidate }
+        } catch {
+            continue
+        }
+    }
+    return ""
 }
 
 function Install-KaroX {
@@ -142,13 +179,17 @@ function Install-KaroX {
         if ($DryRun) {
             Say "would write $ChannelPth (KAROX_CHANNEL=dogfood) into $venv"
         } else {
-            $venvs = Invoke-Quiet ($Pipx + @("environment", "--value", "PIPX_LOCAL_VENVS"))
-            $venvPython = if ($venvs) { Join-Path (Join-Path $venvs $venv) "Scripts\python.exe" } else { "" }
-            if (-not $venvPython -or -not (Test-Path $venvPython)) {
+            $venvPython = Find-VenvPython $Pipx $venv
+            if (-not $venvPython) {
                 Fail "installed, but the karox6 venv was not found to set its data channel; set KAROX_CHANNEL=dogfood before running karox6"
             }
-            $site = Invoke-Quiet @($venvPython, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-            if (-not $site) { Fail "could not locate site-packages of $venv" }
+            # JSON keeps the path ASCII on the way through the pipe.
+            $siteJson = Invoke-Quiet @($venvPython, "-c", "import json, sysconfig; print(json.dumps(sysconfig.get_paths()['purelib']))")
+            $site = $null
+            if ($siteJson) {
+                try { $site = [string](ConvertFrom-Json $siteJson) } catch { $site = $null }
+            }
+            if (-not $site -or -not (Test-Path -LiteralPath $site)) { Fail "could not locate site-packages of $venv" }
             $line = 'import os; os.environ.setdefault("KAROX_CHANNEL", "dogfood")'
             [System.IO.File]::WriteAllText((Join-Path $site $ChannelPth), $line + "`n", (New-Object System.Text.UTF8Encoding($false)))
             Say "karox6 keeps its data in the separate 'dogfood' channel"
