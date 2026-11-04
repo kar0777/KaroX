@@ -107,6 +107,19 @@ _NEGATED_TEST_CHANGE = re.compile(
     re.I,
 )
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+|\n+")
+# A conditional or template item is not an explicit request. A SWE issue quotes
+# the upstream PR checklist ("- [ ] Include new tests or update existing tests
+# when applicable."); read as a demand it overrode the task's own "Do not modify
+# tests": the gate refused the finish with "explicit test change requested" and
+# the model edited the protected test file (sandbox 2026-11-04,
+# swe-pytest-10356).
+_CONDITIONAL_REQUEST = re.compile(
+    r"^\s*(?:[-*+]|\d+[.)])?\s*\[[ xX]?\]"
+    r"|\b(?:when|where|if)\s+(?:applicable|appropriate|needed|necessary|possible|relevant)\b"
+    r"|\b(?:if|when)\s+(?:it\s+)?(?:applies|makes\s+sense)\b"
+    r"|(?:при\s+необходимости|если\s+(?:нужно|необходимо|применимо))",
+    re.I,
+)
 # A scope instruction puts tests out of bounds ("changes go in the source
 # tree, not in the test files"). The negation follows the change verb, so the
 # prefix rules above cannot see it; the whole sentence is the unit of intent.
@@ -216,7 +229,7 @@ def _explicit_test_change_required(record: Any) -> bool:
         # word "tests" from the next sentence, and a negated sentence must not
         # swallow a following positive request.
         for sentence in _SENTENCE_BREAK.split(text):
-            if _TESTS_OUT_OF_SCOPE.search(sentence):
+            if _TESTS_OUT_OF_SCOPE.search(sentence) or _CONDITIONAL_REQUEST.search(sentence):
                 continue
             cleaned = _NEGATED_TEST_CHANGE.sub("", sentence)
             for match in _TEST_CHANGE_REQUEST.finditer(cleaned):
@@ -228,6 +241,128 @@ def _explicit_test_change_required(record: Any) -> bool:
                     continue
                 return True
     return False
+
+
+#: A sentence that keeps the existing tests as they are: "Do not modify tests",
+#: "don't touch the test files", "не меняйте тесты". Only change verbs count, so
+#: "do not add tests" alone does not forbid repairing an existing test. The
+#: noun must be plural or a test-file phrase: "do not change the test command"
+#: is not a ban.
+_FORBIDS_TEST_EDITS = re.compile(
+    r"(?:\b(?:(?:do|does|should|must|may|will|can|could)\s+not|can't|cannot|"
+    r"don't|dont|never|avoid)\b"
+    r".{0,30}\b(?:modify(?:ing)?|chang(?:e|ing)|edit(?:ing)?|touch(?:ing)?|"
+    r"alter(?:ing)?|updat(?:e|ing)|rewrit(?:e|ing))\b"
+    r".{0,40}\b(?:tests|test\s+files?|test\s+suites?|test\s+cases?|"
+    r"existing\s+tests?|unit\s+tests?)\b)"
+    r"|(?:\bне\b.{0,30}(?:измен\w*|меня\w*|редактир\w*|трога\w*|прав\w*)"
+    r".{0,40}тест\w*)",
+    re.I,
+)
+
+
+def _test_edit_ban(record: Any) -> str:
+    """The task sentence that keeps the existing tests unchanged, or "".
+
+    A sandbox SWE run (2026-11-04, swe-pytest-10356) copied the upstream
+    regression test into ``testing/test_mark.py`` two steps before finishing,
+    although the task said "Do not modify tests" and "Changes should be made
+    in the source tree, not in the test files". The hidden grader restores that
+    file, so the edit proved nothing and broke the task's rules. A task that
+    also asks for a test change is ambiguous and keeps its old handling.
+    """
+
+    if _explicit_test_change_required(record):
+        return ""
+    texts = [str(getattr(record, "task", "") or ""), *_active_requirement_texts(record)]
+    for text in texts:
+        for sentence in _SENTENCE_BREAK.split(text):
+            if _FORBIDS_TEST_EDITS.search(sentence) or _TESTS_OUT_OF_SCOPE.search(sentence):
+                return " ".join(sentence.split())
+    return ""
+
+
+def _changed_existing_tests(core: Any, record: Any) -> list[str]:
+    """Committed test files that now hold other bytes than at the run's start.
+
+    ``changed_files`` remembers every file the run ever wrote, so the starting
+    bytes come from the first mutation's ``previous_sha256``: a test file the
+    run restored to its original content is not reported. Only files tracked
+    at ``HEAD`` count: a ``__pycache__/test_*.pyc`` left by a probe and then
+    cleaned up is not the user's test. A file without a recorded starting
+    digest, one this run created, or any file outside Git is never reported.
+    """
+
+    created = {str(item) for item in (getattr(record, "created_files", None) or ())}
+    candidates = [
+        path
+        for path in dict.fromkeys(record.changed_files)
+        if isinstance(path, str)
+        and _is_test_path(path)
+        and path not in created
+        and "__pycache__" not in Path(path).parts
+    ]
+    candidates = [path for path in candidates if _tracked_at_head(core, path)]
+    if not candidates:
+        return []
+    original: dict[str, Optional[str]] = {}
+    for entry in record.provider_history:
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            continue
+        data = result.get("data")
+        if not isinstance(data, dict) or data.get("dry_run") is True:
+            continue
+        name = entry.get("core_name")
+        if name in {"repo.write_file", "repo.edit_file", "web.fetch"}:
+            operations = [data]
+        elif name in {"repo.command", "repo.apply_patch"}:
+            operations = [op for op in data.get("operations") or () if isinstance(op, dict)]
+        else:
+            continue
+        for operation in operations:
+            path = operation.get("path")
+            if (
+                isinstance(path, str)
+                and path in candidates
+                and path not in original
+                and "previous_sha256" in operation
+            ):
+                original[path] = operation.get("previous_sha256")
+    changed = []
+    for path in candidates:
+        before = original.get(path)
+        if not isinstance(before, str):
+            continue
+        try:
+            target = core.safe_path(path)
+            now = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+        except Exception:  # noqa: BLE001 - an unreadable file is not evidence of an edit
+            continue
+        if now != before:
+            changed.append(path)
+    return changed
+
+
+def _tracked_at_head(core: Any, relative: str) -> bool:
+    """Whether ``relative`` is committed at ``HEAD``; any failure says no.
+
+    ``./`` keeps the path relative to the workspace, which may sit below the
+    Git root.
+    """
+
+    try:
+        tracked = subprocess.run(
+            ["git", "cat-file", "-e", f"HEAD:./{Path(relative).as_posix()}"],
+            cwd=str(core.repository), stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=10, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:  # noqa: BLE001 - no Git, no claim about the user's tests
+        return False
+    return tracked.returncode == 0
 
 
 def _is_test_path(relative: str) -> bool:
@@ -714,6 +849,15 @@ def floor(core: Any, record: Any) -> list[str]:
         and not any(_is_test_path(path) for path in record.changed_files)
     ):
         reasons.append("explicit test change requested but no test file changed")
+    ban = _test_edit_ban(record)
+    if ban:
+        touched = _changed_existing_tests(core, record)
+        if touched:
+            quoted = ban if len(ban) <= 120 else ban[:117] + "..."
+            reasons.append(
+                f'existing test files changed although the task says "{quoted}": '
+                f"{', '.join(touched[:4])} (restore their original content)"
+            )
     reviews = [e.get("result", {}).get("data", {}).get("completion_identity")
                for e in record.provider_history if e.get("core_name") == "git.diff"
                and isinstance(e.get("result"), dict) and e["result"].get("ok")]

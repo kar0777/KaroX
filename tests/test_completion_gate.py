@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -561,3 +562,163 @@ def test_a_stale_patch_digest_does_not_prove_the_current_file(tmp_path: Path) ->
     reasons = completion_gate.floor(core, record)
 
     assert "missing current structural evidence: pkg/mod.py" in reasons
+
+_NO_TEST_EDITS_TASK = (
+    "Complete the task below. Do not modify tests, the public check, or any "
+    "grading files.\n\nThis runs the existing tests in `testing/test_mark.py`. "
+    "Changes should be made in the source tree, not in the test files."
+)
+
+
+def test_a_test_edit_ban_is_read_from_the_task() -> None:
+    for task, banned in (
+        (_NO_TEST_EDITS_TASK, True),
+        ("Changes should be made in the source tree, not in the test files.", True),
+        ("Don't touch the test files; fix the parser.", True),
+        ("Не меняйте тесты, исправьте парсер.", True),
+        ("Fix the parser. Do not change the test command.", False),
+        ("Fix the parser and keep the suite green.", False),
+        # Asking for a test change keeps the old handling: no ban.
+        ("Do not modify the existing tests. Add a regression test for the new branch.", False),
+    ):
+        assert bool(completion_gate._test_edit_ban(_task_record(task))) is banned, task
+
+
+def _git(repository: Path, *argv: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *argv],
+        cwd=repository, check=True, capture_output=True,
+    )
+
+
+def _edited_test_record(tmp_path: Path, *, restored: bool) -> tuple[SimpleNamespace, _Core]:
+    original = b"def test_old():\n    assert True\n"
+    test_file = tmp_path / "testing" / "test_mark.py"
+    test_file.parent.mkdir()
+    test_file.write_bytes(original)
+    source = tmp_path / "pkg" / "mod.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "start")
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    if not restored:
+        test_file.write_bytes(original + b"\n\ndef test_new():\n    pass\n")
+    record = SimpleNamespace(
+        task=_NO_TEST_EDITS_TASK,
+        requirements=[],
+        changed_files=["pkg/mod.py", "testing/test_mark.py"],
+        created_files=[],
+        evidence=[],
+        provider_history=[
+            {
+                "role": "tool",
+                "core_name": "repo.edit_file",
+                "result": {
+                    "ok": True,
+                    "data": {
+                        "path": "testing/test_mark.py",
+                        "changed": True,
+                        "previous_sha256": hashlib.sha256(original).hexdigest(),
+                        "sha256": "later",
+                    },
+                },
+            }
+        ],
+    )
+    return record, _Core(tmp_path)
+
+
+def test_an_edited_existing_test_blocks_the_finish_when_the_task_forbids_it(tmp_path: Path) -> None:
+    record, core = _edited_test_record(tmp_path, restored=False)
+
+    reasons = completion_gate.floor(core, record)
+
+    owed = [reason for reason in reasons if reason.startswith("existing test files changed")]
+    assert len(owed) == 1
+    assert "testing/test_mark.py" in owed[0]
+    assert "Do not modify tests" in owed[0]
+
+
+def test_a_restored_test_file_no_longer_blocks_the_finish(tmp_path: Path) -> None:
+    record, core = _edited_test_record(tmp_path, restored=True)
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not [reason for reason in reasons if reason.startswith("existing test files changed")]
+
+
+def test_test_files_are_free_when_the_task_does_not_forbid_edits(tmp_path: Path) -> None:
+    record, core = _edited_test_record(tmp_path, restored=False)
+    record.task = "Fix the mark inheritance in the source tree."
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not [reason for reason in reasons if reason.startswith("existing test files changed")]
+
+
+def test_a_test_file_the_run_created_is_not_an_edited_existing_test(tmp_path: Path) -> None:
+    record, core = _edited_test_record(tmp_path, restored=False)
+    record.created_files = ["testing/test_mark.py"]
+    record.provider_history[0]["result"]["data"]["previous_sha256"] = None
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not [reason for reason in reasons if reason.startswith("existing test files changed")]
+
+
+def test_an_untracked_test_artifact_is_not_an_edited_existing_test(tmp_path: Path) -> None:
+    record, core = _edited_test_record(tmp_path, restored=True)
+    artifact = tmp_path / "_probe" / "__pycache__" / "test_probe.cpython-313.pyc"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"later")
+    stray = tmp_path / "tests" / "test_generated.py"
+    stray.parent.mkdir()
+    stray.write_text("def test_generated():\n    pass\n", encoding="utf-8")
+    record.changed_files += [artifact.relative_to(tmp_path).as_posix(), "tests/test_generated.py"]
+    for path in record.changed_files[-2:]:
+        record.provider_history.append(
+            {
+                "role": "tool",
+                "core_name": "repo.command",
+                "result": {
+                    "ok": True,
+                    "data": {"operations": [{"op": "write", "path": path, "changed": True, "previous_sha256": "0" * 64}]},
+                },
+            }
+        )
+
+    reasons = completion_gate.floor(core, record)
+
+    assert not [reason for reason in reasons if reason.startswith("existing test files changed")]
+
+
+_PR_TEMPLATE_TASK = (
+    "Complete the task below. Do not modify tests, the public check, or any grading "
+    "files.\n\nTASK\nConsider MRO when obtaining marks for classes\n\n"
+    "- [ ] Include documentation when adding new features.\n"
+    "- [ ] Include new tests or update existing tests when applicable.\n\n"
+    "This runs the existing tests in `testing/test_mark.py`. "
+    "Changes should be made in the source tree, not in the test files."
+)
+
+
+def test_a_quoted_pr_checklist_is_not_an_explicit_test_request() -> None:
+    record = _task_record(_PR_TEMPLATE_TASK)
+
+    assert completion_gate._explicit_test_change_required(record) is False
+    assert "Do not modify tests" in completion_gate._test_edit_ban(record)
+
+
+def test_conditional_test_requests_do_not_owe_a_test_change() -> None:
+    for task in (
+        "Fix the parser. Add tests where appropriate.",
+        "Fix the parser and update the tests if needed.",
+        "- [x] Add a regression test",
+        "Исправьте парсер, при необходимости обновите тесты.",
+    ):
+        assert completion_gate._explicit_test_change_required(_task_record(task)) is False, task
+    assert completion_gate._explicit_test_change_required(
+        _task_record("Fix the parser and add a regression test for the empty header.")
+    ) is True
