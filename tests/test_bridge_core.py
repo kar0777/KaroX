@@ -749,6 +749,23 @@ class BridgeWireSecurityTests(unittest.TestCase):
             "named\n",
         )
 
+    def test_non_ascii_text_reaches_the_client_unescaped(self) -> None:
+        # Most clients hand the model the text block. JSON-escaped Cyrillic
+        # (one letter -> six ASCII characters) wasted context and read worse.
+        (self.repository / "notes.md").write_text("Привет, мир\n", encoding="utf-8")
+        app = build_proxy_asgi_app(self.runtime, self.token)
+        (response,) = _wire_requests(
+            app,
+            [_jsonrpc_call(self.token, "karox.repo.read_file", {"path": "notes.md"})],
+        )
+        self.assertEqual(response.status, 200, response.text)
+        result = _jsonrpc_result(response)
+        self.assertFalse(result["isError"], response.text)
+        text = result["content"][0]["text"]
+        self.assertIn("Привет, мир", text)
+        self.assertNotIn("\\u041f", text)
+        self.assertEqual(json.loads(text), result["structuredContent"])
+
     def test_tool_failure_never_reflects_a_filesystem_path(self) -> None:
         secret_path = "/home/user/x"
         app = build_proxy_asgi_app(

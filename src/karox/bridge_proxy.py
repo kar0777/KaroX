@@ -468,6 +468,24 @@ def bridge_error_result(code: str, *, detail: Optional[str] = None) -> CallToolR
     )
 
 
+def utf8_call_result(
+    result: dict[str, Any] | CallToolResult,
+) -> tuple[list[TextContent], dict[str, Any]] | CallToolResult:
+    """Hand a plain tool result to the SDK with its text already UTF-8.
+
+    The low-level SDK turns a ``dict`` into text with ``json.dumps(indent=2)``,
+    which escapes every non-ASCII character: a Cyrillic letter became six ASCII
+    characters in the text block most clients hand the model. Returning the
+    SDK's own ``(content, structured)`` pair keeps everything else as it was:
+    the structured copy, the indentation, ``isError`` and output-schema
+    validation; a value ``json`` cannot encode still fails inside the handler.
+    """
+    if isinstance(result, CallToolResult):
+        return result
+    text = json.dumps(result, indent=2, ensure_ascii=False)
+    return [TextContent(type="text", text=text)], result
+
+
 def chat_push_approval_handoff_result(
     approval: HostedApprovalRequired,
     *,
@@ -1544,11 +1562,13 @@ def build_proxy_asgi_app(
     @server.call_tool()
     async def call_tool(
         name: str, arguments: dict[str, object]
-    ) -> dict[str, Any] | CallToolResult:
+    ) -> tuple[list[TextContent], dict[str, Any]] | CallToolResult:
         meta = server.request_context.meta
         extra = getattr(meta, "model_extra", None) if meta is not None else None
         try:
-            return await execute_tool(name, arguments, meta_extra=extra)
+            return utf8_call_result(
+                await execute_tool(name, arguments, meta_extra=extra)
+            )
         except HostedApprovalRequired:
             # The native approval UX is carried by the stateless 2026-07-28
             # input_required wire below. Older SDK/session clients must fail

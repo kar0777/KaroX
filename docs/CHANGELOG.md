@@ -58,6 +58,14 @@
   reached", "the check failed", "no file changed and nothing confirms the
   answer") instead of the internal code; the report keeps the code.
 
+### Fixed — the hosted bridge sends non-ASCII text as it is
+
+- A file, diff or log with Cyrillic (or any non-ASCII) text reached bridge
+  clients JSON-escaped in the text block most of them hand the model:
+  `Привет` arrived as `\u041f\u0440…`, six characters per letter, so such
+  results read worse and took several times more context. The text is now
+  UTF-8; the structured copy and every other field are unchanged.
+
 ### Changed — MCP from the TUI works without a prior run
 
 - `/mcp` → a server → "Use in this session: all tools" or "read-only tools".
