@@ -124,7 +124,9 @@ TOOL_FAILURE_LIMITS = {"repo.apply_patch": 2, "tests.run": 2}
 _TOOL_ALTERNATIVE = {
     "repo.apply_patch": (
         "Use repo.edit_file with old_string/new_string, or repo.write_file for "
-        "a whole file."
+        "a whole file. To delete a file this session created, use repo_command "
+        '{"action": "batch", "payload": {"operations": [{"op": "delete", '
+        '"path": "<file>"}]}}.'
     ),
     "tests.run": (
         "Use checks.run with the approved command, or point targets at "
@@ -238,6 +240,58 @@ def _run_key(core_name: str, arguments: Mapping[str, Any]) -> str:
 #: then action=delete, then a JSON-string payload -- three refused steps for
 #: one scratch-file cleanup.
 _REPO_DELETE_ACTIONS = frozenset({"delete", "remove", "rm", "unlink", "delete_file", "delete_files", "remove_file"})
+
+
+def _patch_header_path(value: str) -> Optional[str]:
+    value = value.split("\t", 1)[0].strip()
+    if value == "/dev/null":
+        return None
+    if value.startswith(("a/", "b/")):
+        value = value[2:]
+    return value.replace("\\", "/") or None
+
+
+def scratch_delete_paths(arguments: Mapping[str, Any], created: Any) -> List[str]:
+    """Files a pure-deletion patch removes, when this session created all of them.
+
+    A unified diff whose every file goes to ``/dev/null`` only says "delete
+    these files", yet Core's strict parser wants the body to repeat each file
+    exactly. A measured 3D run (2026-11-04) tried to remove its own probe.html
+    that way three times: two guessed bodies were refused, apply_patch was
+    disabled, and the run left a placeholder page next to the deliverable. For
+    a file this session wrote, the body tells the session nothing it does not
+    know, so such a patch is the delete operation the prompt already names.
+    Anything else -- a patch that also edits, renames or creates, or touches a
+    file the session did not create -- returns no paths and goes to Core as
+    sent. Core still decides whether the delete may run.
+    """
+
+    patch = arguments.get("patch")
+    if not isinstance(patch, str):
+        payload = arguments.get("payload")
+        patch = payload.get("patch") if isinstance(payload, Mapping) else None
+    if not isinstance(patch, str) or not patch.strip():
+        return []
+    owned = {str(item).replace("\\", "/") for item in (created or ())}
+    if not owned:
+        return []
+    lines = patch.splitlines()
+    paths: List[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
+            old = _patch_header_path(line[4:])
+            new = _patch_header_path(lines[index + 1][4:])
+            if old is None or new is not None or old not in owned:
+                return []
+            paths.append(old)
+            index += 2
+            continue
+        if line.startswith("+") and not line.startswith("+++ "):
+            return []
+        index += 1
+    return list(dict.fromkeys(paths))
 
 
 def _normalize_repo_command(arguments: Mapping[str, Any]) -> Dict[str, Any]:
@@ -460,6 +514,19 @@ class CoreToolEnvironment:
         definition = self._definitions.get(core_name)
         if definition is None:
             return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
+        if core_name == "repo.apply_patch" and "repo.command" in self._definitions:
+            try:
+                created = self._core.sessions.load(self._session_id).created_files
+            except Exception:  # noqa: BLE001 - no record means no rewrite
+                created = ()
+            doomed = scratch_delete_paths(arguments, created)
+            if doomed:
+                core_name = "repo.command"
+                definition = self._definitions[core_name]
+                arguments = {
+                    "action": "batch",
+                    "payload": {"operations": [{"op": "delete", "path": path} for path in doomed]},
+                }
         disabled = self._disabled_after_refusals(core_name)
         if disabled:
             return self._refusal(action, "tool_disabled_after_refusals", disabled)

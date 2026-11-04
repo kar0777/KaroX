@@ -506,3 +506,88 @@ def test_web_fetch_does_not_claim_an_existing_file_was_created(
         store.release(lease)
     assert fetched.ok is True, fetched.data
     assert "scratch_ref.py" not in store.load("session-1").created_files
+
+class _QuietKernel:
+    """Just enough of the engine kernel for CoreToolEnvironment._execute."""
+
+    _step = 1
+
+    def __init__(self, aliases: dict) -> None:
+        self.engine_tool_aliases = aliases
+
+    def _emit(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def monotonic(self) -> float:
+        import time
+
+        return time.monotonic()
+
+    def remaining_seconds(self) -> float:
+        return 600.0
+
+    def _persist_engine_tool_error(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def _persist_engine_tool_result(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def note_visual_last_check(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def note_visual_limit(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+def test_a_deletion_patch_removes_an_own_probe_but_not_a_user_file(
+    tmp_path: Path,
+) -> None:
+    """A 3D run's scratch probe.html survived three guessed deletion bodies."""
+
+    core, store, origin = _runtime(tmp_path, "build a page")
+    lease = _lease(store)
+    environment = CoreToolEnvironment(
+        core=core,
+        session_id="session-1",
+        origin=origin,
+        lease=lease,
+        kernel=_QuietKernel(
+            {"repo_write_file": "repo.write_file", "repo_apply_patch": "repo.apply_patch"}
+        ),
+        output_char_limit=20_000,
+        command_timeout=30,
+    )
+    try:
+        environment._execute(
+            {
+                "name": "repo_write_file",
+                "arguments": {"path": "probe.html", "content": "<!doctype html>\n<p>x</p>\n</html>\n"},
+                "tool_call_id": "write-probe",
+            },
+            requested_by="model",
+        )
+        assert (core.repository / "probe.html").exists()
+        removed = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": "--- a/probe.html\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<![doctype]>\n"},
+                "tool_call_id": "delete-probe",
+            },
+            requested_by="model",
+        )
+        kept = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": "--- a/seed.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-wrong\n"},
+                "tool_call_id": "delete-seed",
+            },
+            requested_by="model",
+        )
+    finally:
+        store.release(lease)
+
+    assert removed["returncode"] == 0, removed["output"]
+    assert not (core.repository / "probe.html").exists()
+    assert "probe.html" not in store.load("session-1").created_files
+    assert kept["returncode"] != 0
+    assert (core.repository / "seed.txt").read_text(encoding="utf-8") == "seed\n"

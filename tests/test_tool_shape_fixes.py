@@ -199,3 +199,42 @@ def test_visual_checker_usage_reaches_the_session(tmp_path: Path) -> None:
     assert usage["total_tokens"] == 1230
     assert usage["side_requests"] == {"visual_check": 1}
     assert usage["events"][-1]["kind"] == "visual_check"
+
+
+# -- a pure-deletion patch of the session's own scratch file ---------------
+
+from karox.engine_tool_env import _TOOL_ALTERNATIVE, scratch_delete_paths  # noqa: E402
+
+
+def test_a_deletion_patch_of_an_own_file_needs_no_exact_body() -> None:
+    """The 3D run's first try: a guessed body for its own probe.html."""
+
+    patch = "--- a/probe.html\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<![doctype]>\n"
+    assert scratch_delete_paths({"patch": patch}, ["probe.html"]) == ["probe.html"]
+    assert scratch_delete_paths({"payload": {"patch": patch}}, ["probe.html"]) == ["probe.html"]
+    two = (
+        "diff --git a/p1.py b/p1.py\ndeleted file mode 100644\n"
+        "--- a/p1.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x = 1\n--- not a header\n"
+        "--- a/sub\\p2.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-y\n"
+    )
+    assert scratch_delete_paths({"patch": two}, ["p1.py", "sub/p2.py"]) == ["p1.py", "sub/p2.py"]
+
+
+def test_other_patches_still_go_to_core_as_sent() -> None:
+    delete = "--- a/probe.html\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    edit = "--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b\n"
+    create = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n"
+    # Not created by the session: the user's file keeps Core's exact check.
+    assert scratch_delete_paths({"patch": delete}, ["other.html"]) == []
+    assert scratch_delete_paths({"patch": delete}, []) == []
+    # Mixed with an edit or a creation: not a pure delete.
+    assert scratch_delete_paths({"patch": delete + edit}, ["probe.html", "app.js"]) == []
+    assert scratch_delete_paths({"patch": create}, ["new.py"]) == []
+    assert scratch_delete_paths({"patch": "--- a/probe.html\n+++ /dev/null\n+x\n"}, ["probe.html"]) == []
+    for shape in ({}, {"patch": ""}, {"patch": 3}, {"payload": "x"}):
+        assert scratch_delete_paths(shape, ["probe.html"]) == []
+
+
+def test_a_disabled_patch_tool_names_the_delete_operation() -> None:
+    text = _TOOL_ALTERNATIVE["repo.apply_patch"]
+    assert '"op": "delete"' in text and "repo_command" in text
