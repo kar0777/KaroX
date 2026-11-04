@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .net_config import NetworkConfigError, client_options
 from .registry import ModelPricing, ModelRecord, ProviderRecord
 from .security import redact
 
@@ -228,7 +229,13 @@ def discover_models_result(
     response: Optional[httpx.Response] = None
     effective_base = base_url
     try:
-        with httpx.Client(timeout=timeout, transport=transport) as client:
+        try:
+            network = client_options() if transport is None else {}
+        except NetworkConfigError as exc:
+            raise ModelDiscoveryError(
+                "network", attempted_urls=attempted, detail=str(exc)
+            ) from None
+        with httpx.Client(timeout=timeout, transport=transport, **network) as client:
             for index, (candidate_base, endpoint) in enumerate(candidates):
                 attempted.append(endpoint)
                 current = client.get(endpoint, headers=headers, params=params or None)

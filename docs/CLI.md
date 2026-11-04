@@ -31,6 +31,7 @@ karox provider connect ID [--model M] [--stdin-key | --env-key | --credential-re
     [--provider-id ID] [--base-url URL] [--var NAME=VALUE] [--no-test] [--no-activate]
 karox provider catalog-sync [ID ...] [--json]         # fill missing prices/limits
 karox provider presets [--json]
+karox provider local [--json]                         # find local model servers
 karox provider setup <preset> --model <id> [--stdin-key] [--base-url URL]
     [--provider-id ID] [--context-window N] [--max-output-tokens N]
     [--credential-ref REF] [--no-test] [--no-activate]
@@ -60,10 +61,33 @@ window, price, provenance) and the provider's headers, timeouts and Bypass
 preference; only empty fields are filled. `--env-key` uses
 `KAROX_PROVIDER_<ID>_API_KEY` when set, otherwise imports the provider's usual
 variable (for example `WANDB_API_KEY`) into the OS keyring once. Providers that
-need more than a key (Bedrock, Vertex, Azure, Copilot, ...) are listed with
-`--all` and the reason. `catalog-sync` only fills fields that are empty, so it
+need more than a key (Bedrock, Vertex, Copilot, ...) are listed with
+`--all` and the reason. Azure OpenAI connects through its v1 API
+(`https://<resource>.openai.azure.com/openai/v1`, bearer API key):
+`karox provider connect azure --var AZURE_RESOURCE_NAME=<resource>`, or with
+`AZURE_RESOURCE_NAME` already set in the environment, no `--var` at all
+(any endpoint placeholder is filled from the same-named variable).
+`--env-key` reads only the variables that hold the key (`AZURE_API_KEY`), never
+the resource name or region listed next to it. The Azure path follows
+Microsoft's v1 API documentation and has not been exercised live by KaroX yet. `catalog-sync` only fills fields that are empty, so it
 gives existing providers prices (and makes `--max-cost` usable) without
 touching anything entered by hand.
+
+`provider local` probes Ollama (11434), LM Studio (1234), the llama.cpp server
+(8080), vLLM (8000) and SGLang (30000) on `127.0.0.1` with `GET /v1/models` and
+prints, for each server that answers with a model list, its models and the
+ready `provider setup local-openai --provider-id … --base-url … --model …`
+command. A page that is not a model list (another dev server on 8000/8080) is
+skipped; the runtime is named by the listing's `owned_by` where it says, else
+by the port, marked "(by port)". Proxy variables are ignored for these
+loopback probes. Nothing is saved.
+
+Presets also cover Yandex AI Studio (`yandex-ai-studio`, OpenAI-compatible,
+model ids like `gpt://<folder_id>/yandexgpt/latest`; experimental, not
+verified live) and list GigaChat honestly as not installable yet: it needs an
+OAuth token exchange and the Russian Trusted Root CA (see
+[NETWORK.md](NETWORK.md) for `KAROX_CA_BUNDLE`); an OpenAI-compatible proxy in
+front of it works with the generic preset.
 
 `provider setup` reuses an existing saved credential for the same provider ID.
 A loopback endpoint (`localhost`, `127.0.0.1`, `::1`) needs no key. A remote
@@ -179,12 +203,20 @@ Exit code is `0` only when the report says `verified: true`.
 karox session create --task TEXT [--repository PATH] [--id ID] [--name NAME]
 karox session list [--all]
 karox session show <id>
+karox session export <id> [--format html|md|json] [--output PATH]
 karox session fork <id> [--new-session-id ID] [--task TEXT] [--name NAME]
 karox session rename <id> --name NAME
 karox session archive|unarchive|revoke <id>
 karox session delete <id> --confirm <id>
 karox session lock <id>
 ```
+
+`session export` writes one session as a self-contained HTML page (default),
+Markdown or JSON: task, status, checks, changed files, usage (tokens, cost,
+prompt-cache misses by cause) and the full trajectory — each model turn with
+its tool calls and each tool result, in order. Output is redacted again on the
+way out, long tool output is shortened with the omitted size stated, and the
+page has no scripts or external references.
 
 ## MCP outbound
 

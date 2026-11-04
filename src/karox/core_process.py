@@ -557,6 +557,11 @@ class ProcessToolsMixin:
         )
         if denied:
             raise InvalidCommand("publishing, authentication, and remote Git commands are blocked")
+        from .command_guard import process_kill_block_reason
+
+        kill_reason = process_kill_block_reason(values)
+        if kill_reason is not None:
+            raise InvalidCommand(kill_reason)
         if executable == "git":
             # Git is allowed only through the same read-only subcommand
             # boundary used by developer commands. A blanket denial also

@@ -33,6 +33,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from .net_config import NetworkConfigError, client_options
 from .security import contains_credential, redact
 
 
@@ -71,6 +72,70 @@ _ABOVE_HIGH_EFFORTS = frozenset({"xhigh", "max"})
 def _effort_scale_stops_at_high(endpoint: str) -> bool:
     host = (urlsplit(endpoint).hostname or "").lower()
     return host == "api.openai.com" or host.endswith(".openai.azure.com")
+
+
+#: A host that does not answer the TCP/TLS handshake in this long is down or
+#: unreachable; waiting the whole read budget (60 s by default, minutes for a
+#: long deadline) for it only delays the retry or the error the user needs.
+CONNECT_TIMEOUT_SECONDS = 15.0
+
+
+def transport_timeout(read_seconds: float, remaining_seconds: float) -> httpx.Timeout:
+    """Split timeouts: a short connect/pool wait, the full budget between bytes.
+
+    ``read`` is the idle gap allowed between two chunks of the stream, which a
+    thinking model can legitimately stretch; connecting and acquiring a pooled
+    connection should never take that long.
+    """
+
+    budget = max(0.05, min(float(read_seconds), float(remaining_seconds)))
+    short = min(budget, CONNECT_TIMEOUT_SECONDS)
+    return httpx.Timeout(budget, connect=short, pool=short, write=budget)
+
+
+_GO_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)")
+
+
+def _go_duration_seconds(value: str) -> Optional[float]:
+    """Parse ``1h2m3.5s`` / ``250ms`` / a bare number of seconds; None if not."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    total = 0.0
+    position = 0
+    scale = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001, "us": 1e-6, "µs": 1e-6, "ns": 1e-9}
+    for match in _GO_DURATION_PART.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * scale[match.group(2)]
+        position = match.end()
+    return total if position == len(text) and position else None
+
+
+def _looks_numeric(value: str) -> bool:
+    try:
+        float(str(value).strip())
+    except ValueError:
+        return False
+    return True
+
+
+def _accepts_prompt_cache_key(endpoint: str) -> bool:
+    """Only OpenAI's own Chat Completions host documents ``prompt_cache_key``.
+
+    A gateway that rejects the unknown field would trigger the optional-tuning
+    retry, which also drops ``reasoning_effort`` and ``stream_options`` -- a
+    weaker request and no usage report -- to gain nothing: other hosts cache by
+    prefix without the routing hint.
+    """
+
+    host = (urlsplit(endpoint).hostname or "").lower()
+    return host == "api.openai.com"
 
 
 #: Optional tuning fields an OpenAI-compatible gateway may reject. A retry
@@ -744,6 +809,10 @@ class OpenAIChatCompletionsProvider:
         with self._client_lock:
             client = self._client
             if client is None or bool(getattr(client, "is_closed", False)):
+                try:
+                    network = client_options()
+                except NetworkConfigError as exc:
+                    raise ProviderError(ProviderErrorKind.TRANSPORT, str(exc)) from exc
                 client = httpx.Client(
                     follow_redirects=False,
                     limits=httpx.Limits(
@@ -751,6 +820,7 @@ class OpenAIChatCompletionsProvider:
                         max_keepalive_connections=20,
                         keepalive_expiry=120.0,
                     ),
+                    **network,
                 )
                 self._client = client
             return client
@@ -961,6 +1031,8 @@ class OpenAIChatCompletionsProvider:
             hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
         ):
             payload["reasoning"] = {"summary": "auto"}
+        if "prompt_cache_key" in payload and not _accepts_prompt_cache_key(self.endpoint):
+            payload.pop("prompt_cache_key")
         if request.model in self._omit_optional_tuning_models:
             payload = _without_optional_tuning(payload)
         tuning_retry = False
@@ -987,7 +1059,7 @@ class OpenAIChatCompletionsProvider:
                     self.endpoint,
                     json=payload,
                     headers=headers,
-                    timeout=min(self.timeout_seconds, max(remaining, 0.05)),
+                    timeout=transport_timeout(self.timeout_seconds, remaining),
                 ) as response:
                     response_started = True
                     response_headers_ms = round(
@@ -1485,6 +1557,54 @@ class OpenAIChatCompletionsProvider:
         return max(0.0, seconds)
 
     @classmethod
+    def _rate_limit_reset(cls, headers: Mapping[str, str]) -> Optional[float]:
+        """The wait a 429 implies when the provider sent no ``Retry-After``.
+
+        OpenAI sends ``retry-after-ms`` and ``x-ratelimit-reset-{requests,tokens}``
+        as Go durations (``6m0s``, ``250ms``); Anthropic sends
+        ``anthropic-ratelimit-*-reset`` as RFC 3339 times. The reset of a limit
+        that is exhausted (remaining 0) is the one that matters; without
+        remaining counts the longest reset is the safe reading.
+        """
+
+        lowered = {str(key).lower(): str(value) for key, value in headers.items()}
+        raw_ms = lowered.get("retry-after-ms")
+        if raw_ms:
+            try:
+                value = float(raw_ms) / 1000.0
+            except ValueError:
+                value = float("nan")
+            if math.isfinite(value) and value >= 0:
+                return value
+        resets: list[tuple[float, bool]] = []
+        for key, value in lowered.items():
+            if key.startswith("x-ratelimit-reset-"):
+                seconds = _go_duration_seconds(value)
+                limit = key[len("x-ratelimit-reset-"):]
+                remaining = lowered.get("x-ratelimit-remaining-" + limit)
+            elif key.startswith("anthropic-ratelimit-") and key.endswith("-reset"):
+                seconds = cls._retry_after(value) if not _looks_numeric(value) else None
+                if seconds is None:
+                    try:
+                        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if moment.tzinfo is None:
+                        moment = moment.replace(tzinfo=timezone.utc)
+                    seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+                limit = key[len("anthropic-ratelimit-"):-len("-reset")]
+                remaining = lowered.get(f"anthropic-ratelimit-{limit}-remaining")
+            else:
+                continue
+            if seconds is None or not math.isfinite(seconds):
+                continue
+            resets.append((max(0.0, seconds), remaining is not None and remaining.strip() == "0"))
+        if not resets:
+            return None
+        exhausted = [seconds for seconds, empty in resets if empty]
+        return max(exhausted or [seconds for seconds, _ in resets])
+
+    @classmethod
     def _http_error(cls, response: httpx.Response) -> ProviderError:
         status = response.status_code
         if status == 401:
@@ -1504,6 +1624,8 @@ class OpenAIChatCompletionsProvider:
         else:
             kind = ProviderErrorKind.INVALID_REQUEST
         retry_after = cls._retry_after(response.headers.get("Retry-After"))
+        if retry_after is None and status == 429:
+            retry_after = cls._rate_limit_reset(response.headers)
         detail = response.reason_phrase or "provider request failed"
         codes = _vendor_error_codes(response)
         if codes:

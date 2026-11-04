@@ -53,6 +53,10 @@ _NPM_ADAPTERS: Mapping[str, str] = {
     "@aihubmix/ai-sdk-provider": "openai_compatible_chat",
     "venice-ai-sdk-provider": "openai_compatible_chat",
     "@ai-sdk/gateway": "openai_compatible_chat",
+    # Azure OpenAI's v1 API (GA 2025) takes the plain OpenAI wire format and a
+    # bearer API key at /openai/v1, without the api-version query or the
+    # deployment path of the classic surface. Not verified live by KaroX yet.
+    "@ai-sdk/azure": "openai_compatible_chat",
 }
 
 # Documented public endpoints for SDK packages whose catalog entry carries no
@@ -72,11 +76,18 @@ _DOCUMENTED_BASE_URLS: Mapping[str, str] = {
     "aihubmix": "https://aihubmix.com/v1",
     "venice": "https://api.venice.ai/api/v1",
     "vercel": "https://ai-gateway.vercel.sh/v1",
+    "azure": "https://${AZURE_RESOURCE_NAME}.openai.azure.com/openai/v1",
+    "azure-cognitive-services": (
+        "https://${AZURE_COGNITIVE_SERVICES_RESOURCE_NAME}.cognitiveservices.azure.com/openai/v1"
+    ),
 }
+
+# Words that mark an environment variable as the secret rather than, say, the
+# Azure resource name or a cloud region listed next to it.
+_SECRET_ENV_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
 # Why a catalog provider cannot be connected with an API key alone.
 _UNSUPPORTED_NPM: Mapping[str, str] = {
-    "@ai-sdk/azure": "Azure OpenAI needs a resource endpoint and an api-key header",
     "@ai-sdk/amazon-bedrock": "Amazon Bedrock needs AWS request signing",
     "@ai-sdk/google-vertex": "Vertex AI needs Google Cloud OAuth credentials",
     "@ai-sdk/google-vertex/anthropic": "Vertex AI needs Google Cloud OAuth credentials",
@@ -161,6 +172,15 @@ class CatalogProvider:
         return self.adapter_kind is not None and bool(self.base_url) and not self.unsupported_reason
 
     @property
+    def key_env(self) -> tuple[str, ...]:
+        """The listed variables that hold the credential, not endpoint parts."""
+
+        secret = tuple(
+            name for name in self.env if any(word in name.upper() for word in _SECRET_ENV_WORDS)
+        )
+        return secret or tuple(name for name in self.env if name not in self.url_variables)
+
+    @property
     def url_variables(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(_VARIABLE.findall(self.base_url or "")))
 
@@ -209,6 +229,7 @@ class CatalogProvider:
             "base_url": self.base_url,
             "url_variables": list(self.url_variables),
             "env": list(self.env),
+            "key_env": list(self.key_env),
             "doc": self.doc,
             "installable": self.installable,
             "unsupported_reason": self.unsupported_reason,

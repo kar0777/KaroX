@@ -113,3 +113,60 @@ def test_streak_zero_disables_the_check():
 
     assert env.calls == 10
     assert agent.messages[-1]["extra"]["exit_status"] == "LimitsExceeded"
+
+def _notes(agent: DefaultAgent) -> list[dict]:
+    return [m for m in agent.messages if m.get("kind") == "engine_note"]
+
+
+def test_the_step_before_the_limit_warns_the_model_once():
+    model = ScriptedModel(['echo "DONE"'])
+    env = FakeEnv()
+    agent = make_agent(model, env)
+    agent.run(task="fix it")
+
+    assert env.calls == 4, "the note does not change when the run ends"
+    notes = _notes(agent)
+    assert len(notes) == 1
+    assert "same action and got the same result" in notes[0]["content"]
+    note_index = agent.messages.index(notes[0])
+    # Placed after the third observation, never between a call and its result.
+    assert agent.messages[note_index - 1]["content"] == "DONE\n"
+    assert agent.messages[note_index + 1]["role"] == "assistant"
+    assert sum(1 for m in agent.messages[:note_index] if m.get("role") == "assistant") == 3
+
+
+def test_a_model_that_changes_course_after_the_note_keeps_working():
+    model = ScriptedModel(['echo "DONE"'] * 3 + ["pytest -q"] * 7)
+    env = FakeEnv()
+    agent = make_agent(model, env)
+    agent.run(task="fix it")
+
+    assert len(_notes(agent)) >= 1
+    assert agent.messages[-1]["extra"]["exit_status"] == "Submitted"
+    assert agent.messages[-1]["extra"]["exit_reason"] == "no-progress"
+    assert env.calls == 7, "three echoes, then four identical pytest steps"
+
+
+def test_two_alternating_actions_with_unchanged_results_are_noted_once():
+    model = ScriptedModel(["echo a", "echo b"])
+    env = FakeEnv()
+    agent = make_agent(model, env)
+    agent.run(task="fix it")
+
+    assert env.calls == 10, "a cycle is only noted, never submitted"
+    assert agent.messages[-1]["extra"]["exit_status"] == "LimitsExceeded"
+    notes = _notes(agent)
+    assert len(notes) == 1
+    assert "alternated between the same two actions" in notes[0]["content"]
+
+
+def test_varying_output_and_disabled_note_add_nothing():
+    varying = make_agent(ScriptedModel(["pytest -q"]), FakeEnv(vary_output=True))
+    varying.run(task="fix it")
+    assert _notes(varying) == []
+
+    silent_env = FakeEnv()
+    silent = make_agent(ScriptedModel(['echo "DONE"']), silent_env, no_progress_note=False)
+    silent.run(task="fix it")
+    assert silent_env.calls == 4
+    assert _notes(silent) == []

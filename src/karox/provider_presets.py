@@ -303,6 +303,42 @@ _PRESETS = (
         "stable",
         contract_source="https://ai.google.dev/api",
     ),
+    # --- Russian providers ------------------------------------------------
+    # Neither is in the models.dev catalog. Both contracts come from the
+    # providers' documentation and have not been exercised live by KaroX yet,
+    # which is why neither is marked stable.
+    ProviderPreset(
+        "yandex-ai-studio",
+        "Yandex AI Studio (YandexGPT)",
+        "openai_compatible_chat",
+        "https://llm.api.cloud.yandex.net/v1",
+        "experimental",
+        contract_source=(
+            "https://yandex.cloud/ru/docs/foundation-models/concepts/openai-compatibility"
+        ),
+        setup_note=(
+            "OpenAI-compatible endpoint of Yandex Cloud Foundation Models. Model "
+            "ids carry the folder: gpt://<folder_id>/yandexgpt/latest. Use an API "
+            "key of a service account with the ai.languageModels.user role. Not "
+            "verified live by KaroX yet."
+        ),
+    ),
+    ProviderPreset(
+        "gigachat",
+        "GigaChat (Sber)",
+        None,
+        None,
+        "documentation_required",
+        contract_source="https://developers.sber.ru/docs/ru/gigachat/api/overview",
+        privacy_note="Specialized adapter required; the API is not OpenAI-compatible.",
+        setup_note=(
+            "No adapter yet: GigaChat exchanges client credentials for a 30-minute "
+            "OAuth token and serves TLS from the Russian Trusted Root CA. Until an "
+            "adapter exists, run an OpenAI-compatible proxy (for example gpt2giga) "
+            "and connect it with the Generic OpenAI-compatible preset; trust the "
+            "root certificate through KAROX_CA_BUNDLE."
+        ),
+    ),
     ProviderPreset(
         "stepfun",
         "StepFun API (usage billing)",

@@ -19,6 +19,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from .net_config import NetworkConfigError, client_options
 from .providers import (
     CredentialAccessor,
     ModelEvent,
@@ -32,6 +33,7 @@ from .providers import (
     ReasoningBlock,
     ToolCallDelta,
     _REASONING_FAMILY,
+    transport_timeout,
 )
 
 
@@ -171,6 +173,10 @@ class _StreamingAdapter:
         with self._client_lock:
             client = self._client
             if client is None or bool(getattr(client, "is_closed", False)):
+                try:
+                    network = client_options()
+                except NetworkConfigError as exc:
+                    raise ProviderError(ProviderErrorKind.TRANSPORT, str(exc)) from exc
                 client = httpx.Client(
                     follow_redirects=False,
                     limits=httpx.Limits(
@@ -178,6 +184,7 @@ class _StreamingAdapter:
                         max_keepalive_connections=20,
                         keepalive_expiry=120.0,
                     ),
+                    **network,
                 )
                 self._client = client
             return client
@@ -284,7 +291,7 @@ class _StreamingAdapter:
                     endpoint,
                     json=payload,
                     headers=headers,
-                    timeout=min(self.timeout_seconds, max(remaining, 0.05)),
+                    timeout=transport_timeout(self.timeout_seconds, remaining),
                 ) as response:
                     response_started = True
                     response_headers_ms = round(
@@ -564,9 +571,14 @@ class OpenAIResponsesProvider(_StreamingAdapter):
                 payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload["max_output_tokens"] = request.max_output_tokens
-        if request.cache_key is not None:
+        host = (urlsplit(self.base_url).hostname or "").lower()
+        if request.cache_key is not None and (
+            host in {"api.openai.com", "chatgpt.com"} or host.endswith(".chatgpt.com")
+        ):
             # OpenAI caches automatically; the key only routes requests sharing
-            # a prefix to the same cache, which an agent loop always does.
+            # a prefix to the same cache, which an agent loop always does. A
+            # Responses-compatible gateway has no retry without the field, so
+            # it is sent only where OpenAI documents it.
             payload["prompt_cache_key"] = request.cache_key
         if request.reasoning_effort is not None:
             payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort)}
@@ -767,6 +779,16 @@ class OpenAIResponsesProvider(_StreamingAdapter):
 # answer. ``redacted_thinking`` holds an encrypted payload with no readable text;
 # both are routed to the reasoning channel and neither becomes assistant content.
 _ANTHROPIC_REASONING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
+#: A Gemini thought signature travels as a reasoning block whose ``data``
+#: names the part it belongs to. Gemini 3 rejects a follow-up request whose
+#: function-call parts come back without their signatures (HTTP 400), so the
+#: opaque value must round-trip. Other transports must never send these: an
+#: Anthropic thinking block with a Gemini signature is rejected outright.
+GEMINI_SIGNATURE_PREFIX = "gemini-signature:"
+
+
+def _is_gemini_signature(block: ReasoningBlock) -> bool:
+    return str(block.data or "").startswith(GEMINI_SIGNATURE_PREFIX)
 
 # Used only when neither the caller nor the model registry states a ceiling.
 # Chosen to be large enough for a substantial code change rather than to match
@@ -823,6 +845,8 @@ class AnthropicMessagesProvider(_StreamingAdapter):
             # out rather than sent and rejected.
             for reasoning in message.reasoning_blocks:
                 if not reasoning.replayable or not reasoning.signature:
+                    continue
+                if _is_gemini_signature(reasoning):
                     continue
                 if reasoning.kind == "redacted_thinking":
                     blocks.append(
@@ -1275,19 +1299,29 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                     contents.append({"role": "user", "parts": [part]})
                 continue
             role = "model" if message.role == "assistant" else "user"
+            signatures = {
+                str(block.data)[len(GEMINI_SIGNATURE_PREFIX):]: block.signature
+                for block in message.reasoning_blocks
+                if _is_gemini_signature(block) and block.signature
+            }
             parts: list[Dict[str, Any]] = []
             if message.content is not None:
-                parts.append({"text": message.content})
+                text_part: Dict[str, Any] = {"text": message.content}
+                if signatures.get("text"):
+                    text_part["thoughtSignature"] = signatures["text"]
+                parts.append(text_part)
             for call in message.tool_calls:
                 names[call.call_id] = call.name
-                parts.append(
-                    {
-                        "functionCall": {
-                            "name": call.name,
-                            "args": json.loads(call.raw_arguments),
-                        }
+                call_part: Dict[str, Any] = {
+                    "functionCall": {
+                        "name": call.name,
+                        "args": json.loads(call.raw_arguments),
                     }
-                )
+                }
+                signature = signatures.get("call:" + call.call_id)
+                if signature:
+                    call_part["thoughtSignature"] = signature
+                parts.append(call_part)
             contents.append({"role": role, "parts": parts})
         system = (
             {"parts": [{"text": "\n\n".join(systems)}]} if systems else None
@@ -1393,9 +1427,23 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
             for part in content.get("parts", []):
                 if not isinstance(part, dict):
                     raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini content part is invalid")
+                signature = part.get("thoughtSignature")
+                if signature is not None and not isinstance(signature, str):
+                    raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini thought signature is invalid")
                 if "text" in part:
                     if not isinstance(part["text"], str):
                         raise ProviderError(ProviderErrorKind.MALFORMED_RESPONSE, "Gemini text part is invalid")
+                    if signature and part.get("thought") is not True:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_block=ReasoningBlock(
+                                "thinking",
+                                data=GEMINI_SIGNATURE_PREFIX + "text",
+                                signature=signature,
+                            ),
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
                     # A part flagged `thought` is the model's private reasoning,
                     # not its answer. Treating it as answer text streamed private
                     # deliberation to the user and persisted it as the response.
@@ -1416,6 +1464,17 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                     next_tool_index += 1
                     response_scope = response_id or "no-response-id"
                     call_id = f"gemini-call-{call_scope}-{response_scope}-{index}"
+                    if signature:
+                        yield ModelEvent(
+                            ModelEventKind.REASONING_DELTA,
+                            reasoning_block=ReasoningBlock(
+                                "thinking",
+                                data=GEMINI_SIGNATURE_PREFIX + "call:" + call_id,
+                                signature=signature,
+                            ),
+                            response_id=response_id,
+                            transport_attempts=attempts,
+                        )
                     yield ModelEvent(
                         ModelEventKind.TOOL_CALL_DELTA,
                         tool_call_delta=ToolCallDelta(

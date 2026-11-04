@@ -2021,6 +2021,68 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(result.content, "the answer")
         self.assertEqual(result.reasoning, "let me consider")
 
+    def test_gemini_thought_signatures_round_trip_with_their_calls(self) -> None:
+        """Gemini 3 refuses a follow-up whose function calls lost their signatures."""
+
+        records = [
+            (
+                None,
+                {
+                    "responseId": "r1",
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {"name": "git_status", "args": {}},
+                                        "thoughtSignature": "c2lnLTE=",
+                                    },
+                                    {"functionCall": {"name": "git_diff", "args": {}}},
+                                ]
+                            },
+                            "finishReason": "STOP",
+                        }
+                    ],
+                },
+            ),
+        ]
+        result, _ = self.complete(
+            GeminiGenerateContentProvider("https://provider.example/v1beta"), records
+        )
+        first, second = result.tool_calls
+        self.assertEqual(
+            [(block.data, block.signature) for block in result.reasoning_blocks],
+            [("gemini-signature:call:" + first.call_id, "c2lnLTE=")],
+        )
+
+        follow_up = ModelRequest(
+            model="gemini-3-pro",
+            messages=(
+                ModelMessage("user", "look"),
+                ModelMessage(
+                    "assistant",
+                    None,
+                    tool_calls=result.tool_calls,
+                    reasoning_blocks=result.reasoning_blocks,
+                ),
+                ModelMessage("tool", "{}", tool_call_id=first.call_id),
+                ModelMessage("tool", "{}", tool_call_id=second.call_id),
+            ),
+            deadline_seconds=2,
+        )
+        payload = GeminiGenerateContentProvider(
+            "https://provider.example/v1beta"
+        )._request_payload(follow_up)
+        model_parts = payload["contents"][1]["parts"]
+        self.assertEqual(model_parts[0]["thoughtSignature"], "c2lnLTE=")
+        self.assertNotIn("thoughtSignature", model_parts[1])
+
+        # Another transport never sends a Gemini signature as its own thinking.
+        anthropic = AnthropicMessagesProvider("https://provider.example/v1")._request_payload(
+            follow_up
+        )
+        self.assertNotIn("c2lnLTE=", json.dumps(anthropic))
+
     def test_anthropic_requires_one_message_start_before_stream_content(self) -> None:
         message_start = (
             "message_start",

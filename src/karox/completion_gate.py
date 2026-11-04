@@ -572,6 +572,43 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
     return {"files": files, "requirements": ledger_digest(record.requirements), "task": record.task}
 
 
+def same_run_inputs(core: Any, prior: dict[str, Any], current: dict[str, Any]) -> bool:
+    """True when nothing a check could execute differs between two identities.
+
+    ``prior`` is the identity an earlier run was bound to. Every file it hashed
+    must hash the same now (re-read from disk when the current identity no
+    longer lists it) and the task must be the same. The current identity may
+    list more files: files merely read since the run do not change a verdict
+    that depends on repository bytes, and the caller guarantees no tool wrote
+    anything in between. The requirement ledger does not affect what a command
+    executes, so a ledger edit alone does not invalidate a run either.
+    """
+
+    if not prior or not current:
+        return False
+    if prior.get("task") != current.get("task"):
+        return False
+    prior_files = prior.get("files")
+    current_files = current.get("files")
+    if not isinstance(prior_files, dict) or not isinstance(current_files, dict):
+        return False
+    for relative, digest in prior_files.items():
+        now = current_files.get(relative)
+        if now is None:
+            try:
+                path = core.safe_path(relative)
+                now = (
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                    if path.is_file()
+                    else "missing"
+                )
+            except Exception:  # noqa: BLE001 - unreadable means changed
+                return False
+        if now != digest:
+            return False
+    return True
+
+
 def command_classes(argv: Sequence[str]) -> set[str]:
     """Exact runner positions, never a substring of arbitrary python -c text."""
     parts = list(argv)

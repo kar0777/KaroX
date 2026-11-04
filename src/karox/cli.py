@@ -1209,6 +1209,20 @@ def _handle_session(args: argparse.Namespace) -> int:
                     f"{item['access_profile']}\t{item['repository']}{archived}\n"
                 )
         return 0
+    if command == "export":
+        from .session_export import export_session
+
+        record = store.load(args.session_id)
+        text = export_session(record, args.format)
+        target = args.output or Path.cwd() / f"karox-session-{record.session_id}.{args.format}"
+        target = target.expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="\n")
+        _emit(
+            {"session_id": record.session_id, "format": args.format, "path": str(target.resolve()), "bytes": len(text.encode("utf-8"))},
+            json_output=args.json,
+        )
+        return 0
     if command == "fork":
         record = store.fork(
             args.session_id,
@@ -1452,10 +1466,25 @@ def _handle_provider_catalog(args: argparse.Namespace) -> int:
         state = "connected" if row["connected_as"] else (
             "ready" if row["installable"] else "unsupported"
         )
-        note = row["unsupported_reason"] or ", ".join(row["env"][:1])
+        note = row["unsupported_reason"] or ", ".join(row.get("key_env", row["env"])[:1])
         print(f"  {row['provider_id']:<28} {state:<11} {row['model_count']:>4} models  {note}")
     print("Connect one with: karox provider connect <id>")
     return 0
+
+
+def _endpoint_variables(entry: Any, supplied: dict[str, str]) -> dict[str, str]:
+    """``--var`` values, completed from same-named environment variables.
+
+    The catalog names endpoint placeholders after the provider's own
+    conventional variables (``AZURE_RESOURCE_NAME``), so an environment that is
+    already configured for that provider needs no ``--var`` at all.
+    """
+
+    values = dict(supplied)
+    for name in entry.url_variables:
+        if not values.get(name) and os.environ.get(name, "").strip():
+            values[name] = os.environ[name].strip()
+    return values
 
 
 def _handle_provider_connect(args: argparse.Namespace) -> int:
@@ -1479,7 +1508,7 @@ def _handle_provider_connect(args: argparse.Namespace) -> int:
         # Runtime references stay in KaroX's own namespace (see credentials.py);
         # the provider's conventional variable is imported once into the keyring.
         own = "KAROX_PROVIDER_" + re.sub(r"[^A-Z0-9]+", "_", registry_id.upper()).strip("_") + "_API_KEY"
-        variable = next((name for name in entry.env if os.environ.get(name)), None)
+        variable = next((name for name in entry.key_env if os.environ.get(name)), None)
         if os.environ.get(own):
             credential_ref = f"env:{own}"
         elif variable is not None:
@@ -1487,7 +1516,7 @@ def _handle_provider_connect(args: argparse.Namespace) -> int:
         else:
             raise ValueError(
                 "none of these environment variables is set: "
-                + ", ".join([own, *entry.env])
+                + ", ".join([own, *entry.key_env])
             )
     elif not credential_ref and not (existing and existing.credential_ref) and entry.env:
         if not sys.stdin.isatty():
@@ -1503,7 +1532,7 @@ def _handle_provider_connect(args: argparse.Namespace) -> int:
             credential_ref=credential_ref,
             provider_id=registry_id,
             base_url=args.base_url,
-            variables=_pairs(args.var, "var"),
+            variables=_endpoint_variables(entry, _pairs(args.var, "var")),
             model=args.model,
             include_deprecated=bool(args.include_deprecated),
             test=not args.no_test,
@@ -1541,6 +1570,38 @@ def _handle_provider_catalog_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def _program_name() -> str:
+    """``karox`` or the suffixed command this copy was started as (``karox6``)."""
+
+    stem = Path(sys.argv[0] or "").stem.lower() if sys.argv else ""
+    return stem if re.fullmatch(r"karox[0-9a-z_-]*", stem) else "karox"
+
+
+def _handle_provider_local(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from .local_runtimes import KNOWN_RUNTIMES, scan_local_runtimes
+
+    found = scan_local_runtimes()
+    if args.json:
+        _json({"found": [item.to_dict() for item in found]})
+        return 0
+    if not found:
+        ports = ", ".join(f"{kind.display_name} {kind.port}" for kind in KNOWN_RUNTIMES)
+        _write(f"No local model server answered on 127.0.0.1 ({ports}).\n")
+        _write(f"Start one, then run: {_program_name()} provider local\n")
+        return 0
+    for item in found:
+        guessed = " (by port)" if item.identified_by == "port" else ""
+        listed = ", ".join(item.models[:5]) + (" ..." if len(item.models) > 5 else "")
+        _write(f"{item.display_name}{guessed}: {item.base_url}\n")
+        _write(f"  models ({len(item.models)}): {listed or 'none loaded'}\n")
+        argv = item.setup_argv(program=_program_name())
+        line = subprocess.list2cmdline(argv) if os.name == "nt" else " ".join(shlex.quote(part) for part in argv)
+        _write("  connect: " + line + "\n")
+    return 0
+
+
 def _handle_provider(args: argparse.Namespace) -> int:
     controller = _controller()
     command = args.provider_command
@@ -1549,6 +1610,8 @@ def _handle_provider(args: argparse.Namespace) -> int:
         return 0
     if command == "setup":
         return _handle_provider_setup(args)
+    if command == "local":
+        return _handle_provider_local(args)
     if command == "catalog":
         return _handle_provider_catalog(args)
     if command == "connect":

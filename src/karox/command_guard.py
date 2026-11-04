@@ -10,10 +10,15 @@ This is a command boundary, not a malware sandbox.  It rejects shell wrappers an
 known remote-side-effect CLIs so a model cannot hide a blocked action in an
 opaque command string. Repository code is still subject to the normal KaroX
 permission and verification boundaries.
+
+Broad process termination is rejected too: ``taskkill /IM python.exe``,
+``pkill``/``killall`` and ``kill -1`` stop unrelated user programs and KaroX
+itself.  Killing one process by PID stays allowed.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 
@@ -95,6 +100,138 @@ def _git_subcommand(argv: Sequence[str]) -> str | None:
     return None
 
 
+_KILL_GUIDANCE = (
+    "terminate one process by PID instead (taskkill /PID <pid> /T /F or kill <pid>), "
+    "or cancel a job KaroX started with dev.command_cancel"
+)
+
+
+def _protected_pids() -> frozenset[int]:
+    """PIDs whose termination would kill KaroX itself (this process and its parent)."""
+
+    pids = {os.getpid()}
+    try:
+        parent = os.getppid()
+    except (AttributeError, OSError):  # pragma: no cover - platform dependent
+        parent = 0
+    if parent > 1:
+        pids.add(parent)
+    return frozenset(pids)
+
+
+def _parse_pid(value: str) -> int | None:
+    text = value.strip()
+    if text.startswith("+"):
+        text = text[1:]
+    if text.startswith("-"):
+        body = text[1:]
+        return -int(body) if body.isdigit() else None
+    return int(text) if text.isdigit() else None
+
+
+def _taskkill_reason(argv: Sequence[str]) -> str | None:
+    """``taskkill`` may only target explicit PIDs: image names and filters are broad."""
+
+    flags = [item.strip().casefold() for item in argv[1:]]
+    if any(flag in {"/?", "-?", "/h", "-h"} for flag in flags):
+        return None
+    if any(flag in {"/s", "-s", "/u", "-u", "/p", "-p"} for flag in flags):
+        return "remote-system taskkill (/S, /U, /P) is blocked by the local-first command boundary"
+    if any(flag.lstrip("/-").split(":", 1)[0] in {"im", "fi"} for flag in flags if flag[:1] in "/-"):
+        return (
+            "killing processes by image name or filter is blocked because it also terminates "
+            "unrelated processes (including KaroX itself); " + _KILL_GUIDANCE
+        )
+    pids: list[int] = []
+    for index, flag in enumerate(flags):
+        if flag in {"/pid", "-pid"} and index + 1 < len(flags):
+            pid = _parse_pid(flags[index + 1])
+            if pid is None:
+                return "taskkill /PID needs a numeric process id; " + _KILL_GUIDANCE
+            pids.append(pid)
+    if not pids:
+        return "taskkill without an explicit /PID is blocked; " + _KILL_GUIDANCE
+    return _protected_pid_reason(pids)
+
+
+def _kill_reason(argv: Sequence[str]) -> str | None:
+    """POSIX ``kill``: positive PIDs only, never process groups or ``-1`` (everything)."""
+
+    values = [item.strip() for item in argv[1:] if item.strip()]
+    if any(item in {"-l", "-L", "--list", "--help", "-h"} or item.startswith("--list=") for item in values):
+        return None
+    pids: list[int] = []
+    signal_seen = False
+    index = 0
+    end_of_options = False
+    while index < len(values):
+        item = values[index]
+        if not end_of_options and item == "--":
+            end_of_options = True
+            index += 1
+            continue
+        if not end_of_options and item in {"-s", "-n", "--signal"}:
+            signal_seen = True
+            index += 2
+            continue
+        if not end_of_options and item.startswith("--signal="):
+            signal_seen = True
+            index += 1
+            continue
+        if not end_of_options and item.startswith("-") and not signal_seen:
+            # The first dash word is the signal (``-9``, ``-KILL``, ``-SIGTERM``).
+            signal_seen = True
+            index += 1
+            continue
+        pid = _parse_pid(item)
+        if pid is None:
+            if item.startswith("%"):
+                return "shell job specs are not processes KaroX can target; " + _KILL_GUIDANCE
+            return "kill accepts numeric PIDs only here; " + _KILL_GUIDANCE
+        pids.append(pid)
+        index += 1
+    if any(pid <= 0 for pid in pids):
+        return (
+            "kill with 0, -1 or a negative PID signals whole process groups (or every process); "
+            + _KILL_GUIDANCE
+        )
+    return _protected_pid_reason(pids)
+
+
+def _protected_pid_reason(pids: Sequence[int]) -> str | None:
+    protected = _protected_pids()
+    if any(pid in protected for pid in pids):
+        return "this command would terminate the running KaroX process itself"
+    return None
+
+
+def _process_kill_reason(argv: Sequence[str]) -> str | None:
+    """Reject broad, name-based process termination; allow PID-targeted kills."""
+
+    executable = _basename(argv[0])
+    words = _words(argv[1:])
+    if executable == "taskkill":
+        return _taskkill_reason(argv)
+    if executable in {"pkill", "killall", "skill", "slay"}:
+        return "killing processes by name/pattern is blocked; " + _KILL_GUIDANCE
+    if executable == "kill":
+        return _kill_reason(argv)
+    if executable in {"wmic"} and "process" in words and (
+        {"delete", "terminate"}.intersection(words) or any("terminate" in item for item in words)
+    ):
+        return "WMIC process termination is blocked; " + _KILL_GUIDANCE
+    return None
+
+
+def process_kill_block_reason(argv: Sequence[str]) -> str | None:
+    """Public check shared by every KaroX process boundary (dev commands and checks)."""
+
+    values = tuple(argv)
+    if not values or not isinstance(values[0], str):
+        return None
+    return _process_kill_reason(values)
+
+
 def _contains_inline_remote_action(argv: Sequence[str]) -> bool:
     """Catch obvious attempts to hide a forbidden command in Python/Node eval text."""
 
@@ -113,6 +250,15 @@ def _contains_inline_remote_action(argv: Sequence[str]) -> bool:
             r"\b(?:npm|pnpm|yarn|bun|cargo|poetry|twine|uv|hatch|flit)\b.{0,80}\bpublish\b",
             r"\b(?:vercel|netlify|fly|railway|firebase|wrangler|gcloud)\b.{0,80}\bdeploy\b",
             r"\b(?:gh|docker|npm|gcloud|az|vercel|netlify|hf|huggingface-cli)\b.{0,80}\b(?:auth|login|logout)\b",
+            r"\btaskkill\b.{0,80}[/-](?:im|fi)\b",
+            r"\b(?:pkill|killall)\b",
+            # PowerShell's by-name forms, spawned from inline code: any
+            # Stop-Process that does not start with -Id, and Get-Process piped
+            # into Stop-Process.
+            r"\b(?:stop-process|spps)\b(?![\s'\",]+-id\b)",
+            r"\bget-process\b.{0,160}\|\s*(?:stop-process|spps|kill)\b",
+            # psutil sweeps: iterate every process, kill the ones that match.
+            r"\bprocess_iter\b.{0,400}\.(?:kill|terminate)\s*\(",
         )
         return any(re.search(pattern, payload, flags=re.DOTALL) for pattern in patterns)
     return False
@@ -195,8 +341,12 @@ def _blocked_reason(argv: Sequence[str]) -> str | None:
     ):
         return "model-hub authentication/publishing mutations are blocked"
 
+    kill_reason = _process_kill_reason(argv)
+    if kill_reason is not None:
+        return kill_reason
+
     if _contains_inline_remote_action(argv):
-        return "inline code contains a blocked publish/auth/deploy/git-push action"
+        return "inline code contains a blocked publish/auth/deploy/git-push/process-kill action"
     return None
 
 
@@ -214,4 +364,8 @@ def validate_developer_command_argv(argv: Sequence[str]) -> tuple[str, ...]:
     return values
 
 
-__all__ = ["DeveloperCommandBlocked", "validate_developer_command_argv"]
+__all__ = [
+    "DeveloperCommandBlocked",
+    "process_kill_block_reason",
+    "validate_developer_command_argv",
+]

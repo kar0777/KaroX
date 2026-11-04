@@ -2,6 +2,90 @@
 
 ## Unreleased
 
+### Fixed — the no-progress check could not see repeated tool results
+
+- Port 4 ends a run after four identical action+result steps in a row, but
+  every rendered core result carries a fresh child pid, duration and
+  evidence id. Four identical `git diff` (or `checks.run`) calls therefore
+  never looked identical. The check now compares a digest of the result
+  without that bookkeeping; the model still sees the full result.
+- The step before the limit adds one engine note after its observations
+  ("the same action returned the same result; finish or change the
+  approach"), and two actions alternating with unchanged results for six
+  steps get the same note once. The note never ends a run; the agent
+  config `no_progress_note: false` turns it off for A/B runs. Not yet
+  measured on the arena.
+
+### Fixed — prompt caching was off since the engine-only kernel
+
+- The engine-only kernel stopped passing the session's cache identity to the
+  provider bridge, so Anthropic requests carried no `cache_control`
+  breakpoints and OpenAI requests no `prompt_cache_key`: every turn paid the
+  full prompt. The key is back (derived from the session, plus a digest of
+  the system prompt and tools so a different prompt never shares it).
+  `prompt_cache_key` is sent only to api.openai.com (and chatgpt.com
+  Responses), since other OpenAI-compatible endpoints may reject it.
+- New prompt-cache telemetry: each assistant turn records how much of the
+  request prefix was unchanged and, on a full miss, why (`first_request`,
+  `tools_changed`, `history_rewrite`, `provider_miss`, `unreported`);
+  session usage counts misses by cause (`prompt_cache_misses`).
+
+### Fixed — agents can no longer kill processes by name
+
+- `command_guard` blocks mass process termination from agent commands and
+  checks: `taskkill /IM` or `/FI` (or without `/PID`, or against a remote
+  host), `pkill`, `killall`, `kill -1`/`kill 0`/negative PIDs, `wmic process …
+  delete`, the same inside `python -c`/`node -e` (also PowerShell
+  `Stop-Process` by name and psutil "kill every match" loops spawned from
+  there; shells themselves were already blocked), and any kill of KaroX's own
+  PID or its parent. Killing an explicit PID stays allowed. Commands like
+  these, run by other agents on the arena machine, killed the runner and the
+  bridge.
+
+### Changed — reuse of a passed check is exact
+
+- A passed check is reused only when the task, every file the run read and
+  every file it hashed are byte-identical; reads in between no longer prevent
+  reuse, and an edit that failed, was refused or wrote identical bytes no
+  longer counts as a change. Measured on the 03.11 arena sessions: of 25
+  identical re-runs after a pass, 21 followed real edits (correct re-runs),
+  so "reused 0" was mostly correct; at most 4 could have been reused.
+
+### Added — providers and transport
+
+- `karox provider local` finds Ollama, LM Studio, llama.cpp, vLLM and SGLang
+  on localhost and prints the ready setup command.
+- Azure OpenAI connects from the catalog through its v1 API
+  (`--var AZURE_RESOURCE_NAME=…` or the environment variable); endpoint
+  placeholders are filled from same-named environment variables, and
+  `--env-key` reads only key variables (it used to take the first set
+  variable, which for Azure is the resource name). Not verified live yet.
+- Presets: Yandex AI Studio (experimental, not verified live); GigaChat listed
+  as not installable yet, with the reason and the proxy workaround.
+- Gemini thought signatures are kept with their function calls and sent back,
+  which Gemini 2.5/3 require for multi-step tool use.
+- Connect timeout of at most 15 s separate from the read budget; a corrupted
+  response is retried (twice at most); a 429 without `Retry-After` waits for
+  `retry-after-ms`, OpenAI `x-ratelimit-reset-*` or Anthropic
+  `anthropic-ratelimit-*-reset`. A fault stand replays 429/5xx/529, resets,
+  truncated and corrupted streams and stalls against a real loopback server.
+- `KAROX_CA_BUNDLE` (extra PEM roots on top of certifi),
+  `KAROX_TRUST_STORE=system` (OS store via `truststore`), and a clear message
+  for a SOCKS proxy without `socksio`. See [NETWORK.md](NETWORK.md).
+
+### Added — sessions, checks and install
+
+- `karox session export <id>` writes a self-contained, redacted HTML page
+  (or Markdown/JSON) with the task, checks, usage and the whole trajectory.
+- Check detection suggests `python -m unittest discover` for repositories
+  whose tests are unittest-only (pytest is no longer assumed and failed there
+  when not installed); pytest stays for pytest-style or pytest-configured
+  projects.
+- One-command installers `scripts/install.ps1` and `scripts/install.sh`: they
+  detect KaroX 5 and install KaroX 6 next to it as `karox6` with its own data
+  channel, and never replace an existing KaroX 6 silently. See
+  [INSTALL.md](INSTALL.md).
+
 ### Changed — the TUI reads like Claude Code, with KaroX's working dots
 
 - Every step and tool call is one `●` line in order: `Read(calc.py)`,

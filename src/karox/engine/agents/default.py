@@ -54,6 +54,16 @@ class AgentConfig(BaseModel):
     new information, so the workspace is final and the run exits as Submitted
     (exit_reason=no-progress). 0 disables the check.
     """
+    no_progress_note: bool = True
+    """Tell the model once before the no-progress check ends the run.
+
+    With ``no_progress_streak`` of 3 or more, the step before the limit adds a
+    short engine note after its observations: the same action returned the
+    same result again, so finish if the task is done or change the approach.
+    Two actions alternating with unchanged results for six steps get the same
+    note once per pair. The note never ends the run by itself; False keeps the
+    silent port-4 behaviour (for A/B runs).
+    """
     output_path: Path | None = None
     """Save the trajectory to this path."""
     # karo-core port 2 of the KaroX context economy: deterministic history
@@ -111,6 +121,9 @@ class DefaultAgent:
         self.context_overflow_tokens = 0
         self._last_action_key: str = ""
         self._same_step_streak = 0
+        self._recent_step_keys: list[str] = []
+        self._noted_cycles: set[tuple[str, str]] = set()
+        self._pending_progress_note = ""
         self._start_time = time.time()
 
     def get_template_vars(self, **kwargs) -> dict:
@@ -435,7 +448,13 @@ class DefaultAgent:
         """Execute actions in message, add observation messages, return them."""
         outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
         self._check_no_progress(message, outputs)
-        return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        added = self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        # The note goes after every observation: a message between the tool
+        # calls and their results would break the provider's call/result pairing.
+        note, self._pending_progress_note = self._pending_progress_note, ""
+        if note:
+            self.add_messages({"role": "user", "content": note, "kind": "engine_note"})
+        return added
 
     def _check_no_progress(self, message: dict, outputs: list[dict]) -> None:
         """Submit when the same action produces the same observation N times.
@@ -449,10 +468,33 @@ class DefaultAgent:
             return
         commands = [str(a.get("command", "")) for a in message.get("extra", {}).get("actions", [])]
         results = [(o.get("returncode"), str(o.get("output", ""))) for o in outputs]
-        key = repr((commands, results))
+        self._track_progress(repr((commands, results)), message)
+
+    _REPEAT_NOTE = (
+        "KaroX note: the last {count} steps ran the same action and got the same result. "
+        "Repeating it adds no information. If the task is complete, submit the final answer now; "
+        "otherwise change the approach."
+    )
+    _CYCLE_NOTE = (
+        "KaroX note: the last {count} steps alternated between the same two actions and the "
+        "results did not change. If the task is complete, submit the final answer now; "
+        "otherwise change the approach."
+    )
+
+    def _track_progress(self, key: str, message: dict) -> None:
+        """Count one step's action+result key; note or submit on repetition.
+
+        Shared by every key flavour (the stock command key and the kernel's
+        typed-action key). The streak contract of ``no_progress_streak`` is
+        unchanged; ``no_progress_note`` only adds a warning one step earlier.
+        """
+        threshold = self.config.no_progress_streak
         self._same_step_streak = self._same_step_streak + 1 if key == self._last_action_key else 1
         self._last_action_key = key
+        self._recent_step_keys = (self._recent_step_keys + [key])[-6:]
         if self._same_step_streak < threshold:
+            if self.config.no_progress_note:
+                self._queue_progress_note(threshold)
             return
         submission = str(message.get("content") or "").strip() or "no progress: repeated identical step"
         raise Submitted(
@@ -466,6 +508,21 @@ class DefaultAgent:
                 },
             }
         )
+
+    def _queue_progress_note(self, threshold: int) -> None:
+        if threshold >= 3 and self._same_step_streak == threshold - 1:
+            self._pending_progress_note = self._REPEAT_NOTE.format(count=self._same_step_streak)
+            return
+        recent = self._recent_step_keys
+        if len(recent) < 6 or recent[0] == recent[1]:
+            return
+        if recent[0::2] != [recent[0]] * 3 or recent[1::2] != [recent[1]] * 3:
+            return
+        pair = (min(recent[0], recent[1]), max(recent[0], recent[1]))
+        if pair in self._noted_cycles:
+            return
+        self._noted_cycles.add(pair)
+        self._pending_progress_note = self._CYCLE_NOTE.format(count=len(recent))
 
     def serialize(self, *extra_dicts) -> dict:
         """Serialize agent state to a json-compatible nested dictionary for saving."""

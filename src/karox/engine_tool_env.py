@@ -78,14 +78,24 @@ _RUN_NEUTRAL_TOOLS = frozenset(
         "checks.run",
         "tests.run",
         "visual.check",
+        "disk.scan",
+        "disk.plan_cleanup",
     }
 )
+#: File edits that report exactly what they wrote. One that failed or wrote
+#: identical bytes changed nothing a run can see, so it does not end a reuse.
+#: ``repo.command`` is not here: a failed command may still have written files.
+_EXACT_EDIT_TOOLS = frozenset({"repo.edit_file", "repo.write_file", "repo.apply_patch"})
 #: Proof bookkeeping, not an observation. ``completion_identity`` carries the
 #: whole task text and every file hash; the completion gate reads it from the
 #: durable result, so putting it in the model-facing body only makes every later
 #: request re-send an 8 KB echo of the brief. Six visual checks paid about
 #: 640k prompt tokens for that in the aquarium run.
 _BOOKKEEPING_KEYS = frozenset({"completion_identity", "completion_target"})
+#: Process bookkeeping that differs between two otherwise identical runs of
+#: the same call. The model still sees it; the no-progress check compares
+#: results without it, or a repeated `git diff` would never look repeated.
+_VOLATILE_RESULT_KEYS = frozenset({"bridge_pid", "child_pid", "duration_ms", "elapsed_ms"})
 #: A finish call found in a batch with other calls. It is rewritten to this
 #: marker so the other calls still execute and every call gets its observation;
 #: the model must then submit again with finish alone.
@@ -194,6 +204,19 @@ def _counts_as_repository_change(
         and core_name in _CODE_CHANGE_TOOLS
         and (data.get("changed") is True or bool(data.get("changed_files")))
     )
+
+
+def _wrote_anything(data: Mapping[str, Any], ok: bool) -> bool:
+    """Whether an exact edit tool reports any written byte (fail-safe: yes)."""
+
+    if not ok:
+        # Edits are atomic: a failed edit leaves the file as it was.
+        return False
+    if data.get("changed") is True or bool(data.get("changed_files")):
+        return True
+    # Only an explicit "nothing changed" counts as no write; a result that does
+    # not say is treated as a write.
+    return data.get("changed") is not False
 
 
 def _run_key(core_name: str, arguments: Mapping[str, Any]) -> str:
@@ -402,6 +425,7 @@ class CoreToolEnvironment:
             )
             if reused is not None:
                 return reused
+        epoch_entering = self._state_epoch
         if core_name not in _RUN_NEUTRAL_TOOLS:
             self._state_epoch += 1
         epoch_before = self._state_epoch
@@ -465,6 +489,9 @@ class CoreToolEnvironment:
                 summary=type(exc).__name__,
                 duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
             )
+            if core_name in _EXACT_EDIT_TOOLS and self._state_epoch == epoch_before:
+                # A refused edit wrote nothing.
+                self._state_epoch = epoch_entering
             return self._observation(message, 1, "refused")
         self._refusals.pop(core_name, None)
         if core_name == "browser.command":
@@ -478,6 +505,13 @@ class CoreToolEnvironment:
         data = result.data if isinstance(result.data, dict) else {}
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
+        elif (
+            core_name in _EXACT_EDIT_TOOLS
+            and self._state_epoch == epoch_before
+            and not _wrote_anything(data, result.ok)
+        ):
+            # A failed edit, or one that wrote the bytes already on disk.
+            self._state_epoch = epoch_entering
         if core_name == "tests.run" and isinstance(result.data, dict):
             # Say where the target list came from: a reader of the session must
             # be able to tell a model's choice from the harness's derivation.
@@ -819,10 +853,13 @@ class CoreToolEnvironment:
     ) -> Optional[Dict[str, Any]]:
         """The earlier verdict of this exact call, when nothing has changed.
 
-        Identity equality is the same test the completion gate applies to the
-        earlier result, so reusing it proves nothing the earlier run did not.
-        A failed or timed-out run is never reused: a retry there may be the
-        point (a flaky test, a dependency installed in between).
+        Nothing changed means: no state-changing tool ran since (the epoch),
+        the task is the same, and every file the earlier run was bound to has
+        the same bytes now. Requiring the whole identity to be equal also
+        refused a pass after a mere read: reading one more file grows the
+        identity's read set without changing a byte the run executes. A failed
+        or timed-out run is never reused: a retry there may be the point (a
+        flaky test, a dependency installed in between).
         """
 
         entry = self._passed_runs.get(key)
@@ -834,7 +871,9 @@ class CoreToolEnvironment:
             )
         except Exception:  # noqa: BLE001 - when in doubt, run it
             return None
-        if not current or current != entry["identity"]:
+        if not current or not completion_gate.same_run_inputs(
+            self._core, entry["identity"], current
+        ):
             return None
         prior: CoreResult = entry["result"]
         result = CoreResult.from_dict(prior.to_dict())
@@ -842,6 +881,16 @@ class CoreToolEnvironment:
             "call_id": entry["call_id"],
             "step": entry["step"],
         }
+        if "completion_identity" in result.data:
+            # The epoch proves no tool changed a byte since the run, and every
+            # file the run was bound to still hashes the same. Files read since
+            # then (and a ledger change) widen the identity without changing
+            # anything a check executes, so the verdict is re-bound to the
+            # current identity instead of going stale on a mere read.
+            result.data["completion_identity"] = current
+            for item in result.evidence:
+                item.metadata["completion_identity"] = current
+        entry["identity"] = current
         step = entry["step"]
         text = (
             f"[{core_name} exit 0 · reused]\n"
@@ -1198,7 +1247,35 @@ class CoreToolEnvironment:
             "observation": clipped,
             "returncode": returncode,
             "exception_info": "",
+            "progress_key": _progress_key(core_name, result.ok, data),
         }
+
+
+def _stable_result(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_result(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_RESULT_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_result(item) for item in value]
+    return value
+
+
+def _progress_key(core_name: str, ok: bool, data: Mapping[str, Any]) -> str:
+    """A digest of what a result says, without pids, timings or evidence ids."""
+
+    try:
+        text = json.dumps(
+            [core_name, bool(ok), _stable_result(dict(data))],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
 PYTEST_MISSING_HINT = (

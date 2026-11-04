@@ -3018,6 +3018,88 @@ def test_an_identical_passing_check_on_unchanged_bytes_is_reused(
     assert any("[checks.run exit 0 · reused]" in m for m in _tool_messages(harness))
 
 
+def test_a_read_between_identical_checks_still_reuses_the_pass(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Reading one more file widens the identity but changes no byte.
+
+    The whole-identity comparison never fired on the W&B benchmark: the model
+    read a file between two identical runs and the suite ran again.
+    """
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response(
+                (_tool_call("c3", "repo_read_file", {"path": "tests/test_calc.py"}),)
+            ),
+            _response((_tool_call("c4", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c5", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    runs = [
+        entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c4"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4"]
+    reused = runs[1]["result"]["data"]
+    assert reused["reused_from"]["call_id"] == "c2"
+    # Re-bound to the widened identity: the read file is part of it now.
+    assert "tests/test_calc.py" in reused["completion_identity"]["files"]
+    assert "tests/test_calc.py" not in runs[0]["result"]["data"]["completion_identity"]["files"]
+
+
+def test_a_failed_edit_between_identical_checks_still_reuses_the_pass(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An edit whose anchor was not found wrote nothing; the pass still stands."""
+
+    check = _calc_repository(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c3",
+                        "repo_edit_file",
+                        {
+                            "path": "calc.py",
+                            "old_string": "no such anchor in this file",
+                            "new_string": "anything",
+                        },
+                    ),
+                )
+            ),
+            _response((_write_call("c4", "calc.py", CALC_RIGHT),)),
+            _response((_tool_call("c5", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c6", "implemented add"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    runs = [
+        entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c5"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c5"]
+    # c3 failed and c4 rewrote identical bytes: neither changed what c2 saw.
+    assert runs[1]["result"]["data"]["reused_from"]["call_id"] == "c2"
+
+
 def test_an_edit_between_identical_checks_runs_the_check_again(
     tmp_path: Path, repository: Path
 ) -> None:
@@ -3071,3 +3153,66 @@ def test_a_failed_check_is_never_reused(tmp_path: Path, repository: Path) -> Non
     assert len(runs) == 2
     assert all(entry["result"]["ok"] is False for entry in runs)
     assert all("reused_from" not in entry["result"]["data"] for entry in runs)
+
+
+def test_third_identical_tool_step_gets_one_persisted_engine_note(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Port 4 note: the step before the no-progress limit warns the model.
+
+    The note follows the third identical observation, so the next request ends
+    with it after the tool result (never between a call and its result), and
+    the durable transcript keeps it as an engine_note.
+    """
+
+    diffs = [_response((_tool_call(f"d{i}", "git_diff", {}),)) for i in range(3)]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            *diffs,
+            _response((_finish_call("c2", "created hello.txt with hi"),)),
+        ],
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    request = harness.provider.requests[4]
+    assert request.messages[-1].role == "user"
+    assert "same action and got the same result" in (request.messages[-1].content or "")
+    assert request.messages[-2].role == "tool"
+    assert not any(
+        "same action and got the same result" in (message.content or "")
+        for request in harness.provider.requests[:4]
+        for message in request.messages
+    )
+    notes = [
+        entry
+        for entry in harness.record().provider_history
+        if "same action and got the same result" in str(entry.get("content") or "")
+    ]
+    assert [entry.get("kind") for entry in notes] == ["engine_note"]
+
+
+def test_identical_process_results_count_as_no_progress_despite_pids(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Port 4 compares what a result says, not its pid, timing or evidence id.
+
+    Every `git diff` result carries a fresh child pid, duration and evidence
+    id, so the raw output never repeated and four identical diffs in a row
+    were never seen as a loop.
+    """
+
+    diffs = [_response((_tool_call(f"d{i}", "git_diff", {}),)) for i in range(4)]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [_response((_write_call("c1", "hello.txt", "hi"),)), *diffs],
+    )
+    report = harness.run()
+
+    assert len(harness.provider.requests) == 5, "the fourth identical diff ends the loop"
+    assert report.reason == "submitted"
+    assert report.provider_message == "no progress: repeated identical step"

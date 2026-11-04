@@ -50,7 +50,6 @@ from .engine.agents.default import DefaultAgent  # noqa: E402
 from .engine.exceptions import (  # noqa: E402
     FormatError,
     InterruptAgentFlow,
-    Submitted,
     UserInterruption,
 )
 from .engine_tool_env import CoreToolEnvironment, FINISH_BATCH_MARKER  # noqa: E402
@@ -558,27 +557,13 @@ class EngineAgent(DefaultAgent):
                         ),
                     )
                 )
-        results = [(o.get("returncode"), str(o.get("output", ""))) for o in outputs]
-        key = repr((identities, results))
-        self._same_step_streak = self._same_step_streak + 1 if key == self._last_action_key else 1
-        self._last_action_key = key
-        if self._same_step_streak < threshold:
-            return
-        submission = (
-            str(message.get("content") or "").strip()
-            or "no progress: repeated identical step"
-        )
-        raise Submitted(
-            {
-                "role": "exit",
-                "content": submission,
-                "extra": {
-                    "exit_status": "Submitted",
-                    "exit_reason": "no-progress",
-                    "submission": submission,
-                },
-            }
-        )
+        # A rendered core result carries pids, timings and evidence ids that
+        # differ on every run; its progress_key is the result without them.
+        results = [
+            (o.get("returncode"), str(o.get("progress_key") or o.get("output", "")))
+            for o in outputs
+        ]
+        self._track_progress(repr((identities, results)), message)
 
     # -- run control -------------------------------------------------------
 
@@ -950,6 +935,10 @@ class EngineKernel:
                 rewrite_pressure_tokens=min(
                     REWRITE_PRESSURE_TOKENS, max(8_000, self._engine_context_budget() // 2)
                 ),
+                # One key per session: every step shares the prefix, and a
+                # resumed session keeps routing to the cache its prefix built.
+                cache_key="karox-"
+                + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24],
             )
             environment = CoreToolEnvironment(
                 core=self.core,
@@ -1705,6 +1694,11 @@ class EngineKernel:
             "transport_attempts": response.transport_attempts,
             "usage": dict(response.usage),
         }
+        telemetry = (message.get("extra") or {}).get("prompt_cache")
+        if isinstance(telemetry, Mapping):
+            # Digest-derived counts only: why this request did or did not hit
+            # the provider's prefix cache.
+            entry["prompt_cache"] = dict(telemetry)
         stored = dict(redact(entry))
         blocks = message.get("reasoning_blocks")
         if isinstance(blocks, list) and blocks:
@@ -1725,6 +1719,12 @@ class EngineKernel:
                 event=usage_event,
                 model_fallback=self.model,
             )
+            if isinstance(telemetry, Mapping) and telemetry.get("full_miss") is True:
+                misses = record.usage.get("prompt_cache_misses")
+                counts = dict(misses) if isinstance(misses, dict) else {}
+                cause = str(telemetry.get("cause") or "unknown")
+                counts[cause] = int(counts.get(cause) or 0) + 1
+                record.usage["prompt_cache_misses"] = counts
 
         self._update_session(session_id, lease, update)
 

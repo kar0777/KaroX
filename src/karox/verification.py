@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .python_tests import python_test_command
 from .web_check import default_pages
 
 
@@ -106,16 +107,9 @@ def discover_verification_commands(repository: Path) -> tuple[tuple[str, ...], .
                 command = ("npm", "test") if name == "test" else ("npm", "run", name)
                 commands.append(command)
 
-    has_pytest_tests = bool(
-        list(repository.glob("test_*.py"))
-        or list((repository / "tests").glob("test_*.py"))
-    )
-    if has_pytest_tests or (
-        (repository / "pyproject.toml").is_file() and (repository / "tests").is_dir()
-    ):
-        pytest_command = ("python", "-m", "pytest", "-q")
-        if pytest_command not in commands:
-            commands.append(pytest_command)
+    python_command = python_test_command(repository)
+    if python_command is not None and python_command not in commands:
+        commands.append(python_command)
     if default_pages(repository):
         # A page deliverable needs its runtime proof even when project checks also
         # exist. Returning early after npm/pytest made the browser producer vanish,

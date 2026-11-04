@@ -34,6 +34,7 @@ from textual.containers import Horizontal
 from textual.theme import Theme
 from textual.widgets import Input, Static, TextArea
 
+from ..python_tests import python_test_command
 from ..detached_process import windowless_flags
 from . import commands as slash
 from . import prefs
@@ -2020,14 +2021,9 @@ def _detect_verification(repository: Path) -> tuple[tuple[str, ...], ...]:
                 command = ("npm", "test") if name == "test" else ("npm", "run", name)
                 if command not in commands:
                     commands.append(command)
-    has_pytest_tests = bool(
-        list(repository.glob("test_*.py"))
-        or list((repository / "tests").glob("test_*.py"))
-    )
-    if has_pytest_tests or (
-        (repository / "pyproject.toml").is_file() and (repository / "tests").is_dir()
-    ):
-        commands.append(("python", "-m", "pytest", "-q"))
+    python_command = python_test_command(repository)
+    if python_command is not None:
+        commands.append(python_command)
     if (repository / "Cargo.toml").is_file():
         commands.append(("cargo", "test"))
     if (repository / "go.mod").is_file():

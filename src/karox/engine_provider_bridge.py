@@ -9,6 +9,7 @@ read without the session/verification machinery around it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from jinja2 import StrictUndefined, Template
 
 from .engine.exceptions import FormatError  # noqa: E402
 from .engine_salvage import salvage_fenced_command
+from .prompt_cache_telemetry import PromptPrefixTracker, tools_digest
 from .providers import (
     ImageAttachment,
     ModelEvent,
@@ -59,6 +61,10 @@ _RETRYABLE_PROVIDER_ERRORS = frozenset(
         ProviderErrorKind.TRANSPORT,
     }
 )
+#: A corrupted frame (a gateway cut a JSON event, a proxy injected an HTML
+#: error page into the stream) is usually transient, but unlike a 429 it can
+#: also be a systematic incompatibility. Retry it, briefly: twice at most.
+_MALFORMED_RETRY_ATTEMPTS = 2
 #: Retries per model call. With the delays below a call waits at most about
 #: two minutes in total before the failure is reported.
 _PROVIDER_RETRY_ATTEMPTS = 6
@@ -88,7 +94,10 @@ def provider_retry_delay(
 
     if not isinstance(error, ProviderError):
         return None
-    if error.kind not in _RETRYABLE_PROVIDER_ERRORS:
+    if error.kind is ProviderErrorKind.MALFORMED_RESPONSE:
+        if attempt > _MALFORMED_RETRY_ATTEMPTS:
+            return None
+    elif error.kind not in _RETRYABLE_PROVIDER_ERRORS:
         return None
     if attempt > _PROVIDER_RETRY_ATTEMPTS:
         return None
@@ -343,8 +352,15 @@ class EngineProviderModel:
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
         rewrite_pressure_tokens: int = REWRITE_PRESSURE_TOKENS,
+        cache_key: Optional[str] = None,
     ) -> None:
         self._provider = provider
+        #: Per-run prefix-cache routing key. Anthropic gets cache breakpoints
+        #: and OpenAI a ``prompt_cache_key`` only when a request carries one;
+        #: the engine-only kernel stopped sending it, so every Claude step
+        #: re-billed the whole prompt at the full input price.
+        self._cache_key_base = cache_key.strip()[:120] if isinstance(cache_key, str) and cache_key.strip() else None
+        self.prefix_tracker = PromptPrefixTracker()
         self._sleep = sleep
         self._jitter = jitter
         #: Retried provider failures of this run, newest last (bounded).
@@ -383,23 +399,48 @@ class EngineProviderModel:
 
     def query(self, messages: List[Dict[str, Any]], **kwargs: Any) -> Dict[str, Any]:
         del kwargs
+        wire_messages = self._request_messages(messages)
+        observation = self.prefix_tracker.observe(wire_messages, self._tools)
         request = ModelRequest(
             model=self._model_id,
-            messages=self._request_messages(messages),
+            messages=wire_messages,
             tools=self._tools,
             max_output_tokens=self._max_output_tokens,
             reasoning_effort=self._reasoning_effort,
             deadline_seconds=self._current_deadline(),
+            cache_key=self._request_cache_key(wire_messages),
         )
         response = self._call(request)
         self._note_usage(response.usage)
+        telemetry = self.prefix_tracker.classify(observation, response.usage)
         if response.budget_exceeded:
             message = self._engine_message(response, [])
             message["extra"]["budget_exceeded"] = True
             message["extra"]["budget_reason"] = response.budget_reason or "budget"
+            message["extra"]["prompt_cache"] = telemetry
             return message
         actions = self._parse_actions(response)
-        return self._engine_message(response, actions)
+        message = self._engine_message(response, actions)
+        message["extra"]["prompt_cache"] = telemetry
+        return message
+
+    def _request_cache_key(self, messages: Sequence[ModelMessage]) -> Optional[str]:
+        """The run's key plus a digest of the static prefix (system + tools).
+
+        A changed system prompt or tool table starts a new cache entry, so the
+        key stops routing requests to an entry the provider can no longer use.
+        """
+
+        if self._cache_key_base is None:
+            return None
+        system = next(
+            (message.content or "" for message in messages if message.role == "system"),
+            "",
+        )
+        static = hashlib.sha256(
+            (system + "\0" + tools_digest(self._tools)).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"{self._cache_key_base}-{static}"
 
     def history_rewrite_allowed(self, reclaimable_chars: int) -> bool:
         """Whether shrinking old history now is worth the cache it breaks.

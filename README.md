@@ -19,8 +19,23 @@ left behind.
 
 ## Install
 
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.ps1 | iex
+```
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.sh | sh
+```
+
+With KaroX 5 on the machine the installer puts KaroX 6 next to it as
+`karox6`, with its own data, and leaves v5 alone; see
+[docs/INSTALL.md](docs/INSTALL.md). For development, from a checkout:
+
 ```text
-cd D:\проекты\KaroX-v5\lab\kernel-duel-20261025\integrate
 python -m venv .venv
 . .venv/Scripts/activate        # Windows
 python -m pip install -e ".[dev]"
@@ -30,6 +45,7 @@ python -m pip install -e ".[dev]"
 
 ```text
 karox provider presets
+karox provider local                      # Ollama, LM Studio, llama.cpp, vLLM, SGLang
 karox provider setup openai --model gpt-5 --stdin-key
 karox model discover openai --save
 karox doctor

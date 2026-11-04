@@ -138,6 +138,13 @@ def _parser() -> argparse.ArgumentParser:
     show = sessions.add_parser("show")
     show.add_argument("session_id")
     show.add_argument("--json", action="store_true")
+    export = sessions.add_parser(
+        "export", help="write one session as a readable HTML page, Markdown or JSON"
+    )
+    export.add_argument("session_id")
+    export.add_argument("--format", choices=["html", "md", "json"], default="html")
+    export.add_argument("--output", type=Path, help="file to write (default: ./karox-session-<id>.<format>)")
+    export.add_argument("--json", action="store_true")
     fork = sessions.add_parser("fork")
     fork.add_argument("session_id")
     fork.add_argument("--new-session-id")
@@ -163,6 +170,10 @@ def _parser() -> argparse.ArgumentParser:
     provider = commands.add_parser("provider", help="manage API providers")
     providers = provider.add_subparsers(dest="provider_command", required=True)
     providers.add_parser("presets").add_argument("--json", action="store_true")
+    local = providers.add_parser(
+        "local", help="find Ollama, LM Studio, llama.cpp, vLLM or SGLang on this machine"
+    )
+    local.add_argument("--json", action="store_true")
     catalog = providers.add_parser(
         "catalog", help="list the built-in models.dev provider catalog"
     )

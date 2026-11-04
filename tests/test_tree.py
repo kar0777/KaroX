@@ -138,5 +138,10 @@ def test_python_line_count_stays_bounded() -> None:
     # pass. 83k: the Claude-Code-style transcript added a deliberate display
     # layer (tool_display.py and tui/tooltext.py turn tool calls into
     # "Read(calc.py) / Read 42 lines" lines, ~0.9k) plus the working line,
-    # queue and MCP scopes in the TUI (~0.8k).
-    assert lines < 83_000
+    # queue and MCP scopes in the TUI (~0.8k). 85k: the plan-implementation
+    # increment added deliberate new surface (~1.5k): session export
+    # (session_export.py), local model-server discovery (local_runtimes.py),
+    # TLS/proxy settings (net_config.py), prompt-cache telemetry
+    # (prompt_cache_telemetry.py), test-runner detection (python_tests.py) and
+    # the process-kill guard.
+    assert lines < 85_000
