@@ -386,12 +386,14 @@ class VisualChecker:
             previous=self._previous_issues.get(str(page), ()),
         )
         if answer is None:
+            failure = str(getattr(self, "_last_failure", "") or "")
+            unusable = "the checker model gave no usable verdict" + (f" ({failure})" if failure else "")
             if issues:
                 return self._quality_verdict(
                     {
                         "verdict": "needs_work",
                         "method": "heuristics",
-                        "issues": issues + ["the checker model gave no usable verdict"],
+                        "issues": issues + [unusable],
                         "console_errors": console,
                         "page_errors": page_errors,
                         "frames": saved,
@@ -402,7 +404,7 @@ class VisualChecker:
                 {
                     "verdict": "unavailable",
                     "method": "vision_unavailable",
-                    "issues": ["the checker model gave no usable verdict"],
+                    "issues": [unusable],
                     "console_errors": console,
                     "page_errors": page_errors,
                     "frames": saved,
@@ -548,11 +550,17 @@ class VisualChecker:
             reasoning_effort="low",
             deadline_seconds=CHECKER_DEADLINE_SECONDS,
         )
+        self._last_failure = ""
         try:
             response = self.provider.complete(request)
-        except ProviderError:
+        except ProviderError as exc:
+            # Named in the verdict: three measured "no usable verdict" looks
+            # cost 40-97 s each and left no trace of why the call failed.
+            kind = getattr(exc, "kind", None)
+            self._last_failure = str(getattr(kind, "value", kind) or "provider_error")
             return None, None
-        except Exception:
+        except Exception as exc:
+            self._last_failure = type(exc).__name__
             return None, None
         self.tally.vision_calls += 1
         usage = response.usage if isinstance(response.usage, Mapping) else {}

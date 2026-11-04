@@ -67,6 +67,25 @@ _MIN_QUOTE_CHARS = 6
 COPIED_RUN_TOKENS = 4
 _MIN_REASON_WORDS = 3
 _CLAUSE_DISPLAY = 160
+#: The two ways a ``verified`` quote misses. They need different repairs: a
+#: stale quote needs a new observation, a paraphrase only an exact copy.
+NOT_QUOTED = "observed text is not in any browser, check or visual result after the last edit"
+STALE_QUOTE = "quotes a result received before the last edit; observe it again"
+#: Window of a closest-result hint, in tokens, and its display bound.
+_HINT_TOKENS = 14
+_HINT_CHARS = 180
+_HINT_MIN_LINE_WORDS = 2
+_HINT_STOP = frozenset(
+    "the and for with that this from are was were not but all any has have its "
+    "into than then when also only each data true false action evidence result "
+    "must should does can will one its their there".split()
+)
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {
+        token for token in normalize(text).split() if len(token) > 2 and token not in _HINT_STOP
+    }
 
 _BULLET = re.compile(r"(?:^|(?<=\s))[-*\u2022+]\s+(?=\S)")
 _BREAK = re.compile(r"(?<=[.!?;])\s+(?=\S)")
@@ -82,6 +101,8 @@ _UNSPLIT = re.compile(r"`[^`]*`|\([^()]*\)")
 _HEADING = re.compile(r"^#{1,6}(?:\s|$)")
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 _TOKEN = re.compile(r"[0-9a-zа-яё_]+(?:\.[0-9]+)*")
+#: The same tokens located in original-case text, for copyable hints.
+_TOKEN_ANY_CASE = re.compile(_TOKEN.pattern, re.IGNORECASE)
 #: JSON string escapes, possibly nested: a result rendered as JSON shows a
 #: newline as ``\n``, and without decoding "...spawn\nPASS" would tokenize as
 #: "npass" and miss a quote of "PASS".
@@ -546,6 +567,29 @@ def fresh_observations(
     return seen
 
 
+def _observation_texts(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    return [
+        str(entry.get("content") or "")
+        for entry in entries
+        if entry.get("role") == "tool"
+        and entry.get("core_name") in OBSERVATION_TOOLS
+        and isinstance(entry.get("result"), Mapping)
+    ]
+
+
+def stale_observations(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    before: Optional[int] = None,
+    diagnostic: Collection[str] = (),
+) -> List[str]:
+    """Normalized behavioural results received before the last deliverable edit."""
+
+    end = len(history) if before is None or before < 0 else before
+    start = last_deliverable_edit(history[:end], diagnostic) + 1
+    return [f" {text} " for text in map(normalize, _observation_texts(history[:start])) if text]
+
+
 def _display(text: str) -> str:
     return text if len(text) <= _CLAUSE_DISPLAY else text[: _CLAUSE_DISPLAY - 3] + "..."
 
@@ -604,6 +648,8 @@ def judge(
     attested = parse_attestation(attestation)
     observations = fresh_observations(history, before=before, diagnostic=diagnostic)
     runs = _copied_runs(observations)
+    stale: Optional[List[str]] = None
+    stale_runs: set[str] = set()
     if require_presses is None:
         require_presses = browser_worked(history if before is None else history[:before])
     pressed = (
@@ -625,13 +671,11 @@ def judge(
             if len(quote.split()) < _MIN_QUOTE_TOKENS or len(quote) < _MIN_QUOTE_CHARS:
                 problems.append((cid, text, "observed text too short to identify a result"))
             elif not _quoted(quote, observations, runs):
-                problems.append(
-                    (
-                        cid,
-                        text,
-                        "observed text is not in any browser, check or visual result after the last edit",
-                    )
-                )
+                if stale is None:
+                    stale = stale_observations(history, before=before, diagnostic=diagnostic)
+                    stale_runs = _copied_runs(stale)
+                stale_copy = bool(stale) and _quoted(quote, stale, stale_runs)
+                problems.append((cid, text, STALE_QUOTE if stale_copy else NOT_QUOTED))
             elif missing:
                 listed = ", ".join(key_display(key) for key in missing)
                 problems.append(
@@ -674,7 +718,98 @@ def floor_reasons(record: Any, *, diagnostic: Collection[str] = ()) -> List[str]
     return [f"requirement {cid} {problem}: {_display(text)}" for cid, text, problem in problems]
 
 
-def refusal_message(problems: Sequence[Tuple[str, str, str]]) -> str:
+def closest_results(
+    record: Any,
+    attestation: Any,
+    problems: Sequence[Tuple[str, str, str]],
+    *,
+    diagnostic: Collection[str] = (),
+) -> Dict[str, str]:
+    """For each paraphrased ``verified`` entry, the fresh result text nearest to it.
+
+    The 1017 runs narrated what they saw ("Status overlay text changed with
+    state: READY, then RUNNING ...") instead of copying it, and each refusal
+    sent them back to the browser for results they already had. The hint is
+    a verbatim slice of a fresh result -- the window sharing the most words
+    with the entry and its requirement -- so the repair is a copy, and the
+    model still decides whether that result supports the line.
+    """
+
+    wanted = [(cid, text) for cid, text, problem in problems if problem == NOT_QUOTED]
+    if not wanted:
+        return {}
+    history = list(getattr(record, "provider_history", None) or ())
+    start = last_deliverable_edit(history, diagnostic) + 1
+    located = []
+    for raw in _observation_texts(history[start:]):
+        raw = _unescape(raw)
+        spans = [(m.start(), m.end(), m.group().lower()) for m in _TOKEN_ANY_CASE.finditer(raw)]
+        if len(spans) >= COPIED_RUN_TOKENS:
+            located.append((raw, spans))
+    if not located:
+        return {}
+    attested = parse_attestation(attestation)
+    hints: Dict[str, str] = {}
+    for cid, text in wanted:
+        observed = (attested.get(cid) or {}).get("observed", "")
+        line_words = _content_tokens(text)
+        said_words = _content_tokens(observed) - line_words
+        best_score, best_text = 0, ""
+        for raw, spans in located:
+            width = min(_HINT_TOKENS, len(spans))
+            for index in range(len(spans) - width + 1):
+                window = {token for _, _, token in spans[index : index + width]}
+                on_line = len(window & line_words)
+                # The window must share words with the requirement itself, not
+                # only with the narration: a hint is a candidate, never filler.
+                if on_line < max(_HINT_MIN_LINE_WORDS, min(3, len(line_words) // 4)):
+                    continue
+                score = 2 * on_line + len(window & said_words)
+                if score > best_score:
+                    first, last = spans[index][0], spans[index + width - 1][1]
+                    best_score, best_text = score, raw[first:last]
+        if best_text:
+            best_text = " ".join(best_text.split())
+            if len(best_text) > _HINT_CHARS:
+                best_text = best_text[:_HINT_CHARS].rsplit(" ", 1)[0]
+            hints[cid] = best_text
+    return hints
+
+
+def checklist_block(entries: Sequence[Mapping[str, Any]]) -> str:
+    """The finish checklist, shown with the task when a web deliverable is expected.
+
+    Without it the IDs arrived in the first refusal, after the model had
+    already finished, and the closing pass started from scratch: in the
+    measured 1017 runs 11 and 19 more steps, about a third of each run's
+    tokens. Listing them up front lets the model plan one closing pass.
+    """
+
+    listed = clauses(entries)
+    if len(listed) < MIN_CLAUSES:
+        return ""
+    lines = [
+        "<finish-checklist>",
+        "KaroX verifies this web deliverable requirement by requirement. finish "
+        'carries "requirements": one {"id", "status", "observed"} entry per ID '
+        'below -- "verified" with text copied from a browser_command, checks_run '
+        "or visual_check result received after your last edit (four or more "
+        'consecutive words of it), "not_applicable" with a reason for a line '
+        'that only describes the process or context, or "unmet". Plan one '
+        "closing pass: after your final edit, read back the facts these lines "
+        "name in as few responses as possible (several browser_command calls "
+        "per response; press every named key on the deliverable page), then "
+        "finish once, copying from those results.",
+    ]
+    lines.extend(f"{cid} {_display(text)}" for cid, text in listed)
+    lines.append("</finish-checklist>")
+    return "\n".join(lines)
+
+
+def refusal_message(
+    problems: Sequence[Tuple[str, str, str]],
+    hints: Optional[Mapping[str, str]] = None,
+) -> str:
     """What the model reads when finish arrives without a complete attestation."""
 
     lines = [
@@ -699,5 +834,9 @@ def refusal_message(problems: Sequence[Tuple[str, str, str]]) -> str:
         "",
         "Open requirements:",
     ]
-    lines.extend(f"{cid} [{problem}] {_display(text)}" for cid, text, problem in problems)
+    for cid, text, problem in problems:
+        lines.append(f"{cid} [{problem}] {_display(text)}")
+        hint = (hints or {}).get(cid)
+        if hint:
+            lines.append(f"    closest fresh result (copy it only if it shows this line holds): {hint}")
     return "\n".join(lines)

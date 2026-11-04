@@ -3216,3 +3216,44 @@ def test_identical_process_results_count_as_no_progress_despite_pids(
     assert len(harness.provider.requests) == 5, "the fourth identical diff ends the loop"
     assert report.reason == "submitted"
     assert report.provider_message == "no progress: repeated identical step"
+
+
+CHECKLIST_TASK = (
+    "Build a canvas game in index.html with a visible score. The score rises over time. "
+    "A restart begins a fresh run."
+)
+
+
+def test_a_predictable_web_deliverable_gets_its_finish_checklist_up_front(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The IDs the finish gate will ask for arrive with the task, not in a refusal.
+
+    In the measured 1017 runs the first finish came without them and the
+    closing pass took 11 and 19 more steps; with the list in the first user
+    message the model can plan one closing pass.
+    """
+
+    _web_game(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "done"),))],
+        task=CHECKLIST_TASK,
+    )
+    harness.run()
+    first = [m.content for m in harness.provider.requests[0].messages if m.role == "user"][0]
+    assert "<finish-checklist>" in first
+    assert "R1.2 The score rises over time." in first
+    assert "R1.3 A restart begins a fresh run." in first
+    # The system prompt stays byte-identical, so the cached prefix is shared.
+    assert "<finish-checklist>" not in harness.provider.requests[0].messages[0].content
+
+
+def test_a_task_without_a_web_deliverable_gets_no_checklist(
+    tmp_path: Path, repository: Path
+) -> None:
+    harness = Harness(repository, tmp_path, [_response((_finish_call("c1", "done"),))])
+    harness.run()
+    first = [m.content for m in harness.provider.requests[0].messages if m.role == "user"][0]
+    assert "<finish-checklist>" not in first

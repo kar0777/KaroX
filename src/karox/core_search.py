@@ -495,8 +495,11 @@ class SearchToolsMixin:
         requested = arguments.get("timeout_seconds", min(8.0, deadline_seconds))
         if isinstance(requested, bool) or not isinstance(requested, (int, float)):
             raise InvalidCommand("diagnostic timeout must be a number")
-        if not math.isfinite(float(requested)) or not 1.0 <= float(requested) <= 30.0:
+        if not math.isfinite(float(requested)):
             raise InvalidCommand("diagnostic timeout must be between 1 and 30 seconds")
+        # Out-of-range values are clamped, not refused: a refusal cost a model
+        # turn to learn a bound the runtime can apply itself.
+        requested = min(30.0, max(1.0, float(requested)))
         timeout = min(float(requested), max(1.0, float(deadline_seconds)))
         from .lsp_diagnostics import LspDiagnostics, LspDiagnosticsError
 

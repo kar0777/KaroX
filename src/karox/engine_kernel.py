@@ -236,7 +236,7 @@ _DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
         "temporary files",
     ),
     # The Safety section of the system prompt teaches the exact
-    # `repo_command batch {op: delete, path}` form for deleting a scratch file,
+    # exact `repo_command {"action": "batch", ...}` form for deleting a scratch file,
     # so the name stays callable while it is not advertised. An argument error
     # on that rare call is cheaper than 1.3 KB of batch schema on every repair
     # request.
@@ -273,6 +273,16 @@ def _tool_relevant_for_task(
         if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text):
             return True
     return False
+
+
+def _any_language_server() -> bool:
+    """Whether lsp.diagnostics could reach any allowlisted language server."""
+    try:
+        from .lsp_diagnostics import available_language_servers
+
+        return any(row.get("available") for row in available_language_servers())
+    except Exception:  # noqa: BLE001 - advertise rather than hide on doubt
+        return True
 
 
 class _EngineBudgetExceeded(RuntimeError):
@@ -828,6 +838,10 @@ class EngineKernel:
             for alias, core_name in aliases.items()
             if self._may_call(definitions[core_name])
         )
+        # lsp.diagnostics without any installed language server can only
+        # refuse: a sandbox pytest run spent two steps learning that pyright
+        # was missing. The name stays callable; only its schema is withheld.
+        self._language_server_available = _any_language_server()
 
     # -- public surface ----------------------------------------------------
 
@@ -891,6 +905,28 @@ class EngineKernel:
             _COVERAGE_GRACE_STEPS if attest else 1
         )
 
+    def _finish_checklist(self, record: Any) -> str:
+        """The finish checklist for a predictable web deliverable, else "".
+
+        Shown once with the task (it sits in the cached prefix), so the IDs the
+        finish gate will ask for are known before the closing pass rather than
+        learned from a refusal. Predicted, not owed: the gate itself still
+        decides at finish from the files actually changed.
+        """
+
+        try:
+            if not completion_gate.web_render_intent(record):
+                return ""
+            from .web_check import default_pages
+            from . import requirement_coverage
+
+            if not default_pages(pathlib.Path(self.core.repository)):
+                return ""
+            block = requirement_coverage.checklist_block(record.requirements)
+        except Exception:  # noqa: BLE001 - the checklist is advisory
+            return ""
+        return f"\n\n{block}" if block else ""
+
     def note_coverage_refusal(self) -> None:
         """Keep the visual grace window open for the attestation finish owes.
 
@@ -921,6 +957,15 @@ class EngineKernel:
         )
         self._session_id = session_id
         self._lease = lease
+        # The visual checker calls the same provider from inside a tool; its
+        # tokens belong in this session's usage like every other request. They
+        # were dropped before (record_usage was never set), so web runs
+        # reported fewer tokens and less cost than they spent.
+        checker = getattr(self.core, "_visual_checker", None)
+        if checker is not None:
+            existing = getattr(checker, "record_usage", "")
+            if existing is None or getattr(existing, "__func__", None) is type(self)._record_side_usage:
+                checker.record_usage = self._record_side_usage
         try:
             record = self.sessions.load(session_id)
             self.sessions.validate_repository(record, self.core.repository)
@@ -981,7 +1026,7 @@ class EngineKernel:
                 no_progress_streak=4,
                 keep_recent_messages=self._engine_keep_recent_messages,
                 system_template="{{ system_prompt }}",
-                instance_template="{{ instance_contract }}\n\n{{ task }}",
+                instance_template="{{ instance_contract }}\n\n{{ task }}{{ finish_checklist | default("") }}",
             )
             try:
                 exit_extra = agent.run(
@@ -989,6 +1034,7 @@ class EngineKernel:
                     resume_messages=resume_messages,
                     system_prompt=self.system_prompt,
                     instance_contract="Solve the task in the repository above.",
+                    finish_checklist="" if resume_messages else self._finish_checklist(record),
                 )
             except _EngineBudgetExceeded as exc:
                 return self._finish(
@@ -1189,6 +1235,7 @@ class EngineKernel:
                 visual=bool(self.request_images),
                 mode=self.mode,
             )
+            and (core_name != "lsp.diagnostics" or self._language_server_available)
         ) + (_finish_provider_tool(),)
 
     def _engine_context_budget(self) -> int:
@@ -1517,6 +1564,28 @@ class EngineKernel:
                 event=usage_event,
                 model_fallback=self.model,
             )
+
+        self._update_session(session_id, lease, update)
+
+    def _record_side_usage(self, response: ModelResponse, kind: str = "visual_check") -> None:
+        """Merge a request made outside the main loop into the session usage."""
+        session_id = self._session_id
+        lease = self._lease
+        if session_id is None or lease is None:
+            return
+        event = usage_event_from_response(
+            session_id=session_id, step=max(1, self._step), response=response
+        )
+        event["kind"] = kind
+
+        def update(record: SessionRecord) -> None:
+            record.usage = merge_response_usage(
+                record.usage, response, event=event, model_fallback=self.model
+            )
+            side = record.usage.get("side_requests")
+            counts = dict(side) if isinstance(side, dict) else {}
+            counts[kind] = int(counts.get(kind) or 0) + 1
+            record.usage["side_requests"] = counts
 
         self._update_session(session_id, lease, update)
 

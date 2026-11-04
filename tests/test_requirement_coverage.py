@@ -164,7 +164,11 @@ def test_a_quote_must_come_from_a_behavioural_result_after_the_last_edit() -> No
     )
     problems = {cid: problem for cid, _, problem in coverage.judge(record)}
     assert set(problems) == {"R1.1", "R1.2", "R1.3"}
-    assert all("not in any" in problem for problem in problems.values())
+    # A copy of a result from before the edit is told apart from text the
+    # model never received: the first needs a new observation, not a copy.
+    assert problems["R1.1"] == coverage.STALE_QUOTE
+    assert problems["R1.2"] == problems["R1.3"] == coverage.NOT_QUOTED
+    assert all("not in any" in problems[cid] for cid in ("R1.2", "R1.3"))
 
 
 def test_a_probe_page_edit_does_not_make_observations_stale() -> None:
@@ -442,3 +446,48 @@ def test_a_run_without_a_working_browser_owes_no_key_press() -> None:
     )
 
     assert coverage.judge(record, _key_attestation(), use_transcript=False) == []
+
+
+def test_the_finish_checklist_lists_every_clause_id_up_front() -> None:
+    block = coverage.checklist_block(seed(TASK))
+    assert block.startswith("<finish-checklist>") and block.endswith("</finish-checklist>")
+    for cid, text in coverage.clauses(seed(TASK)):
+        assert f"{cid} {text}" in block
+    assert "after your last edit" in block and "not_applicable" in block
+    # A request too short for a checklist gets none.
+    assert coverage.checklist_block(seed("Make it red.")) == ""
+
+
+def test_a_paraphrase_refusal_offers_the_closest_fresh_result_verbatim() -> None:
+    fresh = '{"data": {"action": "get_text", "text": "Status: Paused - press P to resume"}, "ok": true}'
+    attestation = [
+        {"id": "R1.1", "status": "verified", "observed": "the overlay status changed to paused after pausing"},
+        {"id": "R1.2", "status": "verified", "observed": "Status: Paused - press P to resume"},
+        {"id": "R1.3", "status": "unmet", "observed": "not done"},
+    ]
+    record = _record(
+        "The status shows Paused when paused. The overlay explains how to resume. Keep the page offline.",
+        [_edit("app.js"), _seen(fresh), _finish(attestation)],
+    )
+    problems = coverage.judge(record)
+    assert [(cid, problem) for cid, _, problem in problems] == [
+        ("R1.1", coverage.NOT_QUOTED),
+        ("R1.3", "reported unmet"),
+    ]
+    hints = coverage.closest_results(record, attestation, problems)
+    assert set(hints) == {"R1.1"}
+    # The hint is a verbatim slice of the fresh result, so copying it passes.
+    assert hints["R1.1"] in fresh
+    repaired = [dict(attestation[0], observed=hints["R1.1"])] + attestation[1:]
+    record.provider_history[-1] = _finish(repaired)
+    assert [cid for cid, _, _ in coverage.judge(record)] == ["R1.3"]
+    message = coverage.refusal_message(problems, hints)
+    assert "closest fresh result (copy it only if it shows this line holds): " + hints["R1.1"] in message
+
+
+def test_no_hint_without_a_fresh_result_sharing_words() -> None:
+    attestation = [{"id": "R1.1", "status": "verified", "observed": "zebra quartz nebula"}]
+    record = _record(TASK, [_edit("app.js"), _seen("score 0 -> 12"), _finish(attestation)])
+    problems = coverage.judge(record)
+    assert coverage.closest_results(record, attestation, problems) == {}
+    assert "closest fresh result" not in coverage.refusal_message(problems, {})

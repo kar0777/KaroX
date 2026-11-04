@@ -232,6 +232,77 @@ def _run_key(core_name: str, arguments: Mapping[str, Any]) -> str:
     return f"{core_name}\0{encoded}"
 
 
+#: Action names a model sends when it means "delete these files". The prompt
+#: names the batch form, but repo.command is usually not advertised, so the
+#: model writes it from memory: a sandbox pytest run (2026-11-04) sent {},
+#: then action=delete, then a JSON-string payload -- three refused steps for
+#: one scratch-file cleanup.
+_REPO_DELETE_ACTIONS = frozenset({"delete", "remove", "rm", "unlink", "delete_file", "delete_files", "remove_file"})
+
+
+def _normalize_repo_command(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """Rewrite unambiguous near-miss repo.command shapes into the schema.
+
+    Only a shape with exactly one reading is rewritten; anything else is passed
+    through unchanged so Core refuses it with its usual message. Core still
+    validates every operation, so this cannot widen what a call may do.
+    """
+
+    result = dict(arguments)
+    payload = result.get("payload")
+    if isinstance(payload, str):
+        try:
+            decoded = json.loads(payload)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, list):
+            decoded = {"operations": decoded}
+        if not isinstance(decoded, dict):
+            return result
+        payload = decoded
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return result
+    payload = dict(payload)
+    for key in ("operations", "patch"):
+        if key in result and key not in payload:
+            payload[key] = result.pop(key)
+    action = result.get("action")
+    name = action.strip().lower() if isinstance(action, str) else ""
+    if name in _REPO_DELETE_ACTIONS:
+        paths: List[str] = []
+        for source in (result, payload):
+            for key in ("path", "file"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    paths.append(value)
+            for key in ("paths", "files"):
+                value = source.get(key)
+                if isinstance(value, list):
+                    paths.extend(item for item in value if isinstance(item, str) and item.strip())
+        if not paths or "operations" in payload or "patch" in payload:
+            return dict(arguments)
+        unique = list(dict.fromkeys(paths))
+        return {
+            "action": "batch",
+            "payload": {"operations": [{"op": "delete", "path": item} for item in unique]},
+        }
+    if not name:
+        if "operations" in payload and "patch" not in payload:
+            name = "batch"
+        elif "patch" in payload and "operations" not in payload:
+            name = "apply_patch"
+        else:
+            return dict(arguments)
+    if name not in {"batch", "apply_patch"}:
+        return dict(arguments)
+    extras = set(result) - {"action", "payload"}
+    if extras:
+        return dict(arguments)
+    return {"action": name, "payload": payload}
+
+
 def _batch_tail(action: Mapping[str, Any] | None) -> bool:
     """True when this action ends a batched response (or carries no batch data)."""
 
@@ -412,6 +483,8 @@ class CoreToolEnvironment:
                 if derived_targets:
                     arguments = dict(arguments)
                     arguments["targets"] = derived_targets
+        if core_name == "repo.command":
+            arguments = _normalize_repo_command(arguments)
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
         reuse_key = (
@@ -639,7 +712,9 @@ class CoreToolEnvironment:
             keep_open = getattr(self._kernel, "note_coverage_refusal", None)
             if callable(keep_open):
                 keep_open()
-            message = requirement_coverage.refusal_message(problems)
+            message = requirement_coverage.refusal_message(
+                problems, getattr(self, "_coverage_hints", None)
+            )
             reopened = self._browser_reopened_note()
             if reopened:
                 message = f"{message}\n\n{reopened}"
@@ -701,14 +776,22 @@ class CoreToolEnvironment:
                 if isinstance(arguments, dict)
                 else None
             )
-            return requirement_coverage.judge(
+            diagnostic = completion_gate.diagnostic_paths(self._core, record)
+            problems = requirement_coverage.judge(
                 record,
                 attestation,
                 use_transcript=False,
-                diagnostic=completion_gate.diagnostic_paths(self._core, record),
+                diagnostic=diagnostic,
             )
         except Exception:  # noqa: BLE001 - the floor still judges the submission
             return []
+        try:
+            self._coverage_hints = requirement_coverage.closest_results(
+                record, attestation, problems, diagnostic=diagnostic
+            )
+        except Exception:  # noqa: BLE001 - a hint is optional
+            self._coverage_hints = {}
+        return problems
 
     def _fenced_command(self, action: Mapping[str, Any]) -> Dict[str, Any]:
         """A salvaged fenced command, matched fail-closed against approvals.
