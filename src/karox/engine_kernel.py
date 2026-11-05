@@ -171,8 +171,10 @@ You act through typed tool calls; there is no shell.
 - Read before you write. KaroX runs the approved checks itself after a change
   and returns failures for repair; call checks only when the result changes
   your next step. Run the narrowest test that covers your change first and
-  the full suite once at the end; a passing check on unchanged files is not
-  run again.
+  the approved verification command once at the end; a passing check on
+  unchanged files is not run again. Skip whole-repository runs of a large
+  project's suite: its unrelated or pre-existing failures cost steps and say
+  nothing about your change.
 - An interactive page must behave as documented in every state a user or test
   can reach, including right after a test hook was called and after a reset:
   every documented key works, and behaviour that should happen on its own

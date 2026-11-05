@@ -35,6 +35,36 @@ if TYPE_CHECKING:
     from .core import VerificationRule
 
 
+#: Appended to the header of every inline ``python -c`` check. A probe that
+#: leaves a non-daemon thread blocked (a waiter its fake clock never wakes)
+#: keeps the interpreter alive after its last line, and the check then sat
+#: out its whole timeout: 120 s of a measured 312 s run (val1 eng-rate-limit).
+#: Interpreter shutdown calls this before it joins those threads; after a
+#: short grace it names them and exits 3, so the probe reports instead of
+#: hanging. ``threading._register_atexit`` exists from Python 3.9; it runs
+#: in the header's single line through exec().
+_INLINE_THREAD_REAPER = (
+    "def _karox_reap_threads():\n"
+    "    import os, sys, threading, time\n"
+    "    main = threading.main_thread()\n"
+    "    alive = [t for t in threading.enumerate() if t is not main and not t.daemon and t.is_alive()]\n"
+    "    end = time.monotonic() + 3\n"
+    "    for thread in alive:\n"
+    "        thread.join(max(0.0, end - time.monotonic()))\n"
+    "    alive = [t for t in alive if t.is_alive()]\n"
+    "    if alive:\n"
+    "        names = ', '.join(t.name for t in alive[:5])\n"
+    "        print(f'[karox] the probe ended with {len(alive)} non-daemon thread(s) still blocked ({names}); '\n"
+    "              'exited without waiting for them', file=sys.stderr)\n"
+    "        sys.stdout.flush(); sys.stderr.flush()\n"
+    "        os._exit(3)\n"
+    "import threading as _karox_threading\n"
+    "if hasattr(_karox_threading, '_register_atexit'):\n"
+    "    _karox_threading._register_atexit(_karox_reap_threads)\n"
+    "del _karox_threading\n"
+)
+
+
 def _is_karox_module_command(argv: Sequence[str]) -> bool:
     """Whether this argv runs one of KaroX's own modules, by any interpreter.
 
@@ -964,9 +994,10 @@ class ProcessToolsMixin:
         scratch = tempfile.mkdtemp(prefix="karox-inline-")
         try:
             script = os.path.join(scratch, "inline_check.py")
+            # One header line, so traceback line numbers stay off by one only.
             header = (
                 "import sys as _karox_sys; _karox_sys.path.insert(0, ''); "
-                "del _karox_sys\n"
+                f"del _karox_sys; exec({_INLINE_THREAD_REAPER!r})\n"
             )
             with open(script, "w", encoding="utf-8") as handle:
                 handle.write(header + str(plan.inline_code))

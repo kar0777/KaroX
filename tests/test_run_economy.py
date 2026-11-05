@@ -50,3 +50,43 @@ def test_only_attestation_is_true_only_for_requirement_gaps() -> None:
     assert not completion_gate.only_attestation(
         ["requirement R3 is open", "missing visual evidence for index.html"]
     )
+
+
+def test_an_inline_probe_with_a_blocked_thread_ends_instead_of_hanging(tmp_path) -> None:
+    """val1 eng-rate-limit: a waiter the probe never woke held its check for 120 s."""
+
+    import subprocess
+    import sys
+    import time
+
+    from karox.core_process import _INLINE_THREAD_REAPER
+
+    header = (
+        "import sys as _karox_sys; _karox_sys.path.insert(0, ''); "
+        f"del _karox_sys; exec({_INLINE_THREAD_REAPER!r})\n"
+    )
+    script = tmp_path / "inline_check.py"
+    script.write_text(
+        header
+        + "import threading\nevent = threading.Event()\n"
+        + "threading.Thread(target=event.wait, name='waiter').start()\nprint('main done')\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=60
+    )
+    assert time.monotonic() - started < 20
+    assert completed.returncode == 3
+    assert "main done" in completed.stdout
+    assert "still blocked (waiter)" in completed.stderr
+
+    # A thread that finishes within the grace is simply waited for.
+    script.write_text(
+        header + "import threading, time\nthreading.Thread(target=time.sleep, args=(0.5,)).start()\nprint('ok')\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=60
+    )
+    assert completed.returncode == 0 and completed.stdout.strip() == "ok"
