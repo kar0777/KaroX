@@ -1145,6 +1145,20 @@ def _moot_scratch_check(core: Any, argv: Sequence[str]) -> bool:
     return tracked.returncode != 0
 
 
+def only_attestation(reasons: Sequence[str]) -> bool:
+    """True when every remaining gap is the requirement attestation itself.
+
+    Checks, structure and runtime proof are all present; what is missing is
+    the model's own quote per requirement. Once the bounded refusals are spent
+    a repair turn only re-sends the checklist, so the run ends UNVERIFIED and
+    names the open requirements instead.
+    """
+    return bool(reasons) and all(
+        r.startswith("requirement ") or r.startswith("missing requirement attestation")
+        for r in reasons
+    )
+
+
 def only_unproducible(reasons: Sequence[str]) -> bool:
     """True when every remaining gap is proof no approved command can produce.
 

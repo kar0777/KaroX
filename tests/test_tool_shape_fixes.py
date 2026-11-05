@@ -238,3 +238,41 @@ def test_other_patches_still_go_to_core_as_sent() -> None:
 def test_a_disabled_patch_tool_names_the_delete_operation() -> None:
     text = _TOOL_ALTERNATIVE["repo.apply_patch"]
     assert '"op": "delete"' in text and "repo_command" in text
+
+
+def test_a_deletion_patch_of_files_already_gone_is_recognized(tmp_path) -> None:
+    from karox.engine_tool_env import _requested_dry_run, absent_delete_paths
+
+    (tmp_path / "kept.py").write_text("x\n", encoding="utf-8")
+    gone = "--- a/probe.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    kept = "--- a/kept.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    outside = "--- a/../escape.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    edit = "--- a/probe.py\n+++ b/probe.py\n@@ -1 +1 @@\n-a\n+b\n"
+    assert absent_delete_paths({"patch": gone}, tmp_path) == ["probe.py"]
+    assert absent_delete_paths({"patch": gone + kept}, tmp_path) == []
+    assert absent_delete_paths({"patch": outside}, tmp_path) == []
+    assert absent_delete_paths({"patch": edit}, tmp_path) == []
+    assert absent_delete_paths({"patch": gone}, None) == []
+    assert _requested_dry_run({"dry_run": True}) is True
+    assert _requested_dry_run({"payload": {"dry_run": True}}) is True
+    assert _requested_dry_run({"dry_run": "yes"}) is False
+
+
+def test_top_level_old_and_new_mean_old_string_and_new_string() -> None:
+    from karox.engine_tool_env import _normalize_edit_file
+
+    assert _normalize_edit_file({"path": "a.py", "old": "x", "new": "y"}) == {
+        "path": "a.py",
+        "old_string": "x",
+        "new_string": "y",
+    }
+    assert _normalize_edit_file({"path": "a.py", "old": "x", "new_string": "y"}) == {
+        "path": "a.py",
+        "old_string": "x",
+        "new_string": "y",
+    }
+    # The canonical spelling wins and the edits form is left alone.
+    both = {"path": "a.py", "old": "x", "old_string": "z", "new_string": "y"}
+    assert _normalize_edit_file(both) == both
+    batch = {"path": "a.py", "edits": [{"old": "x", "new": "y"}], "old": "q"}
+    assert _normalize_edit_file(batch) == batch

@@ -31,6 +31,20 @@ function tick(t) { n++; document.getElementById("frames").textContent = String(n
 requestAnimationFrame(tick);
 </script></body></html>"""
 
+#: A canvas page whose every animation frame blocks the main thread for
+#: ~300 ms, like an always-rendering WebGL scene in a browser without a GPU.
+HEAVY_CANVAS = """<!doctype html><html><head><title>Heavy canvas</title></head>
+<body><canvas id="c" width="64" height="64"></canvas>
+<button id="poke">Poke</button><p id="pokes">0</p>
+<script>
+let pokes = 0;
+document.getElementById("poke").addEventListener("click", function () {
+  pokes += 1; document.getElementById("pokes").textContent = String(pokes); });
+function frame() { const until = performance.now() + 300;
+  while (performance.now() < until) {} requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+</script></body></html>"""
+
 INDEX = """<!doctype html><html><head><title>KaroX Browser Test Site</title></head>
 <body>
 <h1>Research Index</h1>
@@ -159,6 +173,8 @@ class _SiteHandler(BaseHTTPRequestHandler):
             self._send(200, PAGE2.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/animated":
             self._send(200, ANIMATED.encode("utf-8"), "text/html; charset=utf-8")
+        elif route == "/heavy-canvas":
+            self._send(200, HEAVY_CANVAS.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/frame":
             self._send(200, FRAME.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/replace":

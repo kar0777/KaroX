@@ -26,6 +26,8 @@ class PatchHunk:
     lines: tuple[str, ...]
     old_no_newline: bool = False
     new_no_newline: bool = False
+    #: False for a bare ``@@`` header: the hunk is located by its own lines.
+    numbered: bool = True
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,22 @@ def _path_from_header(value: str) -> Optional[str]:
     return value
 
 
+def _is_hunk_start(line: str) -> bool:
+    return line.startswith("@@")
+
+
 def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
+    """Parse a unified diff; the hunk body, not its header, is authoritative.
+
+    Models miscount hunk lines: measured runs (2026-11-05) sent
+    ``@@ -355,10 +355,33 @@`` over a body of -9/+31 lines, then spent a turn
+    and ~4 KB of reasoning recounting, and a codex-style ``@@`` header without
+    numbers was refused as "no hunks". Like ``git apply --recount``, the counts
+    are taken from the body; a header without numbers locates its hunk by the
+    hunk's own lines. Applying still verifies every context and removed line
+    against the file, so a wrong body is a conflict, never a silent edit.
+    """
+
     if not isinstance(text, str) or not text.strip():
         raise InvalidCommand("patch must be a non-empty string")
     if len(text.encode("utf-8")) > MAX_PATCH_BYTES:
@@ -71,19 +88,18 @@ def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
         while index < len(lines) and not lines[index].startswith("--- "):
             if lines[index].startswith("diff --git "):
                 break
-            match = _HUNK.match(lines[index])
-            if match is None:
+            if not _is_hunk_start(lines[index]):
                 index += 1
                 continue
+            match = _HUNK.match(lines[index])
             index += 1
             body: list[str] = []
-            old_seen = 0
-            new_seen = 0
+            from_blank: list[bool] = []
             old_no_newline = False
             new_no_newline = False
             while index < len(lines):
                 line = lines[index]
-                if line.startswith(("@@ ", "--- ", "diff --git ")):
+                if _is_hunk_start(line) or line.startswith(("--- ", "diff --git ")):
                     break
                 if line == "\\ No newline at end of file":
                     if not body:
@@ -97,31 +113,38 @@ def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
                         new_no_newline = True
                     index += 1
                     continue
-                if not line or line[0] not in {" ", "+", "-"}:
+                if not line:
+                    # An editor or a model stripped the blank context line's
+                    # leading space; trailing ones are dropped below.
+                    body.append(" ")
+                    from_blank.append(True)
+                    index += 1
+                    continue
+                if line[0] not in {" ", "+", "-"}:
                     raise InvalidCommand(f"invalid patch hunk line: {line!r}")
                 body.append(line)
-                if line[0] in {" ", "-"}:
-                    old_seen += 1
-                if line[0] in {" ", "+"}:
-                    new_seen += 1
+                from_blank.append(False)
                 index += 1
-            old_count = int(match.group("old_count") or "1")
-            new_count = int(match.group("new_count") or "1")
-            if old_seen != old_count or new_seen != new_count:
-                raise InvalidCommand(
-                    "patch hunk counts do not match body: "
-                    f"expected -{old_count}/+{new_count}, "
-                    f"saw -{old_seen}/+{new_seen}"
-                )
+            while body and from_blank[-1]:
+                # A bare blank line between hunks or at the end of the text is
+                # layout, not context the file must contain.
+                body.pop()
+                from_blank.pop()
+            old_seen = sum(1 for line in body if line[0] in {" ", "-"})
+            new_seen = sum(1 for line in body if line[0] in {" ", "+"})
+            if not body:
+                raise InvalidCommand("patch hunk has no lines")
+            located = match is not None
             hunks.append(
                 PatchHunk(
-                    old_start=int(match.group("old_start")),
-                    old_count=old_count,
-                    new_start=int(match.group("new_start")),
-                    new_count=new_count,
+                    old_start=int(match.group("old_start")) if located else 0,
+                    old_count=old_seen,
+                    new_start=int(match.group("new_start")) if located else 0,
+                    new_count=new_seen,
                     lines=tuple(body),
                     old_no_newline=old_no_newline,
                     new_no_newline=new_no_newline,
+                    numbered=located,
                 )
             )
         if not hunks:
@@ -134,6 +157,80 @@ def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
     return tuple(files)
 
 
+def _old_side(hunk: PatchHunk) -> list[str]:
+    return [line[1:] for line in hunk.lines if line[0] in {" ", "-"}]
+
+
+def _first_mismatch(source: list[str], start: int, old: list[str]) -> Optional[tuple[int, str, str]]:
+    for offset, value in enumerate(old):
+        position = start + offset
+        if position >= len(source) or source[position] != value:
+            found = source[position] if position < len(source) else "<end of file>"
+            return position, value, found
+    return None
+
+
+def _locate_hunk(source: list[str], cursor: int, hunk: PatchHunk, *, path: str) -> int:
+    """Where the hunk's old side starts: its stated line, else its unique match.
+
+    Line numbers a model derives from an earlier read drift after its own
+    edits; the hunk's lines say exactly what they replace. A block that occurs
+    more than once from the cursor on is ambiguous and is refused, as before.
+    """
+
+    old = _old_side(hunk)
+    if hunk.numbered:
+        target = max(0, hunk.old_start - 1)
+        if not old:
+            if hunk.old_start == 0 or hunk.old_count == 0:
+                # "@@ -N,0 +M,k @@" inserts after line N.
+                target = hunk.old_start
+            if target < cursor or target > len(source):
+                raise InvalidCommand(
+                    f"patch hunk for {path} has invalid source line {hunk.old_start}"
+                )
+            return target
+        if cursor <= target <= len(source) and _first_mismatch(source, target, old) is None:
+            return target
+    elif not old:
+        raise InvalidCommand(
+            f"patch hunk for {path} has no line numbers and no context lines to locate it"
+        )
+    width = len(old)
+    hits = [
+        start
+        for start in range(cursor, len(source) - width + 1)
+        if source[start : start + width] == old
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    if hunk.numbered:
+        target = max(0, hunk.old_start - 1)
+        if target < cursor or target > len(source):
+            raise InvalidCommand(
+                f"patch hunk for {path} has invalid source line {hunk.old_start}"
+            )
+        position, value, found = _first_mismatch(source, target, old) or (target, "", "")
+        detail = (
+            f"; its lines occur {len(hits)} times after line {cursor}, add context"
+            if hits
+            else ""
+        )
+        raise InvalidCommand(
+            f"patch conflict in {path} at line {position + 1}: "
+            f"expected {value!r}, found {found!r}{detail}"
+        )
+    if hits:
+        raise InvalidCommand(
+            f"patch hunk for {path} matches {len(hits)} places; add context lines "
+            "or @@ line numbers"
+        )
+    raise InvalidCommand(
+        f"patch conflict in {path}: the hunk's lines were not found after line "
+        f"{cursor} (first line {old[0]!r})"
+    )
+
+
 def apply_hunks(original: str, hunks: Iterable[PatchHunk], *, path: str) -> str:
     newline = "\r\n" if "\r\n" in original else "\n"
     had_final_newline = original.endswith(("\n", "\r"))
@@ -142,11 +239,7 @@ def apply_hunks(original: str, hunks: Iterable[PatchHunk], *, path: str) -> str:
     cursor = 0
     hunk_list = list(hunks)
     for hunk in hunk_list:
-        target = max(0, hunk.old_start - 1)
-        if target < cursor or target > len(source):
-            raise InvalidCommand(
-                f"patch hunk for {path} has invalid source line {hunk.old_start}"
-            )
+        target = _locate_hunk(source, cursor, hunk, path=path)
         result.extend(source[cursor:target])
         cursor = target
         for patch_line in hunk.lines:

@@ -192,7 +192,9 @@ def test_an_apply_patch_refusal_keeps_patch_guidance(
     """A broken diff must not be answered with the batch JSON shape.
 
     In the 3d-viewer run a hunk-count error came back with "the only batch
-    shape is ...", so the model retried the wrong form twice.
+    shape is ...", so the model retried the wrong form twice. Hunk counts are
+    now recounted from the body, so the broken diff here has a line no hunk
+    can contain.
     """
 
     core, _store, _origin = _runtime(tmp_path, "fix the units conversion")
@@ -201,7 +203,7 @@ def test_an_apply_patch_refusal_keeps_patch_guidance(
         core._prepare_apply_patch(
             {
                 "patch": (
-                    "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n one\n"
+                    "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n one\n*two\n"
                 )
             },
             30.0,
@@ -590,4 +592,76 @@ def test_a_deletion_patch_removes_an_own_probe_but_not_a_user_file(
     assert not (core.repository / "probe.html").exists()
     assert "probe.html" not in store.load("session-1").created_files
     assert kept["returncode"] != 0
+    assert (core.repository / "seed.txt").read_text(encoding="utf-8") == "seed\n"
+
+
+def test_a_deletion_preview_keeps_the_probe_and_a_repeat_delete_is_a_no_op(
+    tmp_path: Path,
+) -> None:
+    """eng-task-queue (2026-11-05): a dry-run delete really deleted the probe.
+
+    The model's real delete one step later was then refused as deleting a file
+    the session did not create; it read that as "deletion is blocked" and wrote
+    the probe back as a "manual smoke script" that shipped in the diff.
+    """
+
+    core, store, origin = _runtime(tmp_path, "build a queue")
+    lease = _lease(store)
+    environment = CoreToolEnvironment(
+        core=core,
+        session_id="session-1",
+        origin=origin,
+        lease=lease,
+        kernel=_QuietKernel(
+            {"repo_write_file": "repo.write_file", "repo_apply_patch": "repo.apply_patch"}
+        ),
+        output_char_limit=20_000,
+        command_timeout=30,
+    )
+    patch = "--- a/probe_check.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-\"\"\"Scratch probe.\"\"\"\n"
+    try:
+        environment._execute(
+            {
+                "name": "repo_write_file",
+                "arguments": {"path": "probe_check.py", "content": "print('probe')\n"},
+                "tool_call_id": "write-probe",
+            },
+            requested_by="model",
+        )
+        preview = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": patch, "dry_run": True},
+                "tool_call_id": "preview-delete",
+            },
+            requested_by="model",
+        )
+        assert preview["returncode"] == 0, preview["output"]
+        assert (core.repository / "probe_check.py").exists()
+        assert "probe_check.py" in store.load("session-1").created_files
+
+        removed = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": patch},
+                "tool_call_id": "delete-probe",
+            },
+            requested_by="model",
+        )
+        assert removed["returncode"] == 0, removed["output"]
+        assert not (core.repository / "probe_check.py").exists()
+
+        again = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": patch},
+                "tool_call_id": "delete-probe-again",
+            },
+            requested_by="model",
+        )
+    finally:
+        store.release(lease)
+
+    assert again["returncode"] == 0, again["output"]
+    assert "nothing to delete" in again["output"]
     assert (core.repository / "seed.txt").read_text(encoding="utf-8") == "seed\n"

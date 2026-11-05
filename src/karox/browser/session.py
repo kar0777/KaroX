@@ -99,6 +99,22 @@ from .redaction import (
     safe_field_names,
     safe_network_url,
 )
+from .pageperf import (
+    FRAME_PROBE_JS,
+    HAS_CANVAS_JS,
+    INPUT_TIMEOUT_NOTE,
+    INPUT_TIMEOUT_SECONDS,
+    MAX_EXPRESSION_CHARS,
+    SLOW_FRAME_MS,
+    body_source,
+    bounded_value,
+    evaluate_timeout_ms,
+    expression_source,
+    frame_probe_enabled,
+    is_syntax_error,
+    slow_frame_report,
+    slow_input_note,
+)
 from .resources import (
     SETTLE_SCRIPT,
     demote_headless_browsers,
@@ -271,6 +287,7 @@ _AUTO_RECOVER_ACTIONS = frozenset(
         "upload",
         "download_start",
         "request_user_takeover",
+        "evaluate",
     }
 )
 
@@ -329,6 +346,9 @@ INPUT_ACTIONS: frozenset[str] = frozenset(
         "reload",
         "reconnect",
         "close",
+        # Runs the agent's own script in a page served from this machine; it
+        # can change page state, so it is input, never a read.
+        "evaluate",
     }
 )
 
@@ -1105,9 +1125,14 @@ class BrowserSession(SessionGuardsMixin):
         if self._handle is not None:
             self._assert_agent_input_allowed()
             page = self._active_page()
+            if "width" in payload or "height" in payload:
+                # A reused tab used to keep its first viewport silently: a run
+                # asked for 390x844, read a 1440x900 layout as the phone view,
+                # then relaunched a detached browser to get the size it named.
+                self._resize(page, width, height)
             self._navigate(page, url, deadline_seconds)
             handle = self._ensure_open()
-            return {
+            reused: dict[str, Any] = {
                 "open": True,
                 "reused": True,
                 "url": self._safe_url(page),
@@ -1119,6 +1144,11 @@ class BrowserSession(SessionGuardsMixin):
                 "profile": handle.profile,
                 "detached": handle.detached,
             }
+            viewport = getattr(page, "viewport_size", None)
+            if isinstance(viewport, dict) and viewport:
+                reused["viewport"] = dict(viewport)
+            self._attach_frame_report(page, reused)
+            return reused
         profile = payload.get("profile")
         if profile is not None and not isinstance(profile, str):
             raise BrowserError("profile must be a safe identifier string")
@@ -1190,7 +1220,7 @@ class BrowserSession(SessionGuardsMixin):
             self._handle = None
             self._teardown_quietly(context, browser, proxy, ctx, None)
             raise
-        return {
+        opened: dict[str, Any] = {
             "open": True,
             "url": self._safe_url(page),
             "viewport": {"width": width, "height": height},
@@ -1204,6 +1234,60 @@ class BrowserSession(SessionGuardsMixin):
             "profile": handle.profile,
             "detached": False,
         }
+        self._attach_frame_report(page, opened)
+        return opened
+
+    @staticmethod
+    def _resize(page: Any, width: int, height: int) -> None:
+        current = getattr(page, "viewport_size", None) or {}
+        if current.get("width") == width and current.get("height") == height:
+            return
+        try:
+            page.set_viewport_size({"width": width, "height": height})
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            raise BrowserError(f"viewport could not be resized: {exc}") from None
+
+    def _attach_frame_report(self, page: Any, result: dict[str, Any]) -> None:
+        """Measure frame time on a local page with a canvas; note it when slow.
+
+        Never raises and never delays an ordinary page: the probe runs only
+        where a canvas exists, and on a responsive page it takes ~0.1 s.
+        """
+
+        self._last_frame_ms = 0
+        if not frame_probe_enabled():
+            return
+        try:
+            if not is_local_browser_url(str(getattr(page, "url", "") or "")):
+                return
+            if not page.evaluate(HAS_CANVAS_JS):
+                return
+            data = page.evaluate(FRAME_PROBE_JS)
+        except Exception:
+            return
+        try:
+            self._last_frame_ms = int((data or {}).get("frame_ms") or 0)
+        except (TypeError, ValueError, AttributeError):
+            self._last_frame_ms = 0
+        report = slow_frame_report(data)
+        if report is not None:
+            result["render"] = report
+
+    def _input_timing(self, action: str, started: float, result: dict[str, Any]) -> dict[str, Any]:
+        note = slow_input_note(action, time.monotonic() - started)
+        if note is not None:
+            result.update(note)
+        return result
+
+    def _input_timeout(self, action: str, exc: BaseException) -> BaseException:
+        """Explain an input timeout on a page whose frames were measured slow."""
+
+        frame_ms = int(getattr(self, "_last_frame_ms", 0) or 0)
+        if frame_ms < SLOW_FRAME_MS or "Timeout" not in str(exc):
+            return exc
+        return BrowserError(
+            INPUT_TIMEOUT_NOTE.format(action=action, ms=frame_ms) + str(exc)[:600]
+        )
 
     def _open_detached(
         self,
@@ -1765,7 +1849,9 @@ class BrowserSession(SessionGuardsMixin):
                 self._remember_safe_url(tab_id, page)
                 break
         self._save_profile_state()
-        return {"navigated": operation, "url": self._safe_url(page)}
+        navigated: dict[str, Any] = {"navigated": operation, "url": self._safe_url(page)}
+        self._attach_frame_report(page, navigated)
+        return navigated
 
     def _back(
         self, payload: Mapping[str, Any], deadline_seconds: float, cancel: Optional[CancelToken]
@@ -1921,6 +2007,56 @@ class BrowserSession(SessionGuardsMixin):
         clipped = text[:_MAX_TEXT_CHARS]
         return {"text": str(redact(clipped)), "truncated": len(text) > _MAX_TEXT_CHARS}
 
+    def _evaluate(
+        self,
+        payload: Mapping[str, Any],
+        deadline_seconds: float,
+        cancel: Optional[CancelToken],
+    ) -> dict[str, Any]:
+        """Run the agent's script in a page served from this machine.
+
+        ``expression`` is a JS expression, an arrow function, or statements
+        that ``return`` a value; promises are awaited and the JSON value comes
+        back bounded. Pages from other hosts are refused: there the agent is
+        not the page's author, and a script could read what the user is
+        signed in to.
+        """
+
+        self._assert_agent_input_allowed()
+        page = self._active_page()
+        if not is_local_browser_url(str(getattr(page, "url", "") or "")):
+            raise BrowserSecurityError(
+                "evaluate runs only on pages served from this machine (open "
+                "page=... or a loopback URL); use get_text or snapshot elsewhere"
+            )
+        raw = payload.get("expression")
+        if raw is None:
+            raw = payload.get("script", payload.get("code", payload.get("js")))
+        if not isinstance(raw, str) or not raw.strip():
+            raise BrowserError("evaluate needs expression: a JS expression or arrow function")
+        if len(raw) > MAX_EXPRESSION_CHARS:
+            raise BrowserError(
+                f"expression must be at most {MAX_EXPRESSION_CHARS} characters"
+            )
+        timeout_ms = evaluate_timeout_ms(payload, deadline_seconds)
+        started = time.monotonic()
+        try:
+            value = page.evaluate(expression_source(raw, timeout_ms))
+        except Exception as exc:  # noqa: BLE001 - classified below
+            if not is_syntax_error(exc):
+                raise BrowserError(f"evaluate failed: {str(exc)[:800]}") from None
+            try:
+                value = page.evaluate(body_source(raw, timeout_ms))
+            except Exception as body_exc:  # noqa: BLE001
+                raise BrowserError(
+                    "evaluate failed: "
+                    f"{str(body_exc)[:700]} (pass one expression, an arrow "
+                    "function, or statements ending in return)"
+                ) from None
+        result = bounded_value(redact(value))
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
     def _page_info(
         self,
         payload: Mapping[str, Any],
@@ -2044,13 +2180,24 @@ class BrowserSession(SessionGuardsMixin):
         page = self._active_page()
         locator = self._locator(payload, page)
         self._assert_action_safe(locator)
-        timeout = self._timeout_ms(deadline_seconds)
+        timeout = self._timeout_ms(deadline_seconds, default=INPUT_TIMEOUT_SECONDS)
 
         def work() -> None:
             locator.click(timeout=timeout)
 
-        self._with_stale_recovery(work, payload, deadline_seconds, cancel)
-        return {"clicked": True, "target": str(payload.get("selector") or payload.get("ref"))}
+        started = time.monotonic()
+        try:
+            self._with_stale_recovery(work, payload, deadline_seconds, cancel)
+        except Exception as exc:  # noqa: BLE001 - re-raised, maybe explained
+            explained = self._input_timeout("click", exc)
+            if explained is exc:
+                raise
+            raise explained from None
+        return self._input_timing(
+            "click",
+            started,
+            {"clicked": True, "target": str(payload.get("selector") or payload.get("ref"))},
+        )
 
     def _dblclick(
         self,
@@ -2061,13 +2208,18 @@ class BrowserSession(SessionGuardsMixin):
         self._assert_agent_input_allowed()
         page = self._active_page()
         locator = self._locator(payload, page)
-        timeout = self._timeout_ms(deadline_seconds)
+        timeout = self._timeout_ms(deadline_seconds, default=INPUT_TIMEOUT_SECONDS)
 
         def work() -> None:
             locator.dblclick(timeout=timeout)
 
+        started = time.monotonic()
         self._with_stale_recovery(work, payload, deadline_seconds, cancel)
-        return {"dblclicked": True, "target": str(payload.get("selector") or payload.get("ref"))}
+        return self._input_timing(
+            "double click",
+            started,
+            {"dblclicked": True, "target": str(payload.get("selector") or payload.get("ref"))},
+        )
 
     def _hover(
         self,
@@ -2333,12 +2485,15 @@ class BrowserSession(SessionGuardsMixin):
             # this, the password guard was bypassed one character at a time.
             self._assert_press_text_allowed(payload, page)
         selector = payload.get("selector")
-        timeout = self._timeout_ms(deadline_seconds)
+        timeout = self._timeout_ms(deadline_seconds, default=INPUT_TIMEOUT_SECONDS)
+        started = time.monotonic()
         if selector is None and payload.get("ref") is None:
             if key.lower() in {"enter", "numpadenter", "space", "tab"}:
                 self._assert_action_safe_page(page)
             page.keyboard.press(key)
-            return {"pressed": True, "key": key, "target": "page"}
+            return self._input_timing(
+                "key press", started, {"pressed": True, "key": key, "target": "page"}
+            )
         locator = self._locator(payload, page)
         if key.lower() in {"enter", "numpadenter", "space"}:
             self._assert_action_safe(locator)
@@ -2346,12 +2501,22 @@ class BrowserSession(SessionGuardsMixin):
         def work() -> None:
             locator.press(key, timeout=timeout)
 
-        self._with_stale_recovery(work, payload, deadline_seconds, cancel)
-        return {
-            "pressed": True,
-            "key": key,
-            "target": str(payload.get("selector") or payload.get("ref")),
-        }
+        try:
+            self._with_stale_recovery(work, payload, deadline_seconds, cancel)
+        except Exception as exc:  # noqa: BLE001 - re-raised, maybe explained
+            explained = self._input_timeout("key press", exc)
+            if explained is exc:
+                raise
+            raise explained from None
+        return self._input_timing(
+            "key press",
+            started,
+            {
+                "pressed": True,
+                "key": key,
+                "target": str(payload.get("selector") or payload.get("ref")),
+            },
+        )
 
     def _assert_press_text_allowed(
         self, payload: Mapping[str, Any], page: Any

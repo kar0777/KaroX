@@ -790,16 +790,14 @@ def checklist_block(entries: Sequence[Mapping[str, Any]]) -> str:
         return ""
     lines = [
         "<finish-checklist>",
-        "KaroX verifies this web deliverable requirement by requirement. finish "
-        'carries "requirements": one {"id", "status", "observed"} entry per ID '
-        'below -- "verified" with text copied from a browser_command, checks_run '
-        "or visual_check result received after your last edit (four or more "
-        'consecutive words of it), "not_applicable" with a reason for a line '
-        'that only describes the process or context, or "unmet". Plan one '
-        "closing pass: after your final edit, read back the facts these lines "
-        "name in as few responses as possible (several browser_command calls "
-        "per response; press every named key on the deliverable page), then "
-        "finish once, copying from those results.",
+        "KaroX reports this web deliverable requirement by requirement. finish "
+        'may carry "requirements": {"id", "status", "observed"} entries for the '
+        'IDs below -- "verified" with text copied from a browser_command, '
+        "checks_run or visual_check result you already received after your last "
+        'edit (four or more consecutive words of it), "not_applicable" with a '
+        'reason for a line that only describes the process or context, or '
+        '"unmet". Lines without a quote are reported as unverified; do not run '
+        "extra checks only to collect quotes.",
     ]
     lines.extend(f"{cid} {_display(text)}" for cid, text in listed)
     lines.append("</finish-checklist>")

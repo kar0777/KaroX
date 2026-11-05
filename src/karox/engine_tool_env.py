@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
@@ -152,11 +153,15 @@ BROWSER_INPUT_LIMIT = 12
 #: observation budget) made honest verification of one line cost the whole
 #: input budget. A press loop is still bounded.
 BROWSER_PRESS_LIMIT = 30
-#: A web deliverable's finish must attest every requirement against results
-#: observed after the last edit. A refused finish says which are open; after
-#: this many refusals the submission is accepted and the completion floor
-#: decides, so a model that cannot attest still ends -- unverified.
-COVERAGE_REFUSAL_LIMIT = 4
+#: A web deliverable's finish may attest each requirement against results
+#: observed after the last edit. A finish is refused for a missing or stale
+#: attestation at most this many times; after that the submission is accepted
+#: and the completion floor reports every line left unattested, so the run
+#: ends honestly unverified instead of buying quotes. Zero: the attestation is
+#: advisory. In the diag1 sandbox round (2026-11-05) the refusals cost 57 model
+#: steps across seven browser tasks -- the most expensive steps of each run,
+#: at full context -- and no web deliverable changed after any of them.
+COVERAGE_REFUSAL_LIMIT = 0
 #: Each refused finish reopens a little browser budget: the attestation asks
 #: for fresh observations, and a run that spent its probes before its last
 #: edit must still be able to produce them.
@@ -251,6 +256,34 @@ def _patch_header_path(value: str) -> Optional[str]:
     return value.replace("\\", "/") or None
 
 
+def _pure_delete_targets(arguments: Mapping[str, Any]) -> List[str]:
+    """Files a patch only deletes: every file goes to ``/dev/null``, nothing added."""
+
+    patch = arguments.get("patch")
+    if not isinstance(patch, str):
+        payload = arguments.get("payload")
+        patch = payload.get("patch") if isinstance(payload, Mapping) else None
+    if not isinstance(patch, str) or not patch.strip():
+        return []
+    lines = patch.splitlines()
+    paths: List[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
+            old = _patch_header_path(line[4:])
+            new = _patch_header_path(lines[index + 1][4:])
+            if old is None or new is not None:
+                return []
+            paths.append(old)
+            index += 2
+            continue
+        if line.startswith("+") and not line.startswith("+++ "):
+            return []
+        index += 1
+    return list(dict.fromkeys(paths))
+
+
 def scratch_delete_paths(arguments: Mapping[str, Any], created: Any) -> List[str]:
     """Files a pure-deletion patch removes, when this session created all of them.
 
@@ -266,32 +299,68 @@ def scratch_delete_paths(arguments: Mapping[str, Any], created: Any) -> List[str
     sent. Core still decides whether the delete may run.
     """
 
-    patch = arguments.get("patch")
-    if not isinstance(patch, str):
-        payload = arguments.get("payload")
-        patch = payload.get("patch") if isinstance(payload, Mapping) else None
-    if not isinstance(patch, str) or not patch.strip():
-        return []
     owned = {str(item).replace("\\", "/") for item in (created or ())}
     if not owned:
         return []
-    lines = patch.splitlines()
-    paths: List[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if line.startswith("--- ") and index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
-            old = _patch_header_path(line[4:])
-            new = _patch_header_path(lines[index + 1][4:])
-            if old is None or new is not None or old not in owned:
-                return []
-            paths.append(old)
-            index += 2
-            continue
-        if line.startswith("+") and not line.startswith("+++ "):
+    paths = _pure_delete_targets(arguments)
+    if not paths or any(path not in owned for path in paths):
+        return []
+    return paths
+
+
+def absent_delete_paths(arguments: Mapping[str, Any], repository: Any) -> List[str]:
+    """Targets of a pure-deletion patch when none of them exists any more.
+
+    Deleting a file that is already gone changes nothing, but the destructive
+    gate saw only "delete a file this session does not own" -- the session
+    forgets a file once it is deleted -- and refused it. A measured run
+    (eng-task-queue, 2026-11-05) re-sent its delete after an earlier one had
+    already removed the probe, read the refusal as "deletion is blocked", and
+    wrote the probe back as a "manual smoke script" that shipped in the diff.
+    """
+
+    paths = _pure_delete_targets(arguments)
+    if not paths or repository is None:
+        return []
+    try:
+        root = Path(str(repository)).resolve()
+    except OSError:
+        return []
+    for path in paths:
+        candidate = root / path
+        try:
+            candidate.resolve().relative_to(root)
+        except (OSError, ValueError):
             return []
-        index += 1
-    return list(dict.fromkeys(paths))
+        if candidate.exists() or candidate.is_symlink():
+            return []
+    return paths
+
+
+def _requested_dry_run(arguments: Mapping[str, Any]) -> bool:
+    if arguments.get("dry_run") is True:
+        return True
+    payload = arguments.get("payload")
+    return isinstance(payload, Mapping) and payload.get("dry_run") is True
+
+
+#: Spellings of one replacement a model uses at the top level because the
+#: ``edits=[{old, new}]`` form names them so. Measured runs (2026-11-05) sent
+#: {"old", "new"} and {"old", "new_string"} three times; each was refused as
+#: unknown arguments and cost a step.
+_EDIT_ALIASES = (("old", "old_string"), ("new", "new_string"))
+
+
+def _normalize_edit_file(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """Top-level old/new mean old_string/new_string when those are absent."""
+
+    normalized = dict(arguments)
+    if "edits" in normalized:
+        return normalized
+    for alias, canonical in _EDIT_ALIASES:
+        if alias in normalized and canonical not in normalized:
+            normalized[canonical] = normalized.pop(alias)
+    return normalized
 
 
 def _normalize_repo_command(arguments: Mapping[str, Any]) -> Dict[str, Any]:
@@ -523,10 +592,25 @@ class CoreToolEnvironment:
             if doomed:
                 core_name = "repo.command"
                 definition = self._definitions[core_name]
-                arguments = {
-                    "action": "batch",
-                    "payload": {"operations": [{"op": "delete", "path": path} for path in doomed]},
+                batch: Dict[str, Any] = {
+                    "operations": [{"op": "delete", "path": path} for path in doomed]
                 }
+                # A preview stays a preview: dropping the flag here once
+                # deleted a probe the model meant only to check, and its
+                # real delete a step later was refused as a stranger's file.
+                if _requested_dry_run(arguments):
+                    batch["dry_run"] = True
+                arguments = {"action": "batch", "payload": batch}
+            else:
+                gone = absent_delete_paths(arguments, getattr(self._core, "repository", None))
+                if gone:
+                    return self._observation(
+                        "nothing to delete: "
+                        + ", ".join(gone)
+                        + " is not in the working tree (an earlier delete already removed it)",
+                        0,
+                        "",
+                    )
         disabled = self._disabled_after_refusals(core_name)
         if disabled:
             return self._refusal(action, "tool_disabled_after_refusals", disabled)
@@ -552,6 +636,8 @@ class CoreToolEnvironment:
                     arguments["targets"] = derived_targets
         if core_name == "repo.command":
             arguments = _normalize_repo_command(arguments)
+        if core_name == "repo.edit_file":
+            arguments = _normalize_edit_file(arguments)
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
         reuse_key = (
@@ -749,9 +835,13 @@ class CoreToolEnvironment:
             return False
 
     def _attestation_owed(self) -> bool:
-        """A pass covers the current bytes and finish owes coverage; fail-closed."""
+        """A pass covers the current bytes and finish owes coverage; fail-closed.
 
-        if self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT:
+        With an advisory attestation (limit 0) the window still leaves room for
+        the one finish that quotes results the run already has.
+        """
+
+        if COVERAGE_REFUSAL_LIMIT and self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT:
             return False
         try:
             record = self._core.sessions.load(self._session_id)
@@ -1538,6 +1628,35 @@ def _visual_check_body(data: Mapping[str, Any], ok: bool) -> str:
     return "\n".join(lines)
 
 
+#: A diff longer than this is summarized in the model's view. The model wrote
+#: every changed line itself one message earlier; echoing a 3.6 KB diff back
+#: doubled what each edit cost on every later request (eng-csv-report: 15
+#: mutations, about a fifth of the final context), while the line numbers are
+#: the only part a next edit uses.
+DIFF_ECHO_MAX_CHARS = 800
+_HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _compact_diff(diff: str) -> str:
+    """A short diff verbatim; a long one as its size and hunk locations."""
+
+    if len(diff) <= DIFF_ECHO_MAX_CHARS:
+        return diff
+    added = removed = 0
+    starts: List[str] = []
+    for line in diff.splitlines():
+        match = _HUNK.match(line)
+        if match:
+            starts.append(match.group(2))
+        elif line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    shown = ", ".join(starts[:12]) + (", ..." if len(starts) > 12 else "")
+    hunks = f"{len(starts)} hunk(s) at new line {shown}" if starts else "no hunk headers"
+    return f"diff: +{added} -{removed} lines, {hunks} (applied as sent)"
+
+
 def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:
     """The small, decision-shaped view of a successful or failed mutation.
 
@@ -1567,7 +1686,7 @@ def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:
         lines.append(" · ".join(facts))
     diff = data.get("diff")
     if isinstance(diff, str) and diff.strip():
-        lines.append(diff.strip())
+        lines.append(_compact_diff(diff.strip()))
     for key in ("quick_checks_line", "affected_tests_line"):
         line = data.get(key)
         if isinstance(line, str) and line.strip():

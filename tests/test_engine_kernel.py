@@ -2285,12 +2285,14 @@ def test_focused_test_failure_is_mapped_for_the_model(
 def test_domain_tool_schemas_are_not_advertised_for_a_plain_repair(
     tmp_path: Path, repository: Path
 ) -> None:
-    """A pytest repair must not pay for web, disk or batch schemas.
+    """A pytest repair must not pay for disk or batch schemas.
 
     The tools stay callable and keep their capability gate; only the request's
     advertised catalog shrinks. This is the measured fixed-cost lever: on the
     ledger task none of the hidden tools was ever called, yet their JSON rode
-    in every one of the eight requests.
+    in every one of the eight requests. web_fetch is the exception: a repair
+    often fixes a known upstream change, and hiding it cost a sandbox SWE run
+    ~25 KB of reasoning spent recalling upstream code.
     """
 
     check = _calc_repository(repository)
@@ -2308,8 +2310,11 @@ def test_domain_tool_schemas_are_not_advertised_for_a_plain_repair(
     names = {tool.name for tool in harness.provider.requests[0].tools}
     assert "repo_edit_file" in names
     assert "repo_command" not in names
-    assert "web_fetch" not in names
     assert "disk_scan" not in names
+    # Offered whenever the origin holds code.fetch (this harness does not).
+    from karox.engine_kernel import _tool_relevant_for_task
+
+    assert _tool_relevant_for_task("web.fetch", "fix the failing add function in calc.py")
 
 
 def test_a_task_that_names_the_domain_gets_its_tool(
@@ -2846,13 +2851,13 @@ def _final_tool_messages(harness: "Harness") -> List[str]:
     return [m.content for m in final if m.role == "tool" and m.content]
 
 
-def test_a_web_finish_is_refused_until_every_requirement_is_attested(
+def test_a_web_finish_that_quotes_fresh_results_is_verified(
     tmp_path: Path, repository: Path
 ) -> None:
-    """A green check and a visual pass are not proof of every requested behaviour.
+    """A green check and a visual pass, quoted line by line, verify the run.
 
-    The first finish carries no attestation and is refused with the open IDs;
-    the model runs a probe, quotes it, and only that finish is accepted.
+    The attestation is advisory: no finish is refused, and a finish whose
+    entries quote a result received after the last edit is accepted verified.
     """
 
     _web_game(repository)
@@ -2867,10 +2872,9 @@ def test_a_web_finish_is_refused_until_every_requirement_is_attested(
         [
             _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
             _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
-            _response((_finish_call("c3", "done"),)),
-            _response((_tool_call("c4", "checks_run", {"argv": list(FACTS_CHECK)}),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(FACTS_CHECK)}),)),
             _response(
-                (_tool_call("c5", "finish", {"answer": "done", "requirements": attestation}),)
+                (_tool_call("c4", "finish", {"answer": "done", "requirements": attestation}),)
             ),
         ],
         verification=(FACTS_CHECK,),
@@ -2883,10 +2887,7 @@ def test_a_web_finish_is_refused_until_every_requirement_is_attested(
     report = harness.run()
 
     assert report.verified is True, (report.reason, report.unmet)
-    refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
-    assert len(refusals) == 1
-    assert "R1.1 [not attested] The score rises over time." in refusals[0]
-    assert "R1.3 [not attested] Keep the page offline." in refusals[0]
+    assert not [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
 
 
 def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
@@ -2895,9 +2896,9 @@ def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
     """Two calls of grace are not enough when finish owes an attestation.
 
     The last real verdict is a pass with no checks left. The model reviews its
-    change for two calls, as the pass asks, and then finishes: the first finish
-    is refused for the attestation, it probes, quotes the probe and is
-    accepted. With the two-call window the run stopped before that finish.
+    change for two calls, as the pass asks, probes once and finishes with the
+    attestation quoting that probe. With the two-call window the run stopped
+    before that finish.
     """
 
     _web_game(repository)
@@ -2918,10 +2919,9 @@ def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
             _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
             _response((_tool_call("c3", "repo_read_file", {"path": "game.js"}),)),
             _response((_tool_call("c4", "git_diff", {}),)),
-            _response((_finish_call("c5", "done"),)),
-            _response((_tool_call("c6", "checks_run", {"argv": list(FACTS_CHECK)}),)),
+            _response((_tool_call("c5", "checks_run", {"argv": list(FACTS_CHECK)}),)),
             _response(
-                (_tool_call("c7", "finish", {"answer": "done", "requirements": attestation}),)
+                (_tool_call("c6", "finish", {"answer": "done", "requirements": attestation}),)
             ),
         ],
         verification=(FACTS_CHECK,),
@@ -2939,7 +2939,7 @@ def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
 def test_a_web_finish_that_never_attests_ends_unverified(
     tmp_path: Path, repository: Path
 ) -> None:
-    """Refusals are bounded; the floor then reports the missing attestation."""
+    """The attestation is advisory: the finish is accepted, the floor reports the gap."""
 
     _web_game(repository)
     harness = Harness(
@@ -2961,7 +2961,7 @@ def test_a_web_finish_that_never_attests_ends_unverified(
 
     assert report.verified is False
     refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
-    assert 1 <= len(refusals) <= 4
+    assert refusals == []
     assert any(item.startswith("missing requirement attestation") for item in report.unmet)
 
 

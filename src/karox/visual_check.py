@@ -551,28 +551,41 @@ class VisualChecker:
             deadline_seconds=CHECKER_DEADLINE_SECONDS,
         )
         self._last_failure = ""
-        try:
-            response = self.provider.complete(request)
-        except ProviderError as exc:
-            # Named in the verdict: three measured "no usable verdict" looks
-            # cost 40-97 s each and left no trace of why the call failed.
-            kind = getattr(exc, "kind", None)
-            self._last_failure = str(getattr(kind, "value", kind) or "provider_error")
-            return None, None
-        except Exception as exc:
-            self._last_failure = type(exc).__name__
-            return None, None
-        self.tally.vision_calls += 1
-        usage = response.usage if isinstance(response.usage, Mapping) else {}
-        self.tally.input_tokens += _count(usage.get("prompt_tokens"))
-        self.tally.output_tokens += _count(usage.get("completion_tokens"))
-        if self.record_usage is not None:
+        # An empty answer that did not stop at the ceiling is a provider
+        # hiccup, not a judgment: measured 3D runs got one such "no usable
+        # verdict" per run, and the gate then sent the model back for a
+        # repair turn and a second look. One immediate retry is cheaper.
+        for attempt in range(2):
             try:
-                self.record_usage(response)
-            except Exception:
-                # Accounting must never be able to lose a verdict.
-                pass
-        return response.content, response.finish_reason
+                response = self.provider.complete(request)
+            except ProviderError as exc:
+                # Named in the verdict: three measured "no usable verdict" looks
+                # cost 40-97 s each and left no trace of why the call failed.
+                kind = getattr(exc, "kind", None)
+                self._last_failure = str(getattr(kind, "value", kind) or "provider_error")
+                return None, None
+            except Exception as exc:
+                self._last_failure = type(exc).__name__
+                return None, None
+            self.tally.vision_calls += 1
+            usage = response.usage if isinstance(response.usage, Mapping) else {}
+            self.tally.input_tokens += _count(usage.get("prompt_tokens"))
+            self.tally.output_tokens += _count(usage.get("completion_tokens"))
+            if self.record_usage is not None:
+                try:
+                    self.record_usage(response)
+                except Exception:
+                    # Accounting must never be able to lose a verdict.
+                    pass
+            content = response.content
+            if (
+                attempt == 0
+                and not (isinstance(content, str) and content.strip())
+                and response.finish_reason != "length"
+            ):
+                continue
+            return content, response.finish_reason
+        return None, None
 
 
 def _count(value: object) -> int:

@@ -52,7 +52,11 @@ from .engine.exceptions import (  # noqa: E402
     InterruptAgentFlow,
     UserInterruption,
 )
-from .engine_tool_env import CoreToolEnvironment, FINISH_BATCH_MARKER  # noqa: E402
+from .engine_tool_env import (  # noqa: E402
+    COVERAGE_REFUSAL_LIMIT,
+    FINISH_BATCH_MARKER,
+    CoreToolEnvironment,
+)
 from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
     REWRITE_PRESSURE_TOKENS,
@@ -177,10 +181,11 @@ You act through typed tool calls; there is no shell.
   on the deliverable page, and let time pass from a fresh reset instead of
   forcing the behaviour.
 - When the task is complete, call the finish tool with {"answer": "<final
-  answer text>"}. For a web deliverable finish also carries "requirements":
-  one {"id", "status", "observed"} entry per requirement ID KaroX lists, and a
-  verified entry quotes a browser, check or visual result received after your
-  last edit; a finish without it is refused with the list. After an accepted
+  answer text>"}. For a web deliverable finish may also carry "requirements":
+  {"id", "status", "observed"} entries for the requirement IDs KaroX lists,
+  each verified entry quoting a browser, check or visual result you already
+  received after your last edit; lines without a quote are reported as
+  unverified, so never re-run checks only to collect quotes. After an accepted
   finish you cannot continue working. finish must be the
   only tool call in its response; if it is batched with other calls, it is
   refused and the other calls run, so call finish again after reviewing them.
@@ -196,25 +201,11 @@ You act through typed tool calls; there is no shell.
 #: JSON on every request. Measured on the ledger fixture, the full catalog cost
 #: about 1.1k prompt tokens per call of which none were ever called.
 _DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
-    "web.fetch": (
-        "web",
-        "website",
-        "webpage",
-        "http",
-        "https",
-        "url",
-        "urls",
-        "fetch",
-        "documentation",
-        "docs",
-        "cdn",
-        "unpkg",
-        "jsdelivr",
-        "github",
-        "external library",
-        "third-party",
-        "npm package",
-    ),
+    # web.fetch is not gated: it is one ~1.2 KB schema, and a repair task names
+    # no domain word while its fix is often a known upstream change. Hidden on
+    # swe-sympy-24213 (2026-11-05), the model spent ~25 KB of reasoning
+    # reconstructing upstream code from memory ("web_fetch isn't in the tool
+    # list"), where a fetch would have read it.
     "disk.scan": (
         "disk",
         "cleanup",
@@ -1133,9 +1124,15 @@ class EngineKernel:
                     if exit_status != "Submitted":
                         break
                     failure = self._failure_summary(record)
-                    if completion_gate.only_unproducible(
-                        completion_gate.floor(self.core, record)
-                    ):
+                    floor_now = completion_gate.floor(self.core, record)
+                    if completion_gate.only_attestation(floor_now) and self._attestation_spent():
+                        self._emit(
+                            AgentEventKind.WARNING,
+                            reason="attestation_open",
+                            detail="requirements stayed unattested after the bounded refusals",
+                        )
+                        break
+                    if completion_gate.only_unproducible(floor_now):
                         # A repair turn cannot produce this proof: no approved
                         # command exists for it. Asking the model to try again
                         # spends turns and tokens on an impossible obligation.
@@ -1955,6 +1952,13 @@ class EngineKernel:
             ):
                 break
 
+    def _attestation_spent(self) -> bool:
+        """Whether the finish gate already used its bounded coverage refusals."""
+
+        environment = self._environment
+        refusals = int(getattr(environment, "_coverage_refusals", 0) or 0)
+        return refusals >= COVERAGE_REFUSAL_LIMIT
+
     def _append_repair_prompt(self, agent: EngineAgent, failure: str) -> None:
         """Give the model one bounded repair turn with the failure in front."""
         last_assistant: Optional[Dict[str, Any]] = None
@@ -2422,10 +2426,10 @@ def _finish_provider_tool() -> ProviderTool:
         FINISH_TOOL_NAME,
         (
             "Submit the final answer and end the task. Arguments: "
-            '{"answer": "<final answer text>"}. A web deliverable also needs '
-            '"requirements": one entry per requirement ID KaroX lists (it lists '
-            "them when finish arrives without them). After an accepted finish "
-            "you cannot continue working."
+            '{"answer": "<final answer text>"}. A web deliverable may also '
+            'carry "requirements": entries for the requirement IDs KaroX lists, '
+            "quoting results you already have; lines left out are reported as "
+            "unverified. After an accepted finish you cannot continue working."
         ),
         {
             "type": "object",

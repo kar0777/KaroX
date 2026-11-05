@@ -153,6 +153,8 @@ BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "page_info": "browser.read",
     "recover": "browser.read",
     "reconnect": "browser.input",
+    # Script on a page served from this machine; it can change page state.
+    "evaluate": "browser.input",
     # Stable hot release actions. The publish action carries its own exact,
     # one-shot chat approval and remote reconciliation; mapping it explicitly
     # prevents a future unknown-action fallback from silently changing risk.

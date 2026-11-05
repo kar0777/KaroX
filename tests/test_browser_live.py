@@ -805,3 +805,107 @@ def test_idle_page_is_parked_between_actions(site, make_session, monkeypatch):
     running_gap = _frames(session) - before
     assert running_gap > 30, f"page did not run with parking off: {running_gap} frames"
 
+
+
+# ---------------------------------------------------------------------------
+# evaluate, viewport on a reused tab, render and input timing
+# ---------------------------------------------------------------------------
+
+def test_evaluate_reads_page_state_in_one_call(site, make_session):
+    """One evaluate answers what took an open/wait/read round trip per fact."""
+
+    session, _root = make_session()
+    _open(session, site)
+    title = _call(session, "evaluate", {"expression": "document.title"})
+    assert title["ok"] is True, title
+    assert title["value"] == "KaroX Browser Test Site"
+    assert isinstance(title["elapsed_ms"], int)
+
+    facts = _call(
+        session,
+        "evaluate",
+        {
+            "expression": "() => ({heading: document.querySelector('h1').textContent,"
+            " links: document.querySelectorAll('a').length})"
+        },
+    )
+    assert facts["value"]["heading"] == "Research Index"
+    assert facts["value"]["links"] >= 2
+
+    body = _call(session, "evaluate", {"expression": "const n = 2 + 3;\nreturn {n};"})
+    assert body["value"] == {"n": 5}
+
+    awaited = _call(
+        session,
+        "evaluate",
+        {"expression": "new Promise((resolve) => setTimeout(() => resolve('late'), 50))"},
+    )
+    assert awaited["value"] == "late"
+
+    big = _call(
+        session,
+        "evaluate",
+        {"expression": "Array.from({length: 4000}, (_, i) => 'item ' + i).join(', ')"},
+    )
+    assert big["truncated"] is True
+    assert big["chars"] > 20_000 and len(big["value_text"]) <= 6000
+
+    stuck = _call(session, "evaluate", {"expression": "new Promise(() => {})", "timeout_ms": 300})
+    assert stuck["ok"] is False
+    assert "timed out" in stuck["error"]
+
+    broken = _call(session, "evaluate", {"expression": "return ("})
+    assert broken["ok"] is False
+    assert "evaluate failed" in broken["error"]
+
+
+def test_evaluate_is_refused_outside_pages_served_from_this_machine(
+    site, make_session, monkeypatch
+):
+    import karox.browser.session as session_module
+
+    session, _root = make_session()
+    _open(session, site)
+    monkeypatch.setattr(session_module, "is_local_browser_url", lambda url: False)
+    refused = _call(session, "evaluate", {"expression": "document.cookie"})
+    assert refused["ok"] is False
+    assert "served from this machine" in refused["error"]
+
+
+def test_open_on_a_reused_tab_applies_the_requested_viewport(site, make_session):
+    """A reused tab used to keep its first viewport whatever open asked for."""
+
+    session, _root = make_session()
+    first = _open(session, site, width=1280, height=800)
+    assert first["viewport"] == {"width": 1280, "height": 800}
+    phone = _open(session, site, "/page2", width=390, height=844)
+    assert phone.get("reused") is True
+    assert phone["viewport"] == {"width": 390, "height": 844}
+    inner = _call(session, "evaluate", {"expression": "[innerWidth, innerHeight]"})
+    assert inner["value"] == [390, 844]
+
+
+def test_open_reports_slow_frames_only_on_a_slow_canvas_page(site, make_session, monkeypatch):
+    """The agent read "clicked: true" on pages whose frames took 0.6-1.3 s.
+
+    ``open`` now measures frame time on local canvas pages and says what a slow
+    frame means; a responsive canvas and a page without one carry no report.
+    """
+
+    monkeypatch.delenv("KAROX_BROWSER_FRAME_PROBE", raising=False)
+    session, _root = make_session()
+    heavy = _open(session, site, "/heavy-canvas")
+    assert heavy["render"]["slow"] is True
+    assert heavy["render"]["frame_ms"] >= 200
+    assert "pixel ratio" in heavy["render"]["note"]
+    clicked = _call(session, "click", {"selector": "#poke"})
+    assert clicked["ok"] is True and clicked["clicked"] is True
+
+    light = _open(session, site, "/animated")
+    assert "render" not in light
+    plain = _open(session, site)
+    assert "render" not in plain
+
+    monkeypatch.setenv("KAROX_BROWSER_FRAME_PROBE", "0")
+    unmeasured = _open(session, site, "/heavy-canvas")
+    assert "render" not in unmeasured
