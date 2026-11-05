@@ -143,5 +143,10 @@ def test_python_line_count_stays_bounded() -> None:
     # (session_export.py), local model-server discovery (local_runtimes.py),
     # TLS/proxy settings (net_config.py), prompt-cache telemetry
     # (prompt_cache_telemetry.py), test-runner detection (python_tests.py) and
-    # the process-kill guard.
-    assert lines < 85_000
+    # the process-kill guard. 86k: the sandbox increment of 2026-11-05 added
+    # deliberate surface (~1.2k): real mouse drag and moving-target detection
+    # in the browser session (browser/pageperf.py, browser/session.py),
+    # viewport re-checks before finish, cheaper verification and bounded
+    # probes (engine_tool_env.py), lenient edits (unified_patch.py) and
+    # salvage of tool calls leaked as markup (engine_salvage.py).
+    assert lines < 86_000
