@@ -31,3 +31,15 @@ def test_system_prompt_does_not_prescribe_one_task_state_shape() -> None:
         "make restart restore the same set",
     ):
         assert fragment not in lowered, fragment
+
+
+def test_system_prompt_asks_for_short_reasoning_and_no_drafts() -> None:
+    """Reasoning is output the run pays for and waits on.
+
+    Replaying one recorded first-write request (the same messages, tools and
+    reasoning setting) took about 90 s and 9-10K reasoning tokens, most of it a
+    draft of the files the tool call then wrote again; with this rule the same
+    request took 23-42 s and mostly 0.6-1.6K reasoning tokens for files of similar size.
+    """
+    assert "reasoning included" in SYSTEM_PROMPT
+    assert "the tool call is the draft" in SYSTEM_PROMPT
