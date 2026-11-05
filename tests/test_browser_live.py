@@ -932,3 +932,85 @@ def test_layout_probe_names_the_element_that_makes_a_page_scroll_sideways(site, 
     line = layout_problem("index.html", 390, 844, wide)
     assert "in a 390 px viewport, so the page scrolls sideways" in line, wide
     assert "div#wide" in line, wide
+
+
+_PAD_JS = """() => {
+  document.body.insertAdjacentHTML('afterbegin',
+    '<canvas id="pad" width="300" height="200" style="position:fixed;left:0;top:0;width:300px;height:200px;z-index:9"></canvas>'
+    + '<div id="drop" style="position:fixed;left:400px;top:20px;width:80px;height:80px;z-index:9"></div>');
+  const pad = document.getElementById('pad');
+  const log = { down: null, up: null, moves: 0, captured: false };
+  window.__pad = log;
+  pad.addEventListener('pointerdown', (e) => {
+    pad.setPointerCapture(e.pointerId);
+    log.captured = pad.hasPointerCapture(e.pointerId);
+    log.down = [e.clientX, e.clientY];
+  });
+  pad.addEventListener('pointermove', (e) => { if (e.buttons) log.moves += 1; });
+  pad.addEventListener('pointerup', (e) => { log.up = [e.clientX, e.clientY]; });
+  return true;
+}"""
+
+
+def test_drag_is_real_pointer_input_with_capture(site, make_session):
+    """Orbit cameras and sliders need press-move-release with pointer capture."""
+
+    session, _root = make_session()
+    _open(session, site)
+    assert _call(session, "evaluate", {"expression": _PAD_JS})["ok"] is True
+
+    dragged = _call(session, "drag", {"selector": "#pad", "dx": 120, "dy": 40, "steps": 8})
+    assert dragged["ok"] is True, dragged
+    assert dragged["from"] == [150, 100] and dragged["to"] == [270, 140], dragged
+    log = _call(session, "evaluate", {"expression": "window.__pad"})["value"]
+    assert log["captured"] is True and log["down"] == [150, 100], log
+    assert log["up"] == [270, 140] and log["moves"] >= 8, log
+
+    # Onto another element, starting at a point inside the first one.
+    dropped = _call(session, "drag", {"selector": "#pad", "x": 10, "y": 10, "to_selector": "#drop"})
+    assert dropped["ok"] is True, dropped
+    assert dropped["from"] == [10, 10] and dropped["to"] == [440, 60], dropped
+
+    refused = _call(session, "drag", {"selector": "#pad"})
+    assert refused["ok"] is False and "dx/dy" in refused["error"], refused
+
+
+_MOVER_JS = """(ms) => {
+  document.body.insertAdjacentHTML('afterbegin',
+    '<button id="mover" style="position:fixed;left:0;top:300px;width:60px;height:30px;z-index:9">go</button>');
+  const button = document.getElementById('mover');
+  const started = performance.now();
+  let left = 0;
+  const tick = (now) => {
+    if (ms >= 0 && now - started > ms) return;
+    left = (left + 3) % 400;
+    button.style.left = left + 'px';
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  return true;
+}"""
+
+
+def test_a_click_that_waits_for_a_moving_target_says_so(site, make_session):
+    """A drifting control is reported as motion, not as a busy main thread."""
+
+    session, _root = make_session()
+    _open(session, site)
+    assert _call(session, "evaluate", {"expression": f"({_MOVER_JS})(2200)"})["ok"] is True
+    clicked = _call(session, "click", {"selector": "#mover"})
+    assert clicked["ok"] is True, clicked
+    assert "because its target kept moving" in clicked.get("slow", ""), clicked
+
+    # Still: a plain click carries no note at all.
+    still = _call(session, "click", {"selector": "#mover"})
+    assert still["ok"] is True and "slow" not in still, still
+
+
+def test_a_click_timeout_on_a_target_that_never_stops_names_the_motion(site, make_session):
+    session, _root = make_session()
+    _open(session, site)
+    assert _call(session, "evaluate", {"expression": f"({_MOVER_JS})(-1)"})["ok"] is True
+    result = _call(session, "click", {"selector": "#mover"}, deadline=4.0)
+    assert result["ok"] is False, result
+    assert "never held still" in result["error"], result

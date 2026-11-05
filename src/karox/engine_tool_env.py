@@ -201,7 +201,7 @@ LAYOUT_PROBE_JS = """async () => {
 COVERAGE_BROWSER_GRANT = 6
 COVERAGE_INPUT_GRANT = 3
 _BROWSER_INPUT_ACTIONS = frozenset(
-    {"click", "dblclick", "fill", "select", "type", "hover"}
+    {"click", "dblclick", "drag", "fill", "select", "type", "hover"}
 )
 #: Once this little wall time remains, every observation carries one line: stop
 #: exploring and finish. The kernel also reserves this window for final proof.

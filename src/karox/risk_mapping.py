@@ -145,6 +145,7 @@ BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "reload": "browser.input",
     "clear": "browser.input",
     "dblclick": "browser.input",
+    "drag": "browser.input",
     "fill_credential": "browser.input",
     "focus": "browser.input",
     "set_checked": "browser.input",

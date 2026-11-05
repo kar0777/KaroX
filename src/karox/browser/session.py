@@ -39,6 +39,7 @@ from __future__ import annotations
 import concurrent.futures
 import functools
 import json
+import math
 import os
 import queue
 import re
@@ -105,7 +106,11 @@ from .pageperf import (
     INPUT_TIMEOUT_NOTE,
     INPUT_TIMEOUT_SECONDS,
     MAX_EXPRESSION_CHARS,
+    MOTION_READ_JS,
+    MOTION_RECORDER_JS,
+    MOVING_TIMEOUT_NOTE,
     SLOW_FRAME_MS,
+    SLOW_INPUT_MS,
     body_source,
     bounded_value,
     evaluate_timeout_ms,
@@ -114,6 +119,7 @@ from .pageperf import (
     is_syntax_error,
     slow_frame_report,
     slow_input_note,
+    unstable_target_timeout,
 )
 from .resources import (
     SETTLE_SCRIPT,
@@ -270,6 +276,7 @@ _AUTO_RECOVER_ACTIONS = frozenset(
         "get_form_state",
         "click",
         "dblclick",
+        "drag",
         "hover",
         "focus",
         "clear",
@@ -328,6 +335,7 @@ INPUT_ACTIONS: frozenset[str] = frozenset(
         "close_tab",
         "click",
         "dblclick",
+        "drag",
         "hover",
         "focus",
         "clear",
@@ -415,6 +423,30 @@ _MODIFIER_NAMES = {
 
 #: Modifiers that turn a letter into a shortcut instead of inserted text.
 _SHORTCUT_MODIFIERS = frozenset({"Control", "Meta", "Alt"})
+
+
+def _drag_offset(payload: Mapping[str, Any], name: str) -> float:
+    value = payload.get(name, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BrowserError(f"drag {name} must be a number of pixels")
+    value = float(value)
+    if not math.isfinite(value) or abs(value) > 10_000:
+        raise BrowserError(f"drag {name} must be a finite number up to 10000 px")
+    return value
+
+
+def _drag_inset(payload: Mapping[str, Any], name: str, extent: float) -> float:
+    """Offset of the drag start inside its element; the centre by default."""
+
+    if payload.get(name) is None:
+        return extent / 2
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BrowserError(f"drag {name} must be a number of pixels inside the element")
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= extent:
+        raise BrowserError(f"drag {name} must lie inside the element (0..{int(extent)} px)")
+    return value
 
 
 def _normalize_key(raw: str) -> str:
@@ -1273,15 +1305,56 @@ class BrowserSession(SessionGuardsMixin):
         if report is not None:
             result["render"] = report
 
-    def _input_timing(self, action: str, started: float, result: dict[str, Any]) -> dict[str, Any]:
-        note = slow_input_note(action, time.monotonic() - started)
+    def _input_timing(
+        self,
+        action: str,
+        started: float,
+        result: dict[str, Any],
+        recording: bool = False,
+    ) -> dict[str, Any]:
+        elapsed = time.monotonic() - started
+        motion = None
+        if recording and elapsed * 1000 >= SLOW_INPUT_MS:
+            motion = self._read_motion()
+        note = slow_input_note(action, elapsed, motion)
         if note is not None:
             result.update(note)
         return result
 
-    def _input_timeout(self, action: str, exc: BaseException) -> BaseException:
-        """Explain an input timeout on a page whose frames were measured slow."""
+    def _page_script_may_block(self) -> bool:
+        """An open dialog blocks page scripts until someone answers it."""
 
+        handle = self._ensure_open()
+        return handle.dialog_mode == "manual" or handle.pending_dialog is not None
+
+    def _record_motion(self, locator: Any) -> bool:
+        """Record the target's position while the input about to run waits.
+
+        The recorder stops itself after a short window, so a fast input pays
+        one tiny script call and nothing else; only a slow one reads it back.
+        """
+
+        if self._page_script_may_block():
+            return False
+        try:
+            return bool(locator.evaluate(MOTION_RECORDER_JS, timeout=400))
+        except Exception:  # noqa: BLE001 - diagnosis only; the input still runs
+            return False
+
+    def _read_motion(self) -> Optional[Mapping[str, Any]]:
+        if self._page_script_may_block():
+            return None
+        try:
+            value = self._active_page().evaluate(MOTION_READ_JS)
+        except Exception:  # noqa: BLE001 - the input may have navigated away
+            return None
+        return value if isinstance(value, Mapping) else None
+
+    def _input_timeout(self, action: str, exc: BaseException) -> BaseException:
+        """Explain an input timeout: a target that never held still, or slow frames."""
+
+        if unstable_target_timeout(exc):
+            return BrowserError(MOVING_TIMEOUT_NOTE.format(action=action) + str(exc)[:600])
         frame_ms = int(getattr(self, "_last_frame_ms", 0) or 0)
         if frame_ms < SLOW_FRAME_MS or "Timeout" not in str(exc):
             return exc
@@ -2185,6 +2258,7 @@ class BrowserSession(SessionGuardsMixin):
         def work() -> None:
             locator.click(timeout=timeout)
 
+        recording = self._record_motion(locator)
         started = time.monotonic()
         try:
             self._with_stale_recovery(work, payload, deadline_seconds, cancel)
@@ -2197,6 +2271,7 @@ class BrowserSession(SessionGuardsMixin):
             "click",
             started,
             {"clicked": True, "target": str(payload.get("selector") or payload.get("ref"))},
+            recording,
         )
 
     def _dblclick(
@@ -2213,12 +2288,98 @@ class BrowserSession(SessionGuardsMixin):
         def work() -> None:
             locator.dblclick(timeout=timeout)
 
+        recording = self._record_motion(locator)
         started = time.monotonic()
-        self._with_stale_recovery(work, payload, deadline_seconds, cancel)
+        try:
+            self._with_stale_recovery(work, payload, deadline_seconds, cancel)
+        except Exception as exc:  # noqa: BLE001 - re-raised, maybe explained
+            explained = self._input_timeout("double click", exc)
+            if explained is exc:
+                raise
+            raise explained from None
         return self._input_timing(
             "double click",
             started,
             {"dblclicked": True, "target": str(payload.get("selector") or payload.get("ref"))},
+            recording,
+        )
+
+    def _drag(
+        self,
+        payload: Mapping[str, Any],
+        deadline_seconds: float,
+        cancel: Optional[CancelToken],
+    ) -> dict[str, Any]:
+        """Press, move and release the mouse the way a person drags.
+
+        Orbit cameras, sliders, canvases and drag-and-drop lists listen to real
+        pointer input with pointer capture and momentum; an event dispatched by
+        a script skips both, so a page that answered it could still fail a user
+        (and a check) that drags for real. Starts at the element's centre, or
+        at x/y inside it, and ends dx/dy pixels away or on to_selector/to_ref.
+        """
+
+        self._assert_agent_input_allowed()
+        page = self._active_page()
+        locator = self._locator(payload, page)
+        self._assert_action_safe(locator)
+        destination = None
+        if payload.get("to_selector") is not None or payload.get("to_ref") is not None:
+            destination = self._locator(
+                {
+                    "selector": payload.get("to_selector"),
+                    "ref": payload.get("to_ref"),
+                    "frame": payload.get("frame"),
+                },
+                page,
+            )
+            self._assert_action_safe(destination)
+            dx = dy = 0.0
+        else:
+            dx = _drag_offset(payload, "dx")
+            dy = _drag_offset(payload, "dy")
+            if abs(dx) < 2 and abs(dy) < 2:
+                raise BrowserError("drag needs dx/dy of at least 2 px, or to_selector/to_ref")
+        steps = payload.get("steps", 12)
+        if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 60:
+            raise BrowserError("drag steps must be an integer from 1 to 60")
+        timeout = self._timeout_ms(deadline_seconds, default=INPUT_TIMEOUT_SECONDS)
+        points: dict[str, list[int]] = {}
+
+        def work() -> None:
+            locator.scroll_into_view_if_needed(timeout=timeout)
+            box = locator.bounding_box(timeout=timeout)
+            if not box:
+                raise BrowserError("drag start has no box: the element is hidden or detached")
+            start_x = box["x"] + _drag_inset(payload, "x", box["width"])
+            start_y = box["y"] + _drag_inset(payload, "y", box["height"])
+            if destination is not None:
+                end_box = destination.bounding_box(timeout=timeout)
+                if not end_box:
+                    raise BrowserError("drag end has no box: the element is hidden or detached")
+                end_x = end_box["x"] + end_box["width"] / 2
+                end_y = end_box["y"] + end_box["height"] / 2
+            else:
+                end_x, end_y = start_x + dx, start_y + dy
+            page.mouse.move(start_x, start_y)
+            page.mouse.down()
+            try:
+                page.mouse.move(end_x, end_y, steps=steps)
+            finally:
+                page.mouse.up()
+            points["from"] = [round(start_x), round(start_y)]
+            points["to"] = [round(end_x), round(end_y)]
+
+        started = time.monotonic()
+        self._with_stale_recovery(work, payload, deadline_seconds, cancel)
+        return self._input_timing(
+            "drag",
+            started,
+            {
+                "dragged": True,
+                "target": str(payload.get("selector") or payload.get("ref")),
+                **points,
+            },
         )
 
     def _hover(
