@@ -162,6 +162,39 @@ BROWSER_PRESS_LIMIT = 30
 #: steps across seven browser tasks -- the most expensive steps of each run,
 #: at full context -- and no web deliverable changed after any of them.
 COVERAGE_REFUSAL_LIMIT = 0
+
+#: A page checked at a viewport and changed afterwards is checked again before
+#: finish: at most this many of those viewports, most recent first, and the
+#: finish is refused at most ``LAYOUT_REFUSAL_LIMIT`` times when one of them now
+#: scrolls sideways. In the r2b sandbox round (2026-11-05) a game page fitted a
+#: 390x844 window when the run measured it; a later sizing edit made it 678 px
+#: wide there, the run re-checked only 1440x900, and the delivered page failed
+#: its mobile layout requirement.
+LAYOUT_RECHECK_VIEWPORTS = 3
+LAYOUT_REFUSAL_LIMIT = 1
+#: Page width and the element that sticks out furthest, read after layout and
+#: any load-time sizing script have settled.
+LAYOUT_PROBE_JS = """async () => {
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const root = document.documentElement;
+  const width = window.innerWidth;
+  const out = {scroll_width: root.scrollWidth, viewport_width: width};
+  if (root.scrollWidth <= width + 1) return out;
+  let worst = null;
+  let right = width + 1;
+  for (const el of document.querySelectorAll('body *')) {
+    const box = el.getBoundingClientRect();
+    if (box.width > 0 && box.right > right) { right = box.right; worst = el; }
+  }
+  if (worst) {
+    const box = worst.getBoundingClientRect();
+    let name = worst.tagName.toLowerCase();
+    if (worst.id) name += '#' + worst.id;
+    else if (worst.classList.length) name += '.' + Array.from(worst.classList).slice(0, 2).join('.');
+    out.widest = {element: name, left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width)};
+  }
+  return out;
+}"""
 #: Each refused finish reopens a little browser budget: the attestation asks
 #: for fresh observations, and a run that spent its probes before its last
 #: edit must still be able to produce them.
@@ -201,6 +234,47 @@ _CHANGE_INTENT = re.compile(
 _CODE_CHANGE_TOOLS = frozenset(
     {"repo.edit_file", "repo.write_file", "repo.apply_patch", "repo.command"}
 )
+
+
+def layout_problem(
+    page: str, width: int, height: int, measured: Optional[Mapping[str, Any]]
+) -> str:
+    """One line for a page that is wider than its viewport, else ""."""
+
+    if not isinstance(measured, Mapping):
+        return ""
+    value = measured.get("value")
+    if not isinstance(value, Mapping):
+        return ""
+    try:
+        scroll_width = int(value.get("scroll_width") or 0)
+        viewport_width = int(value.get("viewport_width") or width)
+    except (TypeError, ValueError):
+        return ""
+    if scroll_width <= viewport_width + 1:
+        return ""
+    line = (
+        f"{page} at {width}x{height}: the document is {scroll_width} px wide in a "
+        f"{viewport_width} px viewport, so the page scrolls sideways"
+    )
+    widest = value.get("widest")
+    if isinstance(widest, Mapping) and widest.get("element"):
+        line += (
+            f"; furthest right: {widest.get('element')} "
+            f"(x {widest.get('left')}-{widest.get('right')} px, {widest.get('width')} px wide)"
+        )
+    return line
+
+
+def layout_refusal_message(problems: List[str]) -> str:
+    lines = "\n".join(f"- {item}" for item in problems)
+    return (
+        "finish was not accepted: the repository changed after these viewports were "
+        "last checked, and KaroX opened the page again at each of them now:\n"
+        f"{lines}\n"
+        "Fix the layout, check that size once more, then finish. This re-check did "
+        "not use the browser budget; the browser tab is left at the last size above."
+    )
 
 
 def _counts_as_repository_change(
@@ -518,6 +592,14 @@ class CoreToolEnvironment:
         self._browser_notice_sent = False
         self._coverage_refusals = 0
         self._time_notice_sent = False
+        #: Order of tool results, the last repository change, and when each
+        #: (page, width, height) was last opened: a viewport opened before the
+        #: last change is re-checked before finish.
+        self._action_seq = 0
+        self._last_change_seq = 0
+        self._viewports: Dict[tuple, int] = {}
+        self._current_view: Optional[tuple] = None
+        self._layout_refusals = 0
 
     # -- Environment protocol ----------------------------------------------
 
@@ -729,8 +811,12 @@ class CoreToolEnvironment:
                 if browser_action in _BROWSER_INPUT_ACTIONS:
                     self._browser_inputs += 1
         data = result.data if isinstance(result.data, dict) else {}
+        self._action_seq = int(getattr(self, "_action_seq", 0)) + 1
+        if core_name == "browser.command" and result.ok:
+            self._note_viewport(arguments, data)
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
+            self._last_change_seq = self._action_seq
         elif (
             core_name in _EXACT_EDIT_TOOLS
             and self._state_epoch == epoch_before
@@ -876,6 +962,13 @@ class CoreToolEnvironment:
             if reopened:
                 message = f"{message}\n\n{reopened}"
             return self._refusal(action, "requirement_coverage", message)
+        regressions = self._layout_regressions()
+        if regressions:
+            self._layout_refusals += 1
+            keep_open = getattr(self._kernel, "note_coverage_refusal", None)
+            if callable(keep_open):
+                keep_open()
+            return self._refusal(action, "layout_regression", layout_refusal_message(regressions))
         raise Submitted(
             {
                 "role": "exit",
@@ -887,6 +980,101 @@ class CoreToolEnvironment:
                 },
             }
         )
+
+    def _note_viewport(self, arguments: Mapping[str, Any], data: Mapping[str, Any]) -> None:
+        """Remember which repository page was open at which size, and when."""
+
+        action = str(arguments.get("action") or "")
+        if action == "reload":
+            if self._current_view is not None:
+                self._viewports[self._current_view] = self._action_seq
+            return
+        if action != "open":
+            return
+        payload = arguments.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        page = payload.get("page")
+        if not isinstance(page, str) or not page.strip():
+            self._current_view = None
+            return
+        inner = data.get("data") if isinstance(data.get("data"), Mapping) else data
+        viewport = inner.get("viewport") if isinstance(inner, Mapping) else None
+        viewport = viewport if isinstance(viewport, Mapping) else {}
+        try:
+            width = int(viewport.get("width") or payload.get("width") or 0)
+            height = int(viewport.get("height") or payload.get("height") or 0)
+        except (TypeError, ValueError):
+            return
+        if width <= 0 or height <= 0:
+            return
+        key = (page.strip(), width, height)
+        self._viewports[key] = self._action_seq
+        self._current_view = key
+
+    def _layout_regressions(self) -> List[str]:
+        """Re-open pages checked before the last change; report sideways scroll.
+
+        Only viewports the run itself opened are checked, so nothing here
+        guesses at the task's sizes. Infrastructure trouble never blocks a
+        finish: a failed open or read is skipped.
+        """
+
+        if int(getattr(self, "_layout_refusals", 0)) >= LAYOUT_REFUSAL_LIMIT:
+            return []
+        if "browser.command" not in getattr(self, "_definitions", {}):
+            return []
+        last_change = int(getattr(self, "_last_change_seq", 0))
+        stale = [
+            key
+            for key, seq in sorted(
+                getattr(self, "_viewports", {}).items(), key=lambda item: -item[1]
+            )
+            if seq < last_change
+        ][:LAYOUT_RECHECK_VIEWPORTS]
+        found: List[str] = []
+        for page, width, height in stale:
+            opened = self._internal_browser(
+                {"action": "open", "payload": {"page": page, "width": width, "height": height}}
+            )
+            if opened is None:
+                continue
+            self._action_seq += 1
+            self._viewports[(page, width, height)] = self._action_seq
+            self._current_view = (page, width, height)
+            measured = self._internal_browser(
+                {"action": "evaluate", "payload": {"expression": LAYOUT_PROBE_JS}}
+            )
+            problem = layout_problem(page, width, height, measured)
+            if problem:
+                found.append(problem)
+        return found
+
+    def _internal_browser(self, arguments: Dict[str, Any]) -> Optional[Mapping[str, Any]]:
+        """One browser action of KaroX's own check; None when it did not work."""
+
+        try:
+            remaining = max(0.1, float(self._kernel.remaining_seconds()))
+            digest = hashlib.sha256(
+                f"{self._session_id}\0layout\0{self._action_seq}\0{arguments.get('action')}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            command = CoreCommand(
+                name="browser.command",
+                arguments=arguments,
+                session_id=self._session_id,
+                origin=self._origin,
+                correlation_id=f"agent-{digest[:32]}",
+                idempotency_key=None,
+                deadline_seconds=min(60.0, remaining),
+            )
+            result = self._core.execute(command, lease=None)
+        except Exception:  # noqa: BLE001 - a failed check never blocks finish
+            return None
+        if not getattr(result, "ok", False) or not isinstance(result.data, Mapping):
+            return None
+        data = result.data
+        return data.get("data") if isinstance(data.get("data"), Mapping) else data
 
     def _browser_reopened_note(self) -> str:
         """Say so when this refusal reopened a browser budget the model saw closed.

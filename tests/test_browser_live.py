@@ -909,3 +909,26 @@ def test_open_reports_slow_frames_only_on_a_slow_canvas_page(site, make_session,
     monkeypatch.setenv("KAROX_BROWSER_FRAME_PROBE", "0")
     unmeasured = _open(session, site, "/heavy-canvas")
     assert "render" not in unmeasured
+
+
+def test_layout_probe_names_the_element_that_makes_a_page_scroll_sideways(site, make_session):
+    """The finish-time layout re-check reads width and the widest element in one call."""
+
+    from karox.engine_tool_env import LAYOUT_PROBE_JS, layout_problem
+
+    session, _root = make_session()
+    _open(session, site, width=390, height=844)
+    fits = _call(session, "evaluate", {"expression": LAYOUT_PROBE_JS})
+    assert fits["ok"] is True, fits
+    assert layout_problem("index.html", 390, 844, fits) == "", fits
+
+    _call(
+        session,
+        "evaluate",
+        {"expression": "document.body.insertAdjacentHTML('beforeend', "
+         "'<div id=\"wide\" style=\"width:700px;height:4px\"></div>')"},
+    )
+    wide = _call(session, "evaluate", {"expression": LAYOUT_PROBE_JS})
+    line = layout_problem("index.html", 390, 844, wide)
+    assert "in a 390 px viewport, so the page scrolls sideways" in line, wide
+    assert "div#wide" in line, wide
