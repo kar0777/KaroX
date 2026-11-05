@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from karox.engine import Environment, Model, __version__
 from karox.engine.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, Submitted, TimeExceeded
 from karox.engine.utils.serialize import recursive_merge
+from karox.engine_salvage import MARKUP_CALL_MARKERS
 
 
 class AgentConfig(BaseModel):
@@ -276,6 +277,10 @@ class DefaultAgent:
             return ""
         text = content.strip()
         if not text or any(marker in text for marker in _ACTION_FENCE_MARKERS):
+            return ""
+        if any(marker in text for marker in MARKUP_CALL_MARKERS):
+            # r4 eng-task-queue: leaked tool-call markup is an attempted
+            # action; the model layer executes the complete ones.
             return ""
         return text
 

@@ -15,6 +15,7 @@ import logging
 import os
 import random
 import time
+import uuid
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -26,7 +27,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from jinja2 import StrictUndefined, Template
 
 from .engine.exceptions import FormatError  # noqa: E402
-from .engine_salvage import salvage_fenced_command
+from .engine_salvage import salvage_fenced_command, salvage_markup_tool_calls
 from .prompt_cache_telemetry import PromptPrefixTracker, tools_digest
 from .providers import (
     ImageAttachment,
@@ -275,6 +276,13 @@ def _engine_tool_calls(entry: Mapping[str, Any]) -> Tuple[ToolCall, ...]:
     return tuple(calls)
 
 
+def _canonical_arguments(raw: str) -> str:
+    try:
+        return json.dumps(json.loads(raw or ""), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return raw or ""
+
+
 def _response_from_engine_message(message: Mapping[str, Any]) -> ModelResponse:
     """Rebuild the ModelResponse an engine assistant message was built from.
 
@@ -419,10 +427,42 @@ class EngineProviderModel:
             message["extra"]["budget_reason"] = response.budget_reason or "budget"
             message["extra"]["prompt_cache"] = telemetry
             return message
+        response, salvaged = self._salvage_markup_calls(response)
         actions = self._parse_actions(response)
         message = self._engine_message(response, actions)
         message["extra"]["prompt_cache"] = telemetry
+        if salvaged:
+            message["extra"]["salvaged_markup_calls"] = salvaged
         return message
+
+    def _salvage_markup_calls(self, response: ModelResponse) -> Tuple[ModelResponse, int]:
+        """Calls the model wrote as native markup text become real calls.
+
+        They run after the calls the gateway did parse, in the order written;
+        one the gateway already parsed is not run twice. The markup leaves the
+        answer text either way, so the replayed turn shows structured calls
+        and never teaches the model its own leak.
+        """
+        calls, remainder = salvage_markup_tool_calls(
+            response.content or "",
+            self._known_names,
+            {tool.name: tool.input_schema for tool in self._tools},
+        )
+        if not calls:
+            return response, 0
+        seen = {(call.name, _canonical_arguments(call.raw_arguments)) for call in response.tool_calls}
+        added: List[ToolCall] = []
+        for name, arguments in calls:
+            raw = json.dumps(arguments, ensure_ascii=False)
+            key = (name, _canonical_arguments(raw))
+            if key in seen:
+                continue
+            seen.add(key)
+            added.append(ToolCall(call_id=f"call-{uuid.uuid4()}", name=name, raw_arguments=raw))
+        return (
+            replace(response, content=remainder, tool_calls=tuple(response.tool_calls) + tuple(added)),
+            len(added),
+        )
 
     def _request_cache_key(self, messages: Sequence[ModelMessage]) -> Optional[str]:
         """The run's key plus a digest of the static prefix (system + tools).

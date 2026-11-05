@@ -138,3 +138,160 @@ def test_tool_calls_win_over_a_fence():
     assert actions == [
         {"name": "finish", "arguments": {"answer": "done"}, "tool_call_id": "call_1"}
     ]
+
+# -- leaked tool-call markup (r4 eng-task-queue) ---------------------------
+
+from karox.engine_salvage import salvage_markup_tool_calls  # noqa: E402
+
+_BAR = "\uff5c"
+_R4_PROBE = (
+    "\n\n<{b}DSML{b} calls>\n"
+    '<{b}DSML{b} invoke name="checks_run">\n'
+    '<{b}DSML{b} parameter name="argv" string="false">'
+    '["python", "-c", "q.enqueue({{\'a\': [1]}})\\nprint(\'dead\', q.dead_letters()[0].payload)\\n"]'
+    "</{b}DSML{b} parameter>\n"
+    "</{b}DSML{b} invoke>\n"
+    "</{b}DSML{b} calls>"
+).format(b=_BAR)
+_PROBE_ARGV = [
+    "python",
+    "-c",
+    "q.enqueue({'a': [1]})\nprint('dead', q.dead_letters()[0].payload)\n",
+]
+
+
+def _tool(name, properties):
+    from karox.providers import ProviderTool
+
+    return ProviderTool(
+        name=name,
+        description=name,
+        input_schema={"type": "object", "properties": properties},
+    )
+
+
+_TOOLS = (
+    _tool("checks_run", {"argv": {"type": "array", "items": {"type": "string"}}}),
+    _tool("repo_write_file", {"path": {"type": "string"}, "content": {"type": "string"}}),
+)
+
+
+def _bridge(response):
+    from karox.engine_kernel import EngineProviderModel
+
+    return EngineProviderModel(
+        provider=_single_response(response),
+        model_id="race-alias",
+        tools=_TOOLS,
+        event=lambda kind, **fields: None,
+        deadline_seconds=30.0,
+    )
+
+
+def _query(response):
+    return _bridge(response).query(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    )
+
+
+def test_dsml_markup_as_the_gateway_leaked_it_is_a_call():
+    calls, rest = salvage_markup_tool_calls(_R4_PROBE, {"checks_run"})
+    assert calls == [("checks_run", {"argv": _PROBE_ARGV})]
+    assert rest == ""
+
+
+def test_prose_around_leaked_markup_is_kept_and_the_markup_removed():
+    calls, rest = salvage_markup_tool_calls("Probe the edges." + _R4_PROBE, {"checks_run"})
+    assert [name for name, _ in calls] == ["checks_run"]
+    assert rest == "Probe the edges."
+
+
+def test_markup_naming_no_known_tool_stays_text():
+    text = _R4_PROBE.replace("checks_run", "run_everything")
+    assert salvage_markup_tool_calls(text, {"checks_run"}) == ([], text)
+
+
+def test_markup_cut_off_mid_call_stays_text():
+    text = _R4_PROBE.split("</" + _BAR + "DSML" + _BAR + " parameter>")[0]
+    assert salvage_markup_tool_calls(text, {"checks_run"}) == ([], text)
+
+
+def test_text_parameters_stay_text_and_json_ones_are_decoded():
+    text = (
+        '<invoke name="repo_write_file">'
+        '<parameter name="path" string="true">a.json</parameter>'
+        '<parameter name="content">{"a": 1}</parameter>'
+        "</invoke>"
+    )
+    schemas = {tool.name: tool.input_schema for tool in _TOOLS}
+    calls, rest = salvage_markup_tool_calls(text, {"repo_write_file"}, schemas)
+    assert calls == [("repo_write_file", {"path": "a.json", "content": '{"a": 1}'})]
+    assert rest == ""
+
+
+def test_hermes_tool_call_markup_is_a_call():
+    text = 'Run it.\n<tool_call>\n{"name": "checks_run", "arguments": {"argv": ["pytest", "-q"]}}\n</tool_call>'
+    calls, rest = salvage_markup_tool_calls(text, {"checks_run"})
+    assert calls == [("checks_run", {"argv": ["pytest", "-q"]})]
+    assert rest == "Run it."
+
+
+def test_a_leaked_call_beside_a_parsed_one_runs_after_it():
+    """r4 eng-task-queue step 3: pytest was parsed, the probe beside it dropped."""
+    from karox.providers import ToolCall
+
+    parsed = ToolCall(call_id="call_1", name="checks_run", raw_arguments='{"argv":["python","-m","pytest","-q"]}')
+    message = _query(_model_response(_R4_PROBE, finish_reason="tool_calls", tool_calls=(parsed,)))
+    actions = message["extra"]["actions"]
+    assert [action["arguments"] for action in actions] == [
+        {"argv": ["python", "-m", "pytest", "-q"]},
+        {"argv": _PROBE_ARGV},
+    ]
+    assert [action["batch_index"] for action in actions] == [0, 1]
+    assert [call["call_id"] for call in message["tool_calls"]][0] == "call_1"
+    assert message["tool_calls"][1]["call_id"] == actions[1]["tool_call_id"]
+    assert "DSML" not in (message["content"] or "")
+    assert message["extra"]["salvaged_markup_calls"] == 1
+
+
+def test_a_response_that_is_only_leaked_markup_is_not_a_format_error():
+    message = _query(_model_response(_R4_PROBE))
+    assert [(a["name"], a["arguments"]) for a in message["extra"]["actions"]] == [
+        ("checks_run", {"argv": _PROBE_ARGV})
+    ]
+
+
+def test_a_call_the_gateway_already_parsed_does_not_run_twice():
+    from karox.providers import ToolCall
+
+    parsed = ToolCall(call_id="call_1", name="checks_run", raw_arguments=json_dumps({"argv": _PROBE_ARGV}))
+    message = _query(_model_response(_R4_PROBE, finish_reason="tool_calls", tool_calls=(parsed,)))
+    assert len(message["extra"]["actions"]) == 1
+    assert "salvaged_markup_calls" not in message["extra"]
+    assert message["content"] == ""
+
+
+def test_unsalvageable_markup_is_never_accepted_as_the_final_answer():
+    from karox.engine.agents.default import DefaultAgent
+
+    truncated = _R4_PROBE.split("</" + _BAR + "DSML" + _BAR + " parameter>")[0]
+    error = FormatError(
+        {
+            "role": "user",
+            "content": "Format error",
+            "extra": {
+                "response": {
+                    "choices": [
+                        {"finish_reason": "stop", "message": {"content": truncated}}
+                    ]
+                }
+            },
+        }
+    )
+    assert DefaultAgent._final_answer_text(error) == ""
+
+
+def json_dumps(value):
+    import json
+
+    return json.dumps(value)
