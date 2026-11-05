@@ -210,6 +210,20 @@ TIME_LEFT_NOTICE_SECONDS = 300.0
 #: controls. The model must hear that before it spends the visual budget, not
 #: only when it tries to finish.
 _INTERACTION_TASK = re.compile(r"\b(?:restart|hotspot)\b", re.IGNORECASE)
+#: A reset is exercised where it is hard: while something still moves. A
+#: measured 3d-viewer run (f3) copied the camera home on reset but left the
+#: orbit controls' damping running; the user's check clicked reset about two
+#: seconds after an orbit, the camera kept drifting and the next hotspot never
+#: held still, so its click failed. The model's own reset check ran in the
+#: next model turn, about ten seconds after its drag, when the damping had died
+#: out, and read a perfect initial state. The passing f2 page stopped all
+#: motion on reset.
+RESET_IN_MOTION_HINT = (
+    "Test a reset or restart while something is still moving: drag or play, "
+    "then click it in the same response and read the state at once -- "
+    "momentum or damping that survives the reset carries the page away from "
+    "its initial state."
+)
 #: A code task is not a reading exercise. On swe-requests-6028 the model spent
 #: about two dozen model steps downloading and comparing three upstream
 #: releases before its first edit; one such run cost 2.1M tokens with only one
@@ -1232,7 +1246,7 @@ class CoreToolEnvironment:
         return (
             "This task names a restart or hotspot. Frames cannot prove it: use "
             "browser.command click or press on the control, then read the state. "
-            "The run cannot be verified without that input."
+            "The run cannot be verified without that input. " + RESET_IN_MOTION_HINT
         )
 
     def _remember_passed_run(

@@ -117,10 +117,12 @@ SLOW_FRAME_NOTE = (
 
 #: A page that once drew slow frames and now reads fast may only have stopped
 #: drawing while idle; the f1 run reloaded eight times after that change and
-#: never saw the 0.7 s frames again until a drag took 100.8 s.
+#: never saw the 0.7 s frames again until a drag took 100.8 s. The reading is
+#: stated, not judged: "fast" was printed for 167-183 ms frames (f3 3d-viewer),
+#: which are five or six frames a second.
 IDLE_AFTER_SLOW_NOTE = (
-    "frames read fast now ({ms} ms), but this page drew frames of about "
-    "{earlier} ms before. If it now draws only on change, a drag, camera "
+    "frames read {ms} ms now (smooth is 16-33 ms), but this page drew frames "
+    "of about {earlier} ms before. If it now draws only on change, a drag, camera "
     "damping or a tween still pays that on every frame: drag or click once "
     "and read the frames it reports (render_after)."
 )

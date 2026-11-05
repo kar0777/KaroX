@@ -80,3 +80,5 @@ def test_idle_after_slow_report_names_the_earlier_cost() -> None:
         "note": pageperf.IDLE_AFTER_SLOW_NOTE.format(ms=17, earlier=667),
     }
     assert "667 ms" in report["note"] and "render_after" in report["note"]
+    # 183 ms is five frames a second: the note states the number, not "fast".
+    assert "fast" not in pageperf.idle_after_slow_report(183, 283)["note"]

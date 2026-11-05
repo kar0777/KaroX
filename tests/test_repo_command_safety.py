@@ -458,6 +458,8 @@ def test_interaction_task_hint_fires_before_the_completion_gate() -> None:
     hint = environment._interaction_hint("browser.command")
     assert "restart or hotspot" in hint
     assert "click or press" in hint
+    # f3 3d-viewer: a reset checked after the motion had stopped proved nothing.
+    assert "while something is still moving" in hint
     assert environment._interaction_hint("browser.command") == "", "send once"
 
     clicked = object.__new__(CoreToolEnvironment)
