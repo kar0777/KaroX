@@ -45,7 +45,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .command_guard import DeveloperCommandBlocked, validate_developer_command_argv
@@ -206,6 +206,30 @@ def code_source_url(raw: str) -> tuple[str, str]:
         )
     normalized = value.split("#", 1)[0]
     return normalized, host
+
+
+def repository_file_segments(url: str) -> tuple[str, ...]:
+    """The path inside a Git repository that a code-source URL names, if any.
+
+    ``raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}`` and
+    ``cdn.jsdelivr.net/gh/{owner}/{repo}@{ref}/{path}`` each point at one file
+    of one Git repository. A ref can itself hold slashes, so the result keeps
+    everything after owner, repo and the first ref segment and callers match
+    its suffixes. Package CDNs (unpkg, npm builds, cdnjs, esm.sh) serve
+    published libraries, not a project's working tree, and return ``()``.
+    """
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ()
+    host = (parts.hostname or "").lower()
+    segments = [unquote(item) for item in parts.path.split("/") if item]
+    if host == "githubusercontent.com" or host.endswith(".githubusercontent.com"):
+        return tuple(segments[3:])
+    if (host == "jsdelivr.net" or host.endswith(".jsdelivr.net")) and segments[:1] == ["gh"]:
+        return tuple(segments[3:])
+    return ()
 
 
 def _is_code_source_type(content_type: str) -> bool:
@@ -1539,6 +1563,19 @@ class ExtendedCoreRuntime(CoreRuntime):
 
     def _prepare_fetch(self, arguments: Dict[str, Any]) -> tuple[str, str]:
         url, host = code_source_url(self._required(arguments, "url", str))
+        local = self._local_copy_of(url)
+        if local is not None:
+            # The prompt already says to solve from the repository in front of
+            # the model, yet measured runs still read the upstream copy of the
+            # very module they were fixing (a units-system file from the
+            # project's own GitHub master). Isolated runs only lost a step to
+            # DNS; with a network the run would copy a fix instead of making
+            # one. Refused before any network read.
+            raise InvalidCommand(
+                f"this URL is another copy of {local}, which the repository "
+                f"already has; solve from the repository's own code (read {local}). "
+                "web_fetch is for sources and documentation the repository lacks"
+            )
         destination = arguments.get("path")
         if destination is not None:
             if not isinstance(destination, str) or not destination.strip():
@@ -1550,6 +1587,26 @@ class ExtendedCoreRuntime(CoreRuntime):
             arguments, "max_chars", self.MAX_FETCH_CHARS, 1, self.MAX_FETCH_CHARS
         )
         return url, host
+
+    def _local_copy_of(self, url: str) -> Optional[str]:
+        """The repository file ``url`` is another copy of, or None.
+
+        Matched on the trailing segments of the in-repository path, two or
+        more of them, longest first: ``sympy/physics/units/unitsystem.py`` or
+        ``requests/utils.py`` match a local file of that path, while a bare
+        ``utils.py`` never does.
+        """
+
+        segments = repository_file_segments(url)
+        for start in range(0, len(segments) - 1):
+            relative = "/".join(segments[start:])
+            try:
+                candidate = self.safe_path(relative)
+            except Exception:  # noqa: BLE001 - an unusable path is no local copy
+                continue
+            if candidate.is_file():
+                return relative
+        return None
 
     def _read_fetched_body(self, response: Any, deadline: float) -> tuple[bytes, bool]:
         """Read at most the ceiling, and say whether the source was longer.

@@ -665,3 +665,74 @@ def test_a_deletion_preview_keeps_the_probe_and_a_repeat_delete_is_a_no_op(
     assert again["returncode"] == 0, again["output"]
     assert "nothing to delete" in again["output"]
     assert (core.repository / "seed.txt").read_text(encoding="utf-8") == "seed\n"
+
+
+def test_web_fetch_refuses_another_copy_of_a_repository_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured runs read the upstream copy of the very module they fixed.
+
+    The prompt says to solve from the repository in front of the model; the
+    tool still fetched the project's own file from its GitHub master. The
+    refusal comes before any network read and names the local file.
+    """
+
+    from karox import core_tools
+
+    opened: list[int] = []
+
+    def _opener(*args: object, **kwargs: object) -> _FakeOpener:
+        opened.append(1)
+        return _FakeOpener()
+
+    monkeypatch.setattr(core_tools, "build_opener", _opener)
+    core, store, origin = _runtime(tmp_path, "fix the scheme handling")
+    (core.repository / "requests").mkdir()
+    (core.repository / "requests" / "utils.py").write_text("old\n", encoding="utf-8")
+    lease = _lease(store)
+
+    try:
+        with pytest.raises(InvalidCommand) as refused:
+            core.execute(
+                _command("web.fetch", {"url": SOURCE_URL}, origin, key="fetch-1"),
+                lease=lease,
+            )
+    finally:
+        store.release(lease)
+
+    message = str(refused.value)
+    assert "another copy of requests/utils.py" in message
+    assert "read requests/utils.py" in message
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://raw.githubusercontent.com/psf/requests/refs/heads/main/requests/utils.py",
+        "https://cdn.jsdelivr.net/gh/psf/requests@main/requests/utils.py",
+        "https://raw.githubusercontent.com/psf/requests/v2.31.0/src/requests/utils.py",
+    ],
+)
+def test_a_local_copy_is_found_through_refs_and_mirrors(tmp_path: Path, url: str) -> None:
+    core, _store, _origin = _runtime(tmp_path, "fix the scheme handling")
+    (core.repository / "requests").mkdir()
+    (core.repository / "requests" / "utils.py").write_text("old\n", encoding="utf-8")
+
+    assert core._local_copy_of(url) == "requests/utils.py"
+
+
+def test_libraries_and_unrelated_paths_are_still_fetchable(tmp_path: Path) -> None:
+    """Only a second copy of a repository file is refused, never a library."""
+
+    core, _store, _origin = _runtime(tmp_path, "vendor the renderer")
+    (core.repository / "build").mkdir()
+    (core.repository / "build" / "three.module.js").write_text("old\n", encoding="utf-8")
+    (core.repository / "utils.py").write_text("old\n", encoding="utf-8")
+
+    # A package CDN serves a published library, not a project's working tree.
+    assert core._local_copy_of("https://unpkg.com/three@0.160.0/build/three.module.js") is None
+    # One segment is a common file name, not evidence of the same project.
+    assert core._local_copy_of("https://raw.githubusercontent.com/o/r/main/utils.py") is None
+    # A file the repository lacks is exactly what the tool is for.
+    assert core._local_copy_of("https://raw.githubusercontent.com/o/r/main/lib/other.py") is None

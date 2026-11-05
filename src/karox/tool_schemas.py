@@ -560,7 +560,9 @@ def additional_tool_definitions(
                 "Reuse proven code instead of re-deriving it and keep a one-line "
                 "credit. Pass path to save into the repository; without it the "
                 "text returns in the answer, shortened. Read-only: nothing is "
-                "uploaded and no credentials are sent."
+                "uploaded and no credentials are sent. A URL for another copy of "
+                "a file the repository already has is refused: read the local "
+                "file."
             ),
             Capability.CODE_FETCH,
             True,
