@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .event_bus import EventBus, EventKind, EventLevel
-from .atomic_io import atomic_write
+from .atomic_io import atomic_write, new_file_mode
 from .core_git import GitToolsMixin
 from .core_process import (
     WILDCARD_ARGUMENT,
@@ -1401,7 +1401,7 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
                     )
                 ],
             }
-        atomic_write(path, encoded, previous_mode)
+        atomic_write(path, encoded, new_file_mode() if previous_mode is None else previous_mode)
         # A write that went around the credential scanner says so in both the
         # result and the durable evidence, so a reviewer can find every one of
         # them rather than having to infer which writes used the escape hatch.

@@ -101,6 +101,33 @@ _VOLATILE_RESULT_KEYS = frozenset({"bridge_pid", "child_pid", "duration_ms", "el
 #: marker so the other calls still execute and every call gets its observation;
 #: the model must then submit again with finish alone.
 FINISH_BATCH_MARKER = "__karox_finish_not_alone__"
+
+
+#: finish argument naming files whose exact contents belong in the reply.
+ANSWER_FILES_FIELD = "answer_files"
+ANSWER_FILES_LIMIT = 8
+ANSWER_FILES_MAX_BYTES = 1_000_000
+_FENCE_LANGUAGES = {
+    ".html": "html", ".htm": "html", ".svg": "svg", ".xml": "xml", ".css": "css",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "jsx",
+    ".ts": "typescript", ".tsx": "tsx", ".py": "python", ".json": "json",
+    ".md": "markdown", ".sh": "bash", ".rs": "rust", ".go": "go", ".java": "java",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp", ".rb": "ruby",
+    ".php": "php", ".sql": "sql", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml",
+    ".kt": "kotlin", ".swift": "swift", ".cs": "csharp", ".lua": "lua",
+}
+
+
+def fenced_file(relative: str, text: str, *, label: bool = False) -> str:
+    """One file as a Markdown code block whose fence cannot occur inside it."""
+
+    longest = max((len(run) for run in re.findall(r"`{3,}", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    language = _FENCE_LANGUAGES.get(Path(relative).suffix.lower(), "")
+    body = text if text.endswith("\n") else text + "\n"
+    block = f"{fence}{language}\n{body}{fence}"
+    return f"`{relative}`\n{block}" if label else block
+
 #: A repair edit is followed by exactly the tests that failed, once, inside a
 #: budget that cannot turn one edit into a long detour.
 AFFECTED_TESTS_TIMEOUT_SECONDS = 20.0
@@ -665,6 +692,13 @@ class CoreToolEnvironment:
             )
         if name == FINISH_TOOL_NAME:
             return self._finish(action)
+        if requested_by == "model" and self._closing_turn():
+            return self._refusal(
+                action,
+                "closing_turn",
+                "The work phase is over: nothing can judge another edit or check "
+                "now. Call finish alone with your final answer.",
+            )
         if name is None:
             # An approved command run from text can write anything a check
             # would read; no earlier verdict survives it.
@@ -957,13 +991,24 @@ class CoreToolEnvironment:
         answer = ""
         if isinstance(arguments, dict):
             answer = str(arguments.get("answer") or "")
-        if not answer.strip():
+        attached, attach_problem = self._answer_files(
+            arguments.get(ANSWER_FILES_FIELD) if isinstance(arguments, dict) else None
+        )
+        if attach_problem:
+            return self._refusal(action, "malformed_arguments", attach_problem)
+        if not answer.strip() and not attached:
             return self._refusal(
                 action,
                 "malformed_arguments",
                 'finish requires {"answer": "<final answer text>"}',
             )
-        problems = self._coverage_problems(arguments)
+        if attached:
+            # The files are copied from disk, not regenerated: a reply that must
+            # contain the deliverable gets its exact bytes at no output cost.
+            answer = f"{answer.rstrip()}\n\n{attached}" if answer.strip() else attached
+        # In the closing call the run is already stopped unverified; a refusal
+        # could only cost the user the answer.
+        problems = [] if self._closing_turn() else self._coverage_problems(arguments)
         if problems:
             self._coverage_refusals += 1
             keep_open = getattr(self._kernel, "note_coverage_refusal", None)
@@ -976,7 +1021,7 @@ class CoreToolEnvironment:
             if reopened:
                 message = f"{message}\n\n{reopened}"
             return self._refusal(action, "requirement_coverage", message)
-        regressions = self._layout_regressions()
+        regressions = [] if self._closing_turn() else self._layout_regressions()
         if regressions:
             self._layout_refusals += 1
             keep_open = getattr(self._kernel, "note_coverage_refusal", None)
@@ -994,6 +1039,54 @@ class CoreToolEnvironment:
                 },
             }
         )
+
+    def _closing_turn(self) -> bool:
+        active = getattr(self._kernel, "closing_turn_active", None)
+        return bool(active()) if callable(active) else False
+
+    def _answer_files(self, value: Any) -> tuple[str, str]:
+        """Render ``answer_files`` as fenced blocks; returns (text, problem).
+
+        A task that says "reply with the complete file in one code block" used
+        to cost a second generation of the whole deliverable, and a run that
+        ended without that turn shipped an empty reply (aquarium a1: a 41 KB
+        page on disk, nothing in the answer). The runtime copies the bytes
+        instead: they are exactly the file that was checked.
+        """
+
+        if value is None or value == []:
+            return "", ""
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return "", f"{ANSWER_FILES_FIELD} must be a list of repository-relative file paths"
+        if len(value) > ANSWER_FILES_LIMIT:
+            return "", f"{ANSWER_FILES_FIELD} takes at most {ANSWER_FILES_LIMIT} files"
+        blocks: List[str] = []
+        total = 0
+        for relative in value:
+            try:
+                path = self._core.safe_path(relative)
+            except Exception as exc:  # noqa: BLE001 - named back to the model
+                return "", f"{ANSWER_FILES_FIELD}: {relative}: {exc}"
+            if not path.is_file():
+                return "", f"{ANSWER_FILES_FIELD}: {relative} is not a file in the repository"
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                return "", f"{ANSWER_FILES_FIELD}: {relative} cannot be read: {exc}"
+            total += len(data)
+            if total > ANSWER_FILES_MAX_BYTES:
+                return "", (
+                    f"{ANSWER_FILES_FIELD}: the files total more than "
+                    f"{ANSWER_FILES_MAX_BYTES // 1000} KB; attach fewer files"
+                )
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                return "", f"{ANSWER_FILES_FIELD}: {relative} is not UTF-8 text"
+            blocks.append(fenced_file(relative, text, label=len(value) > 1))
+        return "\n\n".join(blocks), ""
 
     def _note_viewport(self, arguments: Mapping[str, Any], data: Mapping[str, Any]) -> None:
         """Remember which repository page was open at which size, and when."""

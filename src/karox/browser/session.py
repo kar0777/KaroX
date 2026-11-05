@@ -74,6 +74,7 @@ from .errors import (
     BrowserSessionError,
     classify_browser_error,
 )
+from . import code_sources
 from .netpolicy import (
     BrowserAccessPolicy,
     SessionPinnedProxy,
@@ -133,6 +134,9 @@ from .resources import (
     parking_enabled,
     wake_page,
 )
+
+DEFAULT_VIEWPORT_WIDTH = 1280
+DEFAULT_VIEWPORT_HEIGHT = 800
 
 _MAX_SNAPSHOT_NODES = 500
 _MAX_NETWORK_ENTRIES = 400
@@ -427,6 +431,15 @@ _MODIFIER_NAMES = {
 
 #: Modifiers that turn a letter into a shortcut instead of inserted text.
 _SHORTCUT_MODIFIERS = frozenset({"Control", "Meta", "Alt"})
+
+
+def _has_html_body(page: Any) -> bool:
+    """Whether the active document has an HTML body. Never raises."""
+
+    try:
+        return bool(page.evaluate("() => !!document.body"))
+    except Exception:
+        return True
 
 
 def _frame_page_key(page: Any) -> str:
@@ -840,9 +853,46 @@ class BrowserSession(SessionGuardsMixin):
                         "external pages cannot redirect or issue subrequests to localhost"
                     )
         except BrowserSecurityError:
+            if self._fulfill_code_source(route, request):
+                return
             route.abort()
             return
         route.continue_()
+
+    def _fulfill_code_source(self, route: Any, request: Any) -> bool:
+        """Answer a local page's CDN import through KaroX; False to refuse it."""
+
+        if not self.policy.code_sources:
+            return False
+        try:
+            frame_url = str(request.frame.url)
+        except Exception:
+            frame_url = ""
+        try:
+            navigation = bool(request.is_navigation_request())
+        except Exception:
+            navigation = True
+        url = code_sources.eligible(
+            method=str(getattr(request, "method", "") or ""),
+            url=str(getattr(request, "url", "") or ""),
+            resource_type=str(getattr(request, "resource_type", "") or ""),
+            navigation=navigation,
+            frame_url=frame_url,
+        )
+        if url is None:
+            return False
+        response = code_sources.fetch(url)
+        if response is None:
+            return False
+        try:
+            route.fulfill(
+                status=response.status,
+                headers=code_sources.response_headers(response),
+                body=response.body,
+            )
+        except Exception:
+            return False
+        return True
 
     def _register_page(self, page: Any, *, make_active: bool = True) -> str:
         handle = self._ensure_open()
@@ -1159,8 +1209,11 @@ class BrowserSession(SessionGuardsMixin):
         cancel: Optional[CancelToken],
     ) -> dict[str, Any]:
         url = validate_browser_url(payload.get("url"), self.policy)
-        width = int(payload.get("width", 1440))
-        height = int(payload.get("height", 900))
+        # The default matches the visual checker's frame (1280x800): what the
+        # run inspects is what the checker judges, and a software-rendered
+        # scene draws ~20% fewer pixels per frame than at 1440x900.
+        width = int(payload.get("width", DEFAULT_VIEWPORT_WIDTH))
+        height = int(payload.get("height", DEFAULT_VIEWPORT_HEIGHT))
         if not 320 <= width <= 3840 or not 240 <= height <= 2160:
             raise BrowserError(
                 "browser viewport is outside safe bounds (320-3840 x 240-2160)"
@@ -1225,14 +1278,26 @@ class BrowserSession(SessionGuardsMixin):
         try:
             proxy = SessionPinnedProxy(self.policy)
             proxy.start()
-            browser = ctx.chromium.launch(
-                headless=not self.policy.headed,
-                proxy={
-                    "server": proxy.server_url,
-                    "username": proxy.username,
-                    "password": proxy.password,
-                },
-            )
+            proxy_settings = {
+                "server": proxy.server_url,
+                "username": proxy.username,
+                "password": proxy.password,
+            }
+            if self.policy.headed:
+                browser = ctx.chromium.launch(headless=False, proxy=proxy_settings)
+            else:
+                # Headless WebGL is software-rendered unless asked otherwise;
+                # see browser/render_backend.py for the measured cost.
+                from .render_backend import launch_args, software_args
+
+                try:
+                    browser = ctx.chromium.launch(
+                        headless=True, proxy=proxy_settings, args=launch_args()
+                    )
+                except Exception:
+                    browser = ctx.chromium.launch(
+                        headless=True, proxy=proxy_settings, args=software_args()
+                    )
             context_kwargs: dict[str, Any] = {
                 "viewport": {"width": width, "height": height},
                 "accept_downloads": bool(self.policy.downloads),
@@ -3100,6 +3165,12 @@ class BrowserSession(SessionGuardsMixin):
         # method must never call another wrapped method with extra kwargs.
         page = self._active_page()
         full_page = bool(payload.get("full_page", not region))
+        if full_page and not _has_html_body(page):
+            # Playwright's full-page capture of a document without a body (a
+            # standalone SVG or other XML document) never resolves: a 30 s
+            # timeout cost a measured drawing run one step. The viewport holds
+            # the whole picture.
+            full_page = False
         name = payload.get("name") or "screenshot"
         if not isinstance(name, str) or not _ARTIFACT_NAME.fullmatch(name):
             raise BrowserError(

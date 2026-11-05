@@ -110,7 +110,6 @@ _MAX_SCREENSHOT_BYTES = 900_000
 #: about a second, and a run that renders its page once per check paid that cost
 #: on every check. One browser per process, closed at exit; a failed launch is
 #: never cached, so a machine that cannot run it is retried rather than poisoned.
-_LAUNCH_ARGS = ["--disable-gpu", "--enable-unsafe-swiftshader"]
 _browser_lock = threading.Lock()
 _browser_state: dict[str, Any] = {"playwright": None, "browser": None}
 #: The one thread that owns the browser. Playwright's synchronous API installs an
@@ -167,9 +166,16 @@ def _shared_browser() -> Optional[tuple[Any, Any]]:
             playwright = sync_playwright().start()
         except Exception:
             return None
-        try:
-            browser = playwright.chromium.launch(args=list(_LAUNCH_ARGS))
-        except Exception:
+        from .browser.render_backend import launch_args, software_args
+
+        browser = None
+        for args in (launch_args(), software_args()):
+            try:
+                browser = playwright.chromium.launch(args=args)
+                break
+            except Exception:
+                continue
+        if browser is None:
             try:
                 playwright.stop()
             except Exception:
@@ -264,7 +270,9 @@ async (payload) => {
   const image = new Image();
   image.src = source;
   await image.decode();
-  const canvas = document.createElement("canvas");
+  // Namespaced so the same measurement works inside an SVG document, where
+  // createElement("canvas") makes an element without a drawing context.
+  const canvas = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
   canvas.width = image.naturalWidth;
   canvas.height = image.naturalHeight;
   const context = canvas.getContext("2d");
@@ -285,6 +293,7 @@ async (payload) => {
   }
   const tones = new Set();
   const tones_histogram = {};
+  const tone_sums = {};
   let sampled = 0;
   let structured = 0;
   let background_like = 0;
@@ -320,6 +329,8 @@ async (payload) => {
       const tone = ((data[here] >> 5) << 10) | ((data[here + 1] >> 5) << 5) |
                    (data[here + 2] >> 5);
       tones_histogram[tone] = (tones_histogram[tone] || 0) + 1;
+      const sum = tone_sums[tone] || (tone_sums[tone] = [0, 0, 0]);
+      sum[0] += data[here]; sum[1] += data[here + 1]; sum[2] += data[here + 2];
       const luma = (0.2126 * data[here] + 0.7152 * data[here + 1] +
                     0.0722 * data[here + 2]) / 255;
       luma_sum += luma;
@@ -348,9 +359,11 @@ async (payload) => {
   // scene that renders as a single tone is the failure this reports, and it used
   // to be invisible in the verdict -- the numbers said "not the page background"
   // while the frame held one colour.
-  const modal_color = modal_tone === null ? null : [
-    ((modal_tone >> 10) & 31) << 3, ((modal_tone >> 5) & 31) << 3, (modal_tone & 31) << 3,
-  ].join(",");
+  // The mean colour of the modal bucket. Decoding the 3-bit bucket with the
+  // 5-bit tone layout reported white as "56,56,56" -- a dark grey the frame
+  // never held -- so the colour is measured, not reconstructed.
+  const modal_color = modal_tone === null ? null : tone_sums[modal_tone]
+    .map((total) => Math.round(total / modal_count)).join(",");
   const luma_mean = sampled ? luma_sum / sampled : null;
   // Population standard deviation of brightness: "nearly one tone" as a number
   // rather than as a colour count, because a hundred tones that are all black
@@ -397,9 +410,13 @@ _PAGE_PROBE_JS = """
       rect = { x: box.x, y: box.y, width: box.width, height: box.height };
     }
   }
+  // A standalone SVG document has no body: its root element is the host.
+  const host = document.body || document.documentElement;
   const background =
-    getComputedStyle(document.body).backgroundColor ||
-    getComputedStyle(document.documentElement).backgroundColor || "";
+    (host ? getComputedStyle(host).backgroundColor : "") ||
+    (document.documentElement
+      ? getComputedStyle(document.documentElement).backgroundColor
+      : "") || "";
   return {
     canvases: document.querySelectorAll("canvas").length,
     canvas_rect: rect,
@@ -949,6 +966,132 @@ def _render_in_browser(page: pathlib.Path) -> dict:
 #: and a page that never moved looks exactly like one whose loop never started.
 ANIMATION_SETTLE_MS = 2000
 
+#: How long a page may take to draw its first frames, to draw again between
+#: the two frames, and to redraw after the resize. Bounds, not waits: a page
+#: that draws at 60 fps passes each in one frame.
+FIRST_FRAMES_TIMEOUT_MS = 30_000
+MOTION_FRAMES_TIMEOUT_MS = 20_000
+RESIZE_FRAMES_TIMEOUT_MS = 10_000
+
+#: A software-rendered WebGL scene (SwiftShader: no GPU in the sandbox, and
+#: ``--disable-gpu`` everywhere) draws one frame every 3-6 s. Its animation
+#: loop then owns the page's main thread, and every evaluate and screenshot
+#: of an observation waited behind whole frames: the b0 aquarium page took
+#: 97 s per look (probe 26 s, first screenshot 24 s, second 16 s, pixel
+#: statistics 8 s, resize 12 s) and the visual check spent 405 s of a 1022 s
+#: run on four looks. The gate holds ``requestAnimationFrame`` callbacks while
+#: KaroX measures and photographs, and releases them in between, so the page
+#: draws only when its frames are wanted and the reads run on an idle thread.
+#: It counts drawn frames, so the second picture is taken after the page
+#: really drew again -- not after two seconds in which a slow page drew
+#: nothing -- and it counts pending requests, so a static page is never
+#: waited on.
+_FRAME_GATE_JS = """
+(() => {
+  if (window.__karoxFrameGate) return;
+  const native = window.requestAnimationFrame.bind(window);
+  const cancelNative = window.cancelAnimationFrame.bind(window);
+  const gate = { paused: false, frames: 0, pending: 0, seq: 1 << 30,
+                 queue: [], live: new Map() };
+  const schedule = (id, cb) => {
+    const nativeId = native((time) => {
+      gate.live.delete(id);
+      gate.pending = Math.max(0, gate.pending - 1);
+      gate.frames += 1;
+      cb(time);
+    });
+    gate.live.set(id, { nativeId, cb });
+  };
+  window.requestAnimationFrame = function (cb) {
+    const id = ++gate.seq;
+    gate.pending += 1;
+    if (gate.paused) gate.queue.push([id, cb]);
+    else schedule(id, cb);
+    return id;
+  };
+  window.cancelAnimationFrame = function (id) {
+    const queued = gate.queue.findIndex((entry) => entry[0] === id);
+    if (queued >= 0) {
+      gate.queue.splice(queued, 1);
+      gate.pending = Math.max(0, gate.pending - 1);
+      return;
+    }
+    const live = gate.live.get(id);
+    if (live) {
+      cancelNative(live.nativeId);
+      gate.live.delete(id);
+      gate.pending = Math.max(0, gate.pending - 1);
+      return;
+    }
+    cancelNative(id);
+  };
+  // A frame already handed to the browser would still draw after the pause,
+  // and on a software-rendered scene one frame is seconds: the probe and the
+  // capture then wait for it. Pausing takes those frames back as well.
+  gate.pause = () => {
+    gate.paused = true;
+    for (const [id, entry] of gate.live) {
+      cancelNative(entry.nativeId);
+      gate.queue.push([id, entry.cb]);
+    }
+    gate.live.clear();
+    return gate.frames;
+  };
+  gate.resume = () => {
+    gate.paused = false;
+    const held = gate.queue;
+    gate.queue = [];
+    for (const [id, cb] of held) schedule(id, cb);
+    return gate.frames;
+  };
+  Object.defineProperty(window, "__karoxFrameGate", { value: gate });
+})();
+"""
+#: A standalone SVG is drawn at its own width and height, so a 400x300 picture
+#: arrives as a small corner of the frame and the checker judges a thumbnail.
+#: With a viewBox the picture scales without distortion, so the observed copy
+#: is fitted to the viewport. The file is not touched.
+_SVG_FIT_JS = """
+() => {
+  const root = document.documentElement;
+  if (document.body || !root || root.namespaceURI !== "http://www.w3.org/2000/svg") return false;
+  if (!root.getAttribute("viewBox")) return false;
+  root.setAttribute("width", "100%");
+  root.setAttribute("height", "100%");
+  return true;
+}
+"""
+_FRAMES_DRAWN_JS = (
+    "(n) => { const g = window.__karoxFrameGate;"
+    " return !g || g.frames >= n || (g.pending === 0 && g.queue.length === 0); }"
+)
+
+
+def _gate(view: Any, action: str) -> Optional[int]:
+    """Pause or resume the page's frames; the frame count, or None without a gate."""
+
+    try:
+        value = view.evaluate(
+            "(a) => { const g = window.__karoxFrameGate; return g ? g[a]() : null; }",
+            action,
+        )
+    except Exception:  # noqa: BLE001 - a gate is an optimisation, never a verdict
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _frames_drawn(view: Any, count: Optional[int], timeout_ms: int) -> None:
+    """Wait until ``count`` frames were drawn, or none is pending, or the bound."""
+
+    if count is None:
+        return
+    try:
+        view.wait_for_function(
+            _FRAMES_DRAWN_JS, arg=count, polling=100, timeout=timeout_ms
+        )
+    except Exception:  # noqa: BLE001 - a slow page is observed as it is
+        pass
+
 
 _RESIZE_PROBE_JS = """
 () => {
@@ -1011,13 +1154,27 @@ def _observe_in_browser(
 
         view.on("console", on_console)
         view.on("pageerror", on_page_error)
+        try:
+            view.add_init_script(_FRAME_GATE_JS)
+        except Exception:  # noqa: BLE001 - observed without the gate
+            pass
         view.goto(url or page.resolve().as_uri())
+        if page.suffix.lower() == ".svg":
+            try:
+                view.evaluate(_SVG_FIT_JS)
+            except Exception:  # noqa: BLE001 - observed at its own size
+                pass
         view.wait_for_timeout(RENDER_SETTLE_MS)
+        _frames_drawn(view, 2, FIRST_FRAMES_TIMEOUT_MS)
+        drawn = _gate(view, "pause")
         probe = view.evaluate(_PAGE_PROBE_JS)
         if frames > 0:
             shots.append(view.screenshot())
         for _ in range(max(0, frames - 1)):
+            _gate(view, "resume")
             view.wait_for_timeout(settle_ms)
+            _frames_drawn(view, None if drawn is None else drawn + 2, MOTION_FRAMES_TIMEOUT_MS)
+            drawn = _gate(view, "pause")
             shots.append(view.screenshot())
         if shots:
             measured = view.evaluate(
@@ -1038,7 +1195,12 @@ def _observe_in_browser(
             else:
                 try:
                     view.set_viewport_size({"width": 1000, "height": 700})
+                    _gate(view, "resume")
                     view.wait_for_timeout(1000)
+                    _frames_drawn(
+                        view, None if drawn is None else drawn + 1, RESIZE_FRAMES_TIMEOUT_MS
+                    )
+                    _gate(view, "pause")
                     after = view.evaluate(_RESIZE_PROBE_JS)
                     canvas = after.get("canvas") if isinstance(after, dict) else None
                     ok = isinstance(canvas, dict) and (
@@ -1321,6 +1483,63 @@ def default_pages(root: pathlib.Path) -> list[pathlib.Path]:
     return pages[:_MAX_PAGES]
 
 
+#: A picture larger than this is not parsed: the check stays cheap and bounded.
+_MAX_PICTURE_BYTES = 8_000_000
+_SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
+
+
+def default_pictures(root: pathlib.Path) -> list[pathlib.Path]:
+    """Root-level SVG files that are not scratch work, by name."""
+
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    return [
+        path
+        for path in entries
+        if path.is_file()
+        and path.suffix.lower() == ".svg"
+        and not is_scratch_page(path)
+    ][:_MAX_PAGES]
+
+
+def check_picture(picture: pathlib.Path) -> list[str]:
+    """Problems a browser would show instead of the SVG picture.
+
+    A standalone SVG is XML: one unescaped ``&`` or an unclosed tag and the
+    browser renders a parse error where the drawing should be. Only the bytes
+    are read; nothing is rendered or fetched.
+    """
+
+    import xml.etree.ElementTree as ElementTree
+
+    try:
+        if picture.stat().st_size > _MAX_PICTURE_BYTES:
+            return []
+        data = picture.read_bytes()
+    except OSError as error:
+        return [f"{picture.name}: could not be read ({type(error).__name__})"]
+    if not data.strip():
+        return [f"{picture.name}: is empty"]
+    try:
+        element = ElementTree.fromstring(data)
+    except ElementTree.ParseError as error:
+        return [
+            f"{picture.name}: is not well-formed XML ({error}); a browser shows "
+            "a parse error instead of the picture"
+        ]
+    if element.tag != f"{_SVG_NAMESPACE}svg":
+        if element.tag == "svg":
+            return [
+                f"{picture.name}: the <svg> root has no "
+                'xmlns="http://www.w3.org/2000/svg"; opened as a file, a browser '
+                "shows the markup as text instead of the picture"
+            ]
+        return [f"{picture.name}: the root element is <{element.tag}>, not <svg>"]
+    return []
+
+
 def check(
     root: pathlib.Path,
     pages: Iterable[pathlib.Path] | None = None,
@@ -1328,6 +1547,7 @@ def check(
     render: bool = False,
 ) -> dict:
     selected = list(pages) if pages else default_pages(root)
+    pictures = [] if pages else default_pictures(root)
     problems: list[str] = []
     rendered: dict[str, dict] = {}
     for page in selected:
@@ -1336,12 +1556,21 @@ def check(
             outcome = render_page(page)
             rendered[page.name] = outcome
             problems.extend(outcome.get("problems") or [])
+    for picture in pictures:
+        found = check_picture(picture)
+        problems.extend(found)
+        if render and not found:
+            # Rendered like a page, so a picture has the same browser proof:
+            # loaded in Chromium, errors recorded, pixels measured.
+            outcome = render_page(picture)
+            rendered[picture.name] = outcome
+            problems.extend(outcome.get("problems") or [])
     verdict: dict[str, Any] = {
         "ok": not problems,
         "problems": problems,
-        "checked": [page.name for page in selected],
+        "checked": [page.name for page in selected] + [p.name for p in pictures],
     }
-    if not selected:
+    if not selected and not pictures:
         # A green line over an empty scope is the trap this check was written to
         # close: one measured run opened by running it on a repository with no
         # page yet, saw it pass, and made thirty edits before checking again. The

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -153,6 +154,33 @@ def test_workspace_worker_apply_patch_dry_run_and_batch(tmp_path: Path) -> None:
     assert applied["action"] == "batch"
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "alpha"
     assert (tmp_path / "nested").is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_a_new_file_follows_the_umask_and_an_old_one_keeps_its_mode(tmp_path: Path) -> None:
+    """mkstemp's 0600 must not leak into files the agent creates."""
+
+    runtime = FakeRuntime(tmp_path)
+    kept = tmp_path / "run.sh"
+    kept.write_text("old\n", encoding="utf-8")
+    kept.chmod(0o755)
+    workspace_worker.execute_repo_command(
+        runtime,
+        {
+            "action": "batch",
+            "payload": {
+                "operations": [
+                    {"op": "write", "path": "page.html", "content": "<p>hi</p>"},
+                    {"op": "write", "path": "run.sh", "content": "new\n"},
+                ]
+            },
+        },
+        10.0,
+    )
+    mask = os.umask(0o022)
+    os.umask(mask)
+    assert stat.S_IMODE((tmp_path / "page.html").stat().st_mode) == 0o666 & ~mask
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o755
 
 
 def test_tests_run_uses_the_project_interpreter(tmp_path: Path) -> None:

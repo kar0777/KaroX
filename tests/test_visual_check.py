@@ -81,6 +81,32 @@ class _FakeProvider:
         )
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Generate an SVG of a heron riding a scooter.",
+        "Draw a lighthouse at dusk and save it as lighthouse.svg.",
+        "Make an illustration for the landing hero.",
+        "Add a bar chart of monthly signups.",
+        "Design a logo for the tea shop.",
+    ],
+)
+def test_a_picture_task_is_offered_a_look(task: str) -> None:
+    assert visual_check.is_visual_task(task)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Fix the CSV parser so quoted commas survive.",
+        "Withdraw the deprecated settings flag.",
+        "Add retries to the HTTP client.",
+    ],
+)
+def test_a_code_task_is_not_offered_a_look(task: str) -> None:
+    assert not visual_check.is_visual_task(task)
+
+
 def test_goal_brief_keeps_the_requirements_after_two_kilobytes() -> None:
     brief = goal_brief(LONG_GOAL)
 
@@ -445,3 +471,45 @@ def test_a_page_fixed_after_the_budget_gets_one_closing_look(
     assert closing["closing"] is True
     assert closing["checks_left"] == 0
     assert exhausted["method"] == "limit"
+
+
+class _CutOffProvider:
+    """A thinking checker that spends its whole ceiling before any JSON."""
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def complete(self, request):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        return ModelResponse(
+            content=None,
+            tool_calls=(),
+            finish_reason="length",
+            usage={"prompt_tokens": 10, "completion_tokens": 8000},
+        )
+
+
+def test_a_cut_off_look_is_named_as_cut_off_and_costs_no_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _CutOffProvider()
+    monkeypatch.setattr(
+        visual_check,
+        "observe_page",
+        lambda *args, **kwargs: _observation(resize_ok=True),
+    )
+    checker = VisualChecker(
+        provider=provider,  # type: ignore[arg-type]
+        model="test-model",
+        artifacts=tmp_path / "visual",
+        vision=True,
+        goal="Draw a lighthouse at dusk and save it as lighthouse.svg.",
+    )
+
+    result = checker(Path("lighthouse.svg"))
+
+    assert result["verdict"] == "unavailable"
+    assert any("cut off at the output limit" in issue for issue in result["issues"])
+    assert result["checks_left"] == visual_check.CHECKS_PER_TASK
+    # Drawings measured 3500 tokens of thought before the verdict.
+    assert provider.requests[0].max_output_tokens >= 8000

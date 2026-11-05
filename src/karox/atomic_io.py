@@ -17,6 +17,19 @@ _BYTECODE_SOURCES = frozenset({".py", ".pyw"})
 _SECOND_NS = 1_000_000_000
 
 
+def new_file_mode() -> int:
+    """The mode an ordinary editor gives a new file: 0666 minus the umask.
+
+    ``mkstemp`` creates its temporary 0600; without this a file the agent
+    created stayed private to its user while every other new file in the
+    project followed the umask.
+    """
+
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return 0o666 & ~mask
+
+
 def atomic_write(path: Path, content: bytes, mode: Optional[int] = None) -> None:
     """Replace ``path`` with ``content`` atomically, preserving ``mode``."""
 

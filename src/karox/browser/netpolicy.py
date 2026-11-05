@@ -100,6 +100,11 @@ class BrowserAccessPolicy:
     plain_credentials: bool = False
     downloads: bool = False
     allow_detach: bool = False
+    # Serve GET subresources of a local page from the public code-source
+    # allowlist (``web_fetch``'s hosts) through KaroX; see ``code_sources``.
+    # Off by default; the agent's browser turns it on only when the session
+    # may use ``code.fetch``.
+    code_sources: bool = False
     allowed_emails: tuple[str, ...] = ()
     allowed_credential_refs: tuple[str, ...] = ()
     saved_profile_id: str = "ad-hoc"
@@ -125,6 +130,7 @@ class BrowserAccessPolicy:
             "plain_credentials",
             "downloads",
             "allow_detach",
+            "code_sources",
         ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"browser policy {field_name} must be boolean")
@@ -179,6 +185,7 @@ class BrowserAccessPolicy:
             "plain_credentials": self.plain_credentials,
             "downloads": self.downloads,
             "allow_detach": self.allow_detach,
+            "code_sources": self.code_sources,
             "headed": self.headed,
             "allowed_domains": list(self.allowed_domains),
             "denied_domains": list(self.denied_domains),

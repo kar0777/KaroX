@@ -62,8 +62,11 @@ CHECKER_DEADLINE_SECONDS = 120.0
 #: separately. This one was 500 until a real page proved why that is wrong -- a
 #: thinking model spends tokens before its JSON, the answer was cut off mid
 #: sentence, and a page that was fine fell back to the measurements because the
-#: verdict never arrived.
-CHECKER_MAX_OUTPUT_TOKENS = 3500
+#: verdict never arrived. 3500 failed the same way on drawings: two of three
+#: looks at a standalone SVG thought past it and returned nothing, which cost
+#: the run a repair turn and three screenshots, while ordinary verdicts used
+#: 300-2400 tokens.
+CHECKER_MAX_OUTPUT_TOKENS = 8000
 
 #: Task shapes that ask for something a viewer has to look at. The tool is only
 #: offered for these: a verdict about a rendered page is noise on a task about a
@@ -80,6 +83,11 @@ _TASK_SIGNALS = (
     re.compile(r"\banimat", re.IGNORECASE),
     re.compile(r"\bvisual", re.IGNORECASE),
     re.compile(r"\bdashboard\b", re.IGNORECASE),
+    # Pictures are looked at too: an SVG, a drawing, an illustration, a chart.
+    re.compile(r"\bsvg\b", re.IGNORECASE),
+    re.compile(r"\bdraw(?:s|ing|n)?\b", re.IGNORECASE),
+    re.compile(r"\billustrat", re.IGNORECASE),
+    re.compile(r"\b(?:chart|diagram|logo|icon)s?\b", re.IGNORECASE),
 )
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -387,7 +395,13 @@ class VisualChecker:
         )
         if answer is None:
             failure = str(getattr(self, "_last_failure", "") or "")
-            unusable = "the checker model gave no usable verdict" + (f" ({failure})" if failure else "")
+            unusable = (
+                "the checker's answer was cut off at the output limit before it "
+                "contained a verdict"
+                if str(finish_reason or "").lower() == "length"
+                else "the checker model gave no usable verdict"
+                + (f" ({failure})" if failure else "")
+            )
             if issues:
                 return self._quality_verdict(
                     {

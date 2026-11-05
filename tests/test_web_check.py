@@ -137,3 +137,42 @@ def test_diagnostic_pages_fail_closed(tmp_path: Path) -> None:
     assert diagnostic_pages(tmp_path, []) == set()
     # A missing repository marks nothing.
     assert diagnostic_pages(tmp_path / "missing", ["selftest.html"]) == set()
+
+
+def test_a_root_svg_is_checked_for_what_a_browser_would_show(tmp_path) -> None:
+    """A standalone SVG is XML: a stray ``&`` renders a parse error, not a picture."""
+
+    from karox.web_check import check
+
+    (tmp_path / "good.svg").write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><rect/></svg>",
+        encoding="utf-8",
+    )
+    verdict = check(tmp_path)
+    assert verdict["ok"] is True and verdict["checked"] == ["good.svg"]
+    assert "vacuous" not in verdict
+
+    (tmp_path / "broken.svg").write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg'><text>salt & pepper</text></svg>",
+        encoding="utf-8",
+    )
+    (tmp_path / "bare.svg").write_text("<svg viewBox='0 0 10 10'></svg>", encoding="utf-8")
+    verdict = check(tmp_path)
+    assert verdict["ok"] is False
+    problems = " ".join(verdict["problems"])
+    assert "broken.svg: is not well-formed XML" in problems
+    assert "bare.svg: the <svg> root has no" in problems
+
+
+def test_scratch_svgs_and_explicit_pages_skip_the_picture_check(tmp_path) -> None:
+    from karox.web_check import check
+
+    (tmp_path / "_probe.svg").write_text("<svg", encoding="utf-8")
+    (tmp_path / "index.html").write_text("<!doctype html><title>t</title>", encoding="utf-8")
+    (tmp_path / "logo.svg").write_text("<svg", encoding="utf-8")
+    explicit = check(tmp_path, [tmp_path / "index.html"])
+    assert explicit["checked"] == ["index.html"]
+    assert not any("svg" in problem for problem in explicit["problems"])
+    verdict = check(tmp_path)
+    assert verdict["checked"] == ["index.html", "logo.svg"]
+    assert any(p.startswith("logo.svg:") for p in verdict["problems"])

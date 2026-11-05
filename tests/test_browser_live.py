@@ -384,6 +384,23 @@ def test_screenshot_full_and_region(site, make_session):
     assert hashlib.sha256(blob.read_bytes()).hexdigest() == shot["sha256"]
 
 
+def test_a_default_screenshot_of_an_svg_document_does_not_hang(site, make_session):
+    """Playwright's full-page capture never resolves on a body-less document.
+
+    A drawing run asked for the default (full-page) screenshot of its SVG and
+    waited out a 30 s timeout; the viewport already holds the whole picture.
+    """
+
+    session, _root = make_session()
+    _open(session, site, "/picture.svg")
+    started = time.monotonic()
+    shot = _call(session, "screenshot", {"name": "picture.png"})
+    assert shot["ok"] is True, shot
+    assert shot["full_page"] is False
+    assert shot["size"] > 0
+    assert time.monotonic() - started < 15
+
+
 # ---------------------------------------------------------------------------
 # collectors: console, network, dialogs
 # ---------------------------------------------------------------------------
@@ -663,6 +680,41 @@ def test_visual_observation_serves_module_pages(tmp_path) -> None:
     assert not observed.get("page_errors"), observed
     assert observed.get("probe", {}).get("canvases") == 1
     assert observed.get("frames"), observed
+
+
+def test_a_standalone_svg_is_observed_fitted_to_the_viewport(tmp_path) -> None:
+    """An SVG deliverable is a picture: it is rendered, measured and fitted.
+
+    The page probe read ``document.body``, which an SVG document does not have,
+    so every observation of an ``.svg`` file failed before a frame was taken.
+    A 400x300 picture is also scaled to the viewport so the checker does not
+    judge a thumbnail in the corner of a white frame, and the frame's dominant
+    colour is the colour it holds (white used to be reported as 56,56,56).
+    """
+
+    from karox.browser_bootstrap import playwright_chromium_status
+    from karox.web_check import observe_page
+
+    if not playwright_chromium_status().ready:
+        pytest.skip("managed chromium is not provisioned")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "picture.svg").write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 300' "
+        "width='400' height='300'><rect width='400' height='300' fill='#ff0000'/>"
+        "</svg>",
+        encoding="utf-8",
+    )
+
+    observed = observe_page(repo / "picture.svg", settle_ms=100, serve_root=repo)
+
+    assert not observed.get("error"), observed
+    assert not observed.get("page_errors"), observed
+    measured = observed.get("measured", {})
+    # Unfitted, the white page around a 400x300 corner would dominate.
+    assert measured.get("dominant_color") == "255,0,0", measured
+    assert measured.get("dominant_share", 0) > 0.6, measured
 
 
 def test_actions_survive_dom_replacement(site, make_session):

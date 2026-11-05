@@ -130,6 +130,27 @@ FINISH_RESERVE_SECONDS = 120.0
 #: after its second refusal and was stopped one step before its finish.
 _COVERAGE_GRACE_STEPS = 8
 
+#: The closing answer call needs a provider round trip; with less time left the
+#: stop reports without it.
+_CLOSING_TURN_MIN_SECONDS = 20.0
+_CLOSING_TURN_PROMPT = (
+    "KaroX ended the work phase: the visual check budget is spent and no "
+    "verdict covers the current page, so this run ends unverified. No further "
+    "edits, checks or browser calls will run. Call finish now, as the only tool "
+    "call, with your final answer for the user: what was delivered and what is "
+    "still unverified. If the task asks for a file's contents in the reply, "
+    "list that file in answer_files instead of retyping it."
+)
+#: The same single call when KaroX's own final checks passed the current
+#: bytes: the run is verified, only the user's answer is missing.
+_CLOSING_TURN_VERIFIED_PROMPT = (
+    "KaroX ended the work phase and its final checks passed on the current "
+    "files, so the work is verified. No further edits, checks or browser calls "
+    "will run. Call finish now, as the only tool call, with your final answer "
+    "for the user: what was delivered. If the task asks for a file's contents "
+    "in the reply, list that file in answer_files instead of retyping it."
+)
+
 
 def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
     """Return ``(engine wall limit, reserved seconds)`` for one run.
@@ -183,14 +204,17 @@ You act through typed tool calls; there is no shell.
   on the deliverable page, and let time pass from a fresh reset instead of
   forcing the behaviour.
 - When the task is complete, call the finish tool with {"answer": "<final
-  answer text>"}. For a web deliverable finish may also carry "requirements":
-  {"id", "status", "observed"} entries for the requirement IDs KaroX lists,
-  each verified entry quoting a browser, check or visual result you already
-  received after your last edit; lines without a quote are reported as
-  unverified, so never re-run checks only to collect quotes. After an accepted
-  finish you cannot continue working. finish must be the
-  only tool call in its response; if it is batched with other calls, it is
-  refused and the other calls run, so call finish again after reviewing them.
+  answer text>"}. If the task wants a file's contents in the reply, list the
+  path in "answer_files" instead of retyping it; KaroX appends the exact file.
+  A file the task only asks you to save stays out of the reply.
+  For a web deliverable finish may also carry "requirements": {"id",
+  "status", "observed"} entries for the requirement IDs KaroX lists, each
+  verified entry quoting a browser, check or visual result you already
+  received after your last edit; the list is advisory (only "unmet" keeps the
+  run open), so never re-run checks only to collect quotes. After an accepted
+  finish you cannot continue working. finish must be the only tool call in
+  its response; if it is batched with other calls, it is refused and the
+  other calls run, so call finish again after reviewing them.
 - Never print tool markup as prose; a response without a tool call is a format
   error.
 """
@@ -766,6 +790,10 @@ class EngineKernel:
         #: apply the fix and ask for the closing look. Without a bound, it kept
         #: editing to the step limit (80 steps, 4.1M tokens in one run).
         self._visual_grace_until: Optional[int] = None
+        #: The one model call a visual-budget stop leaves for the final answer
+        #: (``_closing_answer_turn``): the step after which the run stops.
+        self._closing_turn_until: Optional[int] = None
+        self._closing_turn_used = False
         self._step = 0
         self._known_revision: Optional[int] = None
         self._compaction: Optional[Dict[str, Any]] = None
@@ -940,6 +968,8 @@ class EngineKernel:
         self._deadline = started + float(self.limits.max_seconds)
         self._engine_submission = ""
         self._compaction = None
+        self._closing_turn_until = None
+        self._closing_turn_used = False
         self._step = 0
         self._persisted_call_ids = set()
         lease_ttl = min(3600.0, max(5.0, float(self.limits.max_seconds) + 5.0))
@@ -1074,6 +1104,11 @@ class EngineKernel:
                 if self._completed(record):
                     reason = "answer" if self._answer_complete(record) else "submitted"
                     self._snapshot_verified_state(session_id, lease, record)
+                    # Verified, but the stop came between two tool calls: the
+                    # aquarium k1 run (2026-11-05) ended verified with "\n\n"
+                    # as its whole reply. One closing call collects the answer.
+                    if self._closing_answer_turn(agent, verified=True):
+                        provider_message = self._provider_message()
                     return self._finish(
                         session_id,
                         lease,
@@ -1082,6 +1117,11 @@ class EngineKernel:
                         reason,
                         provider_message,
                     )
+            if exit_status == "UserInterruption" and self._visual_budget_hit:
+                # Still unprovable: the stop stays a stop, but the user gets
+                # the model's own final answer instead of an empty reply.
+                if self._closing_answer_turn(agent):
+                    provider_message = self._provider_message()
             # The model used its shortened wall clock; the rest is reserved for proof.
             # It gets the same final calls as a submission, and only a clean
             # completion gate turns that into `verified`.
@@ -1095,6 +1135,8 @@ class EngineKernel:
                 if self._completed(record):
                     reason = "answer" if self._answer_complete(record) else "submitted"
                     self._snapshot_verified_state(session_id, lease, record)
+                    if self._closing_answer_turn(agent, verified=True):
+                        provider_message = self._provider_message()
                     return self._finish(
                         session_id,
                         lease,
@@ -1380,9 +1422,19 @@ class EngineKernel:
 
     # -- engine hooks ------------------------------------------------------
 
+    def closing_turn_active(self) -> bool:
+        """Whether the run is in its one closing call for the final answer."""
+
+        return self._closing_turn_until is not None
+
     def _cancel_requested(self) -> bool:
         if self._cancelled:
             return True
+        closing = getattr(self, "_closing_turn_until", None)
+        if closing is not None:
+            return self._step >= closing or (
+                self._cancel_event is not None and self._cancel_event.is_set()
+            )
         if (
             self._visual_grace_until is not None
             and self._step > self._visual_grace_until
@@ -1954,6 +2006,73 @@ class EngineKernel:
             ):
                 break
 
+    def _closing_answer_turn(self, agent: EngineAgent, *, verified: bool = False) -> bool:
+        """One model call for the final answer after a visual-budget stop.
+
+        The stop is honest -- no further verdict can make the page verified --
+        but it used to end the run between two tool calls, so the user got no
+        reply at all: the aquarium a1 run (2026-11-05) left a 41 KB page on
+        disk and an empty answer where the task demanded the HTML. The model
+        now gets exactly one call in which only finish runs; the run still
+        ends ``stopped`` with the same reason, and an edit is refused because
+        nothing could judge it. Returns whether an answer arrived.
+        """
+
+        if self._closing_turn_used or self._engine_submission:
+            return False
+        if self._deadline - self.monotonic() < _CLOSING_TURN_MIN_SECONDS:
+            return False
+        self._closing_turn_used = True
+        self._cancelled = False
+        if self._cancel_event is not None:
+            self._cancel_event.clear()
+        self._visual_grace_until = None
+        self._closing_turn_until = self._step + 1
+        config = agent.config
+        if 0 < int(config.step_limit) <= int(agent.n_calls):
+            config.step_limit = int(agent.n_calls) + 1
+        # After a wall-clock stop the engine's own clock is spent too; the
+        # closing call may use what is left of KaroX's deadline, nothing more.
+        wall_limit = int(getattr(config, "wall_time_limit_seconds", 0) or 0)
+        started = getattr(agent, "_start_time", None)
+        if wall_limit > 0 and isinstance(started, (int, float)):
+            elapsed = int(time.time() - started)
+            if wall_limit <= elapsed + 1:
+                config.wall_time_limit_seconds = elapsed + max(
+                    2, int(self._deadline - self.monotonic())
+                )
+        # A prose reply in this call is the answer, not a format error to retry.
+        format_budget = config.max_consecutive_format_errors
+        config.max_consecutive_format_errors = 1
+        self._emit(
+            AgentEventKind.WARNING,
+            reason="closing_answer_turn",
+            detail=(
+                "the work phase ended before the model's answer; one call for it"
+                if verified
+                else "visual check budget is exhausted; one call for the final answer"
+            ),
+        )
+        agent.add_messages(
+            {
+                "role": "user",
+                "kind": "engine_closing",
+                "content": _CLOSING_TURN_VERIFIED_PROMPT if verified else _CLOSING_TURN_PROMPT,
+            }
+        )
+        try:
+            agent.continue_run()
+        except KeyboardInterrupt:
+            self.cancel()
+        except Exception:  # noqa: BLE001 - the stop is already decided
+            pass
+        finally:
+            config.max_consecutive_format_errors = format_budget
+            if wall_limit > 0:
+                config.wall_time_limit_seconds = wall_limit
+            self._closing_turn_until = None
+        return bool(self._engine_submission)
+
     def _attestation_spent(self) -> bool:
         """Whether the finish gate already used its bounded coverage refusals."""
 
@@ -2428,17 +2547,36 @@ def _finish_provider_tool() -> ProviderTool:
         FINISH_TOOL_NAME,
         (
             "Submit the final answer and end the task. Arguments: "
-            '{"answer": "<final answer text>"}. A web deliverable may also '
-            'carry "requirements": entries for the requirement IDs KaroX lists, '
-            "quoting results you already have; lines left out are reported as "
-            "unverified. After an accepted finish you cannot continue working."
+            '{"answer": "<final answer text>"}. When the task asks for a '
+            "file's contents in the reply (e.g. \"reply with the complete code "
+            'in one code block"), list that file in "answer_files": KaroX '
+            "appends its exact bytes as a fenced code block, so never paste the "
+            "file into answer; keep answer empty when the reply must contain "
+            "only the code. A file the task only asks you to save or create "
+            'stays out of the reply. A web deliverable may also carry "requirements": '
+            "entries for the requirement IDs KaroX lists, quoting results you "
+            "already have; the list is advisory and only an unmet entry keeps "
+            "the run open. After an accepted finish you cannot continue working."
         ),
         {
             "type": "object",
             "properties": {
                 "answer": {
                     "type": "string",
-                    "description": "The final answer to report to the user.",
+                    "description": (
+                        "The final answer to report to the user. May be empty "
+                        "when answer_files carries the whole reply."
+                    ),
+                },
+                "answer_files": {
+                    "type": "array",
+                    "description": (
+                        "Only files whose complete contents the task asks to "
+                        "see in the reply (not files it only asks to save); "
+                        "each is appended verbatim as one fenced code block "
+                        "after answer."
+                    ),
+                    "items": {"type": "string"},
                 },
                 "requirements": {
                     "type": "array",

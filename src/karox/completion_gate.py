@@ -15,7 +15,7 @@ from typing import Any, Collection, Optional, Sequence
 from .auto_verify import _select_checks
 from . import requirement_coverage
 from .requirements import ledger_digest
-from .web_check import default_pages, diagnostic_pages, is_scratch_artifact, is_scratch_page
+from .web_check import default_pages, default_pictures, diagnostic_pages, is_scratch_artifact, is_scratch_page
 
 _TEXT = {".md", ".rst"}
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -823,9 +823,11 @@ def floor(core: Any, record: Any) -> list[str]:
     docs = all(is_doc(p) for p in record.changed_files)
     behavioral = not docs or bool(_BEHAVIOR.search(record.task))
     pages = default_pages(core.repository)
+    # A standalone SVG is rendered and judged like a page, so a picture task
+    # owes -- and can produce -- the same browser proof.
     browser = (
         behavioral
-        and bool(pages)
+        and bool(pages or default_pictures(core.repository))
         and any(Path(p).suffix.lower() in _VISUAL_ASSETS for p in record.changed_files)
     )
     runtime = behavioral and (
@@ -1045,7 +1047,11 @@ def floor(core: Any, record: Any) -> list[str]:
         # Last, so the repair turn reads the failed checks first: a fix
         # changes the bytes, and every attestation quote must then be renewed.
         reasons.extend(
-            requirement_coverage.floor_reasons(record, diagnostic=harness_pages)
+            requirement_coverage.floor_reasons(
+                record,
+                diagnostic=harness_pages,
+                gating_only=not requirement_coverage.ATTESTATION_GATES_VERIFICATION,
+            )
         )
     return list(dict.fromkeys(reasons))
 

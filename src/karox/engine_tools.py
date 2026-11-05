@@ -28,6 +28,7 @@ schemas below expose.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Mapping
 
 from .browser import BrowserAccessPolicy, BrowserToolRuntime, browser_tool_definition
@@ -68,6 +69,11 @@ def register_browser_tool(
             # the task carries throwaway test credentials. The adapter still
             # redacts every value filled under this permission.
             plain_credentials=bool(plain_credentials),
+            # A local page's CDN imports (three.js from unpkg) load through
+            # KaroX when this session may read code sources anyway; the
+            # model no longer copies libraries into scratch files to see
+            # its own page. KAROX_BROWSER_CODE_SOURCES=0 turns it off.
+            code_sources=_code_sources_allowed(capability_policy, origin),
         ),
         browser_root=runtime_dir() / "vnext" / "browser",
         serve_root=core.repository,
@@ -79,6 +85,15 @@ def register_browser_tool(
 
     core.register_tool(browser_tool_definition(), handler)
     return runtime
+
+
+def _code_sources_allowed(capability_policy: CapabilityPolicy, origin: Origin) -> bool:
+    if os.environ.get("KAROX_BROWSER_CODE_SOURCES", "").strip() == "0":
+        return False
+    try:
+        return bool(capability_policy.decide(origin, Capability.CODE_FETCH).allowed)
+    except Exception:  # noqa: BLE001 - an unknown policy keeps the default off
+        return False
 
 
 def register_desktop_tools(

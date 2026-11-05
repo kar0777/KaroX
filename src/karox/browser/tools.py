@@ -24,6 +24,7 @@ The adapter is deliberately small and engine-neutral:
 
 from __future__ import annotations
 
+import difflib
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -281,7 +282,14 @@ class BrowserToolAdapter:
         if not isinstance(payload, dict):
             raise InvalidCommand("browser.command payload must be object")
         if action not in BROWSER_ACTIONS:
-            raise InvalidCommand(f"unsupported browser.command action: {action}")
+            hint = ""
+            if action.replace("-", "_").replace(".", "_") in {"visual_check", "visualcheck"}:
+                # A measured run spent a step on this: the look is its own tool.
+                hint = "; a visual verdict is the separate visual.check tool"
+            close = difflib.get_close_matches(action, sorted(BROWSER_ACTIONS), n=3)
+            if close and not hint:
+                hint = "; did you mean: " + ", ".join(close)
+            raise InvalidCommand(f"unsupported browser.command action: {action}{hint}")
         if not isinstance(deadline_seconds, (int, float)) or deadline_seconds <= 0:
             raise InvalidCommand("browser.command deadline must be a positive number")
         if action == "open":

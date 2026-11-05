@@ -2751,6 +2751,50 @@ def test_a_visual_pass_on_a_scaffold_page_verifies_a_changed_script(
     assert report.verified is True, report.reason
 
 
+def test_visual_check_looks_at_a_standalone_svg(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An SVG deliverable can be looked at like a page.
+
+    "Generate an SVG of ..." is a picture task, but visual_check refused every
+    file that was not ``.html``: the run could only ship its drawing blind.
+    """
+
+    looked_at: list[str] = []
+
+    def checker(page: Path, *, goal: str = "") -> dict:
+        del goal
+        looked_at.append(page.name)
+        return {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 2,
+            "issues": [],
+            "console_errors": [],
+            "page_errors": [],
+            "resize": {},
+        }
+
+    svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'></svg>\n"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "picture.svg", svg),)),
+            _response((_tool_call("c2", "visual_check", {"path": "picture.svg"}),)),
+            _response((_finish_call("c3", "done"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=checker,
+        task="Generate an SVG of a lighthouse. Save it as picture.svg.",
+        max_steps=6,
+    )
+
+    harness.run()
+
+    assert looked_at == ["picture.svg"]
+
+
 def test_an_edit_after_the_last_visual_pass_gets_a_closing_look(
     tmp_path: Path, repository: Path
 ) -> None:
@@ -2809,6 +2853,69 @@ def test_an_edit_after_the_last_visual_pass_gets_a_closing_look(
         and (entry.get("result") or {}).get("requested_by") == "harness_final"
     ]
     assert closing, "the stop path skipped the harness-final visual check"
+
+
+def test_a_verified_stop_still_gets_the_models_final_answer(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A stop that the closing look verifies must not leave the reply empty.
+
+    Aquarium k1 (2026-11-05) spent its last visual check, edited once more and
+    was stopped; the harness-final look passed the new bytes and the run ended
+    ``verified`` with "\\n\\n" as the whole reply although the task asked for
+    the HTML. The verified stop now gets the same single closing call.
+    """
+
+    first = "<!doctype html><html><body><h1>Focus</h1></body></html>"
+    second = first.replace("Focus", "Focus, beautifully lit")
+
+    def checker(page: Path, *, goal: str = "") -> dict:
+        del page, goal
+        return {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 0,
+            "issues": [],
+            "console_errors": [],
+            "page_errors": [],
+            "resize": {"ok": True},
+        }
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "index.html", first),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response((_write_call("c3", "index.html", second),)),
+            _response((_tool_call("c4", "repo_read_file", {"path": "index.html"}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c5",
+                        "finish",
+                        {"answer": "The lit heading page.", "answer_files": ["index.html"]},
+                    ),
+                )
+            ),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=checker,
+        task="build a landing page in index.html with a polished layout and animation",
+        max_steps=8,
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    assert report.provider_message is not None
+    assert "Focus, beautifully lit" in report.provider_message
+    closing = [
+        m
+        for m in harness.provider.requests[-1].messages
+        if "final checks passed" in str(m.content)
+    ]
+    assert closing, "the verified stop never asked the model for its answer"
 
 
 #: A check whose output states two observable facts, so an attestation can
@@ -2936,10 +3043,15 @@ def test_a_last_pass_with_no_checks_left_still_gets_its_attested_finish(
     assert report.verified is True, (report.reason, report.unmet)
 
 
-def test_a_web_finish_that_never_attests_ends_unverified(
+def test_a_web_finish_that_never_attests_is_not_held_back_by_it(
     tmp_path: Path, repository: Path
 ) -> None:
-    """The attestation is advisory: the finish is accepted, the floor reports the gap."""
+    """The attestation is advisory: no refusal, and no unverified status for it.
+
+    The checks and the visual verdict are the evidence; the attestation is the
+    model's own claim. A missing one used to leave a green, visually passing
+    page "unverified" (smoke1, 2026-11-05: a hello page).
+    """
 
     _web_game(repository)
     harness = Harness(
@@ -2959,10 +3071,51 @@ def test_a_web_finish_that_never_attests_ends_unverified(
 
     report = harness.run()
 
-    assert report.verified is False
     refusals = [m for m in _final_tool_messages(harness) if "finish was not accepted" in m]
     assert refusals == []
-    assert any(item.startswith("missing requirement attestation") for item in report.unmet)
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_a_requirement_the_model_reports_unmet_keeps_the_run_unverified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Advisory does not mean ignored: the model's own ``unmet`` is honoured."""
+
+    _web_game(repository)
+    attestation = [
+        {"id": "R1.1", "status": "verified", "observed": "PASS clock :: score rises over time"},
+        {"id": "R1.2", "status": "unmet", "observed": "restart is not implemented yet"},
+        {"id": "R1.3", "status": "not_applicable", "observed": "the page makes no request at all"},
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "game.js", "console.log('game');\n"),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(FACTS_CHECK)}),)),
+        ]
+        + [
+            _response(
+                (
+                    _tool_call(
+                        f"f{index}", "finish", {"answer": "done", "requirements": attestation}
+                    ),
+                )
+            )
+            for index in range(8)
+        ],
+        verification=(FACTS_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_passing_checker,
+        task=COVERAGE_TASK,
+        max_steps=14,
+    )
+
+    report = harness.run()
+
+    assert report.verified is False
+    assert any(item.startswith("requirement R1.2 reported unmet") for item in report.unmet)
 
 
 def _check_runs(harness: "Harness") -> List[dict]:
@@ -3257,3 +3410,147 @@ def test_a_task_without_a_web_deliverable_gets_no_checklist(
     harness.run()
     first = [m.content for m in harness.provider.requests[0].messages if m.role == "user"][0]
     assert "<finish-checklist>" not in first
+
+
+def test_finish_answer_files_puts_the_exact_file_in_the_reply(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A reply that must contain the deliverable gets its bytes, not a retyped copy."""
+
+    page = "def f():\n    return '```fenced```'\n"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "tool.py", page),)),
+            _response(
+                (_tool_call("c2", "finish", {"answer": "", "answer_files": ["tool.py"]}),)
+            ),
+        ],
+    )
+    report = harness.run()
+
+    assert report.verified is True, report.reason
+    message = report.provider_message or ""
+    # One block, a fence longer than any backtick run inside the file.
+    assert message.startswith("````python\n")
+    assert message.endswith("````")
+    assert page in message
+    assert message.count("````") == 2
+
+
+def test_finish_answer_files_refuses_a_missing_file_and_lets_the_model_retry(
+    tmp_path: Path, repository: Path
+) -> None:
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "a.py", "print(1)\n"),)),
+            _response(
+                (_tool_call("c2", "finish", {"answer": "done", "answer_files": ["nope.py"]}),)
+            ),
+            _response(
+                (_tool_call("c3", "finish", {"answer": "done", "answer_files": ["a.py"]}),)
+            ),
+        ],
+    )
+    report = harness.run()
+
+    observed = "\n".join(_tool_messages(harness))
+    assert "nope.py is not a file in the repository" in observed
+    assert report.provider_message == "done\n\n```python\nprint(1)\n```"
+
+
+def test_fenced_file_labels_several_files() -> None:
+    from karox.engine_tool_env import fenced_file
+
+    assert fenced_file("a/b.js", "x()", label=True) == "`a/b.js`\n```javascript\nx()\n```"
+    assert fenced_file("notes.unknownext", "hi\n") == "```\nhi\n```"
+
+
+def _limit_checker(page: Path, *, goal: str = "") -> dict:
+    del page, goal
+    return {
+        "verdict": "unavailable",
+        "method": "limit",
+        "checks_left": 0,
+        "issues": ["visual_check budget is exhausted"],
+        "console_errors": [],
+        "page_errors": [],
+    }
+
+
+def test_a_visual_budget_stop_still_gets_the_models_final_answer(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The stop stays honest, but the reply is not empty.
+
+    Aquarium a1 (2026-11-05) ended between two tool calls when the checker
+    budget ran out: a 41 KB page on disk and no answer, although the task
+    demanded the HTML in the reply. One closing call now carries it.
+    """
+
+    page = "<!doctype html><html><body><h1>Aquarium</h1></body></html>"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "index.html", page),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c3",
+                        "finish",
+                        {"answer": "", "answer_files": ["index.html"]},
+                    ),
+                )
+            ),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_limit_checker,
+        task="build a landing page in index.html with a polished layout and animation",
+        max_steps=8,
+    )
+
+    report = harness.run()
+
+    assert report.verified is False
+    assert report.reason == "visual_budget_exhausted"
+    assert report.provider_message is not None
+    assert "<h1>Aquarium</h1>" in report.provider_message
+    closing = [
+        m
+        for m in harness.provider.requests[-1].messages
+        if "KaroX ended the work phase" in str(m.content)
+    ]
+    assert closing, "the closing call never told the model the work phase was over"
+
+
+def test_the_closing_call_refuses_more_work(tmp_path: Path, repository: Path) -> None:
+    """An edit in the closing call is refused and the run stops after it."""
+
+    page = "<!doctype html><html><body><h1>Aquarium</h1></body></html>"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "index.html", page),)),
+            _response((_tool_call("c2", "visual_check", {"path": "index.html"}),)),
+            _response((_write_call("c3", "index.html", page.replace("Aquarium", "Tank")),)),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_limit_checker,
+        task="build a landing page in index.html with a polished layout and animation",
+        max_steps=8,
+    )
+
+    report = harness.run()
+
+    assert report.verified is False
+    assert report.reason == "visual_budget_exhausted"
+    assert "Tank" not in (repository / "index.html").read_text(encoding="utf-8")
+    assert len(harness.provider.requests) == 3

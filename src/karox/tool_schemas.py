@@ -667,9 +667,9 @@ def additional_tool_definitions(
                     "path": {
                         "type": "string",
                         "description": (
-                            "Repository-relative page to look at, for "
-                            "example index.html. It must already be "
-                            "written."
+                            "Repository-relative page or SVG image to "
+                            "look at, for example index.html or logo.svg. "
+                            "It must already be written."
                         ),
                     },
                     "goal": {

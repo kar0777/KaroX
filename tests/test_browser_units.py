@@ -416,6 +416,14 @@ def test_adapter_returns_structured_results_and_validates_shape():
         adapter.execute({"action": "not_a_real_action", "payload": {}}, 30.0)
 
 
+def test_an_unknown_action_names_the_tool_or_action_it_resembles():
+    adapter = _adapter()
+    with pytest.raises(InvalidCommand, match="separate visual.check tool"):
+        adapter.execute({"action": "visual_check", "payload": {}}, 30.0)
+    with pytest.raises(InvalidCommand, match="did you mean: screenshot"):
+        adapter.execute({"action": "screenshots", "payload": {}}, 30.0)
+
+
 def test_adapter_enforces_capability_per_action():
     denied = Capability.BROWSER_INPUT
 

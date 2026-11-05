@@ -189,6 +189,8 @@ class _SiteHandler(BaseHTTPRequestHandler):
             self._send(200, INDEX.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/page2":
             self._send(200, PAGE2.encode("utf-8"), "text/html; charset=utf-8")
+        elif route == "/picture.svg":
+            self._send(200, PICTURE_SVG.encode("utf-8"), "image/svg+xml")
         elif route == "/animated":
             self._send(200, ANIMATED.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/heavy-canvas":
@@ -258,6 +260,13 @@ class _SiteHandler(BaseHTTPRequestHandler):
                 self._send(403, b"login refused", "text/plain")
         else:
             self._send(404, b"missing", "text/plain")
+
+
+PICTURE_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 300' width='400' height='300'>"
+    "<rect width='400' height='300' fill='#1e90ff'/><circle cx='200' cy='150' r='80' fill='#ffd700'/>"
+    "</svg>"
+)
 
 
 @contextmanager

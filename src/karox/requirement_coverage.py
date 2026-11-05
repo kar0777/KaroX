@@ -51,6 +51,16 @@ MAX_CLAUSES = 60
 #: Fewer clauses than this and the request is short enough for the visual
 #: review and the checks to judge whole; a checklist would only add a turn.
 MIN_CLAUSES = 3
+#: Whether an imperfect attestation keeps a run unverified. The attestation is
+#: the model's own claim, not evidence: the checks, the render check and the
+#: visual verdict are. Since the finish stopped refusing missing attestations
+#: (diag1, 2026-11-05), a gating floor only flipped the last status -- a
+#: two-sentence hello page with a green render check and a passing visual
+#: verdict ended "unverified" because its prose answer carried no checklist
+#: (smoke1, 2026-11-05), and a model that attested with a clumsy quote fared
+#: worse than one that never attested. Off: only the model's own ``unmet``
+#: keeps the run open; every other gap is reported as advisory.
+ATTESTATION_GATES_VERIFICATION = False
 #: Tool results that observed the deliverable's behaviour. Reads, searches and
 #: Git output describe source text, not behaviour, and never count.
 OBSERVATION_TOOLS = frozenset(
@@ -705,10 +715,19 @@ def judge(
     return problems
 
 
-def floor_reasons(record: Any, *, diagnostic: Collection[str] = ()) -> List[str]:
-    """The completion-floor form: one reason per open clause, or one summary."""
+def floor_reasons(
+    record: Any, *, diagnostic: Collection[str] = (), gating_only: bool = False
+) -> List[str]:
+    """The completion-floor form: one reason per open clause, or one summary.
+
+    ``gating_only`` keeps only what the model itself reported ``unmet``: the
+    form used when the attestation is advisory (see
+    ``ATTESTATION_GATES_VERIFICATION``).
+    """
 
     problems = judge(record, diagnostic=diagnostic)
+    if gating_only:
+        problems = [item for item in problems if item[2] == "reported unmet"]
     if not problems:
         return []
     if all(problem == "not attested" for _, _, problem in problems):
@@ -796,8 +815,9 @@ def checklist_block(entries: Sequence[Mapping[str, Any]]) -> str:
         "checks_run or visual_check result you already received after your last "
         'edit (four or more consecutive words of it), "not_applicable" with a '
         'reason for a line that only describes the process or context, or '
-        '"unmet". Lines without a quote are reported as unverified; do not run '
-        "extra checks only to collect quotes.",
+        '"unmet". The list is advisory: lines without a quote are reported as '
+        "unattested, only an unmet line keeps the run open; do not run extra "
+        "checks only to collect quotes.",
     ]
     lines.extend(f"{cid} {_display(text)}" for cid, text in listed)
     lines.append("</finish-checklist>")

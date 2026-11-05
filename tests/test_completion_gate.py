@@ -722,3 +722,63 @@ def test_conditional_test_requests_do_not_owe_a_test_change() -> None:
     assert completion_gate._explicit_test_change_required(
         _task_record("Fix the parser and add a regression test for the empty header.")
     ) is True
+
+
+def _svg_record(repository: Path, *, verdict: str) -> tuple[object, _Core]:
+    picture = repository / "heron.svg"
+    picture.write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><rect/></svg>",
+        encoding="utf-8",
+    )
+    record = SimpleNamespace(
+        changed_files=["heron.svg"],
+        task="Generate an SVG of a heron riding a scooter. Save it as heron.svg.",
+        requirements=[],
+        evidence=[],
+        provider_history=[],
+    )
+    core = _Core(repository)
+    current = completion_gate.identity(core, record)
+    record.evidence.append(
+        {"kind": "evidence", "evidence_id": "ev-svg", "metadata": {"completion_identity": current}}
+    )
+    record.provider_history.append(
+        {
+            "role": "tool",
+            "core_name": "visual.check",
+            "result": {
+                "ok": True,
+                "requested_by": None,
+                "evidence": [{"evidence_id": "ev-svg"}],
+                "data": {
+                    "completion_identity": current,
+                    "completion_target": "heron.svg",
+                    "verdict": verdict,
+                    "method": "vision",
+                    "page_errors": [],
+                    "console_errors": [],
+                },
+            },
+        }
+    )
+    return record, core
+
+
+def test_a_vision_pass_on_a_standalone_svg_is_its_browser_proof(tmp_path: Path) -> None:
+    """The pelican run (2026-11-05) passed visual.check on its SVG and still
+    ended ``verification_failed``: proof was only recognised for HTML pages."""
+
+    record, core = _svg_record(tmp_path, verdict="pass")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert "missing browser runtime evidence" not in reasons
+    assert "missing behavioral evidence" not in reasons
+
+
+def test_a_standalone_svg_without_a_pass_still_owes_browser_proof(tmp_path: Path) -> None:
+    record, core = _svg_record(tmp_path, verdict="needs_work")
+
+    reasons = completion_gate.floor(core, record)
+
+    assert "missing browser runtime evidence" in reasons

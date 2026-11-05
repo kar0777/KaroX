@@ -148,5 +148,11 @@ def test_python_line_count_stays_bounded() -> None:
     # in the browser session (browser/pageperf.py, browser/session.py),
     # viewport re-checks before finish, cheaper verification and bounded
     # probes (engine_tool_env.py), lenient edits (unified_patch.py) and
-    # salvage of tool calls leaked as markup (engine_salvage.py).
-    assert lines < 86_000
+    # salvage of tool calls leaked as markup (engine_salvage.py). 87k: the
+    # second sandbox increment of 2026-11-05 added deliberate surface
+    # (~0.8k): allow-listed CDN code sources cached for the browser
+    # (browser/code_sources.py), the GPU/software render-backend choice
+    # (browser/render_backend.py), standalone-SVG picture checks and the
+    # paused-frame gate (web_check.py), and the closing answer turn with
+    # answer files after a budget stop (engine_kernel.py).
+    assert lines < 87_000

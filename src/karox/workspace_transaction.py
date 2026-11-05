@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .core_types import CoreError, InvalidCommand
-from .atomic_io import atomic_write
+from .atomic_io import atomic_write, new_file_mode
 from .models import EvidenceRecord
 from .security import contains_credential
 
@@ -339,7 +339,11 @@ class WorkspaceTransaction:
                     changed = previous != digest
                     if changed:
                         self._remember_created_parents(path)
-                        atomic_write(path, payload["content"], state.mode)
+                        atomic_write(
+                            path,
+                            payload["content"],
+                            new_file_mode() if state.mode is None else state.mode,
+                        )
                         changed_files.append(payload["relative"])
                     operations.append(
                         {

@@ -73,6 +73,9 @@ from .tool_schemas import additional_tool_definitions
 # in the conversation, and the whole text stays readable on disk. Core's own
 # MAX_OUTPUT_BYTES ceiling still bounds the capture itself; this bounds what a
 # turn has to pay for.
+#: Files visual.check can render. A standalone SVG is a picture the browser
+#: draws on its own, so it is judged exactly like a page.
+VISUAL_CHECK_SUFFIXES = frozenset({".html", ".htm", ".svg"})
 OUTPUT_ELISION_TRIGGER_CHARS = 8_000
 OUTPUT_ELISION_HEAD_CHARS = 2_000
 OUTPUT_ELISION_TAIL_CHARS = 3_000
@@ -532,9 +535,10 @@ class ExtendedCoreRuntime(CoreRuntime):
         target = self.safe_path(relative)
         if not target.is_file():
             raise FileNotFoundError(target)
-        if target.suffix.lower() not in {".html", ".htm"}:
+        if target.suffix.lower() not in VISUAL_CHECK_SUFFIXES:
             raise InvalidCommand(
-                "visual_check looks at a rendered page; give an .html file"
+                "visual_check looks at a rendered page or image; give an "
+                ".html or .svg file"
             )
         goal = arguments.get("goal")
         if goal is not None and not isinstance(goal, str):
