@@ -45,6 +45,24 @@ function frame() { const until = performance.now() + 300;
 requestAnimationFrame(frame);
 </script></body></html>"""
 
+#: Draws only on change, like an on-demand 3D viewer: busy frames while it
+#: loads (unless sessionStorage says the page was "fixed") and for a few
+#: frames after each poke; idle otherwise.
+LAZY_CANVAS = """<!doctype html><html><head><title>Lazy canvas</title></head>
+<body><canvas id="c" width="64" height="64"></canvas>
+<button id="poke">Poke</button><p id="pokes">0</p>
+<script>
+let pokes = 0;
+let dirty = sessionStorage.getItem("fixed") === "1" ? 0 : 1000;
+document.getElementById("poke").addEventListener("click", function () {
+  pokes += 1; document.getElementById("pokes").textContent = String(pokes); dirty = 6; });
+function frame() {
+  if (dirty > 0) { dirty -= 1; const until = performance.now() + 300; while (performance.now() < until) {} }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script></body></html>"""
+
 INDEX = """<!doctype html><html><head><title>KaroX Browser Test Site</title></head>
 <body>
 <h1>Research Index</h1>
@@ -175,6 +193,8 @@ class _SiteHandler(BaseHTTPRequestHandler):
             self._send(200, ANIMATED.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/heavy-canvas":
             self._send(200, HEAVY_CANVAS.encode("utf-8"), "text/html; charset=utf-8")
+        elif route == "/lazy-canvas":
+            self._send(200, LAZY_CANVAS.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/frame":
             self._send(200, FRAME.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/replace":

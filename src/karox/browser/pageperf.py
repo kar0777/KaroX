@@ -62,14 +62,78 @@ FRAME_PROBE_JS = """() => new Promise((resolve) => {
 
 HAS_CANVAS_JS = "() => !!document.querySelector('canvas')"
 
+#: The frames right after an input: up to eight, at most ~2.6 s. Returns the
+#: gaps themselves -- an answer of three slow frames followed by idle ones has
+#: a fast median, and those three frames are what the next input waits for.
+RESPONSE_FRAME_PROBE_JS = """() => new Promise((resolve) => {
+  const stamps = [];
+  const started = performance.now();
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    const gaps = [];
+    for (let i = 1; i < stamps.length; i += 1) gaps.push(Math.round(stamps[i] - stamps[i - 1]));
+    resolve({ frames: stamps.length, gaps, waited_ms: Math.round(performance.now() - started) });
+  };
+  const tick = (now) => {
+    stamps.push(now);
+    if (stamps.length >= 8 || now - started > 2200) finish();
+    else requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  setTimeout(finish, 2600);
+})"""
+
+
+#: What makes one frame expensive where WebGL runs on the CPU. A measured
+#: 3d-viewer run (f1) followed the older advice -- draw only on change, pixel
+#: ratio 1, no antialiasing -- kept an environment map (PMREM) on standard
+#: materials, and still drew 0.7 s frames: its idle probes read fast, a drag
+#: took 100.8 s, and the user's clicks after an orbit timed out. The DeepSeek
+#: Harness page of the same round also lit standard materials with a PMREM
+#: environment and failed the same four clicks; the passing scenes measured
+#: since r2b had none. The model also timed ``renderer.render()`` inside
+#: evaluate, read 0 ms for every variant (the call only queues the work) and
+#: concluded nothing was slow.
+FRAME_COST_ADVICE = (
+    "Without a GPU the costly parts are environment maps (PMREM, "
+    "scene.environment), standard and physical materials (Lambert or Phong "
+    "cost far less), real-time shadows, transparent layers, post-processing, "
+    "antialiasing and a pixel ratio above 1. Timing a draw call inside "
+    "evaluate shows only how fast the work was queued; the frame time "
+    "measured here is the real cost."
+)
+
 SLOW_FRAME_NOTE = (
     "each animation frame of this page takes about {ms} ms in this browser "
     "(smooth is 16-33 ms). While frames are this slow, clicks and key presses "
     "wait for the main thread: controls answer late and checks with normal "
-    "timeouts fail. Render only while something changes (input, camera "
-    "damping, an animation or a state change), cap the pixel ratio at 1, and "
-    "keep antialiasing, shadow-map size and geometry modest; then open the "
-    "page again to confirm."
+    "timeouts fail. Make one frame cheaper: drawing only on change hides the "
+    "cost while the page is idle, not during a drag, camera damping or a "
+    "tween, which draw every frame. " + FRAME_COST_ADVICE + " Then drag or "
+    "click once: the result reports the frames the page drew in response."
+)
+
+#: A page that once drew slow frames and now reads fast may only have stopped
+#: drawing while idle; the f1 run reloaded eight times after that change and
+#: never saw the 0.7 s frames again until a drag took 100.8 s.
+IDLE_AFTER_SLOW_NOTE = (
+    "frames read fast now ({ms} ms), but this page drew frames of about "
+    "{earlier} ms before. If it now draws only on change, a drag, camera "
+    "damping or a tween still pays that on every frame: drag or click once "
+    "and read the frames it reports (render_after)."
+)
+
+#: The frames a page draws while it answers an input. The input itself can
+#: return fast while its answer -- a camera tween, damping after a drag -- keeps
+#: the main thread busy, and the next click or key press waits behind it.
+RESPONSE_FRAME_NOTE = (
+    "after this {action} the page drew frames of about {ms} ms each (smooth is "
+    "16-33 ms). Input that arrives meanwhile -- the next click, key press or "
+    "drag step -- waits for them, so checks with normal timeouts fail even "
+    "when this {action} returned quickly. Drawing only on change does not "
+    "help while the page answers: make one frame cheaper. " + FRAME_COST_ADVICE
 )
 
 SLOW_INPUT_NOTE = (
@@ -233,6 +297,50 @@ def slow_frame_report(data: Any) -> Optional[dict[str, Any]]:
     if frame_ms < SLOW_FRAME_MS:
         return None
     return {"frame_ms": frame_ms, "slow": True, "note": SLOW_FRAME_NOTE.format(ms=frame_ms)}
+
+
+def idle_after_slow_report(frame_ms: int, earlier_ms: int) -> dict[str, Any]:
+    """The note for a fast probe on a page that drew slow frames before."""
+
+    return {
+        "frame_ms": int(frame_ms),
+        "earlier_frame_ms": int(earlier_ms),
+        "note": IDLE_AFTER_SLOW_NOTE.format(ms=int(frame_ms), earlier=int(earlier_ms)),
+    }
+
+
+def response_frame_report(data: Any, action: str) -> Optional[dict[str, Any]]:
+    """The note for the frames a page drew after an input, or None when fine.
+
+    Two slow gaps make an answer slow; so does a window in which not even a
+    second frame arrived (one frame longer than the whole probe).
+    """
+
+    if not isinstance(data, Mapping):
+        return None
+    raw = data.get("gaps")
+    gaps = [
+        int(gap)
+        for gap in (raw if isinstance(raw, (list, tuple)) else [])
+        if isinstance(gap, (int, float)) and not isinstance(gap, bool)
+    ]
+    slow = sorted(gap for gap in gaps if gap >= SLOW_FRAME_MS)
+    if not gaps:
+        try:
+            waited = int(data.get("waited_ms") or 0)
+        except (TypeError, ValueError):
+            return None
+        if waited < 2 * SLOW_FRAME_MS:
+            return None
+        slow = [waited]
+    elif len(slow) < 2:
+        return None
+    ms = slow[len(slow) // 2]
+    return {
+        "frame_ms": ms,
+        "slow_frames": len(slow),
+        "note": RESPONSE_FRAME_NOTE.format(action=action, ms=ms),
+    }
 
 
 def slow_input_note(

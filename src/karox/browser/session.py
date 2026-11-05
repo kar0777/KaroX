@@ -109,6 +109,7 @@ from .pageperf import (
     MOTION_READ_JS,
     MOTION_RECORDER_JS,
     MOVING_TIMEOUT_NOTE,
+    RESPONSE_FRAME_PROBE_JS,
     SLOW_FRAME_MS,
     SLOW_INPUT_MS,
     body_source,
@@ -116,9 +117,12 @@ from .pageperf import (
     evaluate_timeout_ms,
     expression_source,
     frame_probe_enabled,
+    idle_after_slow_report,
     is_syntax_error,
+    response_frame_report,
     slow_frame_report,
     slow_input_note,
+    target_moved,
     unstable_target_timeout,
 )
 from .resources import (
@@ -423,6 +427,13 @@ _MODIFIER_NAMES = {
 
 #: Modifiers that turn a letter into a shortcut instead of inserted text.
 _SHORTCUT_MODIFIERS = frozenset({"Control", "Meta", "Alt"})
+
+
+def _frame_page_key(page: Any) -> str:
+    """The page a frame measurement belongs to: its URL without query or hash."""
+
+    url = str(getattr(page, "url", "") or "")
+    return url.split("#", 1)[0].split("?", 1)[0]
 
 
 def _drag_offset(payload: Mapping[str, Any], name: str) -> float:
@@ -1301,9 +1312,56 @@ class BrowserSession(SessionGuardsMixin):
             self._last_frame_ms = int((data or {}).get("frame_ms") or 0)
         except (TypeError, ValueError, AttributeError):
             self._last_frame_ms = 0
+        key = _frame_page_key(page)
         report = slow_frame_report(data)
         if report is not None:
             result["render"] = report
+            self._note_slow_frames(key, int(report["frame_ms"]))
+            return
+        # A fast probe after slow ones may only mean the page stopped drawing
+        # while idle; say so once, with the cost it had.
+        earlier = self._slow_frame_pending().pop(key, None)
+        if earlier:
+            result["render"] = idle_after_slow_report(self._last_frame_ms, earlier)
+
+    def _slow_frame_pending(self) -> dict[str, int]:
+        """Pages whose last measured frames were slow, by URL without query."""
+
+        return self.__dict__.setdefault("_slow_frames_pending", {})
+
+    def _note_slow_frames(self, key: str, frame_ms: int) -> None:
+        self._slow_frame_pending()[key] = int(frame_ms)
+        self.__dict__.setdefault("_slow_frame_pages", set()).add(key)
+
+    def _attach_response_frames(self, action: str, result: dict[str, Any], slow: bool) -> None:
+        """Measure the frames a local canvas page draws in answer to an input.
+
+        Runs only after a slow input or on a page that drew slow frames before,
+        so an ordinary page pays nothing and a responsive game keeps its timing.
+        """
+
+        if not frame_probe_enabled():
+            return
+        try:
+            if self._page_script_may_block():
+                return
+            page = self._active_page()
+            key = _frame_page_key(page)
+            if not slow and key not in self.__dict__.get("_slow_frame_pages", set()):
+                return
+            if not is_local_browser_url(str(getattr(page, "url", "") or "")):
+                return
+            if not page.evaluate(HAS_CANVAS_JS):
+                return
+            data = page.evaluate(RESPONSE_FRAME_PROBE_JS)
+        except Exception:  # noqa: BLE001 - diagnosis only; the input already ran
+            return
+        report = response_frame_report(data, action)
+        if report is None:
+            return
+        result["render_after"] = report
+        self._note_slow_frames(key, int(report["frame_ms"]))
+        self._last_frame_ms = max(int(getattr(self, "_last_frame_ms", 0) or 0), int(report["frame_ms"]))
 
     def _input_timing(
         self,
@@ -1314,11 +1372,16 @@ class BrowserSession(SessionGuardsMixin):
     ) -> dict[str, Any]:
         elapsed = time.monotonic() - started
         motion = None
-        if recording and elapsed * 1000 >= SLOW_INPUT_MS:
+        slow = elapsed * 1000 >= SLOW_INPUT_MS
+        if recording and slow:
             motion = self._read_motion()
         note = slow_input_note(action, elapsed, motion)
         if note is not None:
             result.update(note)
+        # A target that kept moving explains its own wait; otherwise the frames
+        # the page draws in answer say what the next input will wait for.
+        if target_moved(motion) is None:
+            self._attach_response_frames(action, result, slow)
         return result
 
     def _page_script_may_block(self) -> bool:

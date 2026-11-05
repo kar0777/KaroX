@@ -57,3 +57,26 @@ def test_frame_probe_switch(monkeypatch) -> None:
     for off in ("0", "false", "off", "NO"):
         monkeypatch.setenv("KAROX_BROWSER_FRAME_PROBE", off)
         assert pageperf.frame_probe_enabled() is False
+
+
+def test_response_frame_report_needs_two_slow_frames_or_one_longer_than_the_window() -> None:
+    assert pageperf.response_frame_report(None, "click") is None
+    assert pageperf.response_frame_report({"gaps": [16, 17, 16]}, "click") is None
+    assert pageperf.response_frame_report({"gaps": [640, 16, 17]}, "click") is None
+    report = pageperf.response_frame_report({"gaps": [700, 690, 16, 16]}, "drag")
+    assert report["frame_ms"] == 700 and report["slow_frames"] == 2
+    assert "after this drag" in report["note"] and "PMREM" in report["note"]
+    stuck = pageperf.response_frame_report({"frames": 1, "gaps": [], "waited_ms": 2600}, "click")
+    assert stuck["frame_ms"] == 2600
+    assert pageperf.response_frame_report({"frames": 1, "gaps": [], "waited_ms": 120}, "click") is None
+    assert pageperf.response_frame_report({"gaps": [True, "x", 900]}, "click") is None
+
+
+def test_idle_after_slow_report_names_the_earlier_cost() -> None:
+    report = pageperf.idle_after_slow_report(17, 667)
+    assert report == {
+        "frame_ms": 17,
+        "earlier_frame_ms": 667,
+        "note": pageperf.IDLE_AFTER_SLOW_NOTE.format(ms=17, earlier=667),
+    }
+    assert "667 ms" in report["note"] and "render_after" in report["note"]

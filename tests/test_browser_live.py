@@ -911,6 +911,49 @@ def test_open_reports_slow_frames_only_on_a_slow_canvas_page(site, make_session,
     assert "render" not in unmeasured
 
 
+def test_a_page_that_draws_only_on_change_reports_the_frames_it_draws_in_answer(
+    site, make_session, monkeypatch
+):
+    """f1 3d-viewer: idle probes read fast while each drawn frame took 0.7 s.
+
+    After slow frames, a fast reload says the earlier cost once, and an input
+    on that page reports the frames drawn in answer (render_after), even when
+    the click itself returned quickly. A page never seen slow is not probed.
+    """
+
+    monkeypatch.delenv("KAROX_BROWSER_FRAME_PROBE", raising=False)
+    session, _root = make_session()
+    loading = _open(session, site, "/lazy-canvas")
+    assert loading["render"]["slow"] is True, loading
+    assert "environment maps" in loading["render"]["note"], loading
+    assert _call(session, "evaluate", {"expression": "sessionStorage.setItem('fixed', '1') || 1"})["ok"]
+
+    idle = _call(session, "reload", {})
+    assert idle["ok"] is True, idle
+    assert idle["render"]["earlier_frame_ms"] >= 200, idle
+    assert idle["render"]["frame_ms"] < 200, idle
+    assert "draws only on change" in idle["render"]["note"], idle
+    again = _call(session, "reload", {})
+    assert "render" not in again, again
+
+    poked = _call(session, "click", {"selector": "#poke"})
+    assert poked["ok"] is True and poked["clicked"] is True, poked
+    after = poked["render_after"]
+    assert after["frame_ms"] >= 200 and after["slow_frames"] >= 2, poked
+    assert "after this click" in after["note"], poked
+
+    # A responsive canvas page is not probed after input and carries no note.
+    light = _open(session, site, "/animated")
+    assert "render" not in light, light
+    pressed = _call(session, "press", {"key": "ArrowUp"})
+    assert pressed["ok"] is True and "render_after" not in pressed, pressed
+
+    monkeypatch.setenv("KAROX_BROWSER_FRAME_PROBE", "0")
+    _open(session, site, "/lazy-canvas")
+    unprobed = _call(session, "click", {"selector": "#poke"})
+    assert unprobed["ok"] is True and "render_after" not in unprobed, unprobed
+
+
 def test_layout_probe_names_the_element_that_makes_a_page_scroll_sideways(site, make_session):
     """The finish-time layout re-check reads width and the widest element in one call."""
 
