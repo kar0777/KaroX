@@ -3286,14 +3286,15 @@ def _check_runs(harness: "Harness") -> List[dict]:
     ]
 
 
-def test_an_identical_passing_check_on_unchanged_bytes_is_reused(
+def test_an_identical_passing_check_on_unchanged_bytes_runs_again(
     tmp_path: Path, repository: Path
 ) -> None:
-    """A repeated green check on the same bytes is answered, not rerun.
+    """A repeated check is executed; no earlier verdict stands in for it.
 
-    About a third of the benchmark's check and test runs repeated a call that
-    had already passed on identical bytes; a SWE suite costs a minute each.
-    The reused verdict is the earlier one, so it proves nothing new.
+    A run executes project code and can write files no ``changed_files`` entry
+    or identity covers, so its verdict describes the bytes it started from, not
+    the tree it left behind. Two identical green checks are two executions, and
+    the second one's proof is its own.
     """
 
     check = _calc_repository(repository)
@@ -3303,15 +3304,7 @@ def test_an_identical_passing_check_on_unchanged_bytes_is_reused(
         [
             _response((_write_call("c1", "calc.py", CALC_RIGHT),)),
             _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
-            _response(
-                (
-                    _tool_call(
-                        "c3",
-                        "checks_run",
-                        {"argv": list(check), "timeout_seconds": 30},
-                    ),
-                )
-            ),
+            _response((_tool_call("c3", "checks_run", {"argv": list(check)}),)),
             _response((_finish_call("c4", "implemented add"),)),
         ],
         verification=(check,),
@@ -3324,20 +3317,16 @@ def test_an_identical_passing_check_on_unchanged_bytes_is_reused(
         entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c3"}
     ]
     assert [entry["tool_call_id"] for entry in runs] == ["c2", "c3"]
-    assert "reused_from" not in runs[0]["result"]["data"]
-    assert runs[1]["result"]["data"]["reused_from"]["call_id"] == "c2"
-    assert runs[1]["result"]["data"]["exit_code"] == 0
-    assert any("[checks.run exit 0 · reused]" in m for m in _tool_messages(harness))
+    assert all("reused_from" not in entry["result"]["data"] for entry in runs)
+    assert all(entry["result"]["ok"] is True for entry in runs)
+    assert all(entry["result"]["data"]["exit_code"] == 0 for entry in runs)
+    assert not any("· reused]" in message for message in _tool_messages(harness))
 
 
-def test_a_read_between_identical_checks_still_reuses_the_pass(
+def test_a_read_between_identical_checks_still_runs_the_check(
     tmp_path: Path, repository: Path
 ) -> None:
-    """Reading one more file widens the identity but changes no byte.
-
-    The whole-identity comparison never fired on the W&B benchmark: the model
-    read a file between two identical runs and the suite ran again.
-    """
+    """A read widens the identity; it is not a licence to skip the execution."""
 
     check = _calc_repository(repository)
     harness = Harness(
@@ -3362,17 +3351,23 @@ def test_a_read_between_identical_checks_still_reuses_the_pass(
         entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c4"}
     ]
     assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4"]
-    reused = runs[1]["result"]["data"]
-    assert reused["reused_from"]["call_id"] == "c2"
-    # Re-bound to the widened identity: the read file is part of it now.
-    assert "tests/test_calc.py" in reused["completion_identity"]["files"]
+    assert "reused_from" not in runs[1]["result"]["data"]
+    assert runs[1]["result"]["data"]["exit_code"] == 0
+    # The later run carries its own binding, which includes the file read in
+    # between; the earlier binding predates that read.
+    assert "tests/test_calc.py" in runs[1]["result"]["data"]["completion_identity"]["files"]
     assert "tests/test_calc.py" not in runs[0]["result"]["data"]["completion_identity"]["files"]
 
 
-def test_a_failed_edit_between_identical_checks_still_reuses_the_pass(
+def test_a_failed_edit_between_identical_checks_still_runs_the_check(
     tmp_path: Path, repository: Path
 ) -> None:
-    """An edit whose anchor was not found wrote nothing; the pass still stands."""
+    """An edit that wrote nothing does not make the earlier pass reusable.
+
+    The old cache treated "the edit reported no write" as a licence to reuse a
+    verdict; the same inputs cannot distinguish that from a run whose write
+    landed in a file no identity covers. The repeat executes.
+    """
 
     check = _calc_repository(repository)
     harness = Harness(
@@ -3408,8 +3403,9 @@ def test_a_failed_edit_between_identical_checks_still_reuses_the_pass(
         entry for entry in _check_runs(harness) if entry.get("tool_call_id") in {"c2", "c5"}
     ]
     assert [entry["tool_call_id"] for entry in runs] == ["c2", "c5"]
-    # c3 failed and c4 rewrote identical bytes: neither changed what c2 saw.
-    assert runs[1]["result"]["data"]["reused_from"]["call_id"] == "c2"
+    # c3 failed and c4 rewrote identical bytes: the later check still executes.
+    assert "reused_from" not in runs[1]["result"]["data"]
+    assert runs[1]["result"]["data"]["exit_code"] == 0
 
 
 def test_an_edit_between_identical_checks_runs_the_check_again(
@@ -3472,12 +3468,12 @@ def test_a_probe_that_writes_an_untracked_dependency_ends_check_reuse(
 ) -> None:
     """Arbitrary probe code can change a file no identity entry covers.
 
-    ``checks.run`` is reuse-neutral, so a reproduction probe left an earlier
-    passing check reusable. Here the approved check reads ``spec.txt``, which
-    the run neither read nor changed; the probe rewrites it, and the repeat of
-    the approved check was answered from the cache and re-bound to the current
-    identity. The run then ended VERIFIED although the check would fail on the
-    final bytes. A probe executes arbitrary code, so it must end reuse.
+    Mission 01's reproduction, kept as the general invariant: the approved
+    check reads ``spec.txt``, which the run neither read nor changed, and the
+    probe rewrites it. The repeat of the approved check must execute and see
+    the new bytes (exit 3); no cached verdict, from the probe or from the
+    earlier check, may stand in for it. After the repair the check passes for
+    real and the run verifies.
     """
 
     spec = repository / "spec.txt"
@@ -3529,6 +3525,326 @@ def test_a_probe_that_writes_an_untracked_dependency_ends_check_reuse(
     assert "reused_from" not in repaired["data"]
     assert repaired["ok"] is True
     assert spec.read_text(encoding="utf-8") == "state=ok\n"
+
+
+#: A check that passes only while ``spec.txt`` says ``state=ok``. ``spec.txt``
+#: is committed and never opened through a repository read, so no run identity
+#: covers its bytes: another tool can rewrite it behind the check's back.
+SPEC_CHECK = (
+    sys.executable,
+    "-c",
+    "import pathlib, sys; "
+    "text = pathlib.Path('spec.txt').read_text(encoding='utf-8').strip(); "
+    "sys.exit(0 if text == 'state=ok' else 3)",
+)
+
+HIDDEN_WRITE_TEST = (
+    "from pathlib import Path\n\n\n"
+    "def test_hidden_write():\n"
+    "    Path('spec.txt').write_text('state=bad\\n', encoding='utf-8')\n"
+    "    assert True\n"
+)
+HIDDEN_WRITE_FAILING_TEST = (
+    "from pathlib import Path\n\n\n"
+    "def test_hidden_write():\n"
+    "    Path('spec.txt').write_text('state=bad\\n', encoding='utf-8')\n"
+    "    assert False, 'the fixture fails after writing'\n"
+)
+HIDDEN_WRITE_HANGING_TEST = (
+    "import time\n"
+    "from pathlib import Path\n\n\n"
+    "def test_hidden_write():\n"
+    "    Path('spec.txt').write_text('state=bad\\n', encoding='utf-8')\n"
+    "    time.sleep(20)\n"
+)
+
+
+def _hidden_write_repository(repository: Path, test_source: str) -> None:
+    """Commit ``spec.txt`` and one pytest file that rewrites it."""
+
+    (repository / "spec.txt").write_text("state=ok\n", encoding="utf-8")
+    tests = repository / "tests"
+    tests.mkdir()
+    (tests / "test_hidden_write.py").write_text(test_source, encoding="utf-8")
+    _git(repository, "add", "spec.txt", "tests")
+    _git(repository, "commit", "-q", "-m", "spec and a test that rewrites it")
+
+
+def _tests_run_call(call_id: str, **arguments: Any) -> ToolCall:
+    run = {"suite": "focused", "targets": ["tests/test_hidden_write.py"]}
+    run.update(arguments)
+    return _tool_call(call_id, "tests_run", run)
+
+
+def test_a_test_run_that_writes_a_hidden_dependency_is_not_verified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The false VERIFIED this mission is about, in full.
+
+    The model writes its deliverable, the approved check passes, a project test
+    rewrites ``spec.txt`` and passes, and the model finishes. The repeat of the
+    approved check was answered from the earlier verdict and re-bound to the
+    current identity, so the gate reported VERIFIED while the final bytes fail
+    that approved check.
+    """
+
+    _hidden_write_repository(repository, HIDDEN_WRITE_TEST)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_tests_run_call("c3"),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+        ]
+        + [
+            _response((_finish_call(f"f{index}", "created hello.txt with hi"),))
+            for index in range(6)
+        ],
+        verification=(SPEC_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        max_steps=9,
+    )
+    report = harness.run()
+
+    assert (repository / "spec.txt").read_text(encoding="utf-8") == "state=bad\n"
+    assert report.verified is False
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4"]
+    assert runs[1]["result"]["ok"] is False
+    assert runs[1]["result"]["data"]["exit_code"] == 3
+
+
+def test_a_test_run_that_writes_a_hidden_dependency_ends_check_reuse(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A test run executes project code; its writes outlive the call.
+
+    ``tests.run`` was reuse-neutral, so a project test that rewrote
+    ``spec.txt`` -- a file the run neither read nor changed, so no identity
+    entry covers it -- left the earlier passing check reusable. The repeat was
+    answered from the cache, its verdict was re-bound to the current identity,
+    and the run ended VERIFIED while the approved check fails on the final
+    bytes. After the repair the check must pass for real and only then verify.
+    """
+
+    _hidden_write_repository(repository, HIDDEN_WRITE_TEST)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_tests_run_call("c3"),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_write_call("c5", "spec.txt", "state=ok\n"),)),
+            _response((_tool_call("c6", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_finish_call("c7", "created hello.txt with hi"),)),
+        ],
+        verification=(SPEC_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    assert (repository / "spec.txt").read_text(encoding="utf-8") == "state=ok\n"
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4", "c6"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4", "c6"]
+    after_test_run = runs[1]["result"]
+    assert "reused_from" not in after_test_run["data"]
+    assert after_test_run["ok"] is False
+    assert after_test_run["data"]["exit_code"] == 3
+    repaired = runs[2]["result"]
+    assert "reused_from" not in repaired["data"]
+    assert repaired["ok"] is True
+    assert repaired["data"]["exit_code"] == 0
+
+
+def test_a_failed_test_run_that_wrote_a_dependency_ends_check_reuse(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A red run also wrote: a failure is not evidence that nothing changed."""
+
+    _hidden_write_repository(repository, HIDDEN_WRITE_FAILING_TEST)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_tests_run_call("c3"),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+        ]
+        + [
+            _response((_finish_call(f"f{index}", "created hello.txt with hi"),))
+            for index in range(6)
+        ],
+        verification=(SPEC_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        max_steps=9,
+    )
+    report = harness.run()
+
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4"]
+    assert runs[1]["result"]["ok"] is False
+    assert "reused_from" not in runs[1]["result"]["data"]
+    assert runs[1]["result"]["data"]["exit_code"] == 3
+    assert report.verified is False
+
+
+def test_a_timed_out_test_run_that_wrote_a_dependency_ends_check_reuse(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A killed run may already have written; its timeout is not a clean slate."""
+
+    _hidden_write_repository(repository, HIDDEN_WRITE_HANGING_TEST)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+            _response((_tests_run_call("c3", timeout_seconds=3),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(SPEC_CHECK)}),)),
+        ]
+        + [
+            _response((_finish_call(f"f{index}", "created hello.txt with hi"),))
+            for index in range(6)
+        ],
+        verification=(SPEC_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        max_steps=9,
+    )
+    report = harness.run()
+
+    timed_out = [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("core_name") == "tests.run"
+    ]
+    assert timed_out, "the fixture test run never reached the core"
+    assert timed_out[0]["result"]["data"]["timed_out"] is True
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4"]
+    assert "reused_from" not in runs[1]["result"]["data"]
+    assert runs[1]["result"]["ok"] is False
+    assert runs[1]["result"]["data"]["exit_code"] == 3
+    assert report.verified is False
+
+
+def test_an_approved_check_whose_own_write_changes_its_verdict_runs_again(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A literal approved argv is not read-only: it may execute project code.
+
+    The approved command creates an ignored state file and passes; a real
+    second run sees that file and fails. The old cache answered the repeat from
+    the first verdict, so the run reported VERIFIED although the approved
+    command fails on the final bytes. The repeat has to execute.
+    """
+
+    (repository / ".gitignore").write_text("state.dep\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "-q", "-m", "ignore the state file")
+    check = (
+        sys.executable,
+        "-c",
+        "import pathlib, sys; p = pathlib.Path('state.dep'); seen = p.exists(); "
+        "p.write_text('bad', encoding='utf-8'); sys.exit(3 if seen else 0)",
+    )
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(check)}),)),
+        ]
+        + [
+            _response((_finish_call(f"f{index}", "created hello.txt with hi"),))
+            for index in range(6)
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+        max_steps=9,
+    )
+    report = harness.run()
+
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c3"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c3"]
+    assert runs[0]["result"]["ok"] is True
+    assert "reused_from" not in runs[1]["result"]["data"]
+    assert runs[1]["result"]["ok"] is False
+    assert runs[1]["result"]["data"]["exit_code"] == 3
+    assert report.verified is False
+
+
+def test_every_identical_check_executes_and_the_count_is_visible(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Policy: a check that executes project code is never answered from cache.
+
+    The approved command appends one line to ``runs.log`` each time it really
+    executes, so the file is direct evidence of the number of executions --
+    not an inference from a ``reused_from`` marker. Three calls with one read
+    in between are three executions.
+    """
+
+    check = (
+        sys.executable,
+        "-c",
+        "import pathlib, sys; "
+        "handle = pathlib.Path('runs.log').open('a', encoding='utf-8'); "
+        "handle.write('x\\n'); handle.close(); sys.exit(0)",
+    )
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_tool_call("c3", "repo_read_file", {"path": "hello.txt"}),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(check)}),)),
+            _response((_tool_call("c5", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c6", "created hello.txt with hi"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    executions = (repository / "runs.log").read_text(encoding="utf-8").count("x")
+    assert executions == 3, f"{executions} real executions, expected 3"
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4", "c5"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4", "c5"]
+    assert all("reused_from" not in entry["result"]["data"] for entry in runs)
 
 
 def test_third_identical_tool_step_gets_one_persisted_engine_note(

@@ -708,15 +708,23 @@ def identity(core: Any, record: Any) -> dict[str, Any]:
 
 
 def same_run_inputs(core: Any, prior: dict[str, Any], current: dict[str, Any]) -> bool:
-    """True when nothing a check could execute differs between two identities.
+    """Whether two identities list the same known inputs.
 
     ``prior`` is the identity an earlier run was bound to. Every file it hashed
     must hash the same now (re-read from disk when the current identity no
     longer lists it) and the task must be the same. The current identity may
-    list more files: files merely read since the run do not change a verdict
-    that depends on repository bytes, and the caller guarantees no tool wrote
-    anything in between. The requirement ledger does not affect what a command
-    executes, so a ledger edit alone does not invalidate a run either.
+    list more files: files merely read since do not change a byte a command
+    executes. The requirement ledger does not affect what a command executes,
+    so a ledger edit alone does not count either.
+
+    Equality here is **not** a licence to answer a later call from an earlier
+    verdict. The identity names only the files KaroX knows about, and a run
+    executes project code that can write a fixture, a lock file or an ignored
+    dependency outside that set, so two equal identities do not prove that
+    nothing changed between the two runs. Mission 02 removed the verdict cache
+    for that reason (``docs/audits/DSH_REUSE_INTEGRITY_20261106.md``); this
+    predicate remains the identity comparison itself, and no caller may treat
+    it as proof of no side effects.
     """
 
     if not prior or not current:

@@ -53,46 +53,23 @@ if TYPE_CHECKING:
 _READABLE_TOOLS = frozenset({"repo.read_file", "repo.read_lines"})
 _TEST_TOOLS = frozenset({"checks.run", "checks.run_affected", "tests.run"})
 _PROOF_TOOLS = frozenset({"checks.run", "visual.check", "git.status", "git.diff"})
-#: Runs whose verdict depends only on the repository bytes. On the W&B
-#: benchmark about 28 of 92 check and test runs repeated an identical call that
-#: had already passed on identical bytes; a SWE suite costs a minute each time.
-_REUSABLE_RUNS = frozenset({"checks.run", "tests.run"})
-#: Tools that cannot change what a check or test run would see. Anything else
-#: (an edit, a shell command, a dev server, a browser action, a fetch) ends
-#: every reuse: the next identical run executes again.
-_RUN_NEUTRAL_TOOLS = frozenset(
-    {
-        "repo.read_file",
-        "repo.read_lines",
-        "repo.list_files",
-        "repo.search",
-        "repo.inspect",
-        "git.status",
-        "git.diff",
-        "git.log",
-        "lsp.diagnostics",
-        "plan.update",
-        "runtime.status",
-        "skill.list",
-        "skill.load",
-        "skill.read",
-        "checks.run",
-        "tests.run",
-        "visual.check",
-        "disk.scan",
-        "disk.plan_cleanup",
-    }
-)
-#: ``checks.run`` is neutral only for the literal approved command. A probe or
-#: an inline wildcard check executes arbitrary code in the repository; it can
-#: write bytes no ``changed_files`` entry and no identity covers, so
-#: ``_execute`` advances the epoch after it returns and every earlier pass has
-#: to be run again.
+# Every check and test run executes. There is no cache of earlier verdicts.
+#
+# A ``checks.run`` command -- an approved literal argv, a wildcard-admitted
+# inline snippet or a reproduction probe -- and every ``tests.run`` execute code
+# the repository controls: a pytest run imports its ``conftest.py``, a probe
+# runs any snippet, a project test writes whatever it likes. That code can write
+# files no ``changed_files`` entry and no ``completion_gate.identity`` covers: a
+# fixture, a lock or state file, an ignored dependency. The identity compares
+# only the files KaroX knows about, so equal identities are not evidence that an
+# earlier run left the tree alone, and a verdict produced before that run's own
+# writes cannot stand in for a later execution.
+#
+# A cached verdict is therefore unsound on every one of those surfaces. The
+# price of dropping the cache is measured in
+# ``docs/audits/DSH_REUSE_INTEGRITY_20261106.md``: repeated check and test calls
+# run again (wall clock only), and no provider request is added.
 
-#: File edits that report exactly what they wrote. One that failed or wrote
-#: identical bytes changed nothing a run can see, so it does not end a reuse.
-#: ``repo.command`` is not here: a failed command may still have written files.
-_EXACT_EDIT_TOOLS = frozenset({"repo.edit_file", "repo.write_file", "repo.apply_patch"})
 #: Proof bookkeeping, not an observation. ``completion_identity`` carries the
 #: whole task text and every file hash; the completion gate reads it from the
 #: durable result, so putting it in the model-facing body only makes every later
@@ -332,49 +309,6 @@ def _counts_as_repository_change(
         and core_name in _CODE_CHANGE_TOOLS
         and (data.get("changed") is True or bool(data.get("changed_files")))
     )
-
-
-def _ran_unchecked_code(data: Mapping[str, Any]) -> bool:
-    """Whether a check call ran code outside the user's approved literal argv.
-
-    A reproduction probe (``python -c``/``-m``/a repository script admitted next
-    to the approved checks, see ``core_process.probe_python_command``) and an
-    inline check admitted under a wildcard rule both execute arbitrary code in
-    the repository. They can write bytes that neither ``changed_files`` nor the
-    identity records: a probe rewrote ``spec.txt`` between two identical
-    approved checks and the second was answered from the reuse cache, so the run
-    ended VERIFIED although the check would fail on the final bytes. Any such
-    call therefore ends reuse; only a literal approved command may stand in for
-    a later identical run.
-    """
-
-    return data.get("probe") is True or data.get("inline_code_from_file") is True
-
-
-def _wrote_anything(data: Mapping[str, Any], ok: bool) -> bool:
-    """Whether an exact edit tool reports any written byte (fail-safe: yes)."""
-
-    if not ok:
-        # Edits are atomic: a failed edit leaves the file as it was.
-        return False
-    if data.get("changed") is True or bool(data.get("changed_files")):
-        return True
-    # Only an explicit "nothing changed" counts as no write; a result that does
-    # not say is treated as a write.
-    return data.get("changed") is not False
-
-
-def _run_key(core_name: str, arguments: Mapping[str, Any]) -> str:
-    """The exact call a passed run answers; a timeout is not part of it."""
-
-    material = {
-        key: value for key, value in arguments.items() if key != "timeout_seconds"
-    }
-    try:
-        encoded = json.dumps(material, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return ""
-    return f"{core_name}\0{encoded}"
 
 
 #: Action names a model sends when it means "delete these files". The prompt
@@ -631,11 +565,6 @@ class CoreToolEnvironment:
         #: milestones already delivered in this run.
         self._last_mutation_step = 0
         self._research_notices: set[int] = set()
-        #: Passing check/test runs by their exact call, with the repository
-        #: identity they ran on and the state epoch. Any call that may change
-        #: what a run sees bumps the epoch and so ends every reuse.
-        self._state_epoch = 0
-        self._passed_runs: Dict[str, Dict[str, Any]] = {}
         #: A code task gets the research budget; a question or a plan does not.
         self._research_applies = self._task_expects_change()
         #: The task names a control whose state a screenshot cannot prove.
@@ -723,9 +652,6 @@ class CoreToolEnvironment:
                 "now. Call finish alone with your final answer.",
             )
         if name is None:
-            # An approved command run from text can write anything a check
-            # would read; no earlier verdict survives it.
-            self._state_epoch += 1
             return self._fenced_command(action)
         core_name = self._aliases.get(str(name))
         if core_name is None:
@@ -793,21 +719,6 @@ class CoreToolEnvironment:
             arguments = _normalize_edit_file(arguments)
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
-        reuse_key = (
-            _run_key(core_name, arguments)
-            if core_name in _REUSABLE_RUNS and requested_by == "model"
-            else ""
-        )
-        if reuse_key:
-            reused = self._reuse_passed_run(
-                reuse_key, core_name, str(name), call_id, call_detail(core_name, arguments)
-            )
-            if reused is not None:
-                return reused
-        epoch_entering = self._state_epoch
-        if core_name not in _RUN_NEUTRAL_TOOLS:
-            self._state_epoch += 1
-        epoch_before = self._state_epoch
         started = self._kernel.monotonic()
         self._kernel._emit(
             AgentEventKind.TOOL_STARTED,
@@ -833,13 +744,6 @@ class CoreToolEnvironment:
             completion_gate.identity(self._core, self._core.sessions.load(self._session_id))
             if core_name in _PROOF_TOOLS
             else None
-        )
-        run_identity_before = (
-            proof_before
-            if proof_before is not None or not reuse_key
-            else completion_gate.identity(
-                self._core, self._core.sessions.load(self._session_id)
-            )
         )
         try:
             result = self._core.execute(
@@ -868,9 +772,6 @@ class CoreToolEnvironment:
                 summary=type(exc).__name__,
                 duration_seconds=round(max(0.0, self._kernel.monotonic() - started), 3),
             )
-            if core_name in _EXACT_EDIT_TOOLS and self._state_epoch == epoch_before:
-                # A refused edit wrote nothing.
-                self._state_epoch = epoch_entering
             return self._observation(message, 1, "refused")
         self._refusals.pop(core_name, None)
         if core_name == "browser.command":
@@ -888,13 +789,6 @@ class CoreToolEnvironment:
         if _counts_as_repository_change(core_name, data, result.ok):
             self._last_mutation_step = self._kernel._step
             self._last_change_seq = self._action_seq
-        elif (
-            core_name in _EXACT_EDIT_TOOLS
-            and self._state_epoch == epoch_before
-            and not _wrote_anything(data, result.ok)
-        ):
-            # A failed edit, or one that wrote the bytes already on disk.
-            self._state_epoch = epoch_entering
         if core_name == "tests.run" and isinstance(result.data, dict):
             # Say where the target list came from: a reader of the session must
             # be able to tell a model's choice from the harness's derivation.
@@ -916,16 +810,6 @@ class CoreToolEnvironment:
                 )
             for item in result.evidence:
                 item.metadata["completion_identity"] = proof
-        if reuse_key:
-            self._remember_passed_run(
-                reuse_key, result, run_identity_before, epoch_before, call_id
-            )
-        if core_name in _REUSABLE_RUNS and _ran_unchecked_code(data):
-            # Arbitrary code may have changed a byte the identity does not
-            # track. It also makes the call's own cached verdict unusable: the
-            # epoch was `epoch_before` when the entry above was stored, so the
-            # next identical run executes instead of answering from the cache.
-            self._state_epoch += 1
         self._attach_quick_checks(result)
         self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
@@ -1370,127 +1254,6 @@ class CoreToolEnvironment:
             "browser.command click or press on the control, then read the state. "
             "The run cannot be verified without that input. " + RESET_IN_MOTION_HINT
         )
-
-    def _remember_passed_run(
-        self,
-        key: str,
-        result: CoreResult,
-        identity_before: Optional[Dict[str, Any]],
-        epoch_before: int,
-        call_id: str,
-    ) -> None:
-        data = result.data if isinstance(result.data, dict) else {}
-        passed = (
-            result.ok
-            and data.get("exit_code") == 0
-            and not data.get("timed_out")
-        )
-        if not passed or not identity_before or self._state_epoch != epoch_before:
-            self._passed_runs.pop(key, None)
-            return
-        try:
-            identity_after = completion_gate.identity(
-                self._core, self._core.sessions.load(self._session_id)
-            )
-        except Exception:  # noqa: BLE001 - no identity means no reuse
-            return
-        if identity_after != identity_before:
-            # Something changed while it ran: the verdict belongs to neither
-            # state, so it cannot stand in for a later run.
-            self._passed_runs.pop(key, None)
-            return
-        try:
-            kept = CoreResult.from_dict(result.to_dict())
-        except Exception:  # noqa: BLE001 - an uncopyable result is simply rerun
-            self._passed_runs.pop(key, None)
-            return
-        self._passed_runs[key] = {
-            "identity": identity_after,
-            "epoch": epoch_before,
-            "step": int(getattr(self._kernel, "_step", 0) or 0),
-            "call_id": call_id,
-            "result": kept,
-        }
-
-    def _reuse_passed_run(
-        self, key: str, core_name: str, alias: str, call_id: str, detail: str = ""
-    ) -> Optional[Dict[str, Any]]:
-        """The earlier verdict of this exact call, when nothing has changed.
-
-        Nothing changed means: no state-changing tool ran since (the epoch),
-        the task is the same, and every file the earlier run was bound to has
-        the same bytes now. Requiring the whole identity to be equal also
-        refused a pass after a mere read: reading one more file grows the
-        identity's read set without changing a byte the run executes. A failed
-        or timed-out run is never reused: a retry there may be the point (a
-        flaky test, a dependency installed in between).
-        """
-
-        entry = self._passed_runs.get(key)
-        if entry is None or entry["epoch"] != self._state_epoch:
-            return None
-        try:
-            current = completion_gate.identity(
-                self._core, self._core.sessions.load(self._session_id)
-            )
-        except Exception:  # noqa: BLE001 - when in doubt, run it
-            return None
-        if not current or not completion_gate.same_run_inputs(
-            self._core, entry["identity"], current
-        ):
-            return None
-        prior: CoreResult = entry["result"]
-        result = CoreResult.from_dict(prior.to_dict())
-        result.data["reused_from"] = {
-            "call_id": entry["call_id"],
-            "step": entry["step"],
-        }
-        if "completion_identity" in result.data:
-            # The epoch proves no tool changed a byte since the run, and every
-            # file the run was bound to still hashes the same. Files read since
-            # then (and a ledger change) widen the identity without changing
-            # anything a check executes, so the verdict is re-bound to the
-            # current identity instead of going stale on a mere read.
-            result.data["completion_identity"] = current
-            for item in result.evidence:
-                item.metadata["completion_identity"] = current
-        entry["identity"] = current
-        step = entry["step"]
-        text = (
-            f"[{core_name} exit 0 · reused]\n"
-            f"This exact call already passed at step {step} and nothing that a "
-            "run can see has changed since, so it was not run again; that "
-            "result stands. Run it again only after an edit."
-        )
-        output = {
-            "output": text,
-            "observation": text,
-            "returncode": 0,
-            "exception_info": "",
-        }
-        self._kernel._emit(
-            AgentEventKind.TOOL_STARTED,
-            tool=core_name,
-            call_id=call_id or None,
-            detail=detail or None,
-        )
-        self._kernel._persist_engine_tool_result(
-            call_id=call_id,
-            alias=alias,
-            core_name=core_name,
-            result=result,
-            output=output,
-            requested_by="model",
-        )
-        self._kernel._emit(
-            AgentEventKind.TOOL_FINISHED,
-            tool=core_name,
-            call_id=call_id or None,
-            ok=True,
-            summary="reused: unchanged since step " + str(step),
-            duration_seconds=0.0,
-        )
-        return output
 
     def _browser_budget_exhausted(self, core_name: str, action: str = "") -> str:
         if core_name != "browser.command":
