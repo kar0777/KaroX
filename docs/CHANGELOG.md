@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Changed — the closing change review reads the whole change
+
+- The harness's `git.diff` review at finish now asks Core for the complete
+  change: tracked staged and unstaged edits against `HEAD` (the index in a
+  repository with no commit) plus every new untracked file, each appended as a
+  bounded, redacted new-file diff. A plain `git diff` was previously accepted as
+  "the change review" whenever it carried the current completion identity,
+  although it shows only the unstaged half, `staged=true` only the index half,
+  `paths=[...]` only one corner, and no view at all of a new file. Four offline
+  engine replays ended `VERIFIED` on the starting code with a review that never
+  showed the run's own file, including a new deliverable behind an empty diff.
+- The scope is written by Core from the commands it executed
+  (`review.mode/base/paths/complete/truncated/untracked`), so a caller cannot
+  widen it by asking for `complete=true`. Partial diffs remain normal
+  inspection tools; they simply no longer discharge the finishing obligation.
+  The harness obtains the complete review once, at finish, without an extra
+  model turn and with the same single `git.diff` tool call.
+- Fail-closed edges: a tracked diff truncated by the output ceiling, an
+  untracked listing over 200 files, or a result recorded before this field (an
+  old resumed session) is not a complete review. A new file the review
+  explicitly excludes (a build or dependency directory) keeps the run
+  unverified instead of claiming it was shown. Files ignored by Git itself stay
+  outside both views, and binary or oversized new files are represented by a
+  size/digest marker rather than their text; both limits are documented. Full
+  analysis: [audits/DSH_CHANGE_REVIEW_20261106.md](audits/DSH_CHANGE_REVIEW_20261106.md).
+
 ### Changed — a check or test that executes code is never answered from cache
 
 - A repeated `checks.run` or `tests.run` now always executes. The verdict
