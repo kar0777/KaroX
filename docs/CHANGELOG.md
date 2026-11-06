@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Changed — a check or test that executes code is never answered from cache
+
+- A repeated `checks.run` or `tests.run` now always executes. The verdict
+  cache was removed because both tools run code the repository controls (an
+  approved `pytest` command imports its `conftest.py`, a project test writes
+  whatever it likes, a probe runs any snippet) and that code can write files no
+  `changed_files` entry and no completion identity covers - a fixture, a state
+  or lock file, an ignored dependency. Two equal identities therefore do not
+  prove that the earlier run left the tree alone, and a cached pass could be
+  replayed onto changed bytes. Four offline reproductions ended `VERIFIED`
+  while an approved check failed on the final bytes (a project test rewriting
+  `spec.txt`, a literal approved command creating an ignored state file, and
+  the failing and timed-out forms of the same test run).
+- The visible cost is wall clock for a repeated command, never a model call:
+  11 real check/test executions before and 17 after across six scripted
+  offline sequences. `checks.run`/`tests.run` still prove the same way, reads
+  and failed edits behave as before, and the `VERIFIED` rules are unchanged.
+  Full analysis: [audits/DSH_REUSE_INTEGRITY_20261106.md](audits/DSH_REUSE_INTEGRITY_20261106.md).
+
 ### Fixed — the closing look judged the entry page, not the run's page
 
 - When a run had spent its visual checks and edited once more, the harness's
