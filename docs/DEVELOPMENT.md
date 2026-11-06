@@ -44,6 +44,12 @@ python -m zipfile -l dist/karox_runtime-*.whl
 Every gate is deterministic. A flaky-looking failure is still a failure until
 it is reproduced and explained.
 
+The package-size ceiling is declared once in `scripts/check_tree.py`
+(`MAX_PACKAGE_LINES`) and `tests/test_tree.py` loads that module, so the script
+and the test share one count and one limit. Raising it is a deliberate policy
+change recorded in the audit, never a way to let a stray copy or a generated
+dump pass.
+
 Bridge tests never open a public route. For a non-live local check:
 
 ```text

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Changed — one declared package-size budget for both release gates
+
+- `scripts/check_tree.py` failed at 80,000 package lines while
+  `tests/test_tree.py` asserted under 87,000, so the release script stayed red
+  and the test had four lines of headroom. The test raised its number four
+  times (83k in `108fc1d`, 85k in `193e247`, 86k in `630be7c`, 87k in
+  `44c46f1`) without the script ever following. The budget is now declared once
+  in the gate (`MAX_PACKAGE_LINES = 88_000`) with one `package_line_count` and
+  one `line_budget_problem` decision; the tree test loads that module, so the
+  count and the ceiling cannot diverge again. The limit is still a hard
+  failure, not a warning.
+- The ceiling is 88,000 against a measured 86,996 lines: 1,004 lines (~1.15%)
+  of headroom. Since the 87k ceiling the deliberate Missions 01–05 added 622
+  net package lines (plus the 36-line `ae9f96b` page change); the new margin
+  covers several similar increments, not an arbitrary doubling. A copied
+  package or a generated dump still trips the gate.
+- Three pre-existing Ruff F401 imports are gone, with import-only edits:
+  `typing.Optional` in `session_export.py`, and `os` and
+  `karox.models.CoreCommand` in `test_tool_shape_fixes.py`. No `noqa`, ignored
+  rule or repository-wide `--fix`. Full analysis:
+  [audits/DSH_RELEASE_GATES_20261106.md](audits/DSH_RELEASE_GATES_20261106.md).
+
 ### Changed — the closing change review covers Git-ignored deliverables
 
 - A deliverable whose name matches `.gitignore` (or `.git/info/exclude`, or a
