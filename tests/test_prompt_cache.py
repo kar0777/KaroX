@@ -795,4 +795,3 @@ def test_repeated_compaction_resume_and_continue_preserve_valid_history(tmp_path
     report3 = kernel3.run(session.session_id)
     assert report3.verified is True, report3.reason
     assert (repo / "big.py").read_text(encoding="utf-8") == w_c
-
