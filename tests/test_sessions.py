@@ -552,5 +552,94 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(payload["session_revision"], self.record.revision)
 
 
+class GitStartRevisionTests(unittest.TestCase):
+    """The revision a session started from is read once, by the trusted runtime.
+
+    It belongs to the session, not to the repository's current HEAD: a commit
+    made during the run, a restart or a continuation must all keep comparing
+    the closing change review against the tree the run actually began with.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repo"
+        self.repository.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "Test")
+        (self.repository / "seed.txt").write_text("seed\n", encoding="utf-8")
+        self.git("add", "seed.txt")
+        self.git("commit", "-q", "-m", "seed")
+        self.store = SessionStore(self.root / "sessions")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def git(self, *arguments: str, cwd: Path | None = None) -> None:
+        subprocess.run(
+            ["git", *arguments],
+            cwd=cwd or self.repository,
+            check=True,
+            capture_output=True,
+        )
+
+    def head(self) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def test_the_start_revision_is_persisted_and_does_not_follow_head(self) -> None:
+        start = self.head()
+        record = self.store.create(
+            self.repository,
+            "change something",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id="anchored",
+        )
+
+        self.assertEqual(record.git_baseline["kind"], "commit")
+        self.assertEqual(record.git_baseline["commit"], start)
+
+        (self.repository / "next.txt").write_text("next\n", encoding="utf-8")
+        self.git("add", "next.txt")
+        self.git("commit", "-q", "-m", "a commit after the session started")
+        self.assertNotEqual(self.head(), start)
+
+        # A reload stands in for a restart or a resume: the durable value is
+        # the one captured at creation, never the HEAD of the moment.
+        self.assertEqual(self.store.load("anchored").git_baseline["commit"], start)
+        continued = self.store.continue_task("anchored", "and another turn")
+        self.assertEqual(continued.git_baseline["commit"], start)
+
+    def test_a_repository_without_a_commit_records_that_it_has_none(self) -> None:
+        fresh = self.root / "fresh"
+        fresh.mkdir()
+        self.git("init", "-q", cwd=fresh)
+        record = self.store.create(
+            fresh, "first file", AccessProfile.WORKSPACE_WRITE, session_id="unborn"
+        )
+
+        self.assertEqual(record.git_baseline["kind"], "unborn")
+        self.assertNotIn("commit", record.git_baseline)
+
+    def test_a_directory_outside_git_is_not_called_a_revision(self) -> None:
+        plain = self.root / "plain"
+        plain.mkdir()
+        record = self.store.create(
+            plain,
+            "plain directory",
+            AccessProfile.WORKSPACE_WRITE,
+            session_id="nogit",
+        )
+
+        self.assertEqual(record.git_baseline["kind"], "unavailable")
+        self.assertNotIn("commit", record.git_baseline)
+
+
 if __name__ == "__main__":
     unittest.main()

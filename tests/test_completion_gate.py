@@ -755,6 +755,218 @@ _NO_TEST_EDITS_TASK = (
 )
 
 
+_START_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_LATER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def _start_baseline(commit: str = _START_COMMIT) -> dict:
+    """The durable value SessionStore records for a repository with a commit."""
+
+    return {"version": 1, "kind": "commit", "commit": commit, "captured_at": 1.0}
+
+
+def _start_review(identity: dict, commit: str = _START_COMMIT, **overrides: object) -> dict:
+    """A review Core took against the session's own start revision."""
+
+    review: dict = {
+        "version": 2,
+        "mode": "complete",
+        "base": "start",
+        "base_commit": commit,
+        "commands": [["git", "diff", "--no-ext-diff", commit]],
+        "paths": [],
+        "complete": True,
+        "truncated": False,
+        "untracked": {
+            "listed": 0,
+            "shown": [],
+            "limited": [],
+            "excluded": [],
+            "truncated": False,
+        },
+    }
+    review.update(overrides)
+    return {"completion_identity": identity, "review": review}
+
+
+def test_a_review_against_the_durable_start_revision_closes_the_review(
+    tmp_path: Path,
+) -> None:
+    """The positive half of the contract: a start-relative review is current."""
+
+    record, core = _changed_record(tmp_path)
+    record.git_baseline = _start_baseline()
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result(_start_review(identity)))
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+def test_a_head_relative_review_is_not_a_review_against_the_start_revision(
+    tmp_path: Path,
+) -> None:
+    """An old-style review of "whatever HEAD is now" cannot close the floor.
+
+    This is the hole Mission 03 left open: the run's start revision is ``A``,
+    the model closed the obligation with a ``HEAD``-relative diff after an
+    elevated commit moved HEAD to ``C``, and that diff showed nothing. The
+    durable baseline is what makes the review's scope checkable, so a review
+    that never named it -- the version-1 shape -- is not evidence of coverage.
+    """
+
+    record, core = _changed_record(tmp_path)
+    record.git_baseline = _start_baseline()
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _complete_review(
+                identity,
+                untracked={
+                    "listed": 1,
+                    "shown": ["pkg/mod.py"],
+                    "limited": [],
+                    "excluded": [],
+                    "truncated": False,
+                },
+            )
+        )
+    )
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def test_a_review_taken_at_a_later_head_cannot_close_the_start_baseline(
+    tmp_path: Path,
+) -> None:
+    """A review of the moved tree is scoped to the wrong revision.
+
+    HEAD advanced from ``A`` to ``C`` during the run. A review relative to
+    ``C`` can be internally complete and carry the current completion identity
+    and still describe the wrong span, so the gate compares the base the review
+    names with the durable one.
+    """
+
+    record, core = _changed_record(tmp_path)
+    record.git_baseline = _start_baseline(_START_COMMIT)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(_start_review(identity, commit=_LATER_COMMIT))
+    )
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def test_a_legacy_review_without_a_durable_baseline_is_not_complete(
+    tmp_path: Path,
+) -> None:
+    """A session written before this field existed cannot be certified.
+
+    The record has no start revision, so the gate cannot tell which span a
+    review covered. It must not invent one from the current HEAD -- that would
+    present a moved tree as the original one -- and it must not accept the
+    version-1 shape as a substitute.
+    """
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _complete_review(
+                identity,
+                untracked={
+                    "listed": 1,
+                    "shown": ["pkg/mod.py"],
+                    "limited": [],
+                    "excluded": [],
+                    "truncated": False,
+                },
+            )
+        )
+    )
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [
+        pytest.param({"version": 1, "kind": "commit", "commit": "HEAD"}, id="a-ref-name"),
+        pytest.param({"version": 1, "kind": "commit", "commit": "0123456"}, id="short-sha"),
+        pytest.param({"version": 1, "kind": "commit"}, id="no-commit-field"),
+        pytest.param({"version": 1, "kind": "unknown"}, id="unknown-kind"),
+        pytest.param({"version": 2, "kind": "commit", "commit": _START_COMMIT}, id="future-version"),
+        pytest.param({"kind": "commit", "commit": _START_COMMIT}, id="no-version"),
+        pytest.param("commit", id="not-a-mapping"),
+    ],
+)
+def test_a_corrupt_start_revision_cannot_close_a_complete_review(
+    tmp_path: Path, baseline: object
+) -> None:
+    """A baseline is either an exact object id or it is not a baseline.
+
+    Corrupt or unknown metadata fails closed instead of being coerced into
+    something that would let a review through.
+    """
+
+    record, core = _changed_record(tmp_path)
+    record.git_baseline = baseline
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result(_start_review(identity)))
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def test_an_unborn_start_revision_matches_only_an_unborn_review(
+    tmp_path: Path,
+) -> None:
+    """A first-commit workflow stays valid while the repository has no commit.
+
+    The durable baseline says "unborn"; the review Core takes in that state
+    names the same thing. A review that claims a start commit instead belongs
+    to a different repository state and must not close the floor.
+    """
+
+    record, core = _changed_record(tmp_path)
+    record.git_baseline = {"version": 1, "kind": "unborn", "captured_at": 1.0}
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _start_review(
+                identity,
+                base="unborn",
+                base_commit=None,
+                untracked={
+                    "listed": 1,
+                    "shown": ["pkg/mod.py"],
+                    "limited": [],
+                    "excluded": [],
+                    "truncated": False,
+                },
+            )
+        )
+    )
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+    record.provider_history[-1] = _diff_result(_start_review(identity))
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def test_a_read_only_session_without_a_baseline_owes_no_review(
+    tmp_path: Path,
+) -> None:
+    """Read-only sessions keep working: with no changed file there is no review.
+
+    The fail-closed baseline rule is about proving coverage of a change. A run
+    that changed nothing inherits nothing to prove.
+    """
+
+    record, core = _changed_record(tmp_path)
+    record.changed_files = []
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
 def test_a_test_edit_ban_is_read_from_the_task() -> None:
     for task, banned in (
         (_NO_TEST_EDITS_TASK, True),

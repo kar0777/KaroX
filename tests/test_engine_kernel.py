@@ -52,6 +52,28 @@ def _git(repository: Path, *args: str) -> None:
     )
 
 
+def _head(repository: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+#: A local commit is the one capability the default workspace_write profile
+#: withholds; the in-session-commit tests below grant it via `elevated`.
+_ELEVATED_REVIEW_GRANTS = {
+    Capability.REPO_READ,
+    Capability.REPO_WRITE,
+    Capability.CHECKS_RUN,
+    Capability.PROCESS_RUN,
+    Capability.GIT_READ,
+    Capability.GIT_COMMIT,
+}
+
+
 @pytest.fixture()
 def repository(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -134,13 +156,14 @@ class Harness:
         task: str = "create hello.txt with hi",
         visual_checker: Any = None,
         allow_probes: bool = False,
+        access_profile: AccessProfile = AccessProfile.WORKSPACE_WRITE,
     ) -> None:
         self.repository = repository
         self.provider = ScriptedProvider(responses)
         self.events: List[AgentEvent] = []
         self.store = SessionStore(tmp_path / "sessions")
         self.origin = Origin(OriginKind.NATIVE_AGENT, "test-kernel")
-        policy = CapabilityPolicy(AccessProfile.WORKSPACE_WRITE)
+        policy = CapabilityPolicy(access_profile)
         policy.set_grants(
             self.origin,
             grants
@@ -166,7 +189,7 @@ class Harness:
             self.store.create(
                 repository,
                 task,
-                AccessProfile.WORKSPACE_WRITE,
+                access_profile,
                 session_id=session_id,
             )
         self.kernel = AgentKernel(
@@ -695,6 +718,247 @@ def test_a_complete_review_before_an_edit_is_retaken_on_the_final_bytes(
     stdout = completed[-1]["result"]["data"].get("stdout", "")
     assert "+ho" in stdout, stdout
     assert "+hi" not in stdout, stdout
+
+
+def test_a_commit_made_during_the_run_is_part_of_the_complete_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A commit inside the run must not hide the change from the review.
+
+    The session starts at HEAD ``A``. An elevated run writes ``hello.txt`` and
+    commits it, so HEAD becomes ``C``. A ``HEAD``-relative ``git diff`` now
+    reports an empty tracked change, and the run could be reported VERIFIED by
+    a review that never showed the deliverable. The closing review has to
+    describe the whole change since the session's own start revision, and the
+    gate has to accept only that scope.
+    """
+
+    start = _head(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response(
+                (
+                    _tool_call(
+                        "c2",
+                        "git_commit",
+                        {"message": "add hello", "paths": ["hello.txt"]},
+                    ),
+                )
+            ),
+            _response((_tool_call("c3", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_tool_call("c4", "git_diff", {"complete": True}),)),
+            _response((_finish_call("c5", "created hello.txt with hi"),)),
+        ],
+        access_profile=AccessProfile.ELEVATED,
+        grants=set(_ELEVATED_REVIEW_GRANTS),
+    )
+
+    report = harness.run()
+
+    assert _head(repository) != start, "the run did not actually commit its file"
+    diffs = _diff_entries(harness)
+    closing = diffs[-1]
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert "+hi" in stdout, stdout
+    review = _review_of(closing)
+    assert review.get("base_commit") == start, review
+    assert harness.record().git_baseline.get("commit") == start
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_a_first_commit_inside_an_unborn_run_cannot_clinch_a_complete_review(
+    tmp_path: Path,
+) -> None:
+    """A repository with no commit yet has no revision to review against.
+
+    A fresh repository is the documented first-commit workflow, and a new file
+    there is covered by the index-based view. Once the run commits that file,
+    though, the session's start state (nothing) cannot be compared with the new
+    commit through the index: the staged view is empty and the file is tracked,
+    so a "complete" review would describe no change at all. That case has to
+    fail closed instead of certifying the run.
+    """
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init", "-q")
+    _git(fresh, "config", "user.email", "test@example.invalid")
+    _git(fresh, "config", "user.name", "Test")
+    harness = Harness(
+        fresh,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response(
+                (
+                    _tool_call(
+                        "c2",
+                        "git_commit",
+                        {"message": "first commit", "paths": ["hello.txt"]},
+                    ),
+                )
+            ),
+            _response((_tool_call("c3", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_tool_call("c4", "git_diff", {"complete": True}),)),
+            _response((_finish_call("c5", "created hello.txt with hi"),)),
+            _response((_finish_call("c6", "created hello.txt with hi"),)),
+            _response((_finish_call("c7", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        access_profile=AccessProfile.ELEVATED,
+        grants=set(_ELEVATED_REVIEW_GRANTS),
+    )
+
+    report = harness.run()
+
+    assert harness.record().git_baseline.get("kind") == "unborn", harness.record().git_baseline
+    review = _review_of(_diff_entries(harness)[-1])
+    assert review.get("complete") is False, review
+    assert review.get("base") is None, review
+    assert report.verified is False, report.reason
+    assert "missing current change review" in report.unmet
+
+
+def test_a_commit_after_the_complete_review_does_not_hide_the_change(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A commit that only records already-reviewed bytes keeps the review valid.
+
+    This is the other half of the in-session commit case: the model reviews the
+    final bytes first and commits them afterwards. No byte the user received
+    changed since the review, so the run must still verify; asking for a second
+    review would be a false negative. The commit is made by the user's Git, not
+    by a tool, because nothing about the coverage depends on who ran it.
+    """
+
+    start = _head(repository)
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_tool_call("c3", "git_diff", {"complete": True}),)),
+            _response((_finish_call("c4", "created hello.txt with hi"),)),
+        ],
+    )
+    committed: List[str] = []
+
+    def commit_after_the_review(_provider: "ScriptedProvider") -> None:
+        if committed:
+            return
+        if not any(
+            entry.get("core_name") == "git.diff"
+            for entry in harness.record().provider_history
+        ):
+            return
+        _git(repository, "add", "hello.txt")
+        _git(repository, "commit", "-q", "-m", "user commits the reviewed bytes")
+        committed.append(_head(repository))
+
+    harness.provider.hook = commit_after_the_review
+
+    report = harness.run()
+
+    assert committed and committed[0] != start, "the post-review commit did not happen"
+    review = _review_of(_diff_entries(harness)[0])
+    assert review.get("base_commit") == start, review
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_a_complete_review_reads_staged_unstaged_and_new_files(
+    tmp_path: Path, repository: Path
+) -> None:
+    """One review shows both tracked halves and every new untracked file.
+
+    A staged edit, an unstaged edit and a new file are three different ways a
+    change reaches the user. Comparing the start revision with the working tree
+    covers the first two; the untracked collector adds the third.
+    """
+
+    (repository / "tracked.txt").write_text("one\n", encoding="utf-8")
+    (repository / "staged.txt").write_text("a\n", encoding="utf-8")
+    _git(repository, "add", "tracked.txt", "staged.txt")
+    _git(repository, "commit", "-q", "-m", "two tracked files")
+    start = _head(repository)
+    harness = Harness(repository, tmp_path, [], runtime_cls=ExtendedCoreRuntime)
+    (repository / "staged.txt").write_text("b\n", encoding="utf-8")
+    _git(repository, "add", "staged.txt")
+    (repository / "tracked.txt").write_text("two\n", encoding="utf-8")
+    (repository / "hello.txt").write_text("hi", encoding="utf-8")
+
+    result = harness.core.execute(
+        CoreCommand("git.diff", {"complete": True}, "s1", harness.origin)
+    )
+
+    review = result.data["review"]
+    stdout = result.data["stdout"]
+    assert review["base"] == "start", review
+    assert review["base_commit"] == start, review
+    assert review["complete"] is True, review
+    assert "+b" in stdout and "+two" in stdout, stdout
+    assert review["untracked"]["shown"] == ["hello.txt"], review
+    assert "+hi" in stdout, stdout
+
+
+def test_a_truncated_tracked_diff_is_not_a_complete_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A review that lost the middle of the diff cannot claim the whole change.
+
+    The output ceiling is lowered here instead of writing a megabyte: the
+    observable rule is the same, and it is the rule that matters, not the size
+    that triggers it. The change is tracked, so the truncated capture is the
+    tracked diff itself.
+    """
+
+    (repository / "big.txt").write_text(
+        "\n".join(f"old line {index}" for index in range(200)), encoding="utf-8"
+    )
+    _git(repository, "add", "big.txt")
+    _git(repository, "commit", "-q", "-m", "a large tracked file")
+    harness = Harness(repository, tmp_path, [], runtime_cls=ExtendedCoreRuntime)
+    harness.core.MAX_OUTPUT_BYTES = 200  # type: ignore[attr-defined]
+    (repository / "big.txt").write_text(
+        "\n".join(f"new line {index}" for index in range(200)), encoding="utf-8"
+    )
+
+    result = harness.core.execute(
+        CoreCommand("git.diff", {"complete": True}, "s1", harness.origin)
+    )
+
+    review = result.data["review"]
+    assert review["truncated"] is True, review
+    assert review["complete"] is False, review
+
+
+def test_a_review_without_a_start_revision_is_not_complete(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A session created before the baseline existed cannot prove its scope.
+
+    An already-persisted record has no start revision: the model could not have
+    supplied one, and inventing it from the current HEAD would present a moved
+    tree as the original one. The review still shows a best-effort diff, but it
+    cannot certify coverage.
+    """
+
+    harness = Harness(repository, tmp_path, [], runtime_cls=ExtendedCoreRuntime)
+    with harness.store.mutate("s1", "test") as record:
+        record.git_baseline = {}
+    (repository / "hello.txt").write_text("hi", encoding="utf-8")
+
+    result = harness.core.execute(
+        CoreCommand("git.diff", {"complete": True}, "s1", harness.origin)
+    )
+
+    review = result.data["review"]
+    assert review["complete"] is False, review
+    assert review["base"] is None, review
+    assert "+hi" in result.data["stdout"]
 
 
 def test_engine_runs_independent_calls_batched_in_one_response(
