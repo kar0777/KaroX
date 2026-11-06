@@ -61,6 +61,9 @@ from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
     REWRITE_PRESSURE_TOKENS,
     EngineProviderModel,
+    _ELIDABLE_ARGUMENT_TOOLS,
+    _ELIDED_ARGUMENT_CHARS,
+    _elided_argument_marker,
     _response_from_engine_message,
 )
 
@@ -337,12 +340,30 @@ _ENGINE_IDENTITY: Dict[str, str] = {
 
 
 _STALE_READ_TOOLS = {"repo_read_file", "repo_read_lines"}
-_STALE_EDIT_TOOLS = {"repo_edit_file"}
+_STALE_EDIT_TOOLS = {"repo_edit_file", "repo_write_file", "repo_apply_patch"}
 _STALE_READ_MARKER = (
     "[KaroX: this read predates a later edit of the same file; "
     "re-read exact lines if needed]"
 )
 _STALE_READ_CHARS = 1_200
+
+
+def _touched_edit_paths(name: str, arguments: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Relative repository paths modified by a write, edit, or patch tool call."""
+
+    paths: List[str] = []
+    path = arguments.get("path")
+    if isinstance(path, str) and path:
+        paths.append(path)
+    if name == "repo_apply_patch":
+        patch_text = arguments.get("patch")
+        if isinstance(patch_text, str):
+            for line in patch_text.splitlines():
+                if line.startswith(("+++ b/", "--- a/")):
+                    candidate = line[6:].strip()
+                    if candidate and candidate != "/dev/null" and candidate not in paths:
+                        paths.append(candidate)
+    return tuple(paths)
 
 
 class EngineAgent(DefaultAgent):
@@ -437,17 +458,48 @@ class EngineAgent(DefaultAgent):
             raise _EngineBudgetExceeded(reason)
         return message
 
-    def _supersede_stale_reads(self) -> None:
-        """Shrink a read once the same file has been edited after it.
+    def _estimate_tokens(self) -> int:
+        """Estimate the wire prompt tokens, accounting for elided write arguments."""
 
-        A repair run reads a file, edits it, then re-sends the full original
-        read on every later request. The edit result carries the diff and the
-        read is no longer the current file, so the body is clipped to a marker
-        with both ends: enough context to keep working, and an explicit note
-        that exact lines need a fresh read. The durable session record keeps the
-        full result; only the in-memory transcript shrinks.
+        base_chars = super()._estimate_tokens() * 4
+        elided = getattr(self.model, "_elided_calls", None)
+        if not isinstance(elided, set) or not elided:
+            return base_chars // 4
+        saved = 0
+        for message in self.messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or ():
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("call_id") or "")
+                name = str(call.get("name") or "")
+                raw = str(call.get("raw_arguments") or "")
+                if (
+                    call_id in elided
+                    and name in _ELIDABLE_ARGUMENT_TOOLS
+                    and len(raw) > _ELIDED_ARGUMENT_CHARS
+                ):
+                    saved += max(0, len(raw) - len(_elided_argument_marker(name)))
+        return max(0, base_chars - saved) // 4
+
+    def _supersede_stale_reads(self, *, force: bool = False) -> None:
+        """Coordinated in-place history shrink for superseded reads and old writes.
+
+        A repair run reads a file, edits or overwrites it, then re-sends the
+        full original read on every later request. Meanwhile, older completed
+        whole-file writes and patches carry arguments that are already on disk.
+        Coordinating both into a single batch decision prevents two separate
+        prefix-cache invalidations a few turns apart, and keeps ``self.messages``
+        and ``_elided_calls`` synchronized before ``super().manage_context()``
+        decides whether middle messages must be dropped.
         """
 
+        tool_messages = {
+            str(message.get("tool_call_id") or ""): message
+            for message in self.messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        }
         edits: Dict[str, int] = {}
         reads: List[tuple[int, str, str]] = []
         for index, message in enumerate(self.messages):
@@ -465,20 +517,21 @@ class EngineAgent(DefaultAgent):
                     continue
                 if not isinstance(arguments, dict):
                     continue
-                path = arguments.get("path")
-                if not isinstance(path, str) or not path:
-                    continue
+                call_id = str(call.get("call_id") or "")
                 if name in _STALE_EDIT_TOOLS:
-                    edits[path] = index
+                    tool_msg = tool_messages.get(call_id)
+                    tool_text = str(tool_msg.get("content") or "") if tool_msg else ""
+                    if (
+                        "<returncode>" in tool_text
+                        and "<returncode>0</returncode>" not in tool_text
+                    ):
+                        continue
+                    for path in _touched_edit_paths(name, arguments):
+                        edits[path] = index
                 else:
-                    reads.append((index, path, str(call.get("call_id") or "")))
-        if not edits:
-            return
-        tool_messages = {
-            str(message.get("tool_call_id") or ""): message
-            for message in self.messages
-            if isinstance(message, dict) and message.get("role") == "tool"
-        }
+                    read_path = arguments.get("path")
+                    if isinstance(read_path, str) and read_path:
+                        reads.append((index, read_path, call_id))
         stale: List[tuple[Dict[str, Any], str]] = []
         for read_index, path, call_id in reads:
             edit_index = edits.get(path)
@@ -495,22 +548,46 @@ class EngineAgent(DefaultAgent):
             ):
                 continue
             stale.append((tool_message, content))
-        if not stale:
+        pending_fn = getattr(self.model, "pending_elidable_writes", None)
+        pending_writes: List[tuple[str, str, int]] = (
+            list(pending_fn(self.messages)) if callable(pending_fn) else []
+        )
+        reclaimable_reads = sum(len(content) - _STALE_READ_CHARS for _, content in stale)
+        reclaimable_writes = sum(size for _, _, size in pending_writes)
+        total_reclaimable = reclaimable_reads + reclaimable_writes
+        if total_reclaimable <= 0:
             return
-        # Clipping rewrites a message the provider may hold in its prompt
-        # cache; on a caching provider that re-bills the whole suffix after the
-        # read, so the model layer decides when the shrink is worth it.
-        allowed = getattr(self.model, "history_rewrite_allowed", None)
-        reclaimable = sum(len(content) - _STALE_READ_CHARS for _, content in stale)
-        if callable(allowed) and not allowed(reclaimable):
-            return
+        # Clipping or eliding rewrites a message the provider may hold in its
+        # prompt cache; on a caching provider that re-bills the whole suffix
+        # after the earliest changed message, so both mechanisms share one
+        # batch gate and execute together on the same turn.
+        if not force:
+            allowed = getattr(self.model, "history_rewrite_allowed", None)
+            if callable(allowed):
+                try:
+                    permitted = allowed(
+                        total_reclaimable, estimated_tokens=self._estimate_tokens()
+                    )
+                except TypeError:
+                    permitted = allowed(total_reclaimable)
+                if not permitted:
+                    return
         for tool_message, content in stale:
             tool_message["content"] = self._clip_text(
                 content, _STALE_READ_CHARS, _STALE_READ_MARKER
             )
+        if pending_writes:
+            elide_fn = getattr(self.model, "elide_calls", None)
+            if callable(elide_fn):
+                elide_fn(call_id for call_id, _, _ in pending_writes)
+        note_fn = getattr(self.model, "note_history_rewritten", None)
+        if callable(note_fn):
+            note_fn(total_reclaimable)
 
     def manage_context(self) -> None:
-        self._supersede_stale_reads()
+        budget = self.config.context_token_budget
+        over_budget = budget > 0 and self._estimate_tokens() > budget
+        self._supersede_stale_reads(force=over_budget)
         events_before = self.n_context_events
         estimate_before = self._estimate_tokens()
         super().manage_context()
@@ -554,13 +631,17 @@ class EngineAgent(DefaultAgent):
             for index, message in enumerate(self.messages):
                 if message.get("role") == "user":
                     self._briefing_target = index
-                    self._briefing_base = str(message.get("content") or "")
+                    raw_base = str(message.get("content") or "")
+                    marker = "\n\n[KaroX durable state (kept across context compaction)]"
+                    if marker in raw_base:
+                        raw_base = raw_base.split(marker, 1)[0]
+                    self._briefing_base = raw_base
                     break
         if self._briefing_target is None or self._briefing_target >= len(self.messages):
             return
-        self.messages[self._briefing_target]["content"] = (
-            f"{self._briefing_base}\n\n{briefing}"
-        )
+        updated = f"{self._briefing_base}\n\n{briefing}"
+        if self.messages[self._briefing_target].get("content") != updated:
+            self.messages[self._briefing_target]["content"] = updated
 
     def _check_no_progress(self, message: Dict[str, Any], outputs: List[Dict[str, Any]]) -> None:
         """Same contract as the engine's port 4, with a typed-action key.
@@ -1023,11 +1104,7 @@ class EngineKernel:
                 event=self._model_event,
                 deadline_seconds=lambda: _model_request_deadline(self.remaining_seconds()),
                 images=self.request_images,
-                # Half the compaction budget, capped: the history is shrunk in
-                # place well before compaction has to drop anything.
-                rewrite_pressure_tokens=min(
-                    REWRITE_PRESSURE_TOKENS, max(8_000, self._engine_context_budget() // 2)
-                ),
+                rewrite_pressure_tokens=self._rewrite_pressure_tokens(),
                 # One key per session: every step shares the prefix, and a
                 # resumed session keeps routing to the cache its prefix built.
                 cache_key="karox-"
@@ -1307,6 +1384,31 @@ class EngineKernel:
         if reserve > 0:
             ceiling = max(1_000, ceiling - reserve)
         return max(1_000, int(ceiling * 0.75))
+
+    def _rewrite_pressure_tokens(self) -> int:
+        """Token threshold at which a caching run rewrites stale history in one batch.
+
+        For unknown or small (<=128K) context windows, ``REWRITE_PRESSURE_TOKENS``
+        (96K) remains the ceiling so a request never approaches a 120K-128K limit
+        before shrinking. For larger advertised windows (e.g. 256K or 1M), the
+        threshold is derived from the usable input budget after reserving room
+        for completion output tokens, system prompt + tool schemas, and new
+        messages before ``_engine_context_budget()`` triggers hard compaction.
+        """
+        budget = self._engine_context_budget()
+        window = self.context.max_input_tokens
+        if not self.context.window_known or window is None or window <= 128_000:
+            return min(REWRITE_PRESSURE_TOKENS, max(8_000, budget // 2))
+        ceiling = max(1_000, int(self.context.token_ceiling))
+        output_reserve = (
+            int(self.max_output_tokens)
+            if self.max_output_tokens is not None and self.max_output_tokens > 0
+            else int(window * 0.20)
+        )
+        usable_ceiling = max(1_000, ceiling - output_reserve)
+        usable_budget = min(budget, max(1_000, int(usable_ceiling * 0.75)))
+        headroom = max(24_000, usable_budget // 4)
+        return max(8_000, usable_budget - headroom)
 
     def _seed_history(
         self, session_id: str, lease: MutationLease, record: SessionRecord

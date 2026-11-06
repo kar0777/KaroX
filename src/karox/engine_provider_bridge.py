@@ -482,7 +482,9 @@ class EngineProviderModel:
         ).hexdigest()[:12]
         return f"{self._cache_key_base}-{static}"
 
-    def history_rewrite_allowed(self, reclaimable_chars: int) -> bool:
+    def history_rewrite_allowed(
+        self, reclaimable_chars: int, *, estimated_tokens: int = 0
+    ) -> bool:
         """Whether shrinking old history now is worth the cache it breaks.
 
         Without a cache every request pays its whole prompt, so any shrink is
@@ -493,10 +495,46 @@ class EngineProviderModel:
 
         if not self.prompt_cache_seen:
             return True
+        effective_tokens = max(self.last_prompt_tokens, int(estimated_tokens))
         return (
-            self.last_prompt_tokens >= self.rewrite_pressure_tokens
+            effective_tokens >= self.rewrite_pressure_tokens
             and int(reclaimable_chars) >= REWRITE_BATCH_CHARS
         )
+
+    def pending_elidable_writes(
+        self, messages: Sequence[Mapping[str, Any]]
+    ) -> List[tuple[str, str, int]]:
+        """Completed large write calls eligible for argument elision.
+
+        Returns ``(call_id, name, reclaimable_chars)`` for completed
+        ``_ELIDABLE_ARGUMENT_TOOLS`` calls older than ``_ELIDED_ARGUMENT_KEEP``
+        that have not been elided yet.
+        """
+
+        large = [
+            (call_id, name, size)
+            for call_id, name, size in _completed_calls(messages)
+            if name in _ELIDABLE_ARGUMENT_TOOLS and size > _ELIDED_ARGUMENT_CHARS
+        ]
+        keep = {call_id for call_id, _, _ in large[-_ELIDED_ARGUMENT_KEEP:]}
+        return [
+            (call_id, name, size)
+            for call_id, name, size in large
+            if call_id not in keep and call_id not in self._elided_calls
+        ]
+
+    def elide_calls(self, call_ids: Iterable[str]) -> None:
+        """Mark completed tool calls as argument-elided on all subsequent wire requests."""
+
+        self._elided_calls.update(str(call_id) for call_id in call_ids if call_id)
+
+    def note_history_rewritten(self, reclaimed_chars: int) -> None:
+        """Adjust ``last_prompt_tokens`` immediately after an in-place history shrink."""
+
+        if reclaimed_chars > 0 and self.last_prompt_tokens > 0:
+            self.last_prompt_tokens = max(
+                1, self.last_prompt_tokens - (int(reclaimed_chars) // 4)
+            )
 
     def _note_usage(self, usage: Any) -> None:
         if not isinstance(usage, Mapping):
@@ -568,19 +606,9 @@ class EngineProviderModel:
 
     def _request_messages(self, messages: Iterable[Mapping[str, Any]]) -> Tuple[ModelMessage, ...]:
         entries = list(messages)
-        large = [
-            (call_id, size)
-            for call_id, name, size in _completed_calls(entries)
-            if name in _ELIDABLE_ARGUMENT_TOOLS and size > _ELIDED_ARGUMENT_CHARS
-        ]
-        keep = {call_id for call_id, _ in large[-_ELIDED_ARGUMENT_KEEP:]}
-        pending = [
-            (call_id, size)
-            for call_id, size in large
-            if call_id not in keep and call_id not in self._elided_calls
-        ]
-        if pending and self.history_rewrite_allowed(sum(size for _, size in pending)):
-            self._elided_calls.update(call_id for call_id, _ in pending)
+        pending = self.pending_elidable_writes(entries)
+        if pending and self.history_rewrite_allowed(sum(size for _, _, size in pending)):
+            self.elide_calls(call_id for call_id, _, _ in pending)
         first_user_seen = False
         converted: List[ModelMessage] = []
         for entry in entries:
