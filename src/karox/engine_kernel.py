@@ -1967,7 +1967,12 @@ class EngineKernel:
             target = self._render_target(record)
             if target is not None:
                 visual_calls = (("visual.check", {"path": target.name}),)
-        return (*calls, *visual_calls, ("git.status", {}), ("git.diff", {}))
+        return (
+            *calls,
+            *visual_calls,
+            ("git.status", {}),
+            ("git.diff", {"complete": True}),
+        )
 
     def _render_target(self, record: SessionRecord) -> Optional[pathlib.Path]:
         """The page the harness's closing look judges: the run's own first.

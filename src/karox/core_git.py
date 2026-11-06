@@ -7,15 +7,25 @@ process runner and the file tools it shares.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .core_types import CoreError, InvalidCommand
 from .models import EvidenceRecord
-from .security import contains_credential
+from .security import contains_credential, redact
 
 
 class GitToolsMixin:
     """Git methods mixed into :class:`karox.core.CoreRuntime`."""
+
+    #: A complete change review appends every new untracked file as its own
+    #: new-file diff. These bounds keep one closing review from turning a
+    #: repository with an untracked dependency tree into an unbounded read: the
+    #: listing fails closed past the file ceiling, and each file's text is
+    #: bounded like a read, with a digest marker beyond it.
+    REVIEW_MAX_UNTRACKED_FILES = 200
+    REVIEW_MAX_UNTRACKED_CHARS = 20_000
+    REVIEW_MAX_UNTRACKED_TOTAL_CHARS = 400_000
 
     def _git(
         self,
@@ -61,12 +71,257 @@ class GitToolsMixin:
         staged = arguments.get("staged", False)
         if not isinstance(staged, bool):
             raise InvalidCommand("staged must be boolean")
+        complete = arguments.get("complete", False)
+        if not isinstance(complete, bool):
+            raise InvalidCommand("complete must be boolean")
+        if complete:
+            if staged:
+                raise InvalidCommand("complete cannot be combined with staged")
+            if arguments.get("paths"):
+                raise InvalidCommand("complete cannot be combined with paths")
+            return self._complete_change_review(deadline_seconds)
         command = ["diff", "--no-ext-diff"]
         if staged:
             command.append("--cached")
+        return self._git_diff_result(command, [], deadline_seconds)
+
+    def _git_diff_result(
+        self,
+        command: List[str],
+        relatives: List[str],
+        deadline_seconds: float,
+    ) -> Dict[str, Any]:
+        """Run one scoped diff and record the scope it actually covered."""
+
         result = self._git(command, deadline_seconds)
+        result["paths"] = list(relatives)
+        result["review"] = {
+            "version": 1,
+            "mode": "staged" if "--cached" in command else "worktree",
+            "base": None,
+            "paths": list(relatives),
+            "complete": False,
+            "truncated": bool(result.get("stdout_truncated")),
+        }
         result["_evidence"] = [self._git_evidence("git_diff", result)]
         return result
+
+    def _complete_change_review(self, deadline_seconds: float) -> Dict[str, Any]:
+        """Read the whole current change against HEAD, new files included.
+
+        ``git diff HEAD`` is the one tracked view that holds both staged and
+        unstaged edits; a plain ``git diff`` shows only the unstaged half and
+        ``--cached`` only the index half, so neither can stand for the change a
+        run is about to hand over. New files are absent from every view, so
+        each untracked file is appended as its own new-file diff. A repository
+        without a commit has no HEAD to compare with: there the index plays
+        that part, and the untracked half covers the rest.
+
+        The returned ``review`` block is the coverage the trusted Core actually
+        executed. The completion gate reads it instead of the caller's claim,
+        so a model asking for ``complete`` cannot widen what the commands saw.
+        """
+
+        head = self._git(["rev-parse", "--verify", "HEAD"], deadline_seconds)
+        has_head = head.get("exit_code") == 0 and not head.get("timed_out")
+        command = ["diff", "--no-ext-diff", "HEAD" if has_head else "--cached"]
+        result = self._git(command, deadline_seconds)
+        result["paths"] = []
+        tracked_ok = result.get("exit_code") == 0 and not result.get("timed_out")
+        untracked: Dict[str, Any] = {
+            "listed": 0,
+            "shown": [],
+            "limited": [],
+            "excluded": [],
+            "truncated": False,
+        }
+        if tracked_ok:
+            result["stdout"] = self._append_untracked_review(
+                str(result.get("stdout") or ""), untracked, deadline_seconds
+            )
+            text = str(result["stdout"])
+            result["stdout_bytes"] = len(text.encode("utf-8"))
+            result["stdout_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        reviewed = bool(
+            tracked_ok
+            and not result.get("stdout_truncated")
+            and not untracked["truncated"]
+        )
+        result["review"] = {
+            "version": 1,
+            "mode": "complete",
+            "base": "HEAD" if has_head else "index",
+            "paths": [],
+            "complete": reviewed,
+            "truncated": bool(
+                result.get("stdout_truncated") or untracked["truncated"]
+            ),
+            "untracked": untracked,
+        }
+        result["_evidence"] = [self._git_evidence("git_diff", result)]
+        return result
+
+    def _append_untracked_review(
+        self,
+        text: str,
+        untracked: Dict[str, Any],
+        deadline_seconds: float,
+    ) -> str:
+        """Append every new unreferenced file to the tracked diff as a review."""
+
+        # Imported lazily: ``core_tools`` builds on this module, and the ignore
+        # rule is the same one the file tools use, so a vendored dependency tree
+        # cannot turn a review into thousands of irrelevant new-file diffs.
+        from .core_tools import is_ignored_path
+
+        listed = self._git(
+            ["ls-files", "--others", "--exclude-standard", "-z"], deadline_seconds
+        )
+        if listed.get("exit_code") != 0 or listed.get("timed_out"):
+            untracked["truncated"] = True
+            return text + (
+                "\n[karox: the untracked-file list could not be read; "
+                "this review does not cover new files]\n"
+            )
+        raw_paths = [
+            item for item in str(listed.get("stdout") or "").split("\0") if item
+        ]
+        untracked["listed"] = len(raw_paths)
+        relative_paths = []
+        for relative in raw_paths:
+            parts = Path(relative).parts
+            if not parts or parts[0].lower() in {".git", ".karox"}:
+                continue
+            if is_ignored_path(relative):
+                # Not source material: the file tools already refuse to list
+                # it. A run can still write there, so the path is recorded as
+                # excluded and the gate refuses to call the change reviewed.
+                untracked["excluded"].append(relative)
+                continue
+            relative_paths.append(relative)
+        if len(relative_paths) > self.REVIEW_MAX_UNTRACKED_FILES:
+            untracked["truncated"] = True
+            relative_paths = relative_paths[: self.REVIEW_MAX_UNTRACKED_FILES]
+        sections: List[str] = []
+        budget = self.REVIEW_MAX_UNTRACKED_TOTAL_CHARS
+        for relative in relative_paths:
+            section, state, spent = self._untracked_review_section(relative, budget)
+            sections.append(section)
+            untracked[state].append(relative)
+            budget -= spent
+        return text + "".join(sections)
+
+    def _untracked_review_section(
+        self, relative: str, budget: int
+    ) -> tuple[str, str, int]:
+        """One new-file diff, bounded and redacted; returns (text, state, spent).
+
+        ``shown`` means the whole textual file is in the review. ``limited``
+        means it is represented by a marker instead: binary content, a file
+        over the read ceiling, a symlink outside the readable tree, or a file
+        the total budget no longer had room for. The marker names the path and,
+        where it was read, its size and digest -- never silence.
+        """
+
+        section, state, spent = self._untracked_review_text(relative, budget)
+        # Untracked bytes never pass through ``_run``'s stdout redaction, so the
+        # captured-output display rule is applied here instead.
+        return (str(redact(section)), state, spent)
+
+    def _untracked_review_text(
+        self, relative: str, budget: int
+    ) -> tuple[str, str, int]:
+        header = (
+            f"\ndiff --git a/{relative} b/{relative}\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            f"+++ b/{relative}\n"
+        )
+        try:
+            path = self.safe_path(relative)
+        except Exception:  # noqa: BLE001 - an unreadable new path is a marker
+            return (
+                header
+                + f"[karox: new path not shown: {relative} "
+                "(outside the readable repository tree)]\n",
+                "limited",
+                0,
+            )
+        try:
+            if not path.is_file():
+                return (
+                    header
+                    + f"[karox: untracked path vanished before its review: "
+                    f"{relative}]\n",
+                    "limited",
+                    0,
+                )
+            size = path.stat().st_size
+        except OSError:
+            return (
+                header + f"[karox: untracked path not readable: {relative}]\n",
+                "limited",
+                0,
+            )
+        if budget <= 0:
+            return (
+                header
+                + f"[karox: not shown, the review content budget is spent: "
+                f"{relative} ({size} bytes)]\n",
+                "limited",
+                0,
+            )
+        raw = b""
+        digest = None
+        if size <= self.MAX_FILE_BYTES:
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                return (
+                    header + f"[karox: untracked path not readable: {relative}]\n",
+                    "limited",
+                    0,
+                )
+            digest = hashlib.sha256(raw).hexdigest()
+        identity = f"{size} bytes" + (f", sha256 {digest}" if digest else "")
+        if size > self.MAX_FILE_BYTES:
+            return (
+                header
+                + f"[karox: new file not shown, larger than the review read "
+                f"limit: {relative} ({identity})]\n",
+                "limited",
+                0,
+            )
+        if b"\0" in raw[:8192]:
+            return (
+                header
+                + f"Binary file {relative} ({identity}) has no textual diff\n",
+                "limited",
+                0,
+            )
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return (
+                header
+                + f"Binary file {relative} ({identity}) has no textual diff\n",
+                "limited",
+                0,
+            )
+        if not content:
+            return (header + "new empty file\n", "shown", 0)
+        limit = min(self.REVIEW_MAX_UNTRACKED_CHARS, max(0, budget))
+        shown = content[:limit]
+        lines = shown.splitlines()
+        body = "".join(f"+{line}\n" for line in lines)
+        section = header + f"@@ -0,0 +1,{len(lines)} @@\n" + body
+        limited = len(shown) < len(content)
+        if limited:
+            section += (
+                f"[karox: only the first {len(shown)} characters of this "
+                f"{identity} file are shown]\n"
+            )
+        return (section, "limited" if limited else "shown", len(shown))
 
     def _prepare_commit(self, arguments: Dict[str, Any]) -> tuple[str, List[str]]:
         message = self._required(arguments, "message", str)

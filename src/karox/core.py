@@ -298,7 +298,18 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
                 False,
                 {
                     "type": "object",
-                    "properties": {"staged": {"type": "boolean"}},
+                    "properties": {
+                        "staged": {"type": "boolean"},
+                        "complete": {
+                            "type": "boolean",
+                            "description": (
+                                "Read the whole current change against HEAD: "
+                                "staged and unstaged tracked edits plus every "
+                                "new untracked file. Cannot be combined with "
+                                "staged or with paths."
+                            ),
+                        },
+                    },
                     "additionalProperties": False,
                 },
             ),

@@ -412,13 +412,22 @@ class ExtendedCoreRuntime(CoreRuntime):
         self._definitions["git.diff"] = replace(
             base_diff,
             description=(
-                "Read the current Git diff, optionally limited to given paths."
+                "Read the current Git diff, optionally limited to given paths, "
+                "or the complete change against HEAD when complete=true."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "staged": {"type": "boolean"},
                     "paths": {"type": "array", "items": {"type": "string"}},
+                    "complete": {
+                        "type": "boolean",
+                        "description": (
+                            "Read the whole current change against HEAD: staged "
+                            "and unstaged tracked edits plus every new untracked "
+                            "file. Cannot be combined with staged or with paths."
+                        ),
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -1463,6 +1472,9 @@ class ExtendedCoreRuntime(CoreRuntime):
         staged = arguments.get("staged", False)
         if not isinstance(staged, bool):
             raise InvalidCommand("staged must be boolean")
+        complete = arguments.get("complete", False)
+        if not isinstance(complete, bool):
+            raise InvalidCommand("complete must be boolean")
         raw_paths = arguments.get("paths", [])
         if not isinstance(raw_paths, list):
             raise InvalidCommand("paths must be array")
@@ -1481,16 +1493,19 @@ class ExtendedCoreRuntime(CoreRuntime):
             relative = resolved.relative_to(self.repository).as_posix()
             if relative not in relatives:
                 relatives.append(relative)
+        if complete:
+            if staged:
+                raise InvalidCommand("complete cannot be combined with staged")
+            if relatives:
+                raise InvalidCommand("complete cannot be combined with paths")
+            return self._complete_change_review(deadline_seconds)
         command = ["diff", "--no-ext-diff"]
         if staged:
             command.append("--cached")
         if relatives:
             command.append("--")
             command.extend(relatives)
-        result = self._git(command, deadline_seconds)
-        result["paths"] = list(relatives)
-        result["_evidence"] = [self._git_evidence("git_diff", result)]
-        return result
+        return self._git_diff_result(command, relatives, deadline_seconds)
 
     # -- repo.list_files --------------------------------------------------
 

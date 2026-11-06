@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from karox import completion_gate
 
 TASK = "Build a three.js aquarium page with exactly three clownfish."
@@ -572,34 +574,179 @@ def test_a_review_of_old_bytes_is_not_current_after_an_edit(tmp_path: Path) -> N
     review of the current bytes instead of accepting the old one.
     """
 
-    target = tmp_path / "pkg" / "mod.py"
-    target.parent.mkdir()
+    record, core = _changed_record(tmp_path)
+    reviewed = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result(_complete_review(reviewed)))
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+    (tmp_path / "pkg" / "mod.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def _changed_record(
+    repository: Path, relative: str = "pkg/mod.py"
+) -> tuple[SimpleNamespace, _Core]:
+    target = repository / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("VALUE = 1\n", encoding="utf-8")
     record = SimpleNamespace(
-        changed_files=["pkg/mod.py"],
+        changed_files=[relative],
         task="Fix the units conversion.",
         requirements=[],
         evidence=[],
         provider_history=[],
     )
-    core = _Core(tmp_path)
-    reviewed = completion_gate.identity(core, record)
-    record.provider_history.append(
-        {
-            "role": "tool",
-            "core_name": "git.diff",
-            "result": {
-                "ok": True,
-                "requested_by": None,
-                "data": {"completion_identity": reviewed},
-            },
-        }
-    )
-    assert "missing current change review" not in completion_gate.floor(core, record)
+    return record, _Core(repository)
 
-    target.write_text("VALUE = 2\n", encoding="utf-8")
+
+def _complete_review(identity: dict, **overrides: object) -> dict:
+    """A git.diff result whose trusted scope metadata says what it read.
+
+    These fields are produced by Core from the commands it executed; the tests
+    vary them only to model results an older Core, a failed command or a
+    narrower command would have returned.
+    """
+
+    review: dict = {
+        "version": 1,
+        "mode": "complete",
+        "base": "HEAD",
+        "paths": [],
+        "complete": True,
+        "truncated": False,
+        "untracked": {
+            "listed": 0,
+            "shown": [],
+            "limited": [],
+            "excluded": [],
+            "truncated": False,
+        },
+    }
+    review.update(overrides)
+    return {"completion_identity": identity, "review": review}
+
+
+def _diff_result(data: dict, *, ok: bool = True) -> dict:
+    return {
+        "role": "tool",
+        "core_name": "git.diff",
+        "result": {"ok": ok, "requested_by": None, "evidence": [], "data": data},
+    }
+
+
+@pytest.mark.parametrize(
+    "review",
+    [
+        pytest.param({"mode": "worktree"}, id="unstaged-only"),
+        pytest.param({"mode": "staged"}, id="staged-only"),
+        pytest.param({"mode": "worktree", "paths": ["pkg/mod.py"]}, id="path-filtered"),
+        pytest.param({"mode": "complete", "complete": False}, id="scope-incomplete"),
+        pytest.param({"mode": "complete", "truncated": True}, id="truncated"),
+        pytest.param(
+            {"mode": "complete", "paths": ["pkg/mod.py"]}, id="complete-with-filter"
+        ),
+        pytest.param({"mode": "complete", "base": "worktree"}, id="wrong-base"),
+        pytest.param(
+            {
+                "mode": "complete",
+                "untracked": {
+                    "listed": 1,
+                    "shown": [],
+                    "limited": [],
+                    "excluded": ["pkg/mod.py"],
+                    "truncated": False,
+                },
+            },
+            id="deliverable-excluded-from-the-review",
+        ),
+    ],
+)
+def test_an_incomplete_diff_never_discharges_the_change_review(
+    tmp_path: Path, review: dict
+) -> None:
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result(_complete_review(identity, **review)))
 
     assert "missing current change review" in completion_gate.floor(core, record)
+
+
+@pytest.mark.parametrize("base", ["HEAD", "index"])
+def test_a_complete_review_of_the_current_bytes_discharges_the_review(
+    tmp_path: Path, base: str
+) -> None:
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _complete_review(
+                identity,
+                base=base,
+                untracked={
+                    "listed": 1,
+                    "shown": ["pkg/mod.py"],
+                    "limited": [],
+                    "excluded": [],
+                    "truncated": False,
+                },
+            )
+        )
+    )
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+def test_an_excluded_path_the_run_did_not_change_still_reviews(tmp_path: Path) -> None:
+    """Only the run's own excluded deliverable blocks the review.
+
+    A repository can hold unrelated untracked files inside ignored directories
+    (a dependency tree, a build output). The review names them as excluded; a
+    file this run never touched must not keep every run in that repository
+    unverified.
+    """
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _complete_review(
+                identity,
+                untracked={
+                    "listed": 2,
+                    "shown": ["pkg/mod.py"],
+                    "limited": [],
+                    "excluded": ["node_modules/left-pad/index.js"],
+                    "truncated": False,
+                },
+            )
+        )
+    )
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+def test_a_failed_diff_is_never_a_review(tmp_path: Path) -> None:
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result(_complete_review(identity), ok=False))
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
+
+def test_a_legacy_diff_without_scope_metadata_is_not_a_review(tmp_path: Path) -> None:
+    """A persisted result from before the scope field cannot claim coverage.
+
+    The gate must fail closed on evidence it cannot read, or a resumed old
+    session could close on a partial diff it recorded before this change.
+    """
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(_diff_result({"completion_identity": identity}))
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
 
 _NO_TEST_EDITS_TASK = (
     "Complete the task below. Do not modify tests, the public check, or any "

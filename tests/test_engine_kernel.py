@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 
 import pytest
 
+from karox import completion_gate
 from karox.agent import AgentEvent, AgentEventKind, AgentKernel, SYSTEM_PROMPT
 from karox.agent import AgentLimits, ContextBudget
 from karox.core import CoreRuntime
@@ -366,6 +367,334 @@ def test_an_edit_that_changed_nothing_keeps_the_evidence_chain(
         and (entry.get("result") or {}).get("requested_by") == "harness_final"
     ]
     assert harness_calls == ["git.status", "git.diff"]
+
+
+def _diff_entries(harness: "Harness") -> List[dict]:
+    return [
+        entry
+        for entry in harness.record().provider_history
+        if entry.get("core_name") == "git.diff" and isinstance(entry.get("result"), dict)
+    ]
+
+
+def _review_of(entry: dict) -> dict:
+    data = entry.get("result", {}).get("data")
+    return data.get("review") if isinstance(data, dict) and isinstance(data.get("review"), dict) else {}
+
+
+def _harness_final_names(harness: "Harness") -> List[str]:
+    return [
+        entry.get("core_name")
+        for entry in harness.record().provider_history
+        if entry.get("role") == "tool"
+        and (entry.get("result") or {}).get("requested_by") == "harness_final"
+    ]
+
+
+def test_a_path_filtered_diff_does_not_discharge_the_change_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Two edited files and a diff of one of them is not a review of the change.
+
+    The model closes a complete-looking chain (write, check, status, diff), but
+    its diff is limited to a.py. Before the fix the last ``git.diff`` alone
+    carried the current completion identity, so the floor called the review
+    current, the harness ran nothing, and the report said VERIFIED while b.py
+    was never shown to anyone. The closing review must cover the whole tracked
+    change, and the harness must obtain it without another model turn.
+    """
+
+    (repository / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (repository / "b.py").write_text("B = 1\n", encoding="utf-8")
+    _git(repository, "add", "a.py", "b.py")
+    _git(repository, "commit", "-q", "-m", "two files")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "a.py", "A = 2\n"),)),
+            _response((_write_call("c2", "b.py", "B = 2\n"),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call("c4", "git_status", {}),
+                    _tool_call("c5", "git_diff", {"paths": ["a.py"]}),
+                )
+            ),
+            _response((_finish_call("c6", "updated both files"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    assert len(harness.provider.requests) == 5, "the closing review cost a model call"
+    diffs = _diff_entries(harness)
+    partial = diffs[0]
+    assert _review_of(partial).get("mode") == "worktree", partial
+    assert _review_of(partial).get("complete") is False, partial
+    closing = diffs[-1]
+    assert closing["result"].get("requested_by") == "harness_final"
+    review = _review_of(closing)
+    assert review.get("mode") == "complete", review
+    assert review.get("complete") is True, review
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert "a.py" in stdout and "b.py" in stdout, stdout
+
+
+def test_a_staged_only_diff_does_not_discharge_the_change_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The index half is not the change: c.py was never in the staged diff.
+
+    A tracked edit is staged before the run starts, and the run creates a new
+    file. A ``staged=true`` diff holds the current identity and shows only the
+    staged file; on the starting code it alone discharged the review, the
+    harness ran nothing, and the run was VERIFIED without c.py ever appearing
+    in a review. The complete review must show both the staged half and the
+    new file.
+    """
+
+    (repository / "a.py").write_text("A = 1\n", encoding="utf-8")
+    _git(repository, "add", "a.py")
+    _git(repository, "commit", "-q", "-m", "a")
+    (repository / "a.py").write_text("A = 2\n", encoding="utf-8")
+    _git(repository, "add", "a.py")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "c.py", "C = 3\n"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call("c3", "git_status", {}),
+                    _tool_call("c4", "git_diff", {"staged": True}),
+                )
+            ),
+            _response((_finish_call("c5", "added c.py"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    diffs = _diff_entries(harness)
+    staged = diffs[0]
+    assert _review_of(staged).get("mode") == "staged", staged
+    assert "C = 3" not in staged["result"]["data"].get("stdout", "")
+    closing = diffs[-1]
+    review = _review_of(closing)
+    assert review.get("mode") == "complete", review
+    assert review.get("complete") is True, review
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert "A = 2" in stdout, stdout
+    assert "C = 3" in stdout, stdout
+
+
+def test_an_empty_unstaged_diff_is_not_a_review_when_the_index_holds_changes(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Exit 0 on an empty ``git diff`` is not proof that anything was reviewed.
+
+    The staged edit is invisible to the default unstaged diff, so the model's
+    plain ``git.diff`` returned success with an empty body. On the starting
+    code that empty success was the change review and the run was VERIFIED.
+    The complete review compares HEAD with the working tree and appends the
+    new file, so both changes are on the record.
+    """
+
+    (repository / "a.py").write_text("A = 1\n", encoding="utf-8")
+    _git(repository, "add", "a.py")
+    _git(repository, "commit", "-q", "-m", "a")
+    (repository / "a.py").write_text("A = 2\n", encoding="utf-8")
+    _git(repository, "add", "a.py")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "c.py", "C = 3\n"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call("c3", "git_status", {}),
+                    _tool_call("c4", "git_diff", {}),
+                )
+            ),
+            _response((_finish_call("c5", "added c.py"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    diffs = _diff_entries(harness)
+    unstaged = diffs[0]
+    assert unstaged["result"]["ok"] is True
+    assert unstaged["result"]["data"].get("stdout") == ""
+    assert _review_of(unstaged).get("mode") == "worktree", unstaged
+    closing = diffs[-1]
+    review = _review_of(closing)
+    assert review.get("mode") == "complete", review
+    assert review.get("complete") is True, review
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert "A = 2" in stdout, stdout
+    assert "C = 3" in stdout, stdout
+
+
+def test_a_complete_review_is_enough_and_the_harness_adds_nothing(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A model-requested complete review closes the chain by itself.
+
+    ``complete=true`` is a scope selector for a Core command, not a claim: Core
+    records the scope it actually executed. When the model already read the
+    whole change after its last check, the harness must not pay for a second
+    review (and never for another model turn). The new untracked deliverable is
+    part of that review.
+    """
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call("c3", "git_status", {}),
+                    _tool_call("c4", "git_diff", {"complete": True}),
+                )
+            ),
+            _response((_finish_call("c5", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    assert len(harness.provider.requests) == 4
+    diffs = _diff_entries(harness)
+    assert len(diffs) == 1, [entry.get("core_name") for entry in harness.record().provider_history]
+    review = _review_of(diffs[0])
+    assert review.get("mode") == "complete", review
+    assert review.get("base") == "HEAD", review
+    assert review.get("paths") == [], review
+    assert review.get("complete") is True, review
+    assert review.get("untracked", {}).get("shown") == ["hello.txt"], review
+    assert "+hi" in diffs[0]["result"]["data"].get("stdout", "")
+    assert _harness_final_names(harness) == []
+
+
+def test_a_complete_review_works_before_the_first_commit(tmp_path: Path) -> None:
+    """A fresh repository has no HEAD; the index is the base of its review.
+
+    ``karox agent run --repository <tmp>`` is documented on a throwaway Git
+    repository, and a repository without a commit has nothing for
+    ``git diff HEAD`` to compare against. The complete review uses the index
+    there, so the same closing review still covers a new deliverable.
+    """
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init", "-q")
+    _git(fresh, "config", "user.email", "test@example.invalid")
+    _git(fresh, "config", "user.name", "Test")
+    harness = Harness(
+        fresh,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_finish_call("c3", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    diffs = _diff_entries(harness)
+    review = _review_of(diffs[-1])
+    assert review.get("base") == "index", review
+    assert review.get("complete") is True, review
+    assert "+hi" in diffs[-1]["result"]["data"].get("stdout", "")
+
+
+def test_a_complete_review_shows_new_files_and_names_ignored_ones(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The scope metadata is written by Core from what it actually read.
+
+    A new deliverable is appended as a new-file diff. A path the file tools
+    treat as non-source (here: a build directory) is named as excluded instead
+    of being silently dropped: the gate can then refuse a run whose own file
+    the complete review did not show.
+    """
+
+    harness = Harness(repository, tmp_path, [], runtime_cls=ExtendedCoreRuntime)
+    (repository / "hello.txt").write_text("hi", encoding="utf-8")
+    (repository / "dist").mkdir()
+    (repository / "dist" / "bundle.js").write_text("var x = 1;\n", encoding="utf-8")
+
+    result = harness.core.execute(
+        CoreCommand("git.diff", {"complete": True}, "s1", harness.origin)
+    )
+
+    assert result.ok is True
+    review = result.data["review"]
+    assert review["mode"] == "complete"
+    assert review["base"] == "HEAD"
+    assert review["complete"] is True
+    assert review["untracked"]["shown"] == ["hello.txt"]
+    assert review["untracked"]["excluded"] == ["dist/bundle.js"]
+    assert "+hi" in result.data["stdout"]
+
+
+def test_a_complete_review_before_an_edit_is_retaken_on_the_final_bytes(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Review evidence is bound to the bytes it showed, like any other proof.
+
+    The model reviews the first version, edits the file again, and checks the
+    new bytes. The old complete review no longer matches the identity, so the
+    closing evidence must be collected again on the final bytes.
+    """
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response(
+                (
+                    _tool_call("c3", "git_status", {}),
+                    _tool_call("c4", "git_diff", {"complete": True}),
+                )
+            ),
+            _response((_write_call("c5", "hello.txt", "ho"),)),
+            _response((_tool_call("c6", "checks_run", {"argv": list(GOOD_CHECK)}),)),
+            _response((_finish_call("c7", "updated hello.txt"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    final_identity = completion_gate.identity(harness.core, harness.record())
+    completed = [entry for entry in _diff_entries(harness) if _review_of(entry).get("mode") == "complete"]
+    assert len(completed) == 2, [entry.get("result", {}).get("requested_by") for entry in completed]
+    assert completed[0]["result"]["data"].get("completion_identity") != final_identity
+    assert completed[-1]["result"]["data"].get("completion_identity") == final_identity
+    stdout = completed[-1]["result"]["data"].get("stdout", "")
+    assert "+ho" in stdout, stdout
+    assert "+hi" not in stdout, stdout
 
 
 def test_engine_runs_independent_calls_batched_in_one_response(

@@ -816,6 +816,60 @@ def browser_proof(data: dict[str, Any]) -> bool:
     )
 
 
+def _complete_change_review(data: dict[str, Any]) -> bool:
+    """Whether this ``git.diff`` result read the whole change, not a slice.
+
+    Only the scope the trusted Core actually executed counts. A plain
+    ``git diff`` shows the unstaged half only, ``staged=true`` the index half
+    only, and ``paths=[...]`` one corner of either; none of them covers the
+    change a run is about to hand over. A complete review compares HEAD with
+    the working tree (both tracked halves) and appends every new untracked
+    file, so a newer or partial observation cannot hide a changed path.
+
+    The model's claim about the scope is never read: ``review`` is written by
+    Core from the commands it ran. A result that predates this field (a resumed
+    old session) fails closed, and so does one whose captured tracked diff was
+    truncated or whose untracked listing was: neither can prove what it did not
+    show.
+    """
+
+    review = data.get("review")
+    if not isinstance(review, dict):
+        return False
+    if review.get("mode") != "complete":
+        return False
+    if review.get("base") not in {"HEAD", "index"}:
+        return False
+    if review.get("paths") != []:
+        return False
+    if review.get("truncated") is not False:
+        return False
+    return review.get("complete") is True
+
+
+def _review_skips_a_change(core: Any, record: Any, data: dict[str, Any]) -> bool:
+    """Whether a complete review explicitly left out a file this run changed.
+
+    An untracked path inside a dependency or build directory is not source
+    material and the file tools do not list it, so the review records it as
+    excluded rather than pretending to show it. When the run itself wrote such
+    a file, that is a real gap: the gate must keep asking instead of counting
+    a review that skipped the deliverable.
+    """
+
+    review = data.get("review")
+    untracked = review.get("untracked") if isinstance(review, dict) else None
+    excluded = untracked.get("excluded") if isinstance(untracked, dict) else None
+    if not isinstance(excluded, list) or not excluded:
+        return False
+    skipped = {path for path in excluded if isinstance(path, str)}
+    diagnostic = diagnostic_paths(core, record)
+    return any(
+        path in skipped and _deliverable(path, diagnostic)
+        for path in record.changed_files
+    )
+
+
 def floor(core: Any, record: Any) -> list[str]:
     """Missing/failed proof reasons for the current state; [] means proven.
 
@@ -868,10 +922,27 @@ def floor(core: Any, record: Any) -> list[str]:
                 f'existing test files changed although the task says "{quoted}": '
                 f"{', '.join(touched[:4])} (restore their original content)"
             )
-    reviews = [e.get("result", {}).get("data", {}).get("completion_identity")
-               for e in record.provider_history if e.get("core_name") == "git.diff"
-               and isinstance(e.get("result"), dict) and e["result"].get("ok")]
-    if not reviews or reviews[-1] != current:
+    #: The most recent successful ``git.diff`` is the review the run is
+    #: handing over. It counts only when the trusted Core recorded a complete
+    #: scope (see ``_complete_change_review``): a path-filtered, staged-only or
+    #: unstaged-only diff carries the current identity too, but it did not see
+    #: the whole change.
+    review: Optional[dict[str, Any]] = None
+    for entry in record.provider_history:
+        if entry.get("core_name") != "git.diff":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            continue
+        data = result.get("data")
+        if isinstance(data, dict):
+            review = data
+    if (
+        review is None
+        or review.get("completion_identity") != current
+        or not _complete_change_review(review)
+        or _review_skips_a_change(core, record, review)
+    ):
         reasons.append("missing current change review")
     for entry in record.provider_history:
         result = entry.get("result")
