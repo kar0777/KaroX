@@ -7,7 +7,6 @@ delete and two on lsp.diagnostics with no language server installed.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from karox import engine_kernel
 from karox.agent import AgentKernel, AgentLimits, ContextBudget, SYSTEM_PROMPT
 from karox.core import CoreRuntime
 from karox.engine_tool_env import _normalize_repo_command
-from karox.models import AccessProfile, Capability, CoreCommand, Origin, OriginKind
+from karox.models import AccessProfile, Capability, Origin, OriginKind
 from karox.policy import CapabilityPolicy
 from karox.sessions import SessionStore
 

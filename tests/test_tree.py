@@ -8,7 +8,9 @@ import must resolve inside the release.
 from __future__ import annotations
 
 import ast
+import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "karox"
 LEGACY = {
@@ -47,6 +49,19 @@ ENGINE_MODULES = {
     "utils/log.py",
     "utils/serialize.py",
 }
+
+
+def _load_release_gate() -> ModuleType:
+    """Load the release script itself, so both gates share one budget."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "check_tree.py"
+    spec = importlib.util.spec_from_file_location("karox_release_gate", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_RELEASE_GATE = _load_release_gate()
 
 
 def _module_exists(module: str) -> bool:
@@ -126,33 +141,36 @@ def test_release_has_no_hosted_bridge_import() -> None:
 
 
 def test_python_line_count_stays_bounded() -> None:
-    lines = sum(
+    # One policy: the counter and the ceiling are the release gate's own, so
+    # this test cannot drift to a second number again (80k in
+    # scripts/check_tree.py versus 87k here disagreed until 2026-11-06).
+    lines = _RELEASE_GATE.package_line_count(PACKAGE)
+    problem = _RELEASE_GATE.line_budget_problem(lines)
+    assert problem is None, problem
+
+
+def test_release_gate_and_tree_test_use_one_budget() -> None:
+    # Positive regression: the pytest guard and the script resolve the same
+    # package, count it the same way and compare against one declared ceiling.
+    # Raising the declared ceiling is a policy decision: update the value in
+    # scripts/check_tree.py and this assertion together, and record why.
+    lines = _RELEASE_GATE.package_line_count(PACKAGE)
+    independent = sum(
         len(path.read_text(encoding="utf-8").splitlines())
         for path in PACKAGE.rglob("*.py")
     )
-    # The retired v5 loop and its economy modules were removed (~8.2k lines)
-    # and the vendored engine was pruned to the product's import closure
-    # (~3.6k lines), so the ceiling dropped from 90k to 80k. The kernel is
-    # large by design; the guard is for accumulation of new surface, not for
-    # the kernel itself. Raise it deliberately, never to make a stray copy
-    # pass. 83k: the Claude-Code-style transcript added a deliberate display
-    # layer (tool_display.py and tui/tooltext.py turn tool calls into
-    # "Read(calc.py) / Read 42 lines" lines, ~0.9k) plus the working line,
-    # queue and MCP scopes in the TUI (~0.8k). 85k: the plan-implementation
-    # increment added deliberate new surface (~1.5k): session export
-    # (session_export.py), local model-server discovery (local_runtimes.py),
-    # TLS/proxy settings (net_config.py), prompt-cache telemetry
-    # (prompt_cache_telemetry.py), test-runner detection (python_tests.py) and
-    # the process-kill guard. 86k: the sandbox increment of 2026-11-05 added
-    # deliberate surface (~1.2k): real mouse drag and moving-target detection
-    # in the browser session (browser/pageperf.py, browser/session.py),
-    # viewport re-checks before finish, cheaper verification and bounded
-    # probes (engine_tool_env.py), lenient edits (unified_patch.py) and
-    # salvage of tool calls leaked as markup (engine_salvage.py). 87k: the
-    # second sandbox increment of 2026-11-05 added deliberate surface
-    # (~0.8k): allow-listed CDN code sources cached for the browser
-    # (browser/code_sources.py), the GPU/software render-backend choice
-    # (browser/render_backend.py), standalone-SVG picture checks and the
-    # paused-frame gate (web_check.py), and the closing answer turn with
-    # answer files after a budget stop (engine_kernel.py).
-    assert lines < 87_000
+    assert _RELEASE_GATE.PACKAGE == PACKAGE
+    assert lines == independent
+    assert _RELEASE_GATE.MAX_PACKAGE_LINES == 88_000
+    assert _RELEASE_GATE.MAX_PACKAGE_LINES > lines
+    assert _RELEASE_GATE.line_budget_problem(independent) is None
+
+
+def test_line_budget_fails_at_a_lower_test_only_ceiling() -> None:
+    # Negative regression: the real measured package against a test-only
+    # ceiling equal to its own count must fail closed, and one line more must
+    # pass. The declared budget and the project are not touched.
+    lines = _RELEASE_GATE.package_line_count(PACKAGE)
+    failure = _RELEASE_GATE.line_budget_problem(lines, ceiling=lines)
+    assert failure == f"package grew to {lines} lines (ceiling {lines})"
+    assert _RELEASE_GATE.line_budget_problem(lines, ceiling=lines + 1) is None

@@ -21,7 +21,7 @@ import datetime as _dt
 import html
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping
 
 from .security import redact
 

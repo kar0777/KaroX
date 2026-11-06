@@ -53,9 +53,37 @@ ENGINE_MODULES = {
 }
 # The retired v5 loop and its economy modules were removed (~8.2k lines) and
 # the vendored engine was pruned to the product's import closure (~3.6k
-# lines), so the ceiling dropped from 90k to 80k. Raise it deliberately for
-# named surface, never to make a stray copy pass.
-MAX_LINES = 80_000
+# lines), so the ceiling dropped from 90k to 80k. The test raised it four times
+# afterwards (83k in 108fc1d, 85k in 193e247, 86k in 630be7c, 87k in 44c46f1)
+# while this script kept 80k, which is how the two release gates disagreed.
+# The budget is declared once, here: tests/test_tree.py reads this module
+# instead of carrying a second number.
+#
+# 88k (2026-11-06): the package measures 86,996 lines. Since the 87k ceiling
+# the deliberate Missions 01-05 added 622 net source lines (verification reuse,
+# the whole-change review, the durable run baseline and its Git-ignored
+# coverage), plus the 36-line closing-page change in ae9f96b; no generated or
+# duplicated module was found. That leaves 1,004 lines (~1.2%) of headroom,
+# several ordinary increments rather than a jump to 100k. A stray copy of the
+# package or a generated dump is thousands of lines and still fails here.
+MAX_PACKAGE_LINES = 88_000
+
+
+def package_line_count(package: Path) -> int:
+    """Count every ``*.py`` line under *package* exactly as both gates did."""
+    return sum(
+        len(path.read_text(encoding="utf-8").splitlines())
+        for path in package.rglob("*.py")
+    )
+
+
+def line_budget_problem(
+    lines: int, ceiling: int = MAX_PACKAGE_LINES
+) -> str | None:
+    """The single line-budget decision: ``count >= ceiling`` fails closed."""
+    if lines >= ceiling:
+        return f"package grew to {lines} lines (ceiling {ceiling})"
+    return None
 
 
 def module_exists(module: str) -> bool:
@@ -124,12 +152,10 @@ def main() -> int:
         problems.append("mcp_client still imports the hosted bridge")
     problems.extend(f"unresolved import: {item}" for item in internal_imports())
 
-    lines = sum(
-        len(path.read_text(encoding="utf-8").splitlines())
-        for path in PACKAGE.rglob("*.py")
-    )
-    if lines >= MAX_LINES:
-        problems.append(f"package grew to {lines} lines (ceiling {MAX_LINES})")
+    lines = package_line_count(PACKAGE)
+    problem = line_budget_problem(lines)
+    if problem is not None:
+        problems.append(problem)
 
     if problems:
         for problem in problems:
