@@ -2918,6 +2918,163 @@ def test_a_verified_stop_still_gets_the_models_final_answer(
     assert closing, "the verified stop never asked the model for its answer"
 
 
+def test_the_closing_look_judges_the_runs_own_page_not_the_entry_page(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An unchanged ``index.html`` must not take the closing look's slot.
+
+    Aquarium k2 (2026-11-06) delivered its own page, spent its last visual
+    check, edited once more and was stopped. The closing look rendered
+    ``index.html`` (the conventional entry page sorts first), its pass named a
+    page the run never changed, the gate rightly ignored it, and a page whose
+    final bytes nobody had judged ended ``visual_budget_exhausted``.
+    """
+
+    (repository / "index.html").write_text(
+        "<!doctype html><html><body><h1>Old entry</h1></body></html>",
+        encoding="utf-8",
+    )
+    _git(repository, "add", "index.html")
+    _git(repository, "commit", "-q", "-m", "entry page")
+    first = "<!doctype html><html><body><h1>Focus</h1></body></html>"
+    second = first.replace("Focus", "Focus, beautifully lit")
+    seen: List[str] = []
+
+    def checker(page: Path, *, goal: str = "") -> dict:
+        del goal
+        seen.append(page.name)
+        return {
+            "verdict": "pass",
+            "method": "vision",
+            "checks_left": 0,
+            "issues": [],
+            "console_errors": [],
+            "page_errors": [],
+            "resize": {"ok": True},
+        }
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "landing.html", first),)),
+            _response((_tool_call("c2", "visual_check", {"path": "landing.html"}),)),
+            _response((_write_call("c3", "landing.html", second),)),
+            _response((_tool_call("c4", "repo_read_file", {"path": "landing.html"}),)),
+            _response(
+                (
+                    _tool_call(
+                        "c5",
+                        "finish",
+                        {"answer": "", "answer_files": ["landing.html"]},
+                    ),
+                )
+            ),
+        ],
+        verification=(GOOD_CHECK,),
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=checker,
+        task=(
+            "build a landing page in landing.html with a polished layout and "
+            "animation; reply with only the complete HTML in one code block"
+        ),
+        max_steps=8,
+    )
+    report = harness.run()
+
+    assert seen == ["landing.html", "landing.html"], seen
+    assert report.verified is True, report.reason
+    assert report.provider_message is not None
+    assert "Focus, beautifully lit" in report.provider_message
+    closing = [
+        str(m.content)
+        for m in harness.provider.requests[-1].messages
+        if "final checks passed" in str(m.content)
+    ]
+    assert closing and "leave answer empty" in closing[-1]
+
+
+def _render_record(changed: List[str], created: Optional[List[str]] = None) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        task="build the page",
+        requirements=[],
+        changed_files=changed,
+        created_files=list(changed if created is None else created),
+        provider_history=[],
+        evidence=[],
+    )
+
+
+def test_the_closing_look_target_follows_the_change(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The page the run changed, or one loading its change, or its picture.
+
+    A page the run created but nothing delivers (its own harness page next to
+    the entry page) is not what the user opens: the entry page stands in.
+    """
+
+    (repository / "index.html").write_text(
+        "<!doctype html><html><body>entry</body></html>", encoding="utf-8"
+    )
+    (repository / "game.html").write_text(
+        '<!doctype html><html><body><script src="game.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    (repository / "game.js").write_text("// game\n", encoding="utf-8")
+    (repository / "logo.svg").write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg'></svg>\n", encoding="utf-8"
+    )
+    harness = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "done"),))],
+        runtime_cls=ExtendedCoreRuntime,
+        visual_checker=_passing_checker,
+    )
+    kernel = harness.kernel.implementation
+
+    def target(changed: List[str], created: Optional[List[str]] = None) -> str:
+        found = kernel._render_target(_render_record(changed, created))
+        return found.name if found is not None else ""
+
+    assert target(["game.html"], created=[]) == "game.html"
+    assert target(["game.js"], created=[]) == "game.html"
+    assert target(["logo.svg"]) == "logo.svg"
+    assert target(["game.html"]) == "index.html"
+    assert target(["notes.txt"]) == "index.html"
+    assert target([]) == "index.html"
+
+
+def test_a_render_check_says_it_finds_every_page_itself(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The render check needs no index.html copy of the deliverable.
+
+    Aquarium k2 guessed the check "probably finds index.html", copied its page
+    there with probes, paid for two renders per check and left the copy behind.
+    """
+
+    render = ("python", "-m", "karox.web_check", "--render")
+    told = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "done"),))],
+        verification=(render,),
+    ).kernel.implementation.system_prompt
+    plain = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c1", "done"),))],
+        session_id="s2",
+    ).kernel.implementation.system_prompt
+
+    assert "needs no copy, rename or extra index.html" in told
+    assert "needs no copy, rename or extra index.html" not in plain
+
+
 #: A check whose output states two observable facts, so an attestation can
 #: quote a real result instead of the model's own narrative.
 FACTS_CHECK = (

@@ -139,7 +139,9 @@ _CLOSING_TURN_PROMPT = (
     "edits, checks or browser calls will run. Call finish now, as the only tool "
     "call, with your final answer for the user: what was delivered and what is "
     "still unverified. If the task asks for a file's contents in the reply, "
-    "list that file in answer_files instead of retyping it."
+    "list that file in answer_files instead of retyping it; if the reply must "
+    "contain only that file, leave answer empty (KaroX reports the unverified "
+    "status itself)."
 )
 #: The same single call when KaroX's own final checks passed the current
 #: bytes: the run is verified, only the user's answer is missing.
@@ -148,7 +150,8 @@ _CLOSING_TURN_VERIFIED_PROMPT = (
     "files, so the work is verified. No further edits, checks or browser calls "
     "will run. Call finish now, as the only tool call, with your final answer "
     "for the user: what was delivered. If the task asks for a file's contents "
-    "in the reply, list that file in answer_files instead of retyping it."
+    "in the reply, list that file in answer_files instead of retyping it; if "
+    "the reply must contain only that file, leave answer empty."
 )
 
 
@@ -836,6 +839,15 @@ class EngineKernel:
                     '\nAn entry ending in "*" is a prefix: repeat the arguments '
                     "before it exactly, then put your own arguments where the "
                     '"*" is, and never send the "*" itself.'
+                )
+            if any("karox.web_check" in item for item in approved_checks):
+                # The aquarium k2 run guessed the render check "probably finds
+                # index.html", copied its page there three times, paid for two
+                # renders per check and left the copy in the user's tree.
+                self.system_prompt += (
+                    "\nkarox.web_check renders every .html page and .svg picture "
+                    "at the repository root by itself, index.html first: it needs "
+                    "no copy, rename or extra index.html of the deliverable."
                 )
         definitions = {item.name: item for item in core.tools()}
         missing = REQUIRED_TOOLS.difference(definitions)
@@ -1958,18 +1970,42 @@ class EngineKernel:
         return (*calls, *visual_calls, ("git.status", {}), ("git.diff", {}))
 
     def _render_target(self, record: SessionRecord) -> Optional[pathlib.Path]:
-        del record
-        try:
-            from .web_check import default_pages
+        """The page the harness's closing look judges: the run's own first.
 
-            pages = default_pages(self.core.repository)
+        ``default_pages`` puts ``index.html`` first. The aquarium k2 run
+        (2026-11-06) copied its deliverable to ``index.html`` with a probe; the
+        closing look judged that copy, its pass named a page the run never
+        changed, the gate rightly did not count it, and the run ended
+        unverified although nobody had judged its own final bytes. A page (or
+        picture) the run changed, or one that loads a changed asset, is what
+        the user opens; only without one does the conventional entry page
+        stand in.
+        """
+
+        try:
+            from .web_check import default_pages, default_pictures
+
+            root = self.core.repository
+            pages = [root / page for page in default_pages(root)]
+            pictures = [root / page for page in default_pictures(root)]
         except Exception:
             return None
-        for page in pages or ():
-            candidate = self.core.repository / page
-            if candidate.is_file():
-                return candidate
-        return None
+        pages = [item for item in pages if item.is_file()]
+        pictures = [item for item in pictures if item.is_file()]
+        changed = list(getattr(record, "changed_files", None) or ())
+        try:
+            diagnostic = completion_gate.diagnostic_paths(self.core, record)
+        except Exception:  # noqa: BLE001 - nothing is diagnostic then
+            diagnostic = frozenset()
+        for candidate in (*pages, *pictures):
+            try:
+                if completion_gate._page_loads_the_change(
+                    self.core, candidate.name, changed, diagnostic
+                ):
+                    return candidate
+            except Exception:  # noqa: BLE001 - try the next page
+                continue
+        return pages[0] if pages else None
 
     def _run_harness_final_calls(
         self, session_id: str, lease: MutationLease, deadline: float

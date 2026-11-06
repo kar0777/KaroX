@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Fixed — the closing look judged the entry page, not the run's page
+
+- When a run had spent its visual checks and edited once more, the harness's
+  closing look rendered the first root page, and `index.html` always sorts
+  first. A run that delivered another page (here: a copy of it sat in
+  `index.html`) got a pass on a page it never changed; the completion gate
+  rightly ignored that pass, and the run ended `visual_budget_exhausted`
+  although its own page was never judged. The closing look now takes the
+  page or SVG picture the run changed, or the page that loads a changed
+  stylesheet/script; the entry page stands in only when there is none. The
+  run's own harness pages still never count.
+- With `python -m karox.web_check` approved, the system prompt says that the
+  check renders every root `.html` page and `.svg` picture by itself, so no
+  copy, rename or extra `index.html` of the deliverable is needed. A measured
+  run copied its page there three times with probes, paid for two renders
+  per check and left the copy in the tree.
+- The closing answer turn says to leave `answer` empty when the reply must
+  contain only the file listed in `answer_files` (KaroX appends the file and
+  reports the status itself). A measured run put a summary paragraph before
+  the single code block the task asked to be the whole reply.
+
+### Added — answer files, a closing answer turn, CDN code sources, GPU rendering
+
+- `finish.answer_files`: when the task asks for a file's contents in the
+  reply, KaroX appends the exact bytes as one fenced code block instead of
+  the model retyping them; a file the task only asks to save stays out.
+- A run stopped by the visual budget or the clock gets one closing turn for
+  its final answer (verified or not), so the reply is never empty.
+- The browser fetches allow-listed public CDN libraries once and caches them
+  for loopback pages; headless launches draw WebGL on the GPU on Windows
+  (ANGLE D3D11) and fall back to software elsewhere (`KAROX_BROWSER_GPU`).
+- Standalone SVG deliverables are rendered, fitted, checked for well-formed
+  XML and judged; new built-in skill `svg-illustration`; checker answer
+  ceiling 3500 → 8000 tokens; `web-3d-scene` 1.7.0.
+
 ### Fixed — the no-progress check could not see repeated tool results
 
 - Port 4 ends a run after four identical action+result steps in a row, but
