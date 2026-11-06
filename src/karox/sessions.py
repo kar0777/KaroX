@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .models import AccessProfile, repository_fingerprint
+from . import git_baseline
 from . import requirements
 from .security import redact
 
@@ -248,6 +249,14 @@ class SessionRecord:
     # action policy lets the agent clean them up without a human prompt.
     created_files: List[str] = field(default_factory=list)
     git_state: Dict[str, Any] = field(default_factory=dict)
+    # The exact Git revision this session started from, read by the trusted
+    # runtime when the session was created (never by the model, and never
+    # re-read on resume). The closing change review is taken against it, so a
+    # local commit made during the run cannot hide the change behind an empty
+    # HEAD-relative diff. Shape and vocabulary: ``karox.git_baseline``; a
+    # record written before this field existed has ``{}`` and fails closed at
+    # the completion gate instead of inventing a baseline from the current HEAD.
+    git_baseline: Dict[str, Any] = field(default_factory=dict)
     checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     checks: List[Dict[str, Any]] = field(default_factory=list)
     failures: List[Dict[str, Any]] = field(default_factory=list)
@@ -468,6 +477,10 @@ class SessionStore:
         if parent == sid:
             raise SessionError("a session cannot be its own parent")
         target = self.state_path(sid)
+        # Read before the state lock: the baseline is a fact about the
+        # repository, not about this session, and a slow Git read must not
+        # lengthen the critical section. It is captured exactly once, here.
+        baseline = git_baseline.capture(repo)
         with _exclusive_file_lock(self.lock_path(sid)):
             if target.exists():
                 raise SessionError(f"session already exists: {sid}")
@@ -481,6 +494,7 @@ class SessionStore:
                 task=str(redact(task)),
                 created_at=now,
                 updated_at=now,
+                git_baseline=baseline,
                 requirements=requirements.seed_with_delegated_sources(
                     str(redact(task)), repo
                 ),

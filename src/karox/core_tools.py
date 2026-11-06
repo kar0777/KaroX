@@ -413,7 +413,8 @@ class ExtendedCoreRuntime(CoreRuntime):
             base_diff,
             description=(
                 "Read the current Git diff, optionally limited to given paths, "
-                "or the complete change against HEAD when complete=true."
+                "or the whole change since the session's start revision when "
+                "complete=true."
             ),
             input_schema={
                 "type": "object",
@@ -423,9 +424,10 @@ class ExtendedCoreRuntime(CoreRuntime):
                     "complete": {
                         "type": "boolean",
                         "description": (
-                            "Read the whole current change against HEAD: staged "
-                            "and unstaged tracked edits plus every new untracked "
-                            "file. Cannot be combined with staged or with paths."
+                            "Read the whole change since the session's start "
+                            "revision: staged and unstaged tracked edits plus "
+                            "every new untracked file. Cannot be combined with "
+                            "staged or with paths."
                         ),
                     },
                 },

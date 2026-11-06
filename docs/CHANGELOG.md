@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Changed — the closing change review is anchored to the session start
+
+- A session now records the exact Git revision it started from, read by KaroX
+  itself when the session is created (`SessionRecord.git_baseline`; an exact
+  commit id, or the explicit "unborn"/"unavailable" state). The closing
+  complete review (`git.diff` with `complete: true`) is taken against that
+  revision, not against the HEAD of the moment: `git diff <start>` plus the
+  bounded untracked review. A run that commits its own work mid-session
+  (elevated `git.commit`) therefore no longer leaves an empty tracked diff: the
+  commit it just created is part of the change the review shows.
+- The trusted review metadata moved to version 2 and names the base it actually
+  used (`base: "start"` with an exact `base_commit`, or `base: "unborn"`, plus
+  the `commands` that ran). The completion gate accepts a complete review only
+  when that base is the session's durable start revision, so a review of the
+  moved HEAD cannot close the obligation even with a matching completion
+  identity. A version-1 review (an already-persisted session), a corrupt
+  baseline, a missing baseline or a missing base object fails closed; a session
+  that changed nothing still owes no review.
+- The baseline is captured once and never advances after a commit, a restart, a
+  resume or a failed mutation. A repository with no commit yet keeps its
+  documented first-commit workflow (the index is the tracked base there), but if
+  the run itself creates the first commit, no earlier revision exists to review
+  against and the run is not certified rather than shown an empty change. Cost:
+  one `git rev-parse --verify HEAD` at session creation (about 47 ms on the
+  Windows test host) and one fewer Git process per complete review, because the
+  commit baseline needs no `rev-parse`. Full analysis:
+  [audits/DSH_RUN_BASELINE_20261106.md](audits/DSH_RUN_BASELINE_20261106.md).
+
 ### Changed — the closing change review reads the whole change
 
 - The harness's `git.diff` review at finish now asks Core for the complete

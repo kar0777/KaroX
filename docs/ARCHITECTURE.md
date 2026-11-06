@@ -235,6 +235,7 @@ not listed is internal to its layer.
 | `providers.py`, `provider_adapters.py`, `provider_factory.py` | model transport; the only path to a model |
 | `registry.py`, `model_discovery.py`, `routing.py`, `provider_pricing.py`, `provider_presets.py`, `provider_controller.py`, `credentials.py` | catalog, routes, budgets, keyring |
 | `sessions.py`, `requirements.py`, `state_briefing.py`, `usage_analytics.py`, `memory.py` | durable state, leases, evidence, compaction snapshot, usage |
+| `git_baseline.py` | the exact Git revision a session started from: read once at creation, exposed to the Git tools of that session only |
 | `project_context.py`, `project_map.py`, `map_service.py`, `mode_artifacts.py` | bounded orientation, durable Plan/Concept |
 | `effort.py`, `agent_modes.py`, `auto_verify.py`, `check_report.py`, `completion_gate.py` | effort budgets, modes, quick checks, parsed failure maps and derived focused targets, verified floor |
 | `mcp_client.py`, `mcp_status.py`, `mcp_oauth.py` | outbound MCP |

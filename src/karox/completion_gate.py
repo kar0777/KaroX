@@ -13,6 +13,7 @@ import subprocess
 from typing import Any, Collection, Optional, Sequence
 
 from .auto_verify import _select_checks
+from . import git_baseline
 from . import requirement_coverage
 from .requirements import ledger_digest
 from .web_check import default_pages, default_pictures, diagnostic_pages, is_scratch_artifact, is_scratch_page
@@ -816,35 +817,50 @@ def browser_proof(data: dict[str, Any]) -> bool:
     )
 
 
-def _complete_change_review(data: dict[str, Any]) -> bool:
-    """Whether this ``git.diff`` result read the whole change, not a slice.
+def _complete_change_review(record: Any, data: dict[str, Any]) -> bool:
+    """Whether this ``git.diff`` read the whole change since the start revision.
 
     Only the scope the trusted Core actually executed counts. A plain
     ``git diff`` shows the unstaged half only, ``staged=true`` the index half
     only, and ``paths=[...]`` one corner of either; none of them covers the
-    change a run is about to hand over. A complete review compares HEAD with
-    the working tree (both tracked halves) and appends every new untracked
-    file, so a newer or partial observation cannot hide a changed path.
+    change a run is about to hand over, and none of them is taken against the
+    tree the run began with.
 
-    The model's claim about the scope is never read: ``review`` is written by
-    Core from the commands it ran. A result that predates this field (a resumed
-    old session) fails closed, and so does one whose captured tracked diff was
-    truncated or whose untracked listing was: neither can prove what it did not
-    show.
+    The base is checked, not assumed. A review is current only when the exact
+    revision it names is the session's durable start revision: a review of
+    "whatever HEAD is now" describes a different span after an elevated commit
+    moved HEAD, and the model's own claim about the scope is never read --
+    ``review`` is written by Core from the commands it ran. A result from
+    before this contract (version 1, symbolic base) or from a session whose
+    record has no usable start revision fails closed, and so does one whose
+    captured tracked diff was truncated or whose untracked listing was:
+    neither can prove what it did not show.
     """
 
     review = data.get("review")
     if not isinstance(review, dict):
         return False
-    if review.get("mode") != "complete":
+    if review.get("version") != git_baseline.REVIEW_VERSION:
         return False
-    if review.get("base") not in {"HEAD", "index"}:
+    if review.get("mode") != "complete":
         return False
     if review.get("paths") != []:
         return False
     if review.get("truncated") is not False:
         return False
-    return review.get("complete") is True
+    if review.get("complete") is not True:
+        return False
+    baseline = git_baseline.normalize(getattr(record, "git_baseline", None))
+    if baseline is None:
+        return False
+    if baseline["kind"] == git_baseline.KIND_COMMIT:
+        return (
+            review.get("base") == git_baseline.REVIEW_BASE_START
+            and review.get("base_commit") == baseline["commit"]
+        )
+    if baseline["kind"] == git_baseline.KIND_UNBORN:
+        return review.get("base") == git_baseline.REVIEW_BASE_UNBORN
+    return False
 
 
 def _review_skips_a_change(core: Any, record: Any, data: dict[str, Any]) -> bool:
@@ -924,9 +940,11 @@ def floor(core: Any, record: Any) -> list[str]:
             )
     #: The most recent successful ``git.diff`` is the review the run is
     #: handing over. It counts only when the trusted Core recorded a complete
-    #: scope (see ``_complete_change_review``): a path-filtered, staged-only or
+    #: scope against the session's own start revision (see
+    #: ``_complete_change_review``): a path-filtered, staged-only or
     #: unstaged-only diff carries the current identity too, but it did not see
-    #: the whole change.
+    #: the whole change, and a ``HEAD``-relative diff no longer names the span
+    #: the run began with once an elevated commit moved HEAD.
     review: Optional[dict[str, Any]] = None
     for entry in record.provider_history:
         if entry.get("core_name") != "git.diff":
@@ -940,7 +958,7 @@ def floor(core: Any, record: Any) -> list[str]:
     if (
         review is None
         or review.get("completion_identity") != current
-        or not _complete_change_review(review)
+        or not _complete_change_review(record, review)
         or _review_skips_a_change(core, record, review)
     ):
         reasons.append("missing current change review")

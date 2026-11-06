@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .event_bus import EventBus, EventKind, EventLevel
 from .atomic_io import atomic_write, new_file_mode
+from . import git_baseline
 from .core_git import GitToolsMixin
 from .core_process import (
     WILDCARD_ARGUMENT,
@@ -303,10 +304,10 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
                         "complete": {
                             "type": "boolean",
                             "description": (
-                                "Read the whole current change against HEAD: "
-                                "staged and unstaged tracked edits plus every "
-                                "new untracked file. Cannot be combined with "
-                                "staged or with paths."
+                                "Read the whole change since the session's start "
+                                "revision: staged and unstaged tracked edits plus "
+                                "every new untracked file. Cannot be combined "
+                                "with staged or with paths."
                             ),
                         },
                     },
@@ -627,7 +628,14 @@ class CoreRuntime(GitToolsMixin, SearchToolsMixin, ProcessToolsMixin):
                 )
             else:
                 assert handler is not None
-                data = handler(dict(command.arguments), float(command.deadline_seconds))
+                # The session's durable start revision, from the record this
+                # call already loaded: a Git review is scoped to the tree the
+                # run began with, and neither the model nor a runtime serving
+                # another session can substitute a different base.
+                with git_baseline.session_baseline(record):
+                    data = handler(
+                        dict(command.arguments), float(command.deadline_seconds)
+                    )
         except Exception as exc:
             self._audit(
                 "core.command.failed",

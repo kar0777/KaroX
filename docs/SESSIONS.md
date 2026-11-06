@@ -13,8 +13,14 @@ create → active → verified | failed | stopped
                      └── fork (new active child)
 ```
 
-- **create** binds the session to a repository fingerprint and an access
-  profile.
+- **create** binds the session to a repository fingerprint, an access profile
+  and the repository state it started from: the exact Git commit (or the
+  explicit "unborn"/"unavailable" state), read by KaroX in the repository, never
+  supplied by the model. The value is written once and travels with the record,
+  so the closing change review compares the tree the run began with against the
+  final bytes even after a local commit, a restart or a resume. A record without
+  a usable start revision cannot certify a change and fails closed; a session
+  that changed nothing owes no review.
 - **run** appends every step before the next model request. A crash or a kill
   therefore loses no completed step.
 - **resume** is `karox agent run --session-id ID --task "..." --continue-task`.
@@ -66,7 +72,8 @@ turns the read off; memory is context, and a broken store never fails a run.
 `session.json` is written atomically with a checksum and a revision. Readers
 retry a Windows sharing violation instead of treating a mid-swap read as a
 corrupt session. The file contains redacted content only; credentials are never
-part of it.
+part of it. `git_baseline` holds the start revision described above; it is the
+one field a run must not rewrite.
 
 ## Access profiles
 

@@ -584,6 +584,16 @@ def test_a_review_of_old_bytes_is_not_current_after_an_edit(tmp_path: Path) -> N
     assert "missing current change review" in completion_gate.floor(core, record)
 
 
+_START_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_LATER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def _start_baseline(commit: str = _START_COMMIT) -> dict:
+    """The durable value SessionStore records for a repository with a commit."""
+
+    return {"version": 1, "kind": "commit", "commit": commit, "captured_at": 1.0}
+
+
 def _changed_record(
     repository: Path, relative: str = "pkg/mod.py"
 ) -> tuple[SimpleNamespace, _Core]:
@@ -596,6 +606,7 @@ def _changed_record(
         requirements=[],
         evidence=[],
         provider_history=[],
+        git_baseline=_start_baseline(),
     )
     return record, _Core(repository)
 
@@ -605,13 +616,16 @@ def _complete_review(identity: dict, **overrides: object) -> dict:
 
     These fields are produced by Core from the commands it executed; the tests
     vary them only to model results an older Core, a failed command or a
-    narrower command would have returned.
+    narrower command would have returned. The base is the session's start
+    revision, which is what a current Core records.
     """
 
     review: dict = {
-        "version": 1,
+        "version": 2,
         "mode": "complete",
-        "base": "HEAD",
+        "base": "start",
+        "base_commit": _START_COMMIT,
+        "commands": [["git", "diff", "--no-ext-diff", _START_COMMIT]],
         "paths": [],
         "complete": True,
         "truncated": False,
@@ -672,17 +686,25 @@ def test_an_incomplete_diff_never_discharges_the_change_review(
     assert "missing current change review" in completion_gate.floor(core, record)
 
 
-@pytest.mark.parametrize("base", ["HEAD", "index"])
+@pytest.mark.parametrize(
+    "baseline, review_base",
+    [
+        pytest.param(_start_baseline(), "start", id="start-revision"),
+        pytest.param({"version": 1, "kind": "unborn"}, "unborn", id="unborn"),
+    ],
+)
 def test_a_complete_review_of_the_current_bytes_discharges_the_review(
-    tmp_path: Path, base: str
+    tmp_path: Path, baseline: dict, review_base: str
 ) -> None:
     record, core = _changed_record(tmp_path)
+    record.git_baseline = baseline
     identity = completion_gate.identity(core, record)
     record.provider_history.append(
         _diff_result(
             _complete_review(
                 identity,
-                base=base,
+                base=review_base,
+                base_commit=_START_COMMIT if review_base == "start" else None,
                 untracked={
                     "listed": 1,
                     "shown": ["pkg/mod.py"],
@@ -755,37 +777,41 @@ _NO_TEST_EDITS_TASK = (
 )
 
 
-_START_COMMIT = "0123456789abcdef0123456789abcdef01234567"
-_LATER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
-
-
-def _start_baseline(commit: str = _START_COMMIT) -> dict:
-    """The durable value SessionStore records for a repository with a commit."""
-
-    return {"version": 1, "kind": "commit", "commit": commit, "captured_at": 1.0}
-
-
 def _start_review(identity: dict, commit: str = _START_COMMIT, **overrides: object) -> dict:
-    """A review Core took against the session's own start revision."""
+    """A review Core took against one explicit start revision."""
 
-    review: dict = {
-        "version": 2,
-        "mode": "complete",
-        "base": "start",
+    arguments: dict = {
         "base_commit": commit,
         "commands": [["git", "diff", "--no-ext-diff", commit]],
+    }
+    arguments.update(overrides)
+    return _complete_review(identity, **arguments)
+
+
+def _legacy_review(identity: dict) -> dict:
+    """The version-1 shape Mission 03 wrote: a symbolic ``HEAD`` base.
+
+    It records which command ran, not which tree it read. That is the shape a
+    session persisted before this change contains, and the gate has to reject
+    it: an elevated commit during the run moves HEAD away from the start, so a
+    review of "HEAD" cannot prove which span it showed.
+    """
+
+    review = {
+        "version": 1,
+        "mode": "complete",
+        "base": "HEAD",
         "paths": [],
         "complete": True,
         "truncated": False,
         "untracked": {
-            "listed": 0,
-            "shown": [],
+            "listed": 1,
+            "shown": ["pkg/mod.py"],
             "limited": [],
             "excluded": [],
             "truncated": False,
         },
     }
-    review.update(overrides)
     return {"completion_identity": identity, "review": review}
 
 
@@ -817,20 +843,7 @@ def test_a_head_relative_review_is_not_a_review_against_the_start_revision(
     record, core = _changed_record(tmp_path)
     record.git_baseline = _start_baseline()
     identity = completion_gate.identity(core, record)
-    record.provider_history.append(
-        _diff_result(
-            _complete_review(
-                identity,
-                untracked={
-                    "listed": 1,
-                    "shown": ["pkg/mod.py"],
-                    "limited": [],
-                    "excluded": [],
-                    "truncated": False,
-                },
-            )
-        )
-    )
+    record.provider_history.append(_diff_result(_legacy_review(identity)))
 
     assert "missing current change review" in completion_gate.floor(core, record)
 
@@ -869,20 +882,7 @@ def test_a_legacy_review_without_a_durable_baseline_is_not_complete(
 
     record, core = _changed_record(tmp_path)
     identity = completion_gate.identity(core, record)
-    record.provider_history.append(
-        _diff_result(
-            _complete_review(
-                identity,
-                untracked={
-                    "listed": 1,
-                    "shown": ["pkg/mod.py"],
-                    "limited": [],
-                    "excluded": [],
-                    "truncated": False,
-                },
-            )
-        )
-    )
+    record.provider_history.append(_diff_result(_legacy_review(identity)))
 
     assert "missing current change review" in completion_gate.floor(core, record)
 

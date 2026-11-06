@@ -20,6 +20,7 @@ from karox.sessions import (
     SessionError,
     SessionStore,
     StaleSessionRevision,
+    _checksum,
     _exclusive_file_lock,
     _lease_owner_is_provably_dead,
     current_mutation_lease,
@@ -90,6 +91,27 @@ class SessionStoreTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(SessionError, "checksum mismatch"):
             self.store.load("sample")
+
+    def test_a_record_written_before_the_start_revision_existed_still_loads(
+        self,
+    ) -> None:
+        """An old session.json has no start revision and must still open.
+
+        The field is additive with an empty default, so a persisted record from
+        before this change is readable and a resume can continue. The empty
+        value is not a licence to guess a revision: the completion gate fails
+        closed on it instead.
+        """
+
+        path = self.store.state_path("sample")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("git_baseline")
+        payload["checksum"] = _checksum(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        record = self.store.load("sample")
+
+        self.assertEqual(record.git_baseline, {})
 
     def test_same_process_threads_serialize_on_the_state_lock(self) -> None:
         """Two threads of one process must wait, not die with EDEADLK.

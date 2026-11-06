@@ -605,7 +605,8 @@ def test_a_complete_review_is_enough_and_the_harness_adds_nothing(
     assert len(diffs) == 1, [entry.get("core_name") for entry in harness.record().provider_history]
     review = _review_of(diffs[0])
     assert review.get("mode") == "complete", review
-    assert review.get("base") == "HEAD", review
+    assert review.get("base") == "start", review
+    assert review.get("base_commit") == _head(repository), review
     assert review.get("paths") == [], review
     assert review.get("complete") is True, review
     assert review.get("untracked", {}).get("shown") == ["hello.txt"], review
@@ -643,7 +644,8 @@ def test_a_complete_review_works_before_the_first_commit(tmp_path: Path) -> None
     assert report.verified is True, (report.reason, report.unmet)
     diffs = _diff_entries(harness)
     review = _review_of(diffs[-1])
-    assert review.get("base") == "index", review
+    assert review.get("base") == "unborn", review
+    assert review.get("base_commit") is None, review
     assert review.get("complete") is True, review
     assert "+hi" in diffs[-1]["result"]["data"].get("stdout", "")
 
@@ -671,7 +673,8 @@ def test_a_complete_review_shows_new_files_and_names_ignored_ones(
     assert result.ok is True
     review = result.data["review"]
     assert review["mode"] == "complete"
-    assert review["base"] == "HEAD"
+    assert review["base"] == "start"
+    assert review["base_commit"] == _head(repository)
     assert review["complete"] is True
     assert review["untracked"]["shown"] == ["hello.txt"]
     assert review["untracked"]["excluded"] == ["dist/bundle.js"]
@@ -959,6 +962,35 @@ def test_a_review_without_a_start_revision_is_not_complete(
     assert review["complete"] is False, review
     assert review["base"] is None, review
     assert "+hi" in result.data["stdout"]
+
+
+def test_a_missing_start_object_fails_the_review_closed(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A start revision Git no longer holds cannot certify a change.
+
+    A reset or a garbage collection outside the run can remove the object the
+    session recorded. The review then cannot compare anything, and reporting an
+    empty or partial diff as complete would be the same lie the durable
+    baseline exists to prevent, so it fails closed with the reason it could not
+    read the base.
+    """
+
+    harness = Harness(repository, tmp_path, [], runtime_cls=ExtendedCoreRuntime)
+    missing = "0" * 39 + "1"
+    with harness.store.mutate("s1", "test") as record:
+        record.git_baseline = {"version": 1, "kind": "commit", "commit": missing}
+    (repository / "hello.txt").write_text("hi", encoding="utf-8")
+
+    result = harness.core.execute(
+        CoreCommand("git.diff", {"complete": True}, "s1", harness.origin)
+    )
+
+    review = result.data["review"]
+    assert review["base_commit"] == missing, review
+    assert review["complete"] is False, review
+    assert result.ok is False, result.data.get("exit_code")
+    assert "not a complete review" in result.data["stdout"]
 
 
 def test_engine_runs_independent_calls_batched_in_one_response(

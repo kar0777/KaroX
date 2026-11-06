@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .core_types import CoreError, InvalidCommand
+from . import git_baseline
 from .models import EvidenceRecord
 from .security import contains_credential, redact
 
@@ -107,27 +108,83 @@ class GitToolsMixin:
         return result
 
     def _complete_change_review(self, deadline_seconds: float) -> Dict[str, Any]:
-        """Read the whole current change against HEAD, new files included.
+        """Read the whole change since the session's start revision.
 
-        ``git diff HEAD`` is the one tracked view that holds both staged and
-        unstaged edits; a plain ``git diff`` shows only the unstaged half and
-        ``--cached`` only the index half, so neither can stand for the change a
-        run is about to hand over. New files are absent from every view, so
-        each untracked file is appended as its own new-file diff. A repository
-        without a commit has no HEAD to compare with: there the index plays
-        that part, and the untracked half covers the rest.
+        The session's durable baseline is the only correct base. An elevated
+        run can commit its own work, after which ``git diff HEAD`` reports an
+        empty tracked change although HEAD moved; the review must describe the
+        span ``start -> working tree`` instead. ``git diff <start>`` is that
+        span: it holds the staged and the unstaged half, and it handles a
+        deletion or a rename natively. New files are absent from every tracked
+        view, so each untracked file is appended as its own new-file diff.
+
+        The base is the exact object name captured when the session was created
+        -- never a ref, never a short name, never the HEAD of this moment. A
+        session with no usable baseline cannot certify coverage: the diff is
+        still collected as a diagnostic, but ``review.complete`` is false and
+        the completion gate refuses it. A repository that had no commit at
+        session start is compared through the index while it still has none; if
+        the run itself creates the first commit, no earlier revision exists to
+        review against, so the review fails closed instead of describing an
+        empty change.
 
         The returned ``review`` block is the coverage the trusted Core actually
         executed. The completion gate reads it instead of the caller's claim,
         so a model asking for ``complete`` cannot widen what the commands saw.
         """
 
-        head = self._git(["rev-parse", "--verify", "HEAD"], deadline_seconds)
-        has_head = head.get("exit_code") == 0 and not head.get("timed_out")
-        command = ["diff", "--no-ext-diff", "HEAD" if has_head else "--cached"]
-        result = self._git(command, deadline_seconds)
+        baseline = git_baseline.current()
+        kind = baseline["kind"] if baseline is not None else ""
+        commands: List[List[str]] = []
+        base: Optional[str] = None
+        base_commit: Optional[str] = None
+        reason: Optional[str] = None
+        if baseline is not None and kind == git_baseline.KIND_COMMIT:
+            base = git_baseline.REVIEW_BASE_START
+            base_commit = str(baseline.get("commit"))
+            commands.append(["git", "diff", "--no-ext-diff", base_commit])
+            result = self._git(commands[0][1:], deadline_seconds)
+        elif kind == git_baseline.KIND_UNBORN:
+            head = self._git(["rev-parse", "--verify", "HEAD"], deadline_seconds)
+            if head.get("exit_code") == 0 and not head.get("timed_out"):
+                reason = (
+                    "the repository gained its first commit during this session, "
+                    "and that commit has no earlier revision to review against"
+                )
+                commands.append(["git", "diff", "--no-ext-diff", "HEAD"])
+                result = self._git(commands[0][1:], deadline_seconds)
+            else:
+                # No commit yet: the index stands in for the empty tree, and the
+                # unstaged view covers an edit made after a path was staged.
+                base = git_baseline.REVIEW_BASE_UNBORN
+                commands.append(["git", "diff", "--no-ext-diff", "--cached"])
+                commands.append(["git", "diff", "--no-ext-diff"])
+                result = self._merge_tracked_diffs(
+                    self._git(commands[0][1:], deadline_seconds),
+                    self._git(commands[1][1:], deadline_seconds),
+                )
+        else:
+            reason = (
+                "Git was not readable when this session started, so its start "
+                "revision is unknown"
+                if kind == git_baseline.KIND_UNAVAILABLE
+                else "this session was created before change reviews named their "
+                "start revision"
+            )
+            commands.append(["git", "diff", "--no-ext-diff", "HEAD"])
+            result = self._git(commands[0][1:], deadline_seconds)
         result["paths"] = []
         tracked_ok = result.get("exit_code") == 0 and not result.get("timed_out")
+        if reason is None and not tracked_ok:
+            # Git refused to produce the tracked span: the start object may be
+            # gone (a reset or a garbage collection outside the run) or the
+            # repository may be unreadable. Both are "the change was not read".
+            reason = (
+                "the session's start revision could not be read from this "
+                "repository"
+                if base == git_baseline.REVIEW_BASE_START
+                else "the tracked change could not be read from this repository"
+            )
         untracked: Dict[str, Any] = {
             "listed": 0,
             "shown": [],
@@ -135,22 +192,34 @@ class GitToolsMixin:
             "excluded": [],
             "truncated": False,
         }
+        if reason is not None:
+            result["stdout"] = (
+                f"[karox: this is not a complete review: {reason}]\n"
+                + str(result.get("stdout") or "")
+            )
         if tracked_ok:
             result["stdout"] = self._append_untracked_review(
                 str(result.get("stdout") or ""), untracked, deadline_seconds
             )
-            text = str(result["stdout"])
-            result["stdout_bytes"] = len(text.encode("utf-8"))
-            result["stdout_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        text = str(result.get("stdout") or "")
+        # Recomputed after the review is assembled: the captured text changes
+        # here (marker, untracked sections, a second view), and evidence must
+        # describe the bytes it ships, not the first command's output.
+        result["stdout_bytes"] = len(text.encode("utf-8"))
+        result["stdout_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         reviewed = bool(
-            tracked_ok
+            reason is None
+            and base is not None
+            and tracked_ok
             and not result.get("stdout_truncated")
             and not untracked["truncated"]
         )
-        result["review"] = {
-            "version": 1,
+        review: Dict[str, Any] = {
+            "version": git_baseline.REVIEW_VERSION,
             "mode": "complete",
-            "base": "HEAD" if has_head else "index",
+            "base": base,
+            "base_commit": base_commit,
+            "commands": [list(item) for item in commands],
             "paths": [],
             "complete": reviewed,
             "truncated": bool(
@@ -158,8 +227,44 @@ class GitToolsMixin:
             ),
             "untracked": untracked,
         }
+        if reason is not None:
+            review["reason"] = reason
+        result["review"] = review
         result["_evidence"] = [self._git_evidence("git_diff", result)]
         return result
+
+    @staticmethod
+    def _merge_tracked_diffs(
+        first: Dict[str, Any], second: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Assemble one tracked observation from two Git views.
+
+        A repository without a commit has no revision to compare with, so the
+        tracked span is the index view plus the unstaged view. Both have to
+        succeed for the span to count as read.
+        """
+
+        merged = dict(first)
+        head = str(first.get("stdout") or "")
+        tail = str(second.get("stdout") or "")
+        if head and tail and not head.endswith("\n"):
+            head += "\n"
+        merged["stdout"] = head + tail
+        merged["exit_code"] = (
+            first.get("exit_code")
+            if first.get("exit_code") != 0
+            else second.get("exit_code")
+        )
+        merged["timed_out"] = bool(
+            first.get("timed_out") or second.get("timed_out")
+        )
+        merged["stdout_truncated"] = bool(
+            first.get("stdout_truncated") or second.get("stdout_truncated")
+        )
+        # The first command's digest describes only its own half.
+        merged.pop("stdout_sha256", None)
+        merged.pop("stdout_bytes", None)
+        return merged
 
     def _append_untracked_review(
         self,
