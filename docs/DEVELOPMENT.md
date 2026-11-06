@@ -60,6 +60,37 @@ karox bridge connect chatgpt-web --repository . --tunnel custom \
 Do not run `bridge connect --tunnel tailscale` against a live connector as part
 of a test: it creates a real Funnel route and a real keyring entry.
 
+## Offline headless quick gate (browser-free subset)
+
+The full gate above is the release gate. On a machine with managed Chromium
+installed, a broad `pytest` selection can start a real browser even when the
+selection was meant to be local: on 2026-11-06 three scenarios in
+`tests/test_engine_tools.py` did exactly that because their ready-check passed.
+This subset is the explicit, pre-audited, browser-free smoke. It is a subset,
+not a replacement for the full gate, and passing it is not `RELEASE_READY`.
+
+Run it sequentially (no `-n`/xdist), with the project `addopts` disabled and no
+pytest cache writes:
+
+```text
+python -m pytest -o addopts="" -p no:cacheprovider tests/test_tree.py tests/test_tool_shape_fixes.py tests/test_session_export.py tests/test_agent_prompt.py tests/test_agent_report_surface.py tests/test_engine_provider_accounting.py tests/test_engine_tool_env_render.py tests/test_run_reuse_identity.py tests/test_skill_scope.py tests/test_unified_patch_leniency.py tests/test_package_data.py tests/test_headless_selection.py
+```
+
+The command names every file; do not replace it with `-k`, a glob or a whole
+directory, and do not add `tests/test_engine_tools.py`, `tests/test_browser_*.py`,
+`tests/test_computer_use*.py`, `tests/test_cli.py` or any module that opens a
+page, a desktop window, a listening socket or a provider. The allowlist is
+pinned by `tests/test_headless_selection.py`, which fails if the docs command
+and the audited list drift apart, and which records the three Mission 07
+browser incidents as a negative control:
+
+- `test_cli_engine_run_advertises_and_executes_browser_command`;
+- `test_browser_command_entry_point_opens_a_real_page`;
+- `test_cli_engine_run_logs_in_and_downloads_a_report`.
+
+A platform-only skip (POSIX symlink/permission checks) is acceptable; a real
+failure is not. Use the full gate before release.
+
 ## Live smoke
 
 Use an isolated configuration so the developer's real providers are untouched:
@@ -103,10 +134,16 @@ The wheel must contain:
 
 - every Python module under `src/karox`;
 - `tui/theme.tcss`;
-- `prompts/*.md` and `prompts/profiles/*.md`;
+- `prompts/*.md`;
 - `builtin_skills/*/SKILL.md`;
 - `engine/py.typed` and its license/notice files;
 - `LICENSE`.
+
+There is no packaged `prompts/profiles/` source in this line. The bridge's
+saved launch profiles are runtime JSON (`web-bridge-profiles.json`), not prompt
+files. Do not require a `prompts/profiles/*.md` directory that the package does
+not ship; `tests/test_package_data.py` checks the resources that do exist, so a
+documentation edit cannot weaken them silently.
 
 It must not contain `__pycache__`, `.pyc`, tests or an old
 `tui_connections.py`/`hosted_bridge.py`. The release bridge modules are
