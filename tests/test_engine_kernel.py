@@ -132,6 +132,7 @@ class Harness:
         runtime_cls: type = CoreRuntime,
         task: str = "create hello.txt with hi",
         visual_checker: Any = None,
+        allow_probes: bool = False,
     ) -> None:
         self.repository = repository
         self.provider = ScriptedProvider(responses)
@@ -157,6 +158,7 @@ class Harness:
             self.store,
             tmp_path / "audit.jsonl",
             verification_commands=verification,
+            allow_probes=allow_probes,
             **({"visual_checker": visual_checker} if visual_checker is not None else {}),
         )
         if create_session:
@@ -3463,6 +3465,70 @@ def test_a_failed_check_is_never_reused(tmp_path: Path, repository: Path) -> Non
     assert len(runs) == 2
     assert all(entry["result"]["ok"] is False for entry in runs)
     assert all("reused_from" not in entry["result"]["data"] for entry in runs)
+
+
+def test_a_probe_that_writes_an_untracked_dependency_ends_check_reuse(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Arbitrary probe code can change a file no identity entry covers.
+
+    ``checks.run`` is reuse-neutral, so a reproduction probe left an earlier
+    passing check reusable. Here the approved check reads ``spec.txt``, which
+    the run neither read nor changed; the probe rewrites it, and the repeat of
+    the approved check was answered from the cache and re-bound to the current
+    identity. The run then ended VERIFIED although the check would fail on the
+    final bytes. A probe executes arbitrary code, so it must end reuse.
+    """
+
+    spec = repository / "spec.txt"
+    spec.write_text("state=ok\n", encoding="utf-8")
+    _git(repository, "add", "spec.txt")
+    _git(repository, "commit", "-q", "-m", "spec")
+    check = (
+        sys.executable,
+        "-c",
+        "import pathlib; raise SystemExit(0 if "
+        "pathlib.Path('spec.txt').read_text(encoding='utf-8').strip() == 'state=ok' "
+        "else 3)",
+    )
+    probe = (
+        sys.executable,
+        "-c",
+        "open('spec.txt', 'w', encoding='utf-8').write('state=bad\\n')",
+    )
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_tool_call("c2", "checks_run", {"argv": list(check)}),)),
+            _response((_tool_call("c3", "checks_run", {"argv": list(probe)}),)),
+            _response((_tool_call("c4", "checks_run", {"argv": list(check)}),)),
+            _response((_write_call("c5", "spec.txt", "state=ok\n"),)),
+            _response((_tool_call("c6", "checks_run", {"argv": list(check)}),)),
+            _response((_finish_call("c7", "created hello.txt with hi"),)),
+        ],
+        verification=(check,),
+        runtime_cls=ExtendedCoreRuntime,
+        allow_probes=True,
+    )
+    report = harness.run()
+
+    assert report.verified is True, (report.reason, report.unmet)
+    runs = [
+        entry
+        for entry in _check_runs(harness)
+        if entry.get("tool_call_id") in {"c2", "c4", "c6"}
+    ]
+    assert [entry["tool_call_id"] for entry in runs] == ["c2", "c4", "c6"]
+    after_probe = runs[1]["result"]
+    assert "reused_from" not in after_probe["data"]
+    assert after_probe["ok"] is False
+    assert after_probe["data"]["exit_code"] == 3
+    repaired = runs[2]["result"]
+    assert "reused_from" not in repaired["data"]
+    assert repaired["ok"] is True
+    assert spec.read_text(encoding="utf-8") == "state=ok\n"
 
 
 def test_third_identical_tool_step_gets_one_persisted_engine_note(

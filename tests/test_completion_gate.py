@@ -563,6 +563,44 @@ def test_a_stale_patch_digest_does_not_prove_the_current_file(tmp_path: Path) ->
 
     assert "missing current structural evidence: pkg/mod.py" in reasons
 
+
+def test_a_review_of_old_bytes_is_not_current_after_an_edit(tmp_path: Path) -> None:
+    """The change review is bound to the bytes it showed.
+
+    A semantic review (here: the working-tree diff) that predates a later edit
+    describes content the user will not receive, so the floor must ask for a
+    review of the current bytes instead of accepting the old one.
+    """
+
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    record = SimpleNamespace(
+        changed_files=["pkg/mod.py"],
+        task="Fix the units conversion.",
+        requirements=[],
+        evidence=[],
+        provider_history=[],
+    )
+    core = _Core(tmp_path)
+    reviewed = completion_gate.identity(core, record)
+    record.provider_history.append(
+        {
+            "role": "tool",
+            "core_name": "git.diff",
+            "result": {
+                "ok": True,
+                "requested_by": None,
+                "data": {"completion_identity": reviewed},
+            },
+        }
+    )
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+    target.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert "missing current change review" in completion_gate.floor(core, record)
+
 _NO_TEST_EDITS_TASK = (
     "Complete the task below. Do not modify tests, the public check, or any "
     "grading files.\n\nThis runs the existing tests in `testing/test_mark.py`. "

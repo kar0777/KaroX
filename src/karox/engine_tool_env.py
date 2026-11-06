@@ -83,6 +83,12 @@ _RUN_NEUTRAL_TOOLS = frozenset(
         "disk.plan_cleanup",
     }
 )
+#: ``checks.run`` is neutral only for the literal approved command. A probe or
+#: an inline wildcard check executes arbitrary code in the repository; it can
+#: write bytes no ``changed_files`` entry and no identity covers, so
+#: ``_execute`` advances the epoch after it returns and every earlier pass has
+#: to be run again.
+
 #: File edits that report exactly what they wrote. One that failed or wrote
 #: identical bytes changed nothing a run can see, so it does not end a reuse.
 #: ``repo.command`` is not here: a failed command may still have written files.
@@ -326,6 +332,23 @@ def _counts_as_repository_change(
         and core_name in _CODE_CHANGE_TOOLS
         and (data.get("changed") is True or bool(data.get("changed_files")))
     )
+
+
+def _ran_unchecked_code(data: Mapping[str, Any]) -> bool:
+    """Whether a check call ran code outside the user's approved literal argv.
+
+    A reproduction probe (``python -c``/``-m``/a repository script admitted next
+    to the approved checks, see ``core_process.probe_python_command``) and an
+    inline check admitted under a wildcard rule both execute arbitrary code in
+    the repository. They can write bytes that neither ``changed_files`` nor the
+    identity records: a probe rewrote ``spec.txt`` between two identical
+    approved checks and the second was answered from the reuse cache, so the run
+    ended VERIFIED although the check would fail on the final bytes. Any such
+    call therefore ends reuse; only a literal approved command may stand in for
+    a later identical run.
+    """
+
+    return data.get("probe") is True or data.get("inline_code_from_file") is True
 
 
 def _wrote_anything(data: Mapping[str, Any], ok: bool) -> bool:
@@ -897,6 +920,12 @@ class CoreToolEnvironment:
             self._remember_passed_run(
                 reuse_key, result, run_identity_before, epoch_before, call_id
             )
+        if core_name in _REUSABLE_RUNS and _ran_unchecked_code(data):
+            # Arbitrary code may have changed a byte the identity does not
+            # track. It also makes the call's own cached verdict unusable: the
+            # epoch was `epoch_before` when the entry above was stored, so the
+            # next identical run executes instead of answering from the cache.
+            self._state_epoch += 1
         self._attach_quick_checks(result)
         self._attach_affected_tests(result, action)
         output = self._render_output(core_name, result)
