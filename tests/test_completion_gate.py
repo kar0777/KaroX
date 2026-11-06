@@ -611,6 +611,28 @@ def _changed_record(
     return record, _Core(repository)
 
 
+def _ignored(**overrides: object) -> dict:
+    """The trusted coverage block for known Git-ignored deliverables.
+
+    Core writes it from the session's own changed paths: it checks each one
+    against Git's exclude rules (never a tree walk), appends an ignored
+    deliverable as a new-file diff and keeps a count, the read state of every
+    candidate and an explicit completeness flag.
+    """
+
+    ignored: dict = {
+        "checked": 0,
+        "shown": [],
+        "limited": [],
+        "excluded": [],
+        "missing": [],
+        "truncated": False,
+        "complete": True,
+    }
+    ignored.update(overrides)
+    return ignored
+
+
 def _complete_review(identity: dict, **overrides: object) -> dict:
     """A git.diff result whose trusted scope metadata says what it read.
 
@@ -621,7 +643,7 @@ def _complete_review(identity: dict, **overrides: object) -> dict:
     """
 
     review: dict = {
-        "version": 2,
+        "version": 3,
         "mode": "complete",
         "base": "start",
         "base_commit": _START_COMMIT,
@@ -636,6 +658,7 @@ def _complete_review(identity: dict, **overrides: object) -> dict:
             "excluded": [],
             "truncated": False,
         },
+        "ignored": _ignored(),
     }
     review.update(overrides)
     return {"completion_identity": identity, "review": review}
@@ -673,6 +696,22 @@ def _diff_result(data: dict, *, ok: bool = True) -> dict:
                 },
             },
             id="deliverable-excluded-from-the-review",
+        ),
+        pytest.param({"ignored": None}, id="no-ignored-coverage-metadata"),
+        pytest.param(
+            {"ignored": _ignored(complete=False, excluded=["pkg/mod.py"])},
+            id="ignored-deliverable-denied",
+        ),
+        pytest.param(
+            {"ignored": _ignored(complete=False, missing=["pkg/mod.py"])},
+            id="ignored-deliverable-unreadable",
+        ),
+        pytest.param(
+            {"ignored": _ignored(complete=False, truncated=True)},
+            id="ignored-check-truncated",
+        ),
+        pytest.param(
+            {"ignored": _ignored(complete=False)}, id="ignored-coverage-incomplete"
         ),
     ],
 )
@@ -717,6 +756,76 @@ def test_a_complete_review_of_the_current_bytes_discharges_the_review(
     )
 
     assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+def test_an_ignored_deliverable_the_review_shows_closes_the_review(
+    tmp_path: Path,
+) -> None:
+    """Covering the ignored deliverable is what discharges the obligation.
+
+    A build or dependency directory the run did not touch still reviews
+    (``test_an_excluded_path_the_run_did_not_change_still_reviews``). Here the
+    run's own deliverable is the ignored path, and the trusted block says Core
+    showed it, so the review is complete.
+    """
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(
+            _complete_review(
+                identity,
+                ignored=_ignored(checked=1, shown=["pkg/mod.py"]),
+            )
+        )
+    )
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+@pytest.mark.parametrize(
+    "ignored",
+    [
+        pytest.param(_ignored(checked=1, limited=["pkg/mod.py"]), id="limited-marker"),
+        pytest.param(
+            _ignored(
+                checked=2,
+                shown=["pkg/mod.py"],
+                limited=["docs/plot.generated.png"],
+            ),
+            id="shown-and-limited",
+        ),
+    ],
+)
+def test_a_limited_ignored_deliverable_is_covered_by_its_marker(
+    tmp_path: Path, ignored: dict
+) -> None:
+    """The established oversized/binary marker policy is coverage, not silence."""
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    record.provider_history.append(
+        _diff_result(_complete_review(identity, ignored=ignored))
+    )
+
+    assert "missing current change review" not in completion_gate.floor(core, record)
+
+
+def test_a_version_two_review_is_not_the_current_contract(tmp_path: Path) -> None:
+    """A review persisted before the ignored-deliverable contract cannot close.
+
+    The earlier metadata has no ignored block, so it cannot say whether a
+    deliverable Git hides was covered. The run takes a fresh review instead of
+    treating the older shape as complete.
+    """
+
+    record, core = _changed_record(tmp_path)
+    identity = completion_gate.identity(core, record)
+    review = _complete_review(identity)
+    review["review"]["version"] = 2
+    record.provider_history.append(_diff_result(review))
+
+    assert "missing current change review" in completion_gate.floor(core, record)
 
 
 def test_an_excluded_path_the_run_did_not_change_still_reviews(tmp_path: Path) -> None:

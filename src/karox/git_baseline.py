@@ -47,8 +47,9 @@ KIND_UNAVAILABLE = "unavailable"
 #: What a complete change review names as the base it actually compared
 #: against, and the version of that trusted metadata block. Mission 03 wrote
 #: version 1 with a symbolic base (``HEAD`` or ``index``); that shape cannot
-#: prove which tree it read, so it is a different contract.
-REVIEW_VERSION = 2
+#: prove which tree it read, so it is a different contract. Version 3 adds the
+#: run's own Git-ignored deliverables (``review.ignored``), hidden from listings.
+REVIEW_VERSION = 3
 REVIEW_BASE_START = "start"
 REVIEW_BASE_UNBORN = "unborn"
 
@@ -173,15 +174,25 @@ _CURRENT: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.Context
     "karox_session_git_baseline", default=None
 )
 
+#: The paths this session's own trusted state records as changed. A complete
+#: review checks them against Git's exclude rules, because an ignored
+#: deliverable is absent from every diff and from the filtered listing.
+_CHANGED: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "karox_session_changed_paths", default=()
+)
+
 
 @contextlib.contextmanager
 def session_baseline(record: Any) -> Iterator[None]:
-    """Expose one session's durable start revision while its command runs."""
+    """Expose one session's start revision and changed paths while it runs."""
 
     token = _CURRENT.set(normalize(getattr(record, "git_baseline", None)))
+    raw_paths = getattr(record, "changed_files", None) or ()
+    changed = _CHANGED.set(tuple(p for p in raw_paths if isinstance(p, str) and p))
     try:
         yield
     finally:
+        _CHANGED.reset(changed)
         _CURRENT.reset(token)
 
 
@@ -189,3 +200,7 @@ def current() -> Optional[Dict[str, Any]]:
     """The start revision of the session whose command is running, if any."""
 
     return _CURRENT.get()
+
+
+def changed_paths() -> tuple[str, ...]:
+    return _CHANGED.get()

@@ -993,6 +993,304 @@ def test_a_missing_start_object_fails_the_review_closed(
     assert "not a complete review" in result.data["stdout"]
 
 
+def _ignored_repository(repository: Path, pattern: str) -> str:
+    """Commit a ``.gitignore`` and return the session's start revision."""
+
+    (repository / ".gitignore").write_text(pattern + "\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "-q", "-m", "ignore generated outputs")
+    return _head(repository)
+
+
+def _all_review_stdout(harness: "Harness") -> str:
+    return "\n".join(
+        str(entry["result"]["data"].get("stdout") or "") for entry in _diff_entries(harness)
+    )
+
+
+def test_an_ignored_deliverable_is_part_of_the_complete_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A deliverable Git ignores must not disappear from the closing review.
+
+    ``git ls-files --others --exclude-standard`` omits a path matched by the
+    repository's ``.gitignore``. On the starting code this run created exactly
+    the requested ``result.generated.txt``, the closing review listed no
+    untracked file, its stdout was empty -- and the run still ended VERIFIED.
+    The durable session state says the run wrote that path, so the complete
+    review has to show it.
+    """
+
+    _ignored_repository(repository, "*.generated.txt")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "result.generated.txt", "generated hello"),)),
+            _response((_finish_call("c2", "created result.generated.txt"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write result.generated.txt with generated hello",
+    )
+
+    report = harness.run()
+
+    closing = _diff_entries(harness)[-1]
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert "result.generated.txt" in stdout, stdout
+    assert "+generated hello" in stdout, stdout
+    review = _review_of(closing)
+    assert review.get("ignored", {}).get("shown") == ["result.generated.txt"], review
+    assert review.get("ignored", {}).get("checked") == 1, review
+    assert review.get("ignored", {}).get("complete") is True, review
+    assert review.get("complete") is True, review
+    assert report.verified is True, (report.reason, report.unmet)
+    assert len(harness.provider.requests) == 2, "the ignored check cost a model call"
+    assert len(_diff_entries(harness)) == 1, "the closing review became two calls"
+    assert _harness_final_names(harness)[-1] == "git.diff"
+
+
+def test_an_unowned_ignored_tree_is_not_enumerated_or_read(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The ignored check covers the run's own paths, never an unrelated tree.
+
+    A dependency directory can hold thousands of ignored files. The review may
+    not walk it, read it or name it: only the changed paths recorded by Core are
+    checked, in one bounded Git call.
+    """
+
+    _ignored_repository(repository, ".venv/")
+    dependency = repository / ".venv" / "lib"
+    dependency.mkdir(parents=True)
+    for index in range(25):
+        (dependency / f"dep{index}.py").write_text(
+            "VENV_UNRELATED_MARKER\n", encoding="utf-8"
+        )
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "hello.txt", "hi"),)),
+            _response((_finish_call("c2", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    commands: List[List[str]] = []
+    original_run = harness.core._run
+
+    def recording_run(argv: List[str], timeout: float, **kwargs: Any) -> Any:
+        commands.append(list(argv))
+        return original_run(argv, timeout, **kwargs)
+
+    harness.core._run = recording_run  # type: ignore[method-assign]
+
+    report = harness.run()
+
+    closing = _diff_entries(harness)[-1]
+    stdout = closing["result"]["data"].get("stdout", "")
+    assert ".venv" not in stdout
+    assert "VENV_UNRELATED_MARKER" not in _all_review_stdout(harness)
+    review = _review_of(closing)
+    assert review.get("ignored", {}).get("checked") == 1, review
+    assert review.get("ignored", {}).get("shown") == [], review
+    assert review.get("complete") is True, review
+    checks = [argv for argv in commands if "--ignored" in argv]
+    assert len(checks) == 1, checks
+    assert checks[0][-2] == "--", checks
+    assert checks[0][-1] == ":(literal)hello.txt", checks
+    assert all(".venv" not in part for part in checks[0]), checks
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_an_ignored_secret_shaped_path_is_neither_read_nor_certified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An ignored secret is not made visible by being in ``changed_files``.
+
+    The run wrote ``.env``; Git ignores it because that is where machine-local
+    secrets live. The closing review must not copy it into the transcript, and
+    it must not call the run verified just because the path is on record.
+    """
+
+    _ignored_repository(repository, ".env")
+    token = "PLACEHOLDER=not-a-real-secret"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", ".env", token),)),
+            _response((_finish_call("c2", "created .env"),)),
+            _response((_finish_call("c3", "created .env"),)),
+            _response((_finish_call("c4", "created .env"),)),
+            _response((_finish_call("c5", "created .env"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write .env",
+        max_steps=5,
+    )
+
+    report = harness.run()
+
+    closing = _diff_entries(harness)[-1]
+    review = _review_of(closing)
+    assert token not in _all_review_stdout(harness)
+    assert review.get("ignored", {}).get("excluded") == [".env"], review
+    assert review.get("ignored", {}).get("complete") is False, review
+    assert review.get("complete") is False, review
+    assert report.verified is False, report.reason
+    assert "missing current change review" in report.unmet
+
+
+def test_an_ignored_build_output_the_run_wrote_cannot_be_certified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """A deliverable inside an ignored directory is named, not silently dropped.
+
+    The file tools do not treat ``dist/`` as source material, and Git ignores
+    it too. Before this contract the path vanished from the review and the run
+    still verified; now it is explicitly excluded and the review stays
+    incomplete.
+    """
+
+    _ignored_repository(repository, "dist/")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "dist/bundle.js", "var x = 1;\n"),)),
+            _response((_finish_call("c2", "wrote dist/bundle.js"),)),
+            _response((_finish_call("c3", "wrote dist/bundle.js"),)),
+            _response((_finish_call("c4", "wrote dist/bundle.js"),)),
+            _response((_finish_call("c5", "wrote dist/bundle.js"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write dist/bundle.js",
+        max_steps=5,
+    )
+
+    report = harness.run()
+
+    review = _review_of(_diff_entries(harness)[-1])
+    assert review.get("ignored", {}).get("excluded") == ["dist/bundle.js"], review
+    assert review.get("ignored", {}).get("shown") == [], review
+    assert review.get("complete") is False, review
+    assert report.verified is False, report.reason
+
+
+def test_an_oversized_ignored_deliverable_is_a_marker_not_silence(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The documented read clamp applies: bounded text plus explicit metadata."""
+
+    _ignored_repository(repository, "*.generated.txt")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "result.generated.txt", "generated hello"),)),
+            _response((_finish_call("c2", "created result.generated.txt"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write result.generated.txt",
+    )
+    harness.core.REVIEW_MAX_UNTRACKED_CHARS = 8  # type: ignore[attr-defined]
+
+    report = harness.run()
+
+    closing = _diff_entries(harness)[-1]
+    stdout = closing["result"]["data"].get("stdout", "")
+    review = _review_of(closing)
+    assert review.get("ignored", {}).get("limited") == ["result.generated.txt"], review
+    assert review.get("ignored", {}).get("shown") == [], review
+    assert "only the first 8 characters" in stdout, stdout
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_a_changed_ignored_deliverable_invalidates_the_complete_review(
+    tmp_path: Path, repository: Path
+) -> None:
+    """An earlier review of the old ignored bytes cannot close the run.
+
+    The model reviews the deliverable, edits it again and finishes. The old
+    review's identity no longer matches the bytes, so the harness retakes the
+    review and the closing stdout shows the final content.
+    """
+
+    _ignored_repository(repository, "*.generated.txt")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "result.generated.txt", "generated first"),)),
+            _response((_tool_call("c2", "git_diff", {"complete": True}),)),
+            _response((_write_call("c3", "result.generated.txt", "generated second"),)),
+            _response((_finish_call("c4", "updated result.generated.txt"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write result.generated.txt",
+    )
+
+    report = harness.run()
+
+    completed = [
+        entry for entry in _diff_entries(harness) if _review_of(entry).get("complete") is True
+    ]
+    assert len(completed) == 2, [entry.get("result", {}).get("requested_by") for entry in completed]
+    first, closing = completed
+    assert "generated first" in first["result"]["data"].get("stdout", "")
+    closing_stdout = closing["result"]["data"].get("stdout", "")
+    assert "+generated second" in closing_stdout, closing_stdout
+    assert "generated first" not in closing_stdout, closing_stdout
+    assert _review_of(closing).get("ignored", {}).get("shown") == [
+        "result.generated.txt"
+    ], _review_of(closing)
+    assert report.verified is True, (report.reason, report.unmet)
+
+
+def test_a_resumed_session_still_reviews_its_ignored_deliverable(
+    tmp_path: Path, repository: Path
+) -> None:
+    """The changed path and the start revision survive a resume.
+
+    The first run is stopped by its step budget after writing the ignored
+    deliverable. The resumed run has no write of its own, so the path and the
+    session's start revision can only come from the durable record.
+    """
+
+    start = _ignored_repository(repository, "*.generated.txt")
+    first = Harness(
+        repository,
+        tmp_path,
+        [_response((_write_call("c1", "result.generated.txt", "generated hello"),))],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write result.generated.txt",
+        max_steps=1,
+    )
+    stopped = first.run()
+    assert stopped.verified is False
+    assert first.record().git_baseline.get("commit") == start
+
+    resumed = Harness(
+        repository,
+        tmp_path,
+        [_response((_finish_call("c2", "created result.generated.txt"),))],
+        runtime_cls=ExtendedCoreRuntime,
+        task="write result.generated.txt",
+        create_session=False,
+        max_steps=6,
+    )
+    report = resumed.run()
+
+    closing = _diff_entries(resumed)[-1]
+    stdout = closing["result"]["data"].get("stdout", "")
+    review = _review_of(closing)
+    assert "+generated hello" in stdout, stdout
+    assert review.get("ignored", {}).get("shown") == ["result.generated.txt"], review
+    assert review.get("base_commit") == start, review
+    assert report.verified is True, (report.reason, report.unmet)
+
+
 def test_engine_runs_independent_calls_batched_in_one_response(
     tmp_path: Path, repository: Path
 ) -> None:

@@ -15,6 +15,21 @@ from . import git_baseline
 from .models import EvidenceRecord
 from .security import contains_credential, redact
 
+#: Names a review never reads, even when the run wrote them: Git ignores them.
+_REVIEW_SECRET_NAMES = frozenset(
+    ".env .git-credentials .netrc .npmrc .pgpass .pypirc credentials.json "
+    "id_dsa id_ecdsa id_ed25519 id_rsa".split()
+)
+_REVIEW_SECRET_SUFFIXES = (".key", ".keystore", ".kdbx", ".p12", ".pem", ".pfx")
+_REVIEW_ENV_TEMPLATES = frozenset({".env.dist", ".env.example", ".env.sample", ".env.template"})
+
+
+def _review_denied_path(relative: str) -> bool:
+    name = Path(relative).name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return name not in _REVIEW_ENV_TEMPLATES
+    return name in _REVIEW_SECRET_NAMES or name.endswith(_REVIEW_SECRET_SUFFIXES)
+
 
 class GitToolsMixin:
     """Git methods mixed into :class:`karox.core.CoreRuntime`."""
@@ -27,6 +42,11 @@ class GitToolsMixin:
     REVIEW_MAX_UNTRACKED_FILES = 200
     REVIEW_MAX_UNTRACKED_CHARS = 20_000
     REVIEW_MAX_UNTRACKED_TOTAL_CHARS = 400_000
+
+    #: A complete review checks the run's own changed paths against Git's
+    #: exclude rules too, in bounded batches; a larger change set fails closed.
+    REVIEW_MAX_IGNORED_FILES = 400
+    _REVIEW_IGNORED_BATCH = 50
 
     def _git(
         self,
@@ -120,17 +140,14 @@ class GitToolsMixin:
 
         The base is the exact object name captured when the session was created
         -- never a ref, never a short name, never the HEAD of this moment. A
-        session with no usable baseline cannot certify coverage: the diff is
-        still collected as a diagnostic, but ``review.complete`` is false and
-        the completion gate refuses it. A repository that had no commit at
-        session start is compared through the index while it still has none; if
-        the run itself creates the first commit, no earlier revision exists to
-        review against, so the review fails closed instead of describing an
-        empty change.
+        session with no usable baseline cannot certify coverage, and a run that
+        creates the repository's first commit fails closed: no earlier revision
+        exists to compare against.
 
         The returned ``review`` block is the coverage the trusted Core actually
         executed. The completion gate reads it instead of the caller's claim,
         so a model asking for ``complete`` cannot widen what the commands saw.
+        A path Git hides is checked through ``review.ignored`` for that reason.
         """
 
         baseline = git_baseline.current()
@@ -192,14 +209,20 @@ class GitToolsMixin:
             "excluded": [],
             "truncated": False,
         }
+        ignored: Dict[str, Any] = {
+            "checked": 0, "shown": [], "limited": [], "excluded": [],
+            "missing": [], "truncated": False, "complete": False,
+        }
+        if tracked_ok:
+            result["stdout"] = self._append_untracked_review(
+                str(result.get("stdout") or ""), untracked, ignored, deadline_seconds
+            )
+        if reason is None and ignored["complete"] is not True:
+            reason = str(ignored.get("reason") or "ignored coverage is incomplete")
         if reason is not None:
             result["stdout"] = (
                 f"[karox: this is not a complete review: {reason}]\n"
                 + str(result.get("stdout") or "")
-            )
-        if tracked_ok:
-            result["stdout"] = self._append_untracked_review(
-                str(result.get("stdout") or ""), untracked, deadline_seconds
             )
         text = str(result.get("stdout") or "")
         # Recomputed after the review is assembled: the captured text changes
@@ -213,6 +236,7 @@ class GitToolsMixin:
             and tracked_ok
             and not result.get("stdout_truncated")
             and not untracked["truncated"]
+            and ignored["complete"] is True
         )
         review: Dict[str, Any] = {
             "version": git_baseline.REVIEW_VERSION,
@@ -224,8 +248,10 @@ class GitToolsMixin:
             "complete": reviewed,
             "truncated": bool(
                 result.get("stdout_truncated") or untracked["truncated"]
+                or ignored["truncated"]
             ),
             "untracked": untracked,
+            "ignored": ignored,
         }
         if reason is not None:
             review["reason"] = reason
@@ -270,20 +296,24 @@ class GitToolsMixin:
         self,
         text: str,
         untracked: Dict[str, Any],
+        ignored: Dict[str, Any],
         deadline_seconds: float,
     ) -> str:
-        """Append every new unreferenced file to the tracked diff as a review."""
+        """Append every new unreferenced file to the tracked diff as a review.
 
-        # Imported lazily: ``core_tools`` builds on this module, and the ignore
-        # rule is the same one the file tools use, so a vendored dependency tree
-        # cannot turn a review into thousands of irrelevant new-file diffs.
-        from .core_tools import is_ignored_path
+        The session's own Git-ignored changed paths are joined here (same
+        bounds and redaction as any new file).
+        """
+
+        from .core_tools import is_ignored_path  # lazy: core_tools imports us
 
         listed = self._git(
             ["ls-files", "--others", "--exclude-standard", "-z"], deadline_seconds
         )
         if listed.get("exit_code") != 0 or listed.get("timed_out"):
             untracked["truncated"] = True
+            ignored["truncated"] = True
+            ignored["reason"] = "the new-file list could not be read"
             return text + (
                 "\n[karox: the untracked-file list could not be read; "
                 "this review does not cover new files]\n"
@@ -291,41 +321,115 @@ class GitToolsMixin:
         raw_paths = [
             item for item in str(listed.get("stdout") or "").split("\0") if item
         ]
+        ignored_paths = self._known_ignored_paths(ignored, deadline_seconds)
+        raw_paths.extend(
+            relative for relative in sorted(ignored_paths) if relative not in raw_paths
+        )
         untracked["listed"] = len(raw_paths)
         relative_paths = []
         for relative in raw_paths:
             parts = Path(relative).parts
             if not parts or parts[0].lower() in {".git", ".karox"}:
                 continue
-            if is_ignored_path(relative):
-                # Not source material: the file tools already refuse to list
-                # it. A run can still write there, so the path is recorded as
-                # excluded and the gate refuses to call the change reviewed.
+            # A secret-shaped ignored deliverable is never read; a denied
+            # directory is not source material, so the path stays excluded.
+            if is_ignored_path(relative) or (
+                relative in ignored_paths and _review_denied_path(relative)
+            ):
                 untracked["excluded"].append(relative)
                 continue
             relative_paths.append(relative)
         if len(relative_paths) > self.REVIEW_MAX_UNTRACKED_FILES:
             untracked["truncated"] = True
+            ignored["truncated"] = True
             relative_paths = relative_paths[: self.REVIEW_MAX_UNTRACKED_FILES]
         sections: List[str] = []
         budget = self.REVIEW_MAX_UNTRACKED_TOTAL_CHARS
         for relative in relative_paths:
+            if relative in ignored_paths and budget <= 0:
+                untracked["excluded"].append(relative)  # no coverage, not a marker
+                continue
             section, state, spent = self._untracked_review_section(relative, budget)
             sections.append(section)
             untracked[state].append(relative)
             budget -= spent
+        for state in ("shown", "limited"):
+            ignored[state] = [p for p in untracked[state] if p in ignored_paths]
+        ignored["excluded"].extend(
+            p for p in untracked["excluded"] if p in ignored_paths
+        )
+        ignored["complete"] = not (
+            ignored["excluded"] or ignored["missing"] or ignored["truncated"]
+            or untracked["truncated"]
+        )
         return text + "".join(sections)
+
+    def _known_ignored_paths(
+        self, ignored: Dict[str, Any], deadline_seconds: float
+    ) -> set[str]:
+        """The session's own changed paths that Git's exclude rules match.
+
+        Only durable changed paths are checked (no tree walk, no model path).
+        """
+
+        candidates = [
+            item
+            for item in dict.fromkeys(git_baseline.changed_paths())
+            if item and "\x00" not in item and not Path(item).is_absolute()
+            and ".." not in Path(item).parts
+            and Path(item).parts[0].lower() not in {".git", ".karox"}
+        ]
+        ignored["checked"] = min(len(candidates), self.REVIEW_MAX_IGNORED_FILES)
+        if len(candidates) > self.REVIEW_MAX_IGNORED_FILES:
+            ignored["truncated"] = True
+            ignored["reason"] = "the change set is larger than the ignored-path check"
+            return set()
+        asked: List[str] = []
+        for relative in candidates:
+            try:
+                path = self.safe_path(relative)
+            except Exception:  # noqa: BLE001 - a denied path is a real gap
+                ignored["excluded"].append(relative)
+                continue
+            if path.is_dir():  # a dir pathspec would walk an ignored tree
+                ignored["excluded"].append(relative)
+            else:
+                asked.append(relative)
+        found: set[str] = set()
+        for start in range(0, len(asked), self._REVIEW_IGNORED_BATCH):
+            batch = asked[start : start + self._REVIEW_IGNORED_BATCH]
+            # Matched, never shown: redacting a token-shaped path would make it
+            # unmatchable and re-open the omission this check closes.
+            listed = self._git(
+                [
+                    "ls-files", "--others", "--ignored", "--exclude-standard",
+                    "-z", "--", *(f":(literal){item}" for item in batch),
+                ],
+                deadline_seconds,
+                redact_output=False,
+            )
+            if listed.get("exit_code") != 0 or listed.get("timed_out"):
+                ignored["truncated"] = True
+                ignored["reason"] = "the ignored-deliverable check could not be read"
+                return set()
+            found.update(filter(None, str(listed.get("stdout") or "").split("\0")))
+        for relative in found:
+            try:
+                if not self.safe_path(relative).is_file():
+                    raise OSError
+            except Exception:  # noqa: BLE001 - vanished or unreadable is a gap
+                ignored["missing"].append(relative)
+        return found - set(ignored["missing"])
 
     def _untracked_review_section(
         self, relative: str, budget: int
     ) -> tuple[str, str, int]:
         """One new-file diff, bounded and redacted; returns (text, state, spent).
 
-        ``shown`` means the whole textual file is in the review. ``limited``
-        means it is represented by a marker instead: binary content, a file
-        over the read ceiling, a symlink outside the readable tree, or a file
-        the total budget no longer had room for. The marker names the path and,
-        where it was read, its size and digest -- never silence.
+        ``shown`` means the whole textual file is in the review; ``limited``
+        means a marker (binary, over the read ceiling, symlink outside the
+        tree, or no budget left) names the path and, when read, its size and
+        digest -- never silence.
         """
 
         section, state, spent = self._untracked_review_text(relative, budget)

@@ -831,10 +831,10 @@ def _complete_change_review(record: Any, data: dict[str, Any]) -> bool:
     "whatever HEAD is now" describes a different span after an elevated commit
     moved HEAD, and the model's own claim about the scope is never read --
     ``review`` is written by Core from the commands it ran. A result from
-    before this contract (version 1, symbolic base) or from a session whose
-    record has no usable start revision fails closed, and so does one whose
-    captured tracked diff was truncated or whose untracked listing was:
-    neither can prove what it did not show.
+    before this contract (an earlier version, a symbolic base) or from a
+    session whose record has no usable start revision fails closed, and so does
+    one whose captured tracked diff or untracked listing was truncated: neither
+    can prove what it did not show, and a path Git excludes is in neither view.
     """
 
     review = data.get("review")
@@ -849,6 +849,14 @@ def _complete_change_review(record: Any, data: dict[str, Any]) -> bool:
     if review.get("truncated") is not False:
         return False
     if review.get("complete") is not True:
+        return False
+    ignored = review.get("ignored")  # older shapes cannot prove hidden coverage
+    if (
+        not isinstance(ignored, dict)
+        or ignored.get("complete") is not True
+        or ignored.get("excluded")
+        or ignored.get("missing")
+    ):
         return False
     baseline = git_baseline.normalize(getattr(record, "git_baseline", None))
     if baseline is None:
