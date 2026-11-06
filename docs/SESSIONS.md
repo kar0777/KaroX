@@ -20,7 +20,10 @@ create → active → verified | failed | stopped
   so the closing change review compares the tree the run began with against the
   final bytes even after a local commit, a restart or a resume. A record without
   a usable start revision cannot certify a change and fails closed; a session
-  that changed nothing owes no review.
+  that changed nothing owes no review. The closing review also checks the
+  session's own changed paths against Git's exclude rules, so a deliverable
+  whose name is ignored by `.gitignore` is still shown (bounded and redacted)
+  or the review fails closed instead of silently omitting it.
 - **run** appends every step before the next model request. A crash or a kill
   therefore loses no completed step.
 - **resume** is `karox agent run --session-id ID --task "..." --continue-task`.

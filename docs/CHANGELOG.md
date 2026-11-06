@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Changed — the closing change review covers Git-ignored deliverables
+
+- A deliverable whose name matches `.gitignore` (or `.git/info/exclude`, or a
+  global exclude) is absent from both the tracked diff and the filtered
+  untracked listing, so a run could end `VERIFIED` with an empty closing review
+  although it had just created the requested file. The complete review
+  (`git.diff` with `complete: true`) now checks the session's own durable
+  changed paths against Git's exclude rules with
+  `git ls-files --others --ignored --exclude-standard` (exact literal
+  pathspecs, bounded batches, at most 400 paths) and appends each ignored
+  deliverable as a new-file diff with the same read limits and redaction as any
+  other new file. Unrelated ignored trees are never enumerated or read.
+- The trusted review metadata moved to version 3 and adds `review.ignored`
+  (`checked`, `shown`, `limited`, `excluded`, `missing`, `truncated`,
+  `complete`). The completion gate accepts a complete review only when that
+  coverage is complete: a secret-shaped path (`.env` and key material), a
+  changed path inside an ignored build/dependency directory, an unreadable
+  candidate, an exhausted review budget, or a change set over the path ceiling
+  leaves the run unverified with an explicit reason instead of a misleading
+  PASS. A version-2 review, an older session's review, or one whose ignored
+  coverage is missing is not complete.
+- Cost: one extra `git ls-files` per complete review (four Git processes in the
+  ordinary one-file run instead of three), no additional model turn and no
+  additional `git.diff` tool call. The package stays under the existing
+  `tests/test_tree.py` ceiling (86,996 of 87,000 lines); `scripts/check_tree.py`
+  remains the pre-existing red gate. Full analysis:
+  [audits/DSH_GITIGNORED_REVIEW_20261106.md](audits/DSH_GITIGNORED_REVIEW_20261106.md).
+
 ### Changed — the closing change review is anchored to the session start
 
 - A session now records the exact Git revision it started from, read by KaroX
