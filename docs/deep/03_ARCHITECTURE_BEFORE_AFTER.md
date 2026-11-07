@@ -197,8 +197,50 @@ and page registration moved to `browser/navigation.py`
 runtime and composes navigation first. Module-qualified `code_sources.fetch`
 calls stay patchable. Browser resource/unit/core/code-source/facade tests PASS.
 
+## Browser series complete
+
+`browser/session.py` 3,703 → **173 lines**: a composition façade with
+`__init__`, three patchable seams and the single action-wrapping loop. Every
+responsibility has an owner module:
+
+| Module | Lines | Responsibility |
+|---|---:|---|
+| `contract.py` | 294 | cancellation, typed records, caps, action vocabulary, windowless flags |
+| `guards.py` | 267 | locator/input/payment guards |
+| `runtime.py` | 312 | owner thread/queue, dispatch, guarded wrapper, parking |
+| `navigation.py` | 368 | routes, pages, tabs, history, recovery |
+| `collectors.py` | 429 | console/network/dialog/cookie events |
+| `observation.py` | 497 | snapshots, text/evaluate, forms, iframes, timing |
+| `interaction.py` | 620 | click/drag/fill/type/key/press/check/scroll |
+| `waits.py` | 204 | waits, user takeover, recovery |
+| `evidence.py` | 316 | screenshots, uploads, downloads |
+| `launch.py` | 437 | managed/detached launch, reconnect |
+| `lifecycle.py` | 255 | close, force-close, profile persistence, process terminate |
+
+The owner-thread serialization, fail-closed timeouts, action wrapping, result
+shapes and all WebGL/Three.js/3D-related behaviour outside `browser/` are
+unchanged. `web_check.py`, `visual_check.py`, `render_backend.py` and
+`code_sources.py` were deliberately not touched: their 3D visibility checks are
+product features with dedicated tests.
+
+## Totals after CLI + engine step 1 + browser series
+
+| Metric | Baseline | Current |
+|---|---:|---:|
+| Product modules | 164 | 183 |
+| Physical lines | 87,689 | 87,804 |
+| Largest file | 3,703 (`browser/session.py`) | 2,392 (`bridge_launcher.py`) |
+| `browser/session.py` | 3,703 | 173 |
+| `engine_kernel.py` | 2,905 | 2,300 |
+| `cli.py` | 2,299 | 193 |
+| Package budget | 88,000 | 90,000 (measured split headroom) |
+
+The remaining biggest files are now `engine_kernel.py` (2,300),
+`bridge_launcher.py` (2,392), `bridge_proxy.py` (2,218), `repo_context.py`
+(2,055), `tui/app.py` (2,038) and `engine_tool_env.py` (1,864); they are the
+next batches.
+
 ## Next
 
-Browser mixin extraction (collectors → observation → interaction →
-waits/evidence → launch/lifecycle), engine steps 2–7, then the bridge
-characterization tests before its split.
+Engine steps 2–7, then the bridge characterization tests before its split,
+then providers, repo_context/TUI and web_check.
