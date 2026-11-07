@@ -32,10 +32,9 @@ import hashlib
 import json
 import logging
 import os
-import pathlib
 import threading
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
 
 # The engine prints a startup banner and loads a global dotenv on import. A
 # product import must be silent and must not adopt another tool's config file.
@@ -44,10 +43,8 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 logger = logging.getLogger("karox.engine_kernel")
 
 
-from .engine import __version__ as _engine_version  # noqa: E402
 from .engine.agents.default import DefaultAgent  # noqa: E402
 from .engine_tool_env import (  # noqa: E402
-    COVERAGE_REFUSAL_LIMIT,
     CoreToolEnvironment,
 )
 from .engine_tool_catalog import (  # noqa: E402
@@ -56,9 +53,10 @@ from .engine_tool_catalog import (  # noqa: E402
     _tool_relevant_for_task,
 )
 from .engine_kernel_control import EngineControlMixin
+from .engine_kernel_io import EngineIoMixin
+from .engine_kernel_finish import EngineFinishMixin
+from .engine_kernel_harness import EngineHarnessMixin
 from .engine_prompts import (  # noqa: E402
-    _CLOSING_TURN_PROMPT,
-    _CLOSING_TURN_VERIFIED_PROMPT,
     _ENGINE_CONTRACT,
 )
 from .engine_agent import (  # noqa: E402
@@ -70,17 +68,11 @@ from .engine_provider_bridge import (  # noqa: E402
     FINISH_TOOL_NAME,
     REWRITE_PRESSURE_TOKENS,
     EngineProviderModel,
-    _response_from_engine_message,
 )
 
 from . import completion_gate  # noqa: E402
-from . import check_report  # noqa: E402
 from . import session_analysis  # noqa: E402
-from .state_briefing import (  # noqa: E402
-    build_state_briefing,
-)
 from .agent import (  # noqa: E402
-    HARNESS_ORIGIN,
     REQUIRED_TOOLS,
     SYSTEM_PROMPT,
     AgentError,
@@ -89,28 +81,20 @@ from .agent import (  # noqa: E402
     AgentLimits,
     AgentReport,
     ContextBudget,
-    _bounded_failure_summary,
-    _is_small_talk_task,
     provider_alias,
 )
 from .agent_modes import normalize_mode  # noqa: E402
-from .session_analysis import HARNESS_REQUESTED_BY  # noqa: E402
 from .core import CoreRuntime, ToolDefinition  # noqa: E402
 from .core_process import probe_forms_text  # noqa: E402
-from .models import CoreResult, Origin  # noqa: E402
+from .models import Origin  # noqa: E402
 from .providers import (  # noqa: E402
     REASONING_EFFORTS,
     ImageAttachment,
-    ModelResponse,
     ProviderTool,
 )
-from .security import redact, redact_content  # noqa: E402
-from .sessions import MutationLease, SessionRecord, SessionStore  # noqa: E402
-from .usage_analytics import merge_response_usage, usage_event_from_response  # noqa: E402
+from .sessions import MutationLease, SessionStore  # noqa: E402
 
 
-_MAX_SNAPSHOT_FILES = 50
-_MAX_SNAPSHOT_BYTES = 2_000_000
 
 #: Cap on one model request, in seconds. A single reply can legitimately be a
 #: whole file: the aquarium run's first answer was 34k completion tokens, about
@@ -133,9 +117,6 @@ def _model_request_deadline(remaining_seconds: float) -> float:
 FINISH_RESERVE_SECONDS = 120.0
 
 
-#: The closing answer call needs a provider round trip; with less time left the
-#: stop reports without it.
-_CLOSING_TURN_MIN_SECONDS = 20.0
 
 
 def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
@@ -174,12 +155,9 @@ def _any_language_server() -> bool:
 #: The identity the engine-backed report stamps in its ``engine`` block: the
 #: in-band proof for stream consumers (the race harness reads exactly this).
 #: The engine's trajectory artifact under the session's runtime dir is the
-#: durable proof; both name the same implementation.
-_ENGINE_IDENTITY: Dict[str, str] = {
-    "name": "karo-core",
-    "version": _engine_version,
-    "implementation": "karox.engine_kernel.EngineAgent",
-}
+#: durable proof; both name the same implementation. Defined in the leaf module
+#: so the finish mixin can read it without importing this facade back.
+from .engine_identity import ENGINE_IDENTITY as _ENGINE_IDENTITY  # noqa: E402,F401
 
 
 class EngineAgent(_EngineAgentMixin, DefaultAgent):
@@ -192,7 +170,7 @@ class EngineAgent(_EngineAgentMixin, DefaultAgent):
     """
 
 
-class EngineKernel(EngineControlMixin):
+class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineControlMixin):
     """Runs one engine-backed native-agent session.
 
     Public surface mirrors the historical ``AgentKernel``: construct with the
@@ -368,27 +346,6 @@ class EngineKernel(EngineControlMixin):
 
 
 
-    def _finish_checklist(self, record: Any) -> str:
-        """The finish checklist for a predictable web deliverable, else "".
-
-        Shown once with the task (it sits in the cached prefix), so the IDs the
-        finish gate will ask for are known before the closing pass rather than
-        learned from a refusal. Predicted, not owed: the gate itself still
-        decides at finish from the files actually changed.
-        """
-
-        try:
-            if not completion_gate.web_render_intent(record):
-                return ""
-            from .web_check import default_pages
-            from . import requirement_coverage
-
-            if not default_pages(pathlib.Path(self.core.repository)):
-                return ""
-            block = requirement_coverage.checklist_block(record.requirements)
-        except Exception:  # noqa: BLE001 - the checklist is advisory
-            return ""
-        return f"\n\n{block}" if block else ""
 
 
     def run(self, session_id: str) -> AgentReport:
@@ -744,129 +701,7 @@ class EngineKernel(EngineControlMixin):
         headroom = max(24_000, usable_budget // 4)
         return max(8_000, usable_budget - headroom)
 
-    def _seed_history(
-        self, session_id: str, lease: MutationLease, record: SessionRecord
-    ) -> Tuple[Optional[List[Dict[str, Any]]], int]:
-        """Initialize or reconstruct the engine transcript from the session."""
-        if not record.provider_history:
 
-            def update(current: SessionRecord) -> None:
-                current.status = "active"
-                current.phase = "execution"
-
-            self._update_session(session_id, lease, update)
-            return None, 0
-        messages: List[Dict[str, Any]] = []
-        assistant_steps = 0
-        for entry in record.provider_history:
-            role = entry.get("role")
-            if role not in {"system", "user", "assistant", "tool"}:
-                continue
-            message: Dict[str, Any] = {
-                "role": str(role),
-                "content": entry.get("content"),
-            }
-            if role == "assistant":
-                raw_calls = entry.get("tool_calls")
-                if isinstance(raw_calls, list) and raw_calls:
-                    message["tool_calls"] = [
-                        {
-                            "call_id": str(item.get("call_id", "")),
-                            "name": str(item.get("name", "")),
-                            "raw_arguments": str(item.get("raw_arguments", "")),
-                        }
-                        for item in raw_calls
-                        if isinstance(item, Mapping)
-                    ]
-                blocks = entry.get("reasoning_blocks")
-                if isinstance(blocks, list) and blocks:
-                    message["reasoning_blocks"] = blocks
-                assistant_steps += 1
-            if role == "tool":
-                call_id = str(entry.get("tool_call_id", ""))
-                if not call_id:
-                    continue
-                message["tool_call_id"] = call_id
-                self._persisted_call_ids.add(call_id)
-            messages.append(message)
-        if not self._task_covered(record):
-            current_task = str(record.task)
-            self._append_message(
-                session_id,
-                lease,
-                {
-                    "role": "user",
-                    "content": current_task,
-                    "kind": "task",
-                    "origin": self.origin.key,
-                },
-                phase="execution",
-            )
-            # Insert before the first assistant, not at the end: a user message
-            # between an assistant tool call and its result is rejected by
-            # transports that pair them (OpenAI-compatible, Anthropic).
-            insert_at = next(
-                (
-                    index
-                    for index, message in enumerate(messages)
-                    if message.get("role") == "assistant"
-                ),
-                len(messages),
-            )
-            messages.insert(insert_at, {"role": "user", "content": current_task})
-        if not messages:
-            return None, 0
-        answered: Set[str] = {
-            str(item.get("tool_call_id", ""))
-            for item in messages
-            if item.get("role") == "tool"
-        }
-        # A run interrupted between the model's call and its execution leaves
-        # a tool_use without a tool_result; a transport that pairs them would
-        # refuse the whole resumed request. Insert the synthetic result
-        # immediately after its assistant message: appending all of them at
-        # the end left assistant/user/tool messages in between. Synthesized in
-        # memory only; the durable record still says the call never ran.
-        rebuilt: List[Dict[str, Any]] = []
-        for message in messages:
-            rebuilt.append(message)
-            if message.get("role") != "assistant":
-                continue
-            for call in message.get("tool_calls") or ():
-                call_id = str(call.get("call_id", ""))
-                if not call_id or call_id in answered:
-                    continue
-                answered.add(call_id)
-                rebuilt.append(
-                    {
-                        "role": "tool",
-                        "content": (
-                            "<returncode>-1</returncode>\n<output>\nthe run "
-                            "was interrupted before this call executed; it did "
-                            "not run and changed nothing\n</output>"
-                        ),
-                        "tool_call_id": call_id,
-                    }
-                )
-        return rebuilt, assistant_steps
-
-    @staticmethod
-    def _task_covered(record: SessionRecord) -> bool:
-        task = str(record.task)
-        if not task:
-            return True
-        for entry in record.provider_history:
-            if entry.get("kind") == "task" and str(entry.get("content", "")).endswith(task):
-                return True
-        # The first user turn of an engine run is the rendered instance
-        # template, which ends with the task. Requiring exact equality made
-        # every engine-written session look uncovered and injected a second
-        # task message at the end of a resumed transcript.
-        return any(
-            entry.get("role") == "user"
-            and str(entry.get("content", "")).endswith(task)
-            for entry in record.provider_history
-        )
 
     # -- engine hooks ------------------------------------------------------
 
@@ -876,1089 +711,43 @@ class EngineKernel(EngineControlMixin):
 
 
 
-    def _on_engine_messages(self, messages: Sequence[Mapping[str, Any]]) -> None:
-        """Persist new engine messages as durable session checkpoints.
-
-        Tool results carry their own persistence path (the environment writes
-        the full CoreResult); here only messages the environment did not
-        already persist are written, deduplicated by tool call id.
-        """
-        session_id = self._session_id
-        lease = self._lease
-        if session_id is None or lease is None:
-            return
-        for message in messages:
-            role = message.get("role")
-            extra = message.get("extra") or {}
-            if role == "exit":
-                # Only a real submission is an answer: the engine's limit and
-                # interruption exits carry their status as content, not prose.
-                if str(extra.get("exit_status") or "") == "Submitted":
-                    submission = str(extra.get("submission") or message.get("content") or "")
-                    if submission:
-                        self._engine_submission = submission
-                        if str(extra.get("exit_reason") or "") == "prose-final":
-                            # The prose answer was never added as an assistant
-                            # message (the bridge raised FormatError for it),
-                            # so the durable transcript gets it here.
-                            self._append_message(
-                                self._session_id,
-                                self._lease,
-                                {
-                                    "role": "assistant",
-                                    "origin": self.origin.key,
-                                    "content": str(redact(submission)),
-                                    "tool_calls": [],
-                                    "provider": self.provider.provider_name,
-                                    "model": self.model,
-                                    "finish_reason": "stop",
-                                    "usage": {},
-                                },
-                            )
-                continue
-            if role == "assistant":
-                self._persist_engine_assistant(session_id, lease, message)
-                continue
-            if role == "tool":
-                call_id = str(message.get("tool_call_id", ""))
-                if not call_id or call_id in self._persisted_call_ids:
-                    continue
-                self._persisted_call_ids.add(call_id)
-                self._append_message(
-                    session_id,
-                    lease,
-                    {
-                        "role": "tool",
-                        "origin": self.origin.key,
-                        "content": str(message.get("content") or ""),
-                        "tool_call_id": call_id,
-                    },
-                )
-                continue
-            content = message.get("content")
-            if self._format_error_response(message) is not None:
-                self._persist_format_error_nudge(session_id, lease, message)
-                continue
-            history = self.sessions.load(session_id).provider_history
-            # Keep the caller's kind: a repair prompt is engine_repair, not an
-            # anonymous engine_note. Only a message without one gets the
-            # first-turn/observation default.
-            kind = str(message.get("kind") or "")
-            if not kind:
-                kind = "task" if not history and role == "user" else "engine_note"
-            self._append_message(
-                session_id,
-                lease,
-                {
-                    "role": str(role),
-                    "content": str(content) if content is not None else "",
-                    "kind": kind,
-                    "origin": self.origin.key,
-                },
-                phase="execution",
-            )
 
     # -- persistence -------------------------------------------------------
 
-    def _format_error_response(self, message: Mapping[str, Any]) -> Optional[ModelResponse]:
-        """Rebuild the billed response behind a format-error nudge, if any.
 
-        The nudge's ``extra`` carries the wire facts the bridge persisted when
-        the model's answer failed the action contract. Tokens for that answer
-        were spent, so the session ledger must count them exactly as the
-        legacy loop counted a response whose tool calls failed validation.
-        """
-        extra = message.get("extra") or {}
-        if not isinstance(extra, Mapping) or str(extra.get("interrupt_type") or "") != "FormatError":
-            return None
-        usage = extra.get("usage")
-        if not isinstance(usage, dict) or not usage:
-            return None
-        response = extra.get("response")
-        choices = response.get("choices") if isinstance(response, Mapping) else None
-        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
-        wire = choice.get("message") if isinstance(choice, Mapping) else None
-        content = wire.get("content") if isinstance(wire, Mapping) else None
-        return ModelResponse(
-            content=content if isinstance(content, str) else None,
-            tool_calls=(),
-            finish_reason=choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None,
-            usage={str(key): value for key, value in usage.items()},
-            transport_attempts=1,
-            selected_provider=extra.get("provider") if isinstance(extra.get("provider"), str) else None,
-            selected_model=extra.get("model") if isinstance(extra.get("model"), str) else None,
-        )
 
-    def _persist_format_error_nudge(
-        self, session_id: str, lease: MutationLease, message: Mapping[str, Any]
-    ) -> None:
-        response = self._format_error_response(message)
-        if response is None:
-            return
-        content = message.get("content")
-        entry = {
-            "role": "user",
-            "content": str(content) if content is not None else "",
-            "kind": "engine_note",
-            "origin": self.origin.key,
-        }
-        usage_event = usage_event_from_response(
-            session_id=session_id,
-            step=max(1, self._step),
-            response=response,
-        )
-        usage_event["kind"] = "format_error"
 
-        def update(record: SessionRecord) -> None:
-            record.provider_history.append(entry)
-            record.usage = merge_response_usage(
-                record.usage,
-                response,
-                event=usage_event,
-                model_fallback=self.model,
-            )
 
-        self._update_session(session_id, lease, update)
 
-    def _record_side_usage(self, response: ModelResponse, kind: str = "visual_check") -> None:
-        """Merge a request made outside the main loop into the session usage."""
-        session_id = self._session_id
-        lease = self._lease
-        if session_id is None or lease is None:
-            return
-        event = usage_event_from_response(
-            session_id=session_id, step=max(1, self._step), response=response
-        )
-        event["kind"] = kind
 
-        def update(record: SessionRecord) -> None:
-            record.usage = merge_response_usage(
-                record.usage, response, event=event, model_fallback=self.model
-            )
-            side = record.usage.get("side_requests")
-            counts = dict(side) if isinstance(side, dict) else {}
-            counts[kind] = int(counts.get(kind) or 0) + 1
-            record.usage["side_requests"] = counts
 
-        self._update_session(session_id, lease, update)
 
-    def _update_session(
-        self,
-        session_id: str,
-        lease: MutationLease,
-        update: Callable[[SessionRecord], None],
-    ) -> SessionRecord:
-        record = self.sessions.load(session_id)
-        update(record)
-        saved = self.sessions.save(record, record.revision, lease)
-        self._known_revision = saved.revision
-        return saved
 
-    def _append_message(
-        self,
-        session_id: str,
-        lease: MutationLease,
-        entry: Dict[str, Any],
-        *,
-        phase: Optional[str] = None,
-    ) -> None:
-        def update(record: SessionRecord) -> None:
-            record.provider_history.append(entry)
-            if phase:
-                record.phase = phase
-
-        self._update_session(session_id, lease, update)
-
-    def _heartbeat(self) -> None:
-        lease = self._lease
-        if lease is None:
-            return
-        try:
-            self.sessions.heartbeat(
-                lease,
-                ttl_seconds=min(3600.0, max(5.0, float(self.limits.max_seconds) + 5.0)),
-                session_revision=self._known_revision,
-            )
-        except Exception:
-            pass
-
-    def _persist_engine_tool_result(
-        self,
-        *,
-        call_id: str,
-        alias: str,
-        core_name: str,
-        result: CoreResult,
-        output: Mapping[str, Any],
-        requested_by: str,
-    ) -> None:
-        session_id = self._session_id
-        lease = self._lease
-        if session_id is None or lease is None:
-            return
-        if call_id:
-            self._persisted_call_ids.add(call_id)
-        harness_call = requested_by == HARNESS_REQUESTED_BY
-        if harness_call:
-            for item in result.evidence:
-                item.metadata["requested_by"] = HARNESS_REQUESTED_BY
-        result_value = result.to_dict()
-        if harness_call:
-            result_value["requested_by"] = HARNESS_REQUESTED_BY
-        content = str(output.get("observation") or output.get("output") or "")
-        entry: Dict[str, Any]
-        if call_id:
-            entry = {
-                "role": "tool",
-                "origin": HARNESS_ORIGIN if harness_call else self.origin.key,
-                "content": redact_content(content),
-                "tool_call_id": call_id,
-                "tool_name": alias,
-                "core_name": core_name,
-                "result": redact_content(result_value),
-            }
-        else:
-            # A fenced command without a tool call id: the engine itself feeds
-            # this back as a user observation, and the durable record matches.
-            entry = {
-                "role": "user",
-                "origin": self.origin.key,
-                "content": redact_content(content),
-                "kind": "engine_observation",
-            }
-
-        def update(record: SessionRecord) -> None:
-            record.provider_history.append(entry)
-            stamped = {item.evidence_id: item.to_dict() for item in result.evidence}
-            record.evidence = [
-                stamped.get(item.get("evidence_id"), item) for item in record.evidence
-            ]
-            if not result.mutation:
-                known = {
-                    item.get("evidence_id")
-                    for item in record.evidence
-                    if isinstance(item, dict)
-                }
-                for item in result.evidence:
-                    if item.evidence_id not in known:
-                        record.evidence.append(item.to_dict())
-            if core_name in {"git.status", "git.diff"}:
-                key = "status" if core_name == "git.status" else "diff"
-                data = result.data if isinstance(result.data, dict) else {}
-                record.git_state[key] = {
-                    "correlation_id": result.correlation_id,
-                    "ok": result.ok,
-                    "exit_code": data.get("exit_code"),
-                    "timed_out": data.get("timed_out", False),
-                    "sha256": data.get("sha256"),
-                    "stdout": data.get("stdout", ""),
-                }
-
-        self._update_session(session_id, lease, update)
-
-    def _persist_engine_tool_error(
-        self,
-        call_id: str,
-        alias: str,
-        core_name: Optional[str],
-        error_type: str,
-        message: str,
-    ) -> None:
-        session_id = self._session_id
-        lease = self._lease
-        if session_id is None or lease is None:
-            return
-        payload = {
-            "ok": False,
-            "error": {"type": error_type, "message": str(redact(message))[:4000]},
-        }
-        entry: Dict[str, Any]
-        if call_id:
-            entry = {
-                "role": "tool",
-                "origin": self.origin.key,
-                "content": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                "tool_call_id": call_id,
-                "tool_name": alias,
-                "core_name": core_name,
-                "error": payload["error"],
-            }
-        else:
-            entry = {
-                "role": "user",
-                "origin": self.origin.key,
-                "content": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                "kind": "engine_observation",
-            }
-        self._append_message(session_id, lease, entry)
-
-    def _record_step_usage(self, event: Mapping[str, Any]) -> None:
-        for key, value in event.items():
-            if key.endswith("_tokens") and isinstance(value, int) and not isinstance(value, bool):
-                self._last_step_usage[key] = self._last_step_usage.get(key, 0) + max(0, value)
-
-    def _persist_engine_assistant(
-        self, session_id: str, lease: MutationLease, message: Mapping[str, Any]
-    ) -> None:
-        response = _response_from_engine_message(message)
-        tool_calls = []
-        for item in response.tool_calls:
-            safe_arguments, recoverable = session_analysis.safe_arguments(
-                item.raw_arguments
-            )
-            tool_calls.append(
-                {
-                    "call_id": item.call_id,
-                    "name": item.name,
-                    "raw_arguments": safe_arguments,
-                    "arguments_sha256": hashlib.sha256(
-                        item.raw_arguments.encode("utf-8")
-                    ).hexdigest(),
-                    "recoverable": recoverable,
-                }
-            )
-        entry: Dict[str, Any] = {
-            "role": "assistant",
-            "origin": self.origin.key,
-            "content": redact(response.content) if response.content is not None else None,
-            "reasoning_summary": (
-                redact(response.reasoning_summary)
-                if response.reasoning_summary is not None
-                else None
-            ),
-            "tool_calls": tool_calls,
-            "provider": response.selected_provider or self.provider.provider_name,
-            "model": response.selected_model or self.model,
-            "finish_reason": response.finish_reason,
-            "response_id": response.response_id,
-            "transport_attempts": response.transport_attempts,
-            "usage": dict(response.usage),
-        }
-        telemetry = (message.get("extra") or {}).get("prompt_cache")
-        if isinstance(telemetry, Mapping):
-            # Digest-derived counts only: why this request did or did not hit
-            # the provider's prefix cache.
-            entry["prompt_cache"] = dict(telemetry)
-        stored = dict(redact(entry))
-        blocks = message.get("reasoning_blocks")
-        if isinstance(blocks, list) and blocks:
-            # Transport form, never display-redacted: a signed block that no
-            # longer matches its signature is rejected by the provider.
-            stored["reasoning_blocks"] = blocks
-        usage_event = usage_event_from_response(
-            session_id=session_id,
-            step=max(1, self._step),
-            response=response,
-        )
-
-        def update(record: SessionRecord) -> None:
-            record.provider_history.append(stored)
-            record.usage = merge_response_usage(
-                record.usage,
-                response,
-                event=usage_event,
-                model_fallback=self.model,
-            )
-            if isinstance(telemetry, Mapping) and telemetry.get("full_miss") is True:
-                misses = record.usage.get("prompt_cache_misses")
-                counts = dict(misses) if isinstance(misses, dict) else {}
-                cause = str(telemetry.get("cause") or "unknown")
-                counts[cause] = int(counts.get(cause) or 0) + 1
-                record.usage["prompt_cache_misses"] = counts
-
-        self._update_session(session_id, lease, update)
-        self._record_step_usage(usage_event)
 
     # -- events ------------------------------------------------------------
 
 
     # -- harness finishing -------------------------------------------------
 
-    def _harness_final_calls(self, record: SessionRecord) -> Tuple[Tuple[str, Dict[str, Any]], ...]:
-        """The calls the kernel owes a finishing run, in order.
 
-        Same discipline as the legacy kernel: only what is actually missing,
-        never a check the model still owes a repair for, and the Git reads
-        last so they describe the bytes the evidence chain will attest.
-        """
-        if self._verification(record):
-            return ()
-        if not record.changed_files:
-            return ()
-        missing = completion_gate.floor(self.core, record)
-        if any(reason.startswith("active failed check:") for reason in missing):
-            return ()
-        if completion_gate.only_unproducible(missing):
-            # No approved command can produce this proof; running the same
-            # passing check again only pays for a duplicate and cannot change
-            # the report. The gap stays visible in ``unmet``.
-            return ()
-        calls: List[Tuple[str, Dict[str, Any]]] = []
-        seen: Set[Tuple[str, ...]] = set()
-        for command in self.core.verification_command_order:
-            joined = " ".join(command)
-            if (
-                f"missing current check: {joined}" in missing
-                or f"unresolved failed check: {joined}" in missing
-            ):
-                calls.append(("checks.run", {"argv": list(command)}))
-                seen.add(tuple(command))
-        for argv in session_analysis.unresolved_model_checks(record, missing):
-            if len(calls) >= 4:
-                break
-            if tuple(argv) not in seen:
-                seen.add(tuple(argv))
-                calls.append(("checks.run", {"argv": list(argv)}))
-        # The fallback exists to produce proof when the floor names an
-        # obligation but not a command (for example "missing behavioral
-        # evidence" after a run that never checked anything). It must not fire
-        # for an obligation a check cannot satisfy: a run whose only missing
-        # proof is the final git.diff review has already run its checks, and
-        # re-running the full suite there is a whole duplicate test run paid
-        # for nothing. Mainline runs do verify themselves when the task asks
-        # them to, so this case is the common one, not the corner one.
-        check_owed = any(
-            reason.startswith(
-                (
-                    "missing current check:",
-                    "unresolved failed check:",
-                    "missing current structural evidence:",
-                    "missing behavioral evidence",
-                    "missing runtime smoke evidence",
-                    "missing browser runtime evidence",
-                )
-            )
-            for reason in missing
-        )
-        # The floor can call a check current while the evidence chain has none:
-        # its identity leaves scratch artifacts and harness pages out, and the
-        # chain restarts at every changing write. A probe written after the
-        # last check (fresh quotes for an attested finish) left a run that the
-        # floor had cleared unverified, with only the Git reads run here. One
-        # check on the final bytes closes the chain; Git reads alone never can.
-        check_owed = check_owed or session_analysis.chain_owes_check(record)
-        if not calls and check_owed:
-            commands = [list(item) for item in self.core.verification_command_order] or [
-                list(item) for item in sorted(self.core.verification_commands or ())
-            ]
-            if not commands:
-                return ()
-            argv = [item for item in commands[0] if item != "*"]
-            if not argv:
-                return ()
-            calls.append(("checks.run", {"argv": argv}))
-        visual_calls: Tuple[Tuple[str, Dict[str, Any]], ...] = ()
-        if "missing visual evidence" in missing and "visual.check" in self._definitions:
-            target = self._render_target(record)
-            if target is not None:
-                visual_calls = (("visual.check", {"path": target.name}),)
-        return (
-            *calls,
-            *visual_calls,
-            ("git.status", {}),
-            ("git.diff", {"complete": True}),
-        )
 
-    def _render_target(self, record: SessionRecord) -> Optional[pathlib.Path]:
-        """The page the harness's closing look judges: the run's own first.
 
-        ``default_pages`` puts ``index.html`` first. The aquarium k2 run
-        (2026-11-06) copied its deliverable to ``index.html`` with a probe; the
-        closing look judged that copy, its pass named a page the run never
-        changed, the gate rightly did not count it, and the run ended
-        unverified although nobody had judged its own final bytes. A page (or
-        picture) the run changed, or one that loads a changed asset, is what
-        the user opens; only without one does the conventional entry page
-        stand in.
-        """
 
-        try:
-            from .web_check import default_pages, default_pictures
 
-            root = self.core.repository
-            pages = [root / page for page in default_pages(root)]
-            pictures = [root / page for page in default_pictures(root)]
-        except Exception:
-            return None
-        pages = [item for item in pages if item.is_file()]
-        pictures = [item for item in pictures if item.is_file()]
-        changed = list(getattr(record, "changed_files", None) or ())
-        try:
-            diagnostic = completion_gate.diagnostic_paths(self.core, record)
-        except Exception:  # noqa: BLE001 - nothing is diagnostic then
-            diagnostic = frozenset()
-        for candidate in (*pages, *pictures):
-            try:
-                if completion_gate._page_loads_the_change(
-                    self.core, candidate.name, changed, diagnostic
-                ):
-                    return candidate
-            except Exception:  # noqa: BLE001 - try the next page
-                continue
-        return pages[0] if pages else None
-
-    def _run_harness_final_calls(
-        self, session_id: str, lease: MutationLease, deadline: float
-    ) -> None:
-        record = self.sessions.load(session_id)
-        calls = self._harness_final_calls(record)
-        if not calls:
-            return
-        self._emit(
-            AgentEventKind.WARNING,
-            reason="harness_final_checks",
-            detail=", ".join(name for name, _arguments in calls),
-        )
-        environment = self._environment
-        assert environment is not None
-        for index, (core_name, arguments) in enumerate(calls, start=1):
-            if self.monotonic() >= deadline:
-                return
-            history = self.sessions.load(session_id).provider_history
-            digest = hashlib.sha256(
-                f"{session_id}\0{len(history)}\0{index}\0{core_name}".encode("utf-8")
-            ).hexdigest()
-            action = {
-                "name": provider_alias(core_name),
-                "arguments": arguments,
-                "tool_call_id": f"harness-{len(history)}-{index}-{digest[:8]}",
-            }
-            environment._execute(action, requested_by=HARNESS_REQUESTED_BY)
-            self._heartbeat()
-            current = self.sessions.load(session_id)
-            if any(
-                reason.startswith("active failed check:")
-                for reason in completion_gate.floor(self.core, current)
-            ):
-                break
-
-    def _closing_answer_turn(self, agent: EngineAgent, *, verified: bool = False) -> bool:
-        """One model call for the final answer after a visual-budget stop.
-
-        The stop is honest -- no further verdict can make the page verified --
-        but it used to end the run between two tool calls, so the user got no
-        reply at all: the aquarium a1 run (2026-11-05) left a 41 KB page on
-        disk and an empty answer where the task demanded the HTML. The model
-        now gets exactly one call in which only finish runs; the run still
-        ends ``stopped`` with the same reason, and an edit is refused because
-        nothing could judge it. Returns whether an answer arrived.
-        """
-
-        if self._closing_turn_used or self._engine_submission:
-            return False
-        if self._deadline - self.monotonic() < _CLOSING_TURN_MIN_SECONDS:
-            return False
-        self._closing_turn_used = True
-        self._cancelled = False
-        if self._cancel_event is not None:
-            self._cancel_event.clear()
-        self._visual_grace_until = None
-        self._closing_turn_until = self._step + 1
-        config = agent.config
-        if 0 < int(config.step_limit) <= int(agent.n_calls):
-            config.step_limit = int(agent.n_calls) + 1
-        # After a wall-clock stop the engine's own clock is spent too; the
-        # closing call may use what is left of KaroX's deadline, nothing more.
-        wall_limit = int(getattr(config, "wall_time_limit_seconds", 0) or 0)
-        started = getattr(agent, "_start_time", None)
-        if wall_limit > 0 and isinstance(started, (int, float)):
-            elapsed = int(time.time() - started)
-            if wall_limit <= elapsed + 1:
-                config.wall_time_limit_seconds = elapsed + max(
-                    2, int(self._deadline - self.monotonic())
-                )
-        # A prose reply in this call is the answer, not a format error to retry.
-        format_budget = config.max_consecutive_format_errors
-        config.max_consecutive_format_errors = 1
-        self._emit(
-            AgentEventKind.WARNING,
-            reason="closing_answer_turn",
-            detail=(
-                "the work phase ended before the model's answer; one call for it"
-                if verified
-                else "visual check budget is exhausted; one call for the final answer"
-            ),
-        )
-        agent.add_messages(
-            {
-                "role": "user",
-                "kind": "engine_closing",
-                "content": _CLOSING_TURN_VERIFIED_PROMPT if verified else _CLOSING_TURN_PROMPT,
-            }
-        )
-        try:
-            agent.continue_run()
-        except KeyboardInterrupt:
-            self.cancel()
-        except Exception:  # noqa: BLE001 - the stop is already decided
-            pass
-        finally:
-            config.max_consecutive_format_errors = format_budget
-            if wall_limit > 0:
-                config.wall_time_limit_seconds = wall_limit
-            self._closing_turn_until = None
-        return bool(self._engine_submission)
-
-    def _attestation_spent(self) -> bool:
-        """Whether the finish gate already used its bounded coverage refusals."""
-
-        environment = self._environment
-        refusals = int(getattr(environment, "_coverage_refusals", 0) or 0)
-        return refusals >= COVERAGE_REFUSAL_LIMIT
-
-    def _append_repair_prompt(self, agent: EngineAgent, failure: str) -> None:
-        """Give the model one bounded repair turn with the failure in front."""
-        last_assistant: Optional[Dict[str, Any]] = None
-        for message in reversed(agent.messages):
-            if message.get("role") == "assistant":
-                last_assistant = message
-                break
-        prompt = (
-            "Verification failed after your finish. Repair the work and call "
-            "finish again.\n\nFailure summary:\n"
-            f"{failure}\n\n"
-            "Fix the cause, keep changes minimal, and only then finish."
-        )
-        delivered = False
-        if last_assistant is not None:
-            for call in last_assistant.get("tool_calls") or ():
-                call_id = str(call.get("call_id", ""))
-                if not call_id:
-                    continue
-                answered = any(
-                    message.get("role") == "tool" and message.get("tool_call_id") == call_id
-                    for message in agent.messages
-                )
-                if not answered:
-                    # Every unanswered call gets its result: a transport that
-                    # pairs tool_use with tool_result (Anthropic, Gemini)
-                    # refuses the request otherwise, and the repair turn would
-                    # die before the model ever saw the failure. The first one
-                    # -- the finish call -- carries the repair itself: a new
-                    # user turn makes a thinking model's chat template drop the
-                    # reasoning of every earlier turn, which re-bills the whole
-                    # history on a caching provider (0.18M prompt tokens over
-                    # two repairs in the W&B run) and loses the plan the model
-                    # was following.
-                    agent.add_messages(
-                        {
-                            "role": "tool",
-                            "content": prompt
-                            if not delivered
-                            else (
-                                "the task was submitted, but KaroX verification "
-                                "failed; continue working"
-                            ),
-                            "tool_call_id": call_id,
-                        }
-                    )
-                    delivered = True
-        if not delivered:
-            agent.add_messages({"role": "user", "content": prompt, "kind": "engine_repair"})
 
     # -- verification ------------------------------------------------------
 
-    def _verification(self, record: SessionRecord) -> bool:
-        return session_analysis.evidence_chain(record) and not completion_gate.floor(
-            self.core, record
-        )
 
-    def _answer_complete(self, record: SessionRecord) -> bool:
-        if self.require_change or record.changed_files:
-            return False
-        if session_analysis.attempted_mutation(record, self._mutating_mcp_tools()):
-            return False
-        # The finish tool's answer is the model's final message; the
-        # transcript only carries it in the call arguments, so a terse model
-        # that never wrote prose would otherwise leave a browser answer
-        # unverifiable even after a successful inspection.
-        if not (
-            self._engine_submission
-            or session_analysis.last_provider_message(record)
-        ):
-            return False
-        if _is_small_talk_task(record.task):
-            return True
-        return bool(session_analysis.answer_basis(record))
 
-    def _mutating_mcp_tools(self) -> frozenset[str]:
-        """The bound MCP tools not classified read-only: they may change a server."""
 
-        tools = getattr(self.core, "tools", None)
-        if not callable(tools):
-            return frozenset()
-        return frozenset(
-            definition.name
-            for definition in tools()
-            if definition.mutates and str(definition.name).startswith("mcp.")
-        )
 
-    def _completed(self, record: SessionRecord) -> bool:
-        visual_ok = (
-            not completion_gate.visual_required(record)
-            or completion_gate.visual_proven(self.core, record)
-        )
-        return (self._verification(record) and visual_ok) or self._answer_complete(record)
 
-    def _failure_summary(self, record: SessionRecord) -> str:
-        """What the repair turn is told, in the order a fix needs it.
 
-        The floor reasons say which obligation is unmet; the failure map says
-        where. Parsed failures survive the log clipping, name the exact file
-        and line, and make "nothing changed since the last repair" visible
-        instead of silently repeating a turn.
-        """
 
-        pieces = list(completion_gate.floor(self.core, record))
-        failed: List[Dict[str, Any]] = []
-        # A map from an older state is worse than none: "missing current check"
-        # means no check ran on these bytes, and showing a failure the last
-        # edit may already have fixed sends the repair at the wrong file.
-        failed_owed = any(
-            reason.startswith(("active failed check:", "unresolved failed check:"))
-            for reason in pieces
-        )
-        entries = record.provider_history if failed_owed else ()
-        for entry in entries:
-            if entry.get("role") != "tool" or entry.get("core_name") != "checks.run":
-                continue
-            result = entry.get("result")
-            if not isinstance(result, dict):
-                continue
-            data = result.get("data")
-            if not isinstance(data, dict) or data.get("verification_eligible") is not True:
-                continue
-            if (
-                result.get("ok") is True
-                and data.get("exit_code") == 0
-                and not data.get("timed_out")
-            ):
-                continue
-            failed.append(data)
-        detail = ""
-        seen_sets: List[tuple[str, ...]] = []
-        last_report: Optional[Dict[str, Any]] = None
-        for data in failed:
-            report = data.get("failure_map")
-            identity = check_report.fingerprints(report) if isinstance(report, dict) else ()
-            seen_sets.append(identity)
-            rendered = check_report.render_failure_map(report)
-            if isinstance(report, dict) and report.get("failures"):
-                # Only the latest failing state feeds the rerun hint: an older
-                # failure may describe a file the last edit already fixed.
-                last_report = report
-            if not rendered:
-                output = "\n".join(
-                    str(data.get(field) or "") for field in ("stdout", "stderr")
-                ).strip()
-                rendered = _bounded_failure_summary(output) if output else ""
-            # The latest failed check wins even when it has no rendered detail:
-            # keeping an older map would present a stale failure as current.
-            detail = rendered
-        if seen_sets and seen_sets[-1]:
-            repeats = sum(1 for item in seen_sets[:-1] if item == seen_sets[-1])
-            if repeats:
-                detail += (
-                    f"\nThe same failure set is still present after {repeats} "
-                    "earlier run(s): the last change did not alter it."
-                )
-        hint = check_report.render_targets(check_report.rerun_targets(last_report, 4))
-        return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
-    @staticmethod
-    def _last_failed_check_map(record: SessionRecord) -> Optional[Dict[str, Any]]:
-        """The parsed failure map of the latest approved check, if it failed."""
-
-        for entry in reversed(record.provider_history):
-            if entry.get("role") != "tool" or entry.get("core_name") != "checks.run":
-                continue
-            result = entry.get("result")
-            if not isinstance(result, dict):
-                continue
-            data = result.get("data")
-            if not isinstance(data, dict) or data.get("verification_eligible") is not True:
-                continue
-            passed = (
-                result.get("ok") is True
-                and data.get("exit_code") == 0
-                and not data.get("timed_out")
-            )
-            if passed:
-                return None
-            report = data.get("failure_map")
-            return dict(report) if isinstance(report, dict) else None
-        return None
-
-    def state_briefing(self) -> str:
-        """The deterministic session snapshot the agent appends after compaction.
-
-        Built from the record, never from a model summary: requirements, the
-        model's own plan, changed files, the latest approved check and its
-        parsed failures all survive a compaction that drops the messages that
-        first carried them.
-        """
-
-        if self._session_id is None:
-            return ""
-        try:
-            record = self.sessions.load(self._session_id)
-        except Exception:  # noqa: BLE001 - a missing snapshot must not break a turn
-            return ""
-        return build_state_briefing(
-            task=record.task,
-            requirements=record.requirements,
-            plan_items=record.plan_items,
-            changed_files=record.changed_files,
-            history=record.provider_history,
-        )
-
-    def _terminal_reason(self, session_id: str, exit_status: str) -> str:
-        if exit_status == "LimitsExceeded":
-            return "step_limit"
-        if exit_status == "TimeExceeded":
-            return "wall_time_limit"
-        if exit_status == "UserInterruption":
-            return "visual_budget_exhausted" if self._visual_budget_hit else "cancelled"
-        if exit_status == "RepeatedFormatError":
-            return "format_errors_exhausted"
-        record = self.sessions.load(session_id)
-        if self.require_change and not record.changed_files:
-            return "no_changes"
-        missing = completion_gate.floor(self.core, record)
-        if completion_gate.only_unproducible(missing):
-            return "unproducible_requirement"
-        if self._failure_summary(record):
-            return "verification_failed"
-        return "unverified_changes" if record.changed_files else "no_changes"
-
-    def _provider_message(self) -> Optional[str]:
-        if self._engine_submission:
-            return str(redact(self._engine_submission))
-        return None
 
     # -- snapshot / restore ------------------------------------------------
 
-    def _snapshot_verified_state(
-        self, session_id: str, lease: MutationLease, record: SessionRecord
-    ) -> None:
-        if not self._restore_on_regression or not record.changed_files:
-            return
-        files = list(record.changed_files)[:_MAX_SNAPSHOT_FILES]
-        directory = self.sessions.session_dir(session_id) / "verified"
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return
-        digests: Dict[str, str] = {}
-        for relative in files:
-            try:
-                source = self.core.safe_path(relative)
-            except Exception:
-                continue
-            if not source.is_file():
-                continue
-            try:
-                payload = source.read_bytes()
-            except OSError:
-                continue
-            if len(payload) > _MAX_SNAPSHOT_BYTES:
-                continue
-            target = directory / pathlib.PurePosixPath(str(relative))
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
-            except OSError:
-                continue
-            digests[str(relative)] = hashlib.sha256(payload).hexdigest()
-        if not digests:
-            return
-        snapshot = {
-            "step": session_analysis.step_count(record.provider_history),
-            "files": digests,
-            "checked_at": time.time(),
-        }
 
-        def update(current: SessionRecord) -> None:
-            current.verified_snapshot = dict(snapshot)
-
-        try:
-            self._update_session(session_id, lease, update)
-        except Exception:
-            # A failed snapshot write must not fail a run that succeeded; the
-            # record still says verified.
-            return
-
-    def _restore_verified_state(
-        self, session_id: str, record: SessionRecord
-    ) -> Optional[str]:
-        if not self._restore_on_regression:
-            return None
-        stored = dict(record.verified_snapshot) if record.verified_snapshot else {}
-        files = stored.get("files")
-        if not isinstance(files, dict) or not files:
-            return None
-        directory = self.sessions.session_dir(session_id) / "verified"
-        restored: List[str] = []
-        for relative, digest in files.items():
-            source = directory / pathlib.PurePosixPath(str(relative))
-            if not source.is_file():
-                continue
-            try:
-                payload = source.read_bytes()
-            except OSError:
-                continue
-            if hashlib.sha256(payload).hexdigest() != str(digest):
-                continue
-            try:
-                target = self.core.safe_path(str(relative))
-            except Exception:
-                continue
-            try:
-                if target.is_file() and target.read_bytes() == payload:
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
-                restored.append(str(relative))
-            except OSError:
-                continue
-        if not restored:
-            return None
-        return (
-            f"restored the verified state from step {stored.get('step', '?')} "
-            f"({', '.join(restored[:5])})"
-        )
 
     # -- finishing ---------------------------------------------------------
-
-    def _record_provider_failure(
-        self, session_id: str, lease: MutationLease, failure: _EngineProviderFailure
-    ) -> AgentReport:
-        def update(record: SessionRecord) -> None:
-            failures = record.usage.get("provider_failures")
-            if not isinstance(failures, list):
-                failures = []
-            failures.append(
-                {
-                    "at_step": self._step,
-                    "kind": failure.kind.value,
-                    "error": str(failure)[:400],
-                }
-            )
-            record.usage["provider_failures"] = failures[-100:]
-
-        self._update_session(session_id, lease, update)
-        self._emit(
-            AgentEventKind.ERROR,
-            reason=f"provider_error:{failure.kind.value}",
-            detail=str(failure)[:400],
-        )
-        return self._finish(
-            session_id,
-            lease,
-            "failed",
-            "provider",
-            f"provider_error:{failure.kind.value}",
-        )
-
-    def _finish(
-        self,
-        session_id: str,
-        lease: MutationLease,
-        status: str,
-        phase: str,
-        reason: str,
-        provider_message: Optional[str] = None,
-    ) -> AgentReport:
-        if status == "verified" and completion_gate.floor(
-            self.core, self.sessions.load(session_id)
-        ):
-            status, phase, reason = "stopped", "verification", "completion_unverified"
-        if status == "verified":
-            current = self.sessions.load(session_id)
-            if completion_gate.visual_required(current) and not completion_gate.visual_proven(
-                self.core, current
-            ):
-                status, phase, reason = "stopped", "stopped", "render_unverified"
-        restore_note: Optional[str] = None
-        if status != "verified":
-            current = self.sessions.load(session_id)
-            if self._completed(current):
-                # It is verified after all: this path is the one that ends as
-                # an answer or a stop after the chain already held.
-                restore_note = None
-            else:
-                restore_note = self._restore_verified_state(session_id, current)
-        if restore_note is not None:
-            self._emit(
-                AgentEventKind.WARNING,
-                reason="regression_restored",
-                detail=restore_note,
-            )
-
-        def update(record: SessionRecord) -> None:
-            record.status = status
-            record.phase = phase
-            if status != "verified":
-                record.summary = f"Native agent stopped: {reason}."
-                if restore_note is not None:
-                    record.summary += " " + restore_note + "."
-            elif reason == "answer":
-                record.summary = "Native agent answered from recorded local evidence."
-            else:
-                record.summary = "Native agent completed with required local evidence."
-
-        record = self._update_session(session_id, lease, update)
-        verified = status == "verified" and self._completed(record)
-        if status == "verified" and not verified:
-            raise AgentError("session verification changed before final report")
-        return self._report(
-            record, reason=reason, provider_message=provider_message, restored=restore_note
-        )
-
-    def _report(
-        self,
-        record: SessionRecord,
-        *,
-        reason: str,
-        provider_message: Optional[str] = None,
-        restored: Optional[str] = None,
-    ) -> AgentReport:
-        verified = record.status == "verified" and self._completed(record)
-        unmet: tuple[str, ...] = ()
-        failure_map: Optional[Dict[str, Any]] = None
-        if not verified:
-            # A stopped run says why, and where the last approved check failed.
-            # Those two facts are the difference between "not verified" and a
-            # report a user can act on without opening the session directory.
-            unmet = tuple(completion_gate.floor(self.core, record))
-            failure_map = self._last_failed_check_map(record)
-        self._emit(
-            AgentEventKind.FINISHED,
-            reason=reason,
-            status=record.status,
-            ok=verified,
-            usage=dict(record.usage) if isinstance(record.usage, dict) else {},
-        )
-        return AgentReport(
-            session_id=record.session_id,
-            status=record.status,
-            phase=record.phase,
-            verified=verified,
-            reason=reason,
-            steps=session_analysis.step_count(record.provider_history),
-            changed_files=tuple(record.changed_files),
-            checks=tuple(record.checks),
-            git_state=dict(record.git_state),
-            evidence=tuple(record.evidence),
-            usage=dict(record.usage),
-            provider_message=provider_message
-            or session_analysis.last_provider_message(record),
-            answer_basis=session_analysis.answer_basis(record) if reason == "answer" else (),
-            project_context=dict(self.project_context),
-            compaction=dict(self._compaction) if self._compaction else None,
-            restored=restored,
-            unmet=unmet,
-            failure_map=failure_map,
-            mode=self.mode,
-            engine=dict(_ENGINE_IDENTITY),
-        )

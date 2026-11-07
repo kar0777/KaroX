@@ -223,27 +223,51 @@ unchanged. `web_check.py`, `visual_check.py`, `render_backend.py` and
 `code_sources.py` were deliberately not touched: their 3D visibility checks are
 product features with dedicated tests.
 
-## After — engine steps 2–4
+## After — engine split complete
 
-`engine_kernel.py` 2,300 → 1,970 lines across three cohesive moves:
+`engine_kernel.py` 2,905 → **753 lines**: the façade keeps the two concrete
+classes (trajectory identity), `EngineKernel.__init__`, the single `run()`,
+tool advertising and context-budget math. Every other responsibility has an
+owner module:
 
 | Module | Lines | Responsibility |
 |---|---:|---|
-| `engine_agent.py` | 646 | EngineAgent methods and loop-control errors |
-| `engine_prompts.py` | 102 | engine execution contract + closing-turn prompts (neutrality-scanned) |
-| `engine_tool_catalog.py` | 150 | domain-keyword schema gating + provider-tool shape helpers |
-| `engine_kernel_control.py` | 228 | cancellation, grace windows, remaining time, event bridge |
+| `engine_agent.py` | 646 | EngineAgent methods, resume/context, stale reads, loop-control errors |
+| `engine_prompts.py` | 89 | engine execution contract + closing-turn prompts (neutrality-scanned) |
+| `engine_tool_catalog.py` | 165 | domain-keyword schema gating, provider-tool shape helpers |
+| `engine_kernel_control.py` | 170 | cancellation, grace windows, remaining time, event bridge |
+| `engine_kernel_io.py` | 670 | transcript seeding, durable message/usage/tool persistence, state briefing, verified snapshot/restore |
+| `engine_kernel_finish.py` | 252 | completion predicates, termination reason, provider-failure record, finish/report |
+| `engine_kernel_harness.py` | 417 | harness final calls, closing answer turn, repair prompt, failure summary |
+| `engine_identity.py` | 23 | the report identity constant shared by façade and finish mixin |
 
-The concrete `EngineAgent` and `EngineKernel` classes stay in the façade so
-their `__module__`/trajectory identity is unchanged; the kernel composes
-`EngineControlMixin`. `_any_language_server` remains in the façade because
-tests monkeypatch it there. Control-focused engine tests, the neutrality scan
-and the tree gate pass.
+The façade composes `EngineHarnessMixin, EngineFinishMixin, EngineIoMixin,
+EngineControlMixin`; private methods stay reachable for the unbound test calls.
+`_any_language_server` remains in the façade because tests monkeypatch it there.
+The full engine contract suite (kernel, tools, salvage, resilience, report,
+prompt-cache, probes, tool shapes) passes after the split.
 
-Remaining engine moves: durable IO/state snapshots, finish/report and the
-harness finishing block.
+### Totals after CLI + engine + browser
 
-## Totals after CLI + engine step 1 + browser series
+| Metric | Baseline | Current |
+|---|---:|---:|
+| Product modules | 164 | 190 |
+| Physical lines | 87,689 | 88,043 |
+| Largest file | 3,703 (`browser/session.py`) | 2,392 (`bridge_launcher.py`) |
+| `browser/session.py` | 3,703 | 173 |
+| `engine_kernel.py` | 2,905 | 753 |
+| `cli.py` | 2,299 | 193 |
+| Package budget | 88,000 | 90,000 (measured split headroom) |
+
+The remaining biggest files are `bridge_launcher.py` (2,392),
+`bridge_proxy.py` (2,218), `repo_context.py` (2,055), `tui/app.py` (2,038),
+`engine_tool_env.py` (1,864), `core_tools.py` (1,802) and `web_check.py`
+(1,831); they are the next batches.
+
+## Next
+
+Bridge characterization tests before its split, then providers, repo_context,
+TUI, web_check, engine_tool_env/core_tools and the gate/platform re-audit.
 
 | Metric | Baseline | Current |
 |---|---:|---:|

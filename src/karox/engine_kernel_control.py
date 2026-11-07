@@ -6,7 +6,6 @@ import logging
 
 logger = logging.getLogger("karox.engine_kernel")
 
-import logging
 from typing import Any
 #: Steps a refused finish keeps the visual grace window open: enough for a
 #: probe page, a few browser reads and the attested finish the refusal asked
