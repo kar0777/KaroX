@@ -1020,6 +1020,7 @@ class EngineKernel:
         self._closing_turn_until: Optional[int] = None
         self._closing_turn_used = False
         self._step = 0
+        self._last_step_usage: Dict[str, int] = {}
         self._known_revision: Optional[int] = None
         self._compaction: Optional[Dict[str, Any]] = None
         self._engine_submission = ""
@@ -1707,12 +1708,18 @@ class EngineKernel:
 
     def _on_step_started(self, step: int) -> None:
         self._step = step
+        self._last_step_usage = {}
         self._heartbeat()
         self._emit(AgentEventKind.STEP_STARTED)
 
     def _on_step_finished(self, step: int) -> None:
         self._step = step
-        self._emit(AgentEventKind.STEP_FINISHED)
+        # The TUI accumulates per-step deltas and replaces the counter with the
+        # final cumulative report. Emitting the cumulative record here would
+        # double-count after the first step.
+        usage = dict(self._last_step_usage)
+        self._last_step_usage = {}
+        self._emit(AgentEventKind.STEP_FINISHED, usage=usage)
 
     def _on_compacted(
         self, tokens_before: int, tokens_after: int, count: int, overflow: int = 0
@@ -2045,6 +2052,11 @@ class EngineKernel:
             }
         self._append_message(session_id, lease, entry)
 
+    def _record_step_usage(self, event: Mapping[str, Any]) -> None:
+        for key, value in event.items():
+            if key.endswith("_tokens") and isinstance(value, int) and not isinstance(value, bool):
+                self._last_step_usage[key] = self._last_step_usage.get(key, 0) + max(0, value)
+
     def _persist_engine_assistant(
         self, session_id: str, lease: MutationLease, message: Mapping[str, Any]
     ) -> None:
@@ -2115,6 +2127,7 @@ class EngineKernel:
                 record.usage["prompt_cache_misses"] = counts
 
         self._update_session(session_id, lease, update)
+        self._record_step_usage(usage_event)
 
     # -- events ------------------------------------------------------------
 

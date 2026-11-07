@@ -1425,6 +1425,12 @@ def test_engine_run_emits_the_stream_event_contract(tmp_path: Path, repository: 
     assert kinds[-1] == "finished"
     for event in harness.events:
         assert isinstance(event.step, int)
+    step_usage = [
+        event.usage
+        for event in harness.events
+        if event.kind is AgentEventKind.STEP_FINISHED
+    ]
+    assert step_usage and any(item.get("total_tokens", 0) > 0 for item in step_usage)
     tool_events = [e for e in harness.events if e.kind is AgentEventKind.TOOL_FINISHED]
     assert all(e.ok is not None for e in tool_events)
     finished = [e for e in harness.events if e.kind is AgentEventKind.FINISHED][0]

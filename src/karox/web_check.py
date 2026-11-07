@@ -235,24 +235,6 @@ def _new_page(browser: Any) -> Any:
     )
 
 
-def _screenshot_in_browser(page: pathlib.Path) -> Optional[bytes]:
-    """Take one frame in the browser thread. Never raises."""
-    shared = _shared_browser()
-    if shared is None:
-        return None
-    _playwright, browser = shared
-    view = _new_page(browser)
-    try:
-        view.goto(page.resolve().as_uri())
-        view.wait_for_timeout(RENDER_SETTLE_MS)
-        payload = view.screenshot()
-    finally:
-        view.close()
-    if not payload or len(payload) > _MAX_SCREENSHOT_BYTES:
-        return None
-    return payload
-
-
 
 # The metric runs in the browser: it decodes the screenshot it is handed and
 # reports local structure, tone count and how much of the *drawing surface* still

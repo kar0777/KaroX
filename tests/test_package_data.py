@@ -21,6 +21,7 @@ NONEMPTY_FILES = (
     "engine/NOTICE.md",
     "data/NOTICE.md",
     "data/models_dev.json.gz",
+    "builtin_skills/repo-selfcheck/scripts/repo_summary.py",
 )
 
 
@@ -48,7 +49,7 @@ def test_pyproject_package_data_still_declares_the_runtime_resources() -> None:
     for fragment in (
         '"karox.tui" = ["*.tcss"]',
         '"karox.prompts" = ["*.md"]',
-        '"karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]',
+        '"karox.builtin_skills" = ["*/SKILL.md", "*/*.md", "*/scripts/*.py"]',
         '"karox.engine" = ["py.typed", "LICENSE.md", "NOTICE.md"]',
         '"karox.data" = ["*.json.gz", "NOTICE.md"]',
     ):

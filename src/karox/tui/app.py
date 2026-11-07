@@ -1577,8 +1577,11 @@ class KaroxApp(App[int]):
                 state.tests_ok += 1
             else:
                 state.tests_failed += 1
-        if event.usage and kind != "step_finished":
-            self._absorb_usage(event.usage)
+        if event.usage:
+            if kind == "finished":
+                self._absorb_usage(event.usage, cumulative=True)
+            elif kind != "step_finished":
+                self._absorb_usage(event.usage)
         self._refresh_working()
 
     def _warning_text(self, reason: str, detail: str) -> str:
@@ -1603,14 +1606,18 @@ class KaroxApp(App[int]):
         elif category == "inspect":
             state.inspections += 1
 
-    def _absorb_usage(self, usage: dict[str, int]) -> None:
+    def _absorb_usage(self, usage: dict[str, int], *, cumulative: bool = False) -> None:
         if not usage:
             return
         state = self.run_state
         total = usage.get("total_tokens")
         if isinstance(total, int) and total > 0:
-            self._tokens += total
-            state.tokens += total
+            if cumulative:
+                self._tokens = total
+                state.tokens = total
+            else:
+                self._tokens += total
+                state.tokens += total
         prompt = usage.get("prompt_tokens") or usage.get("input_tokens")
         if isinstance(prompt, int) and prompt > 0:
             state.prompt_tokens = prompt
