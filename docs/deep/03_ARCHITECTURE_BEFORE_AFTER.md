@@ -173,8 +173,24 @@ and the credential/payment hint now live in `browser/guards.py` on the existing
 same names. `guards.py` 151 → 267 lines; `session.py` 3,501 → 3,398.
 `test_browser_core`, unit/resource/code-source and public-facade tests PASS.
 
+## After — browser split step 3 (runtime)
+
+`browser/session.py` 3,398 → 3,141 lines; the owner-thread runtime moved to
+`browser/runtime.py` (`BrowserRuntimeMixin`, 312 lines): owner loop and queue
+marshalling, `dispatch`, the fail-closed `_guarded` action wrapper, parking and
+waking, `_stop_owner`, `_active_page` and the stateless selector/text helpers.
+
+The concrete `BrowserSession` composes the mixin first
+(`BrowserRuntimeMixin, SessionGuardsMixin`); methods keep their names,
+decorators, signatures and the exact fail-closed timeout. Tests that patch
+`karox.browser.session.demote_headless_browsers` keep working through the
+`_demote_browser_processes()` seam on the session; the runtime never imports the
+session at runtime (TYPE_CHECKING only).
+
+Tests: browser resources/units/core/code-source/public-facade PASS.
+
 ## Next
 
-Browser mixin extraction (runtime → navigation → collectors → observation →
-interaction → waits/evidence → launch/lifecycle), engine steps 2–7, then the
-bridge characterization tests before its split.
+Browser mixin extraction (navigation → collectors → observation → interaction →
+waits/evidence → launch/lifecycle), engine steps 2–7, then the bridge
+characterization tests before its split.
