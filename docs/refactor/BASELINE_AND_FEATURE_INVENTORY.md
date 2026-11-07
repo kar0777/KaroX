@@ -33,7 +33,7 @@ freeze record for contract and behavior parity.
 | Import cycles (AST, internal) | **0** |
 | Environment | isolated config/runtime under `local-runs/karox5-baseline`, no provider key |
 
-Raw metadata is in `local-runs/karox5-baseline/baseline_metadata.json`.
+Raw metadata is in `local-runs/karox5-baseline/baseline_metadata.json`. Fresh-install smoke used a separate venv under `local-runs/karox5-baseline/venv`; no model was configured.
 Raw import graph is in `local-runs/karox5-baseline/import_graph.json`.
 
 ### Baseline gate status before refactor
@@ -44,11 +44,11 @@ Raw import graph is in `local-runs/karox5-baseline/import_graph.json`.
 | `mypy cli.py entrypoint.py tui` | **PASS** | 13 source files, no issues; one unused-override note |
 | `scripts/check_tree.py` | **PASS** | 162 modules · 87,508 lines |
 | Headless audited subset | **PASS** | 64 passed in 3.65 s |
-| Full pytest | **RUNNING / baseline not green-coded yet** | first-failure run in progress; 1,527 collected |
+| Full pytest | **FAIL / HANG recorded** | clean-root run reached 333 passed + 4 skipped, then hung in browser dialog fixture; owner-thread marshalling had no timeout. First failure seen earlier was an environment-override artifact, not product. |
 | Wheel build | **PASS after installing setuptools** | wheel above |
-| Wheel install in fresh venv | **NOT TESTED at freeze time** | must run before any release claim |
+| Wheel install in fresh venv | **PASS** | `venv` + wheel install; `karox --version`, `paths`, `agent run --help`, `tui --help`, `doctor --json` all exit 0 |
 
-The environment initially lacked `setuptools` and `build`; this is an
+The full clean baseline was stopped after the reproducible browser hang. `BrowserSession.dispatch` waited forever on a `Future` while its owner thread sat in `Queue.get`; this is recorded as a product defect and fixed fail-closed in candidate commit `09ae58c`.\n\nThe environment initially lacked `setuptools` and `build`; this is an
 environment prerequisite, not a product result. After installing them the wheel
 built successfully. The earlier full run was restarted because it was launched
 from `b/win`, which made pytest use the wrong root; the corrected run uses
@@ -212,3 +212,5 @@ These are release/documentation gaps to fix, not proof that source is dead.
 3. Ask the independent read-only auditors to challenge this inventory.
 4. Complete `DEAD_CODE_EVIDENCE.md` before the first deletion.
 5. Only then start reversible removals and checkpoint commits.
+
+

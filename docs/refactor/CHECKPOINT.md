@@ -5,7 +5,7 @@
 **Product worktree:** `b/karox5-refactor`
 **Branch:** `goal/karox5-refactor-20261107`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Report/audit worktree:** `b/win` (do not use for product tests)
+**Report/audit worktree:** `b/win` (do not use for product tests)\n**First candidate merge:** `1420e6e` (dev fixes merged into refactor)
 **Other worktrees:** preserve untouched; do not reset/clean them.
 
 ## Current status
@@ -34,7 +34,7 @@ Phase A — baseline freeze. No product deletion/refactor yet.
 
 - Correct-root full pytest first-failure run (background), log:
   `%TEMP%\karox5-baseline-pytest-vv2.log`.
-- Fresh-venv wheel install and CLI smoke (pending).
+- Fresh-venv wheel install and CLI smoke: **PASS** (version, paths, agent help, TUI help, doctor).
 - Independent read-only audits: kernel/verification, CLI/TUI/MCP/bridge,
   browser/skills/package, release/migration.
 
@@ -68,3 +68,5 @@ reset, clean, or alter another worktree.
 5. Choose and document the free stable 5.x version after PyPI/tag/migration
    evidence (current evidence: PyPI has only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
    both free; no decision yet).
+
+
