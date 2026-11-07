@@ -31,7 +31,7 @@ were updated and re-run.
 | Wheel package-data/license inspection | PASS for prior wheel; final package-data smoke PASS |
 | Full one-revision pytest | **PASS** — 5.0.0 single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
 | Real provider/browser/MCP/TUI smoke | **real browser scenario PASS** (verified, 3 steps, 16,857 tokens, open/get_text); provider smoke PASS; real TUI/bridge scenario still partial |
-| Benchmarks | **ONE PAIRED TRIVIAL CELL ONLY**; no representative matrix and no OpenCode/DSH comparison |
+| Benchmarks | **PILOT ONLY**: one paired baseline/candidate cell; OpenCode 2.2.1 free-model product pass; DSH blocked by missing credential. No 30–100-task representative matrix. |
 
 ## Safe migration rehearsal (not executed on the user's install)
 

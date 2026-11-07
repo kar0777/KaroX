@@ -39,7 +39,10 @@ the representative benchmark matrix remain open.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
 - The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
-- Single-process full suite on 5.0.0: **exit 0**, 1,542 collected.
+- Single-process full suite on 5.0.0 after the probe guard: **exit 0**,
+  1,542 collected.
+- Real browser scenario: verified, 3 steps, 16,857 tokens, `browser.command`
+  open/get_text returned the expected h1.
 - Fresh install of the 5.0.0 wheel in `venv-5.0.0` PASS: `karox` and
   `karox-vnext` report 5.0.0; paths JSON and agent help exit 0.
 - Public package-facade, CLI alias, hosted multi-project, legacy keyring, JSON
