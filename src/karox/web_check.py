@@ -418,7 +418,7 @@ _PAGE_PROBE_JS = """
       ? getComputedStyle(document.documentElement).backgroundColor
       : "") || "";
   const dynamic_dom = Boolean(
-    document.querySelector("script,canvas,video,audio,iframe,animate,animateTransform,animateMotion,set") ||
+    document.querySelector("script,canvas,video,audio,iframe,object,embed,link,img,picture,source,image,animate,animateTransform,animateMotion,set") ||
     (typeof document.getAnimations === "function" && document.getAnimations().length > 0)
   );
   return {
@@ -1068,26 +1068,28 @@ _FRAMES_DRAWN_JS = (
 
 
 _DYNAMIC_MARKUP = re.compile(
-    r"<\s*(?:script|canvas|video|audio|iframe|object|embed|animate(?:Transform|Motion)?|set)\b"
+    r"<\s*(?:script|canvas|video|audio|iframe|object|embed|link|img|picture|source|image|feimage|foreignobject|animate(?:Transform|Motion)?|set)\b"
+    r"|<\s*meta\b[^>]*\bhttp-equiv\s*=\s*[\"']?\s*refresh\b"
     r"|\bon[a-z]+\s*="
-    r"|@keyframes\b"
-    r"|\b(?:animation|transition)\s*:"
+    r"|@(?:keyframes|import|font-face)\b"
+    r"|\b(?:animation|transition)(?:-[a-z]+)?\s*:"
+    r"|\b(?:offset-path|will-change)\s*:"
     r"|\brequestAnimationFrame\b"
-    r"|\b(?:href|src)\s*=\s*[\"'](?:https?:)?//"
-    r"|@import\b"
-    r"|url\(\s*[\"']?(?:https?:)?//",
+    r"|\b(?:src|srcset)\s*="
+    r"|\b(?:xlink:)?href\s*=\s*(?:[\"']\s*[^#\"'\s]|[^\"'\s#])"
+    r"|\burl\s*\(\s*(?:[\"']\s*[^#\"'\s]|[^\"'\s#)])",
     re.I,
 )
 
 
 def is_static_document(page: pathlib.Path) -> bool:
-    """True only when markup is well-formed and proven free of scripts, animations or remote assets."""
+    """True only when markup is self-contained and proven free of scripts, animations or external/media assets."""
 
     suffix = page.suffix.lower()
     if suffix not in {".svg", ".html", ".htm"}:
         return False
     try:
-        if page.stat().st_size > _MAX_PICTURE_BYTES:
+        if page.is_symlink() or page.stat().st_size > _MAX_PICTURE_BYTES:
             return False
         text = page.read_text(encoding="utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
@@ -1097,6 +1099,12 @@ def is_static_document(page: pathlib.Path) -> bool:
     if suffix == ".svg":
         return not check_picture(page)
     return not check_page(page)
+
+
+_FINGERPRINT_SUFFIXES = frozenset({
+    ".html", ".htm", ".svg", ".css", ".js", ".mjs", ".json",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".woff", ".woff2", ".ttf",
+})
 
 
 def observation_fingerprint(
@@ -1110,39 +1118,53 @@ def observation_fingerprint(
     """Freshness digest binding page bytes, served repository assets, viewport, query and backend."""
 
     try:
+        if page.is_symlink():
+            return None
         resolved = page.resolve()
+        root = pathlib.Path(serve_root).resolve() if serve_root is not None else resolved.parent
+        rel_page = resolved.relative_to(root).as_posix()
+        if resolved.stat().st_size > _REFERENCE_MAX_BYTES:
+            return None
         data = resolved.read_bytes()
-    except OSError:
+    except (OSError, ValueError):
         return None
     if backend is None:
         from .browser.render_backend import launch_args
 
         backend = " ".join(launch_args())
     hasher = hashlib.sha256()
-    root = pathlib.Path(serve_root).resolve() if serve_root is not None else resolved.parent
-    try:
-        rel_page = resolved.relative_to(root).as_posix()
-    except ValueError:
-        rel_page = resolved.name
     hasher.update(f"page:{rel_page}\0vp:{viewport[0]}x{viewport[1]}\0q:{query}\0be:{backend}\0".encode("utf-8"))
     hasher.update(hashlib.sha256(data).digest())
+    seen = 0
+    total_bytes = 0
     try:
-        files = sorted(root.rglob("*"))
-    except OSError:
+        for directory, subdirs, files in os.walk(root, followlinks=False):
+            dir_path = pathlib.Path(directory)
+            if dir_path.is_symlink():
+                return None
+            subdirs[:] = sorted(
+                d for d in subdirs
+                if d not in _REFERENCE_SKIP_DIRS and not (dir_path / d).is_symlink()
+            )
+            for name in sorted(files):
+                seen += 1
+                if seen > _REFERENCE_MAX_FILES:
+                    return None
+                item = dir_path / name
+                if item.is_symlink():
+                    return None
+                if item.suffix.lower() not in _FINGERPRINT_SUFFIXES:
+                    continue
+                resolved_item = item.resolve()
+                rel = resolved_item.relative_to(root).as_posix()
+                size = resolved_item.stat().st_size
+                total_bytes += size
+                if total_bytes > _REFERENCE_MAX_BYTES:
+                    return None
+                hasher.update(f"{rel}:".encode("utf-8"))
+                hasher.update(hashlib.sha256(resolved_item.read_bytes()).digest())
+    except (OSError, ValueError):
         return None
-    if len(files) > _REFERENCE_MAX_FILES:
-        return None
-    for item in files:
-        if not item.is_file() or any(part in _REFERENCE_SKIP_DIRS for part in item.parts):
-            continue
-        if item.suffix.lower() not in {".html", ".htm", ".svg", ".css", ".js", ".mjs", ".json", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".woff", ".woff2", ".ttf"}:
-            continue
-        try:
-            rel = item.resolve().relative_to(root).as_posix()
-            hasher.update(f"{rel}:".encode("utf-8"))
-            hasher.update(hashlib.sha256(item.read_bytes()).digest())
-        except OSError:
-            return None
     return hasher.hexdigest()
 
 

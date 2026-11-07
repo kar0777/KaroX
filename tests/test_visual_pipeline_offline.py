@@ -195,7 +195,8 @@ def test_is_static_document_requires_clean_markup_without_scripts_animations_or_
     clean_svg = tmp_path / "pelican.svg"
     clean_svg.write_text(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
-        '<circle cx="50" cy="50" r="40" fill="#2266aa"/></svg>',
+        '<defs><linearGradient id="g"><stop offset="0%" stop-color="#2266aa"/></linearGradient></defs>'
+        '<circle id="c" cx="50" cy="50" r="40" fill="url(#g)"/><use href="#c" x="10"/></svg>',
         encoding="utf-8",
     )
     assert is_static_document(clean_svg) is True
@@ -237,7 +238,7 @@ def test_is_static_document_requires_clean_markup_without_scripts_animations_or_
     clean_html = tmp_path / "static.html"
     clean_html.write_text(
         "<!doctype html><html><head><style>body { color: #111; }</style></head>"
-        "<body><h1>Report</h1><p>Static content.</p></body></html>",
+        "<body><h1 id='top'>Report</h1><p>Static content. <a href='#top'>Top</a></p></body></html>",
         encoding="utf-8",
     )
     assert is_static_document(clean_html) is True
@@ -551,3 +552,176 @@ def test_observation_fingerprint_invalidates_on_page_asset_viewport_query_or_bac
     diff_path = fingerprint_fn(copy_page, serve_root=tmp_path, viewport=(1280, 800), query="", backend="software")
 
     assert len({after_font, diff_viewport, diff_query, diff_backend, diff_path}) == 5
+
+
+def test_is_static_document_fails_closed_on_linked_css_css_longhands_and_media_assets(
+    tmp_path: Path,
+) -> None:
+    is_static_document = web_check.is_static_document
+
+    # 1. Local stylesheet with @keyframes / animation (<link rel="stylesheet" href="style.css">)
+    (tmp_path / "style.css").write_text(
+        "@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }"
+        " .box { animation: spin 2s infinite; }",
+        encoding="utf-8",
+    )
+    linked_css_html = tmp_path / "linked_css.html"
+    linked_css_html.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head>'
+        '<body><div class="box">Box</div></body></html>',
+        encoding="utf-8",
+    )
+    gif_html = tmp_path / "gif.html"
+    gif_html.write_text(
+        '<!doctype html><html><body><img src="motion.gif"></body></html>',
+        encoding="utf-8",
+    )
+    longhand_html = tmp_path / "longhand.html"
+    longhand_html.write_text(
+        "<!doctype html><html><head><style>"
+        ".spinner { animation-name: spin; animation-duration: 2s; }"
+        "</style></head><body><div class='spinner'>Spin</div></body></html>",
+        encoding="utf-8",
+    )
+    assert [
+        is_static_document(linked_css_html),
+        is_static_document(gif_html),
+        is_static_document(longhand_html),
+    ] == [False, False, False]
+
+    # 2. Additional media/picture/source/SVG image/background-image/data URLs
+    picture_html = tmp_path / "picture.html"
+    picture_html.write_text(
+        '<!doctype html><html><body><picture><source srcset="hero.webp"><img src="hero.png"></picture></body></html>',
+        encoding="utf-8",
+    )
+    assert is_static_document(picture_html) is False
+
+    svg_image = tmp_path / "embedded_img.svg"
+    svg_image.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+        '<image xlink:href="sprite.png" width="50" height="50"/></svg>',
+        encoding="utf-8",
+    )
+    assert is_static_document(svg_image) is False
+
+    bg_url_html = tmp_path / "bg_url.html"
+    bg_url_html.write_text(
+        "<!doctype html><html><head><style>.hero { background-image: url('anim.webp'); }</style></head>"
+        "<body><div class='hero'>Hi</div></body></html>",
+        encoding="utf-8",
+    )
+    assert is_static_document(bg_url_html) is False
+
+    data_url_html = tmp_path / "data_url.html"
+    data_url_html.write_text(
+        '<!doctype html><html><body><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></body></html>',
+        encoding="utf-8",
+    )
+    assert is_static_document(data_url_html) is False
+
+    # 3. Inline longhand CSS transition / offset-path / will-change
+    transition_longhand = tmp_path / "transition_longhand.html"
+    transition_longhand.write_text(
+        "<!doctype html><html><body><div style='transition-property: opacity; transition-duration: 1s;'>Fade</div></body></html>",
+        encoding="utf-8",
+    )
+    assert is_static_document(transition_longhand) is False
+
+    # 4. Meta refresh or SVG animateTransform / animateMotion / set
+    meta_refresh = tmp_path / "refresh.html"
+    meta_refresh.write_text(
+        '<!doctype html><html><head><meta http-equiv="refresh" content="1"></head><body>Wait</body></html>',
+        encoding="utf-8",
+    )
+    assert is_static_document(meta_refresh) is False
+
+    for tag in ("animateTransform", "animateMotion", "set"):
+        anim_svg = tmp_path / f"{tag}.svg"
+        anim_svg.write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><g><{tag}/></g></svg>',
+            encoding="utf-8",
+        )
+        assert is_static_document(anim_svg) is False
+
+    # 5. Missing or unreadable file fails closed
+    assert is_static_document(tmp_path / "does_not_exist.html") is False
+
+
+def test_ambiguous_fixtures_retain_two_frames_and_normal_stabilization_even_when_dom_looks_quiescent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "style.css").write_text(
+        "@keyframes spin { to { transform: rotate(360deg); } } .box { animation: spin 2s; }",
+        encoding="utf-8",
+    )
+    linked_html = tmp_path / "linked.html"
+    linked_html.write_text(
+        '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><div class="box"></div></body></html>',
+        encoding="utf-8",
+    )
+    gif_html = tmp_path / "gif.html"
+    gif_html.write_text(
+        '<!doctype html><html><body><img src="motion.gif"></body></html>',
+        encoding="utf-8",
+    )
+    longhand_html = tmp_path / "longhand.html"
+    longhand_html.write_text(
+        "<!doctype html><html><head><style>.s { animation-name: spin; animation-duration: 2s; }</style></head>"
+        "<body><div class='s'></div></body></html>",
+        encoding="utf-8",
+    )
+
+    for candidate in (linked_html, gif_html, longhand_html):
+        # Even if the fake browser reports drawn=0, gate_status=ready, and dynamic_dom=False:
+        view = _FakeView(
+            probe_data={
+                "canvases": 0,
+                "canvas_rect": None,
+                "paints_with_three": False,
+                "page_background": "rgb(255, 255, 255)",
+                "dynamic_dom": False,
+            },
+            gate_frames=[0, 0, 0],
+            shots=[b"frame-1", b"frame-2"],
+        )
+        _install_fake_browser(monkeypatch, view)
+        obs = observe_page(candidate, settle_ms=2000, check_resize=False)
+        assert obs["static_proven"] is False, candidate.name
+        assert len(obs["frames"]) == 2, candidate.name
+        assert view.timeouts == [RENDER_SETTLE_MS, 2000], candidate.name
+
+
+def test_observation_fingerprint_rejects_symlinks_and_bounds_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fingerprint_fn = web_check.observation_fingerprint
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    page = repo / "index.html"
+    page.write_text("<!doctype html><html><body><h1>Hi</h1></body></html>", encoding="utf-8")
+
+    # Normal bounded repository succeeds
+    digest = fingerprint_fn(page, serve_root=repo, backend="software")
+    assert isinstance(digest, str) and len(digest) == 64
+
+    # When total files exceed _REFERENCE_MAX_FILES, enumeration stops early and returns None
+    monkeypatch.setattr(web_check, "_REFERENCE_MAX_FILES", 2)
+    for idx in range(5):
+        (repo / f"extra_{idx}.css").write_text("body {}", encoding="utf-8")
+    assert fingerprint_fn(page, serve_root=repo, backend="software") is None
+
+    # A page outside serve_root is rejected
+    outside = tmp_path / "outside.html"
+    outside.write_text("<!doctype html><html><body>Out</body></html>", encoding="utf-8")
+    monkeypatch.setattr(web_check, "_REFERENCE_MAX_FILES", 500)
+    assert fingerprint_fn(outside, serve_root=repo, backend="software") is None
+
+    # A symlinked file inside the repository is rejected fail-closed
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self.name == "extra_0.css" or original_is_symlink(self),
+    )
+    assert fingerprint_fn(page, serve_root=repo, backend="software") is None
