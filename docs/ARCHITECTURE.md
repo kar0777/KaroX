@@ -45,8 +45,12 @@ hosted_core (explicit allowlist) → CapabilityCoreRuntime → core.py
    CLI.
 2. **Command surface — `cli.py`, `entrypoint.py`.** Parses arguments, resolves
    a provider route/model, creates or resumes a session, constructs the kernel
-   and renders the report. It also owns the `bridge` and `connections`-style
-   lifecycle commands; all handlers are thin and return an exit code.
+   and renders the report. The implementation lives in focused command modules
+   (`cli_agent`, `cli_session`, `cli_provider`, `cli_mcp`, `cli_admin`); the
+   shared run-time assembly is `cli_runtime`, presentation is `cli_present`,
+   and `cli.py` is the façade and dispatcher. It also owns the `bridge` and
+   `connections`-style lifecycle commands; all handlers are thin and return an
+   exit code.
 3. **Agent runtime — `engine_kernel.py`, `agent.py`, `session_analysis.py`.**
    `engine_kernel.py` runs the vendored karo-core engine
    (`engine/agents/default.py`, the loop measured ahead of stock mini) as the
@@ -211,7 +215,15 @@ not listed is internal to its layer.
 
 | Module | What it is |
 | --- | --- |
-| `cli.py` | command handlers; `agent run` resolves the session, provider and kernel |
+| `cli.py` | the public command façade, dispatch and `main` |
+| `cli_agent.py` | `agent run`: session/route/policy/Core/kernel assembly and report |
+| `cli_session.py` | `session` command group |
+| `cli_provider.py` | `provider` and `model` command groups |
+| `cli_mcp.py` | outbound MCP command groups |
+| `cli_admin.py` | `skill`, `doctor`, `status`, `credential` command groups |
+| `cli_runtime.py` | provider route and per-session MCP selection assembly |
+| `cli_present.py` | argv aliases and human/NDJSON presentation |
+| `cli_context.py` | durable registry constructors used by the command modules |
 | `cli_parser.py` | the declarative command surface and its defaults |
 | `entrypoint.py` | console-script shim |
 | `agent.py` | `AgentKernel` facade, module helpers and system prompt |

@@ -45,10 +45,9 @@ def _desktop_call(call_id: str, action: str, payload: dict[str, Any]) -> Any:
 
 
 def _scripted_cli(monkeypatch: pytest.MonkeyPatch, responses: List[ModelResponse]) -> Any:
-    from karox import cli
 
     provider = ScriptedProvider(responses)
-    monkeypatch.setattr(cli, "OpenAIChatCompletionsProvider", lambda *args, **kwargs: provider)
+    monkeypatch.setattr("karox.cli_runtime.OpenAIChatCompletionsProvider", lambda *args, **kwargs: provider)
     return provider
 
 

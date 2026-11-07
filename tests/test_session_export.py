@@ -113,7 +113,7 @@ def test_cli_session_export_writes_the_file(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
     record, _ = _record(tmp_path)
-    monkeypatch.setattr(cli, "session_dir", lambda: tmp_path / "sessions")
+    monkeypatch.setattr("karox.cli_session.session_dir", lambda: tmp_path / "sessions")
     target = tmp_path / "out" / "session.html"
     output = io.StringIO()
     with contextlib.redirect_stdout(output):

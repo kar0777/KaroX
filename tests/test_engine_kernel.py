@@ -2732,10 +2732,9 @@ def _agent_run_args(repository: Path, *flags: str) -> List[str]:
 
 
 def _scripted_cli(monkeypatch: pytest.MonkeyPatch, responses: List[ModelResponse]) -> Any:
-    from karox import cli
 
     provider = ScriptedProvider(responses)
-    monkeypatch.setattr(cli, "OpenAIChatCompletionsProvider", lambda *args, **kwargs: provider)
+    monkeypatch.setattr("karox.cli_runtime.OpenAIChatCompletionsProvider", lambda *args, **kwargs: provider)
     return provider
 
 
