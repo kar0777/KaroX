@@ -1,6 +1,6 @@
 # Real-world benchmarks
 
-**Status: one real smoke, no comparison matrix. Spend: cost unavailable.**
+**Status: one smoke + one paired trivial cell; no representative comparison matrix. Spend: cost unavailable.**
 
 The goal requires real tasks and comparisons. One real provider smoke has been
 run; no benchmark cell, no competing CLI comparison, and no multi-task result
@@ -89,3 +89,4 @@ contaminated candidate remains INVALID.
 After the candidate is deterministically green and versioned, start with a small
 development set (6–10 tasks, paired arm order) and do not call it a release
 benchmark until the full 30–100-task registry has been run.
+
