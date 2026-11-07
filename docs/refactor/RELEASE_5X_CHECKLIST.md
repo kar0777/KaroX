@@ -1,36 +1,36 @@
 # Release 5.x checklist
 
-**No release number has been committed yet.** The tree still reports
-`6.0.0a3`; changing only that string is forbidden.
+**Release number: 5.0.0**, chosen on branch `release/karox5-5.0.0`. The tree,
+wheel and console now report `5.0.0`; changing only the string was not enough —
+README/RU, INSTALL, CHANGELOG, PARITY, MIGRATION, wheel and fresh-install smoke
+were updated and re-run.
 
 ## Version decision evidence
 
 - PyPI `karox-runtime` visible 5.x releases: `5.0.0rc2`, `5.0.0rc3`;
   no stable `5.0.0` observed.
 - Local v5 tags: `v5.0.0rc1/rc2/rc3`; no `v5.0.0`.
-- Local v5 runtime source is `5.0.0rc4`, but its release gate still says
-  NOT READY and its shipping `VERSION` file is 4.1.4.
-- Target is a clean 6.0.0a3 line with deliberate exclusions from v5 laboratory
-  scope. Calling it `5.0.0` without restoring/declaring the v5 shipping scope
-  would be misleading.
-- Candidate free numbers considered: `5.0.0` and `5.1.0`. The version decision
-  is blocked on scope and migration, not on availability.
+- Local v5 runtime source is `5.0.0rc4`; the new artifact is the stable
+  clean-line continuation, not a republished v5 laboratory.
+- `5.0.0` is the canonical fifth-line final; `5.1.0` remains free for a later
+  minor. The old lab's orchestration/autonomy surfaces are explicitly out of
+  the stable scope (documented in PARITY/MIGRATION), not silently omitted.
 
 ## P0 before a local 5.x candidate
 
 | Item | Status |
 |---|---|
-| Version/classifier/PEP 440 consistency | NOT DONE |
-| README, README_RU, CHANGELOG, INSTALL, migration text | NOT DONE |
-| 5.x upgrade/rollback and `git_baseline` session compatibility | **BLOCKER**: target adds a field to schema 1; rc4 rejects unknown fields; rollback needs restore |
-| Installer detect/upgrade/alias behavior | **BLOCKER**: current installers are 6 side-by-side, default stale `v6/...` |
-| Preserve/port `karox-vnext`/`karox-agent-mcp` aliases | **DECISION REQUIRED**; absent in target |
-| Existing v5 lab capabilities (orchestration/subagents/checkpoints/connections) | **SCOPE BLOCKER** unless honestly excluded by owner |
-| Wheel build from final HEAD | PASS — `2eed6bfb...` 1,150,836 bytes |
-| Fresh venv install, CLI/TUI smoke | PASS — version/paths/agent help exit 0 |
-| Wheel package-data/license inspection | baseline passed; final pending |
-| Full one-revision pytest | **PASS** — single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
-| Real provider/browser/MCP/TUI smoke | NOT RUN |
+| Version/classifier/PEP 440 consistency | **PASS** — `karox 5.0.0`, wheel metadata `karox_runtime-5.0.0` |
+| README, README_RU, CHANGELOG, INSTALL, migration text | **PASS** for the 5.0.0 local candidate |
+| 5.x upgrade/rollback and `git_baseline` session compatibility | **PARTIAL/BLOCKER**: reads old v5; rollback needs restore of pre-upgrade sessions because rc4 rejects new fields |
+| Installer detect/upgrade/alias behavior | **BLOCKER**: current one-line installers are still 6.x side-by-side; 5.0.0 has no pinned installer yet |
+| Preserve/port aliases | `karox-vnext` restored; `karox-agent-mcp` deliberately out of stable scope |
+| Existing v5 lab capabilities | **DELIBERATE EXCLUSION**, documented; not claimed as stable features |
+| Wheel build from final HEAD | **PASS** — `832cc249...`, 1,150,875 bytes |
+| Fresh venv install, CLI/TUI smoke | **PASS** — `karox` and `karox-vnext` both report 5.0.0; paths/agent help exit 0 |
+| Wheel package-data/license inspection | PASS for prior wheel; final package-data smoke PASS |
+| Full one-revision pytest | **PASS** — 5.0.0 single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
+| Real provider/browser/MCP/TUI smoke | one real provider smoke + local protocol/browser suites; broader user smoke **NOT DONE** |
 | Benchmarks | **ONE PAIRED TRIVIAL CELL ONLY**; no representative matrix and no OpenCode/DSH comparison |
 
 ## Safe migration rehearsal (not executed on the user's install)

@@ -3,18 +3,18 @@
 **Updated:** 2026-11-07
 **Goal file:** `b/win/docs/goals/KAROX_V5_STABLE_REFACTOR_GOAL.md`
 **Product worktree:** `b/karox5-refactor`
-**Branch:** `goal/karox5-refactor-20261107`
+**Branch:** `release/karox5-5.0.0`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Candidate HEAD:** `b30d22c` (docs); code HEAD `f3bceb0`
-**Dev branch:** `goal/karox5-refactor-dev-20261107` (latest isolated test fix)
+**Candidate HEAD:** `6511c6e` (5.0.0 release surface)
+**Dev history:** `goal/karox5-refactor-20261107` at `5e430d8`; dev branch kept for reference
 **Report/audit worktree:** `b/win` (do not use for product tests)
 **Other worktrees:** preserve untouched; do not reset/clean them.
 
 ## Status
 
-Phase A baseline is frozen; Phase B/C first candidate is implemented. This is
-**not** a release candidate: the deterministic full gate and the version/migration
-work remain open.
+KaroX **5.0.0 local release candidate** is built and green on the code tests.
+It is **not yet RELEASE_CANDIDATE_READY**: the pinned installer/upgrade path and
+the representative benchmark matrix remain open.
 
 ## Baseline evidence
 
@@ -32,15 +32,16 @@ work remain open.
 
 ## Candidate evidence
 
-- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,666 lines
-  (334-line headroom under the 88,000 gate).
-- New wheel: `karox_runtime-6.0.0a3-py3-none-any.whl`, 1,150,836 bytes, SHA-256
-  `2eed6bfb0a9ef9f815420b88284256c0a39ad8c9981e0b23bebe46946d6849f3`.
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,667 lines
+  (333-line headroom under the 88,000 gate).
+- New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,150,875 bytes, SHA-256
+  `832cc249d3201e7ddddae1a34bd0b6ab61234b9c8cd071d4ec42d5ae0a691dca`.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
 - The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
-- Fresh install of the final wheel in `venv-candidate-final` PASS: version,
-  isolated paths JSON and `agent run --help` all exit 0.
+- Single-process full suite on 5.0.0: **exit 0**, 1,542 collected.
+- Fresh install of the 5.0.0 wheel in `venv-5.0.0` PASS: `karox` and
+  `karox-vnext` report 5.0.0; paths JSON and agent help exit 0.
 - Public package-facade, CLI alias, hosted multi-project, legacy keyring, JSON
   export, browser timeout, TUI usage and MCP risk tests are passing.
 - One real provider smoke passed: W&B `DeepSeek-V4.1-Flash`, verified, 4
@@ -69,16 +70,18 @@ work remain open.
 
 ## Still blocking READY
 
-1. Version/scope/migration. PyPI shows only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
-   free. The target still reports 6.0.0a3 and its scope differs from old v5.
-2. `git_baseline` is under schema 1; rc4 rejects the new field, so rollback
-   needs a restore/migration plan.
-3. Installers still default to `v6/plan-impl-20261104` and side-by-side
-   `karox6`/dogfood, not a 5.x in-place upgrade.
-4. Real browser/MCP/TUI smoke and the 30–100-task benchmark matrix are not run;
-   only one real provider smoke exists.
-5. Checks/probes command-guard coverage and the TUI pure-helper import boundary
-   still need explicit decisions.
+1. **Installers/upgrade**: the one-line installers are still the 6.x
+   side-by-side flow (`v6/plan-impl-20261104`, `karox6`, dogfood). A pinned
+   5.0.0 installer, in-place upgrade rehearsal and automated rollback are not
+   done. The release docs currently direct reviewers to the isolated wheel.
+2. **Rollback**: new sessions contain fields old rc4 rejects; rollback is a
+   backup/restore procedure, not a tested in-place downgrade.
+3. **Benchmark matrix**: one real provider smoke and one paired trivial cell
+   exist; no 30–100-task matrix and no OpenCode/DSH comparison.
+4. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
+   real bridge/TUI/provider user scenario is not documented end to end.
+5. Checks/probes inline command-guard coverage and the TUI pure-helper import
+   boundary still need explicit decisions.
 
 ## Safe continuation
 

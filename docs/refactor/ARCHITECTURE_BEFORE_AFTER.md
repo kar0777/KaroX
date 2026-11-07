@@ -102,7 +102,7 @@ At `f3bceb0` the AST graph has:
 - the `browser`/`tui`/`computer_use` package-initializer cycles are gone;
 - `cli` fan-out is 50 (from 52) because the bridge group was extracted; the
   remaining fan-out is the command dispatcher itself.
-- `check_tree`: 164 modules, 87,666 lines.
+- `check_tree`: 164 modules, 87,667 lines.
 
 This is a real reduction in package-initializer coupling, not a claim that the
 four remaining lazy/domain cycles are harmless. The next split should target the
@@ -143,4 +143,5 @@ removing the actual browser/TUI/desktop modules.
   redaction still caps by default.
 
 These need the complete gate before they count as a stable split.
+
 
