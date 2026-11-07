@@ -67,15 +67,14 @@ ENGINE_MODULES = {
 # several ordinary increments rather than a jump to 100k. A stray copy of the
 # package or a generated dump is thousands of lines and still fails here.
 #
-# 91k (2026-11-07, second raise): measured 89,892 lines after decomposing
-# engine_tool_env, providers/provider_adapters, mcp_client, hosted_core,
-# disk_maintenance, core/core_tools/core_process, repo_context, completion_gate
-# and check_report. The delta over the 87,689 baseline is owner-module docstrings
-# and imports (per-batch before/after is in docs/deep/03), not duplicated logic.
-# The remaining bridge/TUI/web_check decompositions are projected to need at most
-# ~1,000 lines of that structural overhead. Any further raise requires a fresh
-# measurement and evidence that no product behavior was added.
-MAX_PACKAGE_LINES = 91_000
+# 91.5k (2026-11-08, third raise): measured 90,643 lines after decomposing the
+# bridge launcher/proxy/tailscale on top of the earlier engine, tools, providers,
+# MCP, hosted, disk, TUI and web-check splits. The delta over the 87,689 baseline
+# is owner-module docstrings/imports (per-batch before/after is in docs/deep/03),
+# not duplicated logic. The remaining bridge profiles/oauth and route slices are
+# projected to need at most ~500 lines of that structural overhead. Any further
+# raise requires a fresh measurement and evidence that no behavior was added.
+MAX_PACKAGE_LINES = 91_500
 
 
 def package_line_count(package: Path) -> int:
