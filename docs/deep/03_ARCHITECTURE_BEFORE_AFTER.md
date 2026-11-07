@@ -416,10 +416,22 @@ rendered output, 256). Constants/policy tables move to
 `engine_tool_support.py` (241) and remain re-exported. Engine tools/kernel/
 salvage and prompt-cache suites pass.
 
+## After — TUI app and render split
+
+`tui/app.py` 2,038 → 569 lines. `KaroxApp` composes `AppSessionMixin` (startup/
+background/welcome, 258), `AppCommandsMixin` (slash commands, connect,
+sessions/skills/MCP, 825) and `AppRunMixin` (task/stream/finish/actions/chrome,
+636); constants, `RunState` and preference helpers move to `app_support.py`
+(175). Textual event-decorated handlers and lifecycle stay in the facade.
+`tui/widgets.py` 1,141 → 910; palette constants and pure render/hang/preview/
+card helpers move to `tui/render.py` (314) and remain re-exported
+(`_WRAP_CONSOLE` moved with `hang_text` after a caught NameError). TUI tests
+pass, including long-preview wrapping and narrow-terminal status.
+
 ## Next
 
-TUI (`app.py`, `widgets.py`) and `web_check`, then the bridge launcher/proxy/
-tailscale. The measured package budget decision is recorded in CHECKPOINT.md.
+`web_check` (1,831, preserve Three.js/WebGL/3D checks), then the bridge
+launcher/proxy/tailscale, then bridge profiles/oauth.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
