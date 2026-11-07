@@ -669,24 +669,11 @@ def judge(
     )
     problems: List[Tuple[str, str, str]] = []
     for cid, text in checklist:
+        keys = named_keys(text) if require_presses else ()
+        missing = [key for key in keys if key not in pressed]
         item = attested.get(cid)
         if item is None:
-            problems.append((cid, text, "not attested"))
-            continue
-        status, observed = item["status"], item["observed"]
-        keys = named_keys(text) if require_presses else ()
-        if status == STATUS_VERIFIED:
-            quote = normalize(observed)
-            missing = [key for key in keys if key not in pressed]
-            if len(quote.split()) < _MIN_QUOTE_TOKENS or len(quote) < _MIN_QUOTE_CHARS:
-                problems.append((cid, text, "observed text too short to identify a result"))
-            elif not _quoted(quote, observations, runs):
-                if stale is None:
-                    stale = stale_observations(history, before=before, diagnostic=diagnostic)
-                    stale_runs = _copied_runs(stale)
-                stale_copy = bool(stale) and _quoted(quote, stale, stale_runs)
-                problems.append((cid, text, STALE_QUOTE if stale_copy else NOT_QUOTED))
-            elif missing:
+            if missing:
                 listed = ", ".join(key_display(key) for key in missing)
                 problems.append(
                     (
@@ -696,6 +683,30 @@ def judge(
                         "browser_command press on the deliverable page after the last edit",
                     )
                 )
+            else:
+                problems.append((cid, text, "not attested"))
+            continue
+        status, observed = item["status"], item["observed"]
+        if status == STATUS_VERIFIED:
+            quote = normalize(observed)
+            if missing:
+                listed = ", ".join(key_display(key) for key in missing)
+                problems.append(
+                    (
+                        cid,
+                        text,
+                        f"names key(s) {listed} that were not pressed with "
+                        "browser_command press on the deliverable page after the last edit",
+                    )
+                )
+            elif len(quote.split()) < _MIN_QUOTE_TOKENS or len(quote) < _MIN_QUOTE_CHARS:
+                problems.append((cid, text, "observed text too short to identify a result"))
+            elif not _quoted(quote, observations, runs):
+                if stale is None:
+                    stale = stale_observations(history, before=before, diagnostic=diagnostic)
+                    stale_runs = _copied_runs(stale)
+                stale_copy = bool(stale) and _quoted(quote, stale, stale_runs)
+                problems.append((cid, text, STALE_QUOTE if stale_copy else NOT_QUOTED))
         elif status == STATUS_NOT_APPLICABLE:
             if keys:
                 problems.append(
@@ -715,19 +726,36 @@ def judge(
     return problems
 
 
+def is_key_problem(problem: str) -> bool:
+    """Whether ``problem`` is a missing named-key browser press obligation."""
+
+    return problem.startswith("names key")
+
+
 def floor_reasons(
     record: Any, *, diagnostic: Collection[str] = (), gating_only: bool = False
 ) -> List[str]:
     """The completion-floor form: one reason per open clause, or one summary.
 
-    ``gating_only`` keeps only what the model itself reported ``unmet``: the
-    form used when the attestation is advisory (see
-    ``ATTESTATION_GATES_VERIFICATION``).
+    ``gating_only`` keeps what the model itself reported ``unmet`` and any
+    unpressed named-key browser obligation: the form used when prose quote
+    attestation is advisory (see ``ATTESTATION_GATES_VERIFICATION``).
     """
 
     problems = judge(record, diagnostic=diagnostic)
     if gating_only:
-        problems = [item for item in problems if item[2] == "reported unmet"]
+        if any(p in {"not attested", "attested before the last edit"} for _, _, p in problems):
+            by_id = {
+                item[0]: item
+                for item in judge(record, use_transcript=False, diagnostic=diagnostic)
+                if is_key_problem(item[2])
+            }
+            problems = [by_id.get(item[0], item) for item in problems]
+        problems = [
+            item
+            for item in problems
+            if item[2] == "reported unmet" or is_key_problem(item[2])
+        ]
     if not problems:
         return []
     if all(problem == "not attested" for _, _, problem in problems):

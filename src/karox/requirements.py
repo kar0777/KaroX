@@ -39,6 +39,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 #: Bullets are deliberately not requirements -- prose bullets describe, numbered
 #: items commit.
 _NUMBERED_ITEM = re.compile(r"^[ \t]*(\d+)[.)][ \t]+(.+)$")
+_HEADING = re.compile(r"^[ \t]*#{1,6}(?:\s|$)")
 
 #: A fenced code block opener. Numbered lines inside a fence are quoted data.
 _FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
@@ -195,6 +196,10 @@ def requirement_texts(task: str) -> List[str]:
         if match is not None:
             close_prose()
             segments.append(("item", [match.group(2)]))
+            continue
+        if _HEADING.match(line):
+            close_prose()
+            segments.append(("prose", [line.strip()]))
             continue
         if segments and segments[-1][0] == "item" and line[:1] in (" ", "\t"):
             # An indented line belongs to the requirement above it.

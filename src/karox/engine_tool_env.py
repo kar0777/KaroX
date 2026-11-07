@@ -1130,7 +1130,8 @@ class CoreToolEnvironment:
         through and the completion floor reports what stayed open.
         """
 
-        if self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT:
+        key_only = self._coverage_refusals >= COVERAGE_REFUSAL_LIMIT
+        if key_only and self._coverage_refusals >= 1:
             return []
         try:
             record = self._core.sessions.load(self._session_id)
@@ -1150,6 +1151,13 @@ class CoreToolEnvironment:
             )
         except Exception:  # noqa: BLE001 - the floor still judges the submission
             return []
+        if key_only:
+            problems = [
+                item for item in problems if requirement_coverage.is_key_problem(item[2])
+            ]
+            if not problems:
+                self._coverage_hints = {}
+                return []
         try:
             self._coverage_hints = requirement_coverage.closest_results(
                 record, attestation, problems, diagnostic=diagnostic

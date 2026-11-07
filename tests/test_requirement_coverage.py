@@ -491,3 +491,86 @@ def test_no_hint_without_a_fresh_result_sharing_words() -> None:
     problems = coverage.judge(record)
     assert coverage.closest_results(record, attestation, problems) == {}
     assert "closest fresh result" not in coverage.refusal_message(problems, {})
+
+
+def test_markdown_headings_without_blank_lines_do_not_swallow_or_invent_clauses() -> None:
+    tight = "## Controls\nLeft / Right arrows or A / D: run.\nSpace, Up arrow, or W: jump."
+    assert [text for _, text in coverage.clauses(seed(tight))] == [
+        "Left / Right arrows or A / D: run.",
+        "Space, Up arrow, or W: jump.",
+    ]
+    labeled = (
+        "TASK\n# Interactive Viewer\n\n"
+        "Rotate the model. Zoom smoothly. Reset the view."
+    )
+    assert [text for _, text in coverage.clauses(seed(labeled))] == [
+        "Rotate the model.",
+        "Zoom smoothly.",
+        "Reset the view.",
+    ]
+
+
+def test_unpressed_named_keys_stay_gating_even_when_attestation_is_advisory() -> None:
+    history = [
+        _edit("app.js"),
+        _browser({"url": "http://127.0.0.1:8000/index.html"}),
+        _press("ArrowRight"),
+        _seen("status running x 140"),
+        _finish(),
+    ]
+    record = _record(KEY_TASK, history)
+    reasons = coverage.floor_reasons(record, gating_only=True)
+    assert len(reasons) == 1
+    assert "ArrowLeft, A, D" in reasons[0]
+
+    # Attesting verified with a valid or paraphrased quote still gates on missing presses.
+    record.provider_history[-1] = _finish(_key_attestation())
+    reasons = coverage.floor_reasons(record, gating_only=True)
+    assert len(reasons) == 1
+    assert "ArrowLeft, A, D" in reasons[0]
+
+    paraphrased = _key_attestation()
+    paraphrased[0]["observed"] = "ok"
+    record.provider_history[-1] = _finish(paraphrased)
+    reasons = coverage.floor_reasons(record, gating_only=True)
+    assert len(reasons) == 1
+    assert "ArrowLeft, A, D" in reasons[0]
+
+    # Pressing the remaining named keys discharges the gating reason; prose-only
+    # clauses without quotes stay advisory.
+    record.provider_history[3:3] = [_press("ArrowLeft"), _press("a"), _press("KeyD")]
+    record.provider_history[-1] = _finish()
+    assert coverage.floor_reasons(record, gating_only=True) == []
+
+
+def test_finish_refuses_once_for_unpressed_named_keys_only(tmp_path: Path) -> None:
+    from karox.engine_tool_env import CoreToolEnvironment
+
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    history = [
+        _edit("app.js"),
+        _browser({"url": "http://127.0.0.1:8000/index.html"}),
+        _press("ArrowRight"),
+        _seen("status running x 140"),
+    ]
+    record = _record(KEY_TASK, history)
+    env = object.__new__(CoreToolEnvironment)
+    env._session_id = "s1"
+    env._coverage_refusals = 0
+    env._core = SimpleNamespace(
+        repository=tmp_path,
+        sessions=SimpleNamespace(load=lambda _sid: record),
+    )
+
+    problems = env._coverage_problems({"answer": "done"})
+    assert [cid for cid, _, _ in problems] == ["R1"]
+    assert "ArrowLeft, A, D" in problems[0][2]
+
+    # Bounded to one refusal; the floor then reports what stayed open.
+    env._coverage_refusals = 1
+    assert env._coverage_problems({"answer": "done"}) == []
+
+    # Once all named keys are pressed, prose-only unattested clauses do not refuse finish.
+    env._coverage_refusals = 0
+    record.provider_history[3:3] = [_press("ArrowLeft"), _press("a"), _press("KeyD")]
+    assert env._coverage_problems({"answer": "done"}) == []
