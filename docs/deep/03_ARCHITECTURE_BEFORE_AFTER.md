@@ -440,10 +440,20 @@ stay in the facade so the existing offline-pipeline patches still apply.
 The visual/offline, web-check, render and engine-render suites pass. Every
 Three.js/WebGL/3D threshold and probe is unchanged.
 
+## After — bridge launcher host-primitive split
+
+`bridge_launcher.py` 2,389 → 1,949 lines. Windows job objects, process-group
+kill, child setup/stop, output mirroring, port readiness, pid-tree ownership
+and the public-route wait move to `bridge_host.py` (547). `_wait_for_bridge`
+stays in the facade because tests patch
+`bridge_launcher._listener_belongs_to_process_tree`; the host module is
+re-exported. Launcher (39 tests), bridge core/characterization, OAuth and
+Tailscale suites pass.
+
 ## Next
 
-Split the remaining browser/render/observe core of `web_check` only with a
-dedicated visual parity test, then the bridge launcher/proxy/tailscale.
+Split the launcher watchdog/owner-lock slice only if its `watchdog_dir` seam
+is preserved, then `bridge_proxy` with the S0 wire suite.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
