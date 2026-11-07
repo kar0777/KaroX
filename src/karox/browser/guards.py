@@ -16,7 +16,7 @@ from .errors import BrowserError, BrowserSecurityError
 from .probes import LOCATOR_METADATA_JS
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .session import CancelToken
+    from .contract import CancelToken
 
 
 _REF_ID = re.compile(r"^k[0-9]{1,4}$")

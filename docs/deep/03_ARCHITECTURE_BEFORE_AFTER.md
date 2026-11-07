@@ -146,7 +146,26 @@ dotenv.
 - `_any_language_server` stays in the façade (monkeypatched by tests).
 - No public import changed; no logic edited in the move.
 
+## After — browser split step 1 (`contract.py`)
+
+`browser/session.py` 3,703 → 3,501 lines. The leaf contract moved to
+`browser/contract.py` (286 lines): `CancelToken`, the four typed records, the
+session caps, and the `READ_ACTIONS`/`INPUT_ACTIONS`/`ACTION_CAPABILITIES`
+vocabulary. `session.py` imports and re-exports them, so
+`browser.BrowserSession is session.BrowserSession`,
+`browser.CancelToken is session.CancelToken` and the existing tests keep
+working.
+
+The only dependency edge that changed is the historical
+`browser.guards → browser.session` edge: guards now take `CancelToken` from the
+contract leaf. The action-wrapping loop still runs exactly once in
+`session.py`; no Playwright code moved.
+
+Tests: `test_browser_units`, `test_browser_resources`,
+`test_browser_code_sources`, `test_public_package_facades` PASS.
+
 ## Next
 
-Browser `contract.py` (breaks the `guards → session` cycle), then engine steps
+Browser mixin extraction (guards → runtime → navigation → collectors →
+observation → interaction → waits/evidence → launch/lifecycle), engine steps
 2–7, then the bridge characterization tests before its split.
