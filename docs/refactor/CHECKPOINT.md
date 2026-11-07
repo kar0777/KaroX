@@ -87,10 +87,10 @@ the representative benchmark matrix remain open.
 3. **Real user smoke**: real provider browser scenario passed (verified, 3
    steps, 16,857 tokens, `browser.command` open/get_text). A full real bridge/TUI
    user scenario is still not documented end to end.
-4. TUI pure-helper import boundary still needs an explicit decision. (The
-   checks/probes inline command guard is now covered by a regression test.)
-5. Published installer URL/tag is not tested; local wheel + explicit
+4. Published installer URL/tag is not tested; local wheel + explicit
    `KAROX_SPEC` is the verified path.
+5. The TUI import boundary is now enforced by an AST regression test: TUI may
+   import pure/platform helpers but not agent/core/engine/session runtime.
 
 ## Safe continuation
 

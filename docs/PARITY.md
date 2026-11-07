@@ -85,6 +85,9 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
 - Checks/probes inline command-guard coverage is fixed for the documented
   textual patterns; obfuscated payloads remain outside the claimed model (no OS
   sandbox).
+- The TUI import boundary is enforced by `tests/test_tui_import_boundary.py`;
+  pure/platform helpers are allowed, agent/core/engine/session runtime imports
+  are rejected.
 
 The 5.0.0 wheel is a local candidate for owner review; it is not published and
 does not replace the installed `karox` command.

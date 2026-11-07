@@ -34,6 +34,7 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 | Hosted bridge local core | PASS (offline) | bridge core tests |
 | Browser core/live local page | **PASS** | `test_browser_core.py` 10/10, `test_browser_live.py` 39P/1S; real provider browser scenario verified (`browser.command` open/get_text, 3 steps, 16,857 tokens) |
 | TUI synthetic streaming | PASS | `test_tui.py` 95 tests |
+| TUI import boundary | PASS | AST test rejects agent/core/engine/session runtime imports in `karox.tui` |
 | Desktop live | **NOT TESTED** | Windows fake tests only |
 | Real W&B/model | **ONE SMOKE PASS** | W&B DeepSeek-V4.1-Flash, verified, 4 steps, 27,131 tokens; cost `no_pricing` |
 | OpenCode/DSH comparison | **NOT RUN** | blocked by release readiness |
