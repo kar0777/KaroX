@@ -304,10 +304,22 @@ excerpts, edit context, inspect, 394); shared constants/budgets/match selection
 live in `repo_support.py` (407). The public constructor and method names are
 unchanged; core-smoke and engine context/inspect tests pass.
 
+## After — core runtime split
+
+`core.py` 1,573 → 453 lines. `CoreRuntime` composes `CoreExecuteMixin`
+(execute/risk/replay/session load, 336), `CoreValidationMixin`
+(normalization + JSON-schema validation, 508) and `CoreFilesMixin`
+(safe paths, read/write/list, mutation evidence, audit, 425); support types
+(`VerificationRule`, write modes, ripgrep lookup) live in `core_support.py` (99).
+The facade re-exports the historical names other modules/tests import
+(`CoreCommand`, `InvalidCommand`, `InvalidPath`, `CoreError`, `ToolDefinition`,
+`SessionError`, `_path_label`, `VerificationRule`). Core command/validation/
+safety/smoke and engine-tools tests pass.
+
 ## Next
 
-Providers, `core_tools`/`core.py`, TUI, `web_check`, then the bridge with its
-S0 characterization tests.
+Providers, `core_tools`/`core_process`, TUI, `web_check`, then the bridge with
+its S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
