@@ -135,3 +135,16 @@ All 15 required scenarios are covered in `tests/test_prompt_cache.py` alongside 
 | **Cached prompt tokens billed ($0.03 / 1M)** | `3,355,664` tokens (`$0.1007`) | `~4,650,000` tokens (`$0.1395`) | Higher cached prefix retention across Steps 34–55 |
 | **Net input token cost on `3d-game` ($0.20 uncached / $0.03 cached)** | `$0.1876` | `~$0.1765–$0.1825` | **Net cost reduction (`~$0.005–$0.011`) + eliminates 2 full suffix re-prefill latency stalls** |
 | **Context overflow risk on `3d-game`** | `0%` (`96.8K / 1,000K`) | `0%` (`~155K / 1,000K`, `> 460K` tokens below `1M - 384K`) | Zero overflow risk |
+
+---
+
+## Correction Addendum (2026-11-07 — Mission 13.1 Independent Audit Reconciliation)
+
+The table in **Phase 5.B** above preserved above for historical transparency contained an attribution error identified during the Mission 13 Independent Audit:
+
+1. **Two Distinct `3d-game` Runs Were Conflated in Phase 5.B:**
+   - **`wandb-3arm-20261103-r3 / 3d-game / karo`** (`arena/runs/wandb-3arm-20261103-r3/3d-game/karo/record.json`, commit `3064208`): **48 steps**, peak `prompt_tokens = 140,417` (Step 45), **1** `history_rewrite` event at **Step 46** (`140,417 -> 134,942`, `cached_tokens: 134,912 -> 0`), total `prompt_tokens = 3,867,091`, `cached_tokens = 3,587,328`, `uncached_tokens = 279,763`, measured input cost **`$0.16357`**.
+   - **`m1017-r1 / 3d-game / karo_final`** (`docs/benchmarks/sbx-1017-20261104.md`, commit `e006e71`): **66 steps**, **2** `history_rewrite` events at **Step 34** (`96.7K -> 85.8K`, cache prefix matched `35.6K`) and **Step 39** (`96.8K -> 39.0K`, cache prefix matched `11.9K`), plus **5** `provider_miss` events, total tokens `4.00M`, `uncached_tokens = 459K`.
+2. **Full Primary-Evidence Reconciliation and Mission 13.1 Cache-Safety Corrections:**
+   - See `docs/audits/MISSION_13_1_CACHE_SAFETY_20261107.md` for the complete reconciliation of `r3` vs `m1017-r1`, the exact Mission 13 commit chain (`c892e3f -> 747a2f2 -> 085abe5 -> b639101`), the P0 state-briefing prefix-preservation fix, the P0 context-window safety guard, and the P1 suffix-aware early high-reclaimability rewrite policy.
+
