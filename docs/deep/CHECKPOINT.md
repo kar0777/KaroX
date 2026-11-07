@@ -46,7 +46,7 @@ commits have targeted + full-engine evidence and need the next full gate.
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
 | `ruff` + `check_tree` at current HEAD | PASS — 204 modules / 88,692 lines |
-| Full suite at `142ed70` (completion-gate + repo-context before core split) | running in the isolated gate worktree |
+| Full suite at `142ed70` (completion-gate + repo-context before core split) | **PASS** — exit 0, 100 % (`local-runs/gate-142ed70-full.log`) |
 | Full suite at current HEAD (core split) | pending next round; core targeted suite passes |
 | Wheel build/fresh install | pending after the next full green gate |
 
