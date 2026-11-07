@@ -1,10 +1,10 @@
 # MISSION 13.1 — CACHE SAFETY CORRECTION & EVIDENCE RECONCILIATION (2026-11-07)
 
-**Repository:** `D:\проекты\KaroX-v5`  
-**Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\win`  
-**Starting Branch & HEAD:** `mission-13/kv-cache-preservation-20261106` (`b6391014a76b5ebb2a8bec618fd5d6cc2b479b1c`)  
-**Mission 13.1 Branch:** `mission-13-1/cache-safety-20261107`  
-**Product + Tests Commit:** `866ac1169217b6dc824d5fa439d2f1f0b737d11e`  
+**Repository:** `D:\проекты\KaroX-v5`
+**Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\win`
+**Starting Branch & HEAD:** `mission-13/kv-cache-preservation-20261106` (`b6391014a76b5ebb2a8bec618fd5d6cc2b479b1c`)
+**Mission 13.1 Branch:** `mission-13-1/cache-safety-20261107`
+**Product + Tests Commit:** `866ac1169217b6dc824d5fa439d2f1f0b737d11e`
 
 ---
 

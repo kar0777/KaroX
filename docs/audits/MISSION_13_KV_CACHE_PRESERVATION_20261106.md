@@ -147,4 +147,3 @@ The table in **Phase 5.B** above preserved above for historical transparency con
    - **`m1017-r1 / 3d-game / karo_final`** (`docs/benchmarks/sbx-1017-20261104.md`, commit `e006e71`): **66 steps**, **2** `history_rewrite` events at **Step 34** (`96.7K -> 85.8K`, cache prefix matched `35.6K`) and **Step 39** (`96.8K -> 39.0K`, cache prefix matched `11.9K`), plus **5** `provider_miss` events, total tokens `4.00M`, `uncached_tokens = 459K`.
 2. **Full Primary-Evidence Reconciliation and Mission 13.1 Cache-Safety Corrections:**
    - See `docs/audits/MISSION_13_1_CACHE_SAFETY_20261107.md` for the complete reconciliation of `r3` vs `m1017-r1`, the exact Mission 13 commit chain (`c892e3f -> 747a2f2 -> 085abe5 -> b639101`), the P0 state-briefing prefix-preservation fix, the P0 context-window safety guard, and the P1 suffix-aware early high-reclaimability rewrite policy.
-
