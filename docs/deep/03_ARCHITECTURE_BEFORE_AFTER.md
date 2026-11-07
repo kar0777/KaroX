@@ -189,8 +189,16 @@ session at runtime (TYPE_CHECKING only).
 
 Tests: browser resources/units/core/code-source/public-facade PASS.
 
+## After — browser split step 4 (navigation)
+
+`browser/session.py` 3,141 → 2,820 lines; navigation, tab management, history
+and page registration moved to `browser/navigation.py`
+(`BrowserNavigationMixin`, 458 lines). The session keeps the owner-thread
+runtime and composes navigation first. Module-qualified `code_sources.fetch`
+calls stay patchable. Browser resource/unit/core/code-source/facade tests PASS.
+
 ## Next
 
-Browser mixin extraction (navigation → collectors → observation → interaction →
+Browser mixin extraction (collectors → observation → interaction →
 waits/evidence → launch/lifecycle), engine steps 2–7, then the bridge
 characterization tests before its split.
