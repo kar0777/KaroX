@@ -304,7 +304,7 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
     def test_matching_routes_split_owned_and_foreign(self) -> None:
         routes = [_route(), _route(local_port=3000), _route(local_port=9999, path="/other")]
         with mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes", return_value=routes
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes", return_value=routes
         ):
             owned, foreign = _matching_background_funnel_routes(
                 "tailscale", public_url="https://host.ts.net", port=8765
@@ -321,7 +321,7 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
             return _Completed(0, "", "")
 
         with mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes",
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes",
             return_value=[_route(local_port=3000)],
         ):
             stopped = stop_tailscale_funnel(tunnel, run=fake_run)
@@ -337,7 +337,7 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
             return _Completed(0, "", "")
 
         with mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes", return_value=[]
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes", return_value=[]
         ):
             stopped = stop_tailscale_funnel(tunnel, run=fake_run)
         self.assertTrue(stopped)
@@ -353,7 +353,7 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
 
         responses = [[_route()], []]
         with mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes",
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes",
             side_effect=responses,
         ):
             stopped = stop_tailscale_funnel(tunnel, run=fake_run)
@@ -371,9 +371,9 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
             "public_url": "https://host.ts.net",
         }
         with mock.patch(
-            "karox.bridge_tailscale.query_tailscale_status", return_value=status
+            "karox.bridge_tailscale_funnel.query_tailscale_status", return_value=status
         ), mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes", return_value=[_route()]
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes", return_value=[_route()]
         ):
             tunnel = find_owned_funnel(8765)
         self.assertIsNotNone(tunnel)
@@ -388,9 +388,9 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
             "public_url": "https://host.ts.net",
         }
         with mock.patch(
-            "karox.bridge_tailscale.query_tailscale_status", return_value=status
+            "karox.bridge_tailscale_funnel.query_tailscale_status", return_value=status
         ), mock.patch(
-            "karox.bridge_tailscale.inventory_tailscale_routes",
+            "karox.bridge_tailscale_funnel.inventory_tailscale_routes",
             return_value=[_route(local_port=3000)],
         ):
             with self.assertRaises(TailscaleError):
@@ -399,9 +399,9 @@ class BackgroundFunnelOwnershipTests(unittest.TestCase):
     def test_ensure_reuses_an_owned_route_without_restarting_it(self) -> None:
         existing = TailscaleFunnel("tailscale", "https://host.ts.net", 8765)
         with mock.patch(
-            "karox.bridge_tailscale.find_owned_funnel", return_value=existing
+            "karox.bridge_tailscale_funnel.find_owned_funnel", return_value=existing
         ), mock.patch(
-            "karox.bridge_tailscale.start_tailscale_funnel",
+            "karox.bridge_tailscale_funnel.start_tailscale_funnel",
             side_effect=AssertionError("must not start"),
         ):
             tunnel = ensure_tailscale_funnel(8765)
