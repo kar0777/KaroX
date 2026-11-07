@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-07 23:12 Europe/Warsaw
+**Updated:** 2026-11-07 23:24 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -10,9 +10,9 @@
 
 Phase 0 complete. Phase 1A (dead legacy) has two evidenced batches. Phase 1B
 continues: CLI, browser session and the whole engine kernel are decomposed;
-check_report is split. All landed changes have targeted tests green; a full
-suite gate on `ec32339` (end of the previous round) passed. The latest three
-commits have targeted + full-engine evidence and need the next full gate.
+check_report is split, and the tools/core/MCP layers are decomposed. Full-suite
+gates through `d27e2d2` passed; the MCP split (`4c4071d`) has targeted MCP and
+engine-tool evidence and needs the next full gate.
 
 | Workstream | State | Evidence |
 |---|---|---|
@@ -21,23 +21,22 @@ commits have targeted + full-engine evidence and need the next full gate.
 | CLI split | DONE | `cli.py` 2,299 → 193 + 8 modules |
 | Engine split | DONE | `engine_kernel.py` 2,905 → 753 + 8 owner modules |
 | Browser session split | DONE | `browser/session.py` 3,703 → 173 + 11 modules |
-| Tools batch | DONE (bodies) | `engine_tool_env` 1,864 → 1,396 + bodies 544; `core_tools` pending |
+| Tools batch | DONE | `engine_tool_env` 1,864 → 1,396 + bodies 544; `core_tools` 1,802 → 780 + 4 mixins |
 | Verification batch | DONE (reports/gate) | `check_report` 1,293 → 295 (+parsers/targets); `completion_gate` 1,278 → 565 (+rules/visual/review) |
 | Context batch | DONE (repo) | `repo_context` 2,055 → 148 (+support/identity/search/inspect) |
 | Core runtime | DONE | `core.py` 1,573 → 453 (+execute/validation/files/support) |
 | Core tools | DONE | `core_tools.py` 1,802 → 780 (+skill/job/edit/read mixins) |
 | Process tree | DONE | `core_process.py` 1,126 → 836 (+ `process_tree.py` 344) |
+| MCP client | DONE | `mcp_client.py` 1,201 → 588 (+ types 539 + registry 196 + transport 95) |
 | Bridge | NOT STARTED | split plan + mandatory S0 characterization tests ready |
-| Providers / TUI / web_check / mcp / hosted | NOT STARTED | next batches |
+| Hosted / providers / TUI / web_check | NOT STARTED | next batches |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-4 commits (latest first)
+## Round-5 commits (latest first)
 
 ```
-ada2cf4 refactor(tools): extract process-tree primitives from core_process
-9f2f614 refactor(tools): split ExtendedCoreRuntime into skill/job/edit/read mixins
-5bff142 docs(deep): record the green 142ed70 full-suite gate
-22679de refactor(core): split CoreRuntime into execute/validation/files mixins
+4c4071d refactor(mcp): split mcp_client into types, registry and transport
+d27e2d2 docs(deep): checkpoint the core-tools and process-tree splits
 ```
 
 ## Gates
@@ -49,17 +48,18 @@ ada2cf4 refactor(tools): extract process-tree primitives from core_process
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 209 modules / 88,878 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 212 modules / 89,039 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
-| Full suite at current HEAD (core_tools + process-tree splits) | pending next round; targeted core/engine/MCP/job tests pass |
+| Full suite at `d27e2d2` (core-tools + process-tree) | **PASS** — exit 0, 100 % (`local-runs/gate-d27e2d2-full.log`) |
+| Full suite at current HEAD (MCP split) | pending next round; MCP/engine-tool tests pass |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Metrics
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 209 |
-| Physical lines | 87,689 | 88,878 (ceiling 90,000) |
+| Product modules | 164 | 212 |
+| Physical lines | 87,689 | 89,039 (ceiling 90,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -70,13 +70,15 @@ ada2cf4 refactor(tools): extract process-tree primitives from core_process
 | `core.py` | 1,573 | 453 (+ execute 336 + validation 508 + files 425 + support 99) |
 | `core_tools.py` | 1,802 | 780 (+ skill 202 + job 267 + edit 513 + read 228) |
 | `core_process.py` | 1,126 | 836 (+ process_tree 344) |
+| `mcp_client.py` | 1,201 | 588 (+ types 539 + registry 196 + transport 95) |
 
 Remaining largest files: `bridge_launcher.py` (2,389), `bridge_proxy.py`
 (2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `providers.py`
 (1,638), `bridge_tailscale.py` (1,585), `provider_adapters.py` (1,503),
-`bridge_oauth.py` (1,483), `engine_tool_env.py` (1,396), `mcp_client.py`
-(1,201), `hosted_core.py` (1,162), `bridge_profiles.py` (1,144),
-`tui/widgets.py` (1,141), `disk_maintenance.py` (1,099), `sessions.py` (966).
+`bridge_oauth.py` (1,483), `engine_tool_env.py` (1,396), `hosted_core.py`
+(1,162), `bridge_profiles.py` (1,144), `tui/widgets.py` (1,141),
+`disk_maintenance.py` (1,099), `sessions.py` (966), `engine_provider_bridge.py`
+(952).
 
 ## Decisions that must not be lost
 
@@ -107,15 +109,17 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. Split `mcp_client` (types/registry/transport/client) and `hosted_core`,
-   then `providers`/`provider_adapters` (retarget the many existing provider
-   patch seams carefully), then `bridge_profiles`/`bridge_oauth`.
-3. Bridge S0 characterization tests (modern MCP wire, sealed `requestState`,
-   `execute_approved`/approval consumption), then the launcher/proxy/tailscale
-   split.
+2. Split `hosted_core` (contract/approval/leases/health) and add the bridge S0
+   characterization tests (modern MCP wire, sealed `requestState`,
+   `execute_approved`/approval consumption).
+3. Providers/provider_adapters with careful retargeting of the existing patch
+   seams; `bridge_profiles`/`bridge_oauth`.
 4. TUI (`app.py`, `widgets.py`) and `web_check` (preserve Three.js/WebGL/3D
-   checks), `engine_tool_env` class split.
+   checks), then launcher/proxy/tailscale.
 5. Phase 2 full gate + wheel build/fresh install; only then benchmark arena.
+   The package ceiling has 961 lines of headroom; the next structural batch
+   should include the measured budget decision (simplify or raise in both gate
+   files with evidence).
 
 ## Safe continuation
 
