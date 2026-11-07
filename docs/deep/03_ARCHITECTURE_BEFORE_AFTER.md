@@ -396,6 +396,16 @@ error mapping move to `ProviderStreamMixin` in `provider_stream.py` (525).
 the transport loop. Every historical name is re-exported; provider catalog/
 registry/pricing/fault-stand and engine provider suites pass.
 
+## After — provider adapters split
+
+`provider_adapters.py` 1,503 → 86 lines. The shared streaming base, effort/
+error helpers and Gemini signature helpers move to `provider_adapter_base.py`
+(496); OpenAI Responses (305), Anthropic Messages (499) and Gemini
+GenerateContent (283) become independent vendor modules. The facade re-exports
+every historical name and keeps the shared `httpx` module object, so the
+existing `karox.provider_adapters.httpx.Client` patch seam still reaches the
+base. Provider suites and engine provider accounting/resilience pass.
+
 ## After — engine tool environment split
 
 `engine_tool_env.py` 1,396 → 582 lines. `CoreToolEnvironment` composes

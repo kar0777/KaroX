@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-07 23:47 Europe/Warsaw
+**Updated:** 2026-11-08 00:06 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -31,15 +31,21 @@ engine-tool evidence and needs the next full gate.
 | Disk maintenance | DONE | `disk_maintenance.py` 1,099 → 217 (+ protection 196 + scan 446 + plans 448) |
 | Bridge S0 tests | DONE | `tests/test_bridge_characterization.py` — 21 tests, 54 with existing bridge suites |
 | Hosted core (first slice) | DONE | `hosted_core.py` 1,162 → 821 (+ contract 129 + health 136 + approval 258) |
-| Bridge split | READY (not started) | S0 safety net exists; core-level replay-ledger gap recorded |
-| Providers / TUI / web_check | NOT STARTED | next batches |
+| Providers | DONE | `providers.py` 1,638 → 635 (+ types 652 + stream 525) |
+| Provider adapters | DONE | `provider_adapters.py` 1,503 → 86 (+ base 496 + OpenAI 305 + Anthropic 499 + Gemini 283) |
+| Engine tool env | DONE | `engine_tool_env.py` 1,396 → 582 (+ finish 366 + guidance 267 + attach 256 + support 241) |
+| Package budget | RAISED (measured) | ceiling 90,000 → 91,000; measured 89,892; rationale in `scripts/check_tree.py` |
+| Bridge launch/proxy/tailscale | NOT STARTED | S0 safety net exists; core-level replay-ledger gap recorded |
+| TUI / web_check | NOT STARTED | next batches |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-7 commits (latest first)
+## Round-8 commits (latest first)
 
 ```
-61cd188 refactor(bridge): split hosted_core contract, health and approval
-9e8a367 docs(deep): checkpoint the disk split and bridge characterization tests
+97d76df chore(budget): raise the package ceiling to 91k with a measured rationale
+3617015 refactor(engine): split CoreToolEnvironment finish/guidance/attach mixins
+ab1edac refactor(providers): split vendor adapters from the streaming base
+f427cf2 refactor(providers): split provider types and stream parsing
 ```
 
 ## Gates
@@ -51,22 +57,23 @@ engine-tool evidence and needs the next full gate.
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 218 modules / 89,261 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 228 modules / 89,892 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
 | Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
-| Full suite at current HEAD (hosted-core split) | pending next round; bridge suites pass |
+| Full suite at `b8e9789` (hosted-core split) | **PASS** — exit 0, 100 % (`local-runs/gate-b8e9789-full.log`) |
+| Full suite at current HEAD (provider/engine/budget) | pending next round; provider/engine targeted suites pass |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Metrics
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 218 |
-| Physical lines | 87,689 | 89,261 (ceiling 90,000) |
+| Product modules | 164 | 228 |
+| Physical lines | 87,689 | 89,892 (ceiling 91,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
-| `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
+| `engine_tool_env.py` | 1,864 | 582 (+ finish 366 + guidance 267 + attach 256 + support 241; `engine_tool_bodies` 544) |
 | `check_report.py` | 1,293 | 295 (+ parsers 829 + targets 271) |
 | `completion_gate.py` | 1,278 | 565 (+ rules 360 + visual 317 + review 199) |
 | `repo_context.py` | 2,055 | 148 (+ support 407 + identity 628 + search 736 + inspect 394) |
@@ -76,13 +83,14 @@ engine-tool evidence and needs the next full gate.
 | `mcp_client.py` | 1,201 | 588 (+ types 539 + registry 196 + transport 95) |
 | `disk_maintenance.py` | 1,099 | 217 (+ protection 196 + scan 446 + plans 448) |
 | `hosted_core.py` | 1,162 | 821 (+ contract 129 + health 136 + approval 258) |
+| `providers.py` | 1,638 | 635 (+ types 652 + stream 525) |
+| `provider_adapters.py` | 1,503 | 86 (+ base 496 + OpenAI 305 + Anthropic 499 + Gemini 283) |
 
 Remaining largest files: `bridge_launcher.py` (2,389), `bridge_proxy.py`
-(2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `providers.py`
-(1,638), `bridge_tailscale.py` (1,585), `provider_adapters.py` (1,503),
-`bridge_oauth.py` (1,483), `engine_tool_env.py` (1,396), `bridge_profiles.py`
-(1,144), `tui/widgets.py` (1,141), `sessions.py` (966),
-`engine_provider_bridge.py` (952).
+(2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `bridge_tailscale.py`
+(1,585), `bridge_oauth.py` (1,483), `bridge_profiles.py` (1,144),
+`tui/widgets.py` (1,141), `sessions.py` (966), `engine_provider_bridge.py`
+(952).
 
 ## Decisions that must not be lost
 
@@ -113,16 +121,15 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. Add execute-focused bridge characterization, then split the 335-line
-   `CoreToolBridge.execute` only with that net; keep the core-vs-wire one-shot
-   boundary documented.
-3. Providers/provider_adapters with careful retargeting of the many existing
-   patch seams; then bridge profiles/oauth.
-4. TUI (`app.py`, `widgets.py`) and `web_check` (preserve Three.js/WebGL/3D
-   checks), then launcher/proxy/tailscale with the S0 suite.
+2. TUI (`app.py`, `widgets.py`) and `web_check` (preserve Three.js/WebGL/3D
+   checks) next.
+3. Bridge launcher/proxy/tailscale with the S0 suite; keep the documented
+   core-vs-wire one-shot boundary and add execute-focused characterization
+   before moving `CoreToolBridge.execute`.
+4. Bridge profiles/oauth.
 5. Phase 2 full gate + wheel build/fresh install; only then benchmark arena.
-   Package headroom is 739 lines; the next structural batch needs a measured
-   budget decision (simplify or raise in both gate files with evidence).
+   Ceiling is now 91,000 with 1,108 lines of measured headroom; a further raise
+   needs a fresh measurement and evidence of no behavior growth.
 
 ## Safe continuation
 

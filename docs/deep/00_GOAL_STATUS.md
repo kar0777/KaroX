@@ -34,9 +34,11 @@
 | `mcp_client.py` | 1,201 | 588 (+ types/registry/transport) |
 | `disk_maintenance.py` | 1,099 | 217 (+ protection/scan/plans) |
 | `hosted_core.py` | 1,162 | 821 (+ contract/health/approval) |
-| `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
-| Package modules | 164 | 218 |
-| Package lines | 87,689 | 89,261 (ceiling 90,000) |
+| `providers.py` | 1,638 | 635 (+ types/stream) |
+| `provider_adapters.py` | 1,503 | 86 (+ base/OpenAI/Anthropic/Gemini) |
+| `engine_tool_env.py` | 1,864 | 582 (+ finish/guidance/attach/support; bodies 544) |
+| Package modules | 164 | 228 |
+| Package lines | 87,689 | 89,892 (ceiling 91,000) |
 
 ## Work ledger
 
