@@ -76,7 +76,7 @@ where = ["src"]
 # models.dev provider catalog snapshot (MIT, see karox/data/NOTICE.md).
 "karox.data" = ["*.json.gz", "NOTICE.md"]
 "karox.prompts" = ["*.md"]
-"karox.builtin_skills" = ["*/SKILL.md", "*/*.md"]
+"karox.builtin_skills" = ["*/SKILL.md", "*/*.md", "*/scripts/*.py"]
 # The vendored engine ships its license and typing marker only.
 "karox.engine" = ["py.typed", "LICENSE.md", "NOTICE.md"]
 
