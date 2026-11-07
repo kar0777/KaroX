@@ -471,10 +471,25 @@ name. The tailscale tests patch `inventory_tailscale_routes`/
 the patch paths are retargeted to `karox.bridge_tailscale_funnel.*`; coverage
 is unchanged and all route tests pass.
 
+## After — OAuth types and bridge profile catalog splits
+
+`bridge_oauth.py` 1,483 → 1,208 lines: TTL/scopes constants, state codecs
+(`_pending_from_state`/`_code_from_state`/`_grant_from_state`), wire models and
+small helpers move to `bridge_oauth_types.py` (368). Persistence (`os.replace`
+retry, state replacement constants) stays in the facade so the patch seams
+still apply.
+
+`bridge_profiles.py` 1,144 → 864 lines: catalog/status/public descriptor
+helpers, `BridgeProfile`/`BridgeRegistry`, `known_bridge_profiles`,
+`WEB_BRIDGE_PROFILES`, Notion redirect hosts and store/registry versions move to
+`bridge_profile_types.py` (338). `BridgeCredentialStore` stays in the facade so
+`patch("karox.bridge_profiles.BridgeCredentialStore")` still applies.
+Launcher/OAuth/core/characterization suites pass.
+
 ## Next
 
-`bridge_profiles` and `bridge_oauth`, then route-level characterization before
-splitting `build_proxy_asgi_app`; keep every security seam intact.
+Route-level characterization, then split `build_proxy_asgi_app`; keep the
+core-vs-wire one-shot boundary documented. Then Phase 2 gate.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
