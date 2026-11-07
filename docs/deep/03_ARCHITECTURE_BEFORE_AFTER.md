@@ -336,10 +336,21 @@ are re-exported from `core_process` for the lazy `command_jobs` runner and
 process-tool callers. `core_process` keeps probe/check rules, `CheckPlan` and
 `ProcessToolsMixin`. Core-command/job/repo-safety/MCP/engine-tool tests pass.
 
+## After — MCP client split
+
+`mcp_client.py` 1,201 → 588 lines. Wire types/errors/credentials/records and
+schema validation move to `mcp_types.py` (539); the registry, digests and
+selection validation to `mcp_registry.py` (196); the Streamable-HTTP SDK
+compatibility seam to `mcp_transport.py` (95). `McpClient`, `mcp_selection`,
+the runtime binding and the historical names remain on the facade. The
+`McpToolDescriptor` dataclass decorator and the `_canonical_digest` leaf helper
+were moved with their owners (a decorator near-miss fixed). MCP client/CLI and
+engine-tools tests pass.
+
 ## Next
 
-Providers, `mcp_client`/`hosted_core`, TUI, `web_check`, then the bridge with
-its S0 characterization tests.
+`hosted_core`, providers/provider_adapters, TUI and `web_check`, then the
+bridge with its S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|

@@ -2,759 +2,137 @@
 
 from __future__ import annotations
 
-import hashlib
-import ipaddress
+from .mcp_types import (  # noqa: F401
+    REGISTRY_VERSION as REGISTRY_VERSION,
+    _SAFE_ID as _SAFE_ID,
+    _SAFE_TOOL as _SAFE_TOOL,
+    _SAFE_ENV as _SAFE_ENV,
+    _SAFE_HEADER as _SAFE_HEADER,
+    _SAFE_SCHEME as _SAFE_SCHEME,
+    _SECRET_NAME as _SECRET_NAME,
+    _MCP_REFERENCE_PREFIX as _MCP_REFERENCE_PREFIX,
+    _MCP_SERVICE as _MCP_SERVICE,
+    _JSON_SERIALIZATION_ERRORS as _JSON_SERIALIZATION_ERRORS,
+    _SCHEMA_TYPES as _SCHEMA_TYPES,
+    McpFailureKind as McpFailureKind,
+    McpError as McpError,
+    McpConfigurationError as McpConfigurationError,
+    McpAccessDenied as McpAccessDenied,
+    McpProtocolError as McpProtocolError,
+    McpTransportError as McpTransportError,
+    McpTimeoutError as McpTimeoutError,
+    McpRemoteToolError as McpRemoteToolError,
+    McpUnknownOutcome as McpUnknownOutcome,
+    McpCredentialReference as McpCredentialReference,
+    McpProgress as McpProgress,
+    McpCredentialStore as McpCredentialStore,
+    _safe_identifier as _safe_identifier,
+    _finite_number as _finite_number,
+    _string_mapping as _string_mapping,
+    _validate_url as _validate_url,
+    _reject_json_constant as _reject_json_constant,
+    _strict_json_clone as _strict_json_clone,
+    _validate_schema as _validate_schema,
+    _reject_persisted_credential as _reject_persisted_credential,
+    McpServerRecord as McpServerRecord,
+    McpToolDescriptor as McpToolDescriptor,
+    _descriptor as _descriptor,
+    _resolved_read_only_remote_names as _resolved_read_only_remote_names,
+    _normalize_discovered_tools as _normalize_discovered_tools,
+)
+from .mcp_registry import (  # noqa: F401
+    _atomic_json as _atomic_json,
+    McpRegistry as McpRegistry,
+    _canonical_digest as _canonical_digest,
+    mcp_registry_digest as mcp_registry_digest,
+    validate_mcp_selection_registry as validate_mcp_selection_registry,
+)
+from .mcp_transport import (  # noqa: F401
+    _http_client_factory as _http_client_factory,
+    streamable_http_transport as streamable_http_transport,
+)
+
 import json
-import math
-import os
-import re
 import subprocess
-import uuid
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
-from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, Mapping, Optional
-from urllib.parse import urlsplit
 
 import anyio
 import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-try:
-    from mcp.client.streamable_http import streamable_http_client
-
-    _MODERN_STREAMABLE_HTTP = True
-except ImportError:  # compatibility for pre-1.27 development environments
-    from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
-
-    _MODERN_STREAMABLE_HTTP = False
-
-from .credentials import CredentialBackend, CredentialError, KeyringBackend
+from .credentials import CredentialError
 from .models import Capability
-from .security import child_process_environment, contains_credential, redact
+from .security import child_process_environment, redact
 from .sessions import SessionRecord
 
 
-REGISTRY_VERSION = 1
-_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_SAFE_TOOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_SAFE_ENV = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
-_SAFE_HEADER = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
-_SAFE_SCHEME = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]{0,31})?$")
-_SECRET_NAME = re.compile(
-    r"(?i)(authorization|api[_-]?key|token|secret|password|credential|cookie)"
-)
-_MCP_REFERENCE_PREFIX = "os-keyring:mcp/"
-_MCP_SERVICE = "KaroX/mcp"
-_JSON_SERIALIZATION_ERRORS = (
-    TypeError,
-    ValueError,
-    OverflowError,
-    UnicodeError,
-    RecursionError,
-)
-_SCHEMA_TYPES = frozenset(
-    {"null", "boolean", "integer", "number", "string", "array", "object"}
-)
 
 
-class McpFailureKind(str, Enum):
-    CONFIGURATION = "configuration"
-    ACCESS = "access"
-    PROTOCOL = "protocol"
-    TRANSPORT = "transport"
-    TIMEOUT = "timeout"
-    REMOTE_TOOL = "remote_tool"
-    UNKNOWN_OUTCOME = "unknown_outcome"
 
 
-class McpError(RuntimeError):
-    kind = McpFailureKind.TRANSPORT
 
 
-class McpConfigurationError(McpError):
-    kind = McpFailureKind.CONFIGURATION
-
-
-class McpAccessDenied(McpError, PermissionError):
-    kind = McpFailureKind.ACCESS
-
-
-class McpProtocolError(McpError):
-    kind = McpFailureKind.PROTOCOL
-
-
-class McpTransportError(McpError):
-    kind = McpFailureKind.TRANSPORT
-
-
-class McpTimeoutError(McpError):
-    kind = McpFailureKind.TIMEOUT
-
-
-class McpRemoteToolError(McpError):
-    kind = McpFailureKind.REMOTE_TOOL
-
-
-class McpUnknownOutcome(McpError):
-    kind = McpFailureKind.UNKNOWN_OUTCOME
-
-
-@dataclass(frozen=True)
-class McpCredentialReference:
-    name: str
-
-    def __post_init__(self) -> None:
-        _safe_identifier(self.name, "MCP credential name")
-
-    def __str__(self) -> str:
-        return f"{_MCP_REFERENCE_PREFIX}{self.name}"
-
-    @classmethod
-    def parse(cls, value: str) -> "McpCredentialReference":
-        if not isinstance(value, str) or not value.startswith(_MCP_REFERENCE_PREFIX):
-            raise ValueError("MCP credential reference must use os-keyring:mcp/<name>")
-        return cls(value[len(_MCP_REFERENCE_PREFIX) :])
-
-
-@dataclass(frozen=True)
-class McpProgress:
-    """One progress notification a remote MCP server sent during a call.
-
-    ``total``/``message`` are optional on the wire and stay ``None`` when the
-    server did not send them. The sink receives these inside the transport's
-    event loop, so it must stay cheap and non-blocking.
-    """
-
-    progress: float
-    total: Optional[float] = None
-    message: Optional[str] = None
-
-
-class McpCredentialStore:
-    """MCP-only credential namespace backed by the secure OS keyring."""
-
-    def __init__(self, backend: Optional[CredentialBackend] = None) -> None:
-        self._backend = backend or KeyringBackend()
-
-    @staticmethod
-    def _secret(value: str) -> str:
-        if not isinstance(value, str) or not value:
-            raise ValueError("MCP credential value must not be empty")
-        if any(item in value for item in ("\x00", "\r", "\n")):
-            raise ValueError("MCP credential contains invalid control characters")
-        if len(value) > 65_536:
-            raise ValueError("MCP credential exceeds 65536 characters")
-        return value
-
-    @staticmethod
-    def fingerprint(secret: str) -> str:
-        return f"sha256:{hashlib.sha256(secret.encode('utf-8')).hexdigest()[:12]}"
-
-    def set(self, name: str, secret: str) -> dict[str, str]:
-        reference = McpCredentialReference(name)
-        value = self._secret(secret)
-        try:
-            self._backend.set(_MCP_SERVICE, reference.name, value)
-        except CredentialError:
-            raise
-        except Exception as exc:
-            raise CredentialError(
-                f"cannot write MCP OS credential: {type(exc).__name__}"
-            ) from exc
-        return {"reference": str(reference), "fingerprint": self.fingerprint(value)}
-
-    def resolve(self, reference: str | McpCredentialReference) -> str:
-        parsed = (
-            reference
-            if isinstance(reference, McpCredentialReference)
-            else McpCredentialReference.parse(reference)
-        )
-        try:
-            value = self._backend.get(_MCP_SERVICE, parsed.name)
-        except CredentialError:
-            raise
-        except Exception as exc:
-            raise CredentialError(
-                f"cannot read MCP OS credential: {type(exc).__name__}"
-            ) from exc
-        if not isinstance(value, str) or not value:
-            raise CredentialError(f"MCP credential reference does not exist: {parsed}")
-        return self._secret(value)
-
-    def delete(self, name: str) -> dict[str, str]:
-        reference = McpCredentialReference(name)
-        try:
-            self._backend.delete(_MCP_SERVICE, reference.name)
-        except CredentialError:
-            raise
-        except Exception as exc:
-            raise CredentialError(
-                f"cannot delete MCP OS credential: {type(exc).__name__}"
-            ) from exc
-        return {"reference": str(reference), "status": "deleted"}
-
-    def doctor(self) -> dict[str, str]:
-        if isinstance(self._backend, KeyringBackend):
-            self._backend._module()
-        return {"status": "ok", "backend": "os-keyring", "scope": "mcp"}
-
-
-def _safe_identifier(value: str, label: str) -> str:
-    if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
-        raise ValueError(f"{label} must contain 1-64 safe characters")
-    return value
-
-
-def _finite_number(value: Any, label: str, minimum: float, maximum: float) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        or not minimum <= float(value) <= maximum
-    ):
-        raise ValueError(f"{label} must be between {minimum:g} and {maximum:g}")
-    return float(value)
-
-
-def _string_mapping(value: Any, label: str) -> dict[str, str]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} must be an object")
-    result: dict[str, str] = {}
-    for name, item in value.items():
-        if not isinstance(name, str) or not isinstance(item, str):
-            raise ValueError(f"{label} names and values must be strings")
-        result[name] = item
-    return result
-
-
-def _validate_url(value: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError("MCP URL must be a non-empty string")
-    parsed = urlsplit(value)
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("MCP URL must not contain user information")
-    if parsed.query or parsed.fragment:
-        raise ValueError("MCP URL must not contain a query or fragment")
-    if not parsed.hostname or not parsed.path:
-        raise ValueError("MCP URL must contain a host and path")
-    loopback = parsed.hostname.lower() == "localhost"
-    try:
-        loopback = loopback or ipaddress.ip_address(parsed.hostname).is_loopback
-    except ValueError:
-        pass
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-        raise ValueError("MCP URL must use HTTPS (HTTP is allowed only for loopback)")
-    return value
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON number is not allowed: {value}")
-
-
-def _strict_json_clone(value: Any, label: str) -> Any:
-    """Round-trip a value through strict JSON without accepting extensions."""
-    try:
-        encoded = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        return json.loads(encoded, parse_constant=_reject_json_constant)
-    except _JSON_SERIALIZATION_ERRORS as exc:
-        raise McpProtocolError(f"{label} is not valid strict JSON") from exc
-
-
-def _validate_schema(schema: Any, label: str) -> None:
-    """Validate the recursive JSON-Schema subset enforced by Core."""
-    if not isinstance(schema, dict):
-        raise McpProtocolError(f"{label} must be an object")
-    if "type" in schema:
-        declared = schema["type"]
-        if isinstance(declared, str):
-            type_names = [declared]
-        elif (
-            isinstance(declared, list)
-            and declared
-            and all(isinstance(item, str) for item in declared)
-            and len(set(declared)) == len(declared)
-        ):
-            type_names = declared
-        else:
-            raise McpProtocolError(f"{label} type is malformed")
-        unsupported = set(type_names).difference(_SCHEMA_TYPES)
-        if unsupported:
-            raise McpProtocolError(
-                f"{label} uses unsupported types: {sorted(unsupported)}"
-            )
-    if "properties" in schema:
-        properties = schema["properties"]
-        if not isinstance(properties, dict):
-            raise McpProtocolError(f"{label} properties must be an object")
-        for name, child in properties.items():
-            if not isinstance(name, str):
-                raise McpProtocolError(f"{label} property names must be strings")
-            _validate_schema(child, f"{label}.properties[{name!r}]")
-    if "required" in schema:
-        required = schema["required"]
-        if (
-            not isinstance(required, list)
-            or not all(isinstance(item, str) for item in required)
-            or len(set(required)) != len(required)
-        ):
-            raise McpProtocolError(f"{label} required must contain unique strings")
-    if "items" in schema:
-        _validate_schema(schema["items"], f"{label}.items")
-    if "additionalProperties" in schema:
-        additional = schema["additionalProperties"]
-        if not isinstance(additional, bool):
-            _validate_schema(additional, f"{label}.additionalProperties")
-
-
-def _reject_persisted_credential(value: Optional[str], label: str) -> None:
-    if value is not None and contains_credential(value):
-        raise ValueError(f"{label} must use an MCP credential reference")
-
-
-@dataclass(frozen=True)
-class McpServerRecord:
-    server_id: str
-    namespace: str
-    transport: str
-    command: Optional[str] = None
-    args: tuple[str, ...] = ()
-    url: Optional[str] = None
-    environment: Dict[str, str] = field(default_factory=dict)
-    headers: Dict[str, str] = field(default_factory=dict)
-    credential_ref: Optional[str] = None
-    credential_target: Optional[str] = None
-    credential_scheme: str = "Bearer"
-    oauth: bool = False
-    read_only_tools: tuple[str, ...] = ()
-    timeout_seconds: float = 30.0
-    max_result_bytes: int = 1_000_000
-    max_message_bytes: int = 1_000_000
-    max_transport_retries: int = 1
-
-    def __post_init__(self) -> None:
-        _safe_identifier(self.server_id, "MCP server ID")
-        _safe_identifier(self.namespace, "MCP namespace")
-        if self.transport not in {"stdio", "streamable_http"}:
-            raise ValueError("MCP transport must be stdio or streamable_http")
-        if not isinstance(self.args, tuple) or not all(
-            isinstance(item, str) and "\x00" not in item for item in self.args
-        ):
-            raise ValueError("MCP command arguments must be strings")
-        if not isinstance(self.read_only_tools, tuple) or not all(
-            isinstance(item, str) and _SAFE_TOOL.fullmatch(item)
-            for item in self.read_only_tools
-        ):
-            raise ValueError("MCP read-only tool names are invalid")
-        if len(set(self.read_only_tools)) != len(self.read_only_tools):
-            raise ValueError("MCP read-only tool names must be unique")
-        _reject_persisted_credential(self.command, "MCP command")
-        _reject_persisted_credential(self.url, "MCP URL")
-        for item in self.args:
-            _reject_persisted_credential(item, "MCP command argument")
-        environment = _string_mapping(self.environment, "MCP environment")
-        headers = _string_mapping(self.headers, "MCP headers")
-        for name, value in environment.items():
-            if _SAFE_ENV.fullmatch(name) is None:
-                raise ValueError(f"invalid MCP environment name: {name!r}")
-            if _SECRET_NAME.search(name) or contains_credential(value):
-                raise ValueError("secret-like MCP environment values require a credential reference")
-            if any(char in value for char in ("\x00", "\r", "\n")):
-                raise ValueError("MCP environment values contain control characters")
-        for name, value in headers.items():
-            if _SAFE_HEADER.fullmatch(name) is None:
-                raise ValueError(f"invalid MCP header name: {name!r}")
-            if _SECRET_NAME.search(name) or contains_credential(value):
-                raise ValueError("secret-like MCP headers require a credential reference")
-            if any(char in value for char in ("\x00", "\r", "\n")):
-                raise ValueError("MCP header values contain control characters")
-        if self.credential_ref is not None:
-            McpCredentialReference.parse(self.credential_ref)
-            if not isinstance(self.credential_target, str):
-                raise ValueError("MCP credential target is required with a credential reference")
-            if self.transport == "stdio":
-                if _SAFE_ENV.fullmatch(self.credential_target) is None:
-                    raise ValueError("MCP credential environment target is invalid")
-                if self.credential_target in environment:
-                    raise ValueError("MCP credential target collides with environment")
-            else:
-                if _SAFE_HEADER.fullmatch(self.credential_target) is None:
-                    raise ValueError("MCP credential header target is invalid")
-                if self.credential_target.lower() in {name.lower() for name in headers}:
-                    raise ValueError("MCP credential target collides with headers")
-        elif self.credential_target is not None:
-            raise ValueError("MCP credential target requires a credential reference")
-        if not isinstance(self.oauth, bool):
-            raise ValueError("MCP OAuth flag must be boolean")
-        if self.oauth and self.transport != "streamable_http":
-            raise ValueError("MCP OAuth requires Streamable HTTP transport")
-        if self.oauth and (self.credential_ref is not None or self.credential_target is not None):
-            raise ValueError("MCP OAuth cannot be combined with a static credential")
-        if (
-            not isinstance(self.credential_scheme, str)
-            or _SAFE_SCHEME.fullmatch(self.credential_scheme) is None
-        ):
-            raise ValueError("MCP credential scheme is invalid")
-        _finite_number(self.timeout_seconds, "MCP timeout", 0.1, 3600.0)
-        for value, label in (
-            (self.max_result_bytes, "MCP result limit"),
-            (self.max_message_bytes, "MCP message limit"),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 16_000_000:
-                raise ValueError(f"{label} must be between 1024 and 16000000 bytes")
-        if (
-            isinstance(self.max_transport_retries, bool)
-            or not isinstance(self.max_transport_retries, int)
-            or not 0 <= self.max_transport_retries <= 5
-        ):
-            raise ValueError("MCP transport retries must be between 0 and 5")
-        if self.transport == "stdio":
-            if not isinstance(self.command, str) or not self.command or "\x00" in self.command:
-                raise ValueError("stdio MCP server requires a command")
-            if self.url is not None or headers:
-                raise ValueError("stdio MCP server cannot define a URL or headers")
-        else:
-            if self.command is not None or self.args or environment:
-                raise ValueError("HTTP MCP server cannot define command or environment")
-            if self.url is None:
-                raise ValueError("HTTP MCP server requires a URL")
-            _validate_url(self.url)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, value: Any) -> "McpServerRecord":
-        if not isinstance(value, dict):
-            raise ValueError("MCP server record must be an object")
-        allowed = set(cls.__dataclass_fields__)
-        unknown = set(value).difference(allowed)
-        if unknown:
-            raise ValueError(f"unknown MCP server fields: {sorted(unknown)}")
-        missing = {"server_id", "namespace", "transport"}.difference(value)
-        if missing:
-            raise ValueError(f"missing MCP server fields: {sorted(missing)}")
-        payload = dict(value)
-        for name in ("args", "read_only_tools"):
-            raw = payload.get(name, ())
-            if not isinstance(raw, (list, tuple)):
-                raise ValueError(f"MCP {name} must be an array")
-            payload[name] = tuple(raw)
-        return cls(**payload)
-
-
-def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temp.open("x", encoding="utf-8", newline="\n") as handle:
-            json.dump(
-                value,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
-        try:
-            temp.unlink()
-        except FileNotFoundError:
-            pass
-
-
-class McpRegistry:
-    def __init__(self, path: Path) -> None:
-        self.path = path.expanduser().resolve()
-
-    def _load(self) -> dict[str, McpServerRecord]:
-        if not self.path.exists():
-            return {}
-        try:
-            value = json.loads(
-                self.path.read_text(encoding="utf-8"),
-                parse_constant=_reject_json_constant,
-            )
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            raise McpConfigurationError(f"cannot read MCP registry: {exc}") from exc
-        if not isinstance(value, dict) or set(value) != {"schema_version", "servers"}:
-            raise McpConfigurationError("MCP registry has invalid top-level fields")
-        if value.get("schema_version") != REGISTRY_VERSION or not isinstance(value.get("servers"), list):
-            raise McpConfigurationError("MCP registry has an unsupported schema")
-        try:
-            records = [McpServerRecord.from_dict(item) for item in value["servers"]]
-            return self._validated(records)
-        except (TypeError, ValueError) as exc:
-            raise McpConfigurationError(f"MCP registry is invalid: {exc}") from exc
-
-    @staticmethod
-    def _validated(records: Iterable[McpServerRecord]) -> dict[str, McpServerRecord]:
-        items = list(records)
-        by_id = {item.server_id: item for item in items}
-        if len(by_id) != len(items):
-            raise McpConfigurationError("MCP registry contains duplicate server IDs")
-        namespaces = {item.namespace for item in items}
-        if len(namespaces) != len(items):
-            raise McpConfigurationError("MCP registry contains duplicate namespaces")
-        return by_id
-
-    def _save(self, records: Iterable[McpServerRecord]) -> None:
-        by_id = self._validated(records)
-        _atomic_json(
-            self.path,
-            {
-                "schema_version": REGISTRY_VERSION,
-                "servers": [
-                    item.to_dict()
-                    for item in sorted(by_id.values(), key=lambda record: record.server_id)
-                ],
-            },
-        )
-
-    def list(self) -> list[McpServerRecord]:
-        return sorted(self._load().values(), key=lambda item: item.server_id)
-
-    def get(self, server_id: str) -> McpServerRecord:
-        try:
-            return self._load()[server_id]
-        except KeyError as exc:
-            raise McpConfigurationError(f"MCP server does not exist: {server_id}") from exc
-
-    def put(self, record: McpServerRecord) -> McpServerRecord:
-        records = self._load()
-        for current in records.values():
-            if current.namespace == record.namespace and current.server_id != record.server_id:
-                raise McpConfigurationError(
-                    f"MCP namespace is already used by {current.server_id}: {record.namespace}"
-                )
-        records[record.server_id] = record
-        self._save(records.values())
-        return record
-
-    def remove(self, server_id: str) -> McpServerRecord:
-        records = self._load()
-        try:
-            removed = records.pop(server_id)
-        except KeyError as exc:
-            raise McpConfigurationError(f"MCP server does not exist: {server_id}") from exc
-        self._save(records.values())
-        return removed
-
-
-def _canonical_digest(value: Any) -> str:
-    try:
-        raw = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    except _JSON_SERIALIZATION_ERRORS as exc:
-        raise McpProtocolError("MCP digest input is not valid strict JSON") from exc
-
-
-def mcp_registry_digest(server: McpServerRecord) -> str:
-    """Bind an approval to the exact non-secret server configuration."""
-    return _canonical_digest(server.to_dict())
-
-
-def validate_mcp_selection_registry(
-    server: McpServerRecord, selection: Mapping[str, Any]
-) -> None:
-    """Reject stale or malformed selections before contacting a server."""
-    if (
-        selection.get("server_id") != server.server_id
-        or selection.get("namespace") != server.namespace
-    ):
-        raise McpAccessDenied("MCP server identity changed; reselect the server")
-    if selection.get("registry_digest") != mcp_registry_digest(server):
-        raise McpAccessDenied("MCP server configuration changed; reselect the server")
-
-
-@dataclass(frozen=True)
-class McpToolDescriptor:
-    server_id: str
-    namespace: str
-    remote_name: str
-    description: str
-    input_schema: Dict[str, Any]
-    schema_digest: str
-    read_only: bool
-
-    @property
-    def name(self) -> str:
-        return f"mcp.{self.namespace}.{self.remote_name}"
-
-    @property
-    def mutates(self) -> bool:
-        return not self.read_only
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "server_id": self.server_id,
-            "namespace": self.namespace,
-            "remote_name": self.remote_name,
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-            "schema_digest": self.schema_digest,
-            "read_only": self.read_only,
-        }
-
-
-def _descriptor(record: McpServerRecord, tool: Any) -> McpToolDescriptor:
-    name = getattr(tool, "name", None)
-    schema = getattr(tool, "inputSchema", None)
-    description = getattr(tool, "description", None) or "MCP tool"
-    if not isinstance(name, str) or _SAFE_TOOL.fullmatch(name) is None:
-        raise McpProtocolError("MCP server returned an unsafe tool name")
-    if not isinstance(description, str):
-        raise McpProtocolError(f"MCP tool {name} has an invalid description")
-    safe_schema = _strict_json_clone(schema, f"MCP tool {name} input schema")
-    _validate_schema(safe_schema, f"MCP tool {name} input schema")
-    if safe_schema.get("type", "object") != "object":
-        raise McpProtocolError(f"MCP tool {name} has a non-object input schema")
-    digest = _canonical_digest({"name": name, "input_schema": safe_schema})
-    return McpToolDescriptor(
-        record.server_id,
-        record.namespace,
-        name,
-        str(redact(description))[:4096],
-        safe_schema,
-        digest,
-        name in record.read_only_tools,
-    )
-
-
-def _resolved_read_only_remote_names(
-    record: McpServerRecord, remote_names: Iterable[str]
-) -> frozenset[str]:
-    """Resolve configured tool IDs against their MCP wire spellings.
-
-    KaroX keeps dotted internal identifiers such as ``karox.repo.read_file``,
-    while its public MCP wire replaces dots with underscores because model tool
-    APIs reject dotted function names.  A saved MCP record still uses the
-    internal identifier in ``read_only_tools``.  Prefer an exact server name;
-    only fall back to the dot-to-underscore spelling when the exact name is not
-    present, so an unrelated external tool is never shadowed by an alias.
-    """
-    discovered = tuple(remote_names)
-    resolved: set[str] = set()
-    missing: list[str] = []
-    for configured in record.read_only_tools:
-        if configured in discovered:
-            resolved.add(configured)
-            continue
-        wire_name = configured.replace(".", "_")
-        if wire_name in discovered:
-            resolved.add(wire_name)
-            continue
-        missing.append(configured)
-    if missing:
-        raise McpProtocolError(
-            f"configured read-only MCP tools do not exist: {sorted(missing)}"
-        )
-    return frozenset(resolved)
-
-
-def _normalize_discovered_tools(
-    record: McpServerRecord, tools: Iterable[McpToolDescriptor]
-) -> list[McpToolDescriptor]:
-    """Restore KaroX's dotted IDs while preserving arbitrary MCP names.
-
-    The KaroX wire encodes dots as underscores for model API compatibility, but
-    its registry, permission selections, and retry-safe call path use the dotted
-    identifiers.  Detect that contract only for the canonical ``karox-core``
-    record or when its configured read-only IDs prove the alias relationship.
-    Other MCP servers keep their names byte-for-byte.
-    """
-    items = list(tools)
-    # The release does not ship the hosted bridge, so it has no hosted tool
-    # catalogue to un-mangle. Wire names are preserved byte-for-byte; the
-    # dotted-name restoration in the v5 runtime is unnecessary here.
-
-    names = [item.remote_name for item in items]
-    if len(names) != len(set(names)):
-        raise McpProtocolError("MCP server returned duplicate tool names")
-    read_only_remote_names = _resolved_read_only_remote_names(record, names)
-    return [
-        replace(item, read_only=item.remote_name in read_only_remote_names)
-        for item in items
-    ]
-
-
-def _http_client_factory(
-    headers: Optional[dict[str, str]] = None,
-    timeout: Optional[httpx.Timeout] = None,
-    auth: Optional[httpx.Auth] = None,
-) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        headers=headers,
-        timeout=timeout,
-        auth=auth,
-        follow_redirects=False,
-        trust_env=False,
-    )
-
-
-@asynccontextmanager
-async def streamable_http_transport(
-    url: str,
-    *,
-    headers: Optional[dict[str, str]] = None,
-    timeout_seconds: float = 30.0,
-    terminate_on_close: bool = True,
-    auth: Optional[httpx.Auth] = None,
-) -> AsyncIterator[Any]:
-    """Open the installed MCP SDK's Streamable HTTP transport safely.
-
-    MCP 1.27 renamed ``streamablehttp_client`` and moved caller-supplied HTTP
-    policy behind an explicit ``http_client``.  Keeping that compatibility seam
-    here prevents runtime probes and test helpers from silently falling back to
-    the deprecated function, while older supported development environments can
-    still use their legacy signature.
-    """
-
-    if _MODERN_STREAMABLE_HTTP:
-        async with _http_client_factory(
-            headers=headers,
-            timeout=httpx.Timeout(timeout_seconds),
-            auth=auth,
-        ) as http_client:
-            async with streamable_http_client(url, http_client=http_client) as streams:
-                try:
-                    yield streams
-                finally:
-                    # The modern context manager currently leaves the memory
-                    # object streams to its caller. Closing both is idempotent
-                    # and avoids retaining SDK task-group resources.
-                    await streams[0].aclose()
-                    await streams[1].aclose()
-        return
-
-    async with streamable_http_client(
-        url,
-        headers=headers,
-        timeout=timeout_seconds,
-        sse_read_timeout=timeout_seconds,
-        terminate_on_close=terminate_on_close,
-        httpx_client_factory=_http_client_factory,
-    ) as streams:
-        yield streams
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class McpClient:
