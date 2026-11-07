@@ -264,10 +264,20 @@ The remaining biggest files are `bridge_launcher.py` (2,392),
 `engine_tool_env.py` (1,864), `core_tools.py` (1,802) and `web_check.py`
 (1,831); they are the next batches.
 
+## After — tools batch: engine tool bodies
+
+`engine_tool_env.py` 1,864 → 1,413 lines; the pure result/observation body
+renderers (fence salvage, layout/refusal notices, compact diffs, mutation and
+check bodies, edit/command normalization) move to `engine_tool_bodies.py`
+(544 lines) and stay re-exported through the environment module for the tests
+that import them there. The new module is on the model-facing neutrality scan.
+Engine tool/body/render/layout/check/probe tests pass.
+
 ## Next
 
-Bridge characterization tests before its split, then providers, repo_context,
-TUI, web_check, engine_tool_env/core_tools and the gate/platform re-audit.
+Browser remained done; split `core_tools`, `completion_gate`/`check_report`,
+then providers, repo_context, TUI, web_check and bridge (with S0
+characterization tests first).
 
 | Metric | Baseline | Current |
 |---|---:|---:|

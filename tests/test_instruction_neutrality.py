@@ -31,6 +31,7 @@ MODEL_FACING_MODULES = (
     "engine_prompts.py",
     "engine_kernel.py",
     "engine_tool_env.py",
+    "engine_tool_bodies.py",
     "completion_gate.py",
     "visual_check.py",
     "tool_schemas.py",
