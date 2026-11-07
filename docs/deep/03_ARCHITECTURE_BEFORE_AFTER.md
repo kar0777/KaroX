@@ -103,8 +103,50 @@ vision decision. There is no new import cycle.
   `karox.cli_session.session_dir`.
 - No product capability was removed in this batch.
 
+## After — engine split step 1
+
+`engine_kernel.py` 2,905 → 2,300 lines; `EngineAgent`'s methods (594 lines) now
+live in `engine_agent.py` as `_EngineAgentMixin` (646 lines with the moved
+error types, stale-read constants and briefing key).
+
+The concrete class deliberately stays in the façade:
+
+```python
+class EngineAgent(_EngineAgentMixin, DefaultAgent):
+    ...
+```
+
+The vendored engine writes `self.__class__.__module__` into its trajectory and
+the report identity is `karox.engine_kernel.EngineAgent`; moving the concrete
+class would silently change a durable artifact. `tests/test_engine_split_identity.py`
+pins the module, the MRO and the report identity. The kernel still imports
+`_EngineBudgetExceeded`/`_EngineProviderFailure` from the mixin module because
+`run()` and the finish path catch them.
+
+`engine_agent.py` sets `MSWEA_SILENT_STARTUP` before its first `.engine` import,
+so importing the mixin directly stays silent and does not load another tool's
+dotenv.
+
+### Metrics
+
+| Metric | Baseline | Current |
+|---|---:|---:|
+| Product modules | 164 | 173 |
+| Physical lines | 87,689 | 87,486 |
+| `engine_kernel.py` | 2,905 | 2,300 |
+| `engine_agent.py` | — | 646 |
+| Largest file | 3,703 | 3,703 (`browser/session.py`) |
+
+### Behavior preservation
+
+- Full `tests/test_engine_kernel.py`, `test_engine_tools.py`,
+  `test_engine_port_salvage.py`, `test_engine_provider_resilience.py`,
+  `test_agent_report_surface.py`, `test_prompt_cache.py`, `test_tool_shape_fixes.py`
+  and the neutrality/tree/identity tests pass.
+- `_any_language_server` stays in the façade (monkeypatched by tests).
+- No public import changed; no logic edited in the move.
+
 ## Next
 
-Engine split step 1 (`_EngineAgentMixin`; concrete `EngineAgent` shell stays in
-`engine_kernel.py`), then browser `contract.py`, then bridge characterization
-tests. The before/after table is updated after each landed batch.
+Browser `contract.py` (breaks the `guards → session` cycle), then engine steps
+2–7, then the bridge characterization tests before its split.

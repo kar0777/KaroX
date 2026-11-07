@@ -27,6 +27,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "karox"
 #: tool descriptions, observation hints, gate and repair messages.
 MODEL_FACING_MODULES = (
     "agent.py",
+    "engine_agent.py",
     "engine_kernel.py",
     "engine_tool_env.py",
     "completion_gate.py",
