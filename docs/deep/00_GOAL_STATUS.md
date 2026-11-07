@@ -41,8 +41,9 @@
 | `tui/widgets.py` | 1,141 | 910 (+ render 314) |
 | `web_check.py` | 1,831 | 1,118 (+ scripts/document) |
 | `bridge_launcher.py` | 2,389 | 1,949 (+ `bridge_host` 547) |
-| Package modules | 164 | 236 |
-| Package lines | 87,689 | 90,372 (ceiling 91,000) |
+| `bridge_proxy.py` | 2,218 | 1,707 (+ `bridge_wire` 632) |
+| Package modules | 164 | 237 |
+| Package lines | 87,689 | 90,491 (ceiling 91,000) |
 
 ## Work ledger
 

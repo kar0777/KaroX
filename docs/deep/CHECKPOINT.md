@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-08 00:37 Europe/Warsaw
+**Updated:** 2026-11-08 00:48 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -37,15 +37,16 @@ engine-tool evidence and needs the next full gate.
 | TUI | DONE | `tui/app.py` 2,038 → 569 (+ support/session/commands/run); `tui/widgets.py` 1,141 → 910 (+ render 314) |
 | web_check (safe slices) | DONE | `web_check.py` 1,831 → 1,118 (+ scripts 315 + document 513); browser seams/thresholds kept |
 | Bridge launcher host | DONE | `bridge_launcher.py` 2,389 → 1,949 (+ `bridge_host.py` 547); `_wait_for_bridge` seam kept |
-| Package budget | RAISED (measured) | ceiling 90,000 → 91,000; measured 90,372; rationale in `scripts/check_tree.py` |
-| Bridge proxy/tailscale/profiles/oauth | NOT STARTED | S0 wire suite exists; core-level replay-ledger gap recorded |
+| Bridge proxy wire | DONE | `bridge_proxy.py` 2,218 → 1,707 (+ `bridge_wire.py` 632); approval/time seam kept |
+| Package budget | RAISED (measured) | ceiling 90,000 → 91,000; measured 90,491; rationale in `scripts/check_tree.py` |
+| Bridge tailscale/profiles/oauth | NOT STARTED | next batches |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-11 commits (latest first)
+## Round-12 commits (latest first)
 
 ```
-434b755 refactor(bridge): extract host process/job/port primitives from the launcher
-1e968c2 docs(deep): checkpoint the web_check split and wheel install evidence
+9403245 refactor(bridge): extract wire/security helpers from bridge_proxy
+95a8fc0 docs(deep): checkpoint the bridge host-primitive split
 ```
 
 ## Gates
@@ -57,14 +58,15 @@ engine-tool evidence and needs the next full gate.
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 236 modules / 90,372 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 237 modules / 90,491 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
 | Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
 | Full suite at `b8e9789` (hosted-core split) | **PASS** — exit 0, 100 % (`local-runs/gate-b8e9789-full.log`) |
 | Full suite at `13ba29d` (providers/engine/budget) | **PASS** — exit 0, 100 % (`local-runs/gate-13ba29d-full.log`) |
 | Full suite at `c68e3a2` (TUI split) | **PASS** — exit 0, 100 % (`local-runs/gate-c68e3a2-full.log`) |
 | Full suite at `1e968c2` (web_check split) | **PASS** — exit 0, 100 % (`local-runs/gate-1e968c2-full.log`) |
-| Full suite at current HEAD (bridge host split) | pending next round; bridge suites pass |
+| Full suite at `95a8fc0` (bridge host split) | **PASS** — exit 0, 100 % (`local-runs/gate-95a8fc0-full.log`) |
+| Full suite at current HEAD (bridge wire split) | pending next round; bridge suites pass |
 | Wheel build | **PASS** — `karox_runtime-5.0.0-py3-none-any.whl`, 256 files, 2 prompts, 10 builtin skills, `tui/theme.tcss`, entry point |
 | Fresh-venv wheel install | **PASS** — import/`--version` = 5.0.0, `doctor --json` status ok, full command surface |
 
@@ -72,8 +74,8 @@ engine-tool evidence and needs the next full gate.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 236 |
-| Physical lines | 87,689 | 90,372 (ceiling 91,000) |
+| Product modules | 164 | 237 |
+| Physical lines | 87,689 | 90,491 (ceiling 91,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -93,9 +95,10 @@ engine-tool evidence and needs the next full gate.
 | `tui/widgets.py` | 1,141 | 910 (+ render 314) |
 | `web_check.py` | 1,831 | 1,118 (+ scripts 315 + document 513) |
 | `bridge_launcher.py` | 2,389 | 1,949 (+ `bridge_host` 547) |
+| `bridge_proxy.py` | 2,218 | 1,707 (+ `bridge_wire` 632) |
 
-Remaining largest files: `bridge_proxy.py` (2,218), `bridge_launcher.py`
-(1,949), `bridge_tailscale.py` (1,585), `bridge_oauth.py` (1,483),
+Remaining largest files: `bridge_launcher.py` (1,949), `bridge_proxy.py`
+(1,707), `bridge_tailscale.py` (1,585), `bridge_oauth.py` (1,483),
 `bridge_profiles.py` (1,144), `web_check.py` (1,118), `sessions.py` (966),
 `engine_provider_bridge.py` (952).
 
@@ -128,12 +131,12 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. `bridge_proxy` with the S0 wire suite, then launcher watchdog/owner-lock
-   (only with the `watchdog_dir` seam preserved), tailscale, profiles/oauth.
-3. Keep the documented core-vs-wire one-shot boundary and add execute-focused
-   characterization before moving `CoreToolBridge.execute`.
+2. `bridge_tailscale`, `bridge_profiles`, `bridge_oauth` splits; keep their
+   existing patch seams.
+3. Add route-level characterization before splitting
+   `build_proxy_asgi_app`; keep the core-vs-wire one-shot boundary documented.
 4. Phase 2 full gate + fresh wheel install; only then benchmark arena. Ceiling
-   is 91,000 with 628 lines of measured headroom; a further raise needs fresh
+   is 91,000 with 509 lines of measured headroom; a further raise needs fresh
    evidence and no behavior growth.
 
 ## Safe continuation
