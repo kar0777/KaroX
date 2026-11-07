@@ -579,7 +579,13 @@ class BrowserSession(SessionGuardsMixin):
             finally:
                 self._owner_queue.task_done()
 
-    def _call_on_owner(self, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def _call_on_owner(
+        self,
+        callback: Callable[..., Any],
+        *args: Any,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
+    ) -> Any:
         if threading.get_ident() == self._owner_thread_id:
             return callback(self, *args, **kwargs)
         if not self._owner_thread.is_alive():
@@ -593,7 +599,18 @@ class BrowserSession(SessionGuardsMixin):
                 future=future,
             )
         )
-        return future.result()
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # A callback may itself raise TimeoutError; only a still-pending
+            # future is the wedged-owner case we convert.  A browser action must
+            # never pin the whole host forever if the owner queue is lost.
+            if future.done():
+                raise
+            future.cancel()
+            raise BrowserSessionError(
+                f"browser owner thread did not answer within {timeout:.1f}s"
+            ) from None
 
     # -- session state ------------------------------------------------------
 
@@ -687,7 +704,12 @@ class BrowserSession(SessionGuardsMixin):
             raise BrowserError(f"unsupported browser action: {action}")
         return dict(
             self._call_on_owner(
-                type(self)._run_unparked, method, payload, deadline_seconds, cancel
+                type(self)._run_unparked,
+                method,
+                payload,
+                deadline_seconds,
+                cancel,
+                timeout=float(deadline_seconds) + 5.0,
             )
         )
 
@@ -731,7 +753,11 @@ class BrowserSession(SessionGuardsMixin):
     def _park_when_idle(self, generation: int) -> None:
         # Timer thread: Playwright objects belong to the owner thread.
         try:
-            self._call_on_owner(type(self)._park_if_idle, generation)
+            self._call_on_owner(
+                type(self)._park_if_idle,
+                generation,
+                timeout=10.0,
+            )
         except Exception:
             pass
 
@@ -1918,7 +1944,12 @@ class BrowserSession(SessionGuardsMixin):
         always be able to tear its browser down on shutdown or revocation.
         """
 
-        return dict(self._call_on_owner(type(self)._force_close_impl))
+        return dict(
+            self._call_on_owner(
+                type(self)._force_close_impl,
+                timeout=30.0,
+            )
+        )
 
     def _force_close_impl(self) -> dict[str, Any]:
         handle = self._handle

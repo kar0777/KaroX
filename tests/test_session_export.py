@@ -99,6 +99,16 @@ def test_json_export_is_redacted(tmp_path: Path) -> None:
         export_session(record, "pdf")
 
 
+def test_json_export_keeps_the_whole_trajectory_beyond_500_entries(tmp_path: Path) -> None:
+    record, _ = _record(tmp_path)
+    record.provider_history = [
+        {"role": "user", "kind": "task", "content": f"entry {index}"}
+        for index in range(600)
+    ]
+    payload = json.loads(export_session(record, "json"))
+    assert len(payload["provider_history"]) == 600
+
+
 def test_cli_session_export_writes_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))

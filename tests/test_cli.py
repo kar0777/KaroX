@@ -124,6 +124,34 @@ def test_session_create_and_list_roundtrip(tmp_path: Path, monkeypatch) -> None:
     assert records[0]["repository"] == str(repository.resolve())
 
 
+@pytest.mark.parametrize("alias", ["providers", "models", "sessions", "skills"])
+def test_plural_aliases_accept_json(alias: str, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert cli.main([alias, "--json"]) == 0
+    json.loads(output.getvalue())
+
+
+def test_bridge_saved_create_rejects_auto_tunnel_before_writing(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "bridge",
+                "saved",
+                "create",
+                "demo",
+                "--target-profile",
+                "chatgpt-web",
+                "--tunnel",
+                "auto",
+            ]
+        )
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def test_paths_command_reports_the_three_roots(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
@@ -149,7 +177,8 @@ def test_paths_json_uses_stable_keys(tmp_path: Path, monkeypatch) -> None:
 
 def test_short_daily_commands_and_bare_groups_list(monkeypatch) -> None:
     assert cli._normalize_argv(["models"]) == ["model", "list"]
-    assert cli._normalize_argv(["providers", "--json"]) == ["providers", "--json"]
+    assert cli._normalize_argv(["providers", "--json"]) == ["provider", "list", "--json"]
+    assert cli._normalize_argv(["providers", "--help"]) == ["provider", "list", "--help"]
     assert cli._normalize_argv(["model"]) == ["model", "list"]
     assert cli._normalize_argv(["session", "--json"]) == ["session", "list", "--json"]
     assert cli._normalize_argv(["model", "--help"]) == ["model", "--help"]

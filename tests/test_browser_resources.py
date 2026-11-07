@@ -7,6 +7,7 @@ is ``test_idle_page_is_parked_between_actions`` in ``test_browser_live.py``.
 
 from __future__ import annotations
 
+import queue
 import sys
 import types
 import uuid
@@ -16,7 +17,7 @@ import pytest
 from karox.artifacts import ArtifactStore
 from karox.browser import resources
 from karox.browser.netpolicy import BrowserAccessPolicy
-from karox.browser.session import BrowserSession, _BrowserHandle
+from karox.browser.session import BrowserSession, BrowserSessionError, _BrowserHandle
 
 
 class FakeCdp:
@@ -293,6 +294,21 @@ def test_browsers_someone_may_watch_are_never_parked(session, monkeypatch, case)
     _run(browser, [])
     assert browser._handle.parked == {}
     assert context.sessions == []
+
+
+def test_owner_marshalling_times_out_instead_of_hanging(session) -> None:
+    browser, _context, _tabs = session()
+    original = browser._owner_queue
+    browser._owner_queue = queue.Queue()
+    try:
+        with pytest.raises(BrowserSessionError, match="did not answer"):
+            browser._call_on_owner(
+                type(browser)._park_if_idle,
+                0,
+                timeout=0.05,
+            )
+    finally:
+        browser._owner_queue = original
 
 
 def test_force_close_wakes_parked_tabs_first(session) -> None:
