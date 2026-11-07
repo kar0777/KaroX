@@ -5,42 +5,82 @@
 **Product worktree:** `b/karox5-refactor`
 **Branch:** `goal/karox5-refactor-20261107`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Report/audit worktree:** `b/win` (do not use for product tests)\n**First candidate merge:** `1420e6e` (dev fixes merged into refactor)
+**Candidate HEAD:** `f3bceb0` (latest dev fixes merged)
+**Dev branch:** `goal/karox5-refactor-dev-20261107` (latest isolated test fix)
+**Report/audit worktree:** `b/win` (do not use for product tests)
 **Other worktrees:** preserve untouched; do not reset/clean them.
 
-## Current status
+## Status
 
-Phase A — baseline freeze. No product deletion/refactor yet.
+Phase A baseline is frozen; Phase B/C first candidate is implemented. This is
+**not** a release candidate: the deterministic full gate and the version/migration
+work remain open.
 
-- Baseline inventory: `docs/refactor/BASELINE_AND_FEATURE_INVENTORY.md`.
-- Parity matrix: `docs/refactor/PARITY_MATRIX.md`.
-- Dead-code audit log: `docs/refactor/DEAD_CODE_EVIDENCE.md` (no deletions).
-- Baseline AST graph: `local-runs/karox5-baseline/import_graph.json`.
-- Baseline metadata: `local-runs/karox5-baseline/baseline_metadata.json`.
+## Baseline evidence
 
-## Proven baseline
-
-- 162 Python product modules, 87,508 physical lines.
-- 77 test files, 38,105 physical lines, 1,527 collected tests.
-- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS (162 modules / 87,508 lines).
+- 162 Python product modules, 87,508 physical lines, 77 test files, 38,105 test
+  lines, 1,527 collected tests.
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS.
 - Headless audited subset: 64 PASS.
-- Wheel: `karox_runtime-6.0.0a3-py3-none-any.whl`, 1,147,638 bytes, SHA-256
-  `6a795a2da912935629ea0819e23999d248a1499ca75173fd0b2d49624519dd69`.
-- Import graph: 0 internal cycles.
-- Baseline test count differs from stale docs (1,527 vs 1,018).
-- `README_RU.md` absent; docs contain historical 5/6 contradictions.
+- Baseline full single-process pytest **did not complete**: clean-state run
+  reached 333 passed + 4 skipped, then hung in browser teardown due to an
+  unbounded owner `Future`; first failure was an environment override artifact,
+  not product.
+- Baseline wheel: `karox_runtime-6.0.0a3-py3-none-any.whl`, 1,147,638 bytes,
+  SHA-256 `6a795a2da912935629ea0819e23999d248a1499ca75173fd0b2d49624519dd69`.
+- Import cycles: 6 before refactor; 164 modules/4 cycles after first candidate.
 
-## In progress
+## Candidate evidence
 
-- Correct-root full pytest first-failure run (background), log:
-  `%TEMP%\karox5-baseline-pytest-vv2.log`.
-- Fresh-venv wheel install and CLI smoke: **PASS** (version, paths, agent help, TUI help, doctor).
-- Independent read-only audits: kernel/verification, CLI/TUI/MCP/bridge,
-  browser/skills/package, release/migration.
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,632 lines
+  (368-line headroom under the 88,000 gate).
+- New wheel: `karox_runtime-6.0.0a3-py3-none-any.whl`, 1,150,836 bytes, SHA-256
+  `95272854702efa5fef8e004077855e0fcc6b3a6fab2d9ee5fbb3c806a68691fc`.
+- Headless/targeted suites PASS; public package-facade, CLI alias, hosted
+  multi-project, legacy keyring, JSON export, browser timeout, TUI usage and
+  MCP risk tests added and passing.
+- Full single-process pytest remains **NOT GREEN** due intermittent order/global
+  state hangs in browser/bridge/MCP tests; each affected file passes in
+  isolation. An isolated-runner attempt also hit a transient bridge OAuth hang
+  (file alone: 34P/1S in 9.95 s).
+- No real paid benchmark cell has been run. Spend **$0.00**.
+
+## Landed fixes
+
+- Hosted non-anchor project runtime no longer calls nonexistent
+  `_checkpoint_factory_for` or passes unsupported `checkpoint_factory`.
+- Plural aliases (`providers/models/sessions/skills --json`) work.
+- Saved-create parser rejects `--tunnel auto` before writing.
+- Legacy bridge keyring identity is searched for saved OAuth credentials.
+- JSON session export preserves more than 500 history entries.
+- Per-step TUI usage is emitted as a delta; final usage replaces the counter.
+- Direct MCP CLI mutations now use the consequence/RiskEngine path.
+- Browser owner calls have a fail-closed timeout; force-close stops its owner
+  thread; late navigation callbacks after teardown are ignored.
+- Dead `web_check._screenshot_in_browser` and
+  `hot_worker.execute_browser` removed.
+- `repo-selfcheck` helper is explicitly declared in package data.
+- Lazy package facades cut import time for browser/TUI/computer_use while
+  preserving public imports.
+
+## Still blocking READY
+
+1. Deterministic one-revision full-suite PASS. Per-file isolation is useful
+   evidence but not a substitute for the release command.
+2. Version/scope/migration. PyPI shows only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
+   free. The target still reports 6.0.0a3 and its scope differs from old v5.
+3. `git_baseline` is under schema 1; rc4 rejects the new field, so rollback
+   needs a restore/migration plan.
+4. Installers still default to `v6/plan-impl-20261104` and side-by-side
+   `karox6`/dogfood, not a 5.x in-place upgrade.
+5. Real provider/browser/MCP/TUI smoke and 30–100 real benchmark tasks are not
+   run.
+6. Checks/probes command-guard coverage and the TUI pure-helper import boundary
+   still need explicit decisions.
 
 ## Safe continuation
 
-From the product worktree:
+From `b/karox5-refactor` (never from `b/win` for product tests):
 
 ```text
 $p = 'D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-refactor'
@@ -51,22 +91,15 @@ $env:KAROX_RUNTIME_DIR = "$env:TEMP\karox5-baseline-runtime"
 $env:KAROX_DISABLE_UPDATE = '1'
 ```
 
-Run pytest with `workdir=$p`, not from `b/win`. The previous full run from
-`b/win` was discarded because pytest selected the wrong rootdir.
-
-Do not delete a candidate until `DEAD_CODE_EVIDENCE.md` has source/test proof and
-the independent auditor has tried to find a live consumer. Do not push, publish,
-reset, clean, or alter another worktree.
+Do not push, publish, reset, clean, delete personal data, alter firewall/services,
+or repair a bridge route without owner approval. Do not call the current wheel a
+release candidate.
 
 ## Next checkpoint
 
-1. Record full baseline result, including first failure and final summary.
-2. Fresh wheel install; `karox --version`, `agent run --help`, `doctor`, `paths`.
-3. Merge auditor findings; update inventory/parity.
-4. Freeze `PRODUCT_FEATURE_INVENTORY` + `PARITY_MATRIX` and make the first
-   reversible deletion batch only if proven dead.
-5. Choose and document the free stable 5.x version after PyPI/tag/migration
-   evidence (current evidence: PyPI has only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
-   both free; no decision yet).
-
-
+1. Finish a deterministic full gate; if the single-process suite cannot be made
+   reliable, reproduce and fix the order-dependent bridge/browser/async leak.
+2. Rebuild wheel at final HEAD, install in a fresh venv, run CLI/TUI/doctor/paths.
+3. Resolve 5.x version, scope, installer upgrade, and session rollback.
+4. Run real model/browser/MCP/TUI smoke with cost ledger.
+5. Run the benchmark tasks and then decide READY/NOT_READY.

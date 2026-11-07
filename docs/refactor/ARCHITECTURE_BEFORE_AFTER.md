@@ -89,6 +89,40 @@ Physical counts are the release gate count; non-empty counts differ.
 Each step must add no new reverse edge and must reduce or hold the cycle count.
 The after graph and before/after table are filled in only after gates pass.
 
+## After the first candidate
+
+At `f3bceb0` the AST graph has:
+
+- **164 modules** (two CLI modules added), **424 internal edges**;
+- **4 cycles**, down from 6:
+  - `command_jobs → core_git → core_process → core → core_tools`
+  - `agent → engine_kernel → engine_tool_env`
+  - `credential_secret_service → credential_session → credentials`
+  - `browser.guards → browser.session`
+- the `browser`/`tui`/`computer_use` package-initializer cycles are gone;
+- `cli` fan-out is 50 (from 52) because the bridge group was extracted; the
+  remaining fan-out is the command dispatcher itself.
+- `check_tree`: 164 modules, 87,632 lines.
+
+This is a real reduction in package-initializer coupling, not a claim that the
+four remaining lazy/domain cycles are harmless. The next split should target the
+browser guard/session cycle or the engine integration boundary, with a
+behavioral test first.
+
+### Import-time effect
+
+Measured with `python -X importtime -c "import <module>"` on the same host:
+
+| Import | Baseline c4 | Candidate |
+|---|---:|---:|
+| `karox.browser` | 163,047 µs | **15,118 µs** |
+| `karox.tui` | 543,488 µs | **25,320 µs** |
+| `karox.computer_use` | 91,360 µs | **15,798 µs** |
+
+Public names and submodule imports are pinned by
+`tests/test_public_package_facades.py`; the improvement is not achieved by
+removing the actual browser/TUI/desktop modules.
+
 ## First candidate changes
 
 - Lazy public facades in `browser/__init__.py`, `tui/__init__.py` and

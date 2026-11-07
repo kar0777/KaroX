@@ -1,71 +1,63 @@
 # Dead-code evidence — Phase B audit log
 
-**No product deletion has been performed at this checkpoint.**
+## Baseline
 
-## Method
+- 162 product modules, 87,508 physical lines (`check_tree`), 0 import cycles in
+  the package-level AST audit.
+- Vulture found only two unused exception variables; the package already has a
+  deliberately pruned legacy surface.
+- Static reachability and independent audits found several **latent/dead**
+  helpers, but also false positives caused by dynamic worker imports, lazy
+  package exports and external import compatibility.
 
-1. AST import graph over all 162 product modules (including relative imports).
-2. Dynamic-entrypoint search: `importlib`, `__import__`, subprocess `-m`,
-   CLI/parser actions, bridge subprocess argv, tests and docs.
-3. Resource reachability: prompts, builtin skills, provider catalog, TUI theme,
-   engine license, package-data declarations.
-4. External contracts: console scripts, public `karox.*` imports, hosted tool
-   aliases, persisted JSON keys, keyring names and installers.
-5. Test-reference map and black-box test replay.
-6. Independent auditor review before any high-risk deletion.
+**No large file was deleted merely because one AST scan could not reach it.**
 
-## Status vocabulary
+## Removed in first candidate batch
 
-- `PROVEN_DEAD`: no supported entry, loader, package contract or external
-  consumer requires it; evidence recorded.
-- `DUPLICATE_WITH_PARITY`: another source of truth exists and a regression test
-  proves replacement.
-- `DYNAMIC_OR_EXTERNAL`: reachable through reflection, subprocess, wire, saved
-  state or public import; preserve.
-- `UNCERTAIN`: evidence insufficient; preserve and investigate.
-- `SUPPORTED`: real feature; preserve.
-
-## Initial candidates to investigate (not deletion decisions)
-
-| Candidate | Why it is suspicious | Current status | Required evidence |
+| Path | Evidence | Change | Gate |
 |---|---|---|---|
-| `disk_maintenance.py` | maintenance mode is documented as not exposed; file may still back protected-workspace/size tools | UNCERTAIN | search core/tools/CLI and tests; black-box tool list |
-| `desktop_apps.py` | migration note calls it a refusal shim, architecture says desktop is present | UNCERTAIN | import closure, engine tool registration, Windows tests |
-| `browser_bootstrap.py` | may only gate rendered-page checks | UNCERTAIN | engine/web_check imports |
-| `engine_salvage.py` | prose-to-command recovery may be used only by engine | UNCERTAIN | engine import closure and tests |
-| `mode_artifacts.py` | Plan/Ideate may be active through CLI | UNCERTAIN | CLI run path and session JSON |
-| `task_state.py`, `ellipsis_checkpoint.py` | hosted Smart Stop / old plan state overlap | UNCERTAIN | bridge imports, persisted keys |
-| `project_registry.py`, `repository_lease.py` | bridge lifecycle helpers may be unreachable | UNCERTAIN | bridge launcher/proxy imports |
-| `browser_*` modules | several old names are banned but new package exists | SUPPORTED | import graph and browser tests |
-| legacy tests/docs | tests are release contracts, not package code | SUPPORTED | never delete to reduce count |
-| `scripts/race_task.py` | benchmark harness, separate from product | DYNAMIC_OR_EXTERNAL | installer/wheel/package exclusion |
+| `src/karox/web_check.py::_screenshot_in_browser` | zero references in src/tests; older duplicate screenshot path | removed (~16 lines) | `test_web_check.py`, full browser/resource subset PASS |
+| `src/karox/hot_worker.py::HotWorkerHandle.execute_browser` | zero callers; it called `workspace_worker.execute_browser_command`, which does not exist | removed (~12 lines) | `test_browser_core.py`, resource subset PASS |
 
-No candidate above is removed by this document.
+These are real dead/broken helpers, not a removal of the live browser command
+path. The live path is `engine_tools.register_browser_tool` →
+`browser.tools.BrowserToolRuntime`.
 
-## Reachability evidence to collect
+## Kept and why
 
-- Full internal import SCCs and roots from `karox.entrypoint`, CLI parser,
-  TUI, bridge `-m`, computer-use `-m`, tests and resource loaders.
-- Every string containing a `karox.` module name or tool name.
-- Every persisted key that a loader reads (`providers.json`, `mcp-servers.json`,
-  `ui.json`, `web-bridge-profiles.json`, session fields, OAuth).
-- Every wheel resource and every file opened by import-time code.
-- Import closure of the installed wheel, not only the source checkout.
+| Candidate | Evidence | Decision |
+|---|---|---|
+| `src/karox/desktop_apps.py` | no production caller; hosted allowlist excludes `app.*`; only `browser.tools.execute_browser_command` (itself unreferenced) and tests exercise it | **QUARANTINE**. Could be an external/v5 import contract; owner confirmation required before deletion. |
+| `browser.tools.execute_browser_command` | tests only; docstring claims replacement for a nonexistent workspace-worker function | **QUARANTINE**. Keep until compatibility decision. |
+| `src/karox/ellipsis_checkpoint.py` (379 lines) | zero importers; docs/MIGRATION claims it backs hosted Smart Stop, but no runtime path uses it | **DEAD/UNCERTAIN**. The claim and the missing F1 wiring must be resolved together; do not delete blindly. |
+| `src/karox/verification.py::VerificationResult/build_result` and `AutopilotPlan/plan_autopilot` | no production/test caller; live verification is `completion_gate.floor` + `session_analysis.evidence_chain` | **DEAD/UNCERTAIN**. Removing would reduce a competing verification API, but first prove no external import. |
+| `DesktopAppSecurityError` | defined/exported, never raised | minor dead type; kept for compatibility |
+| `src/karox/browser/__init__.py` lazy exports | new `__getattr__` dynamic surface; tested | **MUST NOT REMOVE** |
+| `workspace_worker.py` | imported dynamically by `hot_worker` | **MUST NOT REMOVE** |
+| `browser/session.py`, `computer_use/`, skills, prompts/data | live typed surfaces | **MUST NOT REMOVE** |
 
-## Deletion record template
+## LOC accounting (candidate, not final)
 
-```text
-path:
-before/after LOC:
-fan-in / fan-out:
-contracts touched:
-evidence of deadness:
-replacement/parity test:
-affected tests:
-full gate:
-commit:
-restore command:
-```
+| Metric | Baseline c4 | Candidate f8b641b |
+|---|---:|---:|
+| Product modules | 162 | 164 |
+| Physical package lines | 87,508 | 87,632 |
+| Test files | 77 | 78 |
+| Collected tests | 1,527 | 1,542 (reported by audit; confirm final) |
+| Removed dead helpers | — | 28 lines |
+| New compatibility tests | — | lazy facade, multi-project, legacy keyring, JSON export, browser timeout, CLI aliases |
+| Net change | — | +124 lines (split/import overhead; no net deletion campaign yet) |
 
-Deletion starts only after the baseline full gate and the independent audit are
-recorded, and proceeds in reversible functional batches.
+The current 405-line headroom under the 88,000 gate is a real constraint. Future
+splits should be net-negative or justified by a policy change recorded in both
+`scripts/check_tree.py` and `tests/test_tree.py`.
+
+## Do-not-delete proof rules
+
+1. Try dynamic entrypoints (`hot_worker`, `python -m`, lazy facades, bridge
+   subprocess argv, tests that import a module directly) before deletion.
+2. Check saved JSON/field names and public import paths, not only source imports.
+3. A type/helper with no production caller can still be a compatibility surface;
+   uncertainty means keep.
+4. After removal run the full affected suite, `ruff`, `mypy`, `check_tree`,
+   wheel build and fresh install before the next batch.
