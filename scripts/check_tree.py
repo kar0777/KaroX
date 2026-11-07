@@ -67,15 +67,15 @@ ENGINE_MODULES = {
 # several ordinary increments rather than a jump to 100k. A stray copy of the
 # package or a generated dump is thousands of lines and still fails here.
 #
-# 90k (2026-11-07): the deep refactor decomposes the six largest monoliths into
-# cohesive owner modules. The measurement that justified this raise:
-#   baseline 87,689 - 449 dead lines + 530 split/import overhead = 87,770
-# (CLI 2,299 -> facade + 8 modules; engine_kernel 2,905 -> 2,300 + mixin;
-# browser/session 3,703 -> under 2,100 after contract/guards/runtime/
-# navigation/collectors/observation). No duplicated logic was added, and the
-# per-batch before/after LOC is recorded in docs/deep/03. The budget stays a
-# hard failure: it is headroom for the remaining decompositions, not a target.
-MAX_PACKAGE_LINES = 90_000
+# 91k (2026-11-07, second raise): measured 89,892 lines after decomposing
+# engine_tool_env, providers/provider_adapters, mcp_client, hosted_core,
+# disk_maintenance, core/core_tools/core_process, repo_context, completion_gate
+# and check_report. The delta over the 87,689 baseline is owner-module docstrings
+# and imports (per-batch before/after is in docs/deep/03), not duplicated logic.
+# The remaining bridge/TUI/web_check decompositions are projected to need at most
+# ~1,000 lines of that structural overhead. Any further raise requires a fresh
+# measurement and evidence that no product behavior was added.
+MAX_PACKAGE_LINES = 91_000
 
 
 def package_line_count(package: Path) -> int:
