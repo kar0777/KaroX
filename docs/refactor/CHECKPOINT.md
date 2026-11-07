@@ -5,7 +5,7 @@
 **Product worktree:** `b/karox5-refactor`
 **Branch:** `release/karox5-5.0.0`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Candidate HEAD:** `aa5e5c5` (5.0.0 release surface)
+**Candidate HEAD:** `c15cec6` (5.0.0 release surface)
 **Dev history:** `goal/karox5-refactor-20261107` at `5e430d8`; dev branch kept for reference
 **Report/audit worktree:** `b/win` (do not use for product tests)
 **Other worktrees:** preserve untouched; do not reset/clean them.
@@ -111,6 +111,7 @@ release candidate.
 2. Resolve 5.x version, scope, installer upgrade, and session rollback.
 3. Run real browser/MCP/TUI smoke with cost ledger.
 4. Run the benchmark tasks and then decide READY/NOT_READY.
+
 
 
 
