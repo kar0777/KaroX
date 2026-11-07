@@ -12,6 +12,7 @@ the Playwright lifecycle.
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import re
 import subprocess
 import threading
@@ -45,6 +46,12 @@ _IFRAME_RETRY_MS = 150
 _INSTANCE_SCHEMA_VERSION = 1
 _PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ARTIFACT_NAME = re.compile(r"[A-Za-z0-9._\-]{1,128}")
+
+
+def _windowless_flags() -> int:
+    if os.name == "nt":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
 
 
 class CancelToken:
@@ -262,6 +269,7 @@ __all__ = [
     "INPUT_ACTIONS",
     "READ_ACTIONS",
     "_AUTO_RECOVER_ACTIONS",
+    "_windowless_flags",
     "_BrowserCommand",
     "_BrowserHandle",
     "_ConsoleEntry",
