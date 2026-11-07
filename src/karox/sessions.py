@@ -25,6 +25,12 @@ from .security import redact
 
 SCHEMA_VERSION = 1
 
+#: ``git_baseline`` is a 5.0 feature.  Older rc4 readers know the existing
+#: top-level ``git_state`` mapping but reject an unknown top-level field.  Keep
+#: the new value inside that mapping so a 5.0 session remains readable by rc4
+#: while 5.0 still reconstructs ``record.git_baseline`` on load.
+_GIT_BASELINE_STATE_KEY = "_karox_git_baseline"
+
 
 class SessionError(RuntimeError):
     pass
@@ -306,6 +312,12 @@ class SessionRecord:
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)
+        baseline = value.pop("git_baseline", {})
+        state = dict(value.get("git_state") or {})
+        state.pop(_GIT_BASELINE_STATE_KEY, None)
+        if baseline:
+            state[_GIT_BASELINE_STATE_KEY] = baseline
+        value["git_state"] = state
         value["checksum"] = _checksum(value)
         return value
 
@@ -315,6 +327,12 @@ class SessionRecord:
             raise SessionError(
                 f"unsupported session schema {value.get('schema_version')!r}"
             )
+        serialized = value
+        if "git_baseline" not in value:
+            state = value.get("git_state")
+            if isinstance(state, dict) and _GIT_BASELINE_STATE_KEY in state:
+                value = dict(value)
+                value["git_baseline"] = state[_GIT_BASELINE_STATE_KEY]
         allowed = {item.name for item in fields(cls)}
         unknown = set(value).difference(allowed)
         if unknown:
@@ -322,7 +340,7 @@ class SessionRecord:
         expected = value.get("checksum")
         if not isinstance(expected, str) or len(expected) != 64:
             raise SessionError("session state has no valid checksum")
-        actual = _checksum(value)
+        actual = _checksum(serialized)
         if not hmac.compare_digest(expected, actual):
             raise SessionError("session state checksum mismatch")
         return cls(**value)

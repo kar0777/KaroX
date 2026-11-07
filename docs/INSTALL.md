@@ -28,8 +28,10 @@ $env:KAROX_RUNTIME_DIR = "$env:TEMP\karox5-review-runtime"
 ## Backup and upgrade
 
 The stable line reads existing v5 configuration, keyring references, saved
-bridge profiles, MCP selections and schema-1 sessions. It writes additional
-session fields that older rc4 readers do not understand. Therefore:
+bridge profiles, MCP selections and schema-1 sessions. New baseline data is
+stored inside the existing `git_state` mapping so the current rc4 reader can
+still load a 5.0.0 session; this does not make every future schema field
+backward-readable. Therefore:
 
 1. Stop the TUI, agent runs and local bridge children. Do not stop a bridge you
    do not own and do not reset a Tailscale route.
@@ -41,8 +43,9 @@ session fields that older rc4 readers do not understand. Therefore:
 4. Run `karox doctor`, `karox session list`, `karox bridge saved list`,
    `karox provider list`, and one small agent task.
 5. Replace the installed command only with explicit owner approval.
-6. Roll back by restoring the backup. Downgrading to rc4 without restoring the
-   pre-upgrade sessions is unsupported because rc4 rejects the newer fields.
+6. Roll back by reinstalling the previous wheel; the rehearsed rc4 reader can
+   load a 5.0.0 session whose baseline lives inside `git_state`. The backup is
+   still the safe path if the old install predates the schema fields.
 
 Do not delete `%APPDATA%\KaroX`, `%LOCALAPPDATA%\KaroX\vnext`, keyring entries,
 saved profiles or user sessions to make an installation succeed.

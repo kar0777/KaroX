@@ -33,9 +33,10 @@ skills.
 - CLI/NDJSON contracts, tool names, config/runtime paths, keyring identities,
   session schema 1, saved bridge profiles and OAuth bindings are preserved.
 - `karox-vnext` remains a console alias for the same CLI.
-- Sessions written by this release carry fields that older rc4 readers reject;
-  rollback therefore requires restoring the pre-upgrade session/runtime backup.
-  See `docs/MIGRATION.md` and `docs/INSTALL.md`.
+- Sessions keep the baseline inside the existing `git_state` mapping rather
+  than adding a top-level field. The rehearsed rc4 reader loads a 5.0.0
+  session; backups remain the safe rollback path. See `docs/MIGRATION.md` and
+  `docs/INSTALL.md`.
 
 ### Notes
 

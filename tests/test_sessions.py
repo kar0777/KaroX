@@ -105,13 +105,25 @@ class SessionStoreTests(unittest.TestCase):
 
         path = self.store.state_path("sample")
         payload = json.loads(path.read_text(encoding="utf-8"))
-        payload.pop("git_baseline")
+        payload.pop("git_baseline", None)
+        state = payload.get("git_state")
+        if isinstance(state, dict):
+            state.pop("_karox_git_baseline", None)
         payload["checksum"] = _checksum(payload)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
         record = self.store.load("sample")
 
         self.assertEqual(record.git_baseline, {})
+
+    def test_baseline_is_stored_inside_git_state_for_rc4_readability(
+        self,
+    ) -> None:
+        raw = json.loads(self.store.state_path("sample").read_text(encoding="utf-8"))
+        self.assertNotIn("git_baseline", raw)
+        self.assertIn("_karox_git_baseline", raw["git_state"])
+        record = self.store.load("sample")
+        self.assertEqual(record.git_baseline, raw["git_state"]["_karox_git_baseline"])
 
     def test_same_process_threads_serialize_on_the_state_lock(self) -> None:
         """Two threads of one process must wait, not die with EDEADLK.

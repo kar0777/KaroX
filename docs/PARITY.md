@@ -7,7 +7,7 @@ was deliberately left out of the v5 laboratory, and what is still not proven?
 
 - OLD: `D:\проекты\KaroX-v5` — 280 Python modules, ~165,800 lines.
 - NEW: `b/karox5-refactor` at the 5.0.0 release head —
-  **164 modules, 87,671 physical lines**.
+  **164 modules, 87,689 physical lines**.
 - Independent read-only audits covered agent kernel/verification, CLI/TUI/MCP,
   browser/skills/packaging, policy/security, and release/migration.
 - Claims below are checked against source or executed tests. Dynamic entrypoints
@@ -58,7 +58,7 @@ From `b/karox5-refactor` on Windows, Python 3.13.11:
 python -m pytest -q -p no:cacheprovider     # exit 0; 1,542 collected
 python -m ruff check src tests scripts       # PASS
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui  # PASS
-python scripts/check_tree.py                 # PASS, 164 modules / 87,671 lines
+python scripts/check_tree.py                 # PASS, 164 modules / 87,689 lines
 python -m build --wheel --no-isolation       # karox_runtime-5.0.0
 ```
 
@@ -73,12 +73,11 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
 - Published installers still target the old side-by-side 6.x dogfood flow; a
   pinned 5.0.0 installer and a real in-place upgrade/rollback rehearsal are
   **not done**.
-- `git_baseline` and the newer session fields are not readable by rc4;
-  rollback requires restoring the pre-upgrade backup. Rehearsal: rc4 creates a
-  session, 5.0.0 reads it; 5.0.0 creates a session, rc4 rejects it with
-  `unknown session fields: ['git_baseline']`; restoring the backup makes the
-  old session readable by rc4 again. This is a restore path, not in-place
-  downgrade.
+- `git_baseline` is stored inside the existing `git_state` mapping, not as a
+  new top-level field. Rehearsal: rc4 creates a session, 5.0.0 reads it; 5.0.0
+  creates a session, rc4 reads it successfully (`session show` exit 0); a
+  timestamped backup/restore also works. This is old-reader compatibility, not
+  a promise that every future schema field will remain readable forever.
 - Real provider/browser/MCP/TUI user smoke beyond one provider task and the
   local protocol suites is incomplete.
 - No representative 30–100-task benchmark matrix or OpenCode/DSH comparison.
@@ -89,4 +88,5 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
 
 The 5.0.0 wheel is a local candidate for owner review; it is not published and
 does not replace the installed `karox` command.
+
 

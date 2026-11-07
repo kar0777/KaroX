@@ -22,11 +22,11 @@ were updated and re-run.
 |---|---|
 | Version/classifier/PEP 440 consistency | **PASS** — `karox 5.0.0`, wheel metadata `karox_runtime-5.0.0` |
 | README, README_RU, CHANGELOG, INSTALL, migration text | **PASS** for the 5.0.0 local candidate |
-| 5.x upgrade/rollback and `git_baseline` session compatibility | **PARTIAL/PASS for restore path**: rc4 old session read by 5.0.0; new session rejected by rc4 (`unknown session fields: ['git_baseline']`); restore of timestamped config/runtime backup lets rc4 read old session again. In-place downgrade unsupported. |
+| 5.x upgrade/rollback and `git_baseline` session compatibility | **PASS**: rc4 old session read by 5.0.0; 5.0.0 stores baseline inside existing `git_state`, and **rc4 reads the new session** (`session show` exit 0); backup/restore also rehearsed. |
 | Installer detect/upgrade/alias behavior | **PASS local**: 5.0.0 installer requires explicit spec, backs up with `KAROX_UPGRADE=1`, uses `pipx install --force`, leaves `karox-runtime6`; PowerShell 9 tests pass; POSIX fresh/refuse/upgrade/backup scenario passed in WSL Ubuntu. Published URL still NOT TESTED. |
 | Preserve/port aliases | `karox-vnext` restored; `karox-agent-mcp` deliberately out of stable scope |
 | Existing v5 lab capabilities | **DELIBERATE EXCLUSION**, documented; not claimed as stable features |
-| Wheel build from final HEAD | **PASS** — `d39da0f0...`, 1,150,912 bytes |
+| Wheel build from final HEAD | **PASS** — `d9867102...`, 1,151,184 bytes |
 | Fresh venv install, CLI/TUI smoke | **PASS** — `karox` and `karox-vnext` both report 5.0.0; paths/agent help exit 0 |
 | Wheel package-data/license inspection | PASS for prior wheel; final package-data smoke PASS |
 | Full one-revision pytest | **PASS** — 5.0.0 single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
@@ -62,5 +62,6 @@ local wheel + SHA-256 + evidence bundle only.
 - migration/rollback result;
 - benchmark ledger and limitations;
 - exact NOT_READY/READY verdict.
+
 
 

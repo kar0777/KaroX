@@ -71,7 +71,7 @@ of general superiority.
 | Arm | Version under test | Entry point | Status |
 |---|---|---|---|
 | Karo baseline c4bc342 | 6.0.0a3 source `b/win` | `karox agent run` | one paired cell |
-| KaroX 5.0.0 | `karox_runtime-5.0.0` wheel, SHA `832cc249...` | same | one verified smoke + paired cell |
+| KaroX 5.0.0 | `karox_runtime-5.0.0` wheel, SHA `d9867102...` | same | one verified smoke + paired cell |
 | OpenCode V2 | installed 2.2.1 (target frozen 2.2.6) | `opencode run` | **one product-as-shipped pass** on `opencode/deepseek-v4.1-flash-free` (15.2 s, fixed file, pytest pass) |
 | DSH | 0.2.2-rc.1 + Node 26.13.0 (target 24.22.2) | `dsh headless` | **blocked: `MISSING_CREDENTIAL` for deepseek-official**; no file change |
 
@@ -147,6 +147,7 @@ contaminated candidate remains INVALID.
 After the candidate is deterministically green and versioned, start with a small
 development set (6–10 tasks, paired arm order) and do not call it a release
 benchmark until the full 30–100-task registry has been run.
+
 
 
 

@@ -9,10 +9,9 @@ most legacy weight.
 
 - The stable line reads existing v5 saved bridge profiles, keyring references,
   provider selections and schema-1 sessions without migration.
-- New sessions contain the `git_baseline` field and the newer evidence fields.
-  An old `5.0.0rc4` reader rejects those unknown fields. **Rollback therefore
-  means restoring the pre-upgrade session/runtime backup**, not merely
-  reinstalling the old wheel.
+- New sessions store baseline data inside the existing `git_state` mapping.
+  The rehearsed rc4 reader can load a 5.0.0 session; keep the pre-upgrade
+  backup as the safe fallback and do not assume future fields are readable.
 - Before upgrading: stop TUI/agent/bridge children, back up `%APPDATA%\KaroX`,
   the `karox paths --json` runtime directory, saved bridge profiles,
   `tailscale-bin` and per-profile OAuth state. Do not reset a foreign Tailscale

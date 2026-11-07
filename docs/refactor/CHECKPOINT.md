@@ -32,10 +32,10 @@ the representative benchmark matrix remain open.
 
 ## Candidate evidence
 
-- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,671 lines
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,689 lines
   (329-line headroom under the 88,000 gate).
-- New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,150,912 bytes, SHA-256
-  `d39da0f0ba9c5edf123dadc0bccdc8e131fb9b7e7672254cefe84158f34dab20`.
+- New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,151,184 bytes, SHA-256
+  `d9867102ba9c5edf123dadc0bccdc8e131fb9b7e7672254cefe84158f34dab20`.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
 - The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
@@ -74,11 +74,12 @@ the representative benchmark matrix remain open.
 
 ## Still blocking READY
 
-1. **Rollback**: rehearsal passed for the supported restore path — rc4 creates a
-   session, 5.0.0 reads it, 5.0.0 creates a new session, rc4 rejects it with
-   `unknown session fields: ['git_baseline']`, and restoring the timestamped
-   config/runtime backup lets rc4 read the old session again. In-place downgrade
-   is deliberately unsupported; the installer does not automate restore.
+1. **Rollback**: compatibility improved and rehearsed — `git_baseline` is now
+   stored inside the existing `git_state` mapping (no new top-level field).
+   rc4 creates a session → 5.0.0 reads it; 5.0.0 creates a session → **rc4
+   reads it successfully** (`session show` exit 0); restoring the timestamped
+   backup also works. In-place old-reader compatibility is now proven; the
+   installer still recommends a data backup.
 2. **Benchmark matrix**: 3-task pilot × 3 arms, all nine patches pass pytest;
    registry/ledger are machine-readable. This is not the required 30–100-task
    representative matrix. DSH remains credential-blocked; OpenCode free model
@@ -114,6 +115,7 @@ release candidate.
 2. Resolve 5.x version, scope, installer upgrade, and session rollback.
 3. Run real browser/MCP/TUI smoke with cost ledger.
 4. Run the benchmark tasks and then decide READY/NOT_READY.
+
 
 
 
