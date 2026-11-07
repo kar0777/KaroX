@@ -695,10 +695,14 @@ class ProcessToolsMixin:
         kill_reason = process_kill_block_reason(values)
         if kill_reason is not None:
             raise InvalidCommand(kill_reason)
-        if executable == "git":
+        if executable == "git" or executable.startswith("python") or executable in {
+            "node",
+            "nodejs",
+        }:
             # Git is allowed only through the same read-only subcommand
-            # boundary used by developer commands. A blanket denial also
-            # blocked a legitimate user-approved `git diff --check` check.
+            # boundary used by developer commands. Python/Node -c/-e payloads
+            # are checked by the same inline remote-action guard; a normal
+            # approved probe has no such payload and is unaffected.
             from .command_guard import (
                 DeveloperCommandBlocked,
                 validate_developer_command_argv,

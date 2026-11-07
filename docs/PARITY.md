@@ -83,7 +83,9 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
   local protocol suites is incomplete.
 - No representative 30–100-task benchmark matrix or OpenCode/DSH comparison.
 - Linux real install and macOS are **NOT TESTED**.
-- Checks/probes inline command-guard coverage remains a known gap.
+- Checks/probes inline command-guard coverage is fixed for the documented
+  textual patterns; obfuscated payloads remain outside the claimed model (no OS
+  sandbox).
 
 The 5.0.0 wheel is a local candidate for owner review; it is not published and
 does not replace the installed `karox` command.

@@ -189,6 +189,18 @@ def test_a_probe_runs_reports_itself_and_is_never_evidence(
     assert [entry.get("probe", False) for entry in record.checks] == [True, True, True, False]
 
 
+def test_inline_remote_action_is_refused_before_a_probe_runs(
+    repository: Path, tmp_path: Path
+) -> None:
+    core, _origin = _runtime(repository, tmp_path, probes=True)
+    with pytest.raises(InvalidCommand, match="inline code contains a blocked"):
+        core._validate_process(
+            [PY, "-c", "import os; os.system('git push origin main')"]
+        )
+    # A normal inline probe is still admitted; the guard is payload-specific.
+    assert core._validate_process([PY, "-c", "print(1)"]) == [PY, "-c", "print(1)"]
+
+
 def test_without_probes_the_exact_rule_still_refuses(repository: Path, tmp_path: Path) -> None:
     core, origin = _runtime(repository, tmp_path, probes=False)
     assert core.probe_interpreters == ()

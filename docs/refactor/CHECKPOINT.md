@@ -83,8 +83,8 @@ the representative benchmark matrix remain open.
    attempts were blocked by invalid/missing credentials, not by Karo results.
 3. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
    real bridge/TUI/provider user scenario is not documented end to end.
-4. Checks/probes inline command-guard coverage and the TUI pure-helper import
-   boundary still need explicit decisions.
+4. TUI pure-helper import boundary still needs an explicit decision. (The
+   checks/probes inline command guard is now covered by a regression test.)
 5. Published installer URL/tag is not tested; local wheel + explicit
    `KAROX_SPEC` is the verified path.
 

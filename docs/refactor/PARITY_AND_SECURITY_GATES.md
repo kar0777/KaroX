@@ -47,7 +47,7 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 | No false VERIFIED | PASS (offline) | completion/engine tests |
 | Capability + risk on mutating Core tools | PASS for Core path | policy/risk tests |
 | MCP CLI call risk gate | **FIXED, HIGH-RISK REFUSAL NOT TESTED** | direct `mcp call` now passes `RiskEngine`; existing MCP CLI suite 11 PASS |
-| checks/probes inline remote-action guard | **NOT TESTED / potential gap** | probes admit `python -c` text; command guard not called |
+| checks/probes inline remote-action guard | **FIXED for documented inline patterns** | `_validate_process` now routes Python/Node `-c`/`-e` through `command_guard`; regression test blocks `os.system('git push ...')` and still admits `print(1)`. Obfuscated payloads remain a limitation, not an OS sandbox. |
 | Credentials redaction | PASS scoped | redaction/export tests |
 | Credential storage outside repo | PASS static | keyring refs |
 | No real key in benchmark guest | **N/A** | no benchmark run |
