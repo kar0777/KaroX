@@ -81,6 +81,7 @@ def redact(
     *,
     secrets: Iterable[str] = (),
     patterns: bool = True,
+    max_items: int | None = 500,
 ) -> Any:
     """Return a recursively redacted representation.
 
@@ -108,16 +109,20 @@ def redact(
         return "[REDACTED]"
     if isinstance(value, dict):
         return {
-            str(k): redact(v, str(k), secrets=exact, patterns=patterns)
+            str(k): redact(
+                v,
+                str(k),
+                secrets=exact,
+                patterns=patterns,
+                max_items=max_items,
+            )
             for k, v in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
+        items = value if max_items is None else value[:max_items]
         return [
-            redact(item, secrets=exact, patterns=patterns) for item in value[:500]
-        ]
-    if isinstance(value, tuple):
-        return [
-            redact(item, secrets=exact, patterns=patterns) for item in value[:500]
+            redact(item, secrets=exact, patterns=patterns, max_items=max_items)
+            for item in items
         ]
     if isinstance(value, str):
         result = value
@@ -133,7 +138,7 @@ def redact(
 
 def redact_content(value: Any, *, secrets: Iterable[str] = ()) -> Any:
     """Redact known secret values without rewriting or clamping the payload."""
-    return redact(value, secrets=secrets, patterns=False)
+    return redact(value, secrets=secrets, patterns=False, max_items=None)
 
 
 """Encoding forced on every guarded child, rather than inherited from the host.

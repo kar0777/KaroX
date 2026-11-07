@@ -465,7 +465,7 @@ def _parser() -> argparse.ArgumentParser:
     saved_create.add_argument("--verification-command", action="append", default=[])
     saved_create.add_argument("--deadline-seconds", type=float, default=600.0)
     saved_create.add_argument(
-        "--tunnel", choices=("auto", "tailscale", "custom"), default="tailscale"
+        "--tunnel", choices=("tailscale", "custom"), default="tailscale"
     )
     saved_create.add_argument("--public-url")
     saved_create.add_argument("--language", choices=("en", "ru"), default="en")

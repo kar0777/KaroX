@@ -136,8 +136,11 @@ def _normalize_argv(arguments: list[str]) -> list[str]:
         return arguments
     head = arguments[0]
     short = _SHORT_COMMANDS.get(head)
-    if short is not None and len(arguments) == 1:
-        return list(short)
+    if short is not None:
+        if len(arguments) == 1:
+            return list(short)
+        if arguments[1].startswith("-"):
+            return [*short, *arguments[1:]]
     if head in _DEFAULT_LIST_GROUPS:
         if len(arguments) == 1:
             return [head, "list"]
@@ -2188,10 +2191,26 @@ def _copy_secret_to_clipboard(secret: str) -> None:
 
 
 def _bridge_session_id_for(args: argparse.Namespace) -> str:
-    from .bridge_profiles import saved_web_bridge_session_id
+    from .bridge_profiles import (
+        BridgeCredentialStore,
+        saved_web_bridge_session_candidates,
+    )
 
     if getattr(args, "saved", None):
-        return saved_web_bridge_session_id(args.saved)
+        candidates = saved_web_bridge_session_candidates(args.saved)
+        # A v5 profile may hold its approval password under the old
+        # target-profile digest.  Read the keyring by candidate identity; keep
+        # the current identity when every candidate is absent so the existing
+        # "missing credential" error remains truthful.
+        store = BridgeCredentialStore()
+        for candidate in candidates:
+            try:
+                status = store.status(f"os-keyring:bridge/{candidate}")
+            except Exception:
+                continue
+            if status.get("status") == "available":
+                return candidate
+        return candidates[0]
     session_id = getattr(args, "session_id", None)
     if not session_id:
         raise ValueError("--saved or --session-id is required")

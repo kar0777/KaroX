@@ -304,6 +304,25 @@ def test_saved_session_identity_matches_the_karoX5_contract() -> None:
     assert legacy in candidates
 
 
+def test_cli_saved_bridge_resolves_a_legacy_approval_credential(monkeypatch) -> None:
+    from karox import cli
+
+    candidates = saved_web_bridge_session_candidates("demo")
+    legacy = candidates[-1]
+
+    class Store:
+        def status(self, reference: str) -> dict[str, str]:
+            return {
+                "status": "available"
+                if reference == f"os-keyring:bridge/{legacy}"
+                else "missing"
+            }
+
+    monkeypatch.setattr("karox.bridge_profiles.BridgeCredentialStore", lambda: Store())
+    args = argparse.Namespace(saved="demo", session_id=None)
+    assert cli._bridge_session_id_for(args) == legacy
+
+
 def test_credential_store_uses_dedicated_keyring_namespace_and_redacts() -> None:
     backend = _MemoryBackend()
     store = BridgeCredentialStore(backend)

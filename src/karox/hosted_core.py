@@ -504,7 +504,6 @@ class CoreToolBridge:
                 risk=self._risk,
                 action_decisions=self._action_decisions,
                 bypass_mode=self._bypass_mode,
-                checkpoint_factory=self._checkpoint_factory_for(Path(entry.path)),
                 events=self._events,
                 session_repository_validator=self._validate_project_session,
                 command_jobs=True,

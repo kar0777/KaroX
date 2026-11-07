@@ -1,62 +1,44 @@
 """Full browser research and interaction as typed karo-core-callable tools.
 
-Public surface:
-
-* :class:`~karox.browser.netpolicy.BrowserAccessPolicy` -- the explicit,
-  secret-free permission object for one session (loopback vs external HTTPS,
-  domain allowlists, headed mode, takeover, downloads, plain test credentials,
-  detached instances).
-* :class:`~karox.browser.session.BrowserSession` -- the Playwright engine:
-  navigation, rendered extraction, interaction, tabs, scrolling, dialogs,
-  iframes, uploads/downloads, screenshots, cookie persistence, ownership-proven
-  detach/reconnect, user takeover and stale-element recovery.
-* :class:`~karox.browser.tools.BrowserToolAdapter` /
-  :class:`~karox.browser.tools.BrowserToolRuntime` /
-  :func:`~karox.browser.tools.browser_tool_definition` -- the engine-neutral
-  adapter an integrator registers with karo-core as the stable
-  ``browser.command`` tool, with structured results and cancellation.
-* :func:`~karox.browser.tools.execute_browser_command` -- drop-in replacement
-  for the ``workspace_worker`` refusal with the identical call contract.
+Public names are exported lazily.  Importing ``karox.browser`` must stay a
+cheap package import; a caller that wants the Playwright session asks for
+``BrowserSession`` explicitly.  This also keeps the package initializer out of
+the submodule import cycle (session → tools → package).
 """
 
 from __future__ import annotations
 
-from .credentials import (
-    BrowserCredentialError,
-    BrowserCredentialInjectionError,
-    BrowserCredentialInjectionResult,
-    BrowserCredentialReference,
-    BrowserCredentialStore,
-    inject_browser_credential,
-)
-from .errors import (
-    BROWSER_ERROR_KINDS,
-    BrowserCancelled,
-    BrowserError,
-    BrowserSecurityError,
-    BrowserSessionError,
-    classify_browser_error,
-    prefix_browser_error,
-)
-from .netpolicy import (
-    BrowserAccessPolicy,
-    SessionPinnedProxy,
-    validate_browser_url,
-)
-from .session import (
-    ACTION_CAPABILITIES,
-    INPUT_ACTIONS,
-    READ_ACTIONS,
-    BrowserSession,
-    CancelToken,
-)
-from .tools import (
-    BROWSER_ACTIONS,
-    BrowserToolAdapter,
-    BrowserToolRuntime,
-    browser_tool_definition,
-    execute_browser_command,
-)
+from importlib import import_module
+from typing import Any
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "ACTION_CAPABILITIES": (".session", "ACTION_CAPABILITIES"),
+    "BROWSER_ACTIONS": (".tools", "BROWSER_ACTIONS"),
+    "BROWSER_ERROR_KINDS": (".errors", "BROWSER_ERROR_KINDS"),
+    "BrowserAccessPolicy": (".netpolicy", "BrowserAccessPolicy"),
+    "BrowserCancelled": (".errors", "BrowserCancelled"),
+    "BrowserCredentialError": (".credentials", "BrowserCredentialError"),
+    "BrowserCredentialInjectionError": (".credentials", "BrowserCredentialInjectionError"),
+    "BrowserCredentialInjectionResult": (".credentials", "BrowserCredentialInjectionResult"),
+    "BrowserCredentialReference": (".credentials", "BrowserCredentialReference"),
+    "BrowserCredentialStore": (".credentials", "BrowserCredentialStore"),
+    "BrowserError": (".errors", "BrowserError"),
+    "BrowserSecurityError": (".errors", "BrowserSecurityError"),
+    "BrowserSession": (".session", "BrowserSession"),
+    "BrowserSessionError": (".errors", "BrowserSessionError"),
+    "BrowserToolAdapter": (".tools", "BrowserToolAdapter"),
+    "BrowserToolRuntime": (".tools", "BrowserToolRuntime"),
+    "CancelToken": (".session", "CancelToken"),
+    "INPUT_ACTIONS": (".session", "INPUT_ACTIONS"),
+    "READ_ACTIONS": (".session", "READ_ACTIONS"),
+    "SessionPinnedProxy": (".netpolicy", "SessionPinnedProxy"),
+    "browser_tool_definition": (".tools", "browser_tool_definition"),
+    "classify_browser_error": (".errors", "classify_browser_error"),
+    "execute_browser_command": (".tools", "execute_browser_command"),
+    "inject_browser_credential": (".credentials", "inject_browser_credential"),
+    "prefix_browser_error": (".errors", "prefix_browser_error"),
+    "validate_browser_url": (".netpolicy", "validate_browser_url"),
+}
 
 __all__ = [
     "ACTION_CAPABILITIES",
@@ -86,3 +68,17 @@ __all__ = [
     "prefix_browser_error",
     "validate_browser_url",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

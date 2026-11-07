@@ -318,7 +318,12 @@ def export_session(record: Any, format: str = "html") -> str:
     if format in {"md", "markdown"}:
         return render_markdown(value)
     if format == "json":
-        return json.dumps(redact(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        return json.dumps(
+            redact(value, max_items=None),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
     raise ValueError(f"unsupported export format: {format}")
 
 

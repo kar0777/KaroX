@@ -38,6 +38,7 @@ from karox.hosted_core import (
     ProxyToolDescriptor,
 )
 from karox.models import AccessProfile
+from karox.project_registry import ProjectRegistry
 from karox.repository_lease import RepositoryLeaseStore
 from karox.sessions import SessionBusy, SessionStore
 from karox.task_state import FactOrigin, TaskStateStore, fact
@@ -257,6 +258,27 @@ class HostedCoreBridgeTests(unittest.TestCase):
             list(tools),
             audit_path=self.root / "audit.jsonl",
         )
+
+    def test_a_non_anchor_project_builds_its_own_runtime(self) -> None:
+        other = self.root / "other"
+        initialize_git_repository(other)
+        registry = ProjectRegistry.from_profile(
+            projects=[
+                {"project_id": "anchor", "path": str(self.repository)},
+                {"project_id": "other", "path": str(other)},
+            ],
+            default_project_id="anchor",
+        )
+        bridge = CoreToolBridge(
+            self.repository,
+            self.sessions,
+            "hosted",
+            ["karox.repo.read_file"],
+            audit_path=self.root / "audit.jsonl",
+            project_registry=registry,
+        )
+        runtime = bridge._runtime_for("other")
+        self.assertEqual(runtime.repository, other.resolve())
 
     def test_allowlist_exposes_and_executes_only_selected_core_tools(self) -> None:
         bridge = self._bridge("karox.repo.read_file", "karox.git.status")
