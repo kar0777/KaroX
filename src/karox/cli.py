@@ -1989,6 +1989,10 @@ def _handle_mcp_call(args: argparse.Namespace) -> int:
         store,
         runtime_dir() / "vnext" / "audit.jsonl",
         mcp_binding=binding,
+        # A direct CLI MCP call is still a mutating Core command. The absence
+        # of an explicit RiskEngine here used to make this one path skip the
+        # consequence gate that every other Core entrypoint uses.
+        risk=RiskEngine(),
     )
     command = CoreCommand(
         name=descriptor.name,

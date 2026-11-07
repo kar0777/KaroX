@@ -274,10 +274,20 @@ def site_server():
     """Serve the fixture site on a random loopback port for the test module."""
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _SiteHandler)
+    server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}"
     finally:
-        server.shutdown()
-        server.server_close()
+        # A browser may leave a keep-alive request thread racing the fixture
+        # teardown. BaseServer.shutdown() has no timeout of its own; bound the
+        # wait so a wedged fixture cannot hang the entire release suite. The
+        # daemon serve thread cannot keep the process alive after close.
+        stopper = threading.Thread(target=server.shutdown, daemon=True)
+        stopper.start()
+        stopper.join(timeout=10.0)
+        try:
+            server.server_close()
+        except OSError:
+            pass
