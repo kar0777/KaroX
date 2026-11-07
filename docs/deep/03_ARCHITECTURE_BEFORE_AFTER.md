@@ -450,10 +450,20 @@ stays in the facade because tests patch
 re-exported. Launcher (39 tests), bridge core/characterization, OAuth and
 Tailscale suites pass.
 
+## After — bridge proxy wire/security split
+
+`bridge_proxy.py` 2,218 → 1,707 lines. Protocol constants, transport-activity
+counters, idempotency derivation, wire-tool naming/alias filtering, host/origin
+normalization and allow-listing, transport security settings, safe error
+payloads/details/codes and rebinding rejection move to `bridge_wire.py` (632).
+The sealed approval `requestState`/time-dependent code stays in the facade, so
+`patch("karox.bridge_proxy.time", clock)` still applies. Bridge
+characterization/core/launcher/OAuth/Tailscale suites pass.
+
 ## Next
 
-Split the launcher watchdog/owner-lock slice only if its `watchdog_dir` seam
-is preserved, then `bridge_proxy` with the S0 wire suite.
+`bridge_proxy.build_proxy_asgi_app` still owns the route closures; split it
+only with route-level characterization. Then tailscale/profiles/oauth.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
