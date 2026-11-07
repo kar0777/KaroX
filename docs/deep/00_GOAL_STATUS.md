@@ -42,8 +42,9 @@
 | `web_check.py` | 1,831 | 1,118 (+ scripts/document) |
 | `bridge_launcher.py` | 2,389 | 1,949 (+ `bridge_host` 547) |
 | `bridge_proxy.py` | 2,218 | 1,707 (+ `bridge_wire` 632) |
-| Package modules | 164 | 237 |
-| Package lines | 87,689 | 90,491 (ceiling 91,000) |
+| `bridge_tailscale.py` | 1,585 | 225 (+ status/gui/funnel) |
+| Package modules | 164 | 240 |
+| Package lines | 87,689 | 90,643 (ceiling 91,500) |
 
 ## Work ledger
 

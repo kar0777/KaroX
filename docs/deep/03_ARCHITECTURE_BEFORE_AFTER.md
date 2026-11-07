@@ -460,10 +460,21 @@ The sealed approval `requestState`/time-dependent code stays in the facade, so
 `patch("karox.bridge_proxy.time", clock)` still applies. Bridge
 characterization/core/launcher/OAuth/Tailscale suites pass.
 
+## After — bridge tailscale split
+
+`bridge_tailscale.py` 1,585 → 225 lines. Discovery/status/doctor/failure
+classification move to `bridge_tailscale_status.py` (383); GUI/service repair
+and readiness to `bridge_tailscale_gui.py` (487); Funnel planning/apply/stop and
+ownership to `bridge_tailscale_funnel.py` (653). The facade re-exports every
+name. The tailscale tests patch `inventory_tailscale_routes`/
+`query_tailscale_status` and those functions now live in the funnel module, so
+the patch paths are retargeted to `karox.bridge_tailscale_funnel.*`; coverage
+is unchanged and all route tests pass.
+
 ## Next
 
-`bridge_proxy.build_proxy_asgi_app` still owns the route closures; split it
-only with route-level characterization. Then tailscale/profiles/oauth.
+`bridge_profiles` and `bridge_oauth`, then route-level characterization before
+splitting `build_proxy_asgi_app`; keep every security seam intact.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
