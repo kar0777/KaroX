@@ -396,11 +396,20 @@ error mapping move to `ProviderStreamMixin` in `provider_stream.py` (525).
 the transport loop. Every historical name is re-exported; provider catalog/
 registry/pricing/fault-stand and engine provider suites pass.
 
+## After — engine tool environment split
+
+`engine_tool_env.py` 1,396 → 582 lines. `CoreToolEnvironment` composes
+`EngineFinishMixin` (turn finish, visual/coverage attestation, browser/layout
+evidence, 366), `EngineGuidanceMixin` (world-state guidance, refusal handling,
+observations, 267) and `EngineAttachMixin` (quick checks, affected tests,
+rendered output, 256). Constants/policy tables move to
+`engine_tool_support.py` (241) and remain re-exported. Engine tools/kernel/
+salvage and prompt-cache suites pass.
+
 ## Next
 
-`provider_adapters` (1,503) next: base transport versus vendor adapters, with
-the existing stream-error/patch seams preserved. Then TUI, `web_check`, and the
-bridge launcher/proxy/tailscale.
+TUI (`app.py`, `widgets.py`) and `web_check`, then the bridge launcher/proxy/
+tailscale. The measured package budget decision is recorded in CHECKPOINT.md.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
