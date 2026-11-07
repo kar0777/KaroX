@@ -273,11 +273,21 @@ check bodies, edit/command normalization) move to `engine_tool_bodies.py`
 that import them there. The new module is on the model-facing neutrality scan.
 Engine tool/body/render/layout/check/probe tests pass.
 
+## After — verification: check_report split
+
+`check_report.py` 1,293 → 295 lines. Runner parsers (pytest/unittest/Jest/
+Vitest/node/go/cargo/ruff/mypy/tsc), normalisation and the `Failure` record
+move to `check_parsers.py` (829 lines); focused test-target selection and the
+import scan move to `check_targets.py` (271 lines). `check_report.py` keeps the
+public `analyze`, `fingerprints`, `render_failure_map`, `is_test_path`,
+`render_targets`/`rerun_targets` surface and re-exports the historical names.
+The Failure dataclass decorator and every regex constant moved with their
+owners. Check/probe/repo-safety/coverage/render tests pass.
+
 ## Next
 
-Browser remained done; split `core_tools`, `completion_gate`/`check_report`,
-then providers, repo_context, TUI, web_check and bridge (with S0
-characterization tests first).
+Browser remained done; split `completion_gate`, then providers, repo_context,
+TUI, web_check and bridge (with S0 characterization tests first).
 
 | Metric | Baseline | Current |
 |---|---:|---:|
