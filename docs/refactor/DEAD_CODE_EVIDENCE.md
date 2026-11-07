@@ -41,9 +41,9 @@ path. The live path is `engine_tools.register_browser_tool` →
 | Metric | Baseline c4 | Candidate f8b641b |
 |---|---:|---:|
 | Product modules | 162 | 164 |
-| Physical package lines | 87,508 | 87,632 |
+| Physical package lines | 87,508 | 87,666 |
 | Test files | 77 | 78 |
-| Collected tests | 1,527 | 1,542 (reported by audit; confirm final) |
+| Collected tests | 1,527 | 1,540 executed in the isolated gate (70 files) |
 | Removed dead helpers | — | 28 lines |
 | New compatibility tests | — | lazy facade, multi-project, legacy keyring, JSON export, browser timeout, CLI aliases |
 | Net change | — | +124 lines (split/import overhead; no net deletion campaign yet) |
@@ -61,3 +61,4 @@ splits should be net-negative or justified by a policy change recorded in both
    uncertainty means keep.
 4. After removal run the full affected suite, `ruff`, `mypy`, `check_tree`,
    wheel build and fresh install before the next batch.
+

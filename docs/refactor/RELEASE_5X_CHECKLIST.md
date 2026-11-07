@@ -26,10 +26,10 @@
 | Installer detect/upgrade/alias behavior | **BLOCKER**: current installers are 6 side-by-side, default stale `v6/...` |
 | Preserve/port `karox-vnext`/`karox-agent-mcp` aliases | **DECISION REQUIRED**; absent in target |
 | Existing v5 lab capabilities (orchestration/subagents/checkpoints/connections) | **SCOPE BLOCKER** unless honestly excluded by owner |
-| Wheel build from final HEAD | PENDING |
-| Fresh venv install, CLI/TUI smoke | baseline passed; final pending |
+| Wheel build from final HEAD | PASS — `2eed6bfb...` 1,150,836 bytes |
+| Fresh venv install, CLI/TUI smoke | PASS — version/paths/agent help exit 0 |
 | Wheel package-data/license inspection | baseline passed; final pending |
-| Full one-revision pytest | **NOT GREEN** |
+| Full one-revision pytest | **FILE-ISOLATED PASS; SINGLE-PROCESS NOT GREEN** (1,525P/15S/0F/0H across 70 files) |
 | Real provider/browser/MCP/TUI smoke | NOT RUN |
 | Benchmarks | NOT RUN |
 

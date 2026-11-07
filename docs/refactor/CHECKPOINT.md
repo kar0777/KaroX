@@ -32,17 +32,19 @@ work remain open.
 
 ## Candidate evidence
 
-- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,632 lines
-  (368-line headroom under the 88,000 gate).
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,666 lines
+  (334-line headroom under the 88,000 gate).
 - New wheel: `karox_runtime-6.0.0a3-py3-none-any.whl`, 1,150,836 bytes, SHA-256
-  `95272854702efa5fef8e004077855e0fcc6b3a6fab2d9ee5fbb3c806a68691fc`.
-- Headless/targeted suites PASS; public package-facade, CLI alias, hosted
-  multi-project, legacy keyring, JSON export, browser timeout, TUI usage and
-  MCP risk tests added and passing.
-- Full single-process pytest remains **NOT GREEN** due intermittent order/global
+  `2eed6bfb0a9ef9f815420b88284256c0a39ad8c9981e0b23bebe46946d6849f3`.
+- Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
+  0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
+- Single-process pytest remains **NOT GREEN** due intermittent order/global
   state hangs in browser/bridge/MCP tests; each affected file passes in
-  isolation. An isolated-runner attempt also hit a transient bridge OAuth hang
-  (file alone: 34P/1S in 9.95 s).
+  isolation.
+- Fresh install of the final wheel in `venv-candidate-final` PASS: version,
+  isolated paths JSON and `agent run --help` all exit 0.
+- Public package-facade, CLI alias, hosted multi-project, legacy keyring, JSON
+  export, browser timeout, TUI usage and MCP risk tests are passing.
 - One real provider smoke passed: W&B `DeepSeek-V4.1-Flash`, verified, 4
   steps, 27,131 tokens; cost unavailable/`no_pricing`, no invoice invented.
 - No paid benchmark comparison matrix has been run.
