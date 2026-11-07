@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import base64
+import hashlib
 import json
 import os
 import pathlib
@@ -410,23 +411,22 @@ _PAGE_PROBE_JS = """
       rect = { x: box.x, y: box.y, width: box.width, height: box.height };
     }
   }
-  // A standalone SVG document has no body: its root element is the host.
   const host = document.body || document.documentElement;
   const background =
     (host ? getComputedStyle(host).backgroundColor : "") ||
     (document.documentElement
       ? getComputedStyle(document.documentElement).backgroundColor
       : "") || "";
+  const dynamic_dom = Boolean(
+    document.querySelector("script,canvas,video,audio,iframe,animate,animateTransform,animateMotion,set") ||
+    (typeof document.getAnimations === "function" && document.getAnimations().length > 0)
+  );
   return {
     canvases: document.querySelectorAll("canvas").length,
     canvas_rect: rect,
     paints_with_three,
-    // Named for what it is: the colour of the page *behind* the canvas. A
-    // measured run read a field called `background` as the colour of the frame
-    // it had just been handed, concluded the capture held only the CSS
-    // background, and spent its last hour tuning a scene it believed was not
-    // being photographed.
     page_background: background,
+    dynamic_dom,
   };
 }
 """
@@ -1067,6 +1067,85 @@ _FRAMES_DRAWN_JS = (
 )
 
 
+_DYNAMIC_MARKUP = re.compile(
+    r"<\s*(?:script|canvas|video|audio|iframe|object|embed|animate(?:Transform|Motion)?|set)\b"
+    r"|\bon[a-z]+\s*="
+    r"|@keyframes\b"
+    r"|\b(?:animation|transition)\s*:"
+    r"|\brequestAnimationFrame\b"
+    r"|\b(?:href|src)\s*=\s*[\"'](?:https?:)?//"
+    r"|@import\b"
+    r"|url\(\s*[\"']?(?:https?:)?//",
+    re.I,
+)
+
+
+def is_static_document(page: pathlib.Path) -> bool:
+    """True only when markup is well-formed and proven free of scripts, animations or remote assets."""
+
+    suffix = page.suffix.lower()
+    if suffix not in {".svg", ".html", ".htm"}:
+        return False
+    try:
+        if page.stat().st_size > _MAX_PICTURE_BYTES:
+            return False
+        text = page.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not text.strip() or _DYNAMIC_MARKUP.search(text):
+        return False
+    if suffix == ".svg":
+        return not check_picture(page)
+    return not check_page(page)
+
+
+def observation_fingerprint(
+    page: pathlib.Path,
+    *,
+    serve_root: pathlib.Path | None = None,
+    viewport: tuple[int, int] = (RENDER_VIEWPORT_WIDTH, RENDER_VIEWPORT_HEIGHT),
+    query: str = "",
+    backend: str | None = None,
+) -> Optional[str]:
+    """Freshness digest binding page bytes, served repository assets, viewport, query and backend."""
+
+    try:
+        resolved = page.resolve()
+        data = resolved.read_bytes()
+    except OSError:
+        return None
+    if backend is None:
+        from .browser.render_backend import launch_args
+
+        backend = " ".join(launch_args())
+    hasher = hashlib.sha256()
+    root = pathlib.Path(serve_root).resolve() if serve_root is not None else resolved.parent
+    try:
+        rel_page = resolved.relative_to(root).as_posix()
+    except ValueError:
+        rel_page = resolved.name
+    hasher.update(f"page:{rel_page}\0vp:{viewport[0]}x{viewport[1]}\0q:{query}\0be:{backend}\0".encode("utf-8"))
+    hasher.update(hashlib.sha256(data).digest())
+    try:
+        files = sorted(root.rglob("*"))
+    except OSError:
+        return None
+    if len(files) > _REFERENCE_MAX_FILES:
+        return None
+    for item in files:
+        if not item.is_file() or any(part in _REFERENCE_SKIP_DIRS for part in item.parts):
+            continue
+        if item.suffix.lower() not in {".html", ".htm", ".svg", ".css", ".js", ".mjs", ".json", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".woff", ".woff2", ".ttf"}:
+            continue
+        try:
+            rel = item.resolve().relative_to(root).as_posix()
+            hasher.update(f"{rel}:".encode("utf-8"))
+            hasher.update(hashlib.sha256(item.read_bytes()).digest())
+        except OSError:
+            return None
+    return hasher.hexdigest()
+
+
 def _gate(view: Any, action: str) -> Optional[int]:
     """Pause or resume the page's frames; the frame count, or None without a gate."""
 
@@ -1080,17 +1159,18 @@ def _gate(view: Any, action: str) -> Optional[int]:
     return value if isinstance(value, int) else None
 
 
-def _frames_drawn(view: Any, count: Optional[int], timeout_ms: int) -> None:
+def _frames_drawn(view: Any, count: Optional[int], timeout_ms: int) -> str:
     """Wait until ``count`` frames were drawn, or none is pending, or the bound."""
 
     if count is None:
-        return
+        return "gate_unavailable"
     try:
         view.wait_for_function(
             _FRAMES_DRAWN_JS, arg=count, polling=100, timeout=timeout_ms
         )
+        return "ready"
     except Exception:  # noqa: BLE001 - a slow page is observed as it is
-        pass
+        return "timed_out"
 
 
 _RESIZE_PROBE_JS = """
@@ -1120,13 +1200,7 @@ def _observe_in_browser(
     check_resize: bool = False,
     url: str | None = None,
 ) -> dict:
-    """Raw observations of one page in the browser thread, judging nothing.
-
-    The same warm browser and the same first-frame wait as every other render;
-    ``frames=2`` adds the second look an animation needs. Kept separate from the
-    verdict so a caller that wants pictures and a caller that wants a verdict
-    share one code path through the browser.
-    """
+    """Raw observations of one page in the browser thread, judging nothing."""
 
     shared = _shared_browser()
     if shared is None:
@@ -1138,6 +1212,9 @@ def _observe_in_browser(
     measured: dict = {}
     shots: list[bytes] = []
     resize: dict = {}
+    unconditional_wait_ms = 0
+    gate_calls = 0
+    static_candidate = is_static_document(page)
     view = _new_page(browser)
     try:
         def on_console(message: Any) -> None:
@@ -1164,16 +1241,56 @@ def _observe_in_browser(
                 view.evaluate(_SVG_FIT_JS)
             except Exception:  # noqa: BLE001 - observed at its own size
                 pass
-        view.wait_for_timeout(RENDER_SETTLE_MS)
-        _frames_drawn(view, 2, FIRST_FRAMES_TIMEOUT_MS)
+        if not static_candidate:
+            view.wait_for_timeout(RENDER_SETTLE_MS)
+            unconditional_wait_ms += RENDER_SETTLE_MS
+        gate_calls += 1
+        gate_status = _frames_drawn(view, 2, FIRST_FRAMES_TIMEOUT_MS)
         drawn = _gate(view, "pause")
-        probe = view.evaluate(_PAGE_PROBE_JS)
-        if frames > 0:
-            shots.append(view.screenshot())
-        for _ in range(max(0, frames - 1)):
+        if drawn is None:
+            gate_status = "gate_unavailable"
+        elif drawn < 2 and gate_status == "ready" and not static_candidate:
+            gate_status = "still_rendering"
+        try:
+            probe = view.evaluate(_PAGE_PROBE_JS)
+        except Exception as error:
+            raise RuntimeError(f"probe_error: {type(error).__name__}: {str(error)[:200]}") from error
+        dynamic_dom = bool(
+            not isinstance(probe, dict)
+            or probe.get("canvases")
+            or probe.get("paints_with_three")
+            or probe.get("dynamic_dom")
+        )
+        static_proven = bool(
+            static_candidate
+            and not dynamic_dom
+            and gate_status == "ready"
+            and drawn == 0
+            and not page_errors
+        )
+        if not static_proven and static_candidate and RENDER_SETTLE_MS > 0:
             _gate(view, "resume")
-            view.wait_for_timeout(settle_ms)
-            _frames_drawn(view, None if drawn is None else drawn + 2, MOTION_FRAMES_TIMEOUT_MS)
+            view.wait_for_timeout(RENDER_SETTLE_MS)
+            unconditional_wait_ms += RENDER_SETTLE_MS
+            gate_calls += 1
+            gate_status = _frames_drawn(view, 2, FIRST_FRAMES_TIMEOUT_MS)
+            drawn = _gate(view, "pause")
+            if drawn is None:
+                gate_status = "gate_unavailable"
+        target_frames = 1 if static_proven and frames > 0 else frames
+        if target_frames > 0:
+            shots.append(view.screenshot())
+        for _ in range(max(0, target_frames - 1)):
+            _gate(view, "resume")
+            if settle_ms > 0:
+                view.wait_for_timeout(settle_ms)
+                unconditional_wait_ms += settle_ms
+            gate_calls += 1
+            motion_status = _frames_drawn(
+                view, None if drawn is None else drawn + 2, MOTION_FRAMES_TIMEOUT_MS
+            )
+            if motion_status == "timed_out":
+                gate_status = "timed_out"
             drawn = _gate(view, "pause")
             shots.append(view.screenshot())
         if shots:
@@ -1181,9 +1298,6 @@ def _observe_in_browser(
                 _PIXEL_STATS_JS, pixel_payload(probe=probe, shot=shots[0])
             )
         if check_resize:
-            # A full-viewport scene promises to follow the window. Measure it
-            # instead of asking a vision model to notice a resize that happened
-            # before its screenshots were taken.
             rect = probe.get("canvas_rect") if isinstance(probe, dict) else None
             fills = (
                 isinstance(rect, dict)
@@ -1196,10 +1310,13 @@ def _observe_in_browser(
                 try:
                     view.set_viewport_size({"width": 1000, "height": 700})
                     _gate(view, "resume")
-                    view.wait_for_timeout(1000)
-                    _frames_drawn(
+                    gate_calls += 1
+                    resize_status = _frames_drawn(
                         view, None if drawn is None else drawn + 1, RESIZE_FRAMES_TIMEOUT_MS
                     )
+                    if resize_status != "ready":
+                        view.wait_for_timeout(250)
+                        unconditional_wait_ms += 250
                     _gate(view, "pause")
                     after = view.evaluate(_RESIZE_PROBE_JS)
                     canvas = after.get("canvas") if isinstance(after, dict) else None
@@ -1207,6 +1324,17 @@ def _observe_in_browser(
                         abs(int(canvas.get("clientWidth") or 0) - 1000) <= 1
                         and abs(int(canvas.get("clientHeight") or 0) - 700) <= 1
                     )
+                    if not ok and resize_status == "ready":
+                        _gate(view, "resume")
+                        view.wait_for_timeout(750)
+                        unconditional_wait_ms += 750
+                        _gate(view, "pause")
+                        after = view.evaluate(_RESIZE_PROBE_JS)
+                        canvas = after.get("canvas") if isinstance(after, dict) else None
+                        ok = isinstance(canvas, dict) and (
+                            abs(int(canvas.get("clientWidth") or 0) - 1000) <= 1
+                            and abs(int(canvas.get("clientHeight") or 0) - 700) <= 1
+                        )
                     resize = {
                         "ok": ok,
                         "target": {"width": 1000, "height": 700},
@@ -1226,6 +1354,12 @@ def _observe_in_browser(
         "probe": probe,
         "frames": shots,
         "resize": resize,
+        "static_proven": static_proven,
+        "gate_status": gate_status,
+        "timings": {
+            "unconditional_wait_ms": unconditional_wait_ms,
+            "gate_calls": gate_calls,
+        },
     }
 
 
@@ -1236,14 +1370,7 @@ def observe_page(
     check_resize: bool = False,
     serve_root: pathlib.Path | None = None,
 ) -> dict:
-    """Observe a page with a warm browser: two frames, console, measurement.
-
-    With ``serve_root`` the page is loaded over a loopback HTTP server instead
-    of ``file://``. A module script is blocked by CORS on ``file://``; the
-    checker then sees an empty canvas and a console error while the same page,
-    served by the grader, works. Returns ``{"skipped": reason}`` when this
-    machine cannot render right now, exactly like :func:`render_page`.
-    """
+    """Observe a page with a warm browser: frames, console, measurement."""
 
     from .browser_bootstrap import playwright_chromium_status
 
@@ -1275,8 +1402,15 @@ def observe_page(
                 page, settle_ms=settle_ms, frames=2, check_resize=check_resize
             )
         )
-    except RuntimeError:
-        return {"skipped": "playwright_unavailable"}
+    except RuntimeError as error:
+        if str(error) in {"playwright_unavailable", "the browser thread has been shut down"}:
+            return {"skipped": "playwright_unavailable"}
+        return {
+            "error": f"{type(error).__name__}: {str(error)[:300]}",
+            "problems": [
+                f"{page.name}: could not be rendered ({type(error).__name__})"
+            ],
+        }
     except Exception as error:
         return {
             "error": f"{type(error).__name__}: {str(error)[:300]}",
@@ -1287,13 +1421,7 @@ def observe_page(
 
 
 def render_page(page: pathlib.Path) -> dict:
-    """Load the page in Chromium and report what a viewer would actually get.
-
-    Returns ``{"skipped": reason}`` when no provisioned browser is available.
-    This never installs one: a verification command may not turn into a
-    download, and a missing browser is a fact about the machine rather than a
-    defect in the page. A page that cannot be loaded at all *is* a defect.
-    """
+    """Load the page in Chromium and report what a viewer would actually get."""
 
     from .browser_bootstrap import playwright_chromium_status
 
@@ -1302,8 +1430,15 @@ def render_page(page: pathlib.Path) -> dict:
         return {"skipped": status.error or "chromium_unavailable"}
     try:
         outcome = _run_in_browser_thread(lambda: _render_in_browser(page))
-    except RuntimeError:
-        return {"skipped": "playwright_unavailable"}
+    except RuntimeError as error:
+        if str(error) in {"playwright_unavailable", "the browser thread has been shut down"}:
+            return {"skipped": "playwright_unavailable"}
+        return {
+            "error": f"{type(error).__name__}: {str(error)[:300]}",
+            "problems": [
+                f"{page.name}: could not be rendered ({type(error).__name__})"
+            ],
+        }
     except Exception as error:
         return {
             "error": f"{type(error).__name__}: {str(error)[:300]}",

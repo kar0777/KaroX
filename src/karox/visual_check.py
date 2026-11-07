@@ -539,10 +539,13 @@ class VisualChecker:
                 "is still present, keep it as an issue; if it is fixed, do not "
                 "repeat it."
             )
-        lines.append(
-            "Two frames follow: the first after the page settled, the second "
-            f"about {round(self.settle_ms / 1000, 1)} seconds later."
-        )
+        if len(frames) == 1:
+            lines.append("One frame follows: captured after the static document rendered.")
+        else:
+            lines.append(
+                "Two frames follow: the first after the page settled, the second "
+                f"about {round(self.settle_ms / 1000, 1)} seconds later."
+            )
         request = ModelRequest(
             model=self.model,
             messages=(
