@@ -3,37 +3,36 @@
 A local coding agent with a compact terminal client, typed tools, durable
 sessions and MCP support.
 
-This is the clean KaroX 6 line. It keeps what proved itself in v5 — the agent
-kernel, capability and risk policy, session evidence, MCP in both directions,
+This is the **KaroX 5.0 stable** line. It keeps the agent kernel, capability and
+risk policy, session evidence, MCP in both directions, browser/desktop control,
 and the hosted bridge that lets ChatGPT Web, Claude Web and HyperAgent call
-KaroX tools over OAuth. Browser profiles, orchestration experiments and the
-legacy shell stay behind.
+KaroX tools over OAuth. The v5 laboratory's orchestration experiments, autonomy
+runtimes and legacy shell stay out of this stable surface.
 
 ## Status
 
-Alpha (`6.0.0a1`). The CLI, terminal client, providers, sessions, outbound MCP,
-the inbound OAuth/MCP bridge and skills work end to end. The migration record in
-[docs/MIGRATION.md](docs/MIGRATION.md) and the parity audit in
-[docs/PARITY.md](docs/PARITY.md) list what was restored, improved or deliberately
-left behind.
+Stable (`5.0.0`). The CLI, terminal client, providers, sessions, outbound MCP,
+the inbound OAuth/MCP bridge, browser/desktop control and skills work end to
+end. The migration record in [docs/MIGRATION.md](docs/MIGRATION.md) and the
+parity audit in [docs/PARITY.md](docs/PARITY.md) list what was restored,
+improved or deliberately left behind.
 
 ## Install
 
-Windows (PowerShell):
+This checkout is the local release candidate; it is not on PyPI yet. Install the
+verified wheel in an isolated environment:
 
-```powershell
-irm https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.ps1 | iex
+```text
+python -m venv .venv
+. .venv/Scripts/activate        # Windows
+python -m pip install .\dist\karox_runtime-5.0.0-py3-none-any.whl
+karox --version
 ```
 
-macOS and Linux:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.sh | sh
-```
-
-With KaroX 5 on the machine the installer puts KaroX 6 next to it as
-`karox6`, with its own data, and leaves v5 alone; see
-[docs/INSTALL.md](docs/INSTALL.md). For development, from a checkout:
+The published-release installers are updated separately after the owner
+approves the artifact. Do not replace an existing `karox` install while testing
+this candidate; see [docs/INSTALL.md](docs/INSTALL.md) for the backup/upgrade
+and rollback procedure. For development from the checkout:
 
 ```text
 python -m venv .venv

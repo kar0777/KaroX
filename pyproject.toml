@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "karox-runtime"
 dynamic = ["version"]
-description = "Local coding agent with a compact terminal client"
+description = "KaroX 5.0 local coding agent with a compact terminal client"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -64,6 +64,9 @@ dev = [
 
 [project.scripts]
 karox = "karox.entrypoint:main"
+# The v5 stable line keeps the historical command alias; both names enter the
+# same CLI and therefore the same policy/session/protocol surface.
+karox-vnext = "karox.entrypoint:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "karox.__version__" }

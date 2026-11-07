@@ -82,10 +82,15 @@ def _install(
         pipx = bin_dir / "pipx-fake"
         pipx.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
         pipx.chmod(0o755)
-        if karox_version:
-            karox = bin_dir / "karox"
-            karox.write_text(f"#!/bin/sh\necho 'karox {karox_version}'\n", encoding="utf-8")
-            karox.chmod(0o755)
+        # A host/venv may already expose a real ``karox`` on the inherited
+        # interpreter path. Pin the version the installer is allowed to see so
+        # this scenario tests the condition it names, not the machine.
+        karox = bin_dir / "karox"
+        karox.write_text(
+            f"#!/bin/sh\necho 'karox {karox_version or '6.0.0a3'}'\n",
+            encoding="utf-8",
+        )
+        karox.chmod(0o755)
         path = os.pathsep.join([str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"])
         argv = ["sh", str(ROOT / "scripts" / "install.sh")]
     else:
@@ -94,8 +99,11 @@ def _install(
         # interpreter path (D:\проекты\...) would not survive inside it, so
         # the paths come from the environment, which is Unicode.
         pipx.write_text('@"%FAKE_PIPX_PYTHON%" "%FAKE_PIPX_SCRIPT%" %*\r\n', encoding="ascii")
-        if karox_version:
-            (bin_dir / "karox.cmd").write_text(f"@echo karox {karox_version}\r\n", encoding="utf-8")
+        # See the POSIX branch: never let the developer venv's own console
+        # script decide an installer scenario.
+        (bin_dir / "karox.cmd").write_text(
+            f"@echo karox {karox_version or '6.0.0a3'}\r\n", encoding="utf-8"
+        )
         windows = os.environ.get("SystemRoot", r"C:\Windows")
         path = os.pathsep.join(
             [str(bin_dir), str(Path(sys.executable).parent), os.path.join(windows, "System32"), windows,

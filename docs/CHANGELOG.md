@@ -1,5 +1,46 @@
 # Changelog
 
+## 5.0.0 — 2026-11-07
+
+Stable fifth-line release built from the verified clean kernel. The release keeps
+the typed agent loop, capability/risk policy, durable sessions and evidence,
+providers, outbound MCP, inbound OAuth/MCP bridge, browser/desktop control and
+skills.
+
+### Fixed
+
+- Hosted non-anchor project runtimes no longer call a nonexistent
+  `_checkpoint_factory_for` or pass an unsupported `checkpoint_factory`.
+- Browser owner-thread calls now fail closed on a lost queue, force-close stops
+  the owner thread, and late navigation callbacks after teardown are ignored.
+- Direct MCP CLI mutations now pass through the consequence/RiskEngine path.
+- Plural `providers/models/sessions/skills` aliases accept `--json`.
+- Saved bridge creation rejects the unsupported `--tunnel auto` value before
+  writing state.
+- Legacy saved-bridge approvals resolve through the historical keyring
+  identity.
+- JSON session export preserves complete lists instead of truncating them at
+  500 entries.
+- Per-step usage reaches the TUI; final usage replaces the cumulative counter.
+- `repo-selfcheck/scripts/repo_summary.py` is explicitly included in package
+  data.
+
+### Compatibility
+
+- CLI/NDJSON contracts, tool names, config/runtime paths, keyring identities,
+  session schema 1, saved bridge profiles and OAuth bindings are preserved.
+- `karox-vnext` remains a console alias for the same CLI.
+- Sessions written by this release carry fields that older rc4 readers reject;
+  rollback therefore requires restoring the pre-upgrade session/runtime backup.
+  See `docs/MIGRATION.md` and `docs/INSTALL.md`.
+
+### Notes
+
+This is the clean-line 5.0.0 release, not a republication of the abandoned v5
+laboratory. Orchestration/autonomy experiments and the legacy shell remain
+deliberately out of scope. The wheel is a local candidate until the owner
+approves publication.
+
 ## Unreleased
 
 ### Changed — one declared package-size budget for both release gates

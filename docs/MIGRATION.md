@@ -1,9 +1,24 @@
-# Migration from v5
+# Migration to KaroX 5.0.0
 
-The release is a curated extraction, not a rewrite of the agent. The kernel
+The 5.0.0 stable line is a curated extraction, not a rewrite of the agent. The kernel
 that passed the v5 tests is copied unchanged where possible; the command
 surface and terminal client are new because those were the parts carrying the
 most legacy weight.
+
+## Upgrade and rollback
+
+- The stable line reads existing v5 saved bridge profiles, keyring references,
+  provider selections and schema-1 sessions without migration.
+- New sessions contain the `git_baseline` field and the newer evidence fields.
+  An old `5.0.0rc4` reader rejects those unknown fields. **Rollback therefore
+  means restoring the pre-upgrade session/runtime backup**, not merely
+  reinstalling the old wheel.
+- Before upgrading: stop TUI/agent/bridge children, back up `%APPDATA%\KaroX`,
+  the `karox paths --json` runtime directory, saved bridge profiles,
+  `tailscale-bin` and per-profile OAuth state. Do not reset a foreign Tailscale
+  route or stop a bridge you do not own.
+- Validate the 5.0.0 wheel in a fresh venv against a copy of that data. Replace
+  the installed command only with explicit owner approval.
 
 ## Source
 
@@ -70,9 +85,9 @@ hot-worker module group; desktop control is not a release surface.
   restart/oauth/credential`. It reads existing v5 saved profiles and keyring
   entries unchanged.
 
-## Not ported (historical 6.0.0a1 list, superseded)
+## Not ported (historical 6.0 alpha list, retained for 5.0.0)
 
-The 6.0.0a2 release made the vendored karo-core engine the only kernel, so
+The 6.0.0a2 alpha made the vendored karo-core engine the only kernel, so
 the engine item below no longer applies; 6.0.0a3 deleted the unreachable
 research-subagent block instead of shipping a second driver.
 

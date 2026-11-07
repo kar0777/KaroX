@@ -1,10 +1,10 @@
 # KaroX release — agent guide
 
-This repository is the clean KaroX 6 line. It keeps the verified local-agent
-kernel, one compact terminal client, outbound MCP, and the inbound OAuth/MCP
-bridge for ChatGPT Web, Claude Web and HyperAgent. It is not the v5 laboratory:
-browser profiles, orchestration experiments, autonomy runtimes and the legacy
-shell do not belong here.
+This repository is the KaroX 5.0 stable line. It keeps the verified local-agent
+kernel, one compact terminal client, outbound MCP, the inbound OAuth/MCP bridge
+for ChatGPT Web, Claude Web and HyperAgent, and the browser/desktop control that
+ships in this line. The v5 laboratory's orchestration experiments, autonomy
+runtimes and legacy shell do not belong here.
 
 Source, tests and the release gates are authoritative when prose disagrees.
 

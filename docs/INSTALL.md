@@ -1,65 +1,92 @@
-# Installing KaroX 6
+# Installing KaroX 5.0
 
-KaroX 6 is not on PyPI yet (the `karox-runtime` name there still carries the
-5.0 release candidates), so the installers install from the source archive of
-a branch on GitHub. Both need Python 3.10 or newer; pipx is installed for the
-user if it is missing.
+KaroX 5.0 is a **local release candidate**. It is not on PyPI yet and must not be
+published or installed over a working `karox` until the owner approves the
+artifact.
 
-## One command
+Python requirement: **3.10 or newer**.
 
-Windows (PowerShell 5.1 or 7):
+## Local wheel (recommended for review)
 
 ```powershell
-irm https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.ps1 | iex
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install .\dist\karox_runtime-5.0.0-py3-none-any.whl
+karox --version
+karox paths --json
+karox agent run --help
 ```
 
-macOS and Linux:
+Use an isolated `KAROX_CONFIG_DIR` / `KAROX_RUNTIME_DIR` for the first smoke so a
+real user profile is not touched:
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/kar0777/KaroX/v6/plan-impl-20261104/scripts/install.sh | sh
+```powershell
+$env:KAROX_CONFIG_DIR = "$env:TEMP\karox5-review-config"
+$env:KAROX_RUNTIME_DIR = "$env:TEMP\karox5-review-runtime"
 ```
 
-## Next to KaroX 5
+## Backup and upgrade
 
-The installers look for KaroX 5 first (the pipx venv `karox-runtime` with a
-5.x version, or a `karox` command that reports 5.x). When it is there, KaroX 6
-is installed **next to it**:
+The stable line reads existing v5 configuration, keyring references, saved
+bridge profiles, MCP selections and schema-1 sessions. It writes additional
+session fields that older rc4 readers do not understand. Therefore:
 
-| | KaroX 5 | KaroX 6 |
-| --- | --- | --- |
-| command | `karox` | `karox6` |
-| pipx venv | `karox-runtime` | `karox-runtime6` (`pipx install --suffix 6`) |
-| data | `%APPDATA%\KaroX` / `~/.config/KaroX` | the `dogfood` channel: `KaroX-dogfood` |
+1. Stop the TUI, agent runs and local bridge children. Do not stop a bridge you
+   do not own and do not reset a Tailscale route.
+2. Back up the whole data set:
+   - `%APPDATA%\KaroX` (Windows) or `~/.config/KaroX`;
+   - the runtime directory shown by `karox paths --json`;
+   - saved bridge profiles, tailscale-bin and any per-profile OAuth state.
+3. Validate the new wheel in a fresh venv with a **copy** of the data.
+4. Run `karox doctor`, `karox session list`, `karox bridge saved list`,
+   `karox provider list`, and one small agent task.
+5. Replace the installed command only with explicit owner approval.
+6. Roll back by restoring the backup. Downgrading to rc4 without restoring the
+   pre-upgrade sessions is unsupported because rc4 rejects the newer fields.
 
-The separate channel comes from a one-line `karox6_channel.pth` in the
-`karox-runtime6` venv (`KAROX_CHANNEL=dogfood` unless already set), so v5, its
-bridge, its providers and sessions are not touched. Without KaroX 5 the
-command is plain `karox` in the stable channel.
+Do not delete `%APPDATA%\KaroX`, `%LOCALAPPDATA%\KaroX\vnext`, keyring entries,
+saved profiles or user sessions to make an installation succeed.
 
-An existing KaroX 6 is never replaced silently: the installer reports the
-version and stops. `KAROX_REINSTALL=1` replaces it (`pipx install --force`).
-A KaroX 6 that is a development install (an editable checkout) should be
-updated from its checkout instead.
+## Published installers
+
+The historical one-line installers in this tree were written for the 6.x
+dogfood line and still default to `v6/plan-impl-20261104`. They are **not** the
+5.0.0 release installer and are not used by this candidate. A release installer
+must be re-tagged and re-tested before publication; until then install the wheel
+locally as above.
+
+When it is ready, the intended published form is a pinned, immutable 5.0.0
+artifact (PyPI wheel or a signed/tagged archive), not a mutable branch:
+
+```text
+pipx install karox-runtime==5.0.0
+uv tool install karox-runtime==5.0.0
+```
+
+## Compatible aliases
+
+- `karox` — primary command.
+- `karox-vnext` — historical alias, same entrypoint and same policy/session
+  surface.
+- `karox-agent-mcp` is **not** provided by the stable line; the v5 Ellipsis
+  remote-control experiment is out of scope. Do not install a stub that claims
+  otherwise.
+
+## Platform status
+
+- Windows: primary tested host.
+- Linux: package/tests are platform-neutral, but a real Linux install and
+  installer run are **NOT TESTED** in this pass.
+- macOS: **NOT TESTED**.
 
 ## Settings
 
+For local review the standard KaroX settings apply:
+
 | Variable | Meaning |
 | --- | --- |
-| `KAROX_SPEC` | What to install: a pip requirement or URL (for a release: `karox-runtime==6.0.0`). |
-| `KAROX_REF` | Branch for the default source archive. |
-| `KAROX_SIDE_BY_SIDE` | `auto` (default), `1` always `karox6`, `0` never — refuses if that would replace KaroX 5. |
-| `KAROX_REINSTALL` | `1` to replace an existing KaroX 6. |
-| `KAROX_DRY_RUN` | `1` prints the pipx commands instead of running them. |
-| `KAROX_PIPX` | A pipx executable to use instead of the one on `PATH`. |
-
-With PowerShell, set them first: `$env:KAROX_DRY_RUN = "1"; irm … | iex`.
-
-## By hand
-
-```text
-pipx install --suffix 6 https://github.com/kar0777/KaroX/archive/refs/heads/<branch>.zip
-uv tool install https://github.com/kar0777/KaroX/archive/refs/heads/<branch>.zip   # no v5 on the machine
-```
-
-`uv tool` cannot keep two installs of the same package, so with KaroX 5
-present use pipx (or the installer).
+| `KAROX_CONFIG_DIR` | Isolated configuration directory. |
+| `KAROX_RUNTIME_DIR` | Isolated durable runtime/session directory. |
+| `KAROX_CHANNEL` | Stable/dogfood data channel; keep `stable` for this release. |
+| `KAROX_DISABLE_UPDATE` | `1` disables update checks during review. |
+| `KAROX_SPEC` | Only for a purpose-built release installer; the local wheel path is authoritative here. |
