@@ -374,10 +374,23 @@ replay ledger — one-shot enforcement lives in the wire `requestState`. The
 bridge refactor must either keep that boundary documented or add a core-level
 ledger with its own test; it must not silently assume one exists.
 
+## After — hosted bridge split (first slice)
+
+`hosted_core.py` 1,162 → 821 lines. The public contract (descriptors, errors,
+approval-required payload, deadline constant, `HostedToolRuntime` protocol)
+moves to `hosted_contract.py` (129); the health snapshot to
+`hosted_health.py` (136); approval decisions, chat-approval consumption and
+cached-catalogue push compatibility to `HostedApprovalMixin` in
+`hosted_approval.py` (258). `CoreToolBridge` keeps construction, project
+routing, descriptors/session info and `execute`. All names remain re-exported;
+the bridge characterisation, core, launcher, OAuth and Tailscale suites pass
+(one pre-existing skip).
+
 ## Next
 
-`hosted_core`, providers/provider_adapters, TUI and `web_check`, then the
-bridge launcher/proxy/tailscale with the S0 tests as the safety net.
+`hosted_core.execute` still owns the 335-line dispatch; split it only after
+more execute-focused characterisation. Then providers/provider_adapters, TUI
+and `web_check`, then launcher/proxy/tailscale.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
