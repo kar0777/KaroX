@@ -32,9 +32,10 @@
 | `core_tools.py` | 1,802 | 780 (+4 owner modules) |
 | `core_process.py` | 1,126 | 836 (+ `process_tree` 344) |
 | `mcp_client.py` | 1,201 | 588 (+ types/registry/transport) |
+| `disk_maintenance.py` | 1,099 | 217 (+ protection/scan/plans) |
 | `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
-| Package modules | 164 | 212 |
-| Package lines | 87,689 | 89,039 (ceiling 90,000) |
+| Package modules | 164 | 215 |
+| Package lines | 87,689 | 89,195 (ceiling 90,000) |
 
 ## Work ledger
 
