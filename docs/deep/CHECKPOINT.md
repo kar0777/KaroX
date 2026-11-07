@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-07 23:38 Europe/Warsaw
+**Updated:** 2026-11-07 23:47 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -30,16 +30,16 @@ engine-tool evidence and needs the next full gate.
 | MCP client | DONE | `mcp_client.py` 1,201 → 588 (+ types 539 + registry 196 + transport 95) |
 | Disk maintenance | DONE | `disk_maintenance.py` 1,099 → 217 (+ protection 196 + scan 446 + plans 448) |
 | Bridge S0 tests | DONE | `tests/test_bridge_characterization.py` — 21 tests, 54 with existing bridge suites |
+| Hosted core (first slice) | DONE | `hosted_core.py` 1,162 → 821 (+ contract 129 + health 136 + approval 258) |
 | Bridge split | READY (not started) | S0 safety net exists; core-level replay-ledger gap recorded |
-| Hosted / providers / TUI / web_check | NOT STARTED | next batches |
+| Providers / TUI / web_check | NOT STARTED | next batches |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-6 commits (latest first)
+## Round-7 commits (latest first)
 
 ```
-fdd2014 test(bridge): pin the modern MCP wire, sealed approval state and hosted approvals
-e6e707b refactor(disk): split disk_maintenance into protection/scan/plan modules
-4c4071d refactor(mcp): split mcp_client into types, registry and transport
+61cd188 refactor(bridge): split hosted_core contract, health and approval
+9e8a367 docs(deep): checkpoint the disk split and bridge characterization tests
 ```
 
 ## Gates
@@ -51,18 +51,18 @@ e6e707b refactor(disk): split disk_maintenance into protection/scan/plan modules
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 215 modules / 89,195 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 218 modules / 89,261 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
-| Full suite at `44d3115` (MCP split) | **PASS** — exit 0, 100 % (`local-runs/gate-44d3115-full.log`) |
-| Full suite at current HEAD (disk split + S0 tests) | pending next round; disk/core tests and 54 bridge tests pass |
+| Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
+| Full suite at current HEAD (hosted-core split) | pending next round; bridge suites pass |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Metrics
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 215 |
-| Physical lines | 87,689 | 89,195 (ceiling 90,000) |
+| Product modules | 164 | 218 |
+| Physical lines | 87,689 | 89,261 (ceiling 90,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -75,14 +75,14 @@ e6e707b refactor(disk): split disk_maintenance into protection/scan/plan modules
 | `core_process.py` | 1,126 | 836 (+ process_tree 344) |
 | `mcp_client.py` | 1,201 | 588 (+ types 539 + registry 196 + transport 95) |
 | `disk_maintenance.py` | 1,099 | 217 (+ protection 196 + scan 446 + plans 448) |
+| `hosted_core.py` | 1,162 | 821 (+ contract 129 + health 136 + approval 258) |
 
 Remaining largest files: `bridge_launcher.py` (2,389), `bridge_proxy.py`
 (2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `providers.py`
 (1,638), `bridge_tailscale.py` (1,585), `provider_adapters.py` (1,503),
-`bridge_oauth.py` (1,483), `engine_tool_env.py` (1,396), `hosted_core.py`
-(1,162), `bridge_profiles.py` (1,144), `tui/widgets.py` (1,141),
-`disk_maintenance.py` (1,099), `sessions.py` (966), `engine_provider_bridge.py`
-(952).
+`bridge_oauth.py` (1,483), `engine_tool_env.py` (1,396), `bridge_profiles.py`
+(1,144), `tui/widgets.py` (1,141), `sessions.py` (966),
+`engine_provider_bridge.py` (952).
 
 ## Decisions that must not be lost
 
@@ -113,14 +113,15 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. Split `hosted_core` (contract/approval/leases/health) using the S0 tests as
-   the safety net; keep the documented core-vs-wire one-shot boundary.
+2. Add execute-focused bridge characterization, then split the 335-line
+   `CoreToolBridge.execute` only with that net; keep the core-vs-wire one-shot
+   boundary documented.
 3. Providers/provider_adapters with careful retargeting of the many existing
    patch seams; then bridge profiles/oauth.
 4. TUI (`app.py`, `widgets.py`) and `web_check` (preserve Three.js/WebGL/3D
    checks), then launcher/proxy/tailscale with the S0 suite.
 5. Phase 2 full gate + wheel build/fresh install; only then benchmark arena.
-   Package headroom is 805 lines; the next structural batch needs a measured
+   Package headroom is 739 lines; the next structural batch needs a measured
    budget decision (simplify or raise in both gate files with evidence).
 
 ## Safe continuation
