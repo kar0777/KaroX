@@ -37,8 +37,10 @@
 | `providers.py` | 1,638 | 635 (+ types/stream) |
 | `provider_adapters.py` | 1,503 | 86 (+ base/OpenAI/Anthropic/Gemini) |
 | `engine_tool_env.py` | 1,864 | 582 (+ finish/guidance/attach/support; bodies 544) |
-| Package modules | 164 | 228 |
-| Package lines | 87,689 | 89,892 (ceiling 91,000) |
+| `tui/app.py` | 2,038 | 569 (+ support/session/commands/run) |
+| `tui/widgets.py` | 1,141 | 910 (+ render 314) |
+| Package modules | 164 | 233 |
+| Package lines | 87,689 | 90,183 (ceiling 91,000) |
 
 ## Work ledger
 

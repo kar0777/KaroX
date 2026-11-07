@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-08 00:06 Europe/Warsaw
+**Updated:** 2026-11-08 00:14 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -34,18 +34,17 @@ engine-tool evidence and needs the next full gate.
 | Providers | DONE | `providers.py` 1,638 → 635 (+ types 652 + stream 525) |
 | Provider adapters | DONE | `provider_adapters.py` 1,503 → 86 (+ base 496 + OpenAI 305 + Anthropic 499 + Gemini 283) |
 | Engine tool env | DONE | `engine_tool_env.py` 1,396 → 582 (+ finish 366 + guidance 267 + attach 256 + support 241) |
-| Package budget | RAISED (measured) | ceiling 90,000 → 91,000; measured 89,892; rationale in `scripts/check_tree.py` |
+| TUI | DONE | `tui/app.py` 2,038 → 569 (+ support/session/commands/run); `tui/widgets.py` 1,141 → 910 (+ render 314) |
+| Package budget | RAISED (measured) | ceiling 90,000 → 91,000; measured 90,183; rationale in `scripts/check_tree.py` |
 | Bridge launch/proxy/tailscale | NOT STARTED | S0 safety net exists; core-level replay-ledger gap recorded |
-| TUI / web_check | NOT STARTED | next batches |
+| web_check | NOT STARTED | next batch; preserve Three.js/WebGL/3D checks |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-8 commits (latest first)
+## Round-9 commits (latest first)
 
 ```
-97d76df chore(budget): raise the package ceiling to 91k with a measured rationale
-3617015 refactor(engine): split CoreToolEnvironment finish/guidance/attach mixins
-ab1edac refactor(providers): split vendor adapters from the streaming base
-f427cf2 refactor(providers): split provider types and stream parsing
+f3a7b84 refactor(tui): split KaroxApp into session/commands/run mixins and render helpers
+13ba29d docs(deep): checkpoint the provider, engine-env and budget batches
 ```
 
 ## Gates
@@ -57,19 +56,20 @@ f427cf2 refactor(providers): split provider types and stream parsing
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 228 modules / 89,892 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 233 modules / 90,183 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
 | Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
 | Full suite at `b8e9789` (hosted-core split) | **PASS** — exit 0, 100 % (`local-runs/gate-b8e9789-full.log`) |
-| Full suite at current HEAD (provider/engine/budget) | pending next round; provider/engine targeted suites pass |
+| Full suite at `13ba29d` (providers/engine/budget) | **PASS** — exit 0, 100 % (`local-runs/gate-13ba29d-full.log`) |
+| Full suite at current HEAD (TUI split) | pending next round; TUI tests pass |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Metrics
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 228 |
-| Physical lines | 87,689 | 89,892 (ceiling 91,000) |
+| Product modules | 164 | 233 |
+| Physical lines | 87,689 | 90,183 (ceiling 91,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -85,12 +85,13 @@ f427cf2 refactor(providers): split provider types and stream parsing
 | `hosted_core.py` | 1,162 | 821 (+ contract 129 + health 136 + approval 258) |
 | `providers.py` | 1,638 | 635 (+ types 652 + stream 525) |
 | `provider_adapters.py` | 1,503 | 86 (+ base 496 + OpenAI 305 + Anthropic 499 + Gemini 283) |
+| `tui/app.py` | 2,038 | 569 (+ support 175 + session 258 + commands 825 + run 636) |
+| `tui/widgets.py` | 1,141 | 910 (+ render 314) |
 
 Remaining largest files: `bridge_launcher.py` (2,389), `bridge_proxy.py`
-(2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `bridge_tailscale.py`
-(1,585), `bridge_oauth.py` (1,483), `bridge_profiles.py` (1,144),
-`tui/widgets.py` (1,141), `sessions.py` (966), `engine_provider_bridge.py`
-(952).
+(2,218), `web_check.py` (1,831), `bridge_tailscale.py` (1,585),
+`bridge_oauth.py` (1,483), `bridge_profiles.py` (1,144), `sessions.py` (966),
+`engine_provider_bridge.py` (952).
 
 ## Decisions that must not be lost
 
@@ -121,15 +122,17 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. TUI (`app.py`, `widgets.py`) and `web_check` (preserve Three.js/WebGL/3D
-   checks) next.
+2. `web_check` next (1,831): move JS probe constants and pure document
+   analyzers only; keep `_run_in_browser_thread`/`_shared_browser`/
+   `_REFERENCE_MAX_FILES` in the facade so existing test seams still apply.
+   Preserve every Three.js/WebGL/3D check and threshold exactly.
 3. Bridge launcher/proxy/tailscale with the S0 suite; keep the documented
    core-vs-wire one-shot boundary and add execute-focused characterization
    before moving `CoreToolBridge.execute`.
 4. Bridge profiles/oauth.
 5. Phase 2 full gate + wheel build/fresh install; only then benchmark arena.
-   Ceiling is now 91,000 with 1,108 lines of measured headroom; a further raise
-   needs a fresh measurement and evidence of no behavior growth.
+   Ceiling is 91,000 with 817 lines of measured headroom; a further raise needs
+   a fresh measurement and evidence of no behavior growth.
 
 ## Safe continuation
 
