@@ -55,6 +55,13 @@ is used only to decide whether a rendered-page check can run, not to control a
 browser. `desktop_apps.py` is an explicit refusal shim required by the
 hot-worker module group; desktop control is not a release surface.
 
+The deep refactor keeps `ellipsis_checkpoint.py` even though no current runtime
+path imports it: Git history shows it was the implementation behind a hosted
+rollback hook (`hosted_core._checkpoint_factory_for`, removed in `04bf7bb`), and
+the product prose still describes an on-demand checkpoint. It is classified as a
+latent safety capability, not dead code; wiring it back (or retiring the
+documented feature) is tracked in `docs/deep/02_DEAD_LEGACY_EVIDENCE.md`.
+
 ## New in the release
 
 - `cli.py` — a compact command surface: agent run, sessions, providers, models,

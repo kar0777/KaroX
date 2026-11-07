@@ -47,6 +47,14 @@ approves publication.
 
 ## Unreleased
 
+### Removed — dead legacy in the deep refactor (no user-visible capability)
+
+- `karox.verification` second API (`VerificationResult`, `build_result`,
+  `AutopilotPlan`, `plan_autopilot`, `LAYERS`, private digest/redact helpers):
+  unused; the live verification decision is `completion_gate.floor` plus
+  `session_analysis`. `discover_verification_commands` remains unchanged.
+  Evidence: `docs/deep/02_DEAD_LEGACY_EVIDENCE.md`.
+
 ### Changed — one declared package-size budget for both release gates
 
 - `scripts/check_tree.py` failed at 80,000 package lines while
