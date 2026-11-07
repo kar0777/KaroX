@@ -26,11 +26,11 @@ were updated and re-run.
 | Installer detect/upgrade/alias behavior | **PASS local**: 5.0.0 installer requires explicit spec, backs up with `KAROX_UPGRADE=1`, uses `pipx install --force`, leaves `karox-runtime6`; PowerShell 9 tests pass; POSIX fresh/refuse/upgrade/backup scenario passed in WSL Ubuntu. Published URL still NOT TESTED. |
 | Preserve/port aliases | `karox-vnext` restored; `karox-agent-mcp` deliberately out of stable scope |
 | Existing v5 lab capabilities | **DELIBERATE EXCLUSION**, documented; not claimed as stable features |
-| Wheel build from final HEAD | **PASS** — `832cc249...`, 1,150,875 bytes |
+| Wheel build from final HEAD | **PASS** — `d39da0f0...`, 1,150,912 bytes |
 | Fresh venv install, CLI/TUI smoke | **PASS** — `karox` and `karox-vnext` both report 5.0.0; paths/agent help exit 0 |
 | Wheel package-data/license inspection | PASS for prior wheel; final package-data smoke PASS |
 | Full one-revision pytest | **PASS** — 5.0.0 single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
-| Real provider/browser/MCP/TUI smoke | one real provider smoke + local protocol/browser suites; broader user smoke **NOT DONE** |
+| Real provider/browser/MCP/TUI smoke | **real browser scenario PASS** (verified, 3 steps, 16,857 tokens, open/get_text); provider smoke PASS; real TUI/bridge scenario still partial |
 | Benchmarks | **ONE PAIRED TRIVIAL CELL ONLY**; no representative matrix and no OpenCode/DSH comparison |
 
 ## Safe migration rehearsal (not executed on the user's install)
@@ -62,4 +62,5 @@ local wheel + SHA-256 + evidence bundle only.
 - migration/rollback result;
 - benchmark ledger and limitations;
 - exact NOT_READY/READY verdict.
+
 

@@ -32,10 +32,10 @@ the representative benchmark matrix remain open.
 
 ## Candidate evidence
 
-- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,667 lines
-  (333-line headroom under the 88,000 gate).
-- New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,150,875 bytes, SHA-256
-  `ed91c1aec6887d974f8d105d53fd0341ccb81cb1316bdfb5633ef5aacc4c91e7`.
+- `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,671 lines
+  (329-line headroom under the 88,000 gate).
+- New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,150,912 bytes, SHA-256
+  `d39da0f0ba9c5edf123dadc0bccdc8e131fb9b7e7672254cefe84158f34dab20`.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
 - The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
@@ -81,8 +81,9 @@ the representative benchmark matrix remain open.
 2. **Benchmark matrix**: one real provider smoke and one paired trivial cell
    exist; no 30–100-task matrix and no OpenCode/DSH comparison. Competitor
    attempts were blocked by invalid/missing credentials, not by Karo results.
-3. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
-   real bridge/TUI/provider user scenario is not documented end to end.
+3. **Real user smoke**: real provider browser scenario passed (verified, 3
+   steps, 16,857 tokens, `browser.command` open/get_text). A full real bridge/TUI
+   user scenario is still not documented end to end.
 4. TUI pure-helper import boundary still needs an explicit decision. (The
    checks/probes inline command guard is now covered by a regression test.)
 5. Published installer URL/tag is not tested; local wheel + explicit

@@ -32,7 +32,7 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 | Provider wire formats (fake transports) | PASS (offline) | provider/engine tests |
 | MCP outbound replay/idempotency | PASS isolated; full-suite hang encountered | `test_mcp_cli` isolated pass |
 | Hosted bridge local core | PASS (offline) | bridge core tests |
-| Browser core/live local page | PASS file-isolated; full-suite order hang | `test_browser_core.py` 10/10, `test_browser_live.py` seen pass in earlier runs |
+| Browser core/live local page | **PASS** | `test_browser_core.py` 10/10, `test_browser_live.py` 39P/1S; real provider browser scenario verified (`browser.command` open/get_text, 3 steps, 16,857 tokens) |
 | TUI synthetic streaming | PASS | `test_tui.py` 95 tests |
 | Desktop live | **NOT TESTED** | Windows fake tests only |
 | Real W&B/model | **ONE SMOKE PASS** | W&B DeepSeek-V4.1-Flash, verified, 4 steps, 27,131 tokens; cost `no_pricing` |

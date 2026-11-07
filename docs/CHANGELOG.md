@@ -24,6 +24,9 @@ skills.
 - Per-step usage reaches the TUI; final usage replaces the cumulative counter.
 - `repo-selfcheck/scripts/repo_summary.py` is explicitly included in package
   data.
+- Python/Node `-c`/`-e` probe payloads now pass through the inline
+  remote-action guard, so an approved interpreter cannot be used to hide
+  `git push`, publish/auth/deploy or broad process-kill actions.
 
 ### Compatibility
 

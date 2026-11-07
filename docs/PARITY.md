@@ -7,7 +7,7 @@ was deliberately left out of the v5 laboratory, and what is still not proven?
 
 - OLD: `D:\проекты\KaroX-v5` — 280 Python modules, ~165,800 lines.
 - NEW: `b/karox5-refactor` at the 5.0.0 release head —
-  **164 modules, 87,667 physical lines**.
+  **164 modules, 87,671 physical lines**.
 - Independent read-only audits covered agent kernel/verification, CLI/TUI/MCP,
   browser/skills/packaging, policy/security, and release/migration.
 - Claims below are checked against source or executed tests. Dynamic entrypoints
@@ -58,7 +58,7 @@ From `b/karox5-refactor` on Windows, Python 3.13.11:
 python -m pytest -q -p no:cacheprovider     # exit 0; 1,542 collected
 python -m ruff check src tests scripts       # PASS
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui  # PASS
-python scripts/check_tree.py                 # PASS, 164 modules / 87,667 lines
+python scripts/check_tree.py                 # PASS, 164 modules / 87,671 lines
 python -m build --wheel --no-isolation       # karox_runtime-5.0.0
 ```
 
@@ -89,3 +89,4 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
 
 The 5.0.0 wheel is a local candidate for owner review; it is not published and
 does not replace the installed `karox` command.
+

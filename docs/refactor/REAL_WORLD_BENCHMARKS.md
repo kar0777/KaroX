@@ -49,6 +49,19 @@ of general superiority.
 | OpenCode V2 | installed 2.2.1 (target frozen 2.2.6) | `opencode run` | **blocked: default provider returned "Incorrect API key"**; no file change |
 | DSH | 0.2.2-rc.1 + Node 26.13.0 (target 24.22.2) | `dsh headless` | **blocked: `MISSING_CREDENTIAL` for deepseek-official**; no file change |
 
+## Real browser user scenario — 2026-11-07
+
+- Arm: local 5.0.0 source/wheel, `browser_control`, W&B DeepSeek-V4.1-Flash.
+- Task: open `http://127.0.0.1:18080/test.html` via `browser.command`, read the
+  h1, finish; explicit approved URL-content check.
+- Result: **verified: true**, 3 steps, 3 requests, **16,857 tokens**, no file
+  edits; `browser.command open` and `get_text` both succeeded; answer:
+  `"KaroX Browser Smoke"`. `answer_basis` names the `get_text` call.
+- Cost: `no_pricing`; no invoice.
+
+This exercises the real provider→policy→browser→completion path, not only the
+fixture browser tests.
+
 ## Competitor credential attempts — 2026-11-07
 
 The same trivial `calc.py` task was attempted Product-as-shipped:
