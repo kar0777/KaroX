@@ -1,0 +1,37 @@
+{
+  "registry_version": 1,
+  "created_at": "2026-11-07T20:47:55+01:00",
+  "kind": "pilot-product-as-shipped",
+  "limitations": [
+    "3 tasks only; not a protected holdout",
+    "OpenCode free model differs from Karo W&B model",
+    "DSH not executed due missing deepseek-official credentials",
+    "cost unavailable: no provider pricing"
+  ],
+  "tasks": [
+    {
+      "id": "bugfix-add",
+      "prompt": "Fix the failing test in calc.py with the smallest correct change. Run python -m pytest -q and finish.",
+      "setup": "calc.py: a - b -> a + b; test_calc.py",
+      "scorer": "public pytest test_add",
+      "prompt_sha256": "db261041af08d31b18bea35286a5f98362920a6a0d43aedb86993696af798289",
+      "scorer_sha256": "4aa75c6dff4d982d00133218a3d8c983697dcffdebb3b0a1f402e99f81f8ad7e"
+    },
+    {
+      "id": "feature-slug",
+      "prompt": "Implement slugify in slug.py so test_slug.py passes. Keep it small, run python -m pytest -q and finish.",
+      "setup": "slugify lower/strip spaces; test_slug.py",
+      "scorer": "public pytest test_slug",
+      "prompt_sha256": "0168ace75f8e8c5fc4bfbf6ce646751512f82692e059a82bc44e784965766f59",
+      "scorer_sha256": "25d0e812699cf17869ae55a2d5ab15fc54aeb2b361d05ff24eb5d715387c1e81"
+    },
+    {
+      "id": "refactor-square",
+      "prompt": "Refactor mathx.py minimally so square and cube are clear and test_mathx.py still passes. Run python -m pytest -q and finish.",
+      "setup": "small refactor; public test_mathx.py",
+      "scorer": "public pytest test_mathx",
+      "prompt_sha256": "9a5e70df01264a2b7bfe6bf9b315cd23619df7fb84cbe891313df55ed7ca7a9a",
+      "scorer_sha256": "e92a4702ad454dbd4d327d0606e02ed1c24e6c8deda11aebc65e81a017c64b73"
+    }
+  ]
+}

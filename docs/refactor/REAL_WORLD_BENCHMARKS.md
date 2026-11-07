@@ -1,11 +1,37 @@
 # Real-world benchmarks
 
-**Status: one smoke + one paired trivial cell + one OpenCode free-model pass; no representative comparison matrix. Spend: cost unavailable.**
+**Status: 3-task × 3-arm pilot + real browser smoke; no 30–100-task representative matrix. Spend: cost unavailable.**
 
 The goal requires real tasks and comparisons. One real provider smoke has been
 run; no benchmark cell, no competing CLI comparison, and no multi-task result
 set exists yet. This file records the smoke and the frozen protocol rather than
 inventing a benchmark.
+
+## Three-task pilot matrix — 2026-11-07
+
+Machine-readable registry and raw ledger:
+
+- `docs/refactor/benchmarks/registry-20261107-pilot.json`
+- `docs/refactor/benchmarks/ledger-20261107-pilot.json`
+
+Three reproducible open tasks (bugfix, feature, refactor), each run in a fresh
+repo/commit with a public pytest scorer. Karo arms used
+`wandb/deepseek-ai/DeepSeek-V4.1-Flash`; OpenCode used its available
+`opencode/deepseek-v4.1-flash-free`. This is **Product-as-shipped**, not a
+same-model controlled comparison.
+
+| Task | Candidate | Baseline c4 | OpenCode 2.2.1 |
+|---|---|---|---|
+| bugfix-add | verified, 29,755 tok, 9.23 s | verified, 29,775 tok, 8.86 s | pytest pass, 10.60 s, no usage |
+| feature-slug | verified, 29,755 tok, 9.08 s | verified, 29,746 tok, 9.71 s | pytest pass, 8.89 s, no usage |
+| refactor-square | verified, 30,607 tok, 11.12 s | verified, 47,380 tok, 11.75 s | pytest pass, 19.19 s, no usage |
+
+All nine cells produced a patch whose public pytest passed. The only visible
+token difference is the refactor cell, where baseline used 47,380 tokens and
+candidate 30,607; two cells are within 1% and cannot support a superiority
+claim. OpenCode reported no token/verified field, so its harness outcomes are
+not directly comparable. DSH is absent because it has no deepseek-official
+credential. Cost is still unavailable (`no_pricing`).
 
 ## Paired baseline/candidate cell — 2026-11-07
 

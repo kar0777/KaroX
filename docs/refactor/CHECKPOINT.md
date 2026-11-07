@@ -79,9 +79,10 @@ the representative benchmark matrix remain open.
    `unknown session fields: ['git_baseline']`, and restoring the timestamped
    config/runtime backup lets rc4 read the old session again. In-place downgrade
    is deliberately unsupported; the installer does not automate restore.
-2. **Benchmark matrix**: one real provider smoke and one paired trivial cell
-   exist; no 30–100-task matrix and no OpenCode/DSH comparison. Competitor
-   attempts were blocked by invalid/missing credentials, not by Karo results.
+2. **Benchmark matrix**: 3-task pilot × 3 arms, all nine patches pass pytest;
+   registry/ledger are machine-readable. This is not the required 30–100-task
+   representative matrix. DSH remains credential-blocked; OpenCode free model
+   differs from Karo's W&B model, so no controlled comparison is claimed.
 3. **Real user smoke**: real provider browser scenario passed (verified, 3
    steps, 16,857 tokens, `browser.command` open/get_text). A full real bridge/TUI
    user scenario is still not documented end to end.

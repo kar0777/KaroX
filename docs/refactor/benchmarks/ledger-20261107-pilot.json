@@ -1,0 +1,110 @@
+[
+  {
+    "arm": "candidate",
+    "task": "bugfix-add",
+    "exit": 0,
+    "seconds": 9.23,
+    "pytest": 0,
+    "diff": "calc.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 29755,
+    "tail": "rsive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"low\", \"reasons\": [\"no escalation signals; targeted change\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "baseline",
+    "task": "bugfix-add",
+    "exit": 0,
+    "seconds": 8.86,
+    "pytest": 0,
+    "diff": "calc.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 29775,
+    "tail": "rsive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"low\", \"reasons\": [\"no escalation signals; targeted change\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "opencode",
+    "task": "bugfix-add",
+    "exit": 0,
+    "seconds": 10.6,
+    "pytest": 0,
+    "diff": "calc.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "verified": false,
+    "status": null,
+    "tokens": null,
+    "tail": "  -------------         ------ ----\n-a---          07.11.2026    20:46             34 calc.py\n-a---          07.11.2026    20:46             68 test_calc.py\nb98c260 init\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead test_calc.py \n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead calc.py \n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u0452 \u001b[0mEdit calc.py\nIndex: calc.py\n===================================================================\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n+    return a + b\n\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m$ \u001b[0mpython -m pytest -q\n.                                                                        [100%]\n1 passed in 0.01s\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n"
+  },
+  {
+    "arm": "candidate",
+    "task": "feature-slug",
+    "exit": 0,
+    "seconds": 9.08,
+    "pytest": 0,
+    "diff": "slug.py | 10 +++++++++-\n 1 file changed, 9 insertions(+), 1 deletion(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 29755,
+    "tail": "\": 5, \"recursive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"medium\", \"reasons\": [\"~2 files likely affected\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "baseline",
+    "task": "feature-slug",
+    "exit": 0,
+    "seconds": 9.71,
+    "pytest": 0,
+    "diff": "slug.py | 8 +++++++-\n 1 file changed, 7 insertions(+), 1 deletion(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 29746,
+    "tail": "\": 5, \"recursive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"medium\", \"reasons\": [\"~2 files likely affected\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "opencode",
+    "task": "feature-slug",
+    "exit": 0,
+    "seconds": 8.89,
+    "pytest": 0,
+    "diff": "slug.py | 5 ++++-\n 1 file changed, 4 insertions(+), 1 deletion(-)",
+    "verified": false,
+    "status": null,
+    "tokens": null,
+    "tail": "wer()).strip(\"-\")\n```\n\nLowercases, collapses any run of non-alphanumeric characters into a single hyphen, and trims leading/trailing hyphens. `python -m pytest -q` \u0432\u2020\u2019 **1 passed**.\n\u001b[0m\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u045a\u00b1 \u001b[0mGlob \"**/*.py\" \u001b[90m2 matches\u001b[0m\n\u001b[0m\u0432\u045a\u00b1 \u001b[0mGlob \"**/*\" \u001b[90m2 matches\u001b[0m\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead slug.py \n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead test_slug.py \n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u0452 \u001b[0mWrite slug.py\nWrote file successfully: slug.py\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m$ \u001b[0mpython -m pytest -q\n.                                                                        [100%]\n1 passed in 0.01s\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n"
+  },
+  {
+    "arm": "candidate",
+    "task": "refactor-square",
+    "exit": 0,
+    "seconds": 11.12,
+    "pytest": 0,
+    "diff": "mathx.py | 4 +++-\n 1 file changed, 3 insertions(+), 1 deletion(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 30607,
+    "tail": "\": 0, \"recursive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"medium\", \"reasons\": [\"~2 files likely affected\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "baseline",
+    "task": "refactor-square",
+    "exit": 0,
+    "seconds": 11.75,
+    "pytest": 0,
+    "diff": "mathx.py | 12 ++++++++++--\n 1 file changed, 10 insertions(+), 2 deletions(-)",
+    "verified": true,
+    "status": "verified",
+    "tokens": 47380,
+    "tail": "\": 0, \"recursive\": {\"enabled\": false, \"mode\": \"off\", \"depth\": 0, \"strategy\": \"dependency_graph\"}}, \"skills\": [\"debug-failing-test\", \"python-feature\", \"refactor-safely\", \"repo-orientation\", \"repo-selfcheck\", \"svg-illustration\", \"web-3d-scene\", \"web-page\"], \"verification\": {\"approved\": [\"D:\\\\\u0420\u0457\u0421\u0402\u0420\u0455\u0420\u00b5\u0420\u0454\u0421\u201a\u0421\u2039\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\local-runs\\\\venv-m16\\\\Scripts\\\\python.exe -m pytest -q\"], \"discovered\": []}, \"effort_auto\": {\"level\": \"medium\", \"reasons\": [\"~2 files likely affected\"]}}, \"compaction\": null, \"restored\": null, \"unmet\": [], \"failure_map\": null, \"mode\": \"build\", \"engine\": {\"name\": \"karo-core\", \"version\": \"0.5.1+karo\", \"implementation\": \"karox.engine_kernel.EngineAgent\"}}}\n"
+  },
+  {
+    "arm": "opencode",
+    "task": "refactor-square",
+    "exit": 0,
+    "seconds": 19.19,
+    "pytest": 0,
+    "diff": "mathx.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "verified": false,
+    "status": null,
+    "tokens": null,
+    "tail": "\u00a0\u00ac\u043f\u0457\u0405\u043f\u0457\u0405\u043f\u0457\u0405 \"la\".\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead test_mathx.py \n\u001b[0m\u0432\u2020\u2019 \u001b[0mRead mathx.py \n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m$ \u001b[0mgit log --oneline -5; git status --short\n6f5456b init\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m\u0432\u2020\u0452 \u001b[0mEdit mathx.py\nIndex: mathx.py\n===================================================================\n--- mathx.py\n+++ mathx.py\n@@ -1,5 +1,5 @@\n def square(n):\n     return n * n\n \n def cube(n):\n-    return n * n * n\n+    return square(n) * n\n\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n\u001b[0m$ \u001b[0mpython -m pytest -q\n..                                                                       [100%]\n2 passed in 0.02s\n> build \u0412\u00b7 deepseek-v4.1-flash-free\n"
+  }
+]
