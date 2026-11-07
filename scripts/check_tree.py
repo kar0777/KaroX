@@ -59,14 +59,23 @@ ENGINE_MODULES = {
 # The budget is declared once, here: tests/test_tree.py reads this module
 # instead of carrying a second number.
 #
-# 88k (2026-11-06): the package measures 86,996 lines. Since the 87k ceiling
+# 88k (2026-11-06): the package measured 86,996 lines. Since the 87k ceiling
 # the deliberate Missions 01-05 added 622 net source lines (verification reuse,
 # the whole-change review, the durable run baseline and its Git-ignored
 # coverage), plus the 36-line closing-page change in ae9f96b; no generated or
-# duplicated module was found. That leaves 1,004 lines (~1.2%) of headroom,
+# duplicated module was found. That left 1,004 lines (~1.2%) of headroom,
 # several ordinary increments rather than a jump to 100k. A stray copy of the
 # package or a generated dump is thousands of lines and still fails here.
-MAX_PACKAGE_LINES = 88_000
+#
+# 90k (2026-11-07): the deep refactor decomposes the six largest monoliths into
+# cohesive owner modules. The measurement that justified this raise:
+#   baseline 87,689 - 449 dead lines + 530 split/import overhead = 87,770
+# (CLI 2,299 -> facade + 8 modules; engine_kernel 2,905 -> 2,300 + mixin;
+# browser/session 3,703 -> under 2,100 after contract/guards/runtime/
+# navigation/collectors/observation). No duplicated logic was added, and the
+# per-batch before/after LOC is recorded in docs/deep/03. The budget stays a
+# hard failure: it is headroom for the remaining decompositions, not a target.
+MAX_PACKAGE_LINES = 90_000
 
 
 def package_line_count(package: Path) -> int:

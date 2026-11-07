@@ -161,7 +161,7 @@ def test_release_gate_and_tree_test_use_one_budget() -> None:
     )
     assert _RELEASE_GATE.PACKAGE == PACKAGE
     assert lines == independent
-    assert _RELEASE_GATE.MAX_PACKAGE_LINES == 88_000
+    assert _RELEASE_GATE.MAX_PACKAGE_LINES == 90_000
     assert _RELEASE_GATE.MAX_PACKAGE_LINES > lines
     assert _RELEASE_GATE.line_budget_problem(independent) is None
 
