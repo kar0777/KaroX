@@ -386,11 +386,21 @@ routing, descriptors/session info and `execute`. All names remain re-exported;
 the bridge characterisation, core, launcher, OAuth and Tailscale suites pass
 (one pre-existing skip).
 
+## After — provider types and stream split
+
+`providers.py` 1,638 → 635 lines. Pure data types, errors, tuning/effort
+helpers, the `Provider` protocol and `accumulate_response` move to
+`provider_types.py` (652); OpenAI stream parsing, retry/rate-limit and HTTP
+error mapping move to `ProviderStreamMixin` in `provider_stream.py` (525).
+`OpenAIChatCompletionsProvider` keeps construction, HTTP client, payloads and
+the transport loop. Every historical name is re-exported; provider catalog/
+registry/pricing/fault-stand and engine provider suites pass.
+
 ## Next
 
-`hosted_core.execute` still owns the 335-line dispatch; split it only after
-more execute-focused characterisation. Then providers/provider_adapters, TUI
-and `web_check`, then launcher/proxy/tailscale.
+`provider_adapters` (1,503) next: base transport versus vendor adapters, with
+the existing stream-error/patch seams preserved. Then TUI, `web_check`, and the
+bridge launcher/proxy/tailscale.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
