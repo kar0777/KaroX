@@ -73,9 +73,11 @@ the representative benchmark matrix remain open.
 
 ## Still blocking READY
 
-1. **Rollback**: new sessions contain fields old rc4 rejects; the installer
-   backs up config/runtime before upgrade, but in-place downgrade is unsupported
-   and a full restore/reinstall rehearsal is not automated.
+1. **Rollback**: rehearsal passed for the supported restore path — rc4 creates a
+   session, 5.0.0 reads it, 5.0.0 creates a new session, rc4 rejects it with
+   `unknown session fields: ['git_baseline']`, and restoring the timestamped
+   config/runtime backup lets rc4 read the old session again. In-place downgrade
+   is deliberately unsupported; the installer does not automate restore.
 2. **Benchmark matrix**: one real provider smoke and one paired trivial cell
    exist; no 30–100-task matrix and no OpenCode/DSH comparison. Competitor
    attempts were blocked by invalid/missing credentials, not by Karo results.

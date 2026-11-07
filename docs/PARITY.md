@@ -74,8 +74,11 @@ Fresh venv wheel smoke: `karox --version` → `karox 5.0.0`, `karox-vnext
   pinned 5.0.0 installer and a real in-place upgrade/rollback rehearsal are
   **not done**.
 - `git_baseline` and the newer session fields are not readable by rc4;
-  rollback requires restoring the pre-upgrade backup. This is documented, not
-  automated.
+  rollback requires restoring the pre-upgrade backup. Rehearsal: rc4 creates a
+  session, 5.0.0 reads it; 5.0.0 creates a session, rc4 rejects it with
+  `unknown session fields: ['git_baseline']`; restoring the backup makes the
+  old session readable by rc4 again. This is a restore path, not in-place
+  downgrade.
 - Real provider/browser/MCP/TUI user smoke beyond one provider task and the
   local protocol suites is incomplete.
 - No representative 30–100-task benchmark matrix or OpenCode/DSH comparison.
