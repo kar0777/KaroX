@@ -241,28 +241,14 @@ CATALOG_HEADER = (
     "# Skills\n"
     "Call skill_load(name) before starting work that matches one of these:"
 )
-CATALOG_OVERFLOW = "(+{count} more: skill_list)"
 #: The specification's conservative token estimate, the same divisor the prompt
 #: budgets use. The catalogue is re-sent on every step, so its own budget is
 #: measured here rather than assumed.
 CATALOG_TOKEN_CHARS = 4
 
 
-def _catalog_line(metadata: SkillMetadata) -> str:
-    line = f"- {metadata.name}: {metadata.description}"
-    if metadata.when_to_use:
-        line += f" Use when: {metadata.when_to_use}"
-    return line
 
 
-def _catalog_text(
-    header: str, kept: Sequence[SkillMetadata], hidden: int
-) -> str:
-    lines = [header]
-    lines.extend(_catalog_line(item) for item in kept)
-    if hidden > 0:
-        lines.append(CATALOG_OVERFLOW.format(count=hidden))
-    return "\n".join(lines)
 
 
 

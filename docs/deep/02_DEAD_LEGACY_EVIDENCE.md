@@ -18,6 +18,30 @@ CLI/hosted schemas, package data and Git history.
 `discover_verification_commands` and its npm/python/page discovery rules are
 kept and still covered by `tests/test_python_tests.py` and CLI/hosted tests.
 
+## Removed — batch 1 (independently audited safe helpers, 193 lines)
+
+An independent read-only auditor produced a per-symbol verdict table. These
+were `PROVEN_SAFE` (no current source/test/dynamic reference, no public feature
+contract); the companion private constants that existed only for them went too:
+
+| Module | Symbols | Lines |
+|---|---|---:|
+| `completion_gate` | `visual_review_listing` | 5 |
+| `requirements` | `review_listing`, `expected_ids` | 12 |
+| `map_service` | `render_status`, `render_preview`, `default_map_level` | 53 |
+| `auto_verify` | `quick_check_families` | 22 |
+| `agent_modes` | `mode_display_name`, `mode_summary`, `_MODE_WORDS`, `_MODE_SUMMARIES` | 29 |
+| `mode_artifacts` | `artifact_skeleton` | 4 |
+| `provider_presets` | `provider_capabilities` | 20 |
+| `agent` | `_reasoning_blocks` (+ unused `ReasoningBlock` import) | 29 |
+| `skills` | `_catalog_text`, `_catalog_line`, `CATALOG_OVERFLOW` | 14 |
+| `paths` | `migration_dir` | 2 |
+| `bridge_launcher` | `_process_is_alive` | 3 |
+
+`visual_review_entries` (the retired v5 visual ledger) was left in place: the
+auditor flagged it as dead in the current tree but live in the retired loop, so
+it is `UNCERTAIN`, not part of the safe batch.
+
 ## Reversed after adversarial review — `ellipsis_checkpoint.py` stays
 
 The first pass deleted `src/karox/ellipsis_checkpoint.py` (379 lines) because it
@@ -63,12 +87,14 @@ formally retire the documented feature with owner-visible docs/CHANGELOG).
 
 ## Accounting
 
-| Metric | Before batch 0 | After batch 0 |
+| Metric | Before batch 0 | After batch 1 (and the engine split step 1) |
 |---|---:|---:|
-| Product modules | 164 | 164 (module restored) |
-| Physical package lines | 87,689 | 87,433 |
-| Removed lines | — | 256 (`verification.py` 362 → 106) |
-| `MAX_PACKAGE_LINES` headroom | 311 | 567 |
+| Product modules | 164 | 173 |
+| Physical package lines | 87,689 | 87,486 |
+| Removed dead lines | — | 256 (batch 0) + 193 (batch 1) |
+| Split overhead | — | ~246 (CLI 8 modules + engine mixin) |
+| `MAX_PACKAGE_LINES` headroom | 311 | 514 |
 
-The ellipsis module is restored; the only net removal is the unused second
-verification API. No product behavior is removed.
+`ellipsis_checkpoint.py` is restored; the net reductions are the unused second
+verification API and the independently audited helper batch. No product
+behavior was removed.

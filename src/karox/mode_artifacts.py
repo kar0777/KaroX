@@ -66,10 +66,6 @@ def _sections(kind: str) -> tuple[str, ...]:
     return sections
 
 
-def artifact_skeleton(kind: str) -> str:
-    """The section skeleton an artifact of ``kind`` is expected to fill."""
-
-    return "".join(f"## {name}\n\n" for name in _sections(kind))
 
 
 def missing_sections(kind: str, content: str) -> tuple[str, ...]:

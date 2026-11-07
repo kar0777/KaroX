@@ -454,26 +454,6 @@ def provider_preset(preset_id: str) -> ProviderPreset:
         raise ValueError(f"unknown provider preset: {preset_id}") from exc
 
 
-def provider_capabilities(
-    provider_id: str = "", adapter_kind: Optional[str] = None
-) -> dict[str, str]:
-    """The capability map of one configured provider.
-
-    A provider installed from a preset keeps that preset's id, which is why the
-    preset's observed overrides (``capability_overrides``) can be reached from a
-    run: they are the only place a capability is recorded because it was
-    measured rather than read from an adapter's contract. Any other provider
-    gets that contract alone, where a genuinely unknown value stays ``unknown``
-    instead of being promoted to a convenient default.
-    """
-
-    preset = PROVIDER_PRESETS.get(provider_id) if provider_id else None
-    if preset is not None:
-        return preset.capabilities
-    capabilities = dict(_BASE_CAPABILITIES)
-    if adapter_kind is not None:
-        capabilities.update(_ADAPTER_CAPABILITIES.get(adapter_kind, {}))
-    return capabilities
 
 
 def sponsor_messages(language: str) -> tuple[str, ...]:

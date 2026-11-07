@@ -156,28 +156,6 @@ def _select_checks(path: Path) -> list[tuple[str, Callable[[Path, float], QuickC
     return []
 
 
-def quick_check_families() -> tuple[str, ...]:
-    """What an edit triggers, named for the prompt.
-
-    Derived from the same extension sets and tool probes ``_select_checks``
-    uses, so the sentence a model is told cannot drift from the checks that
-    actually run: a prompt that promises a check nobody runs teaches the model
-    to wait for feedback that never arrives.
-    """
-
-    families: list[str] = []
-    if PYTHON_EXTENSIONS:
-        names = ["py_compile"]
-        if importlib.util.find_spec("ruff") is not None:
-            names.append("ruff")
-        families.append(f"{' and '.join(names)} on changed .py files")
-    if NODE_EXTENSIONS and shutil.which("node"):
-        families.append("node --check on changed JS files")
-    if HTML_EXTENSIONS:
-        families.append("a browser render check on changed .html pages")
-    if TYPESCRIPT_EXTENSIONS:
-        families.append("a language server on changed .ts files")
-    return tuple(families)
 
 
 def _python() -> str:

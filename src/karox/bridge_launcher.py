@@ -489,9 +489,6 @@ def _close_job(job: Optional[int]) -> None:
     ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(wintypes.HANDLE(job))
 
 
-def _process_is_alive(pid: int) -> bool:
-    """Compatibility spelling for the shared, PID-reuse-safe liveness check."""
-    return process_is_running(pid)
 
 
 def _signal_process_group(process: Optional[object], *, hard: bool) -> None:

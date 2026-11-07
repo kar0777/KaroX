@@ -533,11 +533,6 @@ def visual_review_entries(record: Any, limit: int = _VISUAL_REVIEW_LIMIT) -> lis
     return [entry for _, entry in sorted(selected, key=lambda item: item[0])]
 
 
-def visual_review_listing(record: Any, limit: int = _VISUAL_REVIEW_LIMIT) -> str:
-    return "\n".join(
-        f"{entry.get('id', '')}. {entry.get('text', '')}"
-        for entry in visual_review_entries(record, limit)
-    )
 
 
 def visual_producer_available(core: Any) -> Optional[bool]:

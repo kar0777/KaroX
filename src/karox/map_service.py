@@ -112,20 +112,6 @@ def normalize_map_level(value: object) -> str:
     return resolved
 
 
-def default_map_level(effort_level: Optional[str]) -> str:
-    """The map level the current effort choice is entitled to.
-
-    This is the real contract, not a convention: the budget table's
-    ``map_depth`` field decides. AUTO and unknown spellings fall back to
-    medium, the level whose cost is safe to spend without being asked.
-    """
-
-    try:
-        if effort_level and effort_level != AUTO_EFFORT:
-            return budget_for(normalize_effort(effort_level)).map_depth
-    except ValueError:
-        pass
-    return "medium"
 
 
 @dataclass(frozen=True)
@@ -757,46 +743,3 @@ _MAP_LEVEL_DESCRIPTIONS: dict[str, dict[str, str]] = {
 def _map_level_description(level: object, language: str) -> str:
     key = str(level or "medium")
     return _MAP_LEVEL_DESCRIPTIONS["ru" if language == "ru" else "en"].get(key, key)
-
-
-def render_status(status: dict[str, Any], language: str = "en", *, details: bool = False) -> str:
-    """Human-first /map status; internal provenance is opt-in via ``details``."""
-    russian = language == "ru"
-    if not status.get("exists"):
-        return "Карта проекта: ещё не построена." if russian else "Project map: not built yet."
-    level = status.get("level")
-    fresh = bool(status.get("fresh"))
-    files = status.get("files_scanned")
-    state = (("готова" if fresh else "нужно обновить") if russian else ("ready" if fresh else "needs refresh"))
-    lines = [f"Карта проекта: {state} · {level} · {files} файлов" if russian else f"Project map: {state} · {level} · {files} files", _map_level_description(level, language)]
-    if not details:
-        return "\n".join(lines)
-    age = status.get("age_seconds"); duration = status.get("duration_ms")
-    lines.append(f"Технические детали: возраст {age} с · построена за {duration} мс" if russian else f"Technical details: age {age}s · built in {duration} ms")
-    validation = status.get("validation")
-    if isinstance(validation, dict):
-        stale = len(validation.get("stale", []))
-        lines.append(f"Проверка фактов: {validation.get('state')} · устаревших {stale}" if russian else f"Fact validation: {validation.get('state')} · {stale} stale")
-    sources = status.get("sources")
-    if isinstance(sources, dict):
-        stale_sources = sources.get("stale", [])
-        lines.append((f"Источники: {sources.get('state')}" + (f" · устарели: {', '.join(stale_sources[:5])}" if stale_sources else "")) if russian else (f"Sources: {sources.get('state')}" + (f" · stale: {', '.join(stale_sources[:5])}" if stale_sources else "")))
-    return "\n".join(lines)
-
-
-def render_preview(preview: dict[str, Any], language: str = "en", *, details: bool = False) -> str:
-    """Human-first map estimate; engine internals are hidden unless requested."""
-    russian = language == "ru"
-    level = preview.get("level"); files = preview.get("files_indexed")
-    duration = preview.get("duration_range", {})
-    seconds = duration.get("seconds", [0, 0]) if isinstance(duration, dict) else [0, 0]
-    if not isinstance(seconds, list) or len(seconds) < 2:
-        seconds = [0, 0]
-    basis = duration.get("basis", "estimate") if isinstance(duration, dict) else "estimate"
-    basis_text = (("по измерениям на этом ПК" if basis == "measured" else "оценка") if russian else ("measured on this machine" if basis == "measured" else "estimate"))
-    lines = [f"Карта проекта: {level}" if russian else f"Project map preview: {level}", _map_level_description(level, language), f"Охват: {files} файлов" if russian else f"Scope: {files} files", f"Ожидаемое время: {seconds[0]}–{seconds[1]} с · {basis_text}" if russian else f"Expected time: {seconds[0]}–{seconds[1]}s · {basis_text}"]
-    if not details:
-        return "\n".join(lines)
-    deep = preview.get("deep_inspection_files", [0, 0])
-    lines.extend([f"Проект: {preview.get('repository')}" if russian else f"Project: {preview.get('repository')}", f"Глубокая инспекция: {deep[0]}–{deep[1]} файлов" if russian else f"Deep inspection: {deep[0]}–{deep[1]} files", ("Семантический анализ: " + ("да" if preview.get("semantic_analysis") else "нет")) if russian else ("Semantic analysis: " + ("yes" if preview.get("semantic_analysis") else "no")), ("История Git: " + (f"да, {preview.get('git_history_commits')} коммитов" if preview.get("git_history") else "нет")) if russian else ("Git history: " + (f"yes, {preview.get('git_history_commits')} commits" if preview.get("git_history") else "no"))])
-    return "\n".join(lines)

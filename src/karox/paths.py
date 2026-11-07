@@ -154,7 +154,3 @@ def session_dir() -> Path:
 def oauth_state_dir() -> Path:
     """Where a bridge keeps the OAuth registrations that outlive its process."""
     return runtime_dir() / "vnext" / "oauth-bridge"
-
-
-def migration_dir() -> Path:
-    return config_dir() / "vnext"

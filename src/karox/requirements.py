@@ -344,12 +344,6 @@ def ledger_digest(entries: Sequence[Dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def expected_ids(entries: Sequence[Dict[str, Any]]) -> List[str]:
-    return [
-        str(entry.get("id", ""))
-        for entry in _active_entries(entries)
-        if entry.get("id")
-    ]
 
 
 def admit(
@@ -545,11 +539,3 @@ def seed(task: str) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     admit(entries, requirement_texts(task), source="task")
     return entries
-
-
-def review_listing(entries: Sequence[Dict[str, Any]]) -> str:
-    """The ACTIVE requirements as the visual review sees them, one per line."""
-
-    return "\n".join(
-        f"{entry['id']}. {entry['text']}" for entry in _active_entries(entries)
-    )

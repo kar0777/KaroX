@@ -6,7 +6,6 @@ import re
 from typing import (
     Any,
     Dict,
-    Mapping,
 )
 
 
@@ -55,9 +54,6 @@ from .agent_contract import (
     AgentLimits,
     AgentReport,
     ContextBudget,
-)
-from .providers import (
-    ReasoningBlock,
 )
 
 __all__ = [
@@ -389,35 +385,6 @@ def _is_small_talk_task(task: str) -> bool:
 
 
 
-def _reasoning_blocks(entry: Mapping[str, Any]) -> tuple[ReasoningBlock, ...]:
-    """Rebuild an assistant turn's deliberation from what was persisted.
-
-    A stored block that no longer describes something this transport can return
-    is dropped here rather than at the wire, so a record written by an older
-    version -- or corrupted -- degrades to a turn with no thinking instead of a
-    request the provider refuses.
-    """
-
-    stored = entry.get("reasoning_blocks")
-    if not isinstance(stored, list):
-        return ()
-    blocks: list[ReasoningBlock] = []
-    for item in stored:
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("kind")
-        if kind not in {"thinking", "redacted_thinking"}:
-            continue
-        blocks.append(
-            ReasoningBlock(
-                kind=kind,
-                text=str(item.get("text") or ""),
-                data=str(item.get("data") or ""),
-                signature=str(item.get("signature") or ""),
-                replayable=item.get("replayable") is not False,
-            )
-        )
-    return tuple(blocks)
 
 
 _READ_TOOL_NAMES = frozenset({"repo.read_file", "repo.read_lines"})
