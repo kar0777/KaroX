@@ -5,7 +5,7 @@
 **Product worktree:** `b/karox5-refactor`
 **Branch:** `release/karox5-5.0.0`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Candidate HEAD:** `725fb96` (5.0.0 release surface)
+**Candidate HEAD:** `01e2526` (5.0.0 release surface)
 **Dev history:** `goal/karox5-refactor-20261107` at `5e430d8`; dev branch kept for reference
 **Report/audit worktree:** `b/win` (do not use for product tests)
 **Other worktrees:** preserve untouched; do not reset/clean them.
@@ -74,22 +74,16 @@ the representative benchmark matrix remain open.
 
 ## Still blocking READY
 
-1. **Rollback**: compatibility improved and rehearsed — `git_baseline` is now
-   stored inside the existing `git_state` mapping (no new top-level field).
-   rc4 creates a session → 5.0.0 reads it; 5.0.0 creates a session → **rc4
-   reads it successfully** (`session show` exit 0); restoring the timestamped
-   backup also works. In-place old-reader compatibility is now proven; the
-   installer still recommends a data backup.
-2. **Benchmark matrix**: 3-task pilot × 3 arms, all nine patches pass pytest;
+1. **Benchmark matrix**: 3-task pilot × 3 arms, all nine patches pass pytest;
    registry/ledger are machine-readable. This is not the required 30–100-task
    representative matrix. DSH remains credential-blocked; OpenCode free model
    differs from Karo's W&B model, so no controlled comparison is claimed.
-3. **Real user smoke**: real provider browser scenario passed (verified, 3
+2. **Real user smoke**: real provider browser scenario passed (verified, 3
    steps, 16,857 tokens, `browser.command` open/get_text). A full real bridge/TUI
    user scenario is still not documented end to end.
-4. Published installer URL/tag is not tested; local wheel + explicit
+3. Published installer URL/tag is not tested; local wheel + explicit
    `KAROX_SPEC` is the verified path.
-5. The TUI import boundary is now enforced by an AST regression test: TUI may
+4. The TUI import boundary is now enforced by an AST regression test: TUI may
    import pure/platform helpers but not agent/core/engine/session runtime.
 
 ## Safe continuation
@@ -111,10 +105,11 @@ release candidate.
 
 ## Next checkpoint
 
-1. Rebuild wheel at final HEAD, install in a fresh venv, run CLI/TUI/doctor/paths.
-2. Resolve 5.x version, scope, installer upgrade, and session rollback.
-3. Run real browser/MCP/TUI smoke with cost ledger.
-4. Run the benchmark tasks and then decide READY/NOT_READY.
+1. Rebuild final wheel after any code change and re-run fresh install.
+2. Provision DSH or explicitly exclude it; run a representative 30–100-task matrix.
+3. Run a real bridge/TUI user scenario with owner credentials.
+4. Rehearse published installer URL/tag after approval.
+
 
 
 
