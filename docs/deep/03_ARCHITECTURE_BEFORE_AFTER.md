@@ -295,10 +295,19 @@ and the attestation/unproducible predicates stay in the gate. All historical
 public names are re-exported; the new modules join the model-facing neutrality
 scan. Completion/coverage/probe/neutrality tests pass.
 
+## After — repository context split
+
+`repo_context.py` 2,055 → 148 lines: `RepositoryContextEngine` is a facade over
+`RepoIdentityMixin` (revision identity/cache, 628 lines), `RepoSearchMixin`
+(files/grep/ripgrep/symbols/imports, 736) and `RepoInspectMixin` (ranking,
+excerpts, edit context, inspect, 394); shared constants/budgets/match selection
+live in `repo_support.py` (407). The public constructor and method names are
+unchanged; core-smoke and engine context/inspect tests pass.
+
 ## Next
 
-Providers, `core_tools`/`core.py`, `repo_context`, TUI, `web_check`, then the
-bridge with its S0 characterization tests.
+Providers, `core_tools`/`core.py`, TUI, `web_check`, then the bridge with its
+S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
