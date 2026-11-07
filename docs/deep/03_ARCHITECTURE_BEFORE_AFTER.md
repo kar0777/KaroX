@@ -316,10 +316,22 @@ The facade re-exports the historical names other modules/tests import
 `SessionError`, `_path_label`, `VerificationRule`). Core command/validation/
 safety/smoke and engine-tools tests pass.
 
+## After — extended Core tools split
+
+`core_tools.py` 1,802 → 780 lines. `ExtendedCoreRuntime` composes
+`CoreSkillToolsMixin` (skills/visual/disk/patch, 202), `CoreJobToolsMixin`
+(detached dev-command/check jobs, 267), `CoreEditToolsMixin` (edit/patch/plan
+and mutation replay, 513) and `CoreReadToolsMixin` (windowed reads, git
+log/diff listing, list_files, 228). The facade keeps `__init__`, `execute`,
+output bounding, and the URL-fetch path so the existing
+`core_tools.build_opener` test seam still applies. Ignored-directory and
+visual/plan/diff constants move with their owners and stay re-exported where
+the class attributes read them. Core/engine-tool/check/safety/skill tests pass.
+
 ## Next
 
-Providers, `core_tools`/`core_process`, TUI, `web_check`, then the bridge with
-its S0 characterization tests.
+Providers, `core_process`/`mcp_client`/`hosted_core`, TUI, `web_check`, then
+the bridge with its S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
