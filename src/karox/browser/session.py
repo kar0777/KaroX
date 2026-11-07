@@ -548,7 +548,7 @@ class BrowserSession(SessionGuardsMixin):
         self._activity = 0
         self._park_timer: Optional[threading.Timer] = None
 
-        self._owner_queue: "queue.Queue[_BrowserCommand]" = queue.Queue()
+        self._owner_queue: "queue.Queue[Optional[_BrowserCommand]]" = queue.Queue()
         self._owner_ready = threading.Event()
         self._owner_thread_id: Optional[int] = None
         self._owner_thread = threading.Thread(
@@ -567,6 +567,9 @@ class BrowserSession(SessionGuardsMixin):
         self._owner_ready.set()
         while True:
             command = self._owner_queue.get()
+            if command is None:
+                self._owner_queue.task_done()
+                return
             try:
                 if not command.future.set_running_or_notify_cancel():
                     continue
@@ -1944,12 +1947,33 @@ class BrowserSession(SessionGuardsMixin):
         always be able to tear its browser down on shutdown or revocation.
         """
 
-        return dict(
+        if not self._owner_thread.is_alive():
+            self._handle = None
+            return {
+                "closed": True,
+                "was_open": False,
+                "already_closed": True,
+                "session_id": self.policy.session_id,
+            }
+        result = dict(
             self._call_on_owner(
                 type(self)._force_close_impl,
                 timeout=30.0,
             )
         )
+        # A force close is a session teardown, not the model-facing `close`
+        # action.  Stop the marshalling thread so a test suite or a long-lived
+        # process does not leak one owner thread per browser session.
+        self._stop_owner()
+        return result
+
+    def _stop_owner(self) -> None:
+        if threading.get_ident() == self._owner_thread_id:
+            return
+        if not self._owner_thread.is_alive():
+            return
+        self._owner_queue.put(None)
+        self._owner_thread.join(timeout=5.0)
 
     def _force_close_impl(self) -> dict[str, Any]:
         handle = self._handle

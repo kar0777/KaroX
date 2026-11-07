@@ -317,6 +317,7 @@ def test_force_close_wakes_parked_tabs_first(session) -> None:
     parked = list(browser._handle.parked.values())
     result = browser.force_close()
     assert result["closed"] is True and browser._handle is None
+    assert browser._owner_thread.is_alive() is False
     assert all(cdp.sent[-2:] == ["Debugger.resume", "Debugger.disable"] for cdp in parked)
 
 
