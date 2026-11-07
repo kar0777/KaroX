@@ -28,6 +28,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "karox"
 MODEL_FACING_MODULES = (
     "agent.py",
     "engine_agent.py",
+    "engine_prompts.py",
     "engine_kernel.py",
     "engine_tool_env.py",
     "completion_gate.py",
