@@ -347,10 +347,19 @@ the runtime binding and the historical names remain on the facade. The
 were moved with their owners (a decorator near-miss fixed). MCP client/CLI and
 engine-tools tests pass.
 
+## After — disk maintenance split
+
+`disk_maintenance.py` 1,099 → 217 lines. Protection rules (`is_drive_root`,
+system/protected roots, reparse boundaries, relative-target validation) move to
+`disk_protection.py` (196); bounded candidate scanning/classification and
+markers to `disk_scan.py` (446); cleanup plan schema, persistence, risk and
+apply to `disk_plans.py` (448). The facade re-exports every historical name.
+Core/argument/engine-tool tests pass.
+
 ## Next
 
 `hosted_core`, providers/provider_adapters, TUI and `web_check`, then the
-bridge with its S0 characterization tests.
+bridge launcher/proxy/tailscale with characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
