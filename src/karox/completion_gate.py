@@ -5,243 +5,100 @@ validators are not invented. Unknown proof is missing proof, never success.
 """
 from __future__ import annotations
 
-import hashlib
-import json
+from .completion_rules import (  # noqa: F401
+    _TEXT as _TEXT,
+    NO_PRODUCER as NO_PRODUCER,
+    _DOC_DIRS as _DOC_DIRS,
+    _ROOT_DOC_PREFIXES as _ROOT_DOC_PREFIXES,
+    _BEHAVIOR as _BEHAVIOR,
+    _deliverable as _deliverable,
+    _active_requirement_texts as _active_requirement_texts,
+    _is_test_path as _is_test_path,
+    is_doc as is_doc,
+    docs_only as docs_only,
+    _tracked_at_head as _tracked_at_head,
+    _changed_existing_tests as _changed_existing_tests,
+    _TEST_CHANGE_REQUEST as _TEST_CHANGE_REQUEST,
+    _NEGATED_TEST_CHANGE as _NEGATED_TEST_CHANGE,
+    _SENTENCE_BREAK as _SENTENCE_BREAK,
+    _CONDITIONAL_REQUEST as _CONDITIONAL_REQUEST,
+    _TESTS_OUT_OF_SCOPE as _TESTS_OUT_OF_SCOPE,
+    _TEST_EXECUTION_IN_MATCH as _TEST_EXECUTION_IN_MATCH,
+    _FORBIDS_TEST_EDITS as _FORBIDS_TEST_EDITS,
+    _explicit_test_change_required as _explicit_test_change_required,
+    _test_edit_ban as _test_edit_ban,
+    diagnostic_paths as diagnostic_paths,
+    _created_then_deleted as _created_then_deleted,
+    identity as identity,
+)
+from .completion_visual import (  # noqa: F401
+    _WEB as _WEB,
+    _VISUAL_ASSETS as _VISUAL_ASSETS,
+    _PAGE_ASSETS as _PAGE_ASSETS,
+    _VISUAL as _VISUAL,
+    _NEGATED_VISUAL as _NEGATED_VISUAL,
+    _WEB_INTENT as _WEB_INTENT,
+    _VISUAL_DIRECT as _VISUAL_DIRECT,
+    _VISUAL_OBJECT as _VISUAL_OBJECT,
+    _VISUAL_OBSERVABLE as _VISUAL_OBSERVABLE,
+    _VISUAL_CONTRACT_ONLY as _VISUAL_CONTRACT_ONLY,
+    _VISUAL_CODE_LITERAL as _VISUAL_CODE_LITERAL,
+    _VISUAL_IMPLEMENTATION as _VISUAL_IMPLEMENTATION,
+    _VISUAL_REVIEW_LIMIT as _VISUAL_REVIEW_LIMIT,
+    visual_intent as visual_intent,
+    web_render_intent as web_render_intent,
+    visual_required as visual_required,
+    visual_review_entries as visual_review_entries,
+    visual_producer_available as visual_producer_available,
+    _page_loads_the_change as _page_loads_the_change,
+    visual_proven as visual_proven,
+)
+from .completion_review import (  # noqa: F401
+    same_run_inputs as same_run_inputs,
+    command_classes as command_classes,
+    browser_proof as browser_proof,
+    _complete_change_review as _complete_change_review,
+    _review_skips_a_change as _review_skips_a_change,
+)
+
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Collection, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
-from . import git_baseline
 from . import requirement_coverage
-from .requirements import ledger_digest
-from .web_check import default_pages, default_pictures, diagnostic_pages, is_scratch_artifact, is_scratch_page
+from .web_check import default_pages, default_pictures, is_scratch_page
 
-_TEXT = {".md", ".rst"}
 # Prefix of a floor reason naming an owed proof class Core has no command for.
-NO_PRODUCER = "no approved producer for "
 # Markdown is only documentation where documentation lives. A .md inside a code
 # tree can be runtime data: KaroX itself loads prompts/*.md and SKILL.md.
-_DOC_DIRS = {"docs", "doc", "documentation"}
-_ROOT_DOC_PREFIXES = (
-    "readme", "changelog", "contributing", "license", "security",
-    "support", "code_of_conduct", "quickstart", "release_notes",
-)
-_WEB = {".html", ".htm", ".js", ".mjs", ".cjs", ".jsx", ".tsx", ".css"}
 # What a visual requirement can be about: the page and everything that styles or
 # renders it. A Python change is never graded by a picture.
-_VISUAL_ASSETS = _WEB | {".scss", ".sass", ".less", ".vue", ".svelte", ".svg"}
 _RUNTIME = {"__main__.py", "main.py", "app.py", "server.py", "cli.py", "package.json"}
 # Assets a page loads by relative path. A canvas game often edits only
 # ``game.js`` and leaves the scaffold ``index.html`` untouched; the visual check
 # still rendered that page, so its bytes are the proof surface.
-_PAGE_ASSETS = {".js", ".mjs", ".cjs", ".css"}
-_BEHAVIOR = re.compile(r"\b(?:implement|bugfix|refactor|runtime|behavior|behaviour|execute|launch)\b|исправ.*ошиб|поведен|запуск", re.I)
-_VISUAL = re.compile(
-    r"\b(?:appearance|aesthetic|visually|visible|colour|color|layout|animation|animate|typography)\b"
-    r"|\b(?:heading|background|button|text)\b.{0,40}\b(?:blue|red|green|aligned|centered)\b"
-    r"|визуаль|внешн.*вид|выгляд|цвет|анимац|макет|видим", re.I
-)
-_NEGATED_VISUAL = re.compile(r"(?:without|do not|don't|no|не|без)\s+(?:changing\s+|change\s+|изменения\s+)?(?:the\s+)?(?:appearance|layout|visual\w*|внешн\w*|визуаль\w*)", re.I)
-_WEB_INTENT = re.compile(
-    r"(?:\.html?\b|\b(?:frontend|web\s*page|website|browser|three\.js|canvas|webgl)\b"
-    r"|(?:веб|браузер|страниц\w*|three\.js))",
-    re.I,
-)
-_VISUAL_DIRECT = re.compile(
-    r"\b(?:visible|visibly|visual|look|looks|realistic|recognizable|polished|"
-    r"color|colour|gradient|transparent|opacity|lighting|illuminated|shadow|"
-    r"camera|screenshot|perspective|highlight|glossy|calming|cinematic)\w*\b"
-    r"|визуаль|видим|выгляд|реалист|цвет|свет|тень|камер",
-    re.I,
-)
-_VISUAL_OBJECT = re.compile(
-    r"\b(?:scene|aquarium|tank|glass|water|clownfish|fish|body|tail|fin|eye|pupil|"
-    r"mouth|band|stripe|marking|bubble|gravel|stone|plant|blade|frame|panel|"
-    r"surface|ripple|background)\w*\b"
-    r"|аквариум|рыб|вода|стекл|пузыр|растен|камн|фон|полос|плавник|глаз",
-    re.I,
-)
-_VISUAL_OBSERVABLE = re.compile(
-    r"\b(?:visible|visibly|clearly|recognizable|realistic|polished|look|looks|"
-    r"silhouette|color|colour|orange|white|black|blue|green|transparent|opacity|"
-    r"glossy|highlight|rounded|natural|cinematic|balanced|readable|perspective|"
-    r"screenshot|lit|lighting|shadow)\w*\b"
-    r"|визуаль|видим|выгляд|реалист|цвет|прозрач|свет|тень|полос",
-    re.I,
-)
-_VISUAL_CONTRACT_ONLY = re.compile(
-    r"\b(?:procedurally|constructed\s+from|implemented\s+using|module\s+imports?|"
-    r"object\s+pooling|delta[- ]?time|requestanimationframe|reusable\s+(?:functions?|classes?)|"
-    r"single\s+html|self-contained|shader|geometry|class|function)\b",
-    re.I,
-)
-_VISUAL_CODE_LITERAL = re.compile(
-    r"(?:\brenderer\.[A-Za-z_]|\bTHREE\.[A-Za-z_]|setPixelRatio\s*\(|"
-    r"shadowMap\.[A-Za-z_]|toneMapping\s*=)",
-    re.I,
-)
-_VISUAL_IMPLEMENTATION = re.compile(
-    r"\b(?:geometry|shader|class|function|script|module|import|dependency|"
-    r"delta[- ]?time|object pooling|requestanimationframe|resize|console error)\b",
-    re.I,
-)
-_VISUAL_REVIEW_LIMIT = 40
 
-_TEST_CHANGE_REQUEST = re.compile(
-    r"\b(?:add|write|create|update|modify|change|extend|adjust|revise)\w*\b"
-    r".{0,80}(?<![-_.])\b(?:tests?|test\s+cases?|specs?)\b"
-    r"|(?:добав\w*|напиш\w*|созда\w*|обнов\w*|измен\w*|расшир\w*|допол\w*)"
-    r".{0,80}(?:тест\w*|спек\w*)",
-    re.I,
-)
-_NEGATED_TEST_CHANGE = re.compile(
-    r"(?:\b(?:(?:do|does|should|must|may|will|would|can|could)\s+not|"
-    r"can't|cannot|don't|dont|never|without|avoid)\b"
-    r".{0,45}\b(?:add(?:ing)?|writ(?:e|ing)|creat(?:e|ing)|updat(?:e|ing)|"
-    r"modify(?:ing)?|chang(?:e|ing)|extend(?:ing)?)\w*\b"
-    r".{0,45}\b(?:tests?|test\s+cases?|specs?)\b)"
-    r"|(?:(?:\bне\b|\bбез\b).{0,45}"
-    r"(?:добав\w*|пис\w*|созда\w*|обнов\w*|измен\w*|меня\w*|расшир\w*|допол\w*)"
-    r".{0,45}(?:тест\w*|спек\w*))",
-    re.I,
-)
-_SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+|\n+")
 # A conditional or template item is not an explicit request. A SWE issue quotes
 # the upstream PR checklist ("- [ ] Include new tests or update existing tests
 # when applicable."); read as a demand it overrode the task's own "Do not modify
 # tests": the gate refused the finish with "explicit test change requested" and
 # the model edited the protected test file (sandbox 2026-11-04,
 # swe-pytest-10356).
-_CONDITIONAL_REQUEST = re.compile(
-    r"^\s*(?:[-*+]|\d+[.)])?\s*\[[ xX]?\]"
-    r"|\b(?:when|where|if)\s+(?:applicable|appropriate|needed|necessary|possible|relevant)\b"
-    r"|\b(?:if|when)\s+(?:it\s+)?(?:applies|makes\s+sense)\b"
-    r"|(?:при\s+необходимости|если\s+(?:нужно|необходимо|применимо))",
-    re.I,
-)
 # A scope instruction puts tests out of bounds ("changes go in the source
 # tree, not in the test files"). The negation follows the change verb, so the
 # prefix rules above cannot see it; the whole sentence is the unit of intent.
-_TESTS_OUT_OF_SCOPE = re.compile(
-    r"(?:\b(?:not|never)\b\s+(?:(?:in|to|into|inside|within)\s+)?"
-    r"(?:the\s+)?(?:tests?|test\s+files?|specs?)\b"
-    r"|(?:rather|instead)\s+(?:than|of)\s+(?:in\s+|inside\s+|within\s+)?"
-    r"(?:the\s+)?(?:tests?|test\s+files?|specs?)\b"
-    r"|outside\s+(?:of\s+)?(?:the\s+)?(?:tests?|test\s+files?)\b)",
-    re.I,
-)
-_TEST_EXECUTION_IN_MATCH = re.compile(
-    r"\b(?:run|execute|rerun|re-run)\w*\b|(?:запуст\w*|выполн\w*)",
-    re.I,
-)
 
 
-def diagnostic_paths(core: Any, record: Any) -> frozenset[str]:
-    """Created pages that nothing delivers (``web_check.diagnostic_pages``).
-
-    Like a ``_probe.html``, such a page is the run's own instrument: editing it
-    changes nothing the user opens, so it neither owes proof nor makes the
-    deliverable's proof stale. Fail-closed: any error marks nothing.
-    """
-
-    try:
-        created = list(getattr(record, "created_files", None) or ())
-        created.extend(
-            path for path in _created_then_deleted(core, record) if path not in created
-        )
-        if not created:
-            return frozenset()
-        named = " ".join([str(record.task or ""), *_active_requirement_texts(record)])
-        return frozenset(diagnostic_pages(Path(core.repository), created, named))
-    except Exception:  # noqa: BLE001 - the stricter answer is always safe
-        return frozenset()
 
 
-def _created_then_deleted(core: Any, record: Any) -> list[str]:
-    """Files this run created and has since deleted.
-
-    ``created_files`` forgets a file once the run deletes it, and the run is
-    told to delete its own probes as soon as they have answered. A measured 3D
-    run deleted its ``self-test.html``; the page stopped being diagnostic at
-    that moment, entered the identity as a deleted file and made every proof
-    and every attestation stale. The transcript still shows the first write
-    created the file (no previous bytes), so a file that is gone again was
-    never the user's and is not part of what the user receives.
-    """
-
-    first: dict[str, bool] = {}
-    for entry in record.provider_history:
-        if not isinstance(entry, dict):
-            continue
-        result = entry.get("result")
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            continue
-        data = result.get("data")
-        if not isinstance(data, dict) or data.get("dry_run") is True:
-            continue
-        name = entry.get("core_name")
-        if name == "repo.write_file":
-            operations = [data]
-        elif name in {"repo.command", "repo.apply_patch"}:
-            operations = [op for op in data.get("operations") or () if isinstance(op, dict)]
-        else:
-            continue
-        for operation in operations:
-            path = operation.get("path")
-            if isinstance(path, str) and operation.get("changed") is True:
-                first.setdefault(path, "previous_sha256" in operation
-                                 and operation.get("previous_sha256") is None)
-    gone: list[str] = []
-    for path, created in first.items():
-        if not created or path not in record.changed_files:
-            continue
-        try:
-            if core.safe_path(path).exists():
-                continue
-        except Exception:  # noqa: BLE001 - an unresolvable path stays bound
-            continue
-        gone.append(path)
-    return gone
 
 
-def _deliverable(path: str, diagnostic: frozenset[str]) -> bool:
-    return not is_scratch_artifact(path) and Path(path).as_posix() not in diagnostic
 
 
-def _active_requirement_texts(record: Any) -> list[str]:
-    entries = [
-        entry
-        for entry in record.requirements
-        if isinstance(entry, dict) and entry.get("status", "active") == "active"
-    ]
-    texts = [
-        str(entry.get("text", "")).strip()
-        for entry in entries
-        if str(entry.get("text", "")).strip()
-    ]
-    return texts or [str(record.task)]
 
 
-def _explicit_test_change_required(record: Any) -> bool:
-    for text in _active_requirement_texts(record):
-        # Judge one sentence at a time. A scope sentence must not borrow the
-        # word "tests" from the next sentence, and a negated sentence must not
-        # swallow a following positive request.
-        for sentence in _SENTENCE_BREAK.split(text):
-            if _TESTS_OUT_OF_SCOPE.search(sentence) or _CONDITIONAL_REQUEST.search(sentence):
-                continue
-            cleaned = _NEGATED_TEST_CHANGE.sub("", sentence)
-            for match in _TEST_CHANGE_REQUEST.finditer(cleaned):
-                # "change code, then run tests" is verification work, not a request
-                # to edit tests. The broad matcher deliberately understands varied
-                # phrasing, so reject matches whose path to the test noun crosses
-                # an execution verb.
-                if _TEST_EXECUTION_IN_MATCH.search(match.group(0)):
-                    continue
-                return True
-    return False
 
 
 #: A sentence that keeps the existing tests as they are: "Do not modify tests",
@@ -249,165 +106,20 @@ def _explicit_test_change_required(record: Any) -> bool:
 #: "do not add tests" alone does not forbid repairing an existing test. The
 #: noun must be plural or a test-file phrase: "do not change the test command"
 #: is not a ban.
-_FORBIDS_TEST_EDITS = re.compile(
-    r"(?:\b(?:(?:do|does|should|must|may|will|can|could)\s+not|can't|cannot|"
-    r"don't|dont|never|avoid)\b"
-    r".{0,30}\b(?:modify(?:ing)?|chang(?:e|ing)|edit(?:ing)?|touch(?:ing)?|"
-    r"alter(?:ing)?|updat(?:e|ing)|rewrit(?:e|ing))\b"
-    r".{0,40}\b(?:tests|test\s+files?|test\s+suites?|test\s+cases?|"
-    r"existing\s+tests?|unit\s+tests?)\b)"
-    r"|(?:\bне\b.{0,30}(?:измен\w*|меня\w*|редактир\w*|трога\w*|прав\w*)"
-    r".{0,40}тест\w*)",
-    re.I,
-)
 
 
-def _test_edit_ban(record: Any) -> str:
-    """The task sentence that keeps the existing tests unchanged, or "".
-
-    A sandbox SWE run (2026-11-04, swe-pytest-10356) copied the upstream
-    regression test into ``testing/test_mark.py`` two steps before finishing,
-    although the task said "Do not modify tests" and "Changes should be made
-    in the source tree, not in the test files". The hidden grader restores that
-    file, so the edit proved nothing and broke the task's rules. A task that
-    also asks for a test change is ambiguous and keeps its old handling.
-    """
-
-    if _explicit_test_change_required(record):
-        return ""
-    texts = [str(getattr(record, "task", "") or ""), *_active_requirement_texts(record)]
-    for text in texts:
-        for sentence in _SENTENCE_BREAK.split(text):
-            if _FORBIDS_TEST_EDITS.search(sentence) or _TESTS_OUT_OF_SCOPE.search(sentence):
-                return " ".join(sentence.split())
-    return ""
 
 
-def _changed_existing_tests(core: Any, record: Any) -> list[str]:
-    """Committed test files that now hold other bytes than at the run's start.
-
-    ``changed_files`` remembers every file the run ever wrote, so the starting
-    bytes come from the first mutation's ``previous_sha256``: a test file the
-    run restored to its original content is not reported. Only files tracked
-    at ``HEAD`` count: a ``__pycache__/test_*.pyc`` left by a probe and then
-    cleaned up is not the user's test. A file without a recorded starting
-    digest, one this run created, or any file outside Git is never reported.
-    """
-
-    created = {str(item) for item in (getattr(record, "created_files", None) or ())}
-    candidates = [
-        path
-        for path in dict.fromkeys(record.changed_files)
-        if isinstance(path, str)
-        and _is_test_path(path)
-        and path not in created
-        and "__pycache__" not in Path(path).parts
-    ]
-    candidates = [path for path in candidates if _tracked_at_head(core, path)]
-    if not candidates:
-        return []
-    original: dict[str, Optional[str]] = {}
-    for entry in record.provider_history:
-        if not isinstance(entry, dict):
-            continue
-        result = entry.get("result")
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            continue
-        data = result.get("data")
-        if not isinstance(data, dict) or data.get("dry_run") is True:
-            continue
-        name = entry.get("core_name")
-        if name in {"repo.write_file", "repo.edit_file", "web.fetch"}:
-            operations = [data]
-        elif name in {"repo.command", "repo.apply_patch"}:
-            operations = [op for op in data.get("operations") or () if isinstance(op, dict)]
-        else:
-            continue
-        for operation in operations:
-            path = operation.get("path")
-            if (
-                isinstance(path, str)
-                and path in candidates
-                and path not in original
-                and "previous_sha256" in operation
-            ):
-                original[path] = operation.get("previous_sha256")
-    changed = []
-    for path in candidates:
-        before = original.get(path)
-        if not isinstance(before, str):
-            continue
-        try:
-            target = core.safe_path(path)
-            now = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
-        except Exception:  # noqa: BLE001 - an unreadable file is not evidence of an edit
-            continue
-        if now != before:
-            changed.append(path)
-    return changed
 
 
-def _tracked_at_head(core: Any, relative: str) -> bool:
-    """Whether ``relative`` is committed at ``HEAD``; any failure says no.
-
-    ``./`` keeps the path relative to the workspace, which may sit below the
-    Git root.
-    """
-
-    try:
-        tracked = subprocess.run(
-            ["git", "cat-file", "-e", f"HEAD:./{Path(relative).as_posix()}"],
-            cwd=str(core.repository), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=10, check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception:  # noqa: BLE001 - no Git, no claim about the user's tests
-        return False
-    return tracked.returncode == 0
 
 
-def _is_test_path(relative: str) -> bool:
-    path = Path(relative)
-    parts = {part.lower() for part in path.parts[:-1]}
-    if parts & {"test", "tests", "spec", "specs", "__tests__"}:
-        return True
-    name = path.name.lower()
-    stem = path.stem.lower()
-    return (
-        name.startswith(("test_", "test-", "spec_", "spec-"))
-        or stem.endswith(("_test", "_spec"))
-        or ".test." in name
-        or ".spec." in name
-    )
 
 
-def is_doc(relative: str) -> bool:
-    path = Path(relative)
-    if path.suffix.lower() not in _TEXT:
-        return False
-    parts = path.parts
-    if parts and parts[0].lower() in _DOC_DIRS:
-        return True
-    if len(parts) != 1:
-        return False
-    stem = path.stem.lower()
-    # Root markdown is not automatically documentation. Agent instructions,
-    # prompt resources and skill files often live there too and affect runtime
-    # behavior. Only conventional human-facing documentation names get the
-    # cheap docs-only path.
-    return any(stem.startswith(prefix) for prefix in _ROOT_DOC_PREFIXES)
 
 
-def docs_only(record: Any) -> bool:
-    return bool(record.changed_files) and all(is_doc(p) for p in record.changed_files) and not _BEHAVIOR.search(record.task)
 
 
-def visual_required(record: Any) -> bool:
-    # A picture can only grade a web deliverable: the page, or a stylesheet or
-    # script that renders into one. Visual words on a Python change demand nothing.
-    if not any(Path(p).suffix.lower() in _VISUAL_ASSETS for p in record.changed_files):
-        return False
-    return visual_intent(record)
 
 
 def coverage_required(core: Any, record: Any) -> bool:
@@ -434,459 +146,30 @@ def coverage_required(core: Any, record: Any) -> bool:
     return bool(default_pages(core.repository))
 
 
-def visual_intent(record: Any) -> bool:
-    """Whether the admitted task contract contains an affirmative visual goal."""
-
-    return any(
-        _VISUAL.search(_NEGATED_VISUAL.sub("", text))
-        for text in _active_requirement_texts(record)
-    )
-
-
-def web_render_intent(record: Any) -> bool:
-    """Whether a render-capable web producer is predictably needed up front.
-
-    Unlike visual_required, this is usable before the deliverable exists. It lets
-    the CLI close the verification producer set before spending model calls on a
-    page it would later be unable to verify.
-    """
-
-    texts = _active_requirement_texts(record)
-    return visual_intent(record) and any(_WEB_INTENT.search(text) for text in texts)
-
-
-def visual_review_entries(record: Any, limit: int = _VISUAL_REVIEW_LIMIT) -> list[dict[str, Any]]:
-    """Bound the screenshot checklist to requirements a frame can actually judge.
-
-    The durable ledger stays lossless. This projection is intentionally smaller:
-    sending 100+ implementation requirements to a vision turn is expensive and
-    makes the grader spend output on "NOT VISIBLE" instead of defects the image
-    can prove. High-signal appearance requirements win; implementation-only
-    requirements are omitted unless they also state a visible outcome.
-    """
-
-    direct_entries: list[tuple[int, dict[str, Any]]] = []
-    source_candidates: list[tuple[int, int, dict[str, Any]]] = []
-    for index, entry in enumerate(record.requirements):
-        if not isinstance(entry, dict) or entry.get("status", "active") != "active":
-            continue
-        text = str(entry.get("text", "")).strip()
-        if not text or set(text) <= {"=", "-", "_", " "}:
-            continue
-
-        source = str(entry.get("source", ""))
-        if not source.startswith("file:"):
-            # Preserve the pre-existing fail-closed contract for direct user and
-            # continuation requirements: a nonvisual direct requirement still
-            # gets NOT VISIBLE rather than silently disappearing. Only the
-            # explicit "read this spec" wrapper is metadata, not a screenshot ask.
-            if not entry.get("delegates_source"):
-                direct_entries.append((index, entry))
-            continue
-
-        if _VISUAL_CODE_LITERAL.search(text):
-            continue
-        cleaned = _NEGATED_VISUAL.sub("", text)
-        direct = bool(_VISUAL_DIRECT.search(text) or _VISUAL.search(cleaned))
-        observable = bool(_VISUAL_OBSERVABLE.search(text))
-        objects = len(_VISUAL_OBJECT.findall(text))
-        if _VISUAL_CONTRACT_ONLY.search(text) and not observable:
-            # "Generate procedurally", "use shader X", "single HTML", etc. are
-            # source-code obligations. A screenshot cannot prove them even when
-            # the sentence happens to name fish/plants/animation.
-            continue
-        if not direct and not observable and not objects:
-            continue
-        score = (
-            (7 if observable else 0)
-            + (3 if direct else 0)
-            + min(objects, 4) * 2
-        )
-        # Short atomic visible nouns ("Tail fin", "Two eyes") are useful checker
-        # criteria even when the parent heading carried the word "visible".
-        if objects and len(text) <= 80:
-            score += 3
-        # Quantified scene contents are high-value acceptance facts: they catch
-        # missing fish, sparse gravel/plants and absent bubble streams.
-        if objects and re.search(
-            r"\b(?:exactly|at\s+least|approximately|one|two|three|four|five|\d+)\b",
-            text,
-            re.I,
-        ):
-            score += 2
-        if _VISUAL_IMPLEMENTATION.search(text) and not observable:
-            score -= 5
-        if text.endswith(":"):
-            score -= 2
-        if score <= 0:
-            continue
-        source_candidates.append((score, index, entry))
-
-    source_limit = max(1, int(limit))
-    if len(source_candidates) > source_limit:
-        source_candidates = sorted(
-            source_candidates, key=lambda item: (-item[0], item[1])
-        )[:source_limit]
-    selected = direct_entries + [
-        (index, entry) for _, index, entry in source_candidates
-    ]
-    return [entry for _, entry in sorted(selected, key=lambda item: item[0])]
 
 
 
 
-def visual_producer_available(core: Any) -> Optional[bool]:
-    """Whether this runtime exposes a semantic visual producer.
-
-    None means a lightweight/test core does not expose a tool catalogue, so
-    callers preserve the historical unknown behavior. A real CoreRuntime
-    returns a definite answer: visual.check is advertised only when the active
-    model can actually inspect images.
-    """
-
-    tools = getattr(core, "tools", None)
-    if not callable(tools):
-        return None
-    try:
-        return any(getattr(item, "name", None) == "visual.check" for item in tools())
-    except Exception:
-        return None
 
 
-def _page_loads_the_change(
-    core: Any,
-    page: str,
-    changed_files: Sequence[str],
-    diagnostic: Collection[str] = frozenset(),
-) -> bool:
-    """Whether an unchanged page is still the surface that renders the change.
-
-    The completion gate used to accept a visual pass only when the checked page
-    itself was in ``changed_files``. A scaffold ``index.html`` that loads an
-    edited ``game.js`` never qualified, so a passing web game ended as
-    ``unproducible_requirement`` even though the checker had rendered the page
-    and the current bytes. Require the page to reference at least one changed
-    stylesheet/script in its own directory: that is the page the change is for,
-    not an unrelated page elsewhere in the repository. A sibling scratch probe
-    (``probe_snake.cjs``) is not loaded by the page and must not block the
-    proof. Nor is the run's own ``diagnostic`` harness page: nothing the user
-    opens loads it, so its pass proves nothing about the deliverable.
-    """
-
-    if is_scratch_page(page) or Path(page).as_posix() in diagnostic:
-        return False
-    if page in changed_files:
-        return True
-    page_path = Path(page)
-    assets = [
-        item
-        for item in changed_files
-        if Path(item).suffix.lower() in _PAGE_ASSETS
-        and Path(item).parent == page_path.parent
-    ]
-    if not assets:
-        return False
-    try:
-        text = core.safe_path(page).read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return False
-    return any(Path(item).name in text for item in assets)
 
 
-def visual_proven(core: Any, record: Any) -> bool:
-    """Whether the current bytes have a clean visual verdict.
-
-    Both visual paths count: the legacy in-agent render review and the isolated
-    visual.check checker. The latter keeps frame bytes out of the main transcript,
-    so visual tasks can improve quality without making every later model request
-    pay for screenshots again.
-    """
-
-    current = identity(core, record)
-    if not current:
-        return False
-    diagnostic = diagnostic_paths(core, record)
-
-    for evidence in reversed(record.evidence):
-        if not isinstance(evidence, dict) or evidence.get("kind") != "render_review":
-            continue
-        metadata = evidence.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        if (
-            metadata.get("clean") is True
-            and metadata.get("completion_identity") == current
-        ):
-            return True
-
-    persisted = {
-        item.get("evidence_id"): item
-        for item in record.evidence
-        if isinstance(item, dict) and item.get("evidence_id")
-    }
-    for entry in reversed(record.provider_history):
-        if entry.get("core_name") != "visual.check":
-            continue
-        result = entry.get("result")
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            continue
-        if result.get("requested_by") not in (None, "harness_final"):
-            continue
-        data = result.get("data")
-        if not isinstance(data, dict) or data.get("completion_identity") != current:
-            continue
-        target = str(data.get("completion_target") or "")
-        if not target or not _page_loads_the_change(
-            core, target, record.changed_files, diagnostic
-        ):
-            # A pass on a scratch probe or an unrelated page is not evidence
-            # about the deliverable, even when its bytes are current.
-            continue
-        attached = result.get("evidence") or []
-        if not attached or not all(
-            item.get("evidence_id") in persisted
-            and persisted[item["evidence_id"]].get("metadata", {}).get(
-                "completion_identity"
-            )
-            == current
-            for item in attached
-            if isinstance(item, dict)
-        ):
-            continue
-        if (
-            data.get("verdict") == "pass"
-            and data.get("method") == "vision"
-            and not data.get("page_errors")
-            and not data.get("console_errors")
-        ):
-            return True
-    return False
 
 
-def identity(core: Any, record: Any) -> dict[str, Any]:
-    """Hash only known task inputs (reads + changes), not generated tree noise.
-
-    Missing files have a stable deletion marker. Unreadable/outside paths fail
-    closed. Checks also compare before/after identities to reject concurrent edits.
-    Scratch artifacts are not task inputs: deleting a probe after a passing
-    visual check must not make the deliverable's proof stale. Neither are the
-    run's own unreferenced harness pages (``diagnostic_paths``).
-    """
-    diagnostic = diagnostic_paths(core, record)
-    paths = {p for p in record.changed_files if _deliverable(p, diagnostic)}
-    for requirement in record.requirements:
-        if (
-            not isinstance(requirement, dict)
-            or requirement.get("status", "active") != "active"
-        ):
-            continue
-        source_path = requirement.get("source_path")
-        if (
-            isinstance(source_path, str)
-            and source_path
-            and _deliverable(source_path, diagnostic)
-        ):
-            paths.add(source_path)
-    for entry in record.provider_history:
-        if entry.get("core_name") in {"repo.read_file", "repo.read_lines"}:
-            result = entry.get("result") or {}
-            path = (result.get("data") or {}).get("path")
-            if result.get("ok") and isinstance(path, str) and _deliverable(path, diagnostic):
-                paths.add(path)
-    files = {}
-    for relative in sorted(paths):
-        try:
-            path = core.safe_path(relative)
-            files[relative] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
-        except Exception:
-            return {}
-    return {"files": files, "requirements": ledger_digest(record.requirements), "task": record.task}
 
 
-def same_run_inputs(core: Any, prior: dict[str, Any], current: dict[str, Any]) -> bool:
-    """Whether two identities list the same known inputs.
-
-    ``prior`` is the identity an earlier run was bound to. Every file it hashed
-    must hash the same now (re-read from disk when the current identity no
-    longer lists it) and the task must be the same. The current identity may
-    list more files: files merely read since do not change a byte a command
-    executes. The requirement ledger does not affect what a command executes,
-    so a ledger edit alone does not count either.
-
-    Equality here is **not** a licence to answer a later call from an earlier
-    verdict. The identity names only the files KaroX knows about, and a run
-    executes project code that can write a fixture, a lock file or an ignored
-    dependency outside that set, so two equal identities do not prove that
-    nothing changed between the two runs. Mission 02 removed the verdict cache
-    for that reason (``docs/audits/DSH_REUSE_INTEGRITY_20261106.md``); this
-    predicate remains the identity comparison itself, and no caller may treat
-    it as proof of no side effects.
-    """
-
-    if not prior or not current:
-        return False
-    if prior.get("task") != current.get("task"):
-        return False
-    prior_files = prior.get("files")
-    current_files = current.get("files")
-    if not isinstance(prior_files, dict) or not isinstance(current_files, dict):
-        return False
-    for relative, digest in prior_files.items():
-        now = current_files.get(relative)
-        if now is None:
-            try:
-                path = core.safe_path(relative)
-                now = (
-                    hashlib.sha256(path.read_bytes()).hexdigest()
-                    if path.is_file()
-                    else "missing"
-                )
-            except Exception:  # noqa: BLE001 - unreadable means changed
-                return False
-        if now != digest:
-            return False
-    return True
 
 
-def command_classes(argv: Sequence[str]) -> set[str]:
-    """Exact runner positions, never a substring of arbitrary python -c text."""
-    parts = list(argv)
-    if not parts:
-        return set()
-    exe = Path(parts[0]).stem.lower()
-    if exe == "git" and parts[1:] == ["diff", "--check"]:
-        return {"structural"}
-    if exe.startswith("python") and len(parts) > 2 and parts[1] == "-m":
-        module = parts[2]
-        if module in {"pytest", "unittest"}:
-            return {"tests"}
-        if module in {"ruff", "mypy", "py_compile", "compileall", "build"}:
-            return {"structural"}
-        if module == "karox.web_check":
-            return {"structural", "browser"} if "--render" in parts else {"structural"}
-    if "--help" in parts and "-c" not in parts:
-        return {"runtime"}
-    if exe in {"pytest"}:
-        return {"tests"}
-    if exe in {"ruff", "mypy", "tsc"} or (exe == "node" and "--check" in parts):
-        return {"structural"}
-    if exe in {"npm", "pnpm", "yarn"}:
-        script = parts[2] if len(parts) > 2 and parts[1] == "run" else parts[1] if len(parts) > 1 else ""
-        if script in {"test:smoke", "test:e2e"}:
-            return {"tests", "runtime"}
-        if script == "test":
-            return {"tests"}
-        if script in {"build", "lint", "typecheck", "type-check", "check:types"}:
-            return {"structural"}
-    if exe in {"cargo", "go"} and len(parts) > 1:
-        if parts[1] == "test":
-            return {"tests"}
-        if parts[1] in {"build", "check", "vet"}:
-            return {"structural"}
-    return set()
 
 
-def browser_proof(data: dict[str, Any]) -> bool:
-    # An exact same-bytes/same-argv PASS may be replayed from persisted evidence
-    # without rerunning the browser process. The cache writer sets this bit only
-    # after the original stdout itself passed this function, so the compact replay
-    # keeps proof semantics without copying a large render payload into history.
-    if (
-        data.get("proof_cache_hit") is True
-        and data.get("cached_browser_proof") is True
-    ):
-        return True
-    try:
-        payload = json.loads(data.get("stdout", ""))
-    except (ValueError, TypeError):
-        return False
-    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("vacuous"):
-        return False
-    renders = payload.get("render")
-    if not isinstance(renders, dict) or not renders:
-        return False
-    return all(
-        isinstance(r, dict) and not any(r.get(k) for k in ("skipped", "error", "page_errors", "console_errors", "problems"))
-        and r.get("sampled", 0) > 0
-        for r in renders.values()
-    )
 
 
-def _complete_change_review(record: Any, data: dict[str, Any]) -> bool:
-    """Whether this ``git.diff`` read the whole change since the start revision.
-
-    Only the scope the trusted Core actually executed counts. A plain
-    ``git diff`` shows the unstaged half only, ``staged=true`` the index half
-    only, and ``paths=[...]`` one corner of either; none of them covers the
-    change a run is about to hand over, and none of them is taken against the
-    tree the run began with.
-
-    The base is checked, not assumed. A review is current only when the exact
-    revision it names is the session's durable start revision: a review of
-    "whatever HEAD is now" describes a different span after an elevated commit
-    moved HEAD, and the model's own claim about the scope is never read --
-    ``review`` is written by Core from the commands it ran. A result from
-    before this contract (an earlier version, a symbolic base) or from a
-    session whose record has no usable start revision fails closed, and so does
-    one whose captured tracked diff or untracked listing was truncated: neither
-    can prove what it did not show, and a path Git excludes is in neither view.
-    """
-
-    review = data.get("review")
-    if not isinstance(review, dict):
-        return False
-    if review.get("version") != git_baseline.REVIEW_VERSION:
-        return False
-    if review.get("mode") != "complete":
-        return False
-    if review.get("paths") != []:
-        return False
-    if review.get("truncated") is not False:
-        return False
-    if review.get("complete") is not True:
-        return False
-    ignored = review.get("ignored")  # older shapes cannot prove hidden coverage
-    if (
-        not isinstance(ignored, dict)
-        or ignored.get("complete") is not True
-        or ignored.get("excluded")
-        or ignored.get("missing")
-    ):
-        return False
-    baseline = git_baseline.normalize(getattr(record, "git_baseline", None))
-    if baseline is None:
-        return False
-    if baseline["kind"] == git_baseline.KIND_COMMIT:
-        return (
-            review.get("base") == git_baseline.REVIEW_BASE_START
-            and review.get("base_commit") == baseline["commit"]
-        )
-    if baseline["kind"] == git_baseline.KIND_UNBORN:
-        return review.get("base") == git_baseline.REVIEW_BASE_UNBORN
-    return False
 
 
-def _review_skips_a_change(core: Any, record: Any, data: dict[str, Any]) -> bool:
-    """Whether a complete review explicitly left out a file this run changed.
 
-    An untracked path inside a dependency or build directory is not source
-    material and the file tools do not list it, so the review records it as
-    excluded rather than pretending to show it. When the run itself wrote such
-    a file, that is a real gap: the gate must keep asking instead of counting
-    a review that skipped the deliverable.
-    """
 
-    review = data.get("review")
-    untracked = review.get("untracked") if isinstance(review, dict) else None
-    excluded = untracked.get("excluded") if isinstance(untracked, dict) else None
-    if not isinstance(excluded, list) or not excluded:
-        return False
-    skipped = {path for path in excluded if isinstance(path, str)}
-    diagnostic = diagnostic_paths(core, record)
-    return any(
-        path in skipped and _deliverable(path, diagnostic)
-        for path in record.changed_files
-    )
+
+
 
 
 def floor(core: Any, record: Any) -> list[str]:

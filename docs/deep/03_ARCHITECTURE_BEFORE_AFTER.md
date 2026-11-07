@@ -284,10 +284,21 @@ public `analyze`, `fingerprints`, `render_failure_map`, `is_test_path`,
 The Failure dataclass decorator and every regex constant moved with their
 owners. Check/probe/repo-safety/coverage/render tests pass.
 
+## After — verification: completion gate split
+
+`completion_gate.py` 1,278 → 565 lines. The shared predicates (requirements,
+docs, test-edit rules, diagnostics, run identity) move to
+`completion_rules.py` (360); visual/web intent and proof move to
+`completion_visual.py` (317); whole-change review and run identity to
+`completion_review.py` (199). `floor`, coverage, setup/runtime classification
+and the attestation/unproducible predicates stay in the gate. All historical
+public names are re-exported; the new modules join the model-facing neutrality
+scan. Completion/coverage/probe/neutrality tests pass.
+
 ## Next
 
-Browser remained done; split `completion_gate`, then providers, repo_context,
-TUI, web_check and bridge (with S0 characterization tests first).
+Providers, `core_tools`/`core.py`, `repo_context`, TUI, `web_check`, then the
+bridge with its S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
