@@ -29,7 +29,7 @@
 | Wheel build from final HEAD | PASS — `2eed6bfb...` 1,150,836 bytes |
 | Fresh venv install, CLI/TUI smoke | PASS — version/paths/agent help exit 0 |
 | Wheel package-data/license inspection | baseline passed; final pending |
-| Full one-revision pytest | **FILE-ISOLATED PASS; SINGLE-PROCESS NOT GREEN** (1,525P/15S/0F/0H across 70 files) |
+| Full one-revision pytest | **PASS** — single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
 | Real provider/browser/MCP/TUI smoke | NOT RUN |
 | Benchmarks | NOT RUN |
 

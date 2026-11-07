@@ -20,7 +20,7 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 | `ruff` | PASS | 164 modules/scoped tests |
 | scoped `mypy` | PASS | cli/entrypoint/tui, 13 source files |
 | `check_tree` | PASS | 164 modules, 87,632 lines < 88,000 |
-| Full pytest | **FILE-ISOLATED PASS; SINGLE-PROCESS NOT GREEN** | 70 test files, **1,525 passed / 15 skipped / 0 failed / 0 hangs** in one process per file with separate config/runtime; single-process run still hit order-dependent browser/bridge/async hangs. See CHECKPOINT. |
+| Full pytest | **PASS** | `python -m pytest -q -p no:cacheprovider` exit 0; 1,542 tests collected. Additional file-isolated gate: 70 files, **1,525 passed / 15 skipped / 0 failed / 0 hangs**. |
 
 ## Behavior gates
 

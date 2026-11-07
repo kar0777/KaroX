@@ -38,9 +38,7 @@ work remain open.
   `2eed6bfb0a9ef9f815420b88284256c0a39ad8c9981e0b23bebe46946d6849f3`.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
-- Single-process pytest remains **NOT GREEN** due intermittent order/global
-  state hangs in browser/bridge/MCP tests; each affected file passes in
-  isolation.
+- The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
 - Fresh install of the final wheel in `venv-candidate-final` PASS: version,
   isolated paths JSON and `agent run --help` all exit 0.
 - Public package-facade, CLI alias, hosted multi-project, legacy keyring, JSON
@@ -69,17 +67,15 @@ work remain open.
 
 ## Still blocking READY
 
-1. Deterministic one-revision full-suite PASS. Per-file isolation is useful
-   evidence but not a substitute for the release command.
-2. Version/scope/migration. PyPI shows only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
+1. Version/scope/migration. PyPI shows only 5.0.0rc2/rc3; 5.0.0 and 5.1.0 are
    free. The target still reports 6.0.0a3 and its scope differs from old v5.
-3. `git_baseline` is under schema 1; rc4 rejects the new field, so rollback
+2. `git_baseline` is under schema 1; rc4 rejects the new field, so rollback
    needs a restore/migration plan.
-4. Installers still default to `v6/plan-impl-20261104` and side-by-side
+3. Installers still default to `v6/plan-impl-20261104` and side-by-side
    `karox6`/dogfood, not a 5.x in-place upgrade.
-5. Real provider/browser/MCP/TUI smoke and 30–100 real benchmark tasks are not
-   run.
-6. Checks/probes command-guard coverage and the TUI pure-helper import boundary
+4. Real browser/MCP/TUI smoke and the 30–100-task benchmark matrix are not run;
+   only one real provider smoke exists.
+5. Checks/probes command-guard coverage and the TUI pure-helper import boundary
    still need explicit decisions.
 
 ## Safe continuation
@@ -101,10 +97,9 @@ release candidate.
 
 ## Next checkpoint
 
-1. Finish a deterministic full gate; if the single-process suite cannot be made
-   reliable, reproduce and fix the order-dependent bridge/browser/async leak.
-2. Rebuild wheel at final HEAD, install in a fresh venv, run CLI/TUI/doctor/paths.
-3. Resolve 5.x version, scope, installer upgrade, and session rollback.
-4. Run real model/browser/MCP/TUI smoke with cost ledger.
-5. Run the benchmark tasks and then decide READY/NOT_READY.
+1. Rebuild wheel at final HEAD, install in a fresh venv, run CLI/TUI/doctor/paths.
+2. Resolve 5.x version, scope, installer upgrade, and session rollback.
+3. Run real browser/MCP/TUI smoke with cost ledger.
+4. Run the benchmark tasks and then decide READY/NOT_READY.
+
 
