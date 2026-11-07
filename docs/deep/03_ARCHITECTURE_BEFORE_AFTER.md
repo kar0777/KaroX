@@ -223,6 +223,26 @@ unchanged. `web_check.py`, `visual_check.py`, `render_backend.py` and
 `code_sources.py` were deliberately not touched: their 3D visibility checks are
 product features with dedicated tests.
 
+## After — engine steps 2–4
+
+`engine_kernel.py` 2,300 → 1,970 lines across three cohesive moves:
+
+| Module | Lines | Responsibility |
+|---|---:|---|
+| `engine_agent.py` | 646 | EngineAgent methods and loop-control errors |
+| `engine_prompts.py` | 102 | engine execution contract + closing-turn prompts (neutrality-scanned) |
+| `engine_tool_catalog.py` | 150 | domain-keyword schema gating + provider-tool shape helpers |
+| `engine_kernel_control.py` | 228 | cancellation, grace windows, remaining time, event bridge |
+
+The concrete `EngineAgent` and `EngineKernel` classes stay in the façade so
+their `__module__`/trajectory identity is unchanged; the kernel composes
+`EngineControlMixin`. `_any_language_server` remains in the façade because
+tests monkeypatch it there. Control-focused engine tests, the neutrality scan
+and the tree gate pass.
+
+Remaining engine moves: durable IO/state snapshots, finish/report and the
+harness finishing block.
+
 ## Totals after CLI + engine step 1 + browser series
 
 | Metric | Baseline | Current |
