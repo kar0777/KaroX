@@ -48,6 +48,9 @@ the representative benchmark matrix remain open.
   steps, 27,131 tokens; cost unavailable/`no_pricing`, no invoice invented.
 - One paired cell: baseline c4 **stopped on token budget** (34,113 tokens,
   unverified) on the same task where candidate was verified in 27,131 tokens.
+- Competitor attempts were credential-blocked: OpenCode installed 2.2.1 returned
+  an invalid API key; DSH 0.2.2-rc.1 reported missing deepseek-official
+  credentials. No competitor scores are claimed.
 - No representative benchmark matrix or OpenCode/DSH comparison has been run.
 
 ## Landed fixes
@@ -74,7 +77,8 @@ the representative benchmark matrix remain open.
    backs up config/runtime before upgrade, but in-place downgrade is unsupported
    and a full restore/reinstall rehearsal is not automated.
 2. **Benchmark matrix**: one real provider smoke and one paired trivial cell
-   exist; no 30–100-task matrix and no OpenCode/DSH comparison.
+   exist; no 30–100-task matrix and no OpenCode/DSH comparison. Competitor
+   attempts were blocked by invalid/missing credentials, not by Karo results.
 3. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
    real bridge/TUI/provider user scenario is not documented end to end.
 4. Checks/probes inline command-guard coverage and the TUI pure-helper import

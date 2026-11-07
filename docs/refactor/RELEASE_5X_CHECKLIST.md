@@ -23,7 +23,7 @@ were updated and re-run.
 | Version/classifier/PEP 440 consistency | **PASS** — `karox 5.0.0`, wheel metadata `karox_runtime-5.0.0` |
 | README, README_RU, CHANGELOG, INSTALL, migration text | **PASS** for the 5.0.0 local candidate |
 | 5.x upgrade/rollback and `git_baseline` session compatibility | **PARTIAL**: reads old v5; installer backs up config/runtime before upgrade; rollback is restore + previous wheel, not an in-place downgrade |
-| Installer detect/upgrade/alias behavior | **PASS local**: 5.0.0 installer requires explicit spec, backs up with `KAROX_UPGRADE=1`, uses `pipx install --force`, leaves `karox-runtime6`; PowerShell 9 tests pass; POSIX scenario passes in WSL Ubuntu. Published URL still NOT TESTED. |
+| Installer detect/upgrade/alias behavior | **PASS local**: 5.0.0 installer requires explicit spec, backs up with `KAROX_UPGRADE=1`, uses `pipx install --force`, leaves `karox-runtime6`; PowerShell 9 tests pass; POSIX fresh/refuse/upgrade/backup scenario passed in WSL Ubuntu. Published URL still NOT TESTED. |
 | Preserve/port aliases | `karox-vnext` restored; `karox-agent-mcp` deliberately out of stable scope |
 | Existing v5 lab capabilities | **DELIBERATE EXCLUSION**, documented; not claimed as stable features |
 | Wheel build from final HEAD | **PASS** — `832cc249...`, 1,150,875 bytes |

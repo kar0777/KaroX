@@ -1,6 +1,6 @@
 # Real-world benchmarks
 
-**Status: one smoke + one paired trivial cell; no representative comparison matrix. Spend: cost unavailable.**
+**Status: one smoke + one paired trivial cell + competitor credential blockers; no representative comparison matrix. Spend: cost unavailable.**
 
 The goal requires real tasks and comparisons. One real provider smoke has been
 run; no benchmark cell, no competing CLI comparison, and no multi-task result
@@ -44,10 +44,25 @@ of general superiority.
 
 | Arm | Version under test | Entry point | Status |
 |---|---|---|---|
-| Karo baseline c4bc342 | 6.0.0a3 at `b/karox5-refactor` before refactor | `karox agent run` | offline tests only |
-| KaroX 5.x refactor | candidate `f8b641b`, version still to be chosen | same | offline tests only |
-| OpenCode V2 | 2.2.6 frozen | `opencode run` | not run |
-| DSH | 0.2.2-rc.1 + Node 24.22.2 | `dsh` | not run |
+| Karo baseline c4bc342 | 6.0.0a3 source `b/win` | `karox agent run` | one paired cell |
+| KaroX 5.0.0 | `karox_runtime-5.0.0` wheel, SHA `832cc249...` | same | one verified smoke + paired cell |
+| OpenCode V2 | installed 2.2.1 (target frozen 2.2.6) | `opencode run` | **blocked: default provider returned "Incorrect API key"**; no file change |
+| DSH | 0.2.2-rc.1 + Node 26.13.0 (target 24.22.2) | `dsh headless` | **blocked: `MISSING_CREDENTIAL` for deepseek-official**; no file change |
+
+## Competitor credential attempts — 2026-11-07
+
+The same trivial `calc.py` task was attempted Product-as-shipped:
+
+- OpenCode 2.2.1 chose `deepseek-v4.1-flash-1017` and exited 1 after 9.8 s with
+  `Incorrect API key provided`; `calc.py` was unchanged and the public test
+  still failed. No score, patch or cost is claimed.
+- DSH 0.2.2-rc.1 exited 1 after 7.7 s with
+  `MISSING_CREDENTIAL: llm-deepseek: no API key for provider route
+  "deepseek-official"`; `calc.py` was unchanged and the public test still failed.
+- These are environment/credential blockers, **not** evidence that Karo is
+  better. The installed competitor versions also differ from the frozen targets.
+  A real comparison requires provisioning their routes and re-running the frozen
+  protocol.
 
 ## Planned task families (30–100, not yet frozen)
 
