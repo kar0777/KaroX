@@ -26,9 +26,11 @@
 | `browser/session.py` | 3,703 | 173 (+11 owner modules) |
 | `engine_kernel.py` | 2,905 | 753 (+8 owner modules) |
 | `check_report.py` | 1,293 | 295 (+2 owner modules) |
+| `completion_gate.py` | 1,278 | 565 (+3 owner modules) |
+| `repo_context.py` | 2,055 | 148 (+4 owner modules) |
 | `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
-| Package modules | 164 | 193 |
-| Package lines | 87,689 | 88,219 (ceiling 90,000) |
+| Package modules | 164 | 200 |
+| Package lines | 87,689 | 88,567 (ceiling 90,000) |
 
 ## Work ledger
 
@@ -45,3 +47,4 @@ See `CHECKPOINT.md` for HEADs, gates and the next automatic action. See
 - Every mutating tool still passes capability policy and the consequence engine.
 - The TUI still talks to `agent run --stream-json` as a subprocess.
 - Tests may be added, never weakened to hide a regression.
+

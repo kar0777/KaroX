@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-07 22:38 Europe/Warsaw
+**Updated:** 2026-11-07 22:55 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -21,18 +21,22 @@ commits have targeted + full-engine evidence and need the next full gate.
 | CLI split | DONE | `cli.py` 2,299 → 193 + 8 modules |
 | Engine split | DONE | `engine_kernel.py` 2,905 → 753 + 8 owner modules |
 | Browser session split | DONE | `browser/session.py` 3,703 → 173 + 11 modules |
-| Tools batch | PARTIAL | `engine_tool_env` 1,864 → 1,396 + bodies 544; `core_tools` pending |
-| Verification batch | PARTIAL | `check_report` 1,293 → 295 + parsers/targets; `completion_gate` pending |
+| Tools batch | DONE (bodies) | `engine_tool_env` 1,864 → 1,396 + bodies 544; `core_tools` pending |
+| Verification batch | DONE (reports/gate) | `check_report` 1,293 → 295 (+parsers/targets); `completion_gate` 1,278 → 565 (+rules/visual/review) |
+| Context batch | DONE (repo) | `repo_context` 2,055 → 148 (+support/identity/search/inspect) |
 | Bridge | NOT STARTED | split plan + mandatory S0 characterization tests ready |
-| Providers / repo_context / TUI / web_check / core_tools | NOT STARTED | next batches |
+| Providers / TUI / web_check / core_tools / core | NOT STARTED | next batches |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-2 commits
+## Round-2 commits (latest first)
 
 ```
+5c54e48 refactor(context): split RepositoryContextEngine into identity/search/inspect mixins
+5be38ff refactor(verification): split completion_gate into rules, visual proof and review
 166c73f refactor(verification): split check_report into parsers and target selection
 e6f3004 refactor(tools): extract engine result/observation body module
 edd04b8 refactor(engine): complete the kernel decomposition into owner mixins
+7a5f44f docs(deep): checkpoint the completed engine split and check_report split
 ```
 
 ## Gates
@@ -44,7 +48,8 @@ edd04b8 refactor(engine): complete the kernel decomposition into owner mixins
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 193 modules / 88,219 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 200 modules / 88,567 lines |
+| Full suite at `7a5f44f` (before completion/repo splits) | running in the isolated gate worktree |
 | Full suite at current HEAD | pending next round |
 | Wheel build/fresh install | pending after the next full green gate |
 
@@ -52,19 +57,22 @@ edd04b8 refactor(engine): complete the kernel decomposition into owner mixins
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 193 |
-| Physical lines | 87,689 | 88,219 (ceiling 90,000) |
+| Product modules | 164 | 200 |
+| Physical lines | 87,689 | 88,567 (ceiling 90,000) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
 | `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
 | `check_report.py` | 1,293 | 295 (+ parsers 829 + targets 271) |
+| `completion_gate.py` | 1,278 | 565 (+ rules 360 + visual 317 + review 199) |
+| `repo_context.py` | 2,055 | 148 (+ support 407 + identity 628 + search 736 + inspect 394) |
 
 Remaining largest files: `bridge_launcher.py` (2,389), `bridge_proxy.py`
-(2,218), `repo_context.py` (2,055), `web_check.py` (1,831), `core_tools.py`
+(2,218), `tui/app.py` (2,038), `web_check.py` (1,831), `core_tools.py`
 (1,802), `providers.py` (1,638), `bridge_tailscale.py` (1,585), `core.py`
 (1,573), `provider_adapters.py` (1,503), `bridge_oauth.py` (1,483),
-`engine_tool_env.py` (1,396), `completion_gate.py` (1,278).
+`engine_tool_env.py` (1,396), `mcp_client.py` (1,201), `hosted_core.py`
+(1,162), `bridge_profiles.py` (1,144), `core_process.py` (1,126).
 
 ## Decisions that must not be lost
 
