@@ -428,10 +428,22 @@ card helpers move to `tui/render.py` (314) and remain re-exported
 (`_WRAP_CONSOLE` moved with `hang_text` after a caught NameError). TUI tests
 pass, including long-preview wrapping and narrow-terminal status.
 
+## After — web check split (safe slices)
+
+`web_check.py` 1,831 → 1,118 lines. JavaScript probe/render snippets move to
+`web_scripts.py` (315); import-map/script/page/picture analyzers
+(`check_page`, `check_picture`, `is_static_document`, `default_pages`,
+`default_pictures`, scratch-page helpers, declaration parsers) move to
+`web_document.py` (513). The browser seams (`_run_in_browser_thread`,
+`_shared_browser`, `_REFERENCE_MAX_FILES`) and all render/observe thresholds
+stay in the facade so the existing offline-pipeline patches still apply.
+The visual/offline, web-check, render and engine-render suites pass. Every
+Three.js/WebGL/3D threshold and probe is unchanged.
+
 ## Next
 
-`web_check` (1,831, preserve Three.js/WebGL/3D checks), then the bridge
-launcher/proxy/tailscale, then bridge profiles/oauth.
+Split the remaining browser/render/observe core of `web_check` only with a
+dedicated visual parity test, then the bridge launcher/proxy/tailscale.
 
 | Metric | Baseline | Current |
 |---|---:|---:|

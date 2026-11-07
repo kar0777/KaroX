@@ -31,6 +31,48 @@ to stdout as JSON, the same shape other checks use.
 
 from __future__ import annotations
 
+from .web_document import (  # noqa: F401
+    _MAX_PICTURE_BYTES as _MAX_PICTURE_BYTES,
+    check_picture as check_picture,
+    _ADDONS as _ADDONS,
+    _BARE_SIDE_EFFECT as _BARE_SIDE_EFFECT,
+    _DYNAMIC_MARKUP as _DYNAMIC_MARKUP,
+    _DocumentEndParser as _DocumentEndParser,
+    _FROM as _FROM,
+    _IMPORT_MAP as _IMPORT_MAP,
+    _JS_DECLARATION as _JS_DECLARATION,
+    _MAX_PAGES as _MAX_PAGES,
+    _MODULE_BLOCK as _MODULE_BLOCK,
+    _SVG_NAMESPACE as _SVG_NAMESPACE,
+    _ScriptBlockParser as _ScriptBlockParser,
+    _addons_without_three_mapping as _addons_without_three_mapping,
+    _document_problems as _document_problems,
+    _duplicate_declarations as _duplicate_declarations,
+    _resolves_bare as _resolves_bare,
+    _same_place as _same_place,
+    _top_level_declarations as _top_level_declarations,
+    check_page as check_page,
+    default_pages as default_pages,
+    default_pictures as default_pictures,
+    import_map_targets as import_map_targets,
+    is_scratch_artifact as is_scratch_artifact,
+    is_scratch_page as is_scratch_page,
+    is_static_document as is_static_document,
+    module_specifiers as module_specifiers,
+    shadowed_by_repository as shadowed_by_repository,
+)
+
+from .web_scripts import (  # noqa: F401
+    _FRAMES_DRAWN_JS as _FRAMES_DRAWN_JS,
+    _FRAME_GATE_JS as _FRAME_GATE_JS,
+    _PAGE_PROBE_JS as _PAGE_PROBE_JS,
+    _PIXEL_STATS_JS as _PIXEL_STATS_JS,
+    _RESIZE_PROBE_JS as _RESIZE_PROBE_JS,
+    _SCRATCH_ARTIFACT as _SCRATCH_ARTIFACT,
+    _SCRATCH_PAGE as _SCRATCH_PAGE,
+    _SVG_FIT_JS as _SVG_FIT_JS,
+)
+
 import argparse
 import atexit
 import base64
@@ -38,23 +80,10 @@ import hashlib
 import json
 import os
 import pathlib
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from html.parser import HTMLParser
 from typing import Any, Callable, Iterable, Optional, Sequence
 
-_MODULE_BLOCK = re.compile(
-    r"<script[^>]*type\s*=\s*[\"']module[\"'][^>]*>(.*?)</script>", re.S | re.I
-)
-_IMPORT_MAP = re.compile(
-    r"<script[^>]*type\s*=\s*[\"']importmap[\"'][^>]*>(.*?)</script>", re.S | re.I
-)
-# Matches `import x from "s"`, `export { y } from "s"` and the side-effect form
-# `import "s"`. A static `import(` call is not a module specifier for the loader.
-_FROM = re.compile(r"\b(?:import|export)\b[^;]*?\bfrom\s*[\"']([^\"']+)[\"']")
-_BARE_SIDE_EFFECT = re.compile(r"\bimport\s*[\"']([^\"']+)[\"']")
-_MAX_PAGES = 20
 
 #: How long a page gets to reach its first painted frames before the frame is
 #: measured. Headless rendering of a WebGL scene needs a real animation tick.
@@ -236,467 +265,31 @@ def _new_page(browser: Any) -> Any:
 
 
 
-# The metric runs in the browser: it decodes the screenshot it is handed and
-# reports local structure, tone count and how much of the *drawing surface* still
-# looks like the page behind it, so this check needs no image library.
-#
-# Structure alone was the wrong verdict and this file proves it: a page whose
-# canvas was cleared to a flat magenta measured as "blank" (a flat colour has no
-# local variation) while a full-viewport decorative wallpaper measured as the
-# best frame of the whole comparison. A run noticed exactly that, gave up on the
-# 3D scene it could not verify, and shipped the wallpaper. What makes a drawing
-# visible is that it differs from what would have been there without it, so the
-# verdict is now "the canvas region does not look like the page background".
-_PIXEL_STATS_JS = """
-async (payload) => {
-  const { source, rect, background } = payload;
-  const image = new Image();
-  image.src = source;
-  await image.decode();
-  // Namespaced so the same measurement works inside an SVG document, where
-  // createElement("canvas") makes an element without a drawing context.
-  const canvas = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const context = canvas.getContext("2d");
-  context.drawImage(image, 0, 0);
-  const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
-  const width = canvas.width;
-  const parse = (value) => {
-    const parts = String(value).match(/(\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);
-    return parts ? [Number(parts[1]), Number(parts[2]), Number(parts[3])] : null;
-  };
-  const bg = parse(background);
-  let left = 0, top = 0, right = width, bottom = canvas.height;
-  if (rect && rect.width > 1 && rect.height > 1) {
-    left = Math.max(0, Math.min(width - 1, Math.round(rect.x)));
-    top = Math.max(0, Math.min(canvas.height - 1, Math.round(rect.y)));
-    right = Math.max(left + 1, Math.min(width, Math.round(rect.x + rect.width)));
-    bottom = Math.max(top + 1, Math.min(canvas.height, Math.round(rect.y + rect.height)));
-  }
-  const tones = new Set();
-  const tones_histogram = {};
-  const tone_sums = {};
-  let sampled = 0;
-  let structured = 0;
-  let background_like = 0;
-  // Brightness, not colour: a frame can hold many colours and still be unlit.
-  // The bottom quarter is tracked on the frame's own height, so a scene whose
-  // camera points away from its tank floor cannot hide behind a bright top.
-  const dark_luma = Number(payload.dark_luma);
-  const bottom_edge = canvas.height * 0.75;
-  let luma_sum = 0;
-  let luma_square_sum = 0;
-  let bottom_sampled = 0;
-  let dark_bottom = 0;
-  let bottom_structured = 0;
-  for (let y = top + 4; y + 4 < bottom; y += 8) {
-    for (let x = left + 4; x + 12 < right; x += 8) {
-      const here = (y * width + x) * 4;
-      const there = (y * width + x + 8) * 4;
-      tones.add(((data[here] >> 3) << 10) | ((data[here + 1] >> 3) << 5) |
-                (data[here + 2] >> 3));
-      const delta = Math.abs(data[here] - data[there]) +
-                    Math.abs(data[here + 1] - data[there + 1]) +
-                    Math.abs(data[here + 2] - data[there + 2]);
-      if (delta > 24) {
-        structured += 1;
-      }
-      if (bg) {
-        const gap = Math.abs(data[here] - bg[0]) + Math.abs(data[here + 1] - bg[1]) +
-                    Math.abs(data[here + 2] - bg[2]);
-        if (gap <= 24) {
-          background_like += 1;
-        }
-      }
-      const tone = ((data[here] >> 5) << 10) | ((data[here + 1] >> 5) << 5) |
-                   (data[here + 2] >> 5);
-      tones_histogram[tone] = (tones_histogram[tone] || 0) + 1;
-      const sum = tone_sums[tone] || (tone_sums[tone] = [0, 0, 0]);
-      sum[0] += data[here]; sum[1] += data[here + 1]; sum[2] += data[here + 2];
-      const luma = (0.2126 * data[here] + 0.7152 * data[here + 1] +
-                    0.0722 * data[here + 2]) / 255;
-      luma_sum += luma;
-      luma_square_sum += luma * luma;
-      if (y >= bottom_edge) {
-        bottom_sampled += 1;
-        if (delta > 24) {
-          bottom_structured += 1;
-        }
-        if (luma < dark_luma) {
-          dark_bottom += 1;
-        }
-      }
-      sampled += 1;
-    }
-  }
-  let modal_tone = null;
-  let modal_count = 0;
-  for (const [tone, count] of Object.entries(tones_histogram)) {
-    if (count > modal_count) {
-      modal_count = count;
-      modal_tone = Number(tone);
-    }
-  }
-  // What one flat colour the frame is, and how much of it that colour is: a
-  // scene that renders as a single tone is the failure this reports, and it used
-  // to be invisible in the verdict -- the numbers said "not the page background"
-  // while the frame held one colour.
-  // The mean colour of the modal bucket. Decoding the 3-bit bucket with the
-  // 5-bit tone layout reported white as "56,56,56" -- a dark grey the frame
-  // never held -- so the colour is measured, not reconstructed.
-  const modal_color = modal_tone === null ? null : tone_sums[modal_tone]
-    .map((total) => Math.round(total / modal_count)).join(",");
-  const luma_mean = sampled ? luma_sum / sampled : null;
-  // Population standard deviation of brightness: "nearly one tone" as a number
-  // rather than as a colour count, because a hundred tones that are all black
-  // are still an unlit frame.
-  const luma_std = luma_mean === null
-    ? null
-    : Math.sqrt(Math.max(0, luma_square_sum / sampled - luma_mean * luma_mean));
-  return {
-    sampled,
-    structured,
-    tones: tones.size,
-    background_like,
-    dominant_color: modal_color,
-    dominant_share: sampled ? Number((modal_count / sampled).toFixed(4)) : null,
-    bottom_sampled,
-    bottom_structured_share: bottom_sampled
-      ? Number((bottom_structured / bottom_sampled).toFixed(4))
-      : null,
-    dark_bottom_share: bottom_sampled
-      ? Number((dark_bottom / bottom_sampled).toFixed(4))
-      : null,
-    luma_mean: luma_mean === null ? null : Number(luma_mean.toFixed(4)),
-    luma_std: luma_std === null ? null : Number(luma_std.toFixed(4)),
-    canvas_rect: rect || null,
-    background: bg ? bg.join(",") : null,
-  };
-}
-"""
-
-#: What the page says about its own drawing surface, read before the frame is
-#: measured: the largest canvas is what a viewer's eye lands on, and the page's
-#: background colour is what an unpainted canvas would show instead.
-_PAGE_PROBE_JS = """
-() => {
-  const paints_with_three = Array.from(document.querySelectorAll("script")).some(
-    (script) => /three(\\.module)?\\.js|["']three["']/.test(script.textContent || "")
-  );
-  let rect = null;
-  let area = 0;
-  for (const element of document.querySelectorAll("canvas")) {
-    const box = element.getBoundingClientRect();
-    if (box.width * box.height > area) {
-      area = box.width * box.height;
-      rect = { x: box.x, y: box.y, width: box.width, height: box.height };
-    }
-  }
-  const host = document.body || document.documentElement;
-  const background =
-    (host ? getComputedStyle(host).backgroundColor : "") ||
-    (document.documentElement
-      ? getComputedStyle(document.documentElement).backgroundColor
-      : "") || "";
-  const dynamic_dom = Boolean(
-    document.querySelector("script,canvas,video,audio,iframe,object,embed,link,img,picture,source,image,animate,animateTransform,animateMotion,set") ||
-    (typeof document.getAnimations === "function" && document.getAnimations().length > 0)
-  );
-  return {
-    canvases: document.querySelectorAll("canvas").length,
-    canvas_rect: rect,
-    paints_with_three,
-    page_background: background,
-    dynamic_dom,
-  };
-}
-"""
 
 
-def import_map_targets(text: str) -> dict[str, str]:
-    """Every specifier prefix the page's import maps define."""
-
-    targets: dict[str, str] = {}
-    for block in _IMPORT_MAP.findall(text):
-        try:
-            payload = json.loads(block)
-        except ValueError:
-            continue
-        imports = payload.get("imports") if isinstance(payload, dict) else None
-        if isinstance(imports, dict):
-            for key, value in imports.items():
-                if isinstance(key, str) and isinstance(value, str) and key:
-                    targets.setdefault(key, value)
-    return targets
 
 
-def module_specifiers(text: str) -> list[str]:
-    specifiers: list[str] = []
-    for block in _MODULE_BLOCK.findall(text):
-        for match in _FROM.finditer(block):
-            specifiers.append(match.group(1))
-        for match in _BARE_SIDE_EFFECT.finditer(block):
-            specifiers.append(match.group(1))
-    return specifiers
 
 
-def _resolves_bare(specifier: str, targets: dict[str, str]) -> bool:
-    if specifier in targets:
-        return True
-    # A trailing-slash key maps a whole subtree: "three/addons/" -> ".../jsm/".
-    return any(
-        key.endswith("/") and specifier.startswith(key) for key in targets
-    )
 
 
-# A module fetched by URL can itself import a bare specifier, and the page cannot
-# know that without fetching it. The three.js addons are the case this benchmark
-# hit twice: OrbitControls.js imports `three`, so a page that loads it by URL and
-# defines no import map fails with "Failed to resolve module specifier "three""
-# even though every specifier the page itself wrote is a full URL.
-_ADDONS = re.compile(r"https?://[^\"']*three@[^\"']*/(?:examples/jsm|addons)/")
 
 
-def _addons_without_three_mapping(text: str, targets: dict[str, str]) -> list[str]:
-    if "three" in targets:
-        return []
-    # A "three/" prefix entry is not enough: the addon module itself imports the
-    # bare specifier "three", which a trailing-slash mapping cannot resolve.
-    problems: list[str] = []
-
-    def addon(specifier: str) -> bool:
-        return bool(
-            _ADDONS.search(specifier)
-            or specifier.startswith(("three/addons/", "three/examples/jsm/"))
-        )
-
-    for block in _MODULE_BLOCK.findall(text):
-        for match in _FROM.finditer(block):
-            specifier = match.group(1)
-            if addon(specifier):
-                problems.append(specifier)
-        for match in _BARE_SIDE_EFFECT.finditer(block):
-            specifier = match.group(1)
-            if addon(specifier):
-                problems.append(specifier)
-    return problems
 
 
-def check_page(page: pathlib.Path) -> list[str]:
-    """Return every import this page cannot resolve, as user-facing lines."""
-
-    try:
-        text = page.read_text(encoding="utf-8", errors="replace")
-    except OSError as error:
-        return [f"{page.name}: cannot be read ({type(error).__name__})"]
-    targets = import_map_targets(text)
-    problems: list[str] = []
-    for specifier in module_specifiers(text):
-        if specifier.startswith(("http://", "https://", "data:", "//")):
-            continue
-        if specifier.startswith(("./", "../", "/")):
-            if specifier.startswith("/"):
-                # An absolute path is served from a server root this check cannot
-                # know; only a relative target can be proved missing here.
-                continue
-            target = (page.parent / specifier).resolve()
-            if not target.exists():
-                problems.append(
-                    f"{page.name}: imports {specifier!r}, which does not exist"
-                )
-            continue
-        if not _resolves_bare(specifier, targets):
-            problems.append(
-                f"{page.name}: imports the bare specifier {specifier!r} with no "
-                "import-map entry; a browser cannot resolve it"
-            )
-    for specifier in _addons_without_three_mapping(text, targets):
-        problems.append(
-            f"{page.name}: loads {specifier!r}, whose own module imports 'three', "
-            "and the page defines no import map for it; the browser will refuse "
-            "with \"Failed to resolve module specifier \\\"three\\\"\""
-        )
-    for problem in _document_problems(page.name, text):
-        problems.append(problem)
-    for problem in _duplicate_declarations(page.name, text):
-        problems.append(problem)
-    return problems
 
 
-class _DocumentEndParser(HTMLParser):
-    """Recognize markup end tags, not raw-text/RCDATA content."""
-
-    _TEXT_ELEMENTS = {
-        "script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes",
-    }
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._TEXT_ELEMENTS:
-            self.set_cdata_mode(tag)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed_html = False
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "html":
-            self.closed_html = True
 
 
-_JS_DECLARATION = re.compile(
-    r"(?:export\s+)?(?:const|let|class)\s+([A-Za-z_$][\w$]*)"
-)
 
 
-def _top_level_declarations(source: str) -> list[str]:
-    """Names declared at one script's top level, in order.
-
-    A small scanner rather than a parser: strings and comments are skipped and
-    braces track depth, which is enough to tell a module-level ``const FISH_L``
-    from a local of the same name inside a function (legal shadowing).
-    """
-
-    names: list[str] = []
-    depth = 0
-    index = 0
-    length = len(source)
-    while index < length:
-        char = source[index]
-        if char in "\"'`":
-            quote = char
-            index += 1
-            while index < length:
-                if source[index] == "\\":
-                    index += 2
-                    continue
-                if source[index] == quote:
-                    index += 1
-                    break
-                index += 1
-            continue
-        if char == "/" and index + 1 < length:
-            if source[index + 1] == "/":
-                newline = source.find("\n", index)
-                index = length if newline < 0 else newline + 1
-                continue
-            if source[index + 1] == "*":
-                end = source.find("*/", index + 2)
-                index = length if end < 0 else end + 2
-                continue
-        if char == "{":
-            depth += 1
-            index += 1
-            continue
-        if char == "}":
-            depth = max(0, depth - 1)
-            index += 1
-            continue
-        if depth == 0:
-            match = _JS_DECLARATION.match(source, index)
-            if match is not None:
-                prefix = source[max(0, index - 24) : index].rstrip()
-                if prefix.endswith(("for (", "for(", "for await (", "for await(")):
-                    # `for (let i ...)` and `for (const sx of ...)` bind inside
-                    # the loop statement; several such loops at module level are
-                    # legal and must not be reported as redeclarations.
-                    index = match.end()
-                    continue
-                names.append(match.group(1))
-                index = match.end()
-                continue
-        index += 1
-    return names
 
 
-class _ScriptBlockParser(HTMLParser):
-    """Collect inline script bodies; external ``src`` scripts are not read."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
-        self.blocks: list[str] = []
-        self._buffer: list[str] | None = None
-        self._external = False
-
-    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[no-untyped-def]
-        if tag.lower() != "script":
-            return
-        attributes = {key.lower(): (value or "") for key, value in attrs}
-        self._external = bool(attributes.get("src"))
-        self._buffer = []
-
-    def handle_data(self, data: str) -> None:
-        if self._buffer is not None:
-            self._buffer.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "script" or self._buffer is None:
-            return
-        if not self._external:
-            self.blocks.append("".join(self._buffer))
-        self._buffer = None
-        self._external = False
 
 
-def _duplicate_declarations(name: str, text: str) -> list[str]:
-    """Top-level names a browser would reject as already declared.
-
-    Two aquarium runs added a second ``const FISH_L`` / ``const
-    waterVolumeMaterial`` while appending a section; the page threw before the
-    scene ran and only a visual check could see it. This is the static guard,
-    measured on the file the mutation just wrote.
-    """
-
-    parser = _ScriptBlockParser()
-    try:
-        parser.feed(text)
-        parser.close()
-    except Exception:  # noqa: BLE001 - a malformed page is reported elsewhere
-        return []
-    problems: list[str] = []
-    for source in parser.blocks:
-        seen: set[str] = set()
-        reported: set[str] = set()
-        for declared in _top_level_declarations(source):
-            if declared in seen and declared not in reported:
-                reported.add(declared)
-                problems.append(
-                    f"{name}: declares '{declared}' more than once at top level; "
-                    f"the browser throws \"Identifier '{declared}' has already "
-                    "been declared\" before the page runs"
-                )
-            seen.add(declared)
-    return problems
 
 
-def _document_problems(name: str, text: str) -> list[str]:
-    """Whether this is one complete document rather than the middle of one.
 
-    A browser renders a page that lost its ending, which is how a run's edit
-    spree shipped a file with no closing ``</html>`` and a check that passed it.
-    Leaving the work half-typed is the failure mode, so it is named here rather
-    than left for a reader of the file to notice.
-    """
-
-    problems: list[str] = []
-    stripped = text.strip()
-    if not stripped:
-        return [f"{name}: the file is empty"]
-    if not stripped.lower().startswith("<!doctype html"):
-        problems.append(
-            f"{name}: does not start with <!doctype html>, so this is not one "
-            "complete HTML document"
-        )
-    document = _DocumentEndParser()
-    document.feed(stripped)
-    document.close()
-    if not document.closed_html:
-        problems.append(
-            f"{name}: has no closing </html>, so the document was cut short; the "
-            "browser will still render what is there, which is why it has to be "
-            "said out loud"
-        )
-    return problems
 
 
 def render_problems(
@@ -955,132 +548,10 @@ FIRST_FRAMES_TIMEOUT_MS = 30_000
 MOTION_FRAMES_TIMEOUT_MS = 20_000
 RESIZE_FRAMES_TIMEOUT_MS = 10_000
 
-#: A software-rendered WebGL scene (SwiftShader: no GPU in the sandbox, and
-#: ``--disable-gpu`` everywhere) draws one frame every 3-6 s. Its animation
-#: loop then owns the page's main thread, and every evaluate and screenshot
-#: of an observation waited behind whole frames: the b0 aquarium page took
-#: 97 s per look (probe 26 s, first screenshot 24 s, second 16 s, pixel
-#: statistics 8 s, resize 12 s) and the visual check spent 405 s of a 1022 s
-#: run on four looks. The gate holds ``requestAnimationFrame`` callbacks while
-#: KaroX measures and photographs, and releases them in between, so the page
-#: draws only when its frames are wanted and the reads run on an idle thread.
-#: It counts drawn frames, so the second picture is taken after the page
-#: really drew again -- not after two seconds in which a slow page drew
-#: nothing -- and it counts pending requests, so a static page is never
-#: waited on.
-_FRAME_GATE_JS = """
-(() => {
-  if (window.__karoxFrameGate) return;
-  const native = window.requestAnimationFrame.bind(window);
-  const cancelNative = window.cancelAnimationFrame.bind(window);
-  const gate = { paused: false, frames: 0, pending: 0, seq: 1 << 30,
-                 queue: [], live: new Map() };
-  const schedule = (id, cb) => {
-    const nativeId = native((time) => {
-      gate.live.delete(id);
-      gate.pending = Math.max(0, gate.pending - 1);
-      gate.frames += 1;
-      cb(time);
-    });
-    gate.live.set(id, { nativeId, cb });
-  };
-  window.requestAnimationFrame = function (cb) {
-    const id = ++gate.seq;
-    gate.pending += 1;
-    if (gate.paused) gate.queue.push([id, cb]);
-    else schedule(id, cb);
-    return id;
-  };
-  window.cancelAnimationFrame = function (id) {
-    const queued = gate.queue.findIndex((entry) => entry[0] === id);
-    if (queued >= 0) {
-      gate.queue.splice(queued, 1);
-      gate.pending = Math.max(0, gate.pending - 1);
-      return;
-    }
-    const live = gate.live.get(id);
-    if (live) {
-      cancelNative(live.nativeId);
-      gate.live.delete(id);
-      gate.pending = Math.max(0, gate.pending - 1);
-      return;
-    }
-    cancelNative(id);
-  };
-  // A frame already handed to the browser would still draw after the pause,
-  // and on a software-rendered scene one frame is seconds: the probe and the
-  // capture then wait for it. Pausing takes those frames back as well.
-  gate.pause = () => {
-    gate.paused = true;
-    for (const [id, entry] of gate.live) {
-      cancelNative(entry.nativeId);
-      gate.queue.push([id, entry.cb]);
-    }
-    gate.live.clear();
-    return gate.frames;
-  };
-  gate.resume = () => {
-    gate.paused = false;
-    const held = gate.queue;
-    gate.queue = [];
-    for (const [id, cb] of held) schedule(id, cb);
-    return gate.frames;
-  };
-  Object.defineProperty(window, "__karoxFrameGate", { value: gate });
-})();
-"""
-#: A standalone SVG is drawn at its own width and height, so a 400x300 picture
-#: arrives as a small corner of the frame and the checker judges a thumbnail.
-#: With a viewBox the picture scales without distortion, so the observed copy
-#: is fitted to the viewport. The file is not touched.
-_SVG_FIT_JS = """
-() => {
-  const root = document.documentElement;
-  if (document.body || !root || root.namespaceURI !== "http://www.w3.org/2000/svg") return false;
-  if (!root.getAttribute("viewBox")) return false;
-  root.setAttribute("width", "100%");
-  root.setAttribute("height", "100%");
-  return true;
-}
-"""
-_FRAMES_DRAWN_JS = (
-    "(n) => { const g = window.__karoxFrameGate;"
-    " return !g || g.frames >= n || (g.pending === 0 && g.queue.length === 0); }"
-)
 
 
-_DYNAMIC_MARKUP = re.compile(
-    r"<\s*(?:script|canvas|video|audio|iframe|object|embed|link|img|picture|source|image|feimage|foreignobject|animate(?:Transform|Motion)?|set)\b"
-    r"|<\s*meta\b[^>]*\bhttp-equiv\s*=\s*[\"']?\s*refresh\b"
-    r"|\bon[a-z]+\s*="
-    r"|@(?:keyframes|import|font-face)\b"
-    r"|\b(?:animation|transition)(?:-[a-z]+)?\s*:"
-    r"|\b(?:offset-path|will-change)\s*:"
-    r"|\brequestAnimationFrame\b"
-    r"|\b(?:src|srcset)\s*="
-    r"|\b(?:xlink:)?href\s*=\s*(?:[\"']\s*[^#\"'\s]|[^\"'\s#])"
-    r"|\burl\s*\(\s*(?:[\"']\s*[^#\"'\s]|[^\"'\s#)])",
-    re.I,
-)
 
 
-def is_static_document(page: pathlib.Path) -> bool:
-    """True only when markup is self-contained and proven free of scripts, animations or external/media assets."""
-
-    suffix = page.suffix.lower()
-    if suffix not in {".svg", ".html", ".htm"}:
-        return False
-    try:
-        if page.is_symlink() or page.stat().st_size > _MAX_PICTURE_BYTES:
-            return False
-        text = page.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError):
-        return False
-    if not text.strip() or _DYNAMIC_MARKUP.search(text):
-        return False
-    if suffix == ".svg":
-        return not check_picture(page)
-    return not check_page(page)
 
 
 _FINGERPRINT_SUFFIXES = frozenset({
@@ -1177,23 +648,6 @@ def _frames_drawn(view: Any, count: Optional[int], timeout_ms: int) -> str:
         return "timed_out"
 
 
-_RESIZE_PROBE_JS = """
-() => {
-  const canvas = document.querySelector("canvas");
-  return {
-    innerWidth,
-    innerHeight,
-    canvas: canvas
-      ? {
-          clientWidth: canvas.clientWidth,
-          clientHeight: canvas.clientHeight,
-          width: canvas.width,
-          height: canvas.height,
-        }
-      : null,
-  };
-}
-"""
 
 
 def _observe_in_browser(
@@ -1459,51 +913,12 @@ def render_page(page: pathlib.Path) -> dict:
     )
 
 
-_SCRATCH_PAGE = re.compile(
-    r"(?:^|[-_. ])(?:probe|scratch|debug|tmp|temp)\d*(?:$|[-_. ])", re.I
-)
 
 
-def is_scratch_page(page: str | pathlib.Path) -> bool:
-    """Whether a page is a diagnostic surface, not part of the deliverable.
-
-    A 3D run wrote ``_probe.html`` to inspect pixels and left it in the tree.
-    ``default_pages`` sorted every root HTML, so ``_probe.html`` came before
-    ``index.html`` and the final visual check judged the scratch page. Its
-    failure then stayed owed against a correct game. A leading underscore or a
-    probe/scratch/tmp/debug token in the stem marks a page as scratch; the
-    caller still refuses to let such a page prove or block the deliverable.
-    """
-
-    name = pathlib.Path(page).name
-    if not name:
-        return False
-    if name.startswith(("_", ".")):
-        return True
-    return bool(_SCRATCH_PAGE.search(pathlib.Path(name).stem))
 
 
-_SCRATCH_ARTIFACT = re.compile(
-    r"(?:^|[-_. ])(?:probe|scratch|tmp|temp)\d*(?:$|[-_. ])", re.I
-)
 
 
-def is_scratch_artifact(path: str | pathlib.Path) -> bool:
-    """Whether a path is diagnostic work, not a task input.
-
-    ``identity`` binds every proof to the bytes it judged. A run that deletes
-    its own ``_probe.html`` or ``_scratch_*.py`` after a passing check must not
-    invalidate that proof: the deliverable did not change. HTML keeps the wider
-    page rule; other files need a probe/scratch/tmp token, so ``__init__.py``
-    and ``debug.py`` are not swept away as scratch.
-    """
-
-    name = pathlib.Path(path).name
-    if not name:
-        return False
-    if pathlib.Path(name).suffix.lower() in {".html", ".htm"}:
-        return is_scratch_page(path)
-    return bool(_SCRATCH_ARTIFACT.search(pathlib.Path(name).stem))
 
 
 #: Files read when deciding whether a page the run created is referenced.
@@ -1591,92 +1006,13 @@ def diagnostic_pages(
     return set(candidates) - referenced
 
 
-def default_pages(root: pathlib.Path) -> list[pathlib.Path]:
-    """Root-level deliverable pages, with the conventional entry page first.
-
-    ``glob("*.html")`` is case-sensitive on POSIX and case-insensitive on Windows,
-    so the same repository would be checked on one platform and silently skipped
-    on the other -- and a skipped deliverable is the exact failure this check
-    exists to catch. Scratch pages are excluded: checking them is useful on
-    request, but treating them as the deliverable makes a temporary diagnostic
-    page outrank ``index.html`` and block the run.
-    """
-
-    try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return []
-    pages = [
-        path
-        for path in entries
-        if path.is_file()
-        and path.suffix.lower() == ".html"
-        and not is_scratch_page(path)
-    ]
-    pages.sort(
-        key=lambda path: (
-            0 if path.name.lower() in {"index.html", "index.htm"} else 1,
-            path.name.lower(),
-        )
-    )
-    return pages[:_MAX_PAGES]
 
 
 #: A picture larger than this is not parsed: the check stays cheap and bounded.
-_MAX_PICTURE_BYTES = 8_000_000
-_SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
 
 
-def default_pictures(root: pathlib.Path) -> list[pathlib.Path]:
-    """Root-level SVG files that are not scratch work, by name."""
-
-    try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return []
-    return [
-        path
-        for path in entries
-        if path.is_file()
-        and path.suffix.lower() == ".svg"
-        and not is_scratch_page(path)
-    ][:_MAX_PAGES]
 
 
-def check_picture(picture: pathlib.Path) -> list[str]:
-    """Problems a browser would show instead of the SVG picture.
-
-    A standalone SVG is XML: one unescaped ``&`` or an unclosed tag and the
-    browser renders a parse error where the drawing should be. Only the bytes
-    are read; nothing is rendered or fetched.
-    """
-
-    import xml.etree.ElementTree as ElementTree
-
-    try:
-        if picture.stat().st_size > _MAX_PICTURE_BYTES:
-            return []
-        data = picture.read_bytes()
-    except OSError as error:
-        return [f"{picture.name}: could not be read ({type(error).__name__})"]
-    if not data.strip():
-        return [f"{picture.name}: is empty"]
-    try:
-        element = ElementTree.fromstring(data)
-    except ElementTree.ParseError as error:
-        return [
-            f"{picture.name}: is not well-formed XML ({error}); a browser shows "
-            "a parse error instead of the picture"
-        ]
-    if element.tag != f"{_SVG_NAMESPACE}svg":
-        if element.tag == "svg":
-            return [
-                f"{picture.name}: the <svg> root has no "
-                'xmlns="http://www.w3.org/2000/svg"; opened as a file, a browser '
-                "shows the markup as text instead of the picture"
-            ]
-        return [f"{picture.name}: the root element is <{element.tag}>, not <svg>"]
-    return []
 
 
 def check(
@@ -1725,57 +1061,8 @@ def check(
     return verdict
 
 
-def shadowed_by_repository() -> Optional[str]:
-    """Report the path that shadows this module, or ``None`` when it is genuine.
-
-    ``python -m karox.web_check`` puts the working directory first on ``sys.path``,
-    and a check runs in the repository it checks. A measured run wrote
-    ``karox/web_check.py`` into the repository, so *that* file answered the check,
-    passed it, and KaroX reported the page verified on the strength of a checker
-    the deliverable had written. A check the artifact can rewrite is not a check,
-    so this one refuses to be that: it looks up ``karox.web_check`` with the
-    working directory removed from the path and compares the origin with itself.
-
-    ``None`` also covers the case where nothing else provides the module -- a
-    checkout of KaroX itself, where the repository *is* the source of truth.
-    """
-
-    import importlib.util
-
-    import sys
-
-    here = pathlib.Path(__file__).resolve()
-    cwd = pathlib.Path.cwd().resolve()
-    stripped = [
-        entry
-        for entry in sys.path
-        if entry and not _same_place(pathlib.Path(entry), cwd)
-    ]
-    saved = list(sys.path)
-    try:
-        sys.path = stripped
-        spec = importlib.util.find_spec("karox.web_check")
-    except Exception:
-        return None
-    finally:
-        sys.path = saved
-    origin = getattr(spec, "origin", None) if spec is not None else None
-    if not isinstance(origin, str) or not origin:
-        return None
-    try:
-        other = pathlib.Path(origin).resolve()
-    except OSError:
-        return None
-    if other == here:
-        return None
-    return str(other)
 
 
-def _same_place(candidate: pathlib.Path, other: pathlib.Path) -> bool:
-    try:
-        return candidate.resolve() == other
-    except OSError:
-        return False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
