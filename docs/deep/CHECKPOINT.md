@@ -59,7 +59,8 @@ c46aed6 refactor(browser): extract the session contract leaf
 | CLI/session/MCP/tree targeted suite | PASS |
 | Engine kernels/tools + prompt-cache + neutrality after step 1 | PASS |
 | Full suite on `c46aed6` | **FAIL** — one test patched the old CLI facade for `_mcp_registry`; fixed at `120d779` and retested (`test_mcp_client` PASS) |
-| Full suite on `a8424d7` | RUNNING in `b/karox5-deep-gate` (isolated config/runtime) |
+| Full suite on `a8424d7` (isolated snapshot worktree) | **PASS** — exit 0, 100% progress (log `local-runs/gate-a8424d7-full.log`) |
+| Full suite on `HEAD` (engine prompts/catalog/control) | pending next round; those moves have targeted engine/neutrality/tree tests green |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Decisions that must not be lost
