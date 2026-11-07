@@ -28,9 +28,10 @@
 | `check_report.py` | 1,293 | 295 (+2 owner modules) |
 | `completion_gate.py` | 1,278 | 565 (+3 owner modules) |
 | `repo_context.py` | 2,055 | 148 (+4 owner modules) |
+| `core.py` | 1,573 | 453 (+4 owner modules) |
 | `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
-| Package modules | 164 | 200 |
-| Package lines | 87,689 | 88,567 (ceiling 90,000) |
+| Package modules | 164 | 204 |
+| Package lines | 87,689 | 88,692 (ceiling 90,000) |
 
 ## Work ledger
 
