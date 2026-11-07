@@ -10,9 +10,9 @@
 
 - [x] Phase 0 — frozen baseline, feature inventory, architecture map (this file set)
 - [x] Phase 1A — evidence-driven dead-legacy removal (two batches; adversarial review)
-- [ ] Phase 1B — deep refactor of every monolith (CLI + browser session + engine
-      agent/prompts/catalog done; engine control/IO/finish/harness, bridge,
-      providers, repo_context, TUI and web_check remain)
+- [ ] Phase 1B — deep refactor of every monolith (CLI, browser session, engine
+      kernel and check_report done; tools/verification/bridge/providers/
+      repo_context/TUI/web_check remain)
 - [ ] Phase 2 — full parity/security/build/release gate
 - [ ] Phase 3 — honest latest-CLI benchmark arena
 - [ ] Phase 4 — evidence-driven optimization loop
@@ -24,9 +24,11 @@
 |---|---:|---:|
 | `cli.py` | 2,299 | 193 (+8 owner modules) |
 | `browser/session.py` | 3,703 | 173 (+11 owner modules) |
-| `engine_kernel.py` | 2,905 | 2,300 (agent/prompts/catalog split) |
-| Package modules | 164 | 185 |
-| Package lines | 87,689 | 87,862 (ceiling 90,000) |
+| `engine_kernel.py` | 2,905 | 753 (+8 owner modules) |
+| `check_report.py` | 1,293 | 295 (+2 owner modules) |
+| `engine_tool_env.py` | 1,864 | 1,396 (+ `engine_tool_bodies` 544) |
+| Package modules | 164 | 193 |
+| Package lines | 87,689 | 88,219 (ceiling 90,000) |
 
 ## Work ledger
 
