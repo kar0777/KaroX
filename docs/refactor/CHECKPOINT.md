@@ -70,18 +70,17 @@ the representative benchmark matrix remain open.
 
 ## Still blocking READY
 
-1. **Installers/upgrade**: the one-line installers are still the 6.x
-   side-by-side flow (`v6/plan-impl-20261104`, `karox6`, dogfood). A pinned
-   5.0.0 installer, in-place upgrade rehearsal and automated rollback are not
-   done. The release docs currently direct reviewers to the isolated wheel.
-2. **Rollback**: new sessions contain fields old rc4 rejects; rollback is a
-   backup/restore procedure, not a tested in-place downgrade.
-3. **Benchmark matrix**: one real provider smoke and one paired trivial cell
+1. **Rollback**: new sessions contain fields old rc4 rejects; the installer
+   backs up config/runtime before upgrade, but in-place downgrade is unsupported
+   and a full restore/reinstall rehearsal is not automated.
+2. **Benchmark matrix**: one real provider smoke and one paired trivial cell
    exist; no 30–100-task matrix and no OpenCode/DSH comparison.
-4. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
+3. **Real user smoke**: local browser/MCP/TUI test suites pass, but a full
    real bridge/TUI/provider user scenario is not documented end to end.
-5. Checks/probes inline command-guard coverage and the TUI pure-helper import
+4. Checks/probes inline command-guard coverage and the TUI pure-helper import
    boundary still need explicit decisions.
+5. Published installer URL/tag is not tested; local wheel + explicit
+   `KAROX_SPEC` is the verified path.
 
 ## Safe continuation
 

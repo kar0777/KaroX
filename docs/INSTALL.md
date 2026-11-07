@@ -47,16 +47,38 @@ session fields that older rc4 readers do not understand. Therefore:
 Do not delete `%APPDATA%\KaroX`, `%LOCALAPPDATA%\KaroX\vnext`, keyring entries,
 saved profiles or user sessions to make an installation succeed.
 
-## Published installers
+## Installer (post-approval)
 
-The historical one-line installers in this tree were written for the 6.x
-dogfood line and still default to `v6/plan-impl-20261104`. They are **not** the
-5.0.0 release installer and are not used by this candidate. A release installer
-must be re-tagged and re-tested before publication; until then install the wheel
-locally as above.
+`scripts/install.ps1` and `scripts/install.sh` now implement the 5.0.0
+single-command path. They require an explicit artifact spec; there is no
+mutable-branch default:
 
-When it is ready, the intended published form is a pinned, immutable 5.0.0
-artifact (PyPI wheel or a signed/tagged archive), not a mutable branch:
+```powershell
+$env:KAROX_SPEC = "C:\path\to\karox_runtime-5.0.0-py3-none-any.whl"
+$env:KAROX_UPGRADE = "1"       # only when replacing an existing install
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+```sh
+KAROX_SPEC=/path/to/karox_runtime-5.0.0-py3-none-any.whl \
+KAROX_UPGRADE=1 sh ./scripts/install.sh
+```
+
+The installer:
+
+- installs a fresh machine as `karox`;
+- refuses to replace an existing main install unless `KAROX_UPGRADE=1`;
+- before an upgrade, copies the config/runtime data to timestamped
+  `.backup-<time>` directories;
+- leaves an old side-by-side `karox-runtime6` venv untouched;
+- uses `pipx install --force` only for an explicit upgrade.
+
+`KAROX_DRY_RUN=1` prints the commands and backup copies without executing them.
+Rollback still means restoring the backup and reinstalling the previous wheel;
+do not expect an in-place downgrade to read newer session fields.
+
+When 5.0.0 is approved for publication, replace the local `KAROX_SPEC` with the
+pinned PyPI requirement. The repository does not publish automatically:
 
 ```text
 pipx install karox-runtime==5.0.0

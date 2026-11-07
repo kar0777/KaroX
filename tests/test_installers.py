@@ -1,10 +1,8 @@
-"""The one-line installers, driven against a fake pipx.
+"""The one-line 5.0.0 installer, driven against a fake pipx.
 
-Each scenario runs the real ``scripts/install.sh`` (POSIX sh) or
-``scripts/install.ps1`` (PowerShell, where available) with ``KAROX_PIPX``
-pointing at a recording fake. The fake answers ``list --json`` with the
-scenario's venvs and creates a real (pip-less) venv for a suffixed install, so
-the data-channel ``.pth`` is written into a genuine site-packages directory.
+Every scenario runs the real ``scripts/install.sh`` or ``scripts/install.ps1``
+with a recording fake pipx. No test touches the user's real KaroX data: config,
+runtime, APPDATA, LOCALAPPDATA and HOME all point into ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ from typing import Optional
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = "karox-runtime-test-spec"
+SPEC = "karox-runtime-5.0.0-test-spec"
 FAKE_PIPX = r'''
 import json, os, subprocess, sys
 args = sys.argv[1:]
@@ -30,9 +28,10 @@ if args[:2] == ["list", "--json"]:
     print(os.environ.get("FAKE_PIPX_LIST") or '{"venvs": {}}')
 elif args[:1] == ["environment"]:
     print(os.environ["FAKE_PIPX_VENVS"])
-elif args[:1] == ["install"] and "--suffix" in args:
-    target = os.path.join(os.environ["FAKE_PIPX_VENVS"], "karox-runtime6")
-    subprocess.run([sys.executable, "-m", "venv", "--without-pip", target], check=True)
+elif args[:1] == ["install"]:
+    target = os.path.join(os.environ["FAKE_PIPX_VENVS"], "karox-runtime")
+    if not os.path.isdir(target):
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", target], check=True)
 '''
 
 
@@ -73,21 +72,19 @@ def _install(
     env: Optional[dict[str, str]] = None,
     karox_version: Optional[str] = None,
     venvs_name: str = "venvs",
-) -> tuple[subprocess.CompletedProcess[str], list[list[str]], Path]:
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]], Path, Path]:
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "fake_pipx.py"
     script.write_text(FAKE_PIPX, encoding="utf-8")
     if shell == "sh":
         pipx = bin_dir / "pipx-fake"
         pipx.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
         pipx.chmod(0o755)
-        # A host/venv may already expose a real ``karox`` on the inherited
-        # interpreter path. Pin the version the installer is allowed to see so
-        # this scenario tests the condition it names, not the machine.
+        # Pin the command version so the test never sees the developer venv.
         karox = bin_dir / "karox"
         karox.write_text(
-            f"#!/bin/sh\necho 'karox {karox_version or '6.0.0a3'}'\n",
+            f"#!/bin/sh\necho 'karox {karox_version or '0.0.0-test'}'\n",
             encoding="utf-8",
         )
         karox.chmod(0o755)
@@ -95,14 +92,9 @@ def _install(
         argv = ["sh", str(ROOT / "scripts" / "install.sh")]
     else:
         pipx = bin_dir / "pipx-fake.cmd"
-        # cmd.exe reads a batch file in the console code page: a non-ASCII
-        # interpreter path (D:\проекты\...) would not survive inside it, so
-        # the paths come from the environment, which is Unicode.
         pipx.write_text('@"%FAKE_PIPX_PYTHON%" "%FAKE_PIPX_SCRIPT%" %*\r\n', encoding="ascii")
-        # See the POSIX branch: never let the developer venv's own console
-        # script decide an installer scenario.
         (bin_dir / "karox.cmd").write_text(
-            f"@echo karox {karox_version or '6.0.0a3'}\r\n", encoding="utf-8"
+            f"@echo karox {karox_version or '0.0.0-test'}\r\n", encoding="utf-8"
         )
         windows = os.environ.get("SystemRoot", r"C:\Windows")
         path = os.pathsep.join(
@@ -114,16 +106,27 @@ def _install(
     venvs = tmp_path / venvs_name
     venvs.mkdir(exist_ok=True)
     log = tmp_path / "pipx.log"
+    data = tmp_path / "data"
+    config = data / "config"
+    runtime = data / "runtime"
+    config.mkdir(parents=True)
+    runtime.mkdir(parents=True)
+    (config / "providers.json").write_text("{}", encoding="utf-8")
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("KAROX_") and key.upper() != "PATH"
+        if not key.startswith("KAROX_") and key.upper() not in {"PATH", "APPDATA", "LOCALAPPDATA", "HOME"}
     }
     environment.update(
         {
             "PATH": path,
             "KAROX_PIPX": str(pipx),
             "KAROX_SPEC": SPEC,
+            "KAROX_CONFIG_DIR": str(config),
+            "KAROX_RUNTIME_DIR": str(runtime),
+            "APPDATA": str(data / "appdata"),
+            "LOCALAPPDATA": str(data / "localappdata"),
+            "HOME": str(data / "home"),
             "FAKE_PIPX_LOG": str(log),
             "FAKE_PIPX_LIST": listing,
             "FAKE_PIPX_VENVS": str(venvs),
@@ -132,8 +135,6 @@ def _install(
         }
     )
     environment.update(env or {})
-    # errors="replace": a localized shell error in the console code page must
-    # fail the assertion with its text, not vanish in a decoding thread.
     completed = subprocess.run(
         argv,
         capture_output=True,
@@ -144,93 +145,122 @@ def _install(
         timeout=180,
     )
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
-    return completed, calls, venvs
+    return completed, calls, venvs, data
 
 
 def _installs(calls: list[list[str]]) -> list[list[str]]:
     return [call for call in calls if call[:1] == ["install"]]
 
 
-def _channel_file(venvs: Path) -> Optional[Path]:
-    found = list((venvs / "karox-runtime6").rglob("karox6_channel.pth"))
-    return found[0] if found else None
+def _backup(data: Path) -> list[Path]:
+    return sorted(data.rglob("*.backup-*"))
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_fresh_machine_installs_karox(shell: str, tmp_path: Path) -> None:
-    completed, calls, venvs = _install(shell, tmp_path)
+    completed, calls, _venvs_dir, data = _install(shell, tmp_path)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert _installs(calls) == [["install", SPEC]]
-    assert _channel_file(venvs) is None
+    assert not _backup(data)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_karox5_gets_karox6_next_to_it_with_its_own_channel(shell: str, tmp_path: Path) -> None:
-    completed, calls, venvs = _install(shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"}))
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert _installs(calls) == [["install", "--suffix", "6", SPEC]]
-    channel = _channel_file(venvs)
-    assert channel is not None
-    assert channel.read_text(encoding="utf-8").strip() == 'import os; os.environ.setdefault("KAROX_CHANNEL", "dogfood")'
-    assert "karox6" in completed.stdout
-
-
-@pytest.mark.parametrize("shell", SHELLS)
-def test_an_existing_karox6_is_left_alone_unless_reinstall(shell: str, tmp_path: Path) -> None:
-    listing = _venvs(**{"karox-runtime": "5.0.0rc4", "karox-runtime6": "6.0.0a3"})
-    completed, calls, _ = _install(shell, tmp_path, listing)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert _installs(calls) == []
-    assert "already installed as 'karox6'" in completed.stdout
-    completed, calls, _ = _install(shell, tmp_path, listing, env={"KAROX_REINSTALL": "1"})
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert _installs(calls)[-1] == ["install", "--force", "--suffix", "6", SPEC]
-
-
-@pytest.mark.parametrize("shell", SHELLS)
-def test_refuses_to_replace_karox5_when_side_by_side_is_off(shell: str, tmp_path: Path) -> None:
-    completed, calls, _ = _install(
-        shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"}), env={"KAROX_SIDE_BY_SIDE": "0"}
+def test_existing_v5_is_not_replaced_without_opt_in(shell: str, tmp_path: Path) -> None:
+    completed, calls, _venvs_dir, _data = _install(
+        shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"})
     )
-    assert completed.returncode != 0
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     assert _installs(calls) == []
-    assert "would replace it" in completed.stdout + completed.stderr
+    assert "KAROX_UPGRADE=1" in completed.stdout
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_main_karox6_install_is_not_touched(shell: str, tmp_path: Path) -> None:
-    completed, calls, _ = _install(shell, tmp_path, _venvs(**{"karox-runtime": "6.0.0a3"}))
+def test_upgrade_backs_up_data_and_forces_the_install(shell: str, tmp_path: Path) -> None:
+    completed, calls, _venvs_dir, data = _install(
+        shell,
+        tmp_path,
+        _venvs(**{"karox-runtime": "5.0.0rc4"}),
+        env={"KAROX_UPGRADE": "1"},
+    )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert _installs(calls) == []
-    assert "already installed as 'karox'" in completed.stdout
+    assert _installs(calls) == [["install", "--force", SPEC]]
+    assert _backup(data), completed.stdout
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_karox5_outside_pipx_is_still_detected(shell: str, tmp_path: Path) -> None:
-    completed, calls, _ = _install(shell, tmp_path, karox_version="5.0.0rc4")
+def test_upgrade_from_6_alpha_is_explicit_and_backed_up(shell: str, tmp_path: Path) -> None:
+    completed, calls, _venvs_dir, data = _install(
+        shell,
+        tmp_path,
+        _venvs(**{"karox-runtime": "6.0.0a3"}),
+        env={"KAROX_UPGRADE": "1"},
+    )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert _installs(calls) == [["install", "--suffix", "6", SPEC]]
+    assert _installs(calls) == [["install", "--force", SPEC]]
+    assert _backup(data)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_side_by_side_karox6_is_left_untouched(shell: str, tmp_path: Path) -> None:
+    listing = _venvs(**{"karox-runtime": "5.0.0rc4", "karox-runtime6": "6.0.0a3"})
+    completed, calls, _venvs_dir, _data = _install(shell, tmp_path, listing)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _installs(calls) == []
+    assert "side-by-side karox6" in completed.stdout
+    assert "5.0.0rc4" in completed.stdout
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_karox_outside_pipx_requires_opt_in_then_upgrades(shell: str, tmp_path: Path) -> None:
+    completed, calls, _venvs_dir, _data = _install(shell, tmp_path, karox_version="5.0.0rc4")
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _installs(calls) == []
+    assert "outside pipx" in completed.stdout
+
+    completed, calls, _venvs_dir, data = _install(
+        shell,
+        tmp_path / "upgrade",
+        karox_version="5.0.0rc4",
+        env={"KAROX_UPGRADE": "1"},
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _installs(calls) == [["install", "--force", SPEC]]
+    assert _backup(data)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_dry_run_changes_nothing(shell: str, tmp_path: Path) -> None:
-    completed, calls, venvs = _install(
-        shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"}), env={"KAROX_DRY_RUN": "1"}
+    completed, calls, _venvs_dir, data = _install(
+        shell,
+        tmp_path,
+        _venvs(**{"karox-runtime": "5.0.0rc4"}),
+        env={"KAROX_UPGRADE": "1", "KAROX_DRY_RUN": "1"},
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert _installs(calls) == []
-    assert "would run:" in completed.stdout and "--suffix 6" in completed.stdout
-    assert not (venvs / "karox-runtime6").exists()
+    assert "would run:" in completed.stdout
+    assert "would copy" in completed.stdout
+    assert not _backup(data)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_a_non_ascii_pipx_home_still_gets_the_channel(shell: str, tmp_path: Path) -> None:
-    """A profile such as C:\\Users\\<Cyrillic name>: the venv path reported by
-    pipx and the site-packages path must survive the trip through the pipe."""
-
-    completed, _, venvs = _install(
-        shell, tmp_path, _venvs(**{"karox-runtime": "5.0.0rc4"}), venvs_name="venvs-проверка"
+def test_a_non_ascii_data_path_still_gets_a_backup(shell: str, tmp_path: Path) -> None:
+    completed, _calls, _venvs_dir, data = _install(
+        shell,
+        tmp_path,
+        _venvs(**{"karox-runtime": "5.0.0rc4"}),
+        env={"KAROX_UPGRADE": "1"},
+        venvs_name="venvs-проверка",
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    channel = _channel_file(venvs)
-    assert channel is not None, completed.stdout + completed.stderr
+    assert _backup(data), completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_missing_spec_is_refused_before_any_install(shell: str, tmp_path: Path) -> None:
+    completed, calls, _venvs_dir, _data = _install(
+        shell, tmp_path, env={"KAROX_SPEC": ""}
+    )
+    assert completed.returncode != 0
+    assert _installs(calls) == []
+    assert "KAROX_SPEC is required" in completed.stdout + completed.stderr
