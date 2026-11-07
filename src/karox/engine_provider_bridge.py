@@ -148,6 +148,15 @@ _ELIDED_ARGUMENT_KEEP = 2
 #: per batch instead of one per write.
 REWRITE_PRESSURE_TOKENS = 96_000
 REWRITE_BATCH_CHARS = 24_000
+HIGH_RECLAIM_BATCH_CHARS = 96_000
+_BASELINE_TOOL_SCHEMA_CHARS = 16_000
+
+
+def _conservative_text_chars(text: str) -> int:
+    if not text:
+        return 0
+    utf8_extra = len(text.encode("utf-8")) - len(text)
+    return len(text) + (utf8_extra * 2) + (text.count("\\") * 2)
 
 
 def _elided_argument_marker(name: str) -> str:
@@ -398,6 +407,16 @@ class EngineProviderModel:
         #: Prompt tokens of the latest response: the size the next request
         #: starts from, measured by the provider rather than estimated.
         self.last_prompt_tokens = 0
+        self.last_prompt_local_tokens = 0
+        self.tool_schema_chars = sum(
+            len(tool.name)
+            + len(tool.description)
+            + len(json.dumps(tool.input_schema, ensure_ascii=False, sort_keys=True))
+            for tool in tools
+        )
+        self.extra_tool_schema_tokens = (
+            max(0, self.tool_schema_chars - _BASELINE_TOOL_SCHEMA_CHARS) // 4
+        )
         self.rewrite_pressure_tokens = max(1, int(rewrite_pressure_tokens))
         #: Calls whose arguments the wire replaces with a marker. The set only
         #: grows, so a message is sent the same way on every later request.
@@ -408,6 +427,7 @@ class EngineProviderModel:
     def query(self, messages: List[Dict[str, Any]], **kwargs: Any) -> Dict[str, Any]:
         del kwargs
         wire_messages = self._request_messages(messages)
+        sent_local_tokens = self._wire_messages_tokens(wire_messages)
         observation = self.prefix_tracker.observe(wire_messages, self._tools)
         request = ModelRequest(
             model=self._model_id,
@@ -419,7 +439,7 @@ class EngineProviderModel:
             cache_key=self._request_cache_key(wire_messages),
         )
         response = self._call(request)
-        self._note_usage(response.usage)
+        self._note_usage(response.usage, local_tokens=sent_local_tokens)
         telemetry = self.prefix_tracker.classify(observation, response.usage)
         if response.budget_exceeded:
             message = self._engine_message(response, [])
@@ -482,23 +502,39 @@ class EngineProviderModel:
         ).hexdigest()[:12]
         return f"{self._cache_key_base}-{static}"
 
-    def history_rewrite_allowed(
-        self, reclaimable_chars: int, *, estimated_tokens: int = 0
-    ) -> bool:
-        """Whether shrinking old history now is worth the cache it breaks.
+    def _wire_messages_tokens(self, messages: Sequence[ModelMessage]) -> int:
+        chars = 0
+        for msg in messages:
+            chars += _conservative_text_chars(msg.content or "")
+            for call in msg.tool_calls:
+                chars += _conservative_text_chars(call.raw_arguments) + len(call.name) + 16
+            for block in msg.reasoning_blocks:
+                chars += _conservative_text_chars(block.text) + len(block.data) + len(block.signature)
+            chars += _conservative_text_chars(msg.reasoning_text or "")
+        return (chars // 4) + self.extra_tool_schema_tokens
 
-        Without a cache every request pays its whole prompt, so any shrink is
-        a saving. With one, the unchanged prefix is nearly free and a rewrite
-        re-bills the suffix after it: shrink only a large prompt, by a batch
-        big enough to repay that one break.
-        """
+    def history_rewrite_allowed(
+        self,
+        reclaimable_chars: int,
+        *,
+        estimated_tokens: int = 0,
+        invalidated_suffix_chars: Optional[int] = None,
+    ) -> bool:
+        """Whether shrinking old history now is worth the cache it breaks."""
 
         if not self.prompt_cache_seen:
+            return True
+        reclaimable = int(reclaimable_chars)
+        if (
+            reclaimable >= HIGH_RECLAIM_BATCH_CHARS
+            and invalidated_suffix_chars is not None
+            and reclaimable >= max(0, int(invalidated_suffix_chars))
+        ):
             return True
         effective_tokens = max(self.last_prompt_tokens, int(estimated_tokens))
         return (
             effective_tokens >= self.rewrite_pressure_tokens
-            and int(reclaimable_chars) >= REWRITE_BATCH_CHARS
+            and reclaimable >= REWRITE_BATCH_CHARS
         )
 
     def pending_elidable_writes(
@@ -531,12 +567,15 @@ class EngineProviderModel:
     def note_history_rewritten(self, reclaimed_chars: int) -> None:
         """Adjust ``last_prompt_tokens`` immediately after an in-place history shrink."""
 
-        if reclaimed_chars > 0 and self.last_prompt_tokens > 0:
-            self.last_prompt_tokens = max(
-                1, self.last_prompt_tokens - (int(reclaimed_chars) // 4)
-            )
+        reclaimed_tokens = int(reclaimed_chars) // 4
+        if reclaimed_tokens > 0 and self.last_prompt_tokens > 0:
+            self.last_prompt_tokens = max(1, self.last_prompt_tokens - reclaimed_tokens)
+            if self.last_prompt_local_tokens > 0:
+                self.last_prompt_local_tokens = max(
+                    1, self.last_prompt_local_tokens - reclaimed_tokens
+                )
 
-    def _note_usage(self, usage: Any) -> None:
+    def _note_usage(self, usage: Any, *, local_tokens: int = 0) -> None:
         if not isinstance(usage, Mapping):
             return
         try:
@@ -546,6 +585,8 @@ class EngineProviderModel:
             return
         if prompt > 0:
             self.last_prompt_tokens = prompt
+            if local_tokens > 0:
+                self.last_prompt_local_tokens = int(local_tokens)
         if cached > 0:
             self.prompt_cache_seen = True
 

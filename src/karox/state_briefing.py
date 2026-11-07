@@ -25,7 +25,7 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .security import redact
 
-__all__ = ["build_state_briefing", "MAX_STATE_BRIEFING_CHARS"]
+__all__ = ["HEADER", "MAX_STATE_BRIEFING_CHARS", "build_state_briefing"]
 
 #: The block travels in every request after a compaction, so it must stay a
 #: small fraction of the budget. Sections are dropped whole, lowest value
@@ -174,21 +174,16 @@ def _verification_block(history: Sequence[Mapping[str, Any]]) -> str:
         and data.get("exit_code") == 0
         and not data.get("timed_out")
     )
-    age = max(0, len(history) - index - 1)
-    ago = f" ({age} event{'s' if age != 1 else ''} ago)" if age else " (just now)"
-    if _last_mutation_index(history) > index:
-        # A pass or a failure from before the latest edit describes bytes that
-        # are no longer on disk. Saying so prevents a stale "passed" from
-        # ending the repair early and a stale failure from directing an edit.
-        ago = ago[:-1] + "; predates the latest edit)"
+    freshness = (
+        " (predates the latest edit)"
+        if _last_mutation_index(history) > index
+        else " (current)"
+    )
     command = f"`{argv}`" if argv else "the approved check"
     if passed:
-        return f"Verification: {command} passed{ago}."
-    if data.get("timed_out"):
-        status = "timed out"
-    else:
-        status = "failed"
-    lines = [f"Verification: {command} {status}{ago}."]
+        return f"Verification: {command} passed{freshness}."
+    status = "timed out" if data.get("timed_out") else "failed"
+    lines = [f"Verification: {command} {status}{freshness}."]
     failures = _failure_lines(data.get("failure_map"))
     if failures:
         lines.append("Failures:")
@@ -292,11 +287,15 @@ def _last_mutation_index(history: Sequence[Mapping[str, Any]]) -> int:
         if not isinstance(entry, Mapping):
             continue
         result = entry.get("result")
-        if not isinstance(result, Mapping) or result.get("ok") is not True:
+        if not isinstance(result, Mapping):
             continue
         data = result.get("data")
         data = data if isinstance(data, Mapping) else {}
-        if entry.get("core_name") in _MUTATING_TOOLS and data.get("changed") is True:
+        ok = result.get("ok") is True
+        if entry.get("core_name") in _MUTATING_TOOLS and (
+            (ok and data.get("changed") is True)
+            or (not ok and data.get("changed") is not False)
+        ):
             found = index
     return found
 

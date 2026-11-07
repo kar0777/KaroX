@@ -749,11 +749,18 @@ def test_repeated_compaction_resume_and_continue_preserve_valid_history(tmp_path
     assert report1.compaction is not None
     assert report1.compaction["tokens_after"] < report1.compaction["tokens_before"]
 
-    # Scenario 9: repeated compaction never stacks duplicate state briefings in the task message.
+    # Scenario 9: repeated compaction never modifies messages[0] or messages[1]
+    # and never stacks duplicate state briefings anywhere in the request.
+    first_sys = provider1.requests[0].messages[0].content
+    first_task = provider1.requests[0].messages[1].content
     for req in provider1.requests:
-        for msg in req.messages:
-            if msg.role == "user" and msg.content:
-                assert msg.content.count("[KaroX durable state") <= 1
+        assert req.messages[0].content == first_sys
+        assert req.messages[1].content == first_task
+        assert "[KaroX durable state" not in (req.messages[1].content or "")
+        total_briefings = sum(
+            (msg.content or "").count("[KaroX durable state") for msg in req.messages
+        )
+        assert total_briefings <= 1
 
     # Scenario 10: Resume the compacted session and finish verified.
     kernel2, provider2, _, _ = _make_kernel_for_budget(
@@ -770,9 +777,11 @@ def test_repeated_compaction_resume_and_continue_preserve_valid_history(tmp_path
     report2 = kernel2.run(session.session_id)
     assert report2.verified is True, report2.reason
     for req in provider2.requests:
-        for msg in req.messages:
-            if msg.role == "user" and msg.content:
-                assert msg.content.count("[KaroX durable state") <= 1
+        assert "[KaroX durable state" not in (req.messages[1].content or "")
+        total_briefings = sum(
+            (msg.content or "").count("[KaroX durable state") for msg in req.messages
+        )
+        assert total_briefings <= 1
 
     # Scenario 11: Continue task after compaction and verify.
     store.continue_task(session.session_id, "Now set value to 5")
@@ -795,3 +804,304 @@ def test_repeated_compaction_resume_and_continue_preserve_valid_history(tmp_path
     report3 = kernel3.run(session.session_id)
     assert report3.verified is True, report3.reason
     assert (repo / "big.py").read_text(encoding="utf-8") == w_c
+
+
+def test_state_briefing_preserves_prefix_and_advances_compaction_boundary(tmp_path: Any) -> None:
+    """Mission 13.1 P0: messages[0] and messages[1] stay untouched; earliest change is >= 2 and advances."""
+    from karox.agent_contract import ContextBudget
+    from karox.models import AccessProfile
+    from karox.state_briefing import HEADER
+
+    tight = ContextBudget(max_input_tokens=6_000, utilization=0.8, window_source="advertised")
+    # Budget is int(6000 * 0.8 * 0.75) = 3600 tokens (~14400 chars; system+task is ~2400 tokens).
+    chunk_1 = "value = 10\n" + ("# step_chunk_1\n" * 450)
+    chunk_2 = "value = 20\n" + ("# step_chunk_2\n" * 450)
+    chunk_3 = "value = 30\n" + ("# step_chunk_3\n" * 450)
+    # Include literal HEADER text inside a file to prove unrelated tool content is never stripped.
+    marker_echo = f"# Keep literal header in code: {HEADER}\nvalue = 40\n"
+
+    kernel, provider, store, repo = _make_kernel_for_budget(
+        tmp_path,
+        context=tight,
+        responses=[
+            _cached_tool_response(
+                (ToolCall("c1", "repo_write_file", json.dumps({"path": "big.py", "content": chunk_1})),),
+                prompt_tokens=2_600,
+            ),
+            _cached_tool_response(
+                (ToolCall("c2", "repo_read_file", json.dumps({"path": "big.py"})),),
+                prompt_tokens=3_700,
+            ),
+            # Compaction 1 triggers before step 3:
+            _cached_tool_response(
+                (ToolCall("c3", "repo_write_file", json.dumps({"path": "big.py", "content": chunk_2})),),
+                prompt_tokens=3_100,
+            ),
+            _cached_tool_response(
+                (ToolCall("c4", "repo_write_file", json.dumps({"path": "big.py", "content": chunk_3})),),
+                prompt_tokens=3_800,
+            ),
+            # Compaction 2 triggers before step 5:
+            _cached_tool_response(
+                (ToolCall("c5", "repo_write_file", json.dumps({"path": "big.py", "content": marker_echo})),),
+                prompt_tokens=2_900,
+            ),
+            _cached_tool_response(
+                (ToolCall("c6", "repo_read_file", json.dumps({"path": "big.py"})),),
+                prompt_tokens=3_000,
+            ),
+            _cached_tool_response(
+                (ToolCall("c7", "finish", json.dumps({"answer": "done"})),),
+                prompt_tokens=3_100,
+            ),
+        ],
+    )
+    kernel._engine_keep_recent_messages = 2
+    task = f"1. Update big.py\n2. Note literal marker {HEADER} in task"
+    session = store.create(repo, task, AccessProfile.WORKSPACE_WRITE)
+    report = kernel.run(session.session_id)
+    assert report.verified is True, report.reason
+    assert report.compaction is not None
+    assert report.compaction["count"] >= 2
+
+    def _earliest_diff(req_a: ModelRequest, req_b: ModelRequest) -> int:
+        limit = min(len(req_a.messages), len(req_b.messages))
+        for idx in range(limit):
+            if req_a.messages[idx] != req_b.messages[idx]:
+                return idx
+        return limit
+
+    base_sys = provider.requests[0].messages[0]
+    base_task = provider.requests[0].messages[1]
+    assert HEADER in (base_task.content or "")
+
+    compacted_indices: List[int] = []
+    for req_idx, req in enumerate(provider.requests):
+        # messages[0] and messages[1] are byte-for-byte identical in every request!
+        assert req.messages[0] == base_sys
+        assert req.messages[1] == base_task
+        # Any state briefing attached by compaction sits at index >= 2 and appears at most once.
+        tail_briefings = [
+            idx
+            for idx in range(2, len(req.messages))
+            if f"\n\n{HEADER}\n" in (req.messages[idx].content or "")
+            or (req.messages[idx].content or "").startswith(f"{HEADER}\n")
+        ]
+        assert len(tail_briefings) <= 1, f"request {req_idx} has duplicate briefings at {tail_briefings}"
+        if tail_briefings:
+            compacted_indices.append(tail_briefings[0])
+        if req_idx > 0:
+            earliest = _earliest_diff(provider.requests[req_idx - 1], req)
+            assert earliest >= 2, f"request {req_idx} mutated prefix at index {earliest}"
+
+    assert compacted_indices, "expected at least one compacted request with a state briefing"
+    assert compacted_indices[0] >= 2
+    assert compacted_indices[-1] >= compacted_indices[0]
+    # Unrelated tool output containing HEADER (from reading big.py in c6) is preserved intact.
+    c6_out = next(
+        m.content for m in provider.requests[-1].messages if m.role == "tool" and m.tool_call_id == "c6"
+    )
+    assert f"# Keep literal header in code: {HEADER}" in (c6_out or "")
+
+
+def test_context_window_safety_guards_provider_divergence_and_dense_inputs(tmp_path: Any) -> None:
+    """Mission 13.1 P0: provider last_prompt_tokens divergence, Cyrillic/UTF-8, JSON escapes, and tool schemas."""
+    from karox.agent_contract import ContextBudget
+    from karox.models import AccessProfile
+    from karox.providers import ProviderTool
+
+    # 1. Synthetic provider reports last_prompt_tokens (62,000) much higher than chars//4 (~4,000)
+    # on a 128K window (budget = 64,800). Adding a 4,000-token turn must trigger compaction BEFORE
+    # the next request is sent!
+    win_128k = ContextBudget(max_input_tokens=128_000, utilization=0.8, window_source="advertised")
+    big_read_text = "value = 1\n" + ("# ascii line\n" * 1_200)
+    kernel, provider, store, repo = _make_kernel_for_budget(
+        tmp_path / "diverge",
+        context=win_128k,
+        max_output_tokens=16_000,
+        responses=[
+            _cached_tool_response(
+                (ToolCall("c1", "repo_read_file", json.dumps({"path": "big.py"})),),
+                prompt_tokens=62_000,
+                cached_tokens=50_000,
+            ),
+            _cached_tool_response(
+                (
+                    ToolCall(
+                        "c2",
+                        "repo_write_file",
+                        json.dumps({"path": "big.py", "content": big_read_text + "\nX = 2\n"}),
+                    ),
+                ),
+                prompt_tokens=64_500,
+                cached_tokens=55_000,
+            ),
+            _cached_tool_response(
+                (ToolCall("c3", "repo_read_file", json.dumps({"path": "big.py"})),),
+                prompt_tokens=45_000,
+                cached_tokens=40_000,
+            ),
+            _cached_tool_response(
+                (ToolCall("c4", "finish", json.dumps({"answer": "done"})),),
+                prompt_tokens=46_000,
+                cached_tokens=44_000,
+            ),
+        ],
+    )
+    kernel._engine_keep_recent_messages = 2
+    session = store.create(repo, "Update big.py safely", AccessProfile.WORKSPACE_WRITE)
+    report = kernel.run(session.session_id)
+    assert report.verified is True, report.reason
+    # Even though raw chars//4 was < 15,000 tokens, provider-reported 64,500 + delta exceeded
+    # the 64,800 budget and triggered stale-read/compaction protection before request 3!
+    c1_in_req2 = next(
+        m.content for m in provider.requests[2].messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert any(
+        marker in (c1_in_req2 or "")
+        for marker in ("predates a later edit", "clipped", "dropped by the karo-core context manager")
+    )
+
+    # 2. Dense Cyrillic/UTF-8, JSON escapes, and long tool schemas increase _estimate_tokens()
+    # conservatively compared to plain ASCII of the same character length.
+    from karox.engine_kernel import EngineAgent
+
+    extra_tools = tuple(
+        ProviderTool(
+            f"custom_tool_{i}",
+            "D" * 1_500,
+            {"type": "object", "properties": {"payload": {"type": "string", "description": "S" * 1_500}}},
+        )
+        for i in range(12)
+    )
+    model_dense = EngineProviderModel(
+        provider=provider,
+        model_id="deepseek-v4.1-flash",
+        tools=extra_tools,
+        rewrite_pressure_tokens=27_000,
+    )
+
+    class _DummyEnv:
+        def execute(self, action: Any) -> Dict[str, Any]:
+            return {"output": "", "returncode": 0}
+
+    agent_ascii = EngineAgent(
+        EngineProviderModel(provider=provider, model_id="deepseek-v4.1-flash"),
+        _DummyEnv(),
+        kernel=kernel,
+        context_token_budget=54_000,
+        system_template="{{ system_prompt }}",
+        instance_template="{{ task }}",
+    )
+    agent_dense = EngineAgent(
+        model_dense,
+        _DummyEnv(),
+        kernel=kernel,
+        context_token_budget=54_000,
+        system_template="{{ system_prompt }}",
+        instance_template="{{ task }}",
+    )
+    ascii_payload = "a" * 10_000
+    cyrillic_and_escaped = ("ПроверкаКириллицы" * 250) + ('\\"\\n\\\\' * 900)
+    assert len(cyrillic_and_escaped) <= len(ascii_payload)
+
+    agent_ascii.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": ascii_payload},
+    ]
+    agent_dense.messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": cyrillic_and_escaped},
+    ]
+    assert agent_dense._estimate_tokens() > agent_ascii._estimate_tokens() * 2
+
+
+def test_early_high_reclaim_policy_rewrites_huge_dead_weight_once_without_oscillation(
+    tmp_path: Any,
+) -> None:
+    """Mission 13.1 P1: small reclaim waits for 234K; huge reclaim (>=96K chars & >= suffix) rewrites once."""
+    from karox.agent_contract import ContextBudget
+    from karox.models import AccessProfile
+
+    win_1m = ContextBudget(max_input_tokens=1_000_000, utilization=0.8, window_source="advertised")
+    # 3 large writes (~52KB each) + 1 large stale read (~27KB) -> after 4th write,
+    # 2 older writes (~104KB) + 1 stale read (~26KB) = ~130KB >= 96KB HIGH_RECLAIM_BATCH_CHARS,
+    # while the kept suffix (last 2 writes ~104KB) is smaller than 130KB!
+    huge_w1 = "value = 11\n" + ("# write_one_body\n" * 3_100)
+    huge_w2 = "value = 12\n" + ("# write_two_body\n" * 3_100)
+    huge_w3 = "value = 13\n" + ("# write_three_body\n" * 1_500)
+    huge_w4 = "value = 14\n" + ("# write_four_body\n" * 1_500)
+
+    responses = [
+        _cached_tool_response(
+            (ToolCall("r1", "repo_read_file", json.dumps({"path": "big.py"})),),
+            prompt_tokens=20_000,
+        ),
+        _cached_tool_response(
+            (ToolCall("w1", "repo_write_file", json.dumps({"path": "big.py", "content": huge_w1})),),
+            prompt_tokens=40_000,
+        ),
+        # After w1, only r1 is stale (~26KB < 96KB) -> must NOT rewrite early!
+        _cached_tool_response(
+            (ToolCall("w2", "repo_write_file", json.dumps({"path": "big.py", "content": huge_w2})),),
+            prompt_tokens=60_000,
+        ),
+        # After w2, w1 and w2 are the 2 kept writes; only r1 is stale (~26KB < 96KB) -> NO rewrite!
+        _cached_tool_response(
+            (ToolCall("w3", "repo_write_file", json.dumps({"path": "big.py", "content": huge_w3})),),
+            prompt_tokens=75_000,
+        ),
+        # After w3, r1 (~26KB) + w1 (~52KB) = ~78KB (< 96KB) -> still NO early rewrite!
+        _cached_tool_response(
+            (ToolCall("w4", "repo_write_file", json.dumps({"path": "big.py", "content": huge_w4})),),
+            prompt_tokens=95_000,
+        ),
+        # Now after w4: r1 (~26KB) + w1 (~52KB) + w2 (~52KB) = ~130KB >= 96KB,
+        # and invalidated suffix (w3 + w4 ~ 51KB) < 130KB!
+        # Must trigger ONE coordinated rewrite before Step 6 (even though 95K < 234K)!
+        _cached_tool_response(
+            (ToolCall("chk", "checks_run", json.dumps({"argv": ["python", "-c", "print('ok')"]})),),
+            prompt_tokens=55_000,
+        ),
+        # Step 7: no oscillation / no second rewrite!
+        _cached_tool_response(
+            (ToolCall("fin", "finish", json.dumps({"answer": "done"})),),
+            prompt_tokens=56_000,
+        ),
+    ]
+
+    kernel, provider, store, repo = _make_kernel_for_budget(
+        tmp_path, context=win_1m, max_output_tokens=384_000, responses=responses
+    )
+    session = store.create(repo, "Iterative rewrites on big.py", AccessProfile.WORKSPACE_WRITE)
+    report = kernel.run(session.session_id)
+    assert report.verified is True, report.reason
+
+    def _tool_out(req_idx: int, cid: str) -> str:
+        return next(
+            (m.content or "" for m in provider.requests[req_idx].messages if m.role == "tool" and m.tool_call_id == cid),
+            "",
+        )
+
+    def _call_raw(req_idx: int, cid: str) -> str:
+        return next(
+            (c.raw_arguments for m in provider.requests[req_idx].messages for c in m.tool_calls if c.call_id == cid),
+            "",
+        )
+
+    # Requests 2, 3, 4 (small/moderate reclaim < 96KB): NO early rewrite!
+    assert "predates a later edit" not in _tool_out(2, "r1")
+    assert "predates a later edit" not in _tool_out(3, "r1")
+    assert "predates a later edit" not in _tool_out(4, "r1")
+    assert "# write_one_body" in _call_raw(4, "w1")
+
+    # Request 5 (huge reclaim ~130KB >= 96KB and >= suffix): ONE coordinated rewrite of r1, w1, w2!
+    assert "predates a later edit" in _tool_out(5, "r1")
+    assert "_karo_context_manager" in json.loads(_call_raw(5, "w1"))
+    assert "_karo_context_manager" in json.loads(_call_raw(5, "w2"))
+    # Recent 2 writes (w3, w4) stay intact!
+    assert "# write_three_body" in _call_raw(5, "w3")
+    assert "# write_four_body" in _call_raw(5, "w4")
+
+    # Request 6 (following turn): zero oscillation, identical prefix messages!
+    assert provider.requests[6].messages[:10] == provider.requests[5].messages[:10]

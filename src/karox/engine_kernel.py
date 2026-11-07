@@ -63,6 +63,7 @@ from .engine_provider_bridge import (  # noqa: E402
     EngineProviderModel,
     _ELIDABLE_ARGUMENT_TOOLS,
     _ELIDED_ARGUMENT_CHARS,
+    _conservative_text_chars,
     _elided_argument_marker,
     _response_from_engine_message,
 )
@@ -70,7 +71,10 @@ from .engine_provider_bridge import (  # noqa: E402
 from . import completion_gate  # noqa: E402
 from . import check_report  # noqa: E402
 from . import session_analysis  # noqa: E402
-from .state_briefing import build_state_briefing  # noqa: E402
+from .state_briefing import (  # noqa: E402
+    HEADER as STATE_BRIEFING_HEADER,
+    build_state_briefing,
+)
 from .agent import (  # noqa: E402
     HARNESS_ORIGIN,
     REQUIRED_TOOLS,
@@ -366,6 +370,9 @@ def _touched_edit_paths(name: str, arguments: Mapping[str, Any]) -> Tuple[str, .
     return tuple(paths)
 
 
+_BRIEFING_BASE_KEY = "_karox_briefing_base"
+
+
 class EngineAgent(DefaultAgent):
     """``DefaultAgent`` with resume, cancellation and product event hooks.
 
@@ -387,10 +394,6 @@ class EngineAgent(DefaultAgent):
         super().__init__(model, env, **kwargs)
         self._kernel = kernel
         self.n_calls = int(resume_step_calls)
-        # The task message the durable snapshot is appended to, and its text
-        # before the first append.
-        self._briefing_target: Optional[int] = None
-        self._briefing_base: str = ""
 
     def add_messages(self, *messages: Dict[str, Any]) -> List[Dict[str, Any]]:
         added = super().add_messages(*messages)
@@ -458,30 +461,56 @@ class EngineAgent(DefaultAgent):
             raise _EngineBudgetExceeded(reason)
         return message
 
-    def _estimate_tokens(self) -> int:
-        """Estimate the wire prompt tokens, accounting for elided write arguments."""
-
-        base_chars = super()._estimate_tokens() * 4
+    def _message_wire_chars(self, message: Mapping[str, Any]) -> int:
         elided = getattr(self.model, "_elided_calls", None)
-        if not isinstance(elided, set) or not elided:
-            return base_chars // 4
-        saved = 0
-        for message in self.messages:
-            if not isinstance(message, dict) or message.get("role") != "assistant":
+        elided_set = elided if isinstance(elided, set) else set()
+        total = _conservative_text_chars(str(message.get("content") or ""))
+        for call in message.get("tool_calls") or ():
+            if not isinstance(call, Mapping):
                 continue
-            for call in message.get("tool_calls") or ():
-                if not isinstance(call, dict):
-                    continue
-                call_id = str(call.get("call_id") or "")
-                name = str(call.get("name") or "")
-                raw = str(call.get("raw_arguments") or "")
-                if (
-                    call_id in elided
-                    and name in _ELIDABLE_ARGUMENT_TOOLS
-                    and len(raw) > _ELIDED_ARGUMENT_CHARS
-                ):
-                    saved += max(0, len(raw) - len(_elided_argument_marker(name)))
-        return max(0, base_chars - saved) // 4
+            call_id = str(call.get("call_id") or "")
+            name = str(call.get("name") or "")
+            raw = str(call.get("raw_arguments") or "")
+            if (
+                call_id in elided_set
+                and name in _ELIDABLE_ARGUMENT_TOOLS
+                and len(raw) > _ELIDED_ARGUMENT_CHARS
+            ):
+                raw = _elided_argument_marker(name)
+            total += _conservative_text_chars(raw) + len(name) + 16
+        for block in message.get("reasoning_blocks") or ():
+            if isinstance(block, Mapping):
+                total += (
+                    _conservative_text_chars(str(block.get("text") or ""))
+                    + len(str(block.get("data") or ""))
+                    + len(str(block.get("signature") or ""))
+                )
+        total += _conservative_text_chars(str(message.get("reasoning_content") or ""))
+        return total
+
+    def _estimate_tokens(self) -> int:
+        """Conservative local token estimate with UTF-8, JSON-escape, tool-schema and elision accounting."""
+
+        extra_tools = int(getattr(self.model, "extra_tool_schema_tokens", 0) or 0)
+        chars = sum(
+            self._message_wire_chars(m) for m in self.messages if isinstance(m, Mapping)
+        )
+        return (chars // 4) + extra_tools
+
+    def _effective_prompt_tokens(self) -> int:
+        """Combine local conservative estimate with provider-reported usage + post-turn delta."""
+
+        local_tokens = self._estimate_tokens()
+        last_prompt = int(getattr(self.model, "last_prompt_tokens", 0) or 0)
+        last_local = int(getattr(self.model, "last_prompt_local_tokens", 0) or 0)
+        if last_prompt <= 0:
+            return local_tokens
+        if last_local <= 0:
+            return max(local_tokens, last_prompt)
+        delta = local_tokens - last_local
+        if delta >= 0:
+            return max(local_tokens, last_prompt + delta)
+        return max(local_tokens, int(last_prompt * (local_tokens / max(1, last_local))))
 
     def _supersede_stale_reads(self, *, force: bool = False) -> None:
         """Coordinated in-place history shrink for superseded reads and old writes.
@@ -495,19 +524,26 @@ class EngineAgent(DefaultAgent):
         decides whether middle messages must be dropped.
         """
 
-        tool_messages = {
-            str(message.get("tool_call_id") or ""): message
-            for message in self.messages
-            if isinstance(message, dict) and message.get("role") == "tool"
-        }
+        tool_messages: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+        call_message_index: Dict[str, int] = {}
         edits: Dict[str, int] = {}
         reads: List[tuple[int, str, str]] = []
+        for index, message in enumerate(self.messages):
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "tool":
+                cid = str(message.get("tool_call_id") or "")
+                if cid:
+                    tool_messages[cid] = (index, message)
         for index, message in enumerate(self.messages):
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
             for call in message.get("tool_calls") or ():
                 if not isinstance(call, dict):
                     continue
+                call_id = str(call.get("call_id") or "")
+                if call_id:
+                    call_message_index[call_id] = index
                 name = str(call.get("name") or "")
                 if name not in _STALE_READ_TOOLS and name not in _STALE_EDIT_TOOLS:
                     continue
@@ -517,10 +553,9 @@ class EngineAgent(DefaultAgent):
                     continue
                 if not isinstance(arguments, dict):
                     continue
-                call_id = str(call.get("call_id") or "")
                 if name in _STALE_EDIT_TOOLS:
-                    tool_msg = tool_messages.get(call_id)
-                    tool_text = str(tool_msg.get("content") or "") if tool_msg else ""
+                    pair = tool_messages.get(call_id)
+                    tool_text = str(pair[1].get("content") or "") if pair else ""
                     if (
                         "<returncode>" in tool_text
                         and "<returncode>0</returncode>" not in tool_text
@@ -532,14 +567,15 @@ class EngineAgent(DefaultAgent):
                     read_path = arguments.get("path")
                     if isinstance(read_path, str) and read_path:
                         reads.append((index, read_path, call_id))
-        stale: List[tuple[Dict[str, Any], str]] = []
+        stale: List[tuple[int, Dict[str, Any], str]] = []
         for read_index, path, call_id in reads:
             edit_index = edits.get(path)
             if edit_index is None or edit_index <= read_index:
                 continue
-            tool_message = tool_messages.get(call_id)
-            if tool_message is None:
+            pair = tool_messages.get(call_id)
+            if pair is None:
                 continue
+            tool_idx, tool_message = pair
             content = tool_message.get("content")
             if (
                 not isinstance(content, str)
@@ -547,32 +583,45 @@ class EngineAgent(DefaultAgent):
                 or _STALE_READ_MARKER in content
             ):
                 continue
-            stale.append((tool_message, content))
+            stale.append((tool_idx, tool_message, content))
         pending_fn = getattr(self.model, "pending_elidable_writes", None)
         pending_writes: List[tuple[str, str, int]] = (
             list(pending_fn(self.messages)) if callable(pending_fn) else []
         )
-        reclaimable_reads = sum(len(content) - _STALE_READ_CHARS for _, content in stale)
+        reclaimable_reads = sum(len(content) - _STALE_READ_CHARS for _, _, content in stale)
         reclaimable_writes = sum(size for _, _, size in pending_writes)
         total_reclaimable = reclaimable_reads + reclaimable_writes
         if total_reclaimable <= 0:
             return
-        # Clipping or eliding rewrites a message the provider may hold in its
-        # prompt cache; on a caching provider that re-bills the whole suffix
-        # after the earliest changed message, so both mechanisms share one
-        # batch gate and execute together on the same turn.
         if not force:
             allowed = getattr(self.model, "history_rewrite_allowed", None)
             if callable(allowed):
+                mutated_indices = [idx for idx, _, _ in stale] + [
+                    call_message_index[cid]
+                    for cid, _, _ in pending_writes
+                    if cid in call_message_index
+                ]
+                first_mutated = min(mutated_indices) if mutated_indices else 2
+                suffix_chars = max(
+                    0,
+                    sum(
+                        self._message_wire_chars(m)
+                        for m in self.messages[first_mutated:]
+                        if isinstance(m, Mapping)
+                    )
+                    - total_reclaimable,
+                )
                 try:
                     permitted = allowed(
-                        total_reclaimable, estimated_tokens=self._estimate_tokens()
+                        total_reclaimable,
+                        estimated_tokens=self._effective_prompt_tokens(),
+                        invalidated_suffix_chars=suffix_chars,
                     )
                 except TypeError:
                     permitted = allowed(total_reclaimable)
                 if not permitted:
                     return
-        for tool_message, content in stale:
+        for _, tool_message, content in stale:
             tool_message["content"] = self._clip_text(
                 content, _STALE_READ_CHARS, _STALE_READ_MARKER
             )
@@ -584,21 +633,104 @@ class EngineAgent(DefaultAgent):
         if callable(note_fn):
             note_fn(total_reclaimable)
 
+    def _strip_existing_briefing(self) -> Optional[Tuple[int, str, str]]:
+        """Remove an attached state briefing from messages[2:], returning (index, base, full)."""
+
+        header_block = f"\n\n{STATE_BRIEFING_HEADER}\n"
+        for index in range(len(self.messages) - 1, 1, -1):
+            message = self.messages[index]
+            if not isinstance(message, dict):
+                continue
+            if _BRIEFING_BASE_KEY in message:
+                full = str(message.get("content") or "")
+                base = str(message.pop(_BRIEFING_BASE_KEY) or "")
+                message["content"] = base
+                return index, base, full
+            content = str(message.get("content") or "")
+            end_tag = content.rfind("</output>")
+            tail_start = end_tag + len("</output>") if end_tag >= 0 else 0
+            pos = content.find(header_block, tail_start)
+            if pos >= tail_start and content[pos + 2 :].startswith(f"{STATE_BRIEFING_HEADER}\nTask:"):
+                base = content[:pos]
+                message["content"] = base
+                return index, base, content
+        return None
+
     def manage_context(self) -> None:
         budget = self.config.context_token_budget
-        over_budget = budget > 0 and self._estimate_tokens() > budget
+        over_budget = budget > 0 and self._effective_prompt_tokens() > budget
         self._supersede_stale_reads(force=over_budget)
+        if budget <= 0 or self._effective_prompt_tokens() <= budget or len(self.messages) <= 2:
+            self.context_overflow_tokens = 0
+            self._overflow_reported = False
+            return
         events_before = self.n_context_events
         estimate_before = self._estimate_tokens()
-        super().manage_context()
+        previous_briefing = self._strip_existing_briefing()
+        before_snapshots = [
+            (
+                m.get("content"),
+                m.get("reasoning_content"),
+                tuple(
+                    c.get("raw_arguments")
+                    for c in (m.get("tool_calls") or ())
+                    if isinstance(c, Mapping)
+                ),
+            )
+            for m in self.messages
+        ]
+        briefing = self._kernel.state_briefing()
+        briefing_tokens = (_conservative_text_chars(briefing) // 4) + 4 if briefing else 0
+        local_now = self._estimate_tokens()
+        effective_now = self._effective_prompt_tokens()
+        target_budget = budget
+        if effective_now > budget and effective_now > local_now and local_now > 0:
+            target_budget = min(budget, max(1, int(local_now * (budget / effective_now))))
+        if briefing_tokens > 0 and target_budget > briefing_tokens * 2:
+            target_budget = max(1, target_budget - briefing_tokens)
+        if local_now <= target_budget:
+            target_budget = max(1, local_now - 1)
+        self.config.context_token_budget = target_budget
+        try:
+            super().manage_context()
+        finally:
+            self.config.context_token_budget = budget
         if self.n_context_events > events_before:
+            guard = max(2, int(self.config.keep_recent_messages))
+            cutoff = max(2, len(self.messages) - guard - 1)
+            changed_indices = [
+                idx
+                for idx in range(2, len(self.messages))
+                if (
+                    self.messages[idx].get("content"),
+                    self.messages[idx].get("reasoning_content"),
+                    tuple(
+                        c.get("raw_arguments")
+                        for c in (self.messages[idx].get("tool_calls") or ())
+                        if isinstance(c, Mapping)
+                    ),
+                )
+                != before_snapshots[idx]
+            ]
+            middle_changed = [idx for idx in changed_indices if idx <= cutoff]
+            boundary = max(middle_changed) if middle_changed else cutoff
+            if previous_briefing is not None:
+                boundary = max(boundary, min(previous_briefing[0], cutoff))
+            self._refresh_state_briefing(boundary_index=boundary, briefing=briefing)
+            tokens_after = self._estimate_tokens()
+            self.context_overflow_tokens = max(0, tokens_after - budget)
             self._kernel._on_compacted(
                 estimate_before,
-                self._estimate_tokens(),
+                tokens_after,
                 self.n_context_events,
-                overflow=int(getattr(self, "context_overflow_tokens", 0) or 0),
+                overflow=int(self.context_overflow_tokens),
             )
-            self._refresh_state_briefing()
+        elif previous_briefing is not None:
+            prev_idx, prev_base, prev_full = previous_briefing
+            if 2 <= prev_idx < len(self.messages):
+                self.messages[prev_idx][_BRIEFING_BASE_KEY] = prev_base
+                self.messages[prev_idx]["content"] = prev_full
+            self.context_overflow_tokens = max(0, self._estimate_tokens() - budget)
         overflow = int(getattr(self, "context_overflow_tokens", 0) or 0)
         if overflow and self.n_context_events == events_before:
             if not getattr(self, "_overflow_reported", False):
@@ -615,33 +747,42 @@ class EngineAgent(DefaultAgent):
         elif not overflow:
             self._overflow_reported = False
 
-    def _refresh_state_briefing(self) -> None:
-        """Append the durable state to the task message after a compaction.
+    def _refresh_state_briefing(
+        self,
+        *,
+        boundary_index: Optional[int] = None,
+        briefing: Optional[str] = None,
+    ) -> None:
+        """Attach the durable state at the compaction boundary (index >= 2).
 
-        The task message is outside the compactor's middle slice, so the block
-        cannot be clipped or dropped and survives every later compaction. The
-        base text is captured once, so a rebuild replaces the block instead of
-        stacking a second copy.
+        ``self.messages[0]`` (system) and ``self.messages[1]`` (user task) are
+        never modified, keeping the static prefix cache-safe across compactions.
         """
 
-        briefing = self._kernel.state_briefing()
-        if not briefing:
+        if len(self.messages) <= 2:
             return
-        if self._briefing_target is None:
-            for index, message in enumerate(self.messages):
-                if message.get("role") == "user":
-                    self._briefing_target = index
-                    raw_base = str(message.get("content") or "")
-                    marker = "\n\n[KaroX durable state (kept across context compaction)]"
-                    if marker in raw_base:
-                        raw_base = raw_base.split(marker, 1)[0]
-                    self._briefing_base = raw_base
-                    break
-        if self._briefing_target is None or self._briefing_target >= len(self.messages):
+        text = briefing if briefing is not None else self._kernel.state_briefing()
+        if not text:
             return
-        updated = f"{self._briefing_base}\n\n{briefing}"
-        if self.messages[self._briefing_target].get("content") != updated:
-            self.messages[self._briefing_target]["content"] = updated
+        prev = self._strip_existing_briefing()
+        bound = boundary_index
+        if bound is None:
+            bound = prev[0] if prev is not None else min(len(self.messages) - 1, 2)
+        bound = max(2, min(int(bound), len(self.messages) - 1))
+        target_idx: Optional[int] = None
+        for idx in range(bound, 1, -1):
+            if self.messages[idx].get("role") in {"tool", "user"}:
+                target_idx = idx
+                break
+        if target_idx is None:
+            if bound + 1 < len(self.messages) and self.messages[bound + 1].get("role") in {"tool", "user"}:
+                target_idx = bound + 1
+            else:
+                target_idx = bound
+        target = self.messages[target_idx]
+        raw_base = str(target.get("content") or "")
+        target[_BRIEFING_BASE_KEY] = raw_base
+        target["content"] = f"{raw_base}\n\n{text}" if raw_base else text
 
     def _check_no_progress(self, message: Dict[str, Any], outputs: List[Dict[str, Any]]) -> None:
         """Same contract as the engine's port 4, with a typed-action key.

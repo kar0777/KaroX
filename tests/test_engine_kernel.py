@@ -1875,15 +1875,21 @@ def test_compaction_briefing_keeps_requirements_files_and_failure(
     report = harness.run()
 
     assert report.verified is True, report.reason
-    task_messages: List[str] = []
+    first_task = harness.provider.requests[0].messages[1].content or ""
+    assert "Implement add()" in first_task
     for request in harness.provider.requests:
-        for message in request.messages:
-            content = message.content or ""
-            if message.role == "user" and "Implement add()" in content:
-                task_messages.append(content)
-                break
-    assert task_messages, "the task message must be present in every request"
-    briefing = task_messages[-1]
+        assert request.messages[0].content == harness.provider.requests[0].messages[0].content
+        assert request.messages[1].content == first_task
+        assert "[KaroX durable state" not in (request.messages[1].content or "")
+    last_request = harness.provider.requests[-1]
+    briefings = [
+        (idx, message.content or "")
+        for idx, message in enumerate(last_request.messages)
+        if "[KaroX durable state" in (message.content or "")
+    ]
+    assert len(briefings) == 1
+    briefing_idx, briefing = briefings[0]
+    assert briefing_idx >= 2
     assert briefing.count("[KaroX durable state") == 1
     assert "- R1 Implement add()" in briefing
     assert "- R2 Keep the tests green" in briefing

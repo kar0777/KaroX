@@ -234,3 +234,45 @@ def test_web_fetch_counts_as_a_change_for_the_review_line() -> None:
     text = build_state_briefing(task="fix it", history=history)
 
     assert "no git.diff review since the last edit" in text
+
+
+def test_verification_freshness_stays_stable_across_non_mutating_events() -> None:
+    read_entry = {
+        "role": "tool",
+        "core_name": "repo.read_file",
+        "result": {"ok": True, "data": {"path": "calc.py"}},
+    }
+    base_history = [_write(), _check(failed=False)]
+    later_history = [*base_history, read_entry, read_entry]
+
+    first = build_state_briefing(task="fix it", history=base_history)
+    second = build_state_briefing(task="fix it", history=later_history)
+
+    assert first == second
+    assert "Verification: `python -m pytest -q` passed (current)." in first
+    assert "events ago" not in first
+    assert "just now" not in first
+
+
+def test_ambiguous_failed_mutation_marks_earlier_check_stale() -> None:
+    ambiguous_fail = {
+        "role": "tool",
+        "core_name": "repo.command",
+        "result": {"ok": False, "data": {"exit_code": 1}},
+    }
+    clean_rejected_edit = {
+        "role": "tool",
+        "core_name": "repo.edit_file",
+        "result": {"ok": False, "data": {"changed": False}},
+    }
+
+    stale_text = build_state_briefing(
+        task="fix it", history=[_write(), _check(failed=False), ambiguous_fail]
+    )
+    current_text = build_state_briefing(
+        task="fix it", history=[_write(), _check(failed=False), clean_rejected_edit]
+    )
+
+    assert "predates the latest edit" in stale_text
+    assert "passed (current)" in current_text
+    assert "predates the latest edit" not in current_text
