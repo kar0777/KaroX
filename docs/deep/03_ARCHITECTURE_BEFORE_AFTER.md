@@ -328,10 +328,18 @@ output bounding, and the URL-fetch path so the existing
 visual/plan/diff constants move with their owners and stay re-exported where
 the class attributes read them. Core/engine-tool/check/safety/skill tests pass.
 
+## After — process tree split
+
+`core_process.py` 1,126 → 836 lines; Windows job objects, process-group kill,
+`ProcessTree`, capture and byte decoding move to `process_tree.py` (344) and
+are re-exported from `core_process` for the lazy `command_jobs` runner and
+process-tool callers. `core_process` keeps probe/check rules, `CheckPlan` and
+`ProcessToolsMixin`. Core-command/job/repo-safety/MCP/engine-tool tests pass.
+
 ## Next
 
-Providers, `core_process`/`mcp_client`/`hosted_core`, TUI, `web_check`, then
-the bridge with its S0 characterization tests.
+Providers, `mcp_client`/`hosted_core`, TUI, `web_check`, then the bridge with
+its S0 characterization tests.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
