@@ -1,6 +1,6 @@
 # Real-world benchmarks
 
-**Status: one smoke + one paired trivial cell + competitor credential blockers; no representative comparison matrix. Spend: cost unavailable.**
+**Status: one smoke + one paired trivial cell + one OpenCode free-model pass; no representative comparison matrix. Spend: cost unavailable.**
 
 The goal requires real tasks and comparisons. One real provider smoke has been
 run; no benchmark cell, no competing CLI comparison, and no multi-task result
@@ -46,7 +46,7 @@ of general superiority.
 |---|---|---|---|
 | Karo baseline c4bc342 | 6.0.0a3 source `b/win` | `karox agent run` | one paired cell |
 | KaroX 5.0.0 | `karox_runtime-5.0.0` wheel, SHA `832cc249...` | same | one verified smoke + paired cell |
-| OpenCode V2 | installed 2.2.1 (target frozen 2.2.6) | `opencode run` | **blocked: default provider returned "Incorrect API key"**; no file change |
+| OpenCode V2 | installed 2.2.1 (target frozen 2.2.6) | `opencode run` | **one product-as-shipped pass** on `opencode/deepseek-v4.1-flash-free` (15.2 s, fixed file, pytest pass) |
 | DSH | 0.2.2-rc.1 + Node 26.13.0 (target 24.22.2) | `dsh headless` | **blocked: `MISSING_CREDENTIAL` for deepseek-official**; no file change |
 
 ## Real browser user scenario — 2026-11-07
@@ -66,16 +66,20 @@ fixture browser tests.
 
 The same trivial `calc.py` task was attempted Product-as-shipped:
 
-- OpenCode 2.2.1 chose `deepseek-v4.1-flash-1017` and exited 1 after 9.8 s with
-  `Incorrect API key provided`; `calc.py` was unchanged and the public test
-  still failed. No score, patch or cost is claimed.
+- OpenCode 2.2.1 with its default `dash/deepseek-v4.1-flash-1017` exited 1 after
+  9.8 s with `Incorrect API key provided`; no file change. A second
+  **product-as-shipped** run with the available free model
+  `opencode/deepseek-v4.1-flash-free` succeeded: 15.2 s, one correct one-line
+  patch, `python -m pytest -q` exit 0. OpenCode did not report tokens or cost in
+  the captured output.
 - DSH 0.2.2-rc.1 exited 1 after 7.7 s with
   `MISSING_CREDENTIAL: llm-deepseek: no API key for provider route
   "deepseek-official"`; `calc.py` was unchanged and the public test still failed.
-- These are environment/credential blockers, **not** evidence that Karo is
-  better. The installed competitor versions also differ from the frozen targets.
-  A real comparison requires provisioning their routes and re-running the frozen
-  protocol.
+- DSH is **not comparable** yet. OpenCode used a different model/provider from
+  Karo and baseline; this is a Product-as-shipped datapoint, not a controlled
+  same-model comparison. The installed competitor versions also differ from the
+  frozen targets (OpenCode 2.2.1 vs 2.2.6, Node 26 vs 24.22.2). No claim of
+  general superiority is made from these cells.
 
 ## Planned task families (30–100, not yet frozen)
 
@@ -117,5 +121,6 @@ contaminated candidate remains INVALID.
 After the candidate is deterministically green and versioned, start with a small
 development set (6–10 tasks, paired arm order) and do not call it a release
 benchmark until the full 30–100-task registry has been run.
+
 
 

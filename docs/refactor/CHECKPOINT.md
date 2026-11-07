@@ -5,7 +5,7 @@
 **Product worktree:** `b/karox5-refactor`
 **Branch:** `release/karox5-5.0.0`
 **Baseline commit:** `c4bc342382149c254f1a1ea08aeeeccd21c4e246`
-**Candidate HEAD:** `c15cec6` (5.0.0 release surface)
+**Candidate HEAD:** `725fb96` (5.0.0 release surface)
 **Dev history:** `goal/karox5-refactor-20261107` at `5e430d8`; dev branch kept for reference
 **Report/audit worktree:** `b/win` (do not use for product tests)
 **Other worktrees:** preserve untouched; do not reset/clean them.
@@ -48,9 +48,7 @@ the representative benchmark matrix remain open.
   steps, 27,131 tokens; cost unavailable/`no_pricing`, no invoice invented.
 - One paired cell: baseline c4 **stopped on token budget** (34,113 tokens,
   unverified) on the same task where candidate was verified in 27,131 tokens.
-- Competitor attempts were credential-blocked: OpenCode installed 2.2.1 returned
-  an invalid API key; DSH 0.2.2-rc.1 reported missing deepseek-official
-  credentials. No competitor scores are claimed.
+- Competitor attempts: OpenCode 2.2.1 default route was credential-blocked, but\n  its free model completed the same one-line task (15.2 s, pytest pass); DSH\n  0.2.2-rc.1 was blocked by missing deepseek-official credentials. This is not a\n  controlled matrix.
 - No representative benchmark matrix or OpenCode/DSH comparison has been run.
 
 ## Landed fixes
@@ -112,6 +110,7 @@ release candidate.
 2. Resolve 5.x version, scope, installer upgrade, and session rollback.
 3. Run real browser/MCP/TUI smoke with cost ledger.
 4. Run the benchmark tasks and then decide READY/NOT_READY.
+
 
 
 
