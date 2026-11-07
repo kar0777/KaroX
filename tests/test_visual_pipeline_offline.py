@@ -551,4 +551,3 @@ def test_observation_fingerprint_invalidates_on_page_asset_viewport_query_or_bac
     diff_path = fingerprint_fn(copy_page, serve_root=tmp_path, viewport=(1280, 800), query="", backend="software")
 
     assert len({after_font, diff_viewport, diff_query, diff_backend, diff_path}) == 5
-
