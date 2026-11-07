@@ -377,18 +377,6 @@ class HotWorkerSupervisor:
         module = self.module()
         return dict(module.execute_tests(runtime, arguments, deadline_seconds))
 
-    def execute_browser(
-        self,
-        runtime: Any,
-        arguments: dict[str, Any],
-        deadline_seconds: float,
-    ) -> dict[str, Any]:
-        module = self.module()
-        return dict(
-            module.execute_browser_command(runtime, arguments, deadline_seconds)
-        )
-
-
 _SUPERVISOR = HotWorkerSupervisor()
 
 
