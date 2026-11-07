@@ -33,7 +33,6 @@ import json
 import logging
 import os
 import pathlib
-import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -50,6 +49,11 @@ from .engine.agents.default import DefaultAgent  # noqa: E402
 from .engine_tool_env import (  # noqa: E402
     COVERAGE_REFUSAL_LIMIT,
     CoreToolEnvironment,
+)
+from .engine_tool_catalog import (  # noqa: E402
+    _engine_provider_tool,
+    _finish_provider_tool,
+    _tool_relevant_for_task,
 )
 from .engine_prompts import (  # noqa: E402
     _CLOSING_TURN_PROMPT,
@@ -157,76 +161,8 @@ def _model_wall_limit(max_seconds: float) -> tuple[int, float]:
 
 
 
-#: Tool schemas whose payload is large and whose domain is narrow. They are
-#: advertised only when the task names that domain. The tool itself, its
-#: capability gate and its handler stay in place, so a model that already knows
-#: the name can still call it; an unrelated task simply stops paying ~3.4 KB of
-#: JSON on every request. Measured on the ledger fixture, the full catalog cost
-#: about 1.1k prompt tokens per call of which none were ever called.
-_DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
-    # web.fetch is not gated: it is one ~1.2 KB schema, and a repair task names
-    # no domain word while its fix is often a known upstream change. Hidden on
-    # swe-sympy-24213 (2026-11-05), the model spent ~25 KB of reasoning
-    # reconstructing upstream code from memory ("web_fetch isn't in the tool
-    # list"), where a fetch would have read it.
-    "disk.scan": (
-        "disk",
-        "cleanup",
-        "clean up",
-        "free space",
-        "storage",
-        "cache",
-        "prune",
-        "temporary files",
-    ),
-    "disk.plan_cleanup": (
-        "disk",
-        "cleanup",
-        "clean up",
-        "free space",
-        "storage",
-        "cache",
-        "prune",
-        "temporary files",
-    ),
-    # The Safety section of the system prompt teaches the exact
-    # exact `repo_command {"action": "batch", ...}` form for deleting a scratch file,
-    # so the name stays callable while it is not advertised. An argument error
-    # on that rare call is cheaper than 1.3 KB of batch schema on every repair
-    # request.
-    "repo.command": (
-        "batch",
-        "atomic",
-        "rename",
-        "mkdir",
-        "move file",
-        "move the file",
-        "delete file",
-        "delete the file",
-        "remove file",
-        "remove the file",
-    ),
-}
 
 
-def _tool_relevant_for_task(
-    core_name: str, task: str, *, visual: bool = False, mode: Optional[str] = None
-) -> bool:
-    """Whether this tool's schema belongs on the request for this task."""
-
-    keywords = _DOMAIN_TOOL_KEYWORDS.get(core_name)
-    if keywords is None:
-        return True
-    if visual:
-        # Image tasks commonly fetch a library or an asset.
-        return True
-    text = f"{task} {mode or ''}".lower()
-    for word in keywords:
-        # Word-ish boundaries: "asset" must not fire on "assets", and "url"
-        # must not fire inside an unrelated identifier.
-        if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text):
-            return True
-    return False
 
 
 def _any_language_server() -> bool:
@@ -2166,71 +2102,3 @@ class EngineKernel:
         )
 
 
-def _engine_provider_tool(alias: str, definition: ToolDefinition) -> ProviderTool:
-    return ProviderTool(alias, definition.description, dict(definition.input_schema))
-
-
-def _finish_provider_tool() -> ProviderTool:
-    return ProviderTool(
-        FINISH_TOOL_NAME,
-        (
-            "Submit the final answer and end the task. Arguments: "
-            '{"answer": "<final answer text>"}. When the task asks for a '
-            "file's contents in the reply (e.g. \"reply with the complete code "
-            'in one code block"), list that file in "answer_files": KaroX '
-            "appends its exact bytes as a fenced code block, so never paste the "
-            "file into answer; keep answer empty when the reply must contain "
-            "only the code. A file the task only asks you to save or create "
-            'stays out of the reply. A web deliverable may also carry "requirements": '
-            "entries for the requirement IDs KaroX lists, quoting results you "
-            "already have; the list is advisory and only an unmet entry keeps "
-            "the run open. After an accepted finish you cannot continue working."
-        ),
-        {
-            "type": "object",
-            "properties": {
-                "answer": {
-                    "type": "string",
-                    "description": (
-                        "The final answer to report to the user. May be empty "
-                        "when answer_files carries the whole reply."
-                    ),
-                },
-                "answer_files": {
-                    "type": "array",
-                    "description": (
-                        "Only files whose complete contents the task asks to "
-                        "see in the reply (not files it only asks to save); "
-                        "each is appended verbatim as one fenced code block "
-                        "after answer."
-                    ),
-                    "items": {"type": "string"},
-                },
-                "requirements": {
-                    "type": "array",
-                    "description": (
-                        "Requirement attestation for a web deliverable, one entry "
-                        "per listed requirement ID. status verified: observed is "
-                        "text copied exactly from a browser_command, checks_run or "
-                        "visual_check result received after your last edit. "
-                        "not_applicable: observed says why the line asks nothing "
-                        "of the deliverable. unmet: the requirement is not met."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["verified", "not_applicable", "unmet"],
-                            },
-                            "observed": {"type": "string"},
-                        },
-                        "required": ["id", "status", "observed"],
-                    },
-                },
-            },
-            "required": ["answer"],
-            "additionalProperties": False,
-        },
-    )
