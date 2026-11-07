@@ -45,7 +45,9 @@ work remain open.
   export, browser timeout, TUI usage and MCP risk tests are passing.
 - One real provider smoke passed: W&B `DeepSeek-V4.1-Flash`, verified, 4
   steps, 27,131 tokens; cost unavailable/`no_pricing`, no invoice invented.
-- No paid benchmark comparison matrix has been run.
+- One paired cell: baseline c4 **stopped on token budget** (34,113 tokens,
+  unverified) on the same task where candidate was verified in 27,131 tokens.
+- No representative benchmark matrix or OpenCode/DSH comparison has been run.
 
 ## Landed fixes
 

@@ -7,6 +7,23 @@ run; no benchmark cell, no competing CLI comparison, and no multi-task result
 set exists yet. This file records the smoke and the frozen protocol rather than
 inventing a benchmark.
 
+## Paired baseline/candidate cell — 2026-11-07
+
+Same model (`wandb/deepseek-ai/DeepSeek-V4.1-Flash`), same prompt, same
+`workspace_write` profile, same approved `python -m pytest -q`, same
+`--max-total-tokens 30000`, separate temp repos/configs/runtimes.
+
+| Arm | Status | Steps | Requests | Tokens | Approved check | Changed |
+|---|---|---|---:|---:|---|---|
+| Baseline c4 source (`b/win`, 6.0.0a3) | **stopped: budget_exceeded:token_budget** | 4 | 5 | 34,113 | exit 0 | `calc.py` |
+| Candidate `f3bceb0` | **verified: true** | 4 | 4 | 27,131 | exit 0 | `calc.py` |
+
+The baseline produced the correct one-line patch and its check passed, but the
+run stopped before a current change review and never became `verified=true`.
+The candidate reached VERIFIED with one fewer request and 6,982 fewer tokens.
+This is **one trivial paired cell**, not a benchmark result; it is not evidence
+of general superiority.
+
 ## Real provider smoke — 2026-11-07
 
 - Arm: KaroX candidate, `wandb/deepseek-ai/DeepSeek-V4.1-Flash`.

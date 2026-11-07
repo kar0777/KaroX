@@ -31,7 +31,7 @@
 | Wheel package-data/license inspection | baseline passed; final pending |
 | Full one-revision pytest | **PASS** — single process exit 0, 1,542 collected; file-isolated 1,525P/15S/0F |
 | Real provider/browser/MCP/TUI smoke | NOT RUN |
-| Benchmarks | NOT RUN |
+| Benchmarks | **ONE PAIRED TRIVIAL CELL ONLY**; no representative matrix and no OpenCode/DSH comparison |
 
 ## Safe migration rehearsal (not executed on the user's install)
 
