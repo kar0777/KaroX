@@ -985,7 +985,13 @@ class BrowserSession(SessionGuardsMixin):
             validated = validate_browser_url(value, self.policy)
         except BrowserSecurityError:
             return None
-        self._ensure_open().last_safe_urls[tab_id] = validated
+        # Playwright can deliver a late domcontentloaded/framenavigated event
+        # while close() is tearing the handle down. A closed session has nowhere
+        # to remember the URL; it is not an error for the callback to be late.
+        handle = self._handle
+        if handle is None:
+            return None
+        handle.last_safe_urls[tab_id] = validated
         return validated
 
     @staticmethod
