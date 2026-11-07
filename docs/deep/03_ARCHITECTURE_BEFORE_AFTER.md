@@ -356,10 +356,28 @@ markers to `disk_scan.py` (446); cleanup plan schema, persistence, risk and
 apply to `disk_plans.py` (448). The facade re-exports every historical name.
 Core/argument/engine-tool tests pass.
 
+## Bridge S0 characterization tests (before any bridge move)
+
+Added `tests/test_bridge_characterization.py` (925 lines, 21 deterministic
+tests, in-process ASGI only):
+
+- modern MCP `2026-07-28` wire: `server/discover`, `tools/list`, `tools/call`
+  envelopes, protocol/method mismatch, GET 405, >16 MiB 413;
+- sealed one-shot `requestState`: round-trip, argument binding, replay refusal,
+  expiry, non-canonical base64url and tampered HMAC;
+- hosted `execute_approved`: digest mismatch denial, exact command/capability
+  minting, chat-approval binding/decline/one-shot consumption.
+
+The tests pass together with the existing bridge suites (`54 passed`).
+**Gap found:** `CoreToolBridge.execute_approved` has no transport-independent
+replay ledger — one-shot enforcement lives in the wire `requestState`. The
+bridge refactor must either keep that boundary documented or add a core-level
+ledger with its own test; it must not silently assume one exists.
+
 ## Next
 
 `hosted_core`, providers/provider_adapters, TUI and `web_check`, then the
-bridge launcher/proxy/tailscale with characterization tests.
+bridge launcher/proxy/tailscale with the S0 tests as the safety net.
 
 | Metric | Baseline | Current |
 |---|---:|---:|
