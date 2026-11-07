@@ -49,8 +49,8 @@ edd04b8 refactor(engine): complete the kernel decomposition into owner mixins
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
 | `ruff` + `check_tree` at current HEAD | PASS — 200 modules / 88,567 lines |
-| Full suite at `7a5f44f` (before completion/repo splits) | running in the isolated gate worktree |
-| Full suite at current HEAD | pending next round |
+| Full suite at `7a5f44f` (engine complete + tool bodies + check_report) | **PASS** — exit 0, 100 % (`local-runs/gate-7a5f44f-full.log`) |
+| Full suite at current HEAD (completion-gate + repo-context splits) | pending next round; targeted completion/coverage/neutrality and core-smoke/engine-context tests pass |
 | Wheel build/fresh install | pending after the next full green gate |
 
 ## Metrics
