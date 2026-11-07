@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-07 21:55 Europe/Warsaw
+**Updated:** 2026-11-07 22:20 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -8,76 +8,103 @@
 
 ## Status
 
-Phase 0 (baseline/inventory/plan) complete. Phase 1A started: one dead second
-verification API removed; the checkpoint module was restored after adversarial
-review (latent capability, not dead). Phase 1B started with the CLI split.
+Phase 0 (baseline/inventory/plan) complete. Phase 1A (dead legacy) has two
+evidenced batches. Phase 1B is well underway: CLI and engine-agent seams split;
+the browser session monolith is fully decomposed. All landed changes have
+targeted tests green; a full-suite gate on `a8424d7` is running in an isolated
+snapshot worktree (`b/karox5-deep-gate`).
 
 | Workstream | State | Evidence |
 |---|---|---|
 | Baseline freeze | DONE | `docs/deep/01_BASELINE.md`; wheel SHA verified |
-| Dead-code batch 0 | DONE (verification API only; checkpoint restored) | `docs/deep/02_DEAD_LEGACY_EVIDENCE.md` |
-| CLI split | IN PROGRESS — files split; targeted CLI/MCP/tree tests PASS; engine integration tests running | this file |
-| Engine split | PLANNED — implementation-ready mixin plan received; identity constraints recorded | `docs/deep/ARCHITECTURE_REFACTOR_PLAN.md` |
-| Browser split | PLANNED — mixin plan received; first step = `browser/contract.py` (breaks guards→session cycle) | plan in session notes |
-| Bridge split | PLANNED — 31-module plan + characterization-test prerequisites received | plan in session notes |
-| Benchmark arena | NOT STARTED (correctly blocked on Phase 1/2) | — |
+| Dead-code batch 0 | DONE | verification second API removed; checkpoint module restored after adversarial review |
+| Dead-code batch 1 | DONE | 193 audited helper lines removed |
+| CLI split | DONE | `cli.py` 2,299 → 193 + 8 modules; targeted tests pass |
+| Engine split | PARTIAL | EngineAgent mixin, prompts, tool catalog done; control/IO/finish/harness pending |
+| Browser split | DONE (session) | `browser/session.py` 3,703 → 173 + 11 owner modules; browser tests pass |
+| Bridge split | NOT STARTED | plan + characterization-test prerequisites ready |
+| Browser 3D/web_check split | NOT STARTED | deliberate; 3D checks are product features |
+| Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Gates run in this worktree
+## Landed commits (latest first)
+
+```
+02d7a8b refactor(engine): extract the tool catalog/gating module
+e29d45b refactor(engine): extract model-facing prompts module
+a8424d7 refactor(browser): extract close/profile lifecycle mixin and finish the split
+3fce4ce refactor(browser): extract browser launch mixin
+120d779 refactor(browser): extract screenshot/upload/download evidence mixin
+537d722 refactor(browser): extract waits and user-takeover mixin
+987f4c6 refactor(browser): extract interaction mixin
+afc12e5 build: raise the package line budget to 90k for the measured split overhead
+dc3cb54 refactor(browser): extract observation and snapshot mixin
+b57abf3 refactor(browser): extract event collectors mixin
+7c3095b refactor(browser): extract navigation and tab management mixin
+92b0b12 refactor(browser): extract the owner-thread runtime mixin
+8dbaf2a refactor(browser): move input and payment guards into SessionGuardsMixin
+c46aed6 refactor(browser): extract the session contract leaf
+3121d04 refactor(engine): extract the EngineAgent mixin from engine_kernel
+4b93bd8 refactor: remove 193 lines of independently audited dead helpers
+1bc4702 refactor(cli): split the command surface into focused owner modules
+54adfcc refactor(verification): remove the unused second verification API
+```
+
+## Gates
 
 | Gate | Result |
 |---|---|
-| `python scripts/check_tree.py` (base) | PASS — 164 modules / 87,689 lines |
-| `python scripts/check_tree.py` (current) | PASS — 172 modules / 87,658 lines |
-| `ruff check src tests scripts` | PASS |
-| `mypy cli entrypoint tui` (base) | PASS — 13 files |
-| Full `pytest` on base with batch-0 edit in flight | exit 0 (1542 collected); recorded as a smoke, not a clean pre-change baseline |
-| Targeted CLI/MCP/tree tests after split | PASS (`test_cli`, `test_local_runtimes`, `test_session_export`, `test_agent_report_surface`, `test_tree`, `test_mcp_cli`) |
+| `ruff check src tests scripts` | PASS (latest) |
+| `check_tree.py` | PASS — 185 modules · 87,862 lines (ceiling 90,000) |
+| Browser targeted suite after each mixin | PASS (resources/units/core/code-source/facades) |
+| CLI/session/MCP/tree targeted suite | PASS |
+| Engine kernels/tools + prompt-cache + neutrality after step 1 | PASS |
+| Full suite on `c46aed6` | **FAIL** — one test patched the old CLI facade for `_mcp_registry`; fixed at `120d779` and retested (`test_mcp_client` PASS) |
+| Full suite on `a8424d7` | RUNNING in `b/karox5-deep-gate` (isolated config/runtime) |
+| Wheel build/fresh install | pending after the next full green gate |
 
 ## Decisions that must not be lost
 
-1. `ellipsis_checkpoint.py` is **kept**: it was the implementation of the
-   documented hosted rollback hook, and Git history shows the hook existed.
-   Wiring it back (or formally retiring the feature) is tracked separately.
-   Do not delete it as "dead".
+1. `ellipsis_checkpoint.py` is **kept**: it was the implementation of a
+   documented hosted rollback hook; the history and the tracked wiring gap are
+   in `docs/deep/02_DEAD_LEGACY_EVIDENCE.md`. Do not delete it as "dead".
 2. `route_health` trackers/probes, `requirements.delegated_source_context` and
-   the effort/mode display helpers are **lost wiring**, not dead code. Keep.
+   the effort/mode display helpers are **lost wiring**, not dead code.
 3. `command_jobs.run_job`, `workspace_worker`, `browser.tools`, `tui.app`,
-   `desktop_apps`, `engine/*` and `computer_use.__main__` are dynamic
-   entrypoints. Never judge them by static imports.
-4. `EngineAgent` must remain a concrete class in `engine_kernel.py`
-   (`__class__.__module__` is written to the trajectory and asserted);
-   extract a mixin, not the class. Keep `_any_language_server` in the facade
-   because tests monkeypatch it there.
-5. Browser: use thin mixins; keep the `BrowserSession` façade, the owner-thread
-   fail-closed behavior, and every action wrapper. First split is
-   `browser/contract.py` (breaks `guards → session`).
-6. CLI: tests patch `karox.cli._registry` (kept as a facade seam),
-   `karox.cli_runtime.OpenAIChatCompletionsProvider` and
-   `karox.cli_session.session_dir` (patch targets updated with the move).
+   `desktop_apps`, `engine/*`, `computer_use.__main__` are dynamic entrypoints.
+4. `EngineAgent` must remain concrete in `engine_kernel.py`; the mixin keeps
+   `__module__`/trajectory identity. `_any_language_server` stays patchable in
+   the facade.
+5. Browser owner-thread rules, fail-closed timeout, the single action-wrapping
+   loop, result shapes and all WebGL/Three.js/3D code outside `browser/` are
+   unchanged. `web_check.py`/`visual_check.py` were deliberately untouched.
+6. Test seams preserved or retargeted with the move:
+   `karox.cli._registry` (facade), `karox.cli_runtime.OpenAIChatCompletionsProvider`,
+   `karox.cli_runtime._mcp_registry`, `karox.cli_session.session_dir`,
+   `karox.browser.session.{demote_headless_browsers,is_local_browser_url,MAX_ARTIFACT_BYTES}`
+   (session hooks).
 
 ## Package budget
 
-- `MAX_PACKAGE_LINES = 88_000`; current 87,658 → 342 lines headroom.
-- The CLI split added ~225 net lines of cohesive modules (8 new files; one
-  2,299-line file became one 193-line façade + focused modules).
-- The engine/browser splits will need a recorded budget decision (raise both
-  `scripts/check_tree.py` and `tests/test_tree.py` together, with the measured
-  reason) unless the concurrent simplification removes enough duplication.
+`MAX_PACKAGE_LINES = 90_000` (raised from 88,000 at `afc12e5` with a measured
+justification in `scripts/check_tree.py`). Current 87,862 → 2,138 headroom for
+the remaining decompositions. No duplicated/generated code was admitted.
 
 ## Cost ledger
 
-No paid model/benchmark runs have been started in this goal yet (Phase 1).
-Subagent work is internal. Benchmark spend starts only after Phase 1B/2.
+No paid model/benchmark runs have been started (correctly still Phase 1).
+Subagent work is internal.
 
 ## Next automatic actions
 
-1. Finish the CLI-split integration test run; commit batch 0 and CLI split as
-   separate reversible commits.
-2. Run the full suite for the CLI split.
-3. Apply engine split step 1 (`engine_agent.py` mixin; concrete shell stays).
-4. Add bridge characterization tests before moving any modern-wire/approval
-   code (S0 in the bridge plan).
-5. Continue batches A→H; update this checkpoint after every commit.
+1. Read the `a8424d7` full-gate result; fix any regression before continuing.
+2. Finish engine split: control/events → IO/durable state → finish/report →
+   harness finishing; run full `tests/test_engine_kernel.py` per group.
+3. Add bridge S0 characterization tests (modern MCP wire, sealed approval
+   state, `execute_approved`); only then move bridge code.
+4. Split `repo_context`, `tui/app`, `web_check`, providers, `engine_tool_env`,
+   `core_tools`; delete the now-unwired v5 visual ledger only after a product
+   decision.
+5. Then Phase 2 full gate + wheel/fresh install, and only then benchmarks.
 
 ## Safe continuation
 
@@ -91,6 +118,5 @@ $env:KAROX_DISABLE_UPDATE = '1'
 Set-Location $wt
 ```
 
-Do not push, publish, reset/clean foreign worktrees, alter the user's installed
-KaroX, or start a public tunnel. See `docs/deep/ARCHITECTURE_REFACTOR_PLAN.md`
-for the batch order.
+Do not push, publish, reset/clean foreign worktrees, alter the installed KaroX,
+or start a public tunnel.

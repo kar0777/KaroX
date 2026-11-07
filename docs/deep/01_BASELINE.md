@@ -18,7 +18,7 @@
 | Physical package lines (`check_tree`, `splitlines`) | 87,689 |
 | Test files | 79 |
 | Collected tests | see gate log below |
-| `MAX_PACKAGE_LINES` | 88,000 (311 lines headroom) |
+| `MAX_PACKAGE_LINES` | 88,000 at baseline; 90,000 after the measured split raise (`afc12e5`) |
 | Import cycles | 4 (see audit) |
 | Console scripts | `karox`, `karox-vnext` |
 | Package/version | `karox-runtime` 5.0.0 |
