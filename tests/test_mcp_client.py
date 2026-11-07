@@ -954,7 +954,7 @@ def test_cli_runtime_rejects_a_tampered_selection_name(
     selection["tools"]["echo"]["name"] = "mcp.other.echo"
     _session_with_selection(store, repository, selection, session_id="tamper")
     monkeypatch.setattr(
-        karox_cli, "_mcp_registry", lambda: stdio_server.registry
+        "karox.cli_runtime._mcp_registry", lambda: stdio_server.registry
     )
     with pytest.raises(McpAccessDenied, match="changed"):
         karox_cli._selected_mcp_runtime(store.load("tamper"), repository)
