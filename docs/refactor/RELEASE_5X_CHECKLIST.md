@@ -62,3 +62,4 @@ local wheel + SHA-256 + evidence bundle only.
 - migration/rollback result;
 - benchmark ledger and limitations;
 - exact NOT_READY/READY verdict.
+

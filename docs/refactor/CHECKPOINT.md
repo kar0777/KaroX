@@ -35,7 +35,7 @@ the representative benchmark matrix remain open.
 - `ruff` PASS; scoped `mypy` PASS; `check_tree` PASS: 164 modules / 87,667 lines
   (333-line headroom under the 88,000 gate).
 - New wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,150,875 bytes, SHA-256
-  `832cc249d3201e7ddddae1a34bd0b6ab61234b9c8cd071d4ec42d5ae0a691dca`.
+  `ed91c1aec6887d974f8d105d53fd0341ccb81cb1316bdfb5633ef5aacc4c91e7`.
 - Full **file-isolated** gate PASS: 70 test files, 1,525 passed / 15 skipped /
   0 failed / 0 hangs / 0 errors, each file with its own process and config/runtime.
 - The earlier apparent hangs were prematurely killed slow browser/MCP sections; with a full time budget the single-process suite completed normally.
@@ -109,6 +109,7 @@ release candidate.
 2. Resolve 5.x version, scope, installer upgrade, and session rollback.
 3. Run real browser/MCP/TUI smoke with cost ledger.
 4. Run the benchmark tasks and then decide READY/NOT_READY.
+
 
 
 
