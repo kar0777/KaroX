@@ -164,8 +164,17 @@ contract leaf. The action-wrapping loop still runs exactly once in
 Tests: `test_browser_units`, `test_browser_resources`,
 `test_browser_code_sources`, `test_public_package_facades` PASS.
 
+## After — browser split step 2 (guards)
+
+The four session guard methods (`_assert_agent_input_allowed`,
+`_guard_fill_target`, `_assert_press_text_allowed`, `_assert_action_safe_page`)
+and the credential/payment hint now live in `browser/guards.py` on the existing
+`SessionGuardsMixin`; `BrowserSession(SessionGuardsMixin)` inherits them with the
+same names. `guards.py` 151 → 267 lines; `session.py` 3,501 → 3,398.
+`test_browser_core`, unit/resource/code-source and public-facade tests PASS.
+
 ## Next
 
-Browser mixin extraction (guards → runtime → navigation → collectors →
-observation → interaction → waits/evidence → launch/lifecycle), engine steps
-2–7, then the bridge characterization tests before its split.
+Browser mixin extraction (runtime → navigation → collectors → observation →
+interaction → waits/evidence → launch/lifecycle), engine steps 2–7, then the
+bridge characterization tests before its split.
