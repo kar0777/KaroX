@@ -1,10 +1,27 @@
 # Real-world benchmarks
 
-**Status: NOT RUN. Spend: $0.00.**
+**Status: one real smoke, no comparison matrix. Spend: cost unavailable.**
 
-The goal requires real tasks and comparisons. No benchmark cell has been run in
-this pass, so this file records the frozen protocol and the exact blocker rather
-than inventing results.
+The goal requires real tasks and comparisons. One real provider smoke has been
+run; no benchmark cell, no competing CLI comparison, and no multi-task result
+set exists yet. This file records the smoke and the frozen protocol rather than
+inventing a benchmark.
+
+## Real provider smoke — 2026-11-07
+
+- Arm: KaroX candidate, `wandb/deepseek-ai/DeepSeek-V4.1-Flash`.
+- Task: fix `calc.py` (`a - b` → `a + b`) so the public `test_calc.py` passes.
+- Entry point: `karox agent run`, `workspace_write`, approved check
+  `["python","-m","pytest","-q"]`, `--max-total-tokens 30000`.
+- Result: **verified: true**, 4 steps, 4 model requests, 1 changed file,
+  approved check exit 0.
+- Usage: **27,131 total tokens** (prompt 26,810, completion 321; cache-read
+  6,400); cost status **unknown — no pricing** (`cost_unknown_reason:
+  no_pricing`). No invoice or dollar estimate is invented.
+- Isolated config/runtime under `%TEMP%\karox5-paid-smoke`; no real key printed
+  or written outside the OS keyring.
+- This is a transport/tool/verification smoke. It is **not** a comparison and
+  not a statistically meaningful benchmark.
 
 ## Candidate configurations
 

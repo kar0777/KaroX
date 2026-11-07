@@ -35,9 +35,9 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 | Browser core/live local page | PASS file-isolated; full-suite order hang | `test_browser_core.py` 10/10, `test_browser_live.py` seen pass in earlier runs |
 | TUI synthetic streaming | PASS | `test_tui.py` 95 tests |
 | Desktop live | **NOT TESTED** | Windows fake tests only |
-| Real W&B/model | **NOT RUN** | no paid call |
+| Real W&B/model | **ONE SMOKE PASS** | W&B DeepSeek-V4.1-Flash, verified, 4 steps, 27,131 tokens; cost `no_pricing` |
 | OpenCode/DSH comparison | **NOT RUN** | blocked by release readiness |
-| Fresh wheel install | PASS on pre-split wheel; rebuild pending | baseline wheel smoke |
+| Fresh wheel install | PASS on pre-split wheel; final pending | baseline wheel smoke |
 | Upgrade/rollback from real 5.x | **NOT TESTED** | requires backup and a migration decision |
 
 ## Security gates
@@ -46,7 +46,7 @@ aspirational matrix with executed evidence and explicit NOT TESTED rows.
 |---|---|---|
 | No false VERIFIED | PASS (offline) | completion/engine tests |
 | Capability + risk on mutating Core tools | PASS for Core path | policy/risk tests |
-| MCP CLI call risk gate | **GAP** | direct `mcp call` builds bare CoreRuntime without risk engine; audit finding; not fixed |
+| MCP CLI call risk gate | **FIXED, HIGH-RISK REFUSAL NOT TESTED** | direct `mcp call` now passes `RiskEngine`; existing MCP CLI suite 11 PASS |
 | checks/probes inline remote-action guard | **NOT TESTED / potential gap** | probes admit `python -c` text; command guard not called |
 | Credentials redaction | PASS scoped | redaction/export tests |
 | Credential storage outside repo | PASS static | keyring refs |

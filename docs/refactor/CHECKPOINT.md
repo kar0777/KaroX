@@ -43,7 +43,9 @@ work remain open.
   state hangs in browser/bridge/MCP tests; each affected file passes in
   isolation. An isolated-runner attempt also hit a transient bridge OAuth hang
   (file alone: 34P/1S in 9.95 s).
-- No real paid benchmark cell has been run. Spend **$0.00**.
+- One real provider smoke passed: W&B `DeepSeek-V4.1-Flash`, verified, 4
+  steps, 27,131 tokens; cost unavailable/`no_pricing`, no invoice invented.
+- No paid benchmark comparison matrix has been run.
 
 ## Landed fixes
 
