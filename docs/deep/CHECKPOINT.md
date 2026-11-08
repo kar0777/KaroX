@@ -48,6 +48,7 @@ engine-tool evidence and needs the next full gate.
 | Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
 | DEV task set | 10/10 VALIDATED | registry hash `489f0495…8e08e`; all RED→GREEN; 1 browser, 1 Three.js, backend/frontend/debug/feature/security/migration/MCP covered |
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
+| DEV batch (10 tasks × 4 arms) | RUNNING | isolated runs in `local-runs/arena/runs`; browser/MCP/migration/TS graders use direct `grade.py`, fixed mid-batch; browser reruns required where the old dispatch hit pytest exit 5 |
 | Benchmark arena | PILOT STARTED | invalid first Karo/Codex attempts documented and excluded; no winner claim |
 
 ## Round-15 commits (latest first)
@@ -145,15 +146,15 @@ only.
 
 ## Next automatic actions
 
-1. Run the frozen 10-task DEV registry across all four available arms with the
-   isolated runner; record every attempt, timeout and cost. This is a DEV
-   pilot/regression set, not a holdout leaderboard.
-2. Resolve or park Gemini auth and DSH headless invocation; add aider/crush
+1. Finish the frozen 10-task DEV batch across all four available arms; rerun
+   browser tasks whose grader dispatch hit the old pytest-only path, then
+   aggregate `DEV_SUMMARY.md` with timeouts and costs.
+2. Inspect DEV failures for concrete capability/harness causes; fix only with
+   regression tests, then rerun affected DEV tasks.
+3. Resolve or park Gemini auth and DSH headless invocation; add aider/crush
    only when a lawful local install is available.
-3. Expand to the 100-task target with public/issue-derived tasks, then freeze a
+4. Expand to the 100-task target with public/issue-derived tasks, then freeze a
    separate holdout and pre-register its rubric hashes before opening it.
-4. Use DEV failures for targeted engineering fixes; rerun held-out only after a
-   new candidate freeze.
 5. Optionally split the cohesive `build_proxy_asgi_app` only with route-level
    characterization. Ceiling is 91,500 with 651 lines of measured headroom; a
    further raise needs fresh evidence and no behavior growth.
