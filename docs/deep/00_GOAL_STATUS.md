@@ -4,17 +4,20 @@
 **Product worktree:** `b/karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
-**Updated:** 2026-11-07
+**Updated:** 2026-11-08
 
 ## Phase
 
 - [x] Phase 0 — frozen baseline, feature inventory, architecture map (this file set)
 - [x] Phase 1A — evidence-driven dead-legacy removal (two batches; adversarial review)
-- [ ] Phase 1B — deep refactor of every monolith (CLI, browser session, engine
-      kernel and check_report done; tools/verification/bridge/providers/
-      repo_context/TUI/web_check remain)
-- [ ] Phase 2 — full parity/security/build/release gate
-- [ ] Phase 3 — honest latest-CLI benchmark arena
+- [x] Phase 1B — deep refactor of every major monolith (CLI, browser, engine,
+      tools/core/process, providers/adapters, MCP, hosted/bridge launcher/proxy/
+      tailscale/oauth/profiles, repo context, verification, TUI, web_check).
+      One cohesive route factory remains intentionally unsplit; all seams are
+      covered by bridge characterization tests.
+- [ ] Phase 2 — full parity/security/build/release gate at the frozen commit
+- [ ] Phase 3 — honest latest-CLI benchmark arena (preparation started:
+      `06_BENCHMARK_ARENA.md`, latest CLIs installed locally, 0/100 tasks ready)
 - [ ] Phase 4 — evidence-driven optimization loop
 - [ ] Phase 5 — local 5.x release candidate
 

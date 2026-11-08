@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-08 01:24 Europe/Warsaw
+**Updated:** 2026-11-08 01:38 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -43,7 +43,8 @@ engine-tool evidence and needs the next full gate.
 | Bridge profile types | DONE | `bridge_profiles.py` 1,144 → 864 (+ `bridge_profile_types.py` 338); credential-store seam kept |
 | Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,849; rationale in `scripts/check_tree.py` |
 | Bridge route closures | PARTIAL | OAuth pages/factory split; `build_proxy_asgi_app` closures still cohesive |
-| Benchmark arena | NOT STARTED (correctly blocked) | — |
+| Arena preparation | STARTED | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth probes recorded; 0/100 tasks ready |
+| Benchmark arena | NOT STARTED (correctly blocked) | no paid runs, no winner claim; Gemini auth blocked, DSH headless pending |
 
 ## Round-15 commits (latest first)
 
