@@ -50,8 +50,8 @@ engine-tool evidence and needs the next full gate.
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
-| DEV batch e2 | RUNNING | `local-runs/arena/runs-e2`; no result/winner claim until complete |
-| Benchmark arena | PILOT STARTED | invalid first Karo/Codex attempts documented and excluded; no winner claim |
+| DEV batch e2 | DONE — PRELIMINARY | Karo 9/10 (browser timeout only), OpenCode 2/10, Codex 2/10; Claude lane blocked by noninteractive permission policy; different models, not a holdout |
+| Benchmark arena | DEV EVIDENCE | no frozen-holdout winner claim; browser row is environment-sensitive; next is engineering fixes + 100-task/holdout expansion |
 
 ## Round-15 commits (latest first)
 

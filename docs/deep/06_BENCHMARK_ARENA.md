@@ -1,8 +1,9 @@
-# Benchmark arena — epoch e1-2026-11-08
+# Benchmark arena — epoch e2-2026-11-08
 
-**Status: PREPARATION ONLY. No benchmark runs and no winner claims yet.** The
-refactor Phase-2 gate must be green at the frozen commit first; this document
-records the registry and the honest readiness gaps.
+**Status: DEV evidence only. No frozen-holdout winner claim.** Epoch e1 was
+invalidated and is retained as a harness-failure record; epoch e2 has a
+repaired, frozen task registry and a preliminary four-arm result. The refactor
+Phase-2 gate was green at `51be451`; the wheel/build evidence is below.
 
 ## Frozen candidate (Phase 2)
 
@@ -131,7 +132,40 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
-## Epoch e2 — repaired prompts, rerun in progress
+## Epoch e2 result — preliminary, not a holdout
+
+All four arms were rerun on the repaired registry. Claude's lane is **excluded**
+because its noninteractive sandbox still denied writes even with
+`bypassPermissions` + both bypass flags; its runs made zero-byte patches and are
+not evidence about coding ability.
+
+| Task | Karo | OpenCode | Codex |
+|---|---|---|---|
+| backend-catalog-pagination | ✅ | ✅ | ✅ |
+| browser-orbit-shipping-workflow | ❌ | ❌ | ❌ |
+| debug-catalog-stale-cache | ✅ | ✅ | ✅ |
+| feature-contact-csv-import | ✅ | ❌ | ❌ |
+| frontend-pricing-responsive | ✅ | ❌ | ❌ |
+| mcp-record-lookup-tool | ✅ | ❌ | ❌ |
+| migration-subscription-records | ✅ | ❌ | ❌ |
+| security-vault-document-access | ✅ | ❌ | ❌ |
+| threejs-orbit-gallery | ✅ | ❌ | ❌ |
+| ts-invoice-quote-core | ✅ | ❌ | ❌ |
+
+Raw aggregate: **Karo 9/10**, OpenCode 2/10, Codex 2/10. Karo's browser failure
+is real: its `workflow.py` timed out waiting for the confirmation page (3/5
+grader checks passed); the other arms made no workflow patch on that task.
+Competitor browser lanes may also lack the task's Python Playwright runtime, so
+that row is environment-sensitive and is not used to claim a 3D/browser win.
+
+This is **preliminary DEV evidence**, not a frozen-holdout leaderboard: each arm
+uses a different model/provider, n=10, and several competitor failures are
+zero-patch/question turns rather than demonstrated wrong code. It is useful for
+the engineering loop (Karo solved backend, debugging, multi-file, frontend,
+MCP, migration, security, Three.js and TypeScript on this set) but cannot be
+cited as final superiority.
+
+## Epoch e2 — repaired prompts, rerun complete (see result above)
 
 Epoch e1 was invalidated above. Both task authors audited all ten prompts
 against their graders and added every externally observable requirement plus
