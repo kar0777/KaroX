@@ -132,6 +132,23 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e6 — 50-task DEV expansion (preliminary)
+
+Five more A5/B5 pairs are validated, bringing the DEV set to 50
+(`registry_sha256 = 2218c9af…83b508`). New shapes: SQLite atomic transfers,
+log/request correlation, incremental file indexer, multi-step accessible form,
+Three.js postprocessing; TS retry/DLQ queue, Playwright upload validation, JWT
+key rotation, checksum reconciliation and MCP cursor resources.
+
+On the new ten: **Karo 9/10**, Codex 0/10, OpenCode not rerun (its free-model
+route had already timed out repeatedly; this is an explicit route limitation,
+not a zero score). Combined 50-task DEV: **Karo 46/50**, Codex 7/50,
+OpenCode 2/22 attempted.
+
+Karo's new failure is a real shader/effect numeric mismatch in
+`threejs-postprocessing-pipeline`; the older three failures remain. No product
+regression, no holdout opening.
+
 ## Epoch e5 — 40-task DEV expansion (preliminary)
 
 Ten more tasks (A4/B4) are validated RED→GREEN, bringing the DEV set to 40

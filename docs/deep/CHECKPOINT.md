@@ -51,8 +51,8 @@ engine-tool evidence and needs the next full gate.
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
 | DEV task set | 20/20 VALIDATED | registry `ef63bcd5…33e461`; new A2/B2 batches RED→GREEN; 2 browser, 2 Three.js, 2 backend, 2 security, 2 migration, 2 MCP etc. |
-| DEV task set | 40/40 VALIDATED | registry `5bf3b1bf…35d1e6`; A4/B4 add ETag API, single-flight race, state machine, SVG chart, instanced particles, Node HTTP worker, onboarding, PKCE, transactional migration, scoped MCP |
-| DEV batch e5 (40 tasks) | PRELIMINARY | new ten: Karo **10/10**, Codex 1/10, OpenCode 0/3; combined Karo **37/40**, Codex 7/40, OpenCode 2/22 attempted |
+| DEV task set | 50/50 VALIDATED | registry `2218c9af…83b508`; A5/B5 add SQLite transactions, log correlation, indexer, multi-step form, postprocessing, retry queue, upload, JWT rotation, reconciliation, MCP cursors |
+| DEV batch e6 (50 tasks) | PRELIMINARY | new ten: Karo **9/10**, Codex 0/10; combined Karo **46/50**, Codex 7/50, OpenCode 2/22 attempted |
 | Benchmark arena | DEV EVIDENCE | no frozen-holdout winner claim; next: reach 100 tasks, then freeze/open holdout |
 
 ## Round-15 commits (latest first)
