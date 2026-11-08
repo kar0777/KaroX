@@ -148,17 +148,17 @@ only.
 
 ## Next automatic actions
 
-1. Repair every DEV task prompt so it states the full grader contract and a
-   standard autonomy requirement; rerun all validators, refreeze the registry
-   as epoch e2, then rerun the same four arms. Epoch e1 remains INVALID.
-2. Fix browser grader dispatch already applied; ensure every arm's browser row
-   is a new post-fix run.
-3. Analyze Karo's real frontend/multi-file/Three.js failures from raw diffs and
-   logs; only then add targeted regression tests and fixes.
-4. Resolve or park Gemini auth and DSH headless invocation; add aider/crush
-   only when a lawful local install is available.
-5. Expand to the 100-task target with public/issue-derived tasks, then freeze a
-   separate holdout and pre-register its rubric hashes before opening it.
+1. Collect the 10 new DEV tasks (A2/B2) when validated; refreeze the registry and
+   run a controlled e2b batch only after all prompts are self-contained.
+2. Investigate Karo's one real e2 failure — browser `workflow.py` waited for a
+   promo-code text the app does not guarantee; this is agent overfitting, not a
+   product defect, but record it before any task change.
+3. Analyze competitor zero-patch/question turns; keep them as product behavior,
+   not as hidden harness excuses.
+4. Resolve or park Gemini auth and DSH headless; Claude remains blocked by its
+   noninteractive sandbox policy.
+5. Expand toward the 100-task target and a separate frozen holdout with
+   pre-registered rubric hashes; only then make leaderboard claims.
 6. Optionally split the cohesive `build_proxy_asgi_app` only with route-level
    characterization. Ceiling is 91,500 with 651 lines of measured headroom; a
    further raise needs fresh evidence and no behavior growth.
