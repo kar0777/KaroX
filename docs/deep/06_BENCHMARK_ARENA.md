@@ -132,6 +132,23 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e5 — 40-task DEV expansion (preliminary)
+
+Ten more tasks (A4/B4) are validated RED→GREEN, bringing the DEV set to 40
+(`registry_sha256 = 5bf3b1bf…35d1e6`). New shapes: ETag HTTP API, async
+single-flight race, publish state machine, interactive SVG chart, instanced
+Three.js particles, Node rate-limited HTTP worker, multi-step browser
+onboarding, OAuth PKCE/refresh replay, transactional migration manifest, and
+scoped MCP tools with schema digests.
+
+On the new ten: **Karo 10/10**, Codex 1/10, OpenCode 0/3 attempted (free model
+timed out on every task; seven missing rows). Combined 40-task DEV:
+**Karo 37/40**, Codex 7/40, OpenCode 2/22 attempted.
+
+Karo's three failures remain the same real agent-code bugs (concurrency timing,
+bad `data-testid` selector, `WindowsPath` JSON). No product regression and no
+holdout opening; this is still DEV evidence only.
+
 ## Epoch e4 — 30-task DEV expansion (preliminary)
 
 Ten more DEV tasks were added (A3/B3), giving 30 tasks total; all 30 are
