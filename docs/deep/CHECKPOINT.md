@@ -51,8 +51,8 @@ engine-tool evidence and needs the next full gate.
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
 | DEV task set | 20/20 VALIDATED | registry `ef63bcd5…33e461`; new A2/B2 batches RED→GREEN; 2 browser, 2 Three.js, 2 backend, 2 security, 2 migration, 2 MCP etc. |
-| DEV batch e3 (20 tasks) | PRELIMINARY | Karo **18/20**, Codex 4/20, OpenCode 2/16 attempted (6 timeouts, 4 missing); Claude blocked; no holdout/winner claim |
-| Benchmark arena | DEV EVIDENCE | no frozen-holdout winner claim; browser row environment-sensitive; next: fix Karo's two DEV failures and expand to 100 |
+| DEV batch e3 (20 tasks) | PRELIMINARY | e3b: Karo **19/20** (only browser-orbit selector bug), Codex 4/20, OpenCode 2/16 attempted; Claude blocked; no holdout/winner claim |
+| Benchmark arena | DEV EVIDENCE | grader phrase over-specification fixed and affected task rerun; registry e3b `38045744…77b1f8`; next: expand to 100 + holdout |
 
 ## Round-15 commits (latest first)
 

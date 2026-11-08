@@ -132,6 +132,26 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e3b — contract correction and final DEV evidence
+
+One e3 grader over-specified a phrase: the task prompt required the reason to
+identify JSON, but the grader demanded the literal words `invalid json`. Karo
+printed `json is not valid`, which satisfies the prompt but failed the grader.
+The grader was corrected to assert `json` (as the prompt says), revalidated
+RED→GREEN, and the affected task was rerun.
+
+- Karo: feature-inbox rerun **solved in 47.7 s**; e3b total **19/20** (only
+  `browser-orbit-shipping-workflow` remains a real failure).
+- Codex: feature-inbox rerun still zero-patch/failed; e3b 4/20.
+- OpenCode: free model timed out again; no rerun row, e3b 2/16 attempted.
+- Claude: permission-blocked, excluded.
+- Registry refrozen as `e3b-2026-11-08`, `registry_sha256 = 38045744…77b1f8`.
+
+The browser failure remains a genuine Karo agent bug
+(`document.querySelector("promo-status")` instead of the `data-testid` selector);
+it is not a task defect. No product change is justified by this single sample,
+and no holdout has been run.
+
 ## Epoch e3 — 20-task DEV expansion (preliminary)
 
 Ten new DEV tasks were authored and independently validated RED→GREEN, giving
