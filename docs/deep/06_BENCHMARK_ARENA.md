@@ -132,6 +132,18 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e9 — 80-task DEV expansion (preliminary)
+
+A8/B8 add ten validated tasks (80/80 total; registry
+`732d3abd…8c054d`): async task queue, nested cache invalidation, faceted search,
+accessible drag board, skeletal animation; JSON-RPC HTTP server, print preview,
+CSRF/CORS probes, CSV→JSON migration, MCP resource subscriptions.
+
+New ten: **Karo 9/10**, Codex 0/10. Combined 80-task DEV: **Karo 72/80**,
+Codex 9/80, OpenCode 2/22 attempted. Karo's new failure is
+`frontend-accessible-dragboard` (real browser interaction; all other new tasks
+passed). No product regression and no holdout opening.
+
 ## Epoch e8 — 70-task DEV expansion (preliminary)
 
 A7/B7 add ten validated tasks (70/70 total; registry

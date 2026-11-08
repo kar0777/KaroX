@@ -46,8 +46,8 @@ engine-tool evidence and needs the next full gate.
 | Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth/readiness probes recorded; runner + batch harness; tasks in progress |
 | Phase 2 freeze | DONE | full suite at `51be451`, frozen docs commit `4919a04`, wheel SHA-256 `815030a7…ba62f5`, fresh install ok |
 | Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
-| DEV task set | 70/70 VALIDATED | registry `a7461598…861317`; A7/B7 add GraphQL, deadlock, fan-out, dashboard filters, water, SSE, modal, upload scan, JSON→SQLite, MCP batch |
-| DEV batch e8 (70 tasks) | PRELIMINARY | new ten: Karo **7/10**, Codex 1/10; combined Karo **63/70**, Codex 9/70, OpenCode 2/22 attempted |
+| DEV task set | 80/80 VALIDATED | registry `732d3abd…8c054d`; A8/B8 add async queue, cache invalidation, facets, drag board, skeletal, JSON-RPC, print, CSRF/CORS, CSV→JSON, MCP subscriptions |
+| DEV batch e9 (80 tasks) | PRELIMINARY | new ten: Karo **9/10**, Codex 0/10; combined Karo **72/80**, Codex 9/80, OpenCode 2/22 attempted |
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
