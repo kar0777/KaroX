@@ -1,0 +1,21 @@
+{
+  "purpose": "Non-scored hardware-dependent Windows SwiftShader rAF cadence, 120 samples per scene, no model calls",
+  "results": [
+    {
+      "variant": "red",
+      "status": "PASS",
+      "fps": 60.0,
+      "median_ms": 16.7,
+      "p95_ms": 16.8,
+      "sha256_png": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878"
+    },
+    {
+      "variant": "green",
+      "status": "PASS",
+      "fps": 60.0,
+      "median_ms": 16.7,
+      "p95_ms": 16.7,
+      "sha256_png": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878"
+    }
+  ]
+}
