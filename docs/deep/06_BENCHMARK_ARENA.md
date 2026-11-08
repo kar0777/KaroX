@@ -132,6 +132,17 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e7 — 60-task DEV expansion (preliminary)
+
+A6/B6 add ten validated tasks (60/60 total; registry
+`e9b2922d…b18d44`): idempotency+rate-limit WSGI, deep pagination bug, signed
+webhook delivery, theme persistence, terrain LOD; event-store rebuild, coupon
+checkout, tenant-isolation probes, v1→v2→v3 rollback, streaming MCP output.
+
+New ten: **Karo 10/10**, Codex 1/10. Combined 60-task DEV: **Karo 56/60**,
+Codex 8/60, OpenCode 2/22 attempted. Karo's four failures remain the known
+agent-code defects; no product regression and no holdout opening.
+
 ## Epoch e6 — 50-task DEV expansion (preliminary)
 
 Five more A5/B5 pairs are validated, bringing the DEV set to 50
