@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "authorized_total_usd": 30,
+  "authorized_pilot_usd": 3,
+  "authorized_main_after_pilot_usd": 27,
+  "state": "PAID_CALLS_DISABLED_FAIL_CLOSED",
+  "paid_calls_enabled": false,
+  "pilot_run_started": false,
+  "actual_new_hard20_provider_spend_usd": 0,
+  "estimated_new_hard20_provider_spend_usd": 0,
+  "actual_provider_invoice_usd": null,
+  "estimate_is_not_invoice": true,
+  "prior_pre_hard20_usage_is_not_charged_to_this_experiment": true,
+  "provider": "Weights & Biases Inference API",
+  "endpoint": "https://api.inference.wandb.ai/v1",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "allowed_arms": [
+    "karox5",
+    "opencode_v2",
+    "deepseek_harness"
+  ],
+  "max_effort_required": true,
+  "max_effort_payload_verified_for_all_arms": false,
+  "same_model_checkpoint_proven": false,
+  "hard_budget_cap_at_provider_verified": false,
+  "provider_monthly_budget_warning": "W&B states there may be a delay in enforcing a monthly budget and user is responsible for overage. Therefore the monthly budget is insufficient to prove an absolute $30 maximum.",
+  "locked_outbound_metered_gateway_deployed": false,
+  "sandbox_denies_bypass_direct_provider_access": false,
+  "all_three_official_clients_restricted_to_gateway": false,
+  "per_request_output_token_hard_ceiling_verified": false,
+  "full_price_table_and_charge_units_verified": false,
+  "provider_api_key_access_only_via_host_gateway": false,
+  "requires_all_gates_before_paid_call": [
+    "provider_hard_cap_at_or_below_remaining_budget_verified_OR_strict_prepaid_account_with_no_overdraft_confirmed",
+    "all outbound model traffic including retries and visual evaluators must pass authenticated metering proxy, no direct key in CLI",
+    "max output and context token limits must be verifiably bounded and request cost reserved before dispatch",
+    "per-step model/provider/effort=max over-the-wire parameters verified by offline recorded HTTP mock",
+    "pilot $3 reservation for complete matched three-CLI task, not just a winning arm",
+    "sufficient disk and RAM reserves, sealed task RED/GREEN, and strict run-by-run accounting"
+  ],
+  "pilot_design": {
+    "heavy_tasks": 1,
+    "max_distinct_pilot_tasks": 2,
+    "arms_per_task": 3,
+    "effort": "max (Karo ultra; OpenCode variant max; DSH reasoningEffort max — exact wire payload still unverified)",
+    "budget_usd": 3,
+    "no_unfair_arm_budget_reduction": true,
+    "no_pilot_paid_without_all_gates": true
+  },
+  "blocker_codes": [
+    "W_AND_B_MONTHLY_BUDGET_MAY_OVERSHOOT",
+    "NO_ACTIVE_HARD_EGRESS_METER",
+    "WIRE_EFFORT_MAX_UNVERIFIED",
+    "TASKS_NOT_FROZEN_AND_LOCAL_RED_GREEN_UNVERIFIED"
+  ],
+  "independent_source": {
+    "url": "https://wandb.ai/site/pricing/tokens/",
+    "quote_summary": "Monthly API budget enforcement may be delayed; spending overages remain user's responsibility.",
+    "verified_date": "2026-11-08"
+  }
+}

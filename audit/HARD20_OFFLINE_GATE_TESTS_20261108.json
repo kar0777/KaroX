@@ -1,0 +1,28 @@
+{
+  "checks": [
+    {
+      "name": "pytest",
+      "exit": 0,
+      "seconds": 1.812,
+      "stdout": "....................                                                     [100%]\n20 passed in 0.15s\n",
+      "stderr": ""
+    },
+    {
+      "name": "ruff",
+      "exit": 0,
+      "seconds": 0.229,
+      "stdout": "All checks passed!\n",
+      "stderr": ""
+    },
+    {
+      "name": "compile",
+      "exit": 0,
+      "seconds": 0.084,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "all_pass": true,
+  "no_model_calls": true,
+  "script_sha256": "d44bb7b9d5365fe255ab1c9e9b45df1b74beba8ad55493b50960cc9cdc3ca82d"
+}

@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "protocol": "docs/benchmarks/HARD20_KAROX_TRIAD_PROTOCOL_20261108.md",
+  "state": "PREFLIGHT_ONLY_NO_HEAVY_RUN",
+  "min_free_gib": {
+    "C": 7,
+    "D": 15
+  },
+  "measured_at_preflight_gib": {
+    "C": 8.983,
+    "D": 60.07,
+    "windows_ram_available": 7.313
+  },
+  "safety_checks_before_every_heavy_run": [
+    "Check actual Windows C: and D: disk free, not WSL df alone",
+    "Check Windows available RAM plus WSL process tree RSS, then reserve room for OS",
+    "Record exact ext4.vhdx current Windows host size and measure its growth",
+    "Run only one CLI or independent browser grader at a time",
+    "Check target task image compressed/unpacked sizes and cached dependencies BEFORE download",
+    "Abort if resource reserve could be crossed by worst-case task worktree/image/extraction",
+    "Do not widen auto-approvals or disable sandbox to make a task pass"
+  ],
+  "c_gib_guaranteed_floor": 7,
+  "d_gib_guaranteed_floor": 15,
+  "max_heavy_jobs": 1,
+  "agent_tree_rss_guard_gib": 1,
+  "task_container_memory_gib_swe": 4,
+  "task_container_memory_gib_terminal": 2,
+  "task_container_storage_declared_gib": 10,
+  "image_sizes_currently_verified": false,
+  "docker_image_pulls_authorized_in_this_phase": false,
+  "wsl_ext4_growth_warning": "Deleting files in WSL filesystem does not necessarily reclaim actual C: space; measure host VHDX after cleanup.",
+  "cleanup": {
+    "only_registered_per_run_disposable_workspace": true,
+    "dry_run_log_required": true,
+    "require_archive_verified_sha_and_roundtrip": true,
+    "prohibit_git_clean_and_git_reset_hard": true,
+    "prohibit_unknown_dir_deletion": true,
+    "never_remove_previous_results": true,
+    "preserve_untracked_user_evidence": true
+  },
+  "result_stop_conditions": [
+    "C: < 7 GiB free",
+    "D: < 15 GiB free",
+    "RAM free inadequate for task+OS reserve",
+    "image size and extraction footprint unknown relative to free capacity",
+    "wall-clock or process tree RSS cap crossed",
+    "provider/budget watchdog cannot enforce $30"
+  ]
+}

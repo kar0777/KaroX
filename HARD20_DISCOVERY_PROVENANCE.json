@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "source_swe_hard51_url": "https://github.com/scaleapi/SWE-bench_Pro-os/blob/main/v2/hard51_ids.txt",
+  "source_git_blob_sha1": "270aacf1f3641b2b0084e633e6508968423bd3ec",
+  "official_hard51_id_count": 51,
+  "selected_count": 12,
+  "selected_all_present_in_official_hard51": true,
+  "selected_checks": [
+    {
+      "id": "instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_ansible__ansible-40ade1f84b8bb10a63576b0ac320c13f57c87d34-v6382ea168a93d80a64aab1fbd8c4f02dc5ada5bf",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_element-hq__element-web-5dfde12c1c1c0b6e48f17e3405468593e39d9492-vnan",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_flipt-io__flipt-2ca5dfb3513e4e786d2b037075617cccc286d5c3",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_future-architect__vuls-5af1a227339e46c7abf3f2815e4c636a0c01098e",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_gravitational__teleport-1316e6728a3ee2fc124e2ea0cc6a02044c87a144-v626ec2a48416b10a88641359a169d99e935ff037",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-0dc5b20fa186f9714f8a838178597e69f549d026-v2d9a6c849c60ed19fd0858ce9e40b7cc8e097e59",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_qutebrowser__qutebrowser-3e21c8214a998cb1058defd15aabb24617a76402-v5fc38aaf22415ab0b70567368332beee7955b367",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_element-hq__element-web-66d0b318bc6fee0d17b54c1781d6ab5d5d323135-vnan",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_protonmail__webclients-08bb09914d0d37b0cd6376d4cab5b77728a43e7b",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_navidrome__navidrome-69e0a266f48bae24a11312e9efbe495a337e4c84",
+      "found_in_official_hard51": true
+    },
+    {
+      "id": "instance_tutao__tutanota-f373ac3808deefce8183dad8d16729839cc330c1-v2939aa9f4356f0dc9f523ee5ce19d09e08ab979b",
+      "found_in_official_hard51": true
+    }
+  ],
+  "terminal_bench_source": "https://github.com/harbor-framework/terminal-bench-2-1/tree/main/tasks",
+  "terminal_four_meta_difficulty_hard_verified": true,
+  "threejs_public_source_issues": [
+    35003,
+    34681,
+    34797,
+    34438
+  ],
+  "threejs_red_green_confirmed_local_only": [
+    35003
+  ],
+  "no_pilot_started": true,
+  "warning": "These are source metadata checks only; local RED/GREEN, repository licenses and reference container image readiness are unverified for most candidates."
+}

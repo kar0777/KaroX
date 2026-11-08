@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "title": "HARD20 available observational evidence schema",
+  "version": "1.0.0-dev",
+  "state": "SCHEMA_ONLY_NO_NEW_RUNS",
+  "principles": {
+    "no_hidden_reasoning_reconstruction": true,
+    "include_only_reasoning_emitted_by_model_provider": true,
+    "never_fabricate_provider_request_counts": true,
+    "separate_actual_invoice_from_rate_estimate": true,
+    "no_secret_capture_or_distribution": true,
+    "null_means_unavailable_not_zero": true,
+    "original_events_append_only": true,
+    "record_evidence_origin_and_sha256": true
+  },
+  "mandatory_run_record_keys": [
+    "run_id",
+    "task_id",
+    "arm",
+    "attempt_id",
+    "split",
+    "input_task_sha256",
+    "base_commit",
+    "fixture_sha256",
+    "grader_sha256",
+    "provider",
+    "model",
+    "model_route",
+    "reasoning_effort_requested",
+    "reasoning_effort_payload_verified",
+    "run_start_utc",
+    "run_end_utc",
+    "cli_exit",
+    "cli_completed",
+    "external_artifact_grade",
+    "clean_user_success",
+    "infra_status",
+    "timed_out",
+    "permission_profile",
+    "archive_manifest_sha256",
+    "telemetry_completeness"
+  ],
+  "event_types": {
+    "request": {
+      "description": "All observable provider request/response frames after redaction",
+      "keys": [
+        "request_id",
+        "step",
+        "timestamp_utc",
+        "transport_attempt",
+        "model",
+        "provider_base_url",
+        "reasoning_effort_on_wire",
+        "thinking_parameter",
+        "max_tokens_on_wire",
+        "request_schema_sha256",
+        "redacted_input_sha256",
+        "provider_response_code",
+        "response_visibility",
+        "streaming",
+        "ttft_ms",
+        "wall_ms",
+        "prompt_tokens_reported",
+        "completion_tokens_reported",
+        "cache_read_tokens_reported",
+        "cache_write_tokens_reported",
+        "reasoning_tokens_reported",
+        "retries",
+        "cost_estimated_usd",
+        "actual_billed_usd",
+        "unknown_fields"
+      ]
+    },
+    "reasoning": {
+      "description": "Reasoning delta / summary only if actually surfaced by API. Never interpolate.",
+      "keys": [
+        "timestamp_utc",
+        "request_id",
+        "source",
+        "visible_reasoning_delta_redacted",
+        "visible_reasoning_summary_redacted",
+        "provider_returned_reasoning",
+        "hidden_reasoning_available"
+      ]
+    },
+    "tool": {
+      "description": "Tool call and sandbox decision",
+      "keys": [
+        "timestamp_utc",
+        "step",
+        "call_id",
+        "tool_name",
+        "input_redacted_sha256",
+        "output_redacted_sha256",
+        "started_utc",
+        "finished_utc",
+        "duration_ms",
+        "status",
+        "exit_code",
+        "stderr_redacted",
+        "permission_policy_id",
+        "permission_decision",
+        "denial_reason",
+        "files_read",
+        "files_searched",
+        "files_edited",
+        "git_patch_before_sha256",
+        "git_patch_after_sha256",
+        "no_op"
+      ]
+    },
+    "test": {
+      "description": "Real independent and self-tests separated",
+      "keys": [
+        "timestamp_utc",
+        "test_kind",
+        "command_digest",
+        "test_file",
+        "grader_version",
+        "grader_sha256",
+        "exit",
+        "duration_ms",
+        "passed",
+        "failed",
+        "skipped",
+        "stdout_stderr_sha256",
+        "environment_error",
+        "self_verified"
+      ]
+    },
+    "browser": {
+      "description": "Chromium CDP/WebGL evidence",
+      "keys": [
+        "timestamp_utc",
+        "browser_executable_sha256",
+        "browser_version",
+        "viewport",
+        "gpu_backend",
+        "webgl_context",
+        "frame_png_sha256",
+        "cdp_event_log_sha256",
+        "page_errors",
+        "console_errors",
+        "frame_delta",
+        "perf_rAF_ms_p50",
+        "perf_rAF_ms_p95",
+        "meaningful_render_pass"
+      ]
+    },
+    "budget": {
+      "description": "Spend reservations and provider settlements; fail closed",
+      "keys": [
+        "timestamp_utc",
+        "reservation_id",
+        "run_id",
+        "request_id",
+        "provider",
+        "max_charge_reserved_usd",
+        "actual_charge_usd",
+        "estimated_charge_usd",
+        "pilot_remaining_reserved_usd",
+        "global_remaining_reserved_usd",
+        "provider_invoice_verified",
+        "policy_decision"
+      ]
+    }
+  },
+  "telemetry_completeness_possible_values": [
+    "FULL_OBSERVABLE_NOT_HIDDEN_REASONING",
+    "PARTIAL_CLIENT_EVENTS",
+    "PARTIAL_PROVIDER_USAGE",
+    "NOT_CAPTURED",
+    "INFRA_BLOCKED"
+  ],
+  "source_files_per_run": [
+    "stdout.redacted.jsonl.gz",
+    "stderr.redacted.txt.gz",
+    "tool_ledger.jsonl.gz",
+    "stepwise_patches.jsonl.gz",
+    "provider_observable_frames.jsonl.gz",
+    "usage.json",
+    "result.json",
+    "changes.patch",
+    "grader.redacted.log.gz",
+    "visual-proof/*",
+    "evidence_archives.json",
+    "SHA256SUMS"
+  ],
+  "privacy": {
+    "strip_keys_auth_headers_cookies_personal_paths": true,
+    "preserve_raw_sha_and_byte_count": true,
+    "do_not_include_api_key_even_in_local_archive": true,
+    "verify_redaction_before_any_publication": true
+  }
+}

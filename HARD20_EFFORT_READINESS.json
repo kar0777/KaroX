@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "status": "OFFLINE_HELP_AND_DOCUMENTATION_ONLY_WIRE_UNVERIFIED",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "endpoint": "https://api.inference.wandb.ai/v1",
+  "arms": [
+    {
+      "arm": "karox5",
+      "official_version": "5.0.0",
+      "lab_wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+      "offline_cli_help_reported_effort_choices": [
+        "auto",
+        "low",
+        "medium",
+        "high",
+        "extra-high",
+        "ultra"
+      ],
+      "maximum_cli_effort": "ultra",
+      "proposed_command_extra": [
+        "--effort-level",
+        "ultra"
+      ],
+      "current_frozen_previous_runner_max_effort_applied": false,
+      "on_wire_reasoning_effort_confirmed": false,
+      "reasoning_mapping_to_deepseek_max_verified": false
+    },
+    {
+      "arm": "opencode_v2",
+      "official_version": "2.2.6",
+      "official_package": "@opencode/cli",
+      "launcher_sha256": "50503d24577fa4117a7c95ee85b2cd679606a87eacf20ca54ed5db5c9e1cf895",
+      "offline_cli_help_mentions": "--model provider/model#variant; --thinking shows visible thinking blocks",
+      "proposed_max_variant": "#max",
+      "current_previous_config_max_variant_declared": false,
+      "on_wire_reasoning_effort_confirmed": false,
+      "model_catalog_supports_max_variant_verified": false
+    },
+    {
+      "arm": "deepseek_harness",
+      "official_version": "0.2.2-rc.1",
+      "prerelease": true,
+      "official_package": "@deepseek-ai/dsh",
+      "launcher_sha256": "b6640801a5a65aae9f53ca21bcce3b2ea28bd9e9554c939c1ff7c4448d91fa18",
+      "official_docs_reasoningEffort_max_supported": true,
+      "existing_wandb_patch_has_reasoningEffort_max": false,
+      "proposed_route_field": "reasoningEfforts: {max: max}; reasoningEffort: max or equivalent route config, to be verified on wire",
+      "on_wire_reasoning_effort_confirmed": false
+    }
+  ],
+  "reference_docs": [
+    "https://api-docs.deepseek.com/guides/thinking_mode/",
+    "https://docs.dev.opencode.ai/docs/cli/",
+    "https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md"
+  ],
+  "hard_stop_conditions": [
+    "Do not treat similar CLI 'high' as max",
+    "Do not infer actual provider request fields from CLI help alone",
+    "Do not add unverified reasoning capability to model catalog",
+    "Verify exact model, endpoint, effort and max tokens with same local HTTP capture or provider-visible telemetry, no cost",
+    "If any official CLI cannot send max via W&B route, declare MAX_EFFORT_PARITY_UNAVAILABLE and do not downgrade the others"
+  ],
+  "new_paid_model_calls": 0
+}

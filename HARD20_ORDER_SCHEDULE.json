@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "state": "PREDECLARED_NOT_FROZEN_BECAUSE_TASKS_NOT_ELIGIBLE",
+  "rotation": "Latin cyclic order by task slot, equal first/second/third positions (20 tasks: unbalanced by at most one).",
+  "seed": "HARD20-20261108-public-candidate-order-v1",
+  "selected_task_manifest_file": "HARD20_TASK_MANIFEST.json",
+  "source_task_manifest_sha256": "155b39ebc925fd1f2f0a2a2d773ce2c23328aee01691900246e4ceb0b18201e1",
+  "tasks": [
+    {
+      "slot": 1,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 2,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 3,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 4,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 5,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 6,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 7,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 8,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 9,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 10,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 11,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 12,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 13,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 14,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 15,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 16,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 17,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 18,
+      "order": [
+        "deepseek_harness",
+        "karox5",
+        "opencode_v2"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 19,
+      "order": [
+        "karox5",
+        "opencode_v2",
+        "deepseek_harness"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    },
+    {
+      "slot": 20,
+      "order": [
+        "opencode_v2",
+        "deepseek_harness",
+        "karox5"
+      ],
+      "staged": false,
+      "scored": false,
+      "eligibility": "BLOCKED_PENDING_FREEZE"
+    }
+  ],
+  "note": "No CLI order assignments may change AFTER actual task freeze; avoid leading Karo always."
+}
