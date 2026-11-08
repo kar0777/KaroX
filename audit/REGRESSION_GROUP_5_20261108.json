@@ -1,0 +1,25 @@
+{
+  "group": 5,
+  "files": [
+    "tests/test_unified_patch_leniency.py"
+  ],
+  "expected_count": 7,
+  "command": [
+    "C:\\Users\\ekono\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "-ra",
+    "--durations=10",
+    "-o",
+    "addopts=",
+    "tests/test_unified_patch_leniency.py"
+  ],
+  "exit": 0,
+  "timed_out": false,
+  "seconds": 1.14,
+  "log_path": "audit\\regression_group_5_20261108.log",
+  "log_bytes": 250,
+  "log_sha256": "f3f111e1c9835c168096d69021745ea09712af7fa814c778cbb37a3a73989e59",
+  "log_tail": ".......                                                                  [100%]\r\n============================ slowest 10 durations =============================\r\n\r\n(10 durations < 0.005s hidden.  Use -vv to show these durations.)\r\n7 passed in 0.09s\r\n"
+}

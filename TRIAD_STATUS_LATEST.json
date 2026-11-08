@@ -80,5 +80,41 @@
   },
   "all_in_three_way_leadership_proven": false,
   "actual_provider_invoice_available": false,
-  "valid_blind_holdout": false
+  "valid_blind_holdout": false,
+  "continuation_20261108": {
+    "full_regression_collected": 1575,
+    "partitioned_regression_passed": 1557,
+    "partitioned_regression_skipped": 18,
+    "partitioned_regression_failed": 0,
+    "full_single_process_pytest_complete": false,
+    "security_parity_gate_passed": 425,
+    "security_parity_gate_skipped": 1,
+    "ruff_passed": true,
+    "check_tree_passed": true,
+    "compileall_passed": true,
+    "mypy_passed": false,
+    "mypy_errors": 399,
+    "mypy_faults_in_unchanged_tui_files": true,
+    "candidate_wheel_fresh_venv_import": true,
+    "candidate_wheel_dependency_hermetic": false,
+    "candidate_wheel_browser_regrade_4_of_4": true,
+    "candidate_wheel_paid_rerun": false,
+    "real_three_35003": {
+      "actual_upstream_issue": true,
+      "dev_not_holdout": true,
+      "original_grader_red_invalid_webgl_context": true,
+      "v2_grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+      "v2_red_confirmed": true,
+      "v2_green_reference_confirmed": true,
+      "normal_mouse_pen_touch_original_passed": 3,
+      "normal_mouse_pen_touch_reference_passed": 3,
+      "scored_competitor_runs": 0
+    },
+    "evidence_supplement_assets": 48,
+    "evidence_supplement_sha256": "3a6f4379fc59b39fcbed9f5ba1db70031106406efa98ff72ff2869265ea4dd40",
+    "last_c_free_gib": 9.04,
+    "last_d_free_gib": 60.51,
+    "last_windows_ram_available_gib": 7.642,
+    "leadership_proven": false
+  }
 }

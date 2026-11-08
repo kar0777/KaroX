@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "name": "ruff",
+      "exit": 0,
+      "seconds": 0.28,
+      "stdout_tail": "All checks passed!\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "mypy",
+      "exit": 1,
+      "seconds": 2.63,
+      "stdout_tail": "ds.py:767: error: \"AppCommandsMixin\" has no attribute \"_notice\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:767: error: Cannot determine type of \"language\"  [has-type]\nsrc\\karox\\tui\\app_commands.py:768: error: \"AppCommandsMixin\" has no attribute \"_refresh_chrome\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:773: error: \"AppCommandsMixin\" has no attribute \"_notice\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:774: error: Cannot determine type of \"language\"  [has-type]\nsrc\\karox\\tui\\app_commands.py:780: error: \"AppCommandsMixin\" has no attribute \"_notice\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:780: error: Cannot determine type of \"language\"  [has-type]\nsrc\\karox\\tui\\app_commands.py:781: error: \"AppCommandsMixin\" has no attribute \"_refresh_chrome\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:786: error: \"AppCommandsMixin\" has no attribute \"_notice\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:786: error: Cannot determine type of \"language\"  [has-type]\nsrc\\karox\\tui\\app_commands.py:790: error: \"AppCommandsMixin\" has no attribute \"composer\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:791: error: \"AppCommandsMixin\" has no attribute \"_refresh_status\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:792: error: \"AppCommandsMixin\" has no attribute \"_refresh_chrome\"  [attr-defined]\nsrc\\karox\\tui\\app_commands.py:793: error: \"AppCommandsMixin\" has no attribute \"_notice\"  [attr-defined]\nsrc\\karox\\tui\\app.py:129: error: Incompatible types in assignment (expression has type \"SessionState | None\", base class \"AppSessionMixin\" defined the type as \"SessionState\")  [assignment]\nsrc\\karox\\tui\\app.py:144: error: Incompatible types in assignment (expression has type \"AssistantMessage | None\", base class \"AppRunMixin\" defined the type as \"None\")  [assignment]\nsrc\\karox\\tui\\app.py:147: error: Incompatible types in assignment (expression has type \"WelcomeCard | None\", base class \"AppRunMixin\" defined the type as \"None\")  [assignment]\nsrc\\karox\\tui\\app.py:151: error: Incompatible types in assignment (expression has type \"dict[str, Any] | None\", base class \"AppCommandsMixin\" defined the type as \"dict[str, Collection[str]]\")  [assignment]\nsrc\\karox\\tui\\app.py:161: error: Incompatible types in assignment (expression has type \"str | None\", base class \"AppCommandsMixin\" defined the type as \"None\")  [assignment]\npyproject.toml: note: unused section(s): module = ['jeepney.*', 'keyring.*', 'playwright.*', 'secretstorage.*']\nFound 399 errors in 4 files (checked 18 source files)\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "tree",
+      "exit": 0,
+      "seconds": 1.11,
+      "stdout_tail": "check_tree: ok · 243 modules · 90860 lines · no legacy surface\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "compileall",
+      "exit": 0,
+      "seconds": 0.22,
+      "stdout_tail": "",
+      "stderr_tail": ""
+    }
+  ]
+}

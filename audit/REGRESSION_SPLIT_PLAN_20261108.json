@@ -1,0 +1,118 @@
+{
+  "git_head": "a4fe74c",
+  "full_collection_count": 1575,
+  "targeted_passed": 425,
+  "targeted_skipped": 1,
+  "targeted_files": [
+    "tests/test_action_policy.py",
+    "tests/test_browser_code_sources.py",
+    "tests/test_browser_units.py",
+    "tests/test_check_probes.py",
+    "tests/test_check_report.py",
+    "tests/test_completion_gate.py",
+    "tests/test_engine_port_finish.py",
+    "tests/test_engine_provider_accounting.py",
+    "tests/test_mcp_cli.py",
+    "tests/test_package_data.py",
+    "tests/test_policy.py",
+    "tests/test_repo_command_safety.py",
+    "tests/test_run_reuse_identity.py",
+    "tests/test_tool_shape_fixes.py",
+    "tests/test_tree.py",
+    "tests/test_tui_import_boundary.py",
+    "tests/test_visual_check.py",
+    "tests/test_visual_pipeline_offline.py",
+    "tests/test_web_check.py",
+    "tests/test_web_checker_origin.py"
+  ],
+  "targeted_collected": 426,
+  "remaining_collected": 1149,
+  "groups": [
+    {
+      "files": [
+        "tests/test_agent_prompt.py",
+        "tests/test_agent_report_surface.py",
+        "tests/test_argument_validation.py",
+        "tests/test_auto_verify.py",
+        "tests/test_bridge_characterization.py",
+        "tests/test_bridge_core.py",
+        "tests/test_bridge_launcher.py",
+        "tests/test_bridge_oauth.py",
+        "tests/test_browser_core.py",
+        "tests/test_browser_live.py",
+        "tests/test_browser_render_backend.py",
+        "tests/test_browser_resources.py"
+      ],
+      "test_count": 240
+    },
+    {
+      "files": [
+        "tests/test_cli.py",
+        "tests/test_command_jobs.py",
+        "tests/test_computer_use.py",
+        "tests/test_computer_use_live.py",
+        "tests/test_core_commands.py",
+        "tests/test_core_modules_smoke.py"
+      ],
+      "test_count": 143
+    },
+    {
+      "files": [
+        "tests/test_engine_kernel.py",
+        "tests/test_engine_port_context.py",
+        "tests/test_engine_port_progress.py",
+        "tests/test_engine_port_salvage.py",
+        "tests/test_engine_provider_resilience.py",
+        "tests/test_engine_split_identity.py",
+        "tests/test_engine_tool_env_render.py",
+        "tests/test_engine_tools.py",
+        "tests/test_headless_selection.py",
+        "tests/test_installers.py",
+        "tests/test_instruction_neutrality.py",
+        "tests/test_layout_recheck.py",
+        "tests/test_local_runtimes.py"
+      ],
+      "test_count": 242
+    },
+    {
+      "files": [
+        "tests/test_mcp_client.py",
+        "tests/test_model_discovery.py",
+        "tests/test_net_config.py",
+        "tests/test_pageperf.py",
+        "tests/test_prompt_cache.py",
+        "tests/test_provider_catalog.py",
+        "tests/test_provider_fault_stand.py",
+        "tests/test_provider_pricing.py",
+        "tests/test_provider_registry.py",
+        "tests/test_providers.py",
+        "tests/test_public_package_facades.py"
+      ],
+      "test_count": 258
+    },
+    {
+      "files": [
+        "tests/test_python_tests.py",
+        "tests/test_race_task.py",
+        "tests/test_requirement_coverage.py",
+        "tests/test_run_economy.py",
+        "tests/test_session_export.py",
+        "tests/test_sessions.py",
+        "tests/test_skill_runtime.py",
+        "tests/test_skill_scope.py",
+        "tests/test_state_briefing.py",
+        "tests/test_tailscale_routes.py",
+        "tests/test_tui.py"
+      ],
+      "test_count": 259
+    },
+    {
+      "files": [
+        "tests/test_unified_patch_leniency.py"
+      ],
+      "test_count": 7
+    }
+  ],
+  "collection_order": "per source paths, sorted; group files never overlap",
+  "test_result_policy": "every group independently must exit 0; count all skipped separately"
+}

@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "audit_date": "2026-11-08",
+  "purpose": "Independent RED/GREEN acceptance before any scored triad epoch",
+  "task_id": "real-three-orbitcontrols-35003",
+  "official_source": {
+    "kind": "real-user-issue-reduced-upstream",
+    "repo": "https://github.com/mrdoob/three.js",
+    "url": "https://github.com/mrdoob/three.js/issues/35003",
+    "issue": 35003,
+    "revision": "r186",
+    "license": "MIT",
+    "file_sha256": {
+      "vendor/three.module.js": {
+        "origin": "build/three.module.js",
+        "sha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+        "bytes": 662772
+      },
+      "vendor/three.core.js": {
+        "origin": "build/three.core.js",
+        "sha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+        "bytes": 1458113
+      },
+      "OrbitControls.js": {
+        "origin": "examples/jsm/controls/OrbitControls.js",
+        "sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+        "bytes": 40755
+      },
+      "LICENSE": {
+        "origin": "LICENSE",
+        "sha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+        "bytes": 1081
+      }
+    }
+  },
+  "user_prompt": "Fix the real reported Three.js OrbitControls pointer-release regression in this offline Three.js r186 browser project. Read TASK.md and inspect OrbitControls.js, app.js and index.html. Mixed pen pointerdown and mouse pointerup must end the gesture, not throw or continue to orbit during unpressed mouse moves. Preserve ordinary mouse, pen and touch behavior, the live 3D scene, and vendored libraries. Run public tests as possible; do not install dependencies or access the network.",
+  "category": "threejs-webgl",
+  "benchmark_lane": "DEV_UNPROTECTED",
+  "original_grader": {
+    "path": "tasks/real-three-orbitcontrols-35003/grader/test_browser.py",
+    "sha256": "dafdcc172e777c59421b37d99953fea7e7105b32fcff08ce1ad541627f5167e0",
+    "first_red_run": "audit/REAL_THREE_35003_RED_20261108.json",
+    "result": "INVALID_GRADER_WEBGL1_ONLY",
+    "reason": "The page used a WebGL2 canvas, but the grader requested only a WebGL1 context and aborted before interaction."
+  },
+  "corrected_grader": {
+    "path": "audit/real_three_35003_grader_v2.py",
+    "sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+    "change": "accept existing WebGL2 or WebGL1 context; otherwise preserve independent real browser input checks",
+    "frozen_for_next_new_dev_epoch": true,
+    "after_any_original_competitor_output": false
+  },
+  "red": {
+    "record": "audit/REAL_THREE_35003_RED_V2_20261108.json",
+    "independent_grader_exit": 1,
+    "reason": "Real Chromium CDP pen-down/mouse-up causes TypeError reading x",
+    "browser_render_png": {
+      "path": "scene_before.png",
+      "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878",
+      "bytes": 73647
+    },
+    "event_log": {
+      "path": "event_results.json",
+      "sha256": "143ceb56e6efc67b50f895325d6bc7998836d0206f2c090126672c051062b002",
+      "bytes": 208
+    }
+  },
+  "green": {
+    "record": "audit/REAL_THREE_35003_GREEN_V2_20261108.json",
+    "independent_grader_exit": 0,
+    "node_syntax_exit": 0,
+    "patched_file": "OrbitControls.js",
+    "original_sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+    "changed_sha256": "bc17264989e393a26a9faada1302b3cbaa66fc3a14e45f4af541b15012cdee18",
+    "reference_diff_preserved_in_record": true,
+    "reference_not_in_agent_workspace": true,
+    "browser_render_png": {
+      "path": "scene_before.png",
+      "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878",
+      "bytes": 73647
+    },
+    "event_log": {
+      "path": "event_results.json",
+      "sha256": "d4f51df5c8b852951e31ddf47900bd0b40c2df21b0af93ced47f72b08fff4087",
+      "bytes": 147
+    }
+  },
+  "scoring": {
+    "new_scored_runs": 0,
+    "triad_arms_counted": 0,
+    "no_live_holdout_claim": true,
+    "original_v1_red_excluded": true,
+    "safeguards": "No competitor may access grader source/reference patch; complete equal input state and official CLI readiness before scoring.",
+    "limitations": "Normal multi-touch, accessibility, visual aesthetics and FPS not independently graded by this single-issue test."
+  }
+}

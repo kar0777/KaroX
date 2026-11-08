@@ -1,0 +1,33 @@
+{
+  "task": "real-three-orbitcontrols-35003",
+  "phase": "RED_DEV_v2",
+  "not_competitor_run": true,
+  "original_unchanged": true,
+  "grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+  "exit": 1,
+  "timed_out": false,
+  "seconds": 5.151,
+  "log": "F                                                                        [100%]\n================================== FAILURES ===================================\n__________________ test_real_browser_mixed_pen_mouse_release __________________\n\n    def test_real_browser_mixed_pen_mouse_release():\n        handler=functools.partial(SimpleHTTPRequestHandler,directory=str(ROOT))\n        server=ThreadingHTTPServer((\"127.0.0.1\",0),handler)\n        thread=threading.Thread(target=server.serve_forever,daemon=True)\n        thread.start()\n        try:\n            with sync_playwright() as playwright:\n                browser=playwright.chromium.launch(headless=True,args=[\n                    \"--ignore-gpu-blocklist\",\"--use-angle=swiftshader\",\n                    \"--enable-unsafe-swiftshader\",\"--enable-webgl\"])\n                try:\n                    page=browser.new_page(viewport={\"width\":1200,\"height\":900})\n                    errors=[]\n                    page.on(\"pageerror\",lambda err: errors.append(str(err)))\n                    page.goto(f\"http://127.0.0.1:{server.server_address[1]}/index.html\",\n                              wait_until=\"load\",timeout=25000)\n                    canvas=page.locator(\"#scene\")\n                    canvas.wait_for(state=\"visible\")\n                    assert canvas.evaluate(\"c => !!(c.getContext('webgl2') || c.getContext('webgl'))\"),\"WebGL missing\"\n                    page.wait_for_timeout(900)\n                    snapshot=canvas.screenshot()\n                    (PROOFS/\"scene_before.png\").write_bytes(snapshot)\n                    from PIL import Image,ImageStat\n                    import io\n                    im=Image.open(io.BytesIO(snapshot)).convert(\"RGB\")\n                    assert max(ImageStat.Stat(im).stddev)>10,\"WebGL 3D scene not visible\"\n                    rect=canvas.bounding_box()\n                    assert rect and rect[\"width\"]>500 and rect[\"height\"]>400\n                    x=rect[\"x\"]+rect[\"width\"]/2\n                    y=rect[\"y\"]+rect[\"height\"]/2\n                    cdp=page.context.new_cdp_session(page)\n                    def send(event_type,x,y,*,button=\"none\",buttons=0,pointer=\"mouse\",clicks=0):\n                        return cdp.send(\"Input.dispatchMouseEvent\",{\n                           \"type\":event_type,\"x\":x,\"y\":y,\"button\":button,\"buttons\":buttons,\n                           \"clickCount\":clicks,\"pointerType\":pointer})\n                    angle_initial=float(page.locator(\"#azimuth\").inner_text().split(\":\")[-1])\n                    send(\"mousePressed\",x,y,button=\"left\",buttons=1,pointer=\"pen\",clicks=1)\n                    for i in range(1,7):\n                        send(\"mouseMoved\",x+i*15,y,button=\"left\",buttons=1,pointer=\"pen\")\n                    angle_drag=float(page.locator(\"#azimuth\").inner_text().split(\":\")[-1])\n                    assert abs(angle_drag-angle_initial)>0.03,\"The 3D camera must really orbit during the pressed pen drag\"\n                    send(\"mouseReleased\",x+90,y,button=\"left\",buttons=0,pointer=\"mouse\",clicks=1)\n                    page.wait_for_timeout(150)\n                    before=int(page.locator(\"#ends\").inner_text().split(\":\")[-1])\n                    angle_before=float(page.locator(\"#azimuth\").inner_text().split(\":\")[-1])\n                    for i in range(1,11):\n                        send(\"mouseMoved\",x+90-i*25,y+i*8,buttons=0,pointer=\"mouse\")\n                    page.wait_for_timeout(100)\n                    after=int(page.locator(\"#ends\").inner_text().split(\":\")[-1])\n                    angle_after=float(page.locator(\"#azimuth\").inner_text().split(\":\")[-1])\n                    (PROOFS/\"event_results.json\").write_text(\n                        __import__(\"json\").dumps({\n                            \"page_errors\":errors,\"end_before_hover\":before,\n                            \"end_after_hover\":after,\n                            \"azimuth_before_hover\":angle_before,\n                            \"azimuth_after_hover\":angle_after\n                        },indent=2),encoding=\"utf-8\")\n>                   assert not errors,\"Browser runtime crashed: \"+repr(errors)\nE                   AssertionError: Browser runtime crashed: [\"Cannot read properties of undefined (reading 'x')\"]\nE                   assert not [\"Cannot read properties of undefined (reading 'x')\"]\n\naudit\\real_three_35003_grader_v2.py:77: AssertionError\n---------------------------- Captured stderr call -----------------------------\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /index.html HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /styles.css HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /app.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /vendor/three.module.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /OrbitControls.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:47:22] \"GET /vendor/three.core.js HTTP/1.1\" 200 -\n=========================== short test summary info ===========================\nFAILED audit/real_three_35003_grader_v2.py::test_real_browser_mixed_pen_mouse_release\n1 failed in 4.07s\n",
+  "proofs": [
+    {
+      "path": "event_results.json",
+      "sha256": "143ceb56e6efc67b50f895325d6bc7998836d0206f2c090126672c051062b002",
+      "bytes": 208
+    },
+    {
+      "path": "scene_before.png",
+      "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878",
+      "bytes": 73647
+    }
+  ],
+  "args": [
+    "C:\\Users\\ekono\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "-rA",
+    "-o",
+    "addopts=",
+    "D:\\проекты\\KaroX-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\audit\\real_three_35003_grader_v2.py"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "group": 1,
+  "files": [
+    "tests/test_cli.py",
+    "tests/test_command_jobs.py",
+    "tests/test_computer_use.py",
+    "tests/test_computer_use_live.py",
+    "tests/test_core_commands.py",
+    "tests/test_core_modules_smoke.py"
+  ],
+  "expected_count": 143,
+  "command": [
+    "C:\\Users\\ekono\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "-ra",
+    "--durations=10",
+    "-o",
+    "addopts=",
+    "tests/test_cli.py",
+    "tests/test_command_jobs.py",
+    "tests/test_computer_use.py",
+    "tests/test_computer_use_live.py",
+    "tests/test_core_commands.py",
+    "tests/test_core_modules_smoke.py"
+  ],
+  "exit": 0,
+  "timed_out": false,
+  "seconds": 48.721,
+  "log_path": "audit\\regression_group_1_20261108.log",
+  "log_bytes": 1685,
+  "log_sha256": "d0c77e0b828a394aa3fbf113c7183da93385449ce8f2febd089387511d40eeee",
+  "log_tail": "........................................................................ [ 50%]\r\n.....................................ss.........s......................  [100%]\r\n============================ slowest 10 durations =============================\r\n30.04s call     tests/test_computer_use.py::test_adapter_consequential_action_requires_one_shot_approval\r\n5.87s call     tests/test_computer_use.py::test_capture_scales_down_large_frames\r\n1.87s call     tests/test_command_jobs.py::CommandJobStoreTests::test_exit_code_timeout_and_failed_start_are_reported\r\n0.80s call     tests/test_command_jobs.py::HostedCommandJobTests::test_checks_start_runs_only_the_approved_set\r\n0.78s call     tests/test_command_jobs.py::HostedCommandJobTests::test_elevated_session_starts_polls_and_reads_a_developer_job\r\n0.58s call     tests/test_computer_use.py::test_capture_falls_back_from_blank_frames\r\n0.55s call     tests/test_computer_use.py::test_adapter_full_background_flow\r\n0.46s call     tests/test_command_jobs.py::CommandJobStoreTests::test_job_runs_in_the_background_and_its_log_is_paged\r\n0.46s call     tests/test_computer_use.py::test_capture_returns_valid_png_with_diagnostics\r\n0.46s call     tests/test_command_jobs.py::CommandJobStoreTests::test_argv_secrets_are_not_persisted_and_logs_are_redacted\r\n=========================== short test summary info ===========================\r\nSKIPPED [1] tests\\test_computer_use_live.py:58: set KAROX_DESKTOP_LIVE=1 to run real-desktop evidence\r\nSKIPPED [1] tests\\test_computer_use_live.py:188: puts a real visible window on screen; opt in explicitly\r\nSKIPPED [1] tests\\test_core_modules_smoke.py:159: POSIX permission bits\r\n140 passed, 3 skipped in 47.51s\r\n"
+}

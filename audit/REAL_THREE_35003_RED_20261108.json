@@ -1,0 +1,25 @@
+{
+  "task": "real-three-orbitcontrols-35003",
+  "dev_unprotected": true,
+  "original_unchanged": true,
+  "phase": "red_original_r186",
+  "source_url": "https://github.com/mrdoob/three.js/issues/35003",
+  "grader_sha256": {
+    "test_browser.py": "dafdcc172e777c59421b37d99953fea7e7105b32fcff08ce1ad541627f5167e0"
+  },
+  "exit": 1,
+  "timed_out": false,
+  "seconds": 3.11,
+  "log": "F                                                                        [100%]\n================================== FAILURES ===================================\n__________________ test_real_browser_mixed_pen_mouse_release __________________\n\n    def test_real_browser_mixed_pen_mouse_release():\n        handler=functools.partial(SimpleHTTPRequestHandler,directory=str(ROOT))\n        server=ThreadingHTTPServer((\"127.0.0.1\",0),handler)\n        thread=threading.Thread(target=server.serve_forever,daemon=True)\n        thread.start()\n        try:\n            with sync_playwright() as playwright:\n                browser=playwright.chromium.launch(headless=True,args=[\n                    \"--ignore-gpu-blocklist\",\"--use-angle=swiftshader\",\n                    \"--enable-unsafe-swiftshader\",\"--enable-webgl\"])\n                try:\n                    page=browser.new_page(viewport={\"width\":1200,\"height\":900})\n                    errors=[]\n                    page.on(\"pageerror\",lambda err: errors.append(str(err)))\n                    page.goto(f\"http://127.0.0.1:{server.server_address[1]}/index.html\",\n                              wait_until=\"load\",timeout=25000)\n                    canvas=page.locator(\"#scene\")\n                    canvas.wait_for(state=\"visible\")\n>                   assert canvas.evaluate(\"c => !!c.getContext('webgl')\"),\"WebGL missing\"\nE                   AssertionError: WebGL missing\nE                   assert False\nE                    +  where False = evaluate(\"c => !!c.getContext('webgl')\")\nE                    +    where evaluate = <Locator frame=<Frame name= url='http://127.0.0.1:23500/index.html'> selector='#scene'>.evaluate\n\ntasks\\real-three-orbitcontrols-35003\\grader\\test_browser.py:36: AssertionError\n---------------------------- Captured stderr call -----------------------------\n127.0.0.1 - - [08/Nov/2026 10:45:27] \"GET /index.html HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:45:28] \"GET /styles.css HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:45:28] \"GET /app.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:45:28] \"GET /vendor/three.module.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:45:28] \"GET /OrbitControls.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:45:28] \"GET /vendor/three.core.js HTTP/1.1\" 200 -\n=========================== short test summary info ===========================\nFAILED tasks/real-three-orbitcontrols-35003/grader/test_browser.py::test_real_browser_mixed_pen_mouse_release\n1 failed in 2.05s\n",
+  "proofs": [],
+  "tests": [
+    "C:\\Users\\ekono\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "-rA",
+    "-o",
+    "addopts=",
+    "D:\\проекты\\KaroX-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\tasks\\real-three-orbitcontrols-35003\\grader\\test_browser.py"
+  ]
+}

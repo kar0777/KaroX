@@ -1,0 +1,84 @@
+{
+  "mode": "offline_candidate_wheel_checker_plus_historical_artifact_independent_regrade",
+  "new_paid_agent_run": false,
+  "distribution_dependencies_hermetic": false,
+  "dependency_reuse": "new --system-site-packages venv; existing host dependencies; no download",
+  "wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+  "source_workspace_unchanged": true,
+  "source_raw_archival_result": "D:\\проекты\\KaroX-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\paired-dev\\webgl-strict-epoch1-20261108\\threejs-crystal-cavern-strict\\karox5\\workspace",
+  "staging": "D:\\проекты\\KaroX-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\.tmp\\candidate-wheel-3d-20261108",
+  "venv": {
+    "exit": 0,
+    "seconds": 5.31,
+    "stdout": "",
+    "stderr": ""
+  },
+  "install": {
+    "exit": 0,
+    "seconds": 2.594,
+    "stdout": "Processing d:\\проекты\\karox-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\dist-triad-candidate\\karox_runtime-5.0.0-py3-none-any.whl\nInstalling collected packages: karox-runtime\nSuccessfully installed karox-runtime-5.0.0\n",
+    "stderr": ""
+  },
+  "import": {
+    "exit": 0,
+    "seconds": 0.134,
+    "stdout": "{\"version\": \"5.0.0\", \"origin\": \"D:\\\\\\u043f\\u0440\\u043e\\u0435\\u043a\\u0442\\u044b\\\\KaroX-v5\\\\lab\\\\kernel-duel-20261025\\\\b\\\\gpt6-sol-triad-20261108\\\\.tmp\\\\candidate-wheel-3d-20261108\\\\venv\\\\Lib\\\\site-packages\\\\karox\\\\web_document.py\", \"shadow\": null}\n",
+    "stderr": ""
+  },
+  "import_details": {
+    "version": "5.0.0",
+    "origin": "D:\\проекты\\KaroX-v5\\lab\\kernel-duel-20261025\\b\\gpt6-sol-triad-20261108\\.tmp\\candidate-wheel-3d-20261108\\venv\\Lib\\site-packages\\karox\\web_document.py",
+    "shadow": null
+  },
+  "wheel_import_correct": true,
+  "cli_help": {
+    "exit": 0,
+    "seconds": 1.194,
+    "stdout": "usage: karox [-h] [--version]\n             {tui,agent,session,provider,model,mcp,bridge,skill,credential,doctor,status,paths} ...\n\nLocal coding agent with a compact terminal client.\n\npositional arguments:\n  {tui,agent,session,provider,model,mcp,bridge,skill,credential,doctor,status,paths}\n    tui                 run the compact terminal client\n    agent               run the native agent\n    session             manage durable sessions\n    provider            manage API providers\n    model               manage provider models\n    mcp                 manage MCP servers and tools\n    bridge              hosted MCP bridge for ChatGPT, Claude and HyperAgent\n                        web\n    skill               discover and load Skills\n    credential          manage provider secrets\n    doctor              check providers, credentials, MCP and sessions\n    status              show the current local state\n    paths               show resolved application paths\n\noptions:\n  -h, --help            show this help message and exit\n  --version             show program's version number and exit\n",
+    "stderr": ""
+  },
+  "checker_positive": {
+    "exit": 0,
+    "seconds": 0.145,
+    "stdout": "{\"ok\": true, \"problems\": [], \"checked\": [\"index.html\"], \"checked_by\": \"karox.web_check\"}\n",
+    "stderr": ""
+  },
+  "checker_negative": {
+    "exit": 1,
+    "seconds": 0.15,
+    "stdout": "{\"ok\": false, \"problems\": [\"index.html: imports the bare specifier 'missing-bare-module' with no import-map entry; a browser cannot resolve it\"], \"checked\": [\"index.html\"], \"checked_by\": \"karox.web_check\"}\n",
+    "stderr": ""
+  },
+  "positive_ok": true,
+  "negative_ok": true,
+  "independent_grader": {
+    "exit": 0,
+    "seconds": 10.328,
+    "stdout": "....                                                                     [100%]\n4 passed in 9.24s\n",
+    "stderr": ""
+  },
+  "grader_4_of_4": true,
+  "visual_artifacts": [
+    {
+      "relative_path": "visual-proof/frame1.png",
+      "bytes": 71335,
+      "sha256": "dffca51b7a92aed06c5a14af3f52c3391103d0af9560f887a281c3243bedf07e"
+    },
+    {
+      "relative_path": "visual-proof/frame2.png",
+      "bytes": 66155,
+      "sha256": "c9ebb03f6cbdc3fe1afc0fe2bbe433b04ae1908d6f51cbaac56a392d2f1f3710"
+    },
+    {
+      "relative_path": "visual-proof/frame3.png",
+      "bytes": 65313,
+      "sha256": "79f323eb9fa150c2baa66d1103ae95726a8d36471f3b69121e10232bebfaac85"
+    },
+    {
+      "relative_path": "visual-proof/visual_result.json",
+      "bytes": 1967,
+      "sha256": "634825e063c17a176eb361aef095284c805ec0bbfc6a0dcf0ef07a448378526a"
+    }
+  ],
+  "success": true
+}

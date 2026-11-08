@@ -1,0 +1,29 @@
+{
+  "task": "real-three-orbitcontrols-35003",
+  "phase": "GREEN_REFERENCE_DEV_v2",
+  "not_competitor_run": true,
+  "reference_only_not_shared_with_agent": true,
+  "source_unchanged": true,
+  "grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+  "reference_original_sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+  "reference_modified_sha256": "bc17264989e393a26a9faada1302b3cbaa66fc3a14e45f4af541b15012cdee18",
+  "patch_diff": "--- a/OrbitControls.js\n+++ b/OrbitControls.js\n@@ -1607,6 +1607,28 @@\n \n function onPointerUp( event ) {\n \n+\t// A mismatched non-touch release can leave a pen pointer held. Retire only\n+\t// non-touch pointers; retain tracked touches and their position records.\n+\tif ( ! this._isTrackingPointer( event ) && event.pointerType !== 'touch' ) {\n+\n+\t\tfor ( const pointerId of [ ...this._pointers ] ) {\n+\n+\t\t\tif ( this._pointerPositions[ pointerId ] === undefined ) {\n+\n+\t\t\t\tif ( this.domElement.hasPointerCapture( pointerId ) ) {\n+\n+\t\t\t\t\tthis.domElement.releasePointerCapture( pointerId );\n+\n+\t\t\t\t}\n+\n+\t\t\t\tthis._removePointer( { pointerId } );\n+\n+\t\t\t}\n+\n+\t\t}\n+\n+\t}\n+\n \tthis._removePointer( event );\n \n \tswitch ( this._pointers.length ) {\n",
+  "exit": 0,
+  "timed_out": false,
+  "node_syntax_code": 0,
+  "node_syntax_log": "",
+  "seconds": 5.258,
+  "log": ".                                                                        [100%]\n=================================== PASSES ====================================\n__________________ test_real_browser_mixed_pen_mouse_release __________________\n---------------------------- Captured stderr call -----------------------------\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /index.html HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /styles.css HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /app.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /vendor/three.module.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /OrbitControls.js HTTP/1.1\" 200 -\n127.0.0.1 - - [08/Nov/2026 10:50:55] \"GET /vendor/three.core.js HTTP/1.1\" 200 -\n=========================== short test summary info ===========================\nPASSED audit/real_three_35003_grader_v2.py::test_real_browser_mixed_pen_mouse_release\n1 passed in 4.12s\n",
+  "proofs": [
+    {
+      "path": "event_results.json",
+      "sha256": "d4f51df5c8b852951e31ddf47900bd0b40c2df21b0af93ced47f72b08fff4087",
+      "bytes": 147
+    },
+    {
+      "path": "scene_before.png",
+      "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878",
+      "bytes": 73647
+    }
+  ]
+}
