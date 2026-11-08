@@ -46,7 +46,9 @@ engine-tool evidence and needs the next full gate.
 | Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth/readiness probes recorded; runner + batch harness; tasks in progress |
 | Phase 2 freeze | DONE | full suite at `51be451`, frozen docs commit `4919a04`, wheel SHA-256 `815030a7…ba62f5`, fresh install ok |
 | Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
-| Benchmark arena | PILOT SETUP | no paid task runs, no winner claim; task set still being validated |
+| DEV task set | 10/10 VALIDATED | registry hash `489f0495…8e08e`; all RED→GREEN; 1 browser, 1 Three.js, backend/frontend/debug/feature/security/migration/MCP covered |
+| First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
+| Benchmark arena | PILOT STARTED | invalid first Karo/Codex attempts documented and excluded; no winner claim |
 
 ## Round-15 commits (latest first)
 
@@ -143,20 +145,18 @@ only.
 
 ## Next automatic actions
 
-1. Pin provider/model for the READY arms with one harmless readiness call
-   each; record it as readiness (not benchmark evidence) and append actual
-   cost to `local-runs/arena/cost-ledger.jsonl`.
-2. Build the 10-task DEV pilot with independent public-test/behaviour graders,
-   freeze and hash the task registry before any arm runs; do not call it a
-   leaderboard.
-3. Resolve or honestly park Gemini auth and DSH headless invocation; keep
-   `UNAVAILABLE/BLOCKED` visible.
-4. Run lane A product-as-shipped comparisons, then a frozen holdout epoch;
-   report paired wins/losses, cost/time per success and 3D evidence.
-5. Continue the evidence-driven loop; optionally split the cohesive
-   `build_proxy_asgi_app` only with route-level characterization. Ceiling is
-   91,500 with 651 lines of measured headroom; a further raise needs fresh
-   evidence and no behavior growth.
+1. Run the frozen 10-task DEV registry across all four available arms with the
+   isolated runner; record every attempt, timeout and cost. This is a DEV
+   pilot/regression set, not a holdout leaderboard.
+2. Resolve or park Gemini auth and DSH headless invocation; add aider/crush
+   only when a lawful local install is available.
+3. Expand to the 100-task target with public/issue-derived tasks, then freeze a
+   separate holdout and pre-register its rubric hashes before opening it.
+4. Use DEV failures for targeted engineering fixes; rerun held-out only after a
+   new candidate freeze.
+5. Optionally split the cohesive `build_proxy_asgi_app` only with route-level
+   characterization. Ceiling is 91,500 with 651 lines of measured headroom; a
+   further raise needs fresh evidence and no behavior growth.
 
 ## Safe continuation
 

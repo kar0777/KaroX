@@ -86,10 +86,12 @@ independent behaviour check, or a pre-registered rubric is required. A three
 task pilot is a transport check, not the matrix. The task registry and all
 scorers are hashed before any arm runs; dev and frozen holdout are separate.
 
-Current state: **0/100 ready** (schema in
-`local-runs/arena/tasks/schema.json`; no task is valid until its source,
-fixtures and scorer exist). The next milestone is a 10-task DEV pilot with
-public-test graders, not a leaderboard.
+Current state: **10/10 DEV tasks validated RED→GREEN** (registry
+`489f0495cfb42cdf586334ecde7bdd2691be9c6dca46258d005b82a17558e08e`);
+the 100-task target and frozen holdout remain open. The optional Three.js
+grader uses a vendored Three.js r160 + Node scene-graph/control checks, with an
+optional Playwright mount marker; WebGL rasterization is not graded, which is
+an explicit limitation, not a hidden pass.
 
 ## Metrics and honesty
 
@@ -128,6 +130,31 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --output-format stream-json` in an isolated fixture; OpenCode `run
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
+
+## First DEV pilot — one task, not a leaderboard
+
+Task `backend-catalog-pagination` (synthetic DEV fixture, independent grader
+validated RED 11/12 → GREEN 12/12 before any arm ran). Same prompt, fixture and
+grader; different providers/models, so this is **partially controlled**, n=1.
+
+| Arm | Model | Solved | Wall time | Cost | Notes |
+|---|---|---|---:|---:|---|
+| KaroX | `wandb/deepseek-ai/DeepSeek-V4.1-Flash` | yes | **14.19 s** | UNKNOWN (no pricing) | 38,508 total tokens, 4 steps, verified true; patch 9,968 B |
+| OpenCode | `opencode/deepseek-v4.1-flash-free` | yes | 44.04 s | $0 | free model, 18,984 final-step tokens |
+| Claude | `claude-haiku-5-5` (default) | yes | 48.97 s | $0.01312508 | added a boundary test as well as the fix |
+| Codex | default ChatGPT | yes | 155.21 s | subscription, UNKNOWN USD | 542,100 input / 9,200 output tokens; first 372 s run was `invalid_infra` due a `__pycache__` cleanup loop and is excluded |
+
+A first Karo attempt is **excluded as invalid_integrity**: the harness had not
+passed the required explicit verification command, so the agent exited before a
+model call. A first Codex attempt is **excluded as invalid_infra**: the fixture
+run produced `__pycache__`, and Codex spent the budget trying to remove it
+through a blocked policy. Both are harness defects, not capability results.
+The clean reruns above are the valid records.
+
+This pilot proves the isolation/grader pipeline works. It does **not** prove
+category leadership, cost parity or holdout quality. The task set is still being
+completed (9/10 DEV records present; the Three.js record is pending validation)
+and no holdout exists yet.
 
 ## Readiness probes (2026-11-08, not benchmark results)
 
