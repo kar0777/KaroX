@@ -480,8 +480,19 @@ def shadowed_by_repository() -> Optional[str]:
 
     import sys
 
-    here = pathlib.Path(__file__).resolve()
+    # This function lives in web_document.py, but the module being checked is
+    # karox.web_check. Comparing web_document.py with web_check.py falsely
+    # rejects every genuine installed checker as a repository shadow.
+    here = pathlib.Path(__file__).with_name("web_check.py").resolve()
     cwd = pathlib.Path.cwd().resolve()
+    # Only code *executed from the checked repository* can be a repository
+    # shadow. In an isolated CLI run the system Python may import KaroX from
+    # one installed location while a second legitimate venv supplies the
+    # find_spec origin. Those different installations are NOT a malicious
+    # checker written by the task. Do not turn this mismatch into a false
+    # verification failure; the separate random checker challenge stays intact.
+    if not here.is_relative_to(cwd):
+        return None
     stripped = [
         entry
         for entry in sys.path
