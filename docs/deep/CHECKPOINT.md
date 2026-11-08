@@ -48,7 +48,9 @@ engine-tool evidence and needs the next full gate.
 | Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
 | DEV task set | 10/10 VALIDATED | registry hash `489f0495…8e08e`; all RED→GREEN; 1 browser, 1 Three.js, backend/frontend/debug/feature/security/migration/MCP covered |
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
-| DEV batch (10 tasks × 4 arms) | DONE — INVALID FOR LEADERBOARD | raw solved: Karo 7/10, OpenCode 2/10, Claude 2/10, Codex 2/10; prompts under-specified and browser dispatch invalid for 3 arms; epoch e1 closed as invalid comparison |
+| DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
+| DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
+| DEV batch e2 | RUNNING | `local-runs/arena/runs-e2`; no result/winner claim until complete |
 | Benchmark arena | PILOT STARTED | invalid first Karo/Codex attempts documented and excluded; no winner claim |
 
 ## Round-15 commits (latest first)

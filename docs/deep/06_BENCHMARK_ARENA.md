@@ -131,6 +131,20 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e2 — repaired prompts, rerun in progress
+
+Epoch e1 was invalidated above. Both task authors audited all ten prompts
+against their graders and added every externally observable requirement plus
+the standard autonomy line. Fixtures/graders/references are unchanged; all ten
+`validate.py` runs are still RED→GREEN, all rubric hashes match, and the new
+registry is frozen at:
+
+`registry_sha256 = 7d95e2cf8561b514fa0f9e4d775f169cf1a55b75add04a5df2b3d5862f7bcdd8`
+
+The four arms are being rerun into `local-runs/arena/runs-e2` with the same
+runner, models, budgets and graders. No e2 result is reported until the batch
+is complete; e1 files are retained but must not be cited.
+
 ## DEV batch (epoch e1) — INVALID FOR A LEADERBOARD
 
 All four arms completed the frozen 10-task DEV registry. Raw solved counts:
