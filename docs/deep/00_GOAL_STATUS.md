@@ -17,8 +17,9 @@
       covered by bridge characterization tests.
 - [x] Phase 2 — full parity/security/build/release gate (full suite at `51be451`;
       frozen wheel SHA-256 `815030a7…ba62f5`; fresh install `doctor status ok`)
-- [ ] Phase 3 — honest latest-CLI benchmark arena (e1 invalidated; e2 prompts
-      repaired/frozen `7d95e2cf…bcdd8`; e2 batch running; no winner claim)
+- [ ] Phase 3 — honest latest-CLI benchmark arena (e1 invalid; e2 preliminary
+      DEV: Karo 9/10, OpenCode 2/10, Codex 2/10, Claude permission-blocked;
+      no holdout/winner claim; expanding task set)
 - [ ] Phase 4 — evidence-driven optimization loop
 - [ ] Phase 5 — local 5.x release candidate
 
