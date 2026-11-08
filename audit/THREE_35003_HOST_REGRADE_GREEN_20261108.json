@@ -1,0 +1,30 @@
+{
+  "new_evaluator_sha256": "261f703b0d5be5023960f6a99af11378fd3da7a23d6e36f64b1095826b20b90e",
+  "test_sha256": "befbb9498bd1fd34b27e193bdee972a3d6a4eb3ad9fe8603c973b1fc33908392",
+  "earlier_red_log_sha256": "d50a1bddf0a21bc5aa73868f18bb0a97378eaf09d32add97fc934dcf4b24d1a4",
+  "checks": [
+    {
+      "name": "contract_pytest",
+      "exit": 0,
+      "seconds": 1.12,
+      "stdout": ".....                                                                    [100%]\n5 passed in 0.10s\n",
+      "stderr": ""
+    },
+    {
+      "name": "ruff",
+      "exit": 0,
+      "seconds": 0.23,
+      "stdout": "All checks passed!\n",
+      "stderr": ""
+    },
+    {
+      "name": "compile",
+      "exit": 0,
+      "seconds": 0.09,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "all_pass": true,
+  "note": "Pre-competitor Windows/Linux cross-platform source tree hash and invalid raw result guard, frozen task grader untouched."
+}

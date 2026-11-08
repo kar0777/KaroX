@@ -18,10 +18,25 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from audit.verify_saved_run_provenance import verify as verify_saved_arm
+except ModuleNotFoundError:
+    # Also works when invoked as python audit/windows_regrade_three_35003.py.
+    from verify_saved_run_provenance import verify as verify_saved_arm
+
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "tasks" / "real-three-orbitcontrols-35003-v2"
 ENV = ROOT / "audit" / "THREE_35003_ENVIRONMENT_20261108.json"
 ARMS = ("karox5", "opencode_v2", "deepseek_harness")
+EXPECTED_MODEL = "deepseek-ai/DeepSeek-V4.1-Flash"
+EXPECTED_PROVIDER = "https://api.inference.wandb.ai/v1"
+
+
+def verify_model_route(previous: dict) -> None:
+    """Refuse to score a three-way run with a different recorded model route."""
+    if (previous.get("model") != EXPECTED_MODEL
+            or previous.get("provider_base_url") != EXPECTED_PROVIDER):
+        raise RuntimeError("Recorded model/provider differs from frozen three-way DEV protocol")
 
 
 def hash_file(path: Path) -> str:
@@ -30,7 +45,8 @@ def hash_file(path: Path) -> str:
 
 def hash_tree(folder: Path) -> str:
     digest = hashlib.sha256()
-    for file in sorted(folder.rglob("*")):
+    # Match Linux runner ordering exactly, independent of Windows Path ordering.
+    for file in sorted(folder.rglob("*"), key=lambda item: item.relative_to(folder).as_posix()):
         if file.is_file():
             digest.update(file.relative_to(folder).as_posix().encode())
             digest.update(b"\0")
@@ -60,16 +76,25 @@ def classify_agent_run(previous: dict, independent_grade: dict) -> dict:
         previous.get("agent_timed_out") is True
         or original.get("status") in ("SETUP_BLOCKED", "INFRA_SETUP_BLOCKED")
     )
+    # A working browser cannot rehabilitate a corrupt/invalid original agent run.
+    source_evidence_valid = (
+        original.get("validity") is True
+        and original.get("status") != "INVALID"
+    )
     patch_bytes = previous.get("patch_bytes")
     patch_nonempty = type(patch_bytes) is int and patch_bytes > 0
     artifact_correct = independent_grade.get("grade") == "PASS" and patch_nonempty
     return {
         "cli_completed_from_original_runner": cli_complete,
         "runner_config_integrity": config_intact,
+        "source_evidence_valid": source_evidence_valid,
         "agent_infra_blocked": blocked,
         "patch_nonempty": patch_nonempty,
         "artifact_correct": artifact_correct,
-        "clean_user_success": artifact_correct and cli_complete and config_intact and not blocked,
+        "clean_user_success": (
+            artifact_correct and cli_complete and config_intact
+            and source_evidence_valid and not blocked
+        ),
     }
 
 
@@ -194,6 +219,7 @@ def main() -> int:
             report["arms"][arm] = {"status": "NOT_RUN_NOT_A_LOSS"}
             continue
         previous = json.loads(raw.read_text(encoding="utf-8"))
+        verify_model_route(previous)
         if previous.get("task_id") != report["task_id"]:
             raise RuntimeError(f"Wrong task id: {arm}")
         if previous.get("fixture_sha256") != fixture_hash:
@@ -202,8 +228,14 @@ def main() -> int:
             raise RuntimeError(f"Different task prompt: {arm}")
         if previous.get("grader_sha256") != hash_tree(TASK / "grader"):
             raise RuntimeError(f"Changed grader in raw run: {arm}")
+        # Fail closed before browsing: verify fixture Git HEAD, staged patch,
+        # source file bytes and all ledger SHA values. An altered workspace is
+        # not a competitor failure and cannot be rehabilitated by a visual PASS.
+        provenance = verify_saved_arm(folder, TASK)
         proof = folder / "windows_visual_proof"
         grade = evaluate(workspace, proof, args.max_grader_seconds)
+        grade["saved_run_provenance"] = provenance
+        grade["workspace_provenance_valid"] = provenance["valid"] is True
         grade.update(classify_agent_run(previous, grade))
         grade["estimated_cost_usd"] = None
         grade["actual_provider_invoice_usd"] = None
@@ -211,8 +243,12 @@ def main() -> int:
         grade["agent_wall_seconds"] = previous.get("agent_wall_seconds")
         report["arms"][arm] = grade
     report["three_way_complete"] = all(
-        report["arms"].get(arm, {}).get("grade") in ("PASS", "FAIL") and
-        not report["arms"][arm].get("agent_infra_blocked") for arm in ARMS
+        report["arms"].get(arm, {}).get("grade") in ("PASS", "FAIL")
+        and report["arms"][arm].get("source_evidence_valid") is True
+        and report["arms"][arm].get("workspace_provenance_valid") is True
+        and report["arms"][arm].get("runner_config_integrity") is True
+        and not report["arms"][arm].get("agent_infra_blocked")
+        for arm in ARMS
     )
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8")

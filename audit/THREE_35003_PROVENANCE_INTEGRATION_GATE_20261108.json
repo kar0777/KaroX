@@ -1,0 +1,29 @@
+{
+  "status": "PASS",
+  "no_model_calls": true,
+  "regrader_sha256": "ea9ef89c9d53d3569593411d81f1c03f1670ca13378dee399bd76b8c0221b70a",
+  "provenance_sha256": "5d57886ae0686f010b724e7fb660d2fee0340161b410bc8e2a8f9ae2ba89f313",
+  "checks": [
+    {
+      "check": "pytest",
+      "exit": 0,
+      "duration_s": 6.525,
+      "stdout": "...........                                                              [100%]\n11 passed in 2.21s\n",
+      "stderr": ""
+    },
+    {
+      "check": "ruff",
+      "exit": 0,
+      "duration_s": 0.233,
+      "stdout": "All checks passed!\n",
+      "stderr": ""
+    },
+    {
+      "check": "compile",
+      "exit": 0,
+      "duration_s": 0.09,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

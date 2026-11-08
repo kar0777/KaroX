@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "no_model_calls": true,
+  "historical_real_arms_verified": 3,
+  "tamper_negative_scenarios": 3,
+  "source_sha256": "5d57886ae0686f010b724e7fb660d2fee0340161b410bc8e2a8f9ae2ba89f313",
+  "checks": [
+    {
+      "name": "pytest",
+      "exit": 0,
+      "seconds": 3.488,
+      "stdout_tail": "......                                                                   [100%]\n6 passed in 2.15s\n",
+      "stderr_tail": ""
+    },
+    {
+      "name": "ruff",
+      "exit": 0,
+      "seconds": 0.23,
+      "stdout_tail": "All checks passed!\n",
+      "stderr_tail": ""
+    }
+  ]
+}

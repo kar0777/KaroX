@@ -1,0 +1,104 @@
+{
+  "purpose": "TUI mypy diagnostics as technical debt. Source paths predate checker-origin fix; output not a successful typing gate.",
+  "exit": 1,
+  "seconds": 0.286,
+  "reported_errors": 399,
+  "files": {
+    "src\\karox\\tui\\app_session.py": 40,
+    "src\\karox\\tui\\app_run.py": 103,
+    "src\\karox\\tui\\app_commands.py": 251,
+    "src\\karox\\tui\\app.py": 5
+  },
+  "codes": {
+    "attr-defined": 282,
+    "has-type": 103,
+    "var-annotated": 3,
+    "return-value": 1,
+    "assignment": 9,
+    "index": 1
+  },
+  "first_16": [
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"backend\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_resume_requested\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"backend\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"repository\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"repository\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_new_session_id\"; maybe \"session_id\"?",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_notice\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"language\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_refresh_chrome\"; maybe \"_refresh_welcome\"?",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_refresh_status\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"run_worker\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"call_from_thread\"; maybe \"_from_thread\"?",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_notice\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "Cannot determine type of \"_lookups\"",
+      "code": "has-type"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "\"AppSessionMixin\" has no attribute \"_refresh_working\"",
+      "code": "attr-defined"
+    },
+    {
+      "file": "src\\karox\\tui\\app_session.py",
+      "message": "Cannot determine type of \"_lookups\"",
+      "code": "has-type"
+    }
+  ],
+  "tail": " types in assignment (expression has type \"dict[str, Any] | None\", base class \"AppCommandsMixin\" defined the type as \"dict[str, Collection[str]]\")  [assignment]\nsrc\\karox\\tui\\app.py:161: error: Incompatible types in assignment (expression has type \"str | None\", base class \"AppCommandsMixin\" defined the type as \"None\")  [assignment]\npyproject.toml: note: unused section(s): module = ['jeepney.*', 'keyring.*', 'playwright.*', 'secretstorage.*']\nFound 399 errors in 4 files (checked 16 source files)\n",
+  "stderr": ""
+}

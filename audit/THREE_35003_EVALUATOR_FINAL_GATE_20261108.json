@@ -1,0 +1,31 @@
+{
+  "result": "PASS",
+  "checks": [
+    {
+      "check": "pytest",
+      "exit": 0,
+      "duration_s": 3.382,
+      "stdout": "............                                                             [100%]\n12 passed in 2.18s\n",
+      "stderr": ""
+    },
+    {
+      "check": "ruff",
+      "exit": 0,
+      "duration_s": 0.237,
+      "stdout": "All checks passed!\n",
+      "stderr": ""
+    },
+    {
+      "check": "compile",
+      "exit": 0,
+      "duration_s": 0.099,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "regrader_sha256": "e632ebacaacb284f9cf07d2592ea1fb014512ff7c3a8274cd14cc48d88457d70",
+  "provenance_sha256": "5d57886ae0686f010b724e7fb660d2fee0340161b410bc8e2a8f9ae2ba89f313",
+  "model_calls": 0,
+  "competitor_arms_run": 0,
+  "correctness": "Linux-byte-order tree hash, raw evidence validity, exact model route, saved Git artifact provenance"
+}

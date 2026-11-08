@@ -1,0 +1,45 @@
+{
+  "purpose": "Read-only replay of saved source/index/patch provenance; existing valid three-arm Rich run; no model calls",
+  "results": [
+    {
+      "valid": true,
+      "arm": "karox5",
+      "task_id": "real-rich-4246",
+      "tracked_files": 104,
+      "baseline_files": 104,
+      "patch_sha256": "0cbc5c40579661801df2cee5deb18b21b33ff64508f35f9a05bb7d67cf20ef1b",
+      "patch_bytes": 432,
+      "baseline_fixture_sha256": "6fb4caa8d3312e5e196d7c35b543c199ea475809f5ea3d0292e8ea07a5500269",
+      "grader_sha256": "d348f2a2c07d6c992b61b60232772eb83b3173bb7a6489d974deaa69ddb016d0",
+      "result_sha256": "61b6b05fcb48cf1d0859355d380f222ac21d89861c53fe5e027f927b20b809db",
+      "note": "Git object byte hashes avoid Windows core.autocrlf false positives"
+    },
+    {
+      "valid": true,
+      "arm": "opencode_v2",
+      "task_id": "real-rich-4246",
+      "tracked_files": 104,
+      "baseline_files": 104,
+      "patch_sha256": "0cbc5c40579661801df2cee5deb18b21b33ff64508f35f9a05bb7d67cf20ef1b",
+      "patch_bytes": 432,
+      "baseline_fixture_sha256": "6fb4caa8d3312e5e196d7c35b543c199ea475809f5ea3d0292e8ea07a5500269",
+      "grader_sha256": "d348f2a2c07d6c992b61b60232772eb83b3173bb7a6489d974deaa69ddb016d0",
+      "result_sha256": "f9585ed83417a1c0946bcb714c5cec67e49e0bc94555d027170077bebcd0667c",
+      "note": "Git object byte hashes avoid Windows core.autocrlf false positives"
+    },
+    {
+      "valid": true,
+      "arm": "deepseek_harness",
+      "task_id": "real-rich-4246",
+      "tracked_files": 104,
+      "baseline_files": 104,
+      "patch_sha256": "0cbc5c40579661801df2cee5deb18b21b33ff64508f35f9a05bb7d67cf20ef1b",
+      "patch_bytes": 432,
+      "baseline_fixture_sha256": "6fb4caa8d3312e5e196d7c35b543c199ea475809f5ea3d0292e8ea07a5500269",
+      "grader_sha256": "d348f2a2c07d6c992b61b60232772eb83b3173bb7a6489d974deaa69ddb016d0",
+      "result_sha256": "0be5decb5235c0c89e0ab608748782d1aa1d8e504085a87aa83e45b2a915ca42",
+      "note": "Git object byte hashes avoid Windows core.autocrlf false positives"
+    }
+  ],
+  "all_valid": true
+}

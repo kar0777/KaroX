@@ -1,0 +1,8 @@
+{
+  "source": "actual Ubuntu 26.04 WSL2 pathlib sorting and Linux triad_runner algorithm",
+  "tree_sha256": {
+    "tasks/real-three-orbitcontrols-35003-v2/fixture": "82d6a6dea04e36314e472d56a2edf73ceadbea774f02bee8316ba57d8d0e9134",
+    "tasks/real-three-orbitcontrols-35003-v2/grader": "1194d5f6088d4696ac710d737d4046c118f15e6610c29c075e38f3296c976efa",
+    "tasks/real-rich-4246/fixture": "6fb4caa8d3312e5e196d7c35b543c199ea475809f5ea3d0292e8ea07a5500269"
+  }
+}
