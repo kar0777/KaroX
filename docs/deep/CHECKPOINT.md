@@ -43,7 +43,8 @@ engine-tool evidence and needs the next full gate.
 | Bridge profile types | DONE | `bridge_profiles.py` 1,144 → 864 (+ `bridge_profile_types.py` 338); credential-store seam kept |
 | Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,849; rationale in `scripts/check_tree.py` |
 | Bridge route closures | PARTIAL | OAuth pages/factory split; `build_proxy_asgi_app` closures still cohesive |
-| Arena preparation | STARTED | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth probes recorded; 0/100 tasks ready |
+| Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth probes recorded; 0/100 tasks ready |
+| Phase 2 freeze | DONE | full suite at `51be451`, frozen docs commit `4919a04`, wheel SHA-256 `815030a7…ba62f5`, fresh install ok |
 | Benchmark arena | NOT STARTED (correctly blocked) | no paid runs, no winner claim; Gemini auth blocked, DSH headless pending |
 
 ## Round-15 commits (latest first)
@@ -73,8 +74,10 @@ c4b6999 docs(deep): checkpoint the OAuth and bridge-profile type splits
 | Full suite at `d26ace3` (bridge wire split) | **PASS** — exit 0, 100 % (`local-runs/gate-d26ace3-full.log`) |
 | Full suite at `02eb453` (tailscale + budget) | **PASS** — exit 0, 100 % (`local-runs/gate-02eb453-full.log`) |
 | Full suite at `c4b6999` (OAuth/profile splits) | **PASS** — exit 0, 100 % (`local-runs/gate-c4b6999-full.log`) |
-| Full suite at current HEAD (OAuth app split) | pending next round; OAuth tests pass |
-| Wheel build | **PASS** — `karox_runtime-5.0.0-py3-none-any.whl`, 256 files, 2 prompts, 10 builtin skills, `tui/theme.tcss`, entry point |
+| Full suite at `51be451` (OAuth app split) | **PASS** — exit 0, 100 % (`local-runs/gate-51be451-full.log`) |
+| Frozen candidate wheel at `4919a04` | **PASS** — SHA-256 `815030a7964fad0c294df568113d0c65c161ddde1e271be81ac662f598ba62f5`, 264 files |
+| Fresh-venv frozen install | **PASS** — version 5.0.0, doctor status ok, TUI/bridge imports |
+| Wheel build | **PASS** — `karox_runtime-5.0.0-py3-none-any.whl`, 2 prompts, 10 builtin skills, `tui/theme.tcss`, entry point |
 | Fresh-venv wheel install | **PASS** — import/`--version` = 5.0.0, `doctor --json` status ok, full command surface |
 
 ## Metrics
@@ -139,12 +142,19 @@ only.
 
 ## Next automatic actions
 
-1. Run the full gate at current HEAD; fix any regression.
-2. Add route-level characterization, then split the remaining
-   `build_proxy_asgi_app` route closures; keep the sealed approval `time`
-   patch seam and the core-vs-wire one-shot boundary intact.
-3. Phase 2 full gate + fresh wheel install; only then benchmark arena. Ceiling
-   is 91,500 with 721 lines of measured headroom; a further raise needs fresh
+1. Pin provider/model for the READY arms with one harmless readiness call
+   each; record it as readiness (not benchmark evidence) and append actual
+   cost to `local-runs/arena/cost-ledger.jsonl`.
+2. Build the 10-task DEV pilot with independent public-test/behaviour graders,
+   freeze and hash the task registry before any arm runs; do not call it a
+   leaderboard.
+3. Resolve or honestly park Gemini auth and DSH headless invocation; keep
+   `UNAVAILABLE/BLOCKED` visible.
+4. Run lane A product-as-shipped comparisons, then a frozen holdout epoch;
+   report paired wins/losses, cost/time per success and 3D evidence.
+5. Continue the evidence-driven loop; optionally split the cohesive
+   `build_proxy_asgi_app` only with route-level characterization. Ceiling is
+   91,500 with 651 lines of measured headroom; a further raise needs fresh
    evidence and no behavior growth.
 
 ## Safe continuation

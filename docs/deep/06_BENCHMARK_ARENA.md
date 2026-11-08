@@ -4,6 +4,18 @@
 refactor Phase-2 gate must be green at the frozen commit first; this document
 records the registry and the honest readiness gaps.
 
+## Frozen candidate (Phase 2)
+
+- Code commit with a full green suite: `51be451` (all 100%).
+- Frozen metadata commit: `4919a04` (docs-only delta from `51be451`).
+- Wheel: `karox_runtime-5.0.0-py3-none-any.whl`, 1,228,540 bytes,
+  SHA-256 `815030a7964fad0c294df568113d0c65c161ddde1e271be81ac662f598ba62f5`,
+  264 files / 2 prompts / 10 builtin skills / TUI theme.
+- Fresh-venv install: `karox --version` = 5.0.0, `karox doctor --json` =
+  `status: ok`, TUI/bridge imports succeed.
+- No paid benchmark run has occurred yet; this freeze is the candidate, not a
+  leaderboard result.
+
 ## Why this exists
 
 The goal requires evidence-based competition after the deep refactor: same

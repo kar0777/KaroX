@@ -15,7 +15,8 @@
       tailscale/oauth/profiles, repo context, verification, TUI, web_check).
       One cohesive route factory remains intentionally unsplit; all seams are
       covered by bridge characterization tests.
-- [ ] Phase 2 — full parity/security/build/release gate at the frozen commit
+- [x] Phase 2 — full parity/security/build/release gate (full suite at `51be451`;
+      frozen wheel SHA-256 `815030a7…ba62f5`; fresh install `doctor status ok`)
 - [ ] Phase 3 — honest latest-CLI benchmark arena (preparation started:
       `06_BENCHMARK_ARENA.md`, latest CLIs installed locally, 0/100 tasks ready)
 - [ ] Phase 4 — evidence-driven optimization loop
