@@ -73,9 +73,9 @@
     "c_gib_reserve_min": 7,
     "d_gib_reserve_min": 15,
     "per_process_tree_rss_gib_max": 1,
-    "last_c_free_gib": 9.15,
-    "last_d_free_gib": 60.69,
-    "last_windows_ram_available_gib": 3.12,
+    "last_c_free_gib": 9.16,
+    "last_d_free_gib": 60.67,
+    "last_windows_ram_available_gib": 7.79,
     "logs_lossless_gzip": true
   },
   "all_in_three_way_leadership_proven": false,
