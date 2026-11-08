@@ -132,6 +132,19 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e8 — 70-task DEV expansion (preliminary)
+
+A7/B7 add ten validated tasks (70/70 total; registry
+`a7461598…861317`): GraphQL resolver, deterministic lock-order deadlock,
+notification fan-out, dashboard URL filters, water reflection; SSE reconnect,
+accessible modal, upload magic-scan, JSON→SQLite migration, MCP batch calls.
+
+New ten: **Karo 7/10**, Codex 1/10. Combined 70-task DEV: **Karo 63/70**,
+Codex 9/70, OpenCode 2/22 attempted. Karo's new failures: GraphQL field-level
+secret error, notification fan-out (grader timed out; treat as unresolved
+task/runtime interaction, not a clean pass or loss), and SSE reconnect (4/5).
+No product regression and no holdout opening.
+
 ## Epoch e7 — 60-task DEV expansion (preliminary)
 
 A6/B6 add ten validated tasks (60/60 total; registry
