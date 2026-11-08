@@ -1,0 +1,37 @@
+{
+  "result": "PASS",
+  "returncode": 0,
+  "details": {
+    "status": "PASS",
+    "method": "new isolated lab Python virtualenv, wheel ZIP/RECORD verified, original venv used only for dependency reuse via .pth",
+    "wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+    "wheel_file_count": 264,
+    "python": "/home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-isolated-20261108/bin/python",
+    "python_isolated_import": {
+      "exit": 0,
+      "stdout": "5.0.0\n/home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-isolated-20261108/lib/python3.14/site-packages/karox/web_document.py\n/home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-isolated-20261108/lib/python3.14/site-packages/karox/web_check.py\n",
+      "stderr": ""
+    },
+    "official_entrypoint_help_exit": 0,
+    "security_test": {
+      "isolated_python": true,
+      "shadowed_checker_not_executed": true,
+      "checker_exit": 0,
+      "checker_verdict": {
+        "ok": true,
+        "problems": [],
+        "checked": [
+          "index.html"
+        ],
+        "challenge": "candidate-isolated-linux-20261108",
+        "checked_by": "karox.web_check"
+      },
+      "bad_document_exit": 1
+    },
+    "sitepackages": "/home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-isolated-20261108/lib/python3.14/site-packages",
+    "dependencies_sitepackages_reused": "/home/ekono/.cache/karox-fair-linux-20261108/karox-venv/lib/python3.14/site-packages",
+    "fully_hermetic_dependencies": false,
+    "old_venv_unmodified": true
+  },
+  "stderr_note": "w\u0000s\u0000l\u0000:\u0000 \u0000\u001d\u00045\u00044\u0004>\u0004?\u0004C\u0004A\u0004B\u00048\u0004<\u0004K\u00049\u0004 \u0000M\u0004:\u0004@\u00040\u0004=\u00048\u0004@\u0004C\u00045\u0004<\u0004K\u00049\u0004 \u0000A\u00048\u0004<\u00042\u0004>\u0004;\u0004:\u0000 \u0000\"\u0000w\u0000\"\u0000 \u00002\u0004 \u0000C\u0000:\u0000\\\u0000U\u0000s\u0000e\u0000r\u0000s\u0000\\\u0000e\u0000k\u0000o\u0000n\u0000o\u0000\\\u0000.\u0000w\u0000s\u0000l\u0000c\u0000o\u0000n\u0000f\u0000i\u0000g\u0000:\u00004\u0000\n\u0000\n\u0000"
+}

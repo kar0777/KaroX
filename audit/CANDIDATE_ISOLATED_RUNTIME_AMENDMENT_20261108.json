@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "kind": "prepaid_prearm_runtime_fix_non_scored",
+  "supersedes_adapter_only": "audit/triad_linux_candidate.py@sha256:33f82efb9a1159c10a30840d6721ae3f21f7132bc6df67b62d6c4a8899ff2efe",
+  "new_adapter": "audit/triad_linux_candidate.py",
+  "new_adapter_sha256": "1c2952bb952c0ec82bc475671c8488c59dfa737685981e4f171817d656ee3e38",
+  "candidate_wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+  "reason": "Running the main CLI with PYTHONPATH overlay does not pin python -I -m karox.web_check children to the same repaired wheel. Isolate runtime and child imports in their own candidate virtualenv.",
+  "validation": {
+    "venv_install": "audit/LINUX_CANDIDATE_ISOLATED_VENV_20261108.json",
+    "isolated_entrypoint": "audit/LINUX_CANDIDATE_ISOLATED_ENTRYPOINT_20261108.json",
+    "offline_adapter_preflight": "audit/LINUX_CANDIDATE_ADAPTER_PREFLIGHT_20261108.json",
+    "recorded_pass": true,
+    "forged_workspace_checker_blocked": true,
+    "positive_and_negative_browser_checker_tests": true,
+    "wheel_record_sha256_validated": true,
+    "frozen_wheel_modules_verified": true,
+    "true_hermetic_dependency_install": false,
+    "model_invocations": 0,
+    "paid_model_calls": 0
+  },
+  "unchanged": {
+    "fixed_browser_grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+    "task_sha256": "98f2f823a681050adf4a82a8df16af281ba2f477b335ff5a39d1e754b210f312",
+    "provider": "https://api.inference.wandb.ai/v1",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "competitors": [
+      "karox5",
+      "opencode_v2",
+      "deepseek_harness"
+    ],
+    "user_installed_karo_untouched": true,
+    "historical_run_outputs_untouched": true
+  },
+  "scorer_before_paid_epoch": true,
+  "new_scored_arms": 0,
+  "triad_leadership_proven": false,
+  "context": "DEV_UNPROTECTED, not blind holdout; repair does not change independent grader or comparison metrics."
+}

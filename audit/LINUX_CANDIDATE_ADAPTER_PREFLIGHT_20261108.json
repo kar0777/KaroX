@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "returncode": 0,
+  "audit": {
+    "status": "PASS",
+    "candidate_venv": "/home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-isolated-20261108",
+    "frozen_wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+    "original_cli_unmodified": true,
+    "test_arms": [
+      "opencode_v2",
+      "karox5",
+      "deepseek_harness"
+    ],
+    "env_never_mutated": true,
+    "candidate_script_in_isolated_mode": true,
+    "no_agent_or_provider_calls": true,
+    "source_sha256": "1c2952bb952c0ec82bc475671c8488c59dfa737685981e4f171817d656ee3e38"
+  },
+  "stderr_truncated": "w\u0000s\u0000l\u0000:\u0000 \u0000\u001d\u00045\u00044\u0004>\u0004?\u0004C\u0004A\u0004B\u00048\u0004<\u0004K\u00049\u0004 \u0000M\u0004:\u0004@\u00040\u0004=\u00048\u0004@\u0004C\u00045\u0004<\u0004K\u00049\u0004 \u0000A\u00048\u0004<\u00042\u0004>\u0004;\u0004:\u0000 \u0000\"\u0000w\u0000\"\u0000 \u00002\u0004 \u0000C\u0000:\u0000\\\u0000U\u0000s\u0000e\u0000r\u0000s\u0000\\\u0000e\u0000k\u0000o\u0000n\u0000o\u0000\\\u0000.\u0000w\u0000s\u0000l\u0000c\u0000o\u0000n\u0000f\u0000i\u0000g\u0000:\u00004\u0000\n\u0000\n\u0000"
+}
