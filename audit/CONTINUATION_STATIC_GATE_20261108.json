@@ -1,0 +1,20 @@
+[
+  {
+    "name": "ruff",
+    "exit": 0,
+    "seconds": 0.23,
+    "stdout": "All checks passed!\n"
+  },
+  {
+    "name": "compile",
+    "exit": 0,
+    "seconds": 0.1,
+    "stdout": ""
+  },
+  {
+    "name": "mypy_touched",
+    "exit": 0,
+    "seconds": 0.46,
+    "stdout": "pyproject.toml: note: unused section(s): module = ['jeepney.*', 'keyring.*', 'playwright.*', 'secretstorage.*']\nSuccess: no issues found in 1 source file\n"
+  }
+]

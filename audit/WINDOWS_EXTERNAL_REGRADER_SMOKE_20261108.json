@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "red",
+      "grade": "FAIL",
+      "exit": 1,
+      "seconds": 5.2578,
+      "files": [
+        {
+          "name": "event_results.json",
+          "bytes": 208,
+          "sha256": "143ceb56e6efc67b50f895325d6bc7998836d0206f2c090126672c051062b002"
+        },
+        {
+          "name": "scene_before.png",
+          "bytes": 73647,
+          "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878"
+        }
+      ],
+      "events": {
+        "page_errors": [
+          "Cannot read properties of undefined (reading 'x')"
+        ],
+        "end_before_hover": 0,
+        "end_after_hover": 0,
+        "azimuth_before_hover": -0.3789,
+        "azimuth_after_hover": 2.24785
+      }
+    },
+    {
+      "case": "green",
+      "grade": "PASS",
+      "exit": 0,
+      "seconds": 5.1617,
+      "files": [
+        {
+          "name": "event_results.json",
+          "bytes": 147,
+          "sha256": "d4f51df5c8b852951e31ddf47900bd0b40c2df21b0af93ced47f72b08fff4087"
+        },
+        {
+          "name": "scene_before.png",
+          "bytes": 73647,
+          "sha256": "fe8cc15e5f0384cd7fdbcc2919b70f1206e02f519925fc3e039709d843a49878"
+        }
+      ],
+      "events": {
+        "page_errors": [],
+        "end_before_hover": 1,
+        "end_after_hover": 1,
+        "azimuth_before_hover": -0.3789,
+        "azimuth_after_hover": -0.3789
+      }
+    }
+  ],
+  "script": "audit/windows_regrade_three_35003.py",
+  "no_competitor_run": true
+}

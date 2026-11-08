@@ -1,0 +1,9 @@
+{
+  "wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+  "method": "offline wheel ZIP extraction into separate WSL lab target with validated wheel RECORD, original venv dependencies reused",
+  "new_env_hermetic": false,
+  "pip_in_existing_venv": false,
+  "exit": 0,
+  "stdout": "WHEEL_EXTRACTED 264 RECORD_VALIDATED 264\ncandidate_import 5.0.0 /home/ekono/.cache/karox-fair-linux-20261108/karox-candidate-wheel-20261108/karox/web_document.py\nOFFLINE_CANDIDATE_RUNTIME_READY\n",
+  "stderr": ""
+}

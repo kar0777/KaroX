@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "freeze_date": "2026-11-08",
+  "status": "READY_FOR_OFFLINE_EVALUATION_NOT_EXECUTED",
+  "task_id": "real-three-orbitcontrols-35003-v2",
+  "split": "DEV_UNPROTECTED",
+  "issue_url": "https://github.com/mrdoob/three.js/issues/35003",
+  "source_revision": "r186",
+  "task_sha256": "98f2f823a681050adf4a82a8df16af281ba2f477b335ff5a39d1e754b210f312",
+  "original_orbitcontrols_sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+  "grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+  "browser": {
+    "evaluation_platform": "Windows",
+    "chromium_version": "134.0.6998.35",
+    "chromium_binary_sha256": "58d0a9d996cadb3f516ad38b21e6a3ed2a6953e8d738a6d458cd1fe4faf8da85",
+    "playwright": "1.51.0",
+    "python": "3.13.11",
+    "network": "localhost only; no remote fetch required",
+    "visual_required": true,
+    "screenshots_required": true,
+    "interaction_required": "CDP pen-down then mismatched mouse-up plus hover; ordinary mouse/pen/touch separately validated"
+  },
+  "candidate": {
+    "KaroX_5": {
+      "version": "5.0.0",
+      "wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+      "runtime_method": "original KaroX 5 Linux official entrypoint + repaired candidate wheel on PYTHONPATH before original lab dependencies",
+      "qualification": "Not hermetic: reuses preinstalled dependency environment",
+      "prepared": true
+    },
+    "OpenCode_V2": {
+      "version": "2.2.6",
+      "official_package": "@opencode/cli"
+    },
+    "DSH": {
+      "version": "0.2.2-rc.1",
+      "official_package": "@deepseek-ai/dsh",
+      "prerelease": true
+    }
+  },
+  "scoring_protocol": {
+    "agent_platform": "Ubuntu 26.04 LTS WSL2",
+    "tool": "audit/triad_linux_candidate.py",
+    "external_after_run": "audit/windows_regrade_three_35003.py",
+    "same_prompts": true,
+    "provider": "W&B inference",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "route": "https://api.inference.wandb.ai/v1",
+    "isolation": "per-arm isolated workspace/profile; all 3 serially; Linux graders lacking Chromium are infrastructure-only diagnostics",
+    "protected_holdout": false,
+    "reference_patch_in_agent_workspace": false,
+    "immutable_competitor_inputs": true,
+    "batch_requirements": "Each of 3 arms must pass readiness, model transport, actual source edits and terminal event; no blocked arm counts as competitor loss.",
+    "primary_success": "Independent Windows grader PASS + real changes + CLI successful terminal + no infrastructure/integrity violation",
+    "browser_graph_only_not_allowed": true,
+    "skip_browser_as_pass": false,
+    "cost_actual": null,
+    "cost_estimation": "Published W&B rates applied to observed token accounting; not invoice. Include failed attempts in cost per clean success.",
+    "cost_billed_status": "UNKNOWN",
+    "max_parallel_heavy_cli": 1,
+    "C_min_free_gib": 7,
+    "D_min_free_gib": 15,
+    "process_tree_rss_max_gib": 1,
+    "no_safety_bypass": true
+  },
+  "evidence_sources": {
+    "integrity": "audit/REAL_THREE_35003_ADJUDICATION_20261108.json",
+    "independent_external_red_green": "audit/WINDOWS_EXTERNAL_REGRADER_SMOKE_20261108.json",
+    "original_red": "audit/REAL_THREE_35003_RED_V2_20261108.json",
+    "reference_green": "audit/REAL_THREE_35003_GREEN_V2_20261108.json",
+    "freeze": "tasks/real-three-orbitcontrols-35003-v2/GRADER_FREEZE.json",
+    "test_count": "4 independent visual+interaction validations; no synthetic leaderboard"
+  },
+  "scored_arms_to_date": 0,
+  "leaderboard_valid": false,
+  "notes": [
+    "No Karo/OpenCode/DSH paid runs occurred for this new issue.",
+    "The original v1 grader produced a false early failure for WebGL2 and is preserved as INVALID.",
+    "The WSL eval environment lacks Playwright and cached Chromium; it must not be scored as model failure.",
+    "Different installed model routes/checkpoint hashes remain unverified beyond matching provider URL and model ID."
+  ]
+}

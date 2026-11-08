@@ -1,0 +1,23 @@
+{
+  "date": "2026-11-08",
+  "purpose": "Independent Windows Chromium evaluation of real Three.js #35003 after Linux CLI outputs, not agent run",
+  "windows_platform": "Windows-11-10.0.26300-SP0",
+  "python": "3.13.11",
+  "playwright_package": "1.51.0",
+  "browser_version": "134.0.6998.35",
+  "browser_executable": "D:\\DeveloperData\\ms-playwright\\chromium-1161\\chrome-win\\chrome.exe",
+  "browser_sha256": "58d0a9d996cadb3f516ad38b21e6a3ed2a6953e8d738a6d458cd1fe4faf8da85",
+  "browser_bytes": 3194368,
+  "node_version": "v26.13.0",
+  "node_exit": 0,
+  "task_id": "real-three-orbitcontrols-35003-v2",
+  "task_sha256": "98f2f823a681050adf4a82a8df16af281ba2f477b335ff5a39d1e754b210f312",
+  "grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+  "vendor_three_module_sha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+  "vendor_three_core_sha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+  "orbit_controls_sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+  "environment_qualification": "Windows independent browser evaluator; WSL eval venv lacks playwright and Chromium; no paid arm executed",
+  "C_free_gib": 9.016,
+  "D_free_gib": 60.452,
+  "RAM_available_gib": 7.955
+}

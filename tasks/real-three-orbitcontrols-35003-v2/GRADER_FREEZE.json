@@ -1,0 +1,19 @@
+{
+  "task_id": "real-three-orbitcontrols-35003-v2",
+  "source_task_id": "real-three-orbitcontrols-35003",
+  "fixture_sha256": {
+    "app.js": "ce329866a1c5f92b727bbe95cc0ba57f9c434d0f97ea4cd980c84734cbcde175",
+    "index.html": "be5ac7ced30a0a0ac580abd2956ef4a0b182a27744b6cbebce98890b608b2784",
+    "LICENSE": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+    "OrbitControls.js": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+    "styles.css": "31cafa84fea7851e5bffa15e2309fa95d5d758593ecb644a16fa09d80b51f7a7",
+    "TASK.md": "928459c44b73b526b77090c1e8c6a8ec51822060b8acb9648ba8ba7e95582c45",
+    "tests/test_public.py": "635a6a553dfa4d028929c4f914a25b334330eb39b74664fc0caf787cd160270d",
+    "vendor/three.core.js": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+    "vendor/three.module.js": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea"
+  },
+  "grader_file_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
+  "original_grader_preserved": "tasks\\real-three-orbitcontrols-35003\\grader\\test_browser.py",
+  "split": "DEV_UNPROTECTED",
+  "reason": "v1 invalid WebGL1-only check rejected genuine WebGL2; v2 corrected independent RED 1 / GREEN 0"
+}
