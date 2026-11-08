@@ -132,6 +132,30 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e4 — 30-task DEV expansion (preliminary)
+
+Ten more DEV tasks were added (A3/B3), giving 30 tasks total; all 30 are
+RED→GREEN and frozen at `registry_sha256 = 7bd713c7…16cb50a`. New shapes:
+bounded concurrency with a fake clock, deterministic memory-retention debug, a
+cursor-paginated API feature, an accessibility form, a shader/plasma scene, a
+state-machine CLI, a real Playwright download flow, signed replay protection,
+v1→v2 schema backfill, and MCP resources/list+read.
+
+New-task result: **Karo 8/10**, Codex 2/10, OpenCode 0/3 attempted (the free
+model timed out on each new task and the batch was stopped; seven rows are
+missing, not failures).
+
+Combined 30-task DEV matrix (preliminary): **Karo 27/30**, Codex 6/30,
+OpenCode 2/19 attempted. Karo's three failures are all real agent-code defects:
+- `backend-concurrency-fake-clock`: third record starts at 2.0 s instead of 1.0 s.
+- `browser-orbit-shipping-workflow`: wrong `querySelector` (missing the
+  `data-testid` attribute) → timeout.
+- `browser-report-download-workflow`: writes a `WindowsPath` object into JSON
+  (`TypeError: Object of type WindowsPath is not JSON serializable`).
+
+These are useful engineering signals but not product regressions; no holdout
+has been opened and this is still not a leaderboard.
+
 ## Epoch e3b — contract correction and final DEV evidence
 
 One e3 grader over-specified a phrase: the task prompt required the reason to
