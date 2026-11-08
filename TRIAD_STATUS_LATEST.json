@@ -115,6 +115,23 @@
     "last_c_free_gib": 9.04,
     "last_d_free_gib": 60.51,
     "last_windows_ram_available_gib": 7.642,
-    "leadership_proven": false
+    "leadership_proven": false,
+    "security_shadow_e2e": {
+      "candidate_wheel_negative_test_passed": true,
+      "fake_repository_checker_executed": false,
+      "installed_checker_confirmed": true,
+      "isolation_python_flag": "-I",
+      "test_file": "audit/SECURITY_SHADOW_E2E_20261108.json",
+      "permanent_regression_test_added": true,
+      "related_targeted_tests_passed": 85,
+      "related_targeted_tests_failed": 0,
+      "distinct_tests_collected_after_new_regression": 1576,
+      "distinct_tests_passed_across_partition_and_targeted_new_test": 1558,
+      "distinct_tests_skipped": 18,
+      "not_a_new_competitor_run": true,
+      "c_free_gib": 9.007,
+      "d_free_gib": 60.391,
+      "windows_ram_available_gib": 7.794
+    }
   }
 }

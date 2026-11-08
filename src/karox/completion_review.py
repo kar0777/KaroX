@@ -63,8 +63,16 @@ def command_classes(argv: Sequence[str]) -> set[str]:
     exe = Path(parts[0]).stem.lower()
     if exe == "git" and parts[1:] == ["diff", "--check"]:
         return {"structural"}
-    if exe.startswith("python") and len(parts) > 2 and parts[1] == "-m":
-        module = parts[2]
+    # The trusted checker is launched with Python -I to prevent task-local
+    # shadow modules. Treat exactly that isolated module form as equivalent to
+    # python -m; never classify arbitrary python -c stdout as browser proof.
+    module = None
+    if exe.startswith("python") and len(parts) > 2:
+        if parts[1] == "-m":
+            module = parts[2]
+        elif len(parts) > 3 and parts[1:3] == ["-I", "-m"]:
+            module = parts[3]
+    if module is not None:
         if module in {"pytest", "unittest"}:
             return {"tests"}
         if module in {"ruff", "mypy", "py_compile", "compileall", "build"}:

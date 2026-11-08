@@ -198,10 +198,21 @@ def _shared_browser() -> Optional[tuple[Any, Any]]:
             return None
         from .browser.render_backend import launch_args, software_args
 
+        # The configured executable is accepted only by browser_bootstrap:
+        # official Playwright installation, or explicit SHA-pinned host approval.
+        # Never let the repository, a PATH entry or model text choose a browser.
+        from .browser_bootstrap import playwright_chromium_status
+
+        status = playwright_chromium_status()
+        if not status.ready or not status.executable:
+            playwright.stop()
+            return None
         browser = None
         for args in (launch_args(), software_args()):
             try:
-                browser = playwright.chromium.launch(args=args)
+                browser = playwright.chromium.launch(
+                    args=args, executable_path=status.executable
+                )
                 break
             except Exception:
                 continue

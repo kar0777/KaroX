@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "state": "PREDECLARED_NOT_FROZEN_BECAUSE_TASKS_NOT_ELIGIBLE",
+  "state": "INCREMENTAL_SLOT13_FROZEN_OTHERS_PENDING",
   "rotation": "Latin cyclic order by task slot, equal first/second/third positions (20 tasks: unbalanced by at most one).",
   "seed": "HARD20-20261108-public-candidate-order-v1",
   "selected_task_manifest_file": "HARD20_TASK_MANIFEST.json",
-  "source_task_manifest_sha256": "155b39ebc925fd1f2f0a2a2d773ce2c23328aee01691900246e4ceb0b18201e1",
+  "source_task_manifest_sha256": "0949d27b4fae2c662be1d4912ce7d9297c9dc09975afe4ab43272753dc8ff04b",
   "tasks": [
     {
       "slot": 1,
@@ -145,9 +145,11 @@
         "opencode_v2",
         "deepseek_harness"
       ],
-      "staged": false,
+      "staged": true,
       "scored": false,
-      "eligibility": "BLOCKED_PENDING_FREEZE"
+      "eligibility": "FROZEN_DEV_READY",
+      "task_id": "real-three-orbitcontrols-35003-v2",
+      "source_freeze_sha256": "e8839a126a9db1b2652f4339a92528adff3de3de5916155a7e5150b7da6e20f2"
     },
     {
       "slot": 14,

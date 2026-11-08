@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "title": "HARD20 available observational evidence schema",
-  "version": "1.0.0-dev",
-  "state": "SCHEMA_ONLY_NO_NEW_RUNS",
+  "version": "2.0.0-live",
+  "state": "LIVE_PARTIAL_CLI_STREAMS_NO_PROVIDER_WIRE_CAPTURE",
   "principles": {
     "no_hidden_reasoning_reconstruction": true,
     "include_only_reasoning_emitted_by_model_provider": true,

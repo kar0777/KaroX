@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "protocol": "docs/benchmarks/HARD20_KAROX_TRIAD_PROTOCOL_20261108.md",
-  "state": "PREFLIGHT_ONLY_NO_HEAVY_RUN",
+  "state": "HARD20_EXECUTE_SEQUENTIAL_RESOURCE_GUARDS",
   "min_free_gib": {
     "C": 7,
     "D": 15
@@ -44,7 +44,7 @@
     "D: < 15 GiB free",
     "RAM free inadequate for task+OS reserve",
     "image size and extraction footprint unknown relative to free capacity",
-    "wall-clock or process tree RSS cap crossed",
-    "provider/budget watchdog cannot enforce $30"
-  ]
+    "wall-clock or process tree RSS cap crossed"
+  ],
+  "financial_limits_removed_under": "docs/benchmarks/HARD20_SOL_EXECUTE_MAX_20261108.md"
 }

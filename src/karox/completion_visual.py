@@ -237,7 +237,44 @@ def _page_loads_the_change(
         text = core.safe_path(page).read_text(encoding="utf-8", errors="replace")
     except Exception:
         return False
-    return any(Path(item).name in text for item in assets)
+    if any(Path(item).name in text for item in assets):
+        return True
+    # A page may load app.js, which statically imports the changed module.
+    # The #35003 public DEV scene has exactly this shape: index.html ->
+    # app.js -> OrbitControls.js. Inspect only direct local module imports;
+    # unrelated pages, remote URLs, arbitrary prose, scratch probes, and
+    # missing modules cannot establish the necessary relationship. This
+    # authorizes an actual visual check; it never treats the source scan as
+    # browser proof.
+    script_srcs = re.findall(
+        r"""<script\b[^>]*\bsrc\s*=\s*["'](\./[^"'?#]+)["']""",
+        text,
+        flags=re.I,
+    )
+    for src in script_srcs[:12]:
+        loader = (page_path.parent / src).as_posix()
+        if loader in diagnostic or is_scratch_page(loader):
+            continue
+        try:
+            loaded = core.safe_path(loader)
+            if not loaded.is_file() or loaded.suffix.lower() not in {".js", ".mjs"}:
+                continue
+            js = loaded.read_text(encoding="utf-8", errors="replace")[:250_000]
+        except Exception:
+            continue
+        for match in re.finditer(
+            r"""(?:\bfrom\s*|\bimport\s*)["'](\./[^"'?#]+)["']""",
+            js,
+        ):
+            imported = (Path(loader).parent / match.group(1)).as_posix()
+            if imported not in assets:
+                continue
+            try:
+                if core.safe_path(imported).is_file():
+                    return True
+            except Exception:
+                continue
+    return False
 
 def visual_proven(core: Any, record: Any) -> bool:
     """Whether the current bytes have a clean visual verdict.

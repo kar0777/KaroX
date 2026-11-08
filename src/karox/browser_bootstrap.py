@@ -13,8 +13,11 @@ retryable diagnostic instead of an import traceback.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
+import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -44,8 +47,38 @@ def _playwright_package_available() -> bool:
         return False
 
 
+def _approved_preinstalled_chromium() -> Optional[Path]:
+    """An explicitly approved, SHA-pinned offline browser; never a task executable.
+
+    The user/host must provide BOTH variables before launching this Karo process.
+    A path or a digest alone grants nothing. The runtime checks the actual bytes,
+    not a basename, the model's stdout, or a mutable PATH entry.
+    """
+
+    name = os.environ.get("KAROX_APPROVED_CHROMIUM_EXECUTABLE", "")
+    digest = os.environ.get("KAROX_APPROVED_CHROMIUM_SHA256", "")
+    if not name or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    try:
+        path = Path(name)
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return None
+        resolved = path.resolve(strict=True)
+        if path != resolved or resolved.is_relative_to(Path.cwd().resolve()):
+            return None  # Never execute a browser supplied in the agent workspace.
+        info = path.stat()
+        if (not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK)
+                or not 1_000_000 <= info.st_size <= 600_000_000):
+            return None
+        with path.open("rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        return resolved if actual == digest else None
+    except (OSError, ValueError):
+        return None
+
+
 def _chromium_executable() -> Optional[Path]:
-    """Return Playwright's installed Chromium executable without launching it."""
+    """Resolve the preinstalled browser without provisioning or downloading it."""
 
     if not _playwright_package_available():
         return None
@@ -57,9 +90,11 @@ def _chromium_executable() -> Optional[Path]:
             path = Path(playwright.chromium.executable_path).expanduser()
         finally:
             playwright.stop()
+        if path.is_file():
+            return path.resolve()
     except Exception:
-        return None
-    return path.resolve() if path.is_file() else None
+        pass
+    return _approved_preinstalled_chromium()
 
 
 def playwright_chromium_status() -> BrowserBootstrapStatus:

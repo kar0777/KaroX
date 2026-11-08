@@ -3,9 +3,9 @@
   "generated_date": "2026-11-08",
   "protocol": "docs/benchmarks/HARD20_KAROX_TRIAD_PROTOCOL_20261108.md",
   "protocol_sha256": "28b0cfdcb2a5bc93d8fe33705ee358729d5a6c10db9d0ac70223d53e20431748",
-  "state": "CANDIDATES_ONLY_NOT_FROZEN_DO_NOT_RUN",
+  "state": "ONE_TASK_FROZEN_INCREMENTAL_EXECUTION",
   "count_candidates": 20,
-  "count_frozen_for_competition": 0,
+  "count_frozen_for_competition": 1,
   "count_local_red_green_verified": 1,
   "holdout_claims": 0,
   "public_sources_only": true,
@@ -302,8 +302,10 @@
       "grader_sha256": "9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445",
       "source_revision": "r186",
       "license_individually_verified": true,
-      "state": "DEV_READY_NOT_HOLDOUT",
-      "browser_requirements": "real Chromium/CDP, WebGL2, measured interaction + screenshots + page errors; extra browser-grader not yet prepared"
+      "state": "FROZEN_DEV_READY_FOR_FIRST_PAID_TRIAD",
+      "browser_requirements": "real Chromium/CDP, WebGL2, measured interaction + screenshots + page errors; extra browser-grader not yet prepared",
+      "freeze_record": "HARD20_FREEZE_SLOT13_20261108.json",
+      "fixture_tree_sha256": "d018b1342e5d04ee7660c1d4a0288a30f0f44d9a0dec68ee4b9cab88b5f2a7c1"
     },
     {
       "slot": 14,

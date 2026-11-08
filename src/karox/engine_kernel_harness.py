@@ -119,9 +119,23 @@ class EngineHarnessMixin:
                 return ()
             calls.append(("checks.run", {"argv": argv}))
         visual_calls: Tuple[Tuple[str, Dict[str, Any]], ...] = ()
-        if "missing visual evidence" in missing and "visual.check" in self._definitions:
+        if (
+            "visual.check" in self._definitions
+            and (
+                "missing visual evidence" in missing
+                or "missing browser runtime evidence" in missing
+            )
+        ):
             target = self._render_target(record)
-            if target is not None:
+            if target is not None and completion_gate._approved_visual_producer_for_change(
+                self.core,
+                record,
+                [target.name],
+                completion_gate.diagnostic_paths(self.core, record),
+            ):
+                # Only a real, approved visual tool can produce browser evidence;
+                # a tool failure or a verdict on unrelated/old bytes still fails
+                # the unchanged completion gate.
                 visual_calls = (("visual.check", {"path": target.name}),)
         return (
             *calls,

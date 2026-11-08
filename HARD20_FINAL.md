@@ -1,55 +1,71 @@
-# HARD20_FINAL — промежуточный аудит, НЕ итог соревнования
+# HARD20_FINAL — фактический срез HARD20, 8 ноября 2026
 
-> **LIVE UPDATE, 2026-11-08:** Состояние Phase0 и лимиты $3/$30 ниже являются **историческими** и больше не действуют. Проведены реальные оплачиваемые W&B-запуски на публичной DEV Three.js #35003. Независимый неизменённый Chromium grader дал **PASS для всех трёх сохранённых патчей**: DeepSeek Harness **CLI exit 0 / clean success**, KaroX 5 **CLI exit 1 / внутренний `unproducible_requirement`**, OpenCode V2 **CLI exit -9 / превышение memory guard 1.25 GiB**. Полные доказательства в `HARD20_LIVE_RESULTS_20261108.md`, `hard20-max-runs/independent-regrades/` и исходных журналах. Это **не** результат полного 20×3 и **не** валидный strictly-serial leaderboard; оригинальные неуспешные исходы не переписаны.
+> **НЕ ЗАВЕРШЁННАЯ 20-задачная гонка.** Это проверяемый отчёт по реально проведённым API-вызовам и независимым тестам, а не список планов. Первоначальный пустой Phase0-отчёт сохранён как `audit/HARD20_FINAL_PHASE0_INTERIM_ARCHIVED_20261108.md`.
 
-Дата: 2026-11-08. Ветка: `goal/gpt6-sol-triad-20261108`.
+## Авторизация и ограничения
 
-## Статус проекта HARD20
+- Новый приоритетный приказ: `docs/benchmarks/HARD20_SOL_EXECUTE_MAX_20261108.md`, SHA-256 `830ebf15818db2fd61722f0e65328278cdf006435f2e44d14706ef228139d659`.
+- Действующая финансовая политика `HARD20_BUDGET_POLICY.json`: `OBSERVE_ONLY_NO_HARD_CAP`. Старые жёсткие $3/$30, токены, steps и API-call бюджетные лимиты отменены. $30 — только ориентир, **не** cap.
+- Старое бюджетное решение сохранено в `audit/HARD20_BUDGET_POLICY_PHASE0_ARCHIVED_20261108.json`. Правила запрета Anthropic, личных проектов, push, утечки секретов и disk/RAM safeguards продолжают действовать.
+- Модель всех реальных вызовов: `deepseek-ai/DeepSeek-V4.1-Flash`, W&B `https://api.inference.wandb.ai/v1`. Точный удалённый checkpoint hash не доказан. W&B max effort подтверждался отдельным HTTP 200 smoke, но битовая эквивалентность фактического hidden reasoning между CLI **не доказана**.
+- Основной Karo-PC Git branch при проверке: `karox-v6`, HEAD `fd1e9cf`. Рабочее дерево огромно/грязно ещё до продолжения; чужие изменения не сброшены. Лабораторные файлы локализованы внутри `lab/kernel-duel-20261025/b/gpt6-sol-triad-20261108/`.
 
-| Поле | Подтверждено |
-|---|---:|
-| Выбранные публичные кандидаты с реальными ID | 20 |
-| Допущенные к новой **замороженной HARD20** матрице | 0 |
-| Локально подтверждённые RED/GREEN среди кандидатов | 1 (Three.js #35003 DEV) |
-| Новых основных платных запусков | 0 / 60 |
-| Пилотных платных запусков | 0 / 3–6 |
-| Завершённых новых трёхсторонних HARD20 сравнений | 0 |
-| Новые оценочные API-затраты HARD20 | $0 |
-| Подтверждённый реальный счёт W&B | отсутствует |
-| Доказанная общая победа Karo | **нет** |
+## Реальное выполнение
 
-Этот документ существует как **честный interim report**. Название файла соответствует обязательному протоколу, но финального 20-задачного соревнования ещё не было. Не вычислять win rate, p50/p95, paired confidence intervals или стоимость clean solved по нулевой выборке.
+| Показатель | Состояние |
+|---|---|
+| Кандидатов в `HARD20_TASK_MANIFEST.json` | 20 |
+| Полностью замороженных с локальным RED/GREEN в данной программе | **1** |
+| Задача с реальными платными прогонами | Three.js OrbitControls #35003, `real-three-orbitcontrols-35003-v2` |
+| Сохранённых terminal `result.json` HARD20 на этой задаче | **13** (включая no-route/setup ошибки) |
+| Из них terminal records с токенами модели | **5** |
+| Дополнительный запуск с безопасной остановкой до записи terminal result | **1** (OpenCode `hard20-sol-max-opencode-20261108-004`) |
+| Независимые Chromium PASS по подтверждённым patched workspaces | KaroX candidate, OpenCode V2, DeepSeek Harness |
+| Подтверждённых clean CLI + independent grader PASS | **DeepSeek Harness**, минимум 2 DEV попытки |
+| Завершённых строгих 20-task/60-run blind HOLDOUT гонок | **0** |
+| Подтверждённый провайдером W&B invoice | **нет данных** |
 
-## Уже проверенное ранее, не HARD20
+Не смешивать повторные DEV attempts с независимыми публичными задачами. Строгая тройка с тремя clean терминальными исходами в одном замороженном и заранее выданном порядке пока **не получена**. Поэтому никакой общий win rate или победа Karo **не заявляется**.
 
-- Rich #4246 — единственный настоящий старый matched Linux DEV triad: все 3/3 PASS с идентичным patch, но базовая (неисправленная) Karo wheel. Время 11.2341 / 53.4054 / 105.2042 сек; оценка $0.0098110 / $0.0097074 / $0.0154485; это **не** результаты HARD20.
-- Исходная регрессия Karo 1 576 различных тестов: 1 558 PASS, 18 SKIP, 0 FAIL при разбитом запуске; прежние 399 mypy TUI diagnostics остаются.
-- Three.js #35003 — настоящие local Chromium/WebGL RED/GREEN и нормальные mouse/pen/touch 3/3, DEV, один grader v2 SHA-256 `9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445`. Новых оплаченных arm по нему нет.
-- Оценочная инфраструктура защищает от подмены вывода и исходных данных; Linux wheel candidate запускается из изолированного lab venv с reuse зависимостей. Никакая существующая таблица не переписана.
+### Точная независимая оценка на неизменённом DEV grader v2
 
-## Исследование кандидатов
+Источник: GitHub Three.js issue #35003, upstream tag `r186` (commit `9b4a2ac29c63ccb43fd51c5661f2f873ac2c39b8`), MIT. Задание SHA-256 `98f2f823a681050adf4a82a8df16af281ba2f477b335ff5a39d1e754b210f312`. Grader SHA-256 `9dd7db762590796de132a7f3d719bf2f3032a9c88e9f8f78de501cb6dd3cc445`; RED исходника exit 1, GREEN закрытого reference exit 0, `grader` и reference недоступны агентам. Chromium/WebGL использовался отдельно на Windows, поскольку в WSL eval-venv нет Playwright.
 
-12 записей из официального SWE-bench Pro V2 HARD-51, отобраны по различным крупным репозиториям и содержат точные instance ID + SHA GitHub task.toml. Четыре HARD задания Terminal-Bench 2.1: `llm-inference-batching-scheduler`, `path-tracing`, `circuit-fibsqrt`, `make-mips-interpreter`; их task.toml относит к категории hard. Четыре реальных Three.js issues: #35003, #34681, #34797 и #34438, из которых только первое проверено локально. Все 20 ID и источник проверки в `HARD20_TASK_MANIFEST.json`. **Матрица пока предварительная**: 12 задач из одного публичного SWE-бенчмарка, который может быть известен модели; нельзя объявить это истинным blind holdout.
+| Арм и идентификатор прогона | CLI / время | Внешний Chromium | Clean success |
+|---|---|---|---|
+| **KaroX 5 repaired wheel** — `paired-linux/hard20-max-35003-20261108-002` | exit 1, ~116.5 сек | **PASS** | **Нет**: `unproducible_requirement`, агент не признал свою задачу проверенной |
+| **Official OpenCode V2** — `paired-linux/hard20-max-35003-20261108-003` | exit -9, ~737.4 сек | **PASS** | **Нет**: resource guard убил процесс, но patch уже был корректным |
+| **Genuine DeepSeek Harness** — `paired-linux/hard20-max-35003-20261108-002` | exit 0, ~266.5 сек | **PASS** | **Да** |
+| **Genuine DeepSeek Harness** — `hard20-max-runs/hard20-slot13-three35003-max-20261108-a` | exit 0, ~465.4 сек | **PASS** | **Да** |
 
-Публикатор SWE-bench Pro V2 заявляет общую независимую двухстороннюю проверку HARD-51 (gold patch PASS / empty patch FAIL) в чистых контейнерах; индивидуальный повтор на этом ПК пока невозможен без новых больших образов. На машине WSL есть Docker 29.1.3 и Harbor 0.23.0, но под образами уже занято ~7.83 GB и в build cache ~2.05 GB; новые гигантские образы не загружены, C: резерв сохранён.
+Это **разные попытки одной DEV задачи**, а не четыре независимых задачи. Linux `grader_exit=2` для существующих прогонов — ошибка инфраструктуры `ModuleNotFoundError: playwright`, не семантический FAIL. Соответствующий независимый Windows regrade хранится отдельно и не переписывает исходные результаты. У OpenCode 003 `quality_classification=INFRA_SETUP_BLOCKED` из-за памяти, несмотря на external artifact PASS.
 
-## Блокеры и технические причины
+## Причины ошибок и корректирующие действия
 
-**P0 — честный контроль $30:** W&B monthly budget может дать перерасход. Нужен реальный hard cap без задержки либо строго ограниченный баланс провайдера, плюс защищённый локальный gateway без bypass для всех трёх CLI, с worst-case reservation per request и проверенным max output. Нельзя расходовать API, пока лимит **технически не гарантирован**.
+1. **KaroX false-negative completion.** У repaired candidate Karo есть реальный patch, публичные тесты (`2 passed`) и независимый Browser PASS. Видимый tool trace показывает повторные неудачные попытки запуска собственного browser.command. В результате agent exit 1 `unproducible_requirement` при фактически правильных байтах. Это **не false VERIFIED** и **не чистое решение**; механизм — разрыв между достижением качества кода и доступностью собственного доказательства. Нельзя просто снимать visual gate, нужно изучить fallback independent evidence.
+2. **OpenCode route mismatch.** Ранние попытки выходили через `provider.no-route` / `Variant unavailable: max`. Offline `opencode models --standalone` с временным тестовым ключом подтвердил обнаружение кастомной модели `wandb-triad/deepseek-ai/DeepSeek-V4.1-Flash`; последующий реальный #max 003 успешно обращался к W&B. MAX-конфигурация и сравнение целостности config исправлены в лабораторных адаптерах. No-route не является проигрышем качества.
+3. **OpenCode memory limit.** 003 был убит из-за устаревшего лимита RSS ~1 GiB, хотя независимый grader проверил верный патч. Лабораторный монитор теперь имеет явную настройку HARD20 до 2 GiB RSS с сохранением резервов C/D и отдельной проверкой Windows RAM до запуска.
+4. **Остановка 004 для безопасности пользователя.** После ~496 секунд Windows `MemAvailable` уменьшилась до ~1.55 GiB (занято 93.5%). Вызван cancel **только owned command job** `job-81b204a5e8bfc7f84e9c`; подтверждён статус `cancelled`, затем Windows RAM восстановилась >3 GiB и активных WSL `opencode/dsh/karox/node` не обнаружено. 004 не получил terminal ledger и его потенциальные оплаченные provider calls **не равны нулю**; стоимость неизвестна. Постоянное свидетельство безопасной остановки: `audit/HARD20_RESOURCE_CANCEL_OPENCODE_004_20261108.json` (owned job, RAM-триггер, recovery, отсутствие terminal результата). Ресурсный safety stop не является бюджетным watchdog и не считается quality FAIL.
+5. **Нет 20 замороженных задач.** 19 из 20 кандидатов ещё не имеют локально проверенного независимого RED/GREEN, точной установленной среды или изолированного grader. SWE/Terminal Docker images нельзя без предварительного resource gate бездумно вытягивать на текущем C:. Не подменять их лёгкими smoke fixtures и не называть DEV blind holdout.
 
-**P0 — effort parity:** требуется зафиксировать реальный `reasoning_effort=max` (или эквивалент с картой преобразования) в каждом запросе Karo/ OpenCode V2/ DSH; сейчас доказана лишь CLI-документация и возможные флаги, не wire payload.
+## Прозрачная стоимость (не invoice)
 
-**P0 — task freeze:** каждому ID нужны точный base commit, repo/license/fixture SHA, независимые локальные RED и GREEN, изоляция эталона, рабочая оценочная среда, замер образа и RAM, а не только официальное описание задачи.
+Офлайн воспроизводимый `audit/hard20_cost_accounting.py` прочёл 13 окончательных `result.json`, из которых у пяти есть token usage. Журнал и SHA каждого результата: `HARD20_ACCOUNTING_20261108.json`.
 
-**P0 — общее покрытие:** три CLI последовательно по заранее объявленному rotating order; оригинальные raw tool/model events append-only, SHA, patch per step, reviewer-grade screenshots, не придумывать скрытые reasoning traces. Получение provider invoice vs тарифного расчёта разделить.
+- При output-only трактовке отдельного OpenCode reasoning поле: сумма тарифных **оценок** по этим пяти файлам **$0.44856069**.
+- Если отдельно сообщённые 42 903 reasoning tokens OpenCode 003 **добавлять** к billable output, альтернативная оценка **$0.47644764**.
+- У восьми terminal записей без usage и остановленного 004 точный расход неизвестен. Ни одна оценка не является W&B invoice; поэтому нельзя утверждать полный total cost или cost-per-clean-solved всех 20 задач.
+- Тарифная формула по политике: `(0.20 * input_uncached + 0.03 * input_cached + 0.65 * output) / 1_000_000` USD. Кэш и reasoning представлены раздельно там, где доступны.
 
-## План доступа после снятия блокеров
+## Просмотрщик, архивы, ресурсы
 
-1. Установить и **независимо проверить** жёсткое ограничение суммарного API-расхода $30 и отдельного пилота $3, включая retries и дополнительные модельные оценки.
-2. Офлайн проверить exact on-wire model/provider/max effort всех 3 CLI, не изменяя их permissions. Не снижать effort ради бюджета.
-3. Заморозить 20 задач только после локальных RED/GREEN и подтверждения ресурсов; при невозможности загрузки тяжёлого Docker выбрать сопоставимые публичные источники **до** начала гонки.
-4. Провести одну новую полную сложную DEV тройку, сохранив всю доступную телеметрию, provenance и lossless compression; потом вторую, если хватает лимита.
-5. Если пилот действительно зелёный, последовательно выполнить максимальное число **полных** парных троек, не смешивая неодинаковые бюджеты или инфраструктурные ошибки с качеством.
-6. Проанализировать случаи проигрыша Karo на реальных traces и улучшать движок только после серии, проверяя на новой независимой выборке.
+- Запущена генерация автономного локального `hard20-max-runs/HARD20_TRACE_VIEWER_20261108.html` через `audit/hard20_trace_viewer.py`: offline HTML на D:, выбор run/task/arm, tool timeline, patch, stderr, grader и usage. При актуальном восстановлении просмотрщика обнаружено 35 исторических terminal artifacts, но **они не считаются 34 независимыми HARD20 задачами**. Скрытое reasoning, которое API не отдаёт, не выдумывается; сырые redacted event streams остались в архивах.
+- Известные архивы `*.HARD20_EVIDENCE.zip` содержат SHA-манифесты и проверку roundtrip; Windows regrade сохраняет PNG/event_result hash. **Реализована safety-only уборка для последующих HARD20 запусков:** `audit/hard20_temp_ownership_cleanup.py` записывает перед агентом точные disposable temp paths с inode/device и после ZIP roundtrip/SHA удаляет исключительно два зарегистрированных workspace/profile дерева. При нехватке результата, повреждённом архиве, symlink, ином inode, отсутствии snapshot или изменённом temp parent очистка отказывается. Изменён `audit/hard20_live_one.py`, чтобы архивировать перед уборкой. Для старых и незарегистрированных аварийных корней 004 уборка **не проводилась**: неизвестные файлы не удалять. Запрещены `git clean`, `git reset --hard`, чужие папки.
+- Ограничения: свободное C: >=7 GiB, D: >=15 GiB, один тяжёлый CLI/Chromium за раз, Windows RAM guard. После cancel временная память Windows восстанавливается. Никаких Anthropic запросов, GitHub push или модификаций личных проектов.
+- Проверки после правок: `pytest audit/test_hard20_safe_cleanup.py audit/test_hard20_preflight.py` — **25 passed** (4 safety-negative/positive cleanup + 21 financial/resource tests); `ruff check` всех изменённых Python-файлов — **PASS**; Python compile и offline OpenCode model inventory — PASS.
 
-**No publish, no push, no git clean, no reset --hard, no modified personal projects, no Anthropic.**
+## Следующий честный milestone
+
+Добиться завершения official OpenCode без RAM depletion на отдельном resource-balanced хосте или с менее тяжёлой конфигурацией, сохраняя максимальный доступный reasoning и исходные критерии. Затем заморозить **новую сложную публичную задачу** с реальным RED/GREEN и провести на ней полную последовательную тройку. Повторять вплоть до 20 задач только в пределах реальной безопасности и ресурсов. Улучшения Karo на DEV — исключительно после фиксации исходных доказательств; новые изменения проверять на новых независимых задачах.
+
+**Дата записи: 2026-11-08. Это честная история реальных запусков, включая неудачи, а не утверждение о завершённых 60 тестах.**

@@ -8,6 +8,7 @@ not hermetically reinstalled. No API calls occur during module validation.
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import zipfile
 from pathlib import Path
@@ -15,11 +16,19 @@ from pathlib import Path
 import triad_linux as linux
 
 BASE = Path.home() / ".cache/karox-fair-linux-20261108"
-VENV = BASE / "karox-candidate-isolated-20261108"
+VENV = BASE / "karox-candidate-browser-evidence-20261108"
 CANDIDATE_PYTHON = VENV / "bin" / "python"
 CANDIDATE_BIN = VENV / "bin" / "karox"
-WHEEL = linux.core.ROOT / "dist-triad-candidate" / "karox_runtime-5.0.0-py3-none-any.whl"
-EXPECTED_SHA = "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0"
+WHEEL = linux.core.ROOT / "dist-triad-browser-producer" / "karox_runtime-5.0.0-py3-none-any.whl"
+EXPECTED_SHA = "da881029a7959e47f3e5188d3920ef6219bad99fe9f18ab77a89dd871b4d265d"
+# Frozen host-approved offline Chromium; no network or browser installation.
+# SHA is checked *before* granting the executable to any Karo process; the
+# installed Karo checker checks it again immediately before browser launch.
+APPROVED_BROWSER = (
+    Path.home() / ".cache/puppeteer/chrome-headless-shell/"
+    "linux-156.0.8078.47/chrome-headless-shell-linux64/chrome-headless-shell"
+)
+APPROVED_BROWSER_SHA = "201ce52b0e6e571702a9bd747f2552e3d17818f1789e0967e6392d5e1a6167da"
 
 
 def freeze_candidate() -> None:
@@ -88,13 +97,40 @@ base_command = linux.core.command_for_arm
 def command_for_repaired_wheel(
     arm: str, workspace: Path, task: dict, env: dict[str, str], max_seconds: int
 ):
-    if arm == "karox5":
-        freeze_candidate()
-        # The base Linux adapter builds the official KaroX 5 argument contract.
-        # Replace only the lab entrypoint. Do not pass a PYTHONPATH patch and do
-        # not alter official OpenCode V2 or DSH commands/permissions.
-        linux.core.KARO = CANDIDATE_BIN
-    return base_command(arm, workspace, task, env, max_seconds)
+    if arm != "karox5":
+        # Official OpenCode V2 and DSH remain byte-for-byte unchanged.
+        return base_command(arm, workspace, task, env, max_seconds)
+
+    freeze_candidate()
+    # The installed browser belongs to host infrastructure, not the task.
+    # In particular this refuses a forged, replaced or unapproved executable.
+    if (
+        not APPROVED_BROWSER.is_file()
+        or APPROVED_BROWSER.is_symlink()
+        or hashlib.sha256(APPROVED_BROWSER.read_bytes()).hexdigest()
+        != APPROVED_BROWSER_SHA
+    ):
+        raise RuntimeError("DEV browser producer failed its immutable host SHA check")
+    env["KAROX_APPROVED_CHROMIUM_EXECUTABLE"] = str(APPROVED_BROWSER)
+    env["KAROX_APPROVED_CHROMIUM_SHA256"] = APPROVED_BROWSER_SHA
+
+    # Same exact candidate wheel in CLI and its -I subprocess; only the
+    # candidate entrypoint changes, never OpenCode or DeepSeek Harness.
+    linux.core.KARO = CANDIDATE_BIN
+    command, profile_file = base_command(arm, workspace, task, env, max_seconds)
+    if (workspace / "index.html").is_file() and (
+        task.get("require_visual") is True
+        or task.get("category") == "threejs-webgl"
+    ):
+        # Browser execution is explicitly added to Core's approved verification
+        # allowlist. It is generic installed KaroX web_check, NOT the grader
+        # or the hidden/reference test. Source lives outside agent workspace.
+        approved = [
+            str(CANDIDATE_PYTHON), "-m", "karox.web_check",
+            "--render", "index.html",
+        ]
+        command += ["--verification-command", json.dumps(approved)]
+    return command, profile_file
 
 
 linux.core.command_for_arm = command_for_repaired_wheel

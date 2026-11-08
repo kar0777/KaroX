@@ -172,6 +172,26 @@ def coverage_required(core: Any, record: Any) -> bool:
 
 
 
+def _approved_visual_producer_for_change(
+    core: Any, record: Any, pages: Sequence[str], diagnostic: set[str] | frozenset[str]
+) -> bool:
+    """An approved visual.check can *attempt* browser proof of the changed page.
+
+    This only marks the evidence *producible*; it never marks evidence *passed*.
+    An unrelated page, a scratch probe, or an unavailable visual tool cannot
+    discharge runtime proof. The actual visual result must still be successful,
+    current to the changed bytes, and accepted by the existing evidence chain.
+    """
+    if visual_producer_available(core) is not True:
+        return False
+    changed = list(getattr(record, "changed_files", ()) or ())
+    return any(
+        (page in changed or _page_loads_the_change(core, page, changed, diagnostic))
+        for page in pages
+        if not is_scratch_page(page) and page not in diagnostic
+    )
+
+
 def floor(core: Any, record: Any) -> list[str]:
     """Missing/failed proof reasons for the current state; [] means proven.
 
@@ -395,6 +415,15 @@ def floor(core: Any, record: Any) -> list[str]:
             # runtime proof is producible; the obligation stays, but the run
             # asks for it instead of stopping as if no approval could supply it.
             producible |= {"runtime", "behavioral"}
+    # An explicitly advertised visual.check on the actual changed page is an
+    # approved browser-proof *producer*. The old floor looked only at shell
+    # verification commands, called the browser duty impossible, and aborted
+    # before the finishing visual.check could run. Do not count it as a PASS:
+    # only the trusted tool's subsequent current-byte evidence can do that.
+    if browser and _approved_visual_producer_for_change(
+        core, record, pages, harness_pages
+    ):
+        producible.update({"browser", "behavioral"})
     if not docs:
         for argv in commands:
             if "*" in argv:
