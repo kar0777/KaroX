@@ -111,6 +111,44 @@ INVALID and is not reused.
 started. Exact provider bills are recorded when available; estimates are marked
 `estimated`, unknown costs are `UNKNOWN`, never invented.
 
+## Runner contract
+
+`local-runs/arena/run_task.py --task <dir> --arm <arm> [--model ...]`:
+copies `fixture/` into a fresh git workspace, records the exact command and
+task/fixture hashes, runs the CLI in that workspace, captures the full
+`changes.patch` and logs, then runs the independent `grader/` with
+`TASK_WORKSPACE` pointing at the solution. A run is `solved` only when the
+grader exits 0; timeouts and failures are classified, never discarded.
+`run_batch.py` runs a task directory for one arm and writes a summary.
+
+Current arm command policy (must be copied verbatim into every result):
+Karo `agent run --stream-json` with explicit `--route` when the default route
+is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
+-c approval_policy=never`; Claude `-p --dangerously-skip-permissions
+--output-format stream-json` in an isolated fixture; OpenCode `run
+--format json` with an explicitly recorded model. Gemini is not run while
+credential-blocked; DSH has no pinned headless command yet.
+
+## Readiness probes (2026-11-08, not benchmark results)
+
+One harmless prompt per available arm; actual costs are in
+`local-runs/arena/cost-ledger.jsonl`:
+
+| Arm | Probe result | Provider/model | Cost |
+|---|---|---|---|
+| Codex | `OK`, exit 0, 23,301 input / 5 output tokens | default ChatGPT session | subscription, UNKNOWN USD |
+| Claude | `OK`, exit 0 | `claude-sonnet-5-5` | **$0.0919574** list cost |
+| KaroX | real call succeeded on a non-default route, but the answer was not verified; default `stepfun-plan/step-5-preview` returns HTTP 400 `request_params_invalid` | `wandb/deepseek-ai/DeepSeek-V4.1-Flash`, 4,841 prompt / 5,034 total tokens | UNKNOWN, no pricing |
+| OpenCode | `OK` with an explicit model, exit 0; the default configured provider returns `Unexpected server error` | `opencode/deepseek-v4.1-flash-free`, 13,180 input / 3 output, 1,792 cache-read | **$0** (free model) |
+| Gemini | not run | — | blocked by credential |
+| DSH | not run | — | headless profile not pinned |
+
+These are readiness observations only. Karo's default provider route and the
+OpenCode default config are not claimed as working benchmark configurations;
+the explicit Karo `wandb/...` route and OpenCode free model are recorded, and
+any run must name them. A free model is not the same capability as a paid
+frontier model; the lane record must say so.
+
 ## Immediate next steps
 
 1. Freeze the refactor commit after a green full gate, rebuild the AFTER wheel

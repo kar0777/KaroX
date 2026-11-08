@@ -43,9 +43,10 @@ engine-tool evidence and needs the next full gate.
 | Bridge profile types | DONE | `bridge_profiles.py` 1,144 → 864 (+ `bridge_profile_types.py` 338); credential-store seam kept |
 | Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,849; rationale in `scripts/check_tree.py` |
 | Bridge route closures | PARTIAL | OAuth pages/factory split; `build_proxy_asgi_app` closures still cohesive |
-| Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth probes recorded; 0/100 tasks ready |
+| Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth/readiness probes recorded; runner + batch harness; tasks in progress |
 | Phase 2 freeze | DONE | full suite at `51be451`, frozen docs commit `4919a04`, wheel SHA-256 `815030a7…ba62f5`, fresh install ok |
-| Benchmark arena | NOT STARTED (correctly blocked) | no paid runs, no winner claim; Gemini auth blocked, DSH headless pending |
+| Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
+| Benchmark arena | PILOT SETUP | no paid task runs, no winner claim; task set still being validated |
 
 ## Round-15 commits (latest first)
 
