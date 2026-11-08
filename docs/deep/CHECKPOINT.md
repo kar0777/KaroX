@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-08 01:09 Europe/Warsaw
+**Updated:** 2026-11-08 01:24 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -39,17 +39,17 @@ engine-tool evidence and needs the next full gate.
 | Bridge launcher host | DONE | `bridge_launcher.py` 2,389 → 1,949 (+ `bridge_host.py` 547); `_wait_for_bridge` seam kept |
 | Bridge proxy wire | DONE | `bridge_proxy.py` 2,218 → 1,707 (+ `bridge_wire.py` 632); approval/time seam kept |
 | Bridge tailscale | DONE | `bridge_tailscale.py` 1,585 → 225 (+ status 383 + gui 487 + funnel 653) |
-| Bridge OAuth types | DONE | `bridge_oauth.py` 1,483 → 1,208 (+ `bridge_oauth_types.py` 368); persistence seam kept |
+| Bridge OAuth types | DONE | `bridge_oauth.py` 1,483 → 936 (+ types 368 + app 351); persistence seam kept |
 | Bridge profile types | DONE | `bridge_profiles.py` 1,144 → 864 (+ `bridge_profile_types.py` 338); credential-store seam kept |
-| Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,779; rationale in `scripts/check_tree.py` |
-| Bridge route closures | NOT STARTED | `build_proxy_asgi_app` still owns them; needs route-level characterization |
+| Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,849; rationale in `scripts/check_tree.py` |
+| Bridge route closures | PARTIAL | OAuth pages/factory split; `build_proxy_asgi_app` closures still cohesive |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-14 commits (latest first)
+## Round-15 commits (latest first)
 
 ```
-e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
-02eb453 docs(deep): checkpoint the tailscale split and measured budget raise
+5127dfe refactor(bridge): extract OAuth approval pages and ASGI registration
+c4b6999 docs(deep): checkpoint the OAuth and bridge-profile type splits
 ```
 
 ## Gates
@@ -61,7 +61,7 @@ e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 242 modules / 90,779 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 243 modules / 90,849 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
 | Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
 | Full suite at `b8e9789` (hosted-core split) | **PASS** — exit 0, 100 % (`local-runs/gate-b8e9789-full.log`) |
@@ -71,7 +71,8 @@ e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
 | Full suite at `95a8fc0` (bridge host split) | **PASS** — exit 0, 100 % (`local-runs/gate-95a8fc0-full.log`) |
 | Full suite at `d26ace3` (bridge wire split) | **PASS** — exit 0, 100 % (`local-runs/gate-d26ace3-full.log`) |
 | Full suite at `02eb453` (tailscale + budget) | **PASS** — exit 0, 100 % (`local-runs/gate-02eb453-full.log`) |
-| Full suite at current HEAD (OAuth/profile splits) | pending next round; bridge suites pass |
+| Full suite at `c4b6999` (OAuth/profile splits) | **PASS** — exit 0, 100 % (`local-runs/gate-c4b6999-full.log`) |
+| Full suite at current HEAD (OAuth app split) | pending next round; OAuth tests pass |
 | Wheel build | **PASS** — `karox_runtime-5.0.0-py3-none-any.whl`, 256 files, 2 prompts, 10 builtin skills, `tui/theme.tcss`, entry point |
 | Fresh-venv wheel install | **PASS** — import/`--version` = 5.0.0, `doctor --json` status ok, full command surface |
 
@@ -80,9 +81,9 @@ e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
 | Metric | Baseline | Current |
 |---|---:|---:|
 | `bridge_profiles.py` | 1,144 | 864 (+ `bridge_profile_types` 338) |
-| `bridge_oauth.py` | 1,483 | 1,208 (+ `bridge_oauth_types` 368) |
-| Product modules | 164 | 242 |
-| Physical lines | 87,689 | 90,779 (ceiling 91,500) |
+| `bridge_oauth.py` | 1,483 | 936 (+ types 368 + app 351) |
+| Product modules | 164 | 243 |
+| Physical lines | 87,689 | 90,849 (ceiling 91,500) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -106,7 +107,7 @@ e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
 | `bridge_tailscale.py` | 1,585 | 225 (+ status 383 + gui 487 + funnel 653) |
 
 Remaining largest files: `bridge_launcher.py` (1,949), `bridge_proxy.py`
-(1,707), `bridge_oauth.py` (1,208), `web_check.py` (1,118), `bridge_profiles.py`
+(1,707), `web_check.py` (1,118), `bridge_oauth.py` (936), `bridge_profiles.py`
 (864), `sessions.py` (966), `engine_provider_bridge.py` (952).
 
 ## Decisions that must not be lost
