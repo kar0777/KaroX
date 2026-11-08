@@ -1,5 +1,7 @@
 # HARD20_FINAL — промежуточный аудит, НЕ итог соревнования
 
+> **LIVE UPDATE, 2026-11-08:** Состояние Phase0 и лимиты $3/$30 ниже являются **историческими** и больше не действуют. Проведены реальные оплачиваемые W&B-запуски на публичной DEV Three.js #35003. Независимый неизменённый Chromium grader дал **PASS для всех трёх сохранённых патчей**: DeepSeek Harness **CLI exit 0 / clean success**, KaroX 5 **CLI exit 1 / внутренний `unproducible_requirement`**, OpenCode V2 **CLI exit -9 / превышение memory guard 1.25 GiB**. Полные доказательства в `HARD20_LIVE_RESULTS_20261108.md`, `hard20-max-runs/independent-regrades/` и исходных журналах. Это **не** результат полного 20×3 и **не** валидный strictly-serial leaderboard; оригинальные неуспешные исходы не переписаны.
+
 Дата: 2026-11-08. Ветка: `goal/gpt6-sol-triad-20261108`.
 
 ## Статус проекта HARD20
