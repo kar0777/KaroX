@@ -1,6 +1,6 @@
 # Deep-refactor checkpoint
 
-**Updated:** 2026-11-08 00:59 Europe/Warsaw
+**Updated:** 2026-11-08 01:09 Europe/Warsaw
 **Worktree:** `D:\проекты\KaroX-v5\lab\kernel-duel-20261025\b\karox5-deep`
 **Branch:** `refactor/karo5-deep-competition-20261107`
 **Base:** `release/karox5-5.0.0` @ `066a35134ff5f288413c8ff3d47068706fc8ae8a`
@@ -39,16 +39,17 @@ engine-tool evidence and needs the next full gate.
 | Bridge launcher host | DONE | `bridge_launcher.py` 2,389 → 1,949 (+ `bridge_host.py` 547); `_wait_for_bridge` seam kept |
 | Bridge proxy wire | DONE | `bridge_proxy.py` 2,218 → 1,707 (+ `bridge_wire.py` 632); approval/time seam kept |
 | Bridge tailscale | DONE | `bridge_tailscale.py` 1,585 → 225 (+ status 383 + gui 487 + funnel 653) |
-| Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,643; rationale in `scripts/check_tree.py` |
-| Bridge profiles/oauth | NOT STARTED | next batches |
+| Bridge OAuth types | DONE | `bridge_oauth.py` 1,483 → 1,208 (+ `bridge_oauth_types.py` 368); persistence seam kept |
+| Bridge profile types | DONE | `bridge_profiles.py` 1,144 → 864 (+ `bridge_profile_types.py` 338); credential-store seam kept |
+| Package budget | RAISED (measured) | ceiling 91,000 → 91,500; measured 90,779; rationale in `scripts/check_tree.py` |
+| Bridge route closures | NOT STARTED | `build_proxy_asgi_app` still owns them; needs route-level characterization |
 | Benchmark arena | NOT STARTED (correctly blocked) | — |
 
-## Round-13 commits (latest first)
+## Round-14 commits (latest first)
 
 ```
-942e039 chore(budget): raise the package ceiling to 91.5k with a measured rationale
-6336267 refactor(bridge): split tailscale into status/gui/funnel modules
-d26ace3 docs(deep): checkpoint the bridge wire/security split
+e7a4f7d refactor(bridge): split oauth state codecs and profile catalog types
+02eb453 docs(deep): checkpoint the tailscale split and measured budget raise
 ```
 
 ## Gates
@@ -60,7 +61,7 @@ d26ace3 docs(deep): checkpoint the bridge wire/security split
 | Full engine contract suite after the complete mixin split | PASS — kernel, tools, salvage, resilience, report, prompt-cache, probes, tool shapes |
 | Tool bodies / render / layout / check / probe tests | PASS |
 | check_report / probes / repo-safety / coverage / render tests after split | PASS |
-| `ruff` + `check_tree` at current HEAD | PASS — 240 modules / 90,643 lines |
+| `ruff` + `check_tree` at current HEAD | PASS — 242 modules / 90,779 lines |
 | Full suite at `5bff142` (core split) | **PASS** — exit 0, 100 % (`local-runs/gate-5bff142-full.log`) |
 | Full suite at `9e8a367` (disk split + bridge S0 tests) | **PASS** — exit 0, 100 % (`local-runs/gate-9e8a367-full.log`) |
 | Full suite at `b8e9789` (hosted-core split) | **PASS** — exit 0, 100 % (`local-runs/gate-b8e9789-full.log`) |
@@ -69,7 +70,8 @@ d26ace3 docs(deep): checkpoint the bridge wire/security split
 | Full suite at `1e968c2` (web_check split) | **PASS** — exit 0, 100 % (`local-runs/gate-1e968c2-full.log`) |
 | Full suite at `95a8fc0` (bridge host split) | **PASS** — exit 0, 100 % (`local-runs/gate-95a8fc0-full.log`) |
 | Full suite at `d26ace3` (bridge wire split) | **PASS** — exit 0, 100 % (`local-runs/gate-d26ace3-full.log`) |
-| Full suite at current HEAD (tailscale + budget) | pending next round; tailscale/launcher tests pass |
+| Full suite at `02eb453` (tailscale + budget) | **PASS** — exit 0, 100 % (`local-runs/gate-02eb453-full.log`) |
+| Full suite at current HEAD (OAuth/profile splits) | pending next round; bridge suites pass |
 | Wheel build | **PASS** — `karox_runtime-5.0.0-py3-none-any.whl`, 256 files, 2 prompts, 10 builtin skills, `tui/theme.tcss`, entry point |
 | Fresh-venv wheel install | **PASS** — import/`--version` = 5.0.0, `doctor --json` status ok, full command surface |
 
@@ -77,8 +79,10 @@ d26ace3 docs(deep): checkpoint the bridge wire/security split
 
 | Metric | Baseline | Current |
 |---|---:|---:|
-| Product modules | 164 | 240 |
-| Physical lines | 87,689 | 90,643 (ceiling 91,500) |
+| `bridge_profiles.py` | 1,144 | 864 (+ `bridge_profile_types` 338) |
+| `bridge_oauth.py` | 1,483 | 1,208 (+ `bridge_oauth_types` 368) |
+| Product modules | 164 | 242 |
+| Physical lines | 87,689 | 90,779 (ceiling 91,500) |
 | `cli.py` | 2,299 | 193 |
 | `browser/session.py` | 3,703 | 173 |
 | `engine_kernel.py` | 2,905 | 753 |
@@ -102,9 +106,8 @@ d26ace3 docs(deep): checkpoint the bridge wire/security split
 | `bridge_tailscale.py` | 1,585 | 225 (+ status 383 + gui 487 + funnel 653) |
 
 Remaining largest files: `bridge_launcher.py` (1,949), `bridge_proxy.py`
-(1,707), `bridge_oauth.py` (1,483), `bridge_profiles.py` (1,144),
-`web_check.py` (1,118), `sessions.py` (966), `engine_provider_bridge.py`
-(952).
+(1,707), `bridge_oauth.py` (1,208), `web_check.py` (1,118), `bridge_profiles.py`
+(864), `sessions.py` (966), `engine_provider_bridge.py` (952).
 
 ## Decisions that must not be lost
 
@@ -135,12 +138,11 @@ only.
 ## Next automatic actions
 
 1. Run the full gate at current HEAD; fix any regression.
-2. `bridge_tailscale`, `bridge_profiles`, `bridge_oauth` splits; keep their
-   existing patch seams.
-3. Add route-level characterization before splitting
-   `build_proxy_asgi_app`; keep the core-vs-wire one-shot boundary documented.
-4. Phase 2 full gate + fresh wheel install; only then benchmark arena. Ceiling
-   is 91,000 with 509 lines of measured headroom; a further raise needs fresh
+2. Add route-level characterization, then split the remaining
+   `build_proxy_asgi_app` route closures; keep the sealed approval `time`
+   patch seam and the core-vs-wire one-shot boundary intact.
+3. Phase 2 full gate + fresh wheel install; only then benchmark arena. Ceiling
+   is 91,500 with 721 lines of measured headroom; a further raise needs fresh
    evidence and no behavior growth.
 
 ## Safe continuation

@@ -43,8 +43,10 @@
 | `bridge_launcher.py` | 2,389 | 1,949 (+ `bridge_host` 547) |
 | `bridge_proxy.py` | 2,218 | 1,707 (+ `bridge_wire` 632) |
 | `bridge_tailscale.py` | 1,585 | 225 (+ status/gui/funnel) |
-| Package modules | 164 | 240 |
-| Package lines | 87,689 | 90,643 (ceiling 91,500) |
+| `bridge_profiles.py` | 1,144 | 864 (+ `bridge_profile_types`) |
+| `bridge_oauth.py` | 1,483 | 1,208 (+ `bridge_oauth_types`) |
+| Package modules | 164 | 242 |
+| Package lines | 87,689 | 90,779 (ceiling 91,500) |
 
 ## Work ledger
 
