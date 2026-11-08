@@ -132,6 +132,34 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e3 — 20-task DEV expansion (preliminary)
+
+Ten new DEV tasks were authored and independently validated RED→GREEN, giving
+20 tasks total (registry `ef63bcd5…33e461`, all prompts self-contained with the
+autonomy line, all rubric hashes match). New categories include a second
+backend-large-context task, a second browser workflow, a second Three.js
+scene, SSRF/HMAC security, multi-source migration and a framed MCP protocol.
+
+New-task results (e2 old-task rows retained from the previous run):
+
+| Metric | Karo | OpenCode | Codex |
+|---|---:|---:|---:|
+| Solved (of 20 attempted rows) | **18/20** | 2/16 attempted (4 missing) | 4/20 |
+| Median time | 45.6 s | 113.8 s | 119.6 s |
+| Cost | UNKNOWN | $0 (free model) | UNKNOWN |
+
+Karo's two failures: `browser-orbit-shipping-workflow` (selector bug:
+`querySelector("promo-status")` instead of the `data-testid` selector) and
+`feature-inbox-jsonl-import` (real grader failure). OpenCode's free model hit
+the 300 s timeout on six new tasks; four rows were not run after the batch was
+stopped to avoid wasteful repeats, and are shown as missing, not as passes or
+losses. Codex produced several zero-patch/question turns.
+
+This remains **partially controlled DEV evidence**, not a frozen-holdout
+leaderboard. It is sufficient to justify the next engineering loop on Karo's
+two failures and to expand toward 100 tasks; it is not sufficient to claim
+category leadership.
+
 ## Epoch e2 result — preliminary, not a holdout
 
 All four arms were rerun on the repaired registry. Claude's lane is **excluded**

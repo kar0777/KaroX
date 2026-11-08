@@ -50,8 +50,9 @@ engine-tool evidence and needs the next full gate.
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
-| DEV batch e2 | DONE — PRELIMINARY | Karo 9/10 (browser timeout only), OpenCode 2/10, Codex 2/10; Claude lane blocked by noninteractive permission policy; different models, not a holdout |
-| Benchmark arena | DEV EVIDENCE | no frozen-holdout winner claim; browser row is environment-sensitive; next is engineering fixes + 100-task/holdout expansion |
+| DEV task set | 20/20 VALIDATED | registry `ef63bcd5…33e461`; new A2/B2 batches RED→GREEN; 2 browser, 2 Three.js, 2 backend, 2 security, 2 migration, 2 MCP etc. |
+| DEV batch e3 (20 tasks) | PRELIMINARY | Karo **18/20**, Codex 4/20, OpenCode 2/16 attempted (6 timeouts, 4 missing); Claude blocked; no holdout/winner claim |
+| Benchmark arena | DEV EVIDENCE | no frozen-holdout winner claim; browser row environment-sensitive; next: fix Karo's two DEV failures and expand to 100 |
 
 ## Round-15 commits (latest first)
 
@@ -148,18 +149,17 @@ only.
 
 ## Next automatic actions
 
-1. Collect the 10 new DEV tasks (A2/B2) when validated; refreeze the registry and
-   run a controlled e2b batch only after all prompts are self-contained.
-2. Investigate Karo's one real e2 failure — browser `workflow.py` waited for a
-   promo-code text the app does not guarantee; this is agent overfitting, not a
-   product defect, but record it before any task change.
-3. Analyze competitor zero-patch/question turns; keep them as product behavior,
-   not as hidden harness excuses.
-4. Resolve or park Gemini auth and DSH headless; Claude remains blocked by its
-   noninteractive sandbox policy.
-5. Expand toward the 100-task target and a separate frozen holdout with
-   pre-registered rubric hashes; only then make leaderboard claims.
-6. Optionally split the cohesive `build_proxy_asgi_app` only with route-level
+1. Fix Karo's two real DEV failures from e3: browser selector bug and
+   `feature-inbox-jsonl-import`; add regression coverage, then rerun only the
+   affected DEV tasks and the full product gate.
+2. Expand the task set from 20 toward 100 with public/issue-derived tasks; keep
+   prompts self-contained and freeze a separate holdout with pre-registered
+   rubric hashes.
+3. Resolve or park Gemini auth, DSH headless and Claude's permission policy;
+   keep unavailable lanes visibly labelled.
+4. Do not cite e1/e2/e3 as a final leaderboard: different models, partial
+   attempts and no frozen holdout.
+5. Optionally split the cohesive `build_proxy_asgi_app` only with route-level
    characterization. Ceiling is 91,500 with 651 lines of measured headroom; a
    further raise needs fresh evidence and no behavior growth.
 
