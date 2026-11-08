@@ -131,6 +131,40 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## DEV batch (epoch e1) — INVALID FOR A LEADERBOARD
+
+All four arms completed the frozen 10-task DEV registry. Raw solved counts:
+
+| Arm | Solved | Median time | Cost | Status |
+|---|---:|---:|---:|---|
+| KaroX | 7/10 | 28.9 s | UNKNOWN | browser rerun solved; 3 real failures |
+| OpenCode | 2/10 | 88.6 s | $0 | free model |
+| Claude | 2/10 | 63.0 s | $0.034572 | mostly zero-patch/question turns |
+| Codex | 2/10 | 139.8 s | UNKNOWN | several zero-patch/question turns |
+
+**This comparison is not valid for any leaderboard claim.** Causes established
+from the raw logs, not guesses:
+
+- Several task prompts do not state the full acceptance contract that the
+  independent grader enforces (for example the MCP projection/scope details).
+  Codex and Claude responded with a design question and a zero-byte patch; Karo
+  guessed a projection and passed. That is prompt ambiguity, not a clean coding
+  comparison.
+- Browser graders for three arms were invoked through the old pytest-only
+  dispatch and returned exit 5; Karo's post-fix rerun passed with real headless
+  Chromium. Those browser rows are harness-invalid for the other arms.
+- The arms use different models/providers (DeepSeek V4.1 Flash, free
+  DeepSeek, Claude Haiku, ChatGPT default), so this is at best partially
+  controlled.
+- Karo's failed frontend/multi-file/Three.js tasks are **real grader failures**
+  worth engineering analysis after the task contract is made explicit.
+
+The raw logs, diffs and costs are retained in `local-runs/arena/runs`; the
+aggregate is `DEV_SUMMARY.md/json`. Epoch e1 is closed as an invalid/incomplete
+comparison and must not be cited as evidence of superiority. The next epoch must
+first make every prompt self-contained (including the autonomy requirement) and
+rerun all arms on the same frozen registry.
+
 ## First DEV pilot — one task, not a leaderboard
 
 Task `backend-catalog-pagination` (synthetic DEV fixture, independent grader
