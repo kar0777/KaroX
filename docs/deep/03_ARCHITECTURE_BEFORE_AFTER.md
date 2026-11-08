@@ -473,11 +473,13 @@ is unchanged and all route tests pass.
 
 ## After — OAuth types and bridge profile catalog splits
 
-`bridge_oauth.py` 1,483 → 1,208 lines: TTL/scopes constants, state codecs
+`bridge_oauth.py` 1,483 → 936 lines: TTL/scopes constants, state codecs
 (`_pending_from_state`/`_code_from_state`/`_grant_from_state`), wire models and
-small helpers move to `bridge_oauth_types.py` (368). Persistence (`os.replace`
-retry, state replacement constants) stays in the facade so the patch seams
-still apply.
+small helpers move to `bridge_oauth_types.py` (368); approval pages, request
+probe limiting, body/form parsing and the ASGI registration move to
+`bridge_oauth_app.py` (351) with a lazy service import to avoid a cycle.
+Persistence (`os.replace` retry, state replacement constants) stays in the
+facade so the patch seams still apply.
 
 `bridge_profiles.py` 1,144 → 864 lines: catalog/status/public descriptor
 helpers, `BridgeProfile`/`BridgeRegistry`, `known_bridge_profiles`,
