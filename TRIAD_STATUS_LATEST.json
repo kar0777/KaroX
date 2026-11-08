@@ -1,0 +1,84 @@
+{
+  "updated_local_date": "2026-11-08",
+  "branch": "goal/gpt6-sol-triad-20261108",
+  "product_fix_commit": "487bb7b",
+  "official_competitors": [
+    {
+      "id": "karox5",
+      "version": "5.0.0"
+    },
+    {
+      "id": "opencode_v2",
+      "version": "2.2.6"
+    },
+    {
+      "id": "deepseek_harness",
+      "version": "0.2.2-rc.1",
+      "prerelease": true
+    }
+  ],
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "provider": "https://api.inference.wandb.ai/v1",
+  "linux_readiness_three_of_three": true,
+  "real_issue_reduced_red_green_six_of_six": true,
+  "linux_real_rich_4246": [
+    {
+      "arm": "karox5",
+      "agent_seconds": 11.2341,
+      "artifact_correct": true,
+      "clean_user_success": true,
+      "estimated_api_usd": 0.009811
+    },
+    {
+      "arm": "opencode_v2",
+      "agent_seconds": 53.4054,
+      "artifact_correct": true,
+      "clean_user_success": true,
+      "estimated_api_usd": 0.0097074
+    },
+    {
+      "arm": "deepseek_harness",
+      "agent_seconds": 105.2042,
+      "artifact_correct": true,
+      "clean_user_success": true,
+      "estimated_api_usd": 0.0154485
+    }
+  ],
+  "windows_3d_diagnostic_valid_leaderboard": false,
+  "windows_3d_corrected": [
+    {
+      "arm": "karox5",
+      "status": "ARTIFACT_CORRECT_BUT_INCOMPLETE",
+      "grader_pass": true
+    },
+    {
+      "arm": "opencode_v2",
+      "status": "ARTIFACT_FAIL",
+      "grader_pass": false
+    },
+    {
+      "arm": "deepseek_harness",
+      "status": "INFRA_SETUP_BLOCKED",
+      "grader_pass": false
+    }
+  ],
+  "product_repair": {
+    "target": "karox.web_document.shadowed_by_repository",
+    "tests_passed": 84,
+    "candidate_wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+    "paid_rerun_after_repair": false
+  },
+  "resource_guard": {
+    "serial_cli": true,
+    "c_gib_reserve_min": 7,
+    "d_gib_reserve_min": 15,
+    "per_process_tree_rss_gib_max": 1,
+    "last_c_free_gib": 9.15,
+    "last_d_free_gib": 60.69,
+    "last_windows_ram_available_gib": 3.12,
+    "logs_lossless_gzip": true
+  },
+  "all_in_three_way_leadership_proven": false,
+  "actual_provider_invoice_available": false,
+  "valid_blind_holdout": false
+}

@@ -1,0 +1,57 @@
+{
+  "epoch": "linux-wsl2-nested-20261108",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "terminal": "official CLI (noninteractive), no vendor source modification",
+  "all_3_ready": true,
+  "arms": [
+    {
+      "arm": "karox5",
+      "new_adjudicated_readiness": true,
+      "original_readiness": true,
+      "internal_command_proven": true,
+      "evidence": [
+        {
+          "type": "verified",
+          "report_status": "verified"
+        }
+      ],
+      "independent_test_exit": 0,
+      "original_result_sha256": "c1d72ac48904becab32a6443b3efc75a910a3e08433d56ecf108ae718292837d",
+      "redacted_event_sha256": "f1b5a242a07a99de7647c616b03615deb5de5ea1d7177b361a4bce7cf6094242",
+      "original_files_untouched": true
+    },
+    {
+      "arm": "opencode_v2",
+      "new_adjudicated_readiness": true,
+      "original_readiness": true,
+      "internal_command_proven": true,
+      "evidence": [
+        {
+          "type": "shell_completed_test",
+          "count": 1
+        }
+      ],
+      "independent_test_exit": 0,
+      "original_result_sha256": "20e457d0ed58b2a55615e9345820c550f6e4aaef5a28352eed7f85b4d0664c02",
+      "redacted_event_sha256": "aa4671f6d1088676a4388cc34fdca0f5d0cb89551f88f6c9945f2a738510b16a",
+      "original_files_untouched": true
+    },
+    {
+      "arm": "deepseek_harness",
+      "new_adjudicated_readiness": true,
+      "original_readiness": false,
+      "internal_command_proven": true,
+      "evidence": [
+        {
+          "type": "bash_completed_test",
+          "count": 1
+        }
+      ],
+      "independent_test_exit": 0,
+      "original_result_sha256": "f60bf40abd6380fddc9465621b660e9798340ab201be22083fbaac2fb47f4b4f",
+      "redacted_event_sha256": "ac1957e900e061ea69f16fa008150a164480ca38e442168aa942849b7125a52a",
+      "original_files_untouched": true
+    }
+  ],
+  "note": "Original DSH result false due an overly strict parser requiring the optional success-exit-code decoration. Bash raw tool_result has completed state and '1 passed'."
+}

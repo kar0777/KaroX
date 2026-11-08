@@ -1,0 +1,118 @@
+{
+  "epoch": "windows-threejs-strict-epoch1",
+  "status": "DEV_DIAGNOSTIC",
+  "competitor_count": 3,
+  "platform_fairness": "Not used as three-CLI leaderboard due DSH Windows ACL setup failure.",
+  "issue_fixed": "Original runner looked at visual_proof directory while the grader wrote visual-proof.",
+  "raw_runs_rewritten": false,
+  "rows": [
+    {
+      "arm": "karox5",
+      "task_id": "threejs-crystal-cavern-strict",
+      "raw_result_sha256": "3124b733304f5c2ba3643cd2598ba67efa76dd1e2ede2598fe7348c3fad8f1b9",
+      "original_raw_status": "INVALID",
+      "corrected_status": {
+        "status": "ARTIFACT_CORRECT_BUT_INCOMPLETE",
+        "artifact_correct": true,
+        "cli_completed": false,
+        "self_verified": false,
+        "clean_user_success": false,
+        "validity": true,
+        "raw_grade": "PASS"
+      },
+      "external_grader_exit": 0,
+      "cli_exit": 1,
+      "wall_seconds": 170.9424,
+      "visual_result": "PASS_RENDER_SMOKE",
+      "frames_verified": [
+        {
+          "frame": "frame1",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame2",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame3",
+          "sha256_valid": true
+        }
+      ],
+      "visual_sha256": "3b949f0acc8c5980b23b80924582bbb225a20ae6b7492df96f0ecd120c75c8c9",
+      "original_files_untouched": true,
+      "proof_note": "A strict WebGL Chromium raster validator passed only when nonblank rendered pixels and animation across two post-warmup frame intervals were present. This is not a human preference grade."
+    },
+    {
+      "arm": "opencode_v2",
+      "task_id": "threejs-crystal-cavern-strict",
+      "raw_result_sha256": "78bf7ff637d4eb0e8473d6c5737122e9a8406ef0537e0770b71a85fa2c1dd868",
+      "original_raw_status": "ARTIFACT_FAIL",
+      "corrected_status": {
+        "status": "ARTIFACT_FAIL",
+        "artifact_correct": false,
+        "cli_completed": true,
+        "self_verified": null,
+        "clean_user_success": false,
+        "validity": true,
+        "raw_grade": "FAIL"
+      },
+      "external_grader_exit": 1,
+      "cli_exit": 0,
+      "wall_seconds": 94.0167,
+      "visual_result": "PASS_RENDER_SMOKE",
+      "frames_verified": [
+        {
+          "frame": "frame1",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame2",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame3",
+          "sha256_valid": true
+        }
+      ],
+      "visual_sha256": "9e38ff573970208f6937cacde1466f3dc267a964a006360dfca4c329ac007abb",
+      "original_files_untouched": true,
+      "proof_note": "A strict WebGL Chromium raster validator passed only when nonblank rendered pixels and animation across two post-warmup frame intervals were present. This is not a human preference grade."
+    },
+    {
+      "arm": "deepseek_harness",
+      "task_id": "threejs-crystal-cavern-strict",
+      "raw_result_sha256": "b99fef315d0fac4c7d0aac1923ee4fa46be50499c94bd49d7eaf5738f7ac9148",
+      "original_raw_status": "INFRA_SETUP_BLOCKED",
+      "corrected_status": {
+        "status": "INFRA_SETUP_BLOCKED",
+        "artifact_correct": false,
+        "cli_completed": false,
+        "self_verified": null,
+        "clean_user_success": false,
+        "validity": false,
+        "raw_grade": "FAIL"
+      },
+      "external_grader_exit": 1,
+      "cli_exit": 1,
+      "wall_seconds": 215.3394,
+      "visual_result": "FAIL",
+      "frames_verified": [
+        {
+          "frame": "frame1",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame2",
+          "sha256_valid": true
+        },
+        {
+          "frame": "frame3",
+          "sha256_valid": true
+        }
+      ],
+      "visual_sha256": "351ebf86a7bb4cae64b54481d930695b31c588dea7634275c45417207673ee6c",
+      "original_files_untouched": true,
+      "proof_note": "A strict WebGL Chromium raster validator passed only when nonblank rendered pixels and animation across two post-warmup frame intervals were present. This is not a human preference grade."
+    }
+  ]
+}

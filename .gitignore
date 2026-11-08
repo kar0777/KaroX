@@ -5,8 +5,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 build/
-dist/
 *.egg-info/
+dist/
 .venv/
 venv/
 
@@ -14,3 +14,27 @@ venv/
 .karox/
 .tmp/
 *.log
+
+# Fair triad's disposable outputs and external installations (worktree-root only)
+/triad-tools/
+/sources/
+/paired-dev/
+/paired-linux/
+/dist-triad/
+/dist-triad-candidate/
+/TRIAD_EVIDENCE_20261108.zip
+/audit/strict_baseline_fixture/
+/audit/strict_baseline_visual*/
+/audit/strict_reference_visual/
+/audit/strict-3d-red-visual/
+/readiness/*/stdout.redacted*
+/readiness/*/stderr.redacted*
+/readiness/*/result.json
+/readiness/dsh-windows-acl-repair/
+/readiness/*/profile/
+/readiness/*/home/
+/readiness/*/dsh/
+/readiness/*/xdg/
+/readiness/*/appdata/
+/readiness/*/localappdata/
+/readiness/*/cache/
