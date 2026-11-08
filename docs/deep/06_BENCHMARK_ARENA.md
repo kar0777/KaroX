@@ -132,6 +132,23 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e11 — 100-task DEV set reached (preliminary)
+
+A10/B10 complete the 100-task DEV target. All 100 are RED→GREEN and frozen at
+`registry_sha256 = 8aeb501c…2acfbd`. New shapes: payment ledger, retention
+closure registry, approval workflow, command palette, procedural terrain;
+TS cache proxy, autocomplete form, secret redaction, partitioned rollup, MCP
+permission audit.
+
+New ten: **Karo 6/10**, Codex 0/10. Combined 100-task DEV: **Karo 87/100**,
+Codex 10/100, OpenCode 2/22 attempted. Karo's new failures: payment-ledger
+status, approval audit shape, command-palette option role, procedural-terrain
+wiring. No product regression and no holdout opening.
+
+The 100-task DEV set is now large enough to stop growing it. The next stage is a
+separate frozen holdout, authored without arm feedback and opened once after the
+candidate is frozen.
+
 ## Epoch e10 — 90-task DEV expansion (preliminary)
 
 A9/B9 add ten validated tasks (90/90 total; registry

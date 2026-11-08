@@ -46,8 +46,9 @@ engine-tool evidence and needs the next full gate.
 | Arena preparation | STARTED / FROZEN | `docs/deep/06_BENCHMARK_ARENA.md`; latest CLIs installed locally; registry/hashes/auth/readiness probes recorded; runner + batch harness; tasks in progress |
 | Phase 2 freeze | DONE | full suite at `51be451`, frozen docs commit `4919a04`, wheel SHA-256 `815030a7…ba62f5`, fresh install ok |
 | Readiness probes | DONE (not benchmarks) | Codex OK; Claude OK ($0.09196); Karo works on `wandb/DeepSeek-V4.1-Flash`; OpenCode works on free model; Gemini blocked; DSH harness pending |
-| DEV task set | 90/90 VALIDATED | registry `c1259676…2346ad5`; A9/B9 add preferences, DST, import/export, tabs, shadows, cron, sortable table, path containment, encoding, MCP resume; `tzdata` dependency recorded |
-| DEV batch e10 (90 tasks) | PRELIMINARY | new ten: Karo **9/10**, Codex 1/10; combined Karo **81/90**, Codex 10/90, OpenCode 2/22 attempted |
+| DEV task set | 100/100 VALIDATED | registry `8aeb501c…2acfbd`; A10/B10 add payment ledger, retention, approvals, command palette, terrain, cache proxy, autocomplete, redaction, rollup, MCP audit |
+| DEV batch e11 (100 tasks) | PRELIMINARY | new ten: Karo **6/10**, Codex 0/10; combined Karo **87/100**, Codex 10/100, OpenCode 2/22 attempted |
+| Holdout | NOT OPENED | 30-task separate set to be authored/frozen; no winner claim until opened once |
 | First pilot (n=1) | DONE, NOT A LEADERBOARD | all four arms solved `backend-catalog-pagination`; Karo 14.19 s, OpenCode 44.04 s, Claude 48.97 s, Codex 155.21 s, different models/providers |
 | DEV batch e1 | CLOSED — INVALID | raw Karo 7/10 vs others 2/10, but prompts under-specified and browser dispatch invalid; not a comparison |
 | DEV prompts e2 | REPAIRED / FROZEN | full acceptance contracts + autonomy line; registry `7d95e2cf…bcdd8`; 10/10 RED→GREEN |
