@@ -132,6 +132,19 @@ is unusable; Codex `exec --sandbox workspace-write --skip-git-repo-check
 --format json` with an explicitly recorded model. Gemini is not run while
 credential-blocked; DSH has no pinned headless command yet.
 
+## Epoch e10 — 90-task DEV expansion (preliminary)
+
+A9/B9 add ten validated tasks (90/90 total; registry
+`c1259676…2346ad5`): notification preferences, DST boundary, import/export CLI,
+accessible tabs/accordion, shadow mapping; cron scheduler, sortable table,
+path containment, encoding normalization, MCP job resume.
+
+New ten: **Karo 9/10**, Codex 1/10. Combined 90-task DEV: **Karo 81/90**,
+Codex 10/90, OpenCode 2/22 attempted. Karo's new failure is `mcp-job-resume`
+(the other nine passed). Two timezone tasks required the standard `tzdata`
+package in the test venv; that dependency is now recorded in their task
+metadata. No product regression and no holdout opening.
+
 ## Epoch e9 — 80-task DEV expansion (preliminary)
 
 A8/B8 add ten validated tasks (80/80 total; registry
