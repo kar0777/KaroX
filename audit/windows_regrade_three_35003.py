@@ -47,6 +47,32 @@ def clean(text: str) -> str:
     return re.sub(r"\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_.-]{12,}\b", "[REDACTED]", text)
 
 
+def classify_agent_run(previous: dict, independent_grade: dict) -> dict:
+    """Separate final-code quality from CLI completion and infrastructure.
+
+    These are pre-registered adjudication rules, not agent-reported evidence.
+    A correct page with an empty patch is not a successfully solved bug.
+    """
+    original = previous.get("quality_classification") or {}
+    cli_complete = original.get("cli_completed") is True
+    config_intact = previous.get("harness_config_untampered") is True
+    blocked = (
+        previous.get("agent_timed_out") is True
+        or original.get("status") in ("SETUP_BLOCKED", "INFRA_SETUP_BLOCKED")
+    )
+    patch_bytes = previous.get("patch_bytes")
+    patch_nonempty = type(patch_bytes) is int and patch_bytes > 0
+    artifact_correct = independent_grade.get("grade") == "PASS" and patch_nonempty
+    return {
+        "cli_completed_from_original_runner": cli_complete,
+        "runner_config_integrity": config_intact,
+        "agent_infra_blocked": blocked,
+        "patch_nonempty": patch_nonempty,
+        "artifact_correct": artifact_correct,
+        "clean_user_success": artifact_correct and cli_complete and config_intact and not blocked,
+    }
+
+
 def evaluate(workspace: Path, proof: Path, timeout: int) -> dict:
     if proof.exists():
         raise FileExistsError("Refusing to overwrite old visual proof: " + str(proof))
@@ -178,18 +204,7 @@ def main() -> int:
             raise RuntimeError(f"Changed grader in raw run: {arm}")
         proof = folder / "windows_visual_proof"
         grade = evaluate(workspace, proof, args.max_grader_seconds)
-        completion = previous.get("quality_classification", {}).get("cli_completed") is True
-        integrity = previous.get("harness_config_untampered") is True
-        source_infra = (
-            previous.get("agent_timed_out") is True or
-            previous.get("quality_classification", {}).get("status") in
-            ("SETUP_BLOCKED", "INFRA_SETUP_BLOCKED")
-        )
-        grade["cli_completed_independent"] = completion
-        grade["runner_config_integrity"] = integrity
-        grade["agent_infra_blocked"] = source_infra
-        grade["artifact_correct"] = grade["grade"] == "PASS"
-        grade["clean_user_success"] = grade["artifact_correct"] and completion and integrity and not source_infra
+        grade.update(classify_agent_run(previous, grade))
         grade["estimated_cost_usd"] = None
         grade["actual_provider_invoice_usd"] = None
         grade["usage_from_raw_result"] = previous.get("terminal_events", {}).get("usage")

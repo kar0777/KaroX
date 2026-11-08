@@ -76,3 +76,13 @@ C: резерв не менее 7 GiB, D: не менее 15 GiB, тяжёлые
 разрешает и проходит актуальная transport readiness; прежнюю
 OpenAI-tool safety блокировку нельзя обходить. Иначе доступная
 работа — независимые security/type/parity fixes и новые реальные задачи.
+
+## Последующие безопасные проверки без новых API-вызовов
+
+- При дополнении набора одним реальным subprocess security-negative тестом, не входившим в старые 1575, сбор pytest показывает 1576 случаев. Его отдельный security/parity gate 85/85 PASS (84 старых + 1 новый). Совокупный **непересекающийся результат: 1558 PASS, 18 SKIP, 0 FAIL** в разбитой регрессии и отдельном целевом новом тесте. Это не повтор одного целого pytest процесса.
+- Real Three.js #35003: 120 последовательных rAF на Windows Chromium/SwiftShader для каждого RED и GREEN. Оба показали rAF 60.0 Гц; p95 кадрового интервала соответственно 16.8 / 16.7 мс. Это НЕ hardware GPU FPS, не оценка визуальной эстетики и не преимущество CLI. Логи audit/THREE_35003_OFFLINE_PERF_20261108.json; воспроизводимый audit/three_35003_perf_probe.py; архив TRIAD_EVIDENCE_35003_PERF_20261108.zip (6 файлов, SHA 7bc110c8f5ea05fc122b9adf8c11ef154c0d4775fcfdeccadb598abad0184f84).
+- Проверка независимости внешней оценки: audit/windows_regrade_three_35003.py требует реальный непустой patch, не принимает self-verified вместо внешнего FAIL и разделяет CLI/infra/artefact. Восемь unit-тестов 8/8 PASS, ruff и compile PASS, audit/WINDOWS_REGRADER_CONTRACT_GATE_20261108.json. Browser grader v2 при этом **не менялся**.
+- Непосредственный WSL smoke исправленного Karo checker на настоящем Three.js v2 — exit 0, checked_by karox.web_check, нет проблем: audit/LINUX_CANDIDATE_REAL_THREE_CHECKER_20261108.json. Не был запущен сам paid agent.
+- Шесть разных Rich real-issue DEV fixtures: исходные task, source, grader и issue snapshot SHA сверены с frozen registry — 6/6, reference в agent fixtures не найден, audit/RICH_6_FROZEN_INTEGRITY_20261108.json. Это структурный аудит, не ещё пять соревнований.
+- Все четыре архива хранятся на D: и не включены в Git (только checksum): original 846, supplement 48, Three.js freeze 52, Three.js performance 6. SHA + манифесты проверены. Не удалять raw proof directories до убедительной архивации.
+- Локальные коммиты этого продолжения c3adb82 (Three DEV freeze + repaired Linux candidate) и 35430f3 (rAF performance). Другие незакоммиченные изменения worktree сохраняются без reset/clean.

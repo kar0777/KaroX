@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-08",
+  "purpose": "Read-only structural integrity of six frozen public Rich real issues, no model calls and no grader re-execution",
+  "source_revision": "9d8f9a372cc5916fd4781fec207ced7ddac2f08f",
+  "source_registry_sha256": "f1d75c80dc3c7d05405aa421eefb2d63938afaeb00e405bfd03b166b2944f9f5",
+  "red_green_audit_sha256": "7de9498cf327cf52272eaefc3164247bb532253ef1b7dd4a65d0179c223d047b",
+  "tasks_verified": 6,
+  "tasks_expected": 6,
+  "cohort_bias": "all six from same Python Rich upstream repository; this is DEV, not an unbiased SWE benchmark or protected holdout",
+  "items": [
+    {
+      "task_id": "real-rich-4234",
+      "issue_url": "https://github.com/Textualize/rich/issues/4234",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    },
+    {
+      "task_id": "real-rich-4238",
+      "issue_url": "https://github.com/Textualize/rich/issues/4238",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    },
+    {
+      "task_id": "real-rich-4244",
+      "issue_url": "https://github.com/Textualize/rich/issues/4244",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    },
+    {
+      "task_id": "real-rich-4245",
+      "issue_url": "https://github.com/Textualize/rich/issues/4245",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    },
+    {
+      "task_id": "real-rich-4246",
+      "issue_url": "https://github.com/Textualize/rich/issues/4246",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    },
+    {
+      "task_id": "real-rich-4247",
+      "issue_url": "https://github.com/Textualize/rich/issues/4247",
+      "checks": {
+        "task": true,
+        "fixture": true,
+        "grader": true,
+        "issue": true,
+        "source_lock": true,
+        "red_was_failed": true,
+        "green_was_passed": true,
+        "reference_not_exposed": true,
+        "same_upstream_revision": true,
+        "no_holdout_claim": true
+      },
+      "all_integrity": true
+    }
+  ]
+}

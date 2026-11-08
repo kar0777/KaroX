@@ -1,0 +1,8 @@
+{
+  "task_id": "real-three-orbitcontrols-35003-v2",
+  "candidate_wheel_sha256": "485c8ebfbcff994941c09375eda7907c29ad99fd74bedb542b448c2b0affbdc0",
+  "method": "offline KaroX checker from repaired wheel under WSL, no model run",
+  "exit": 0,
+  "stdout": "{\"ok\": true, \"problems\": [], \"checked\": [\"index.html\"], \"checked_by\": \"karox.web_check\"}\n",
+  "stderr": "w\u0000s\u0000l\u0000:\u0000 \u0000\u001d\u00045\u00044\u0004>\u0004?\u0004C\u0004A\u0004B\u00048\u0004<\u0004K\u00049\u0004 \u0000M\u0004:\u0004@\u00040\u0004=\u00048\u0004@\u0004C\u00045\u0004<\u0004K\u00049\u0004 \u0000A\u00048\u0004<\u00042\u0004>\u0004;\u0004:\u0000 \u0000\"\u0000w\u0000\"\u0000 \u00002\u0004 \u0000C\u0000:\u0000\\\u0000U\u0000s\u0000e\u0000r\u0000s\u0000\\\u0000e\u0000k\u0000o\u0000n\u0000o\u0000\\\u0000.\u0000w\u0000s\u0000l\u0000c\u0000o\u0000n\u0000f\u0000i\u0000g\u0000:\u00004\u0000\n\u0000\n\u0000"
+}

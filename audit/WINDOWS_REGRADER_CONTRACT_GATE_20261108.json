@@ -1,0 +1,23 @@
+{
+  "scorer_sha256": "9d1c15d4ad28d777128c4a54428994f7caa0315194c3cb9a3df7baaf95d7b955",
+  "tests": [
+    {
+      "check": "unit",
+      "exit": 0,
+      "elapsed": 1.09,
+      "output": "........                                                                 [100%]\n8 passed in 0.07s\n"
+    },
+    {
+      "check": "ruff",
+      "exit": 0,
+      "elapsed": 0.24,
+      "output": "All checks passed!\n"
+    },
+    {
+      "check": "compile",
+      "exit": 0,
+      "elapsed": 0.09,
+      "output": ""
+    }
+  ]
+}
