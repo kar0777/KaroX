@@ -3533,11 +3533,13 @@ def test_one_advisory_rerun_per_batched_response(
         for entry in record.provider_history
         if "affected_tests" in ((entry.get("result") or {}).get("data") or {})
     ]
-    assert [entry.get("tool_call_id") for entry in affected] == ["c5"]
-    assert affected[0]["result"]["data"]["affected_tests"]["ok"] is True
+    # c1: the first edit runs the edited module's own tests (benchmark
+    # 2026-11-13: 10% of steps only ran them); c3/c4 share c5's single rerun.
+    assert [entry.get("tool_call_id") for entry in affected] == ["c1", "c5"]
+    assert affected[-1]["result"]["data"]["affected_tests"]["ok"] is True
     advisory = [item for item in record.checks if item.get("suite") == "focused"]
-    assert len(advisory) == 1
-    assert advisory[0]["ok"] is True
+    assert len(advisory) == 2
+    assert advisory[-1]["ok"] is True
 
 
 def test_focused_tests_derive_targets_from_the_session_changes(
@@ -3564,7 +3566,9 @@ def test_focused_tests_derive_targets_from_the_session_changes(
     write = next(
         entry for entry in record.provider_history if entry.get("tool_call_id") == "c1"
     )
-    assert "affected_tests" not in write["result"]["data"]
+    # The edit already carries its module's tests (advisory, not evidence).
+    assert write["result"]["data"]["affected_tests"]["targets"] == ["tests/test_calc.py"]
+    assert write["result"]["data"]["affected_tests"]["ok"] is True
     # The durable snapshot is a compaction aid, not prompt decoration: a short
     # run that never compacted must not pay for it.
     assert not any(

@@ -287,3 +287,42 @@ def _render(core: Any, files: Sequence[Dict[str, Any]], tests_for: Dict[str, set
         lines.append(f"\nRecent commits to {files[0]['path']}:\n{history}")
     text = "\n".join(lines)
     return text if len(text) <= MAX_TEXT else text[: MAX_TEXT - 20] + "\n[dossier clipped]"
+
+
+def related_tests(core: Any, source: str, limit: int = 3) -> List[str]:
+    """Test files for a changed Python source: by file name first, then by import.
+
+    Benchmark 2026-11-13: 10% of all steps only ran the tests next to the
+    file just edited. The harness runs them with the edit instead.
+    """
+
+    if not source.endswith(".py") or _TEST_PATH.search(source.lower()):
+        return []
+    tracked = [line for line in _git(core, ["ls-files", "*.py"]).splitlines() if line]
+    tests = [path for path in tracked if _TEST_PATH.search(path.lower()) and not path.endswith("conftest.py")]
+    stem = source.rsplit("/", 1)[-1][:-3]
+    if stem == "__init__":
+        stem = source.rsplit("/", 2)[-2] if "/" in source else stem
+    named = [t for t in tests if t.rsplit("/", 1)[-1] in (f"test_{stem}.py", f"{stem}_test.py", f"test_{stem.lstrip('_')}.py")]
+    found = list(named)
+    if len(found) < limit:
+        module = source[:-3]
+        for prefix in ("src/", "lib/"):
+            if module.startswith(prefix):
+                module = module[len(prefix):]
+        dotted = module.replace("/", ".")
+        if dotted.endswith(".__init__"):
+            dotted = dotted[: -len(".__init__")]
+        pattern = re.compile(r"(?:from|import)\s+" + re.escape(dotted) + r"(?![\w])")
+        for path in tests:
+            if path in found:
+                continue
+            try:
+                text = (core.repository / path).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if pattern.search(text):
+                found.append(path)
+            if len(found) >= limit:
+                break
+    return found[:limit]

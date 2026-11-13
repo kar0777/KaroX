@@ -141,9 +141,18 @@ class EngineAttachMixin:
         except Exception:  # noqa: BLE001 - an advisory helper must not break a turn
             return
         report = _failed_check_report(record)
-        if report is None:
-            return
-        targets = rerun_targets(report, AFFECTED_TEST_LIMIT)
+        if report is not None:
+            targets = rerun_targets(report, AFFECTED_TEST_LIMIT)
+        else:
+            # No failing check yet: run the tests that belong to the edited
+            # source, so the edit result already says whether they still pass.
+            from . import task_dossier
+
+            path = data.get("path")
+            try:
+                targets = task_dossier.related_tests(self._core, path) if isinstance(path, str) else []
+            except Exception:  # noqa: BLE001 - advisory only
+                targets = []
         if not targets:
             return
         digest = str(data.get("content_sha256") or data.get("sha256") or "")
