@@ -165,6 +165,11 @@ def chain_owes_check(record: SessionRecord) -> bool:
     return write is not None and check is None
 
 
+def _no_start_revision(record: SessionRecord) -> bool:
+    start = getattr(record, "git_baseline", None)
+    return isinstance(start, dict) and start.get("reason") in ("not-a-repository", "git-unavailable")
+
+
 def evidence_chain(record: SessionRecord) -> bool:
     """Whether the record holds a complete write -> check -> status/diff chain."""
 
@@ -182,6 +187,10 @@ def evidence_chain(record: SessionRecord) -> bool:
                 elif entry.get("core_name") == "git.diff":
                     diff = result
         selected = (write, status, diff)
+    elif _no_start_revision(record):
+        # No git at the start: status and diff can never succeed, and the
+        # write -> check links are the whole chain there is.
+        selected = (write, check)
     else:
         selected = (write, check, status, diff)
     if any(item is None for item in selected):

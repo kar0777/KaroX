@@ -584,17 +584,17 @@ def test_a_review_of_old_bytes_is_not_current_after_an_edit(tmp_path: Path) -> N
     assert "missing current change review" in completion_gate.floor(core, record)
 
 
-def test_a_folder_without_git_owes_a_review_nothing_can_produce(tmp_path: Path) -> None:
-    """A fresh folder has no start revision, so the run ends instead of repairing."""
+def test_a_folder_without_git_owes_no_change_review(tmp_path: Path) -> None:
+    """No start revision means no git.diff can show the change, so none is owed."""
 
     record, core = _changed_record(tmp_path)
     record.git_baseline = {"version": 1, "kind": "unavailable", "reason": "not-a-repository"}
     reasons = completion_gate.floor(core, record)
-    assert completion_gate.NO_PRODUCER + "current change review" in reasons
-    assert completion_gate.only_unproducible(["missing current change review", completion_gate.NO_PRODUCER + "current change review"])
+    assert not any("change review" in reason for reason in reasons)
     # No git binary at all (TB 4.1 images): no git.diff can run either.
     record.git_baseline = {"version": 1, "kind": "unavailable", "reason": "git-unavailable"}
-    assert completion_gate.NO_PRODUCER + "current change review" in completion_gate.floor(core, record)
+    assert not any("change review" in reason for reason in completion_gate.floor(core, record))
+    assert completion_gate.only_unproducible(["missing current change review", completion_gate.NO_PRODUCER + "current change review"])
 
 
 _START_COMMIT = "0123456789abcdef0123456789abcdef01234567"

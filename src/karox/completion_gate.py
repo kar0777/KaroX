@@ -271,21 +271,21 @@ def floor(core: Any, record: Any) -> list[str]:
         data = result.get("data")
         if isinstance(data, dict):
             review = data
-    if (
+    # No start revision (a fresh folder, or a TB 4.1 image with no git binary)
+    # means no git.diff can ever show the change: owing a review there only
+    # ended verified work as unproducible (offline scenario, 2026-11-13).
+    start = getattr(record, "git_baseline", None)
+    reviewable = not (isinstance(start, dict) and start.get("reason") in (
+        git_baseline.REASON_NOT_A_REPOSITORY,
+        git_baseline.REASON_GIT_UNAVAILABLE,
+    ))
+    if reviewable and (
         review is None
         or review.get("completion_identity") != current
         or not _complete_change_review(record, review)
         or _review_skips_a_change(core, record, review)
     ):
         reasons.append("missing current change review")
-        # No start revision: a repair loop (4 min, aquarium 11-12) can never
-        # review. TB 4.1 images have no git binary at all (git-unavailable):
-        # two finish refusals and three refused git.diff calls per task.
-        if (start := getattr(record, "git_baseline", None)) and isinstance(start, dict) and start.get("reason") in (
-            git_baseline.REASON_NOT_A_REPOSITORY,
-            git_baseline.REASON_GIT_UNAVAILABLE,
-        ):
-            reasons.append(NO_PRODUCER + "current change review")
     for entry in record.provider_history:
         result = entry.get("result")
         if entry.get("role") != "tool" or not isinstance(result, dict):
@@ -546,9 +546,24 @@ def _is_runtime_entry(core: Any, relative: str) -> bool:
 
 
 def _inline_probe(argv: Sequence[str]) -> bool:
-    """``python -c CODE``: an inline snippet, never a deliverable check."""
+    """``python -c CODE`` or a shell script carrying its own code in a heredoc.
+
+    Both are inline snippets, never a deliverable check. TB 4.1 (2026-11-13,
+    mvcc-lsm-compaction): ``bash -lc "cat > /tmp/probe.cc <<'EOF' ... EOF; g++
+    ... && ./probe"`` failed on the probe's own expectation, the corrected probe
+    (a different argv) passed, and the stale red one stayed owed: two finish
+    refusals and a hand-made "review" instead of work.
+    """
     parts = [str(p) for p in argv]
-    return len(parts) >= 3 and Path(parts[0]).stem.lower().startswith("python") and parts[1] == "-c"
+    if len(parts) < 3:
+        return False
+    if Path(parts[0]).stem.lower().startswith("python") and parts[1] == "-c":
+        return True
+    return (
+        Path(parts[0]).name.lower() in {"bash", "sh", "dash", "zsh"}
+        and parts[1] in {"-c", "-lc"}
+        and "<<" in parts[2]
+    )
 
 
 def _pytest_ran_nothing(data: dict[str, Any]) -> bool:

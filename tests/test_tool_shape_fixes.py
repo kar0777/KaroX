@@ -124,18 +124,20 @@ def _kernel(tmp_path: Path) -> AgentKernel:
     )
 
 
-def _advertised(kernel: AgentKernel) -> set[str]:
+def _advertised(kernel: AgentKernel, task: str = "fix the bug") -> set[str]:
     implementation = kernel.implementation
-    return {tool.name for tool in implementation._advertised_tools("fix the bug")}
+    return {tool.name for tool in implementation._advertised_tools(task)}
 
 
 def test_lsp_schema_is_withheld_without_any_language_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(engine_kernel, "_any_language_server", lambda: False)
-    hidden = _advertised(_kernel(tmp_path / "a"))
+    hidden = _advertised(_kernel(tmp_path / "a"), "fix the type errors mypy reports")
     monkeypatch.setattr(engine_kernel, "_any_language_server", lambda: True)
-    shown = _advertised(_kernel(tmp_path / "b"))
+    shown = _advertised(_kernel(tmp_path / "b"), "fix the type errors mypy reports")
+    # A plain repair names no type-checking domain, so the schema stays off.
+    assert not any("lsp" in name for name in _advertised(_kernel(tmp_path / "c")))
     assert not any("lsp" in name for name in hidden)
     assert any("lsp" in name for name in shown)
 

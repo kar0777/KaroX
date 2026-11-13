@@ -93,3 +93,11 @@ def test_an_early_finisher_is_told_how_much_time_is_left() -> None:
     assert "8 of 60 minutes" in kernel._time_used_note()
     kernel.remaining_seconds = lambda: 600.0  # type: ignore[method-assign]
     assert kernel._time_used_note() == ""
+
+
+def test_a_heredoc_shell_probe_is_an_inline_snippet() -> None:
+    from karox.completion_gate import _inline_probe
+
+    assert _inline_probe(["bash", "-lc", "cat > /tmp/p.cc <<'EOF'\nint main(){}\nEOF\ng++ /tmp/p.cc"])
+    assert not _inline_probe(["bash", "-lc", "make -C /app test"])
+    assert _inline_probe(["python", "-c", "print(1)"])

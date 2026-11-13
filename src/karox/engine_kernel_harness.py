@@ -379,6 +379,11 @@ class EngineHarnessMixin:
         """
 
         pieces = list(completion_gate.floor(self.core, record))
+        # A review nothing can produce (no Git) is not the model's to fix:
+        # naming it sent the TB 4.1 mvcc run off to hand-craft a diff.
+        unproducible = completion_gate.NO_PRODUCER + "current change review"
+        if unproducible in pieces:
+            pieces = [p for p in pieces if p not in (unproducible, "missing current change review")]
         failed: List[Dict[str, Any]] = []
         # A map from an older state is worse than none: "missing current check"
         # means no check ran on these bytes, and showing a failure the last

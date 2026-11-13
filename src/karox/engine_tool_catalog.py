@@ -77,16 +77,46 @@ _DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
 }
 
 
+# The default surface is the handful of tools real runs use. 66 benchmark
+# trajectories (2026-11-13, 4658 calls): checks_run, repo_search,
+# repo_read_lines, repo_edit_file, repo_read_file, finish, git_log, git_diff,
+# repo_write_file and repo_list_files made 98.6% of all calls; skill_*,
+# runtime_status, lsp_diagnostics, plan_update, repo_inspect, repo_apply_patch,
+# tests_run, git_status, web_fetch and browser_command together made 1.4%.
+# web_fetch stays advertised (see above); skill_* follow the skill catalog.
+# Top CLIs ship 6-10 tools (Claude Code, OpenCode V2, DeepSeek Harness); every
+# extra schema is paid on every request and is one more wrong choice. Those
+# tools stay callable (known_names) and come back when the task is about them.
+_DOMAIN_TOOL_KEYWORDS.update({
+    "runtime.status": ("runtime status", "hot reload", "reload the runtime"),
+    "repo.inspect": ("architecture", "overview of the", "map of the"),
+    "repo.apply_patch": ("apply the patch", "apply this patch", "unified diff", ".patch", ".diff"),
+    "tests.run": ("focused tests",),
+    "git.status": ("git status", "staged", "unstaged", "untracked", "stash"),
+    "browser.command": (
+        "html", "browser", "web page", "webpage", "page", "pages", "css", "javascript",
+        "canvas", "website", "frontend", "front-end", "button", "click", "dom", "playwright",
+        "game", "animation", "ui",
+    ),
+    "lsp.diagnostics": ("type error", "type errors", "type check", "typecheck", "mypy", "pyright", "diagnostics", "lsp"),
+})
+#: Tools shown only in the named modes (plan.update is a planning surface).
+_MODE_TOOLS: Dict[str, frozenset[str]] = {"plan.update": frozenset({"plan"})}
+
+
 def _tool_relevant_for_task(
     core_name: str, task: str, *, visual: bool = False, mode: Optional[str] = None
 ) -> bool:
     """Whether this tool's schema belongs on the request for this task."""
 
+    modes = _MODE_TOOLS.get(core_name)
+    if modes is not None:
+        return (mode or "") in modes
     keywords = _DOMAIN_TOOL_KEYWORDS.get(core_name)
     if keywords is None:
         return True
-    if visual:
-        # Image tasks commonly fetch a library or an asset.
+    if visual and core_name in {"browser.command", "web.fetch", "disk.scan", "disk.plan_cleanup", "repo.command"}:
+        # Image tasks commonly fetch a library or an asset and check a page.
         return True
     text = f"{task} {mode or ''}".lower()
     for word in keywords:

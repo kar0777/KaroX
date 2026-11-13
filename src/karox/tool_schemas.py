@@ -215,7 +215,9 @@ def additional_tool_definitions(
         ),
         "repo.read_lines": ToolDefinition(
             "repo.read_lines",
-            "Read a bounded line range of a UTF-8 repository file.",
+            "Read a UTF-8 repository file: the whole file by default (up to "
+            "1500 lines), or the window start/count; rev reads it as of a "
+            "commit, tag or branch.",
             Capability.REPO_READ,
             False,
             {

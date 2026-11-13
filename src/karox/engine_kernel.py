@@ -738,7 +738,28 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 mode=self.mode,
             )
             and (core_name != "lsp.diagnostics" or self._language_server_available)
+            and self._surface_tool_advertised(core_name)
         ) + (_finish_provider_tool(),)
+
+    def _surface_tool_advertised(self, core_name: str) -> bool:
+        """Redundant schemas stay off the wire; skill schemas follow the prompt.
+
+        The catalog in the system prompt already lists every skill, so
+        skill.list is redundant; skill.load is the one entry point. skill.read
+        and skill.run serve an active skill. Hidden ones stay callable.
+        """
+
+        if core_name == "repo.read_file":
+            # repo.read_lines reads the whole file by default (1500 lines) as
+            # plain anchor-safe lines; two read tools were one more choice.
+            return "repo.read_lines" not in self._definitions
+        if not core_name.startswith("skill."):
+            return True
+        if core_name == "skill.load":
+            return "AVAILABLE SKILLS" in self.system_prompt
+        if core_name in {"skill.read", "skill.run"}:
+            return "<karox-skill " in self.system_prompt
+        return False
 
     def _engine_context_budget(self) -> int:
         """The engine's compaction budget in the engine's own token units.

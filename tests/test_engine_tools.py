@@ -135,9 +135,11 @@ def test_cli_engine_run_advertises_and_executes_browser_command(
             _response((_finish_call("c4", "created hello.txt with hi"),)),
         ],
     )
+    arguments = _agent_run_args(repository)
+    arguments[arguments.index("--task") + 1] = "read the intro of the local web page and create hello.txt with hi"
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        code = cli.main(_agent_run_args(repository))
+        code = cli.main(arguments)
     assert code == 0
     # The stable browser.command surface is advertised under its provider alias.
     assert "browser_command" in _request_tools(provider.requests[0])
@@ -206,7 +208,8 @@ def test_cli_engine_run_hides_desktop_tools_from_write_sessions(
     assert code == 0
     advertised = _request_tools(provider.requests[0])
     assert "desktop_status" not in advertised
-    assert "browser_command" in advertised
+    # A plain file task names no page, so the browser schema is not paid for.
+    assert "browser_command" not in advertised
     # The refused call came back as a denial observation, not a contract report.
     assert "denied" in _request_text(provider.requests[1]).lower()
     _, report = _parse_stream(output.getvalue())
