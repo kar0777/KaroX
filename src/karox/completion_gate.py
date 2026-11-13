@@ -244,6 +244,16 @@ def floor(core: Any, record: Any) -> list[str]:
                 f'existing test files changed although the task says "{quoted}": '
                 f"{', '.join(touched[:4])} (restore their original content)"
             )
+    else:
+        from . import original_tests
+
+        try:
+            hidden = original_tests.regressions(core, record)
+        except Exception:  # noqa: BLE001 - a comparison that cannot run proves nothing
+            hidden = None
+        open_cases = original_tests.undeclared(hidden or [], outdated)
+        if open_cases:
+            reasons.append(original_tests.reason(open_cases))
     #: The most recent successful ``git.diff`` is the review the run is
     #: handing over. It counts only when the trusted Core recorded a complete
     #: scope against the session's own start revision (see

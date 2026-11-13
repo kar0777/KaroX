@@ -460,7 +460,9 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     resume_messages=resume_messages,
                     system_prompt=self.system_prompt,
                     instance_contract="Solve the task in the repository above.",
-                    finish_checklist="" if resume_messages else self._finish_checklist(record),
+                    finish_checklist=""
+                    if resume_messages
+                    else self._task_dossier(record) + self._finish_checklist(record),
                 )
             except _EngineBudgetExceeded as exc:
                 return self._finish(
@@ -665,6 +667,24 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
 
 
     # -- construction helpers ----------------------------------------------
+
+    def _task_dossier(self, record: Any) -> str:
+        """Candidate files, the functions they hold and their tests, found before step one.
+
+        Sits in the cached first message. ``KAROX_TASK_DOSSIER=0`` turns it off
+        for an ablation run.
+        """
+
+        if os.environ.get("KAROX_TASK_DOSSIER", "1") == "0":
+            return ""
+        try:
+            from . import task_dossier
+
+            text = task_dossier.build(self.core, str(getattr(record, "task", "") or ""))["text"]
+        except Exception:  # noqa: BLE001 - optional context never stops a run
+            logger.debug("task dossier failed", exc_info=True)
+            return ""
+        return f"\n\n<karox_dossier>\n{text}\n</karox_dossier>" if text else ""
 
     def _may_call(self, definition: ToolDefinition) -> bool:
         required = (definition.capability, *definition.additional_capabilities)

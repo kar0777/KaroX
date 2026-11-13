@@ -170,3 +170,52 @@ def test_history_reads_are_one_call(tmp_path: Path) -> None:
     for bad in ("--output=x", "a b", "../x"):
         with pytest.raises(Exception):
             core._read_lines({"path": "core.py", "rev": bad}, 30)
+
+
+def test_an_edited_test_file_does_not_hide_a_regression(tmp_path: Path) -> None:
+    """Benchmark 2026-11-13 (click-3239, 4/4 failures): a broken case was edited to pass."""
+
+    import hashlib
+
+    from karox import original_tests
+
+    old_test = b"from mod import f\n\ndef test_one():\n    assert f(1) == 1\n\ndef test_two():\n    assert f(2) == 2\n"
+    core = _runtime(tmp_path, {"mod.py": b"def f(x):\n    return x\n", "tests/test_mod.py": old_test})
+    repo = core.repository
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    (repo / "mod.py").write_text("def f(x):\n    return 1\n")
+    (repo / "tests/test_mod.py").write_bytes(old_test.replace(b"f(2) == 2", b"f(2) == 1"))
+    edit = {"core_name": "repo.edit_file", "result": {"ok": True, "data": {
+        "path": "tests/test_mod.py", "previous_sha256": hashlib.sha256(old_test).hexdigest()}}}
+    record = SimpleNamespace(
+        task="Make f constant.", requirements=[], changed_files=["mod.py", "tests/test_mod.py"],
+        created_files=[], provider_history=[edit],
+    )
+    found = original_tests.regressions(core, record)
+    assert found is not None and [n.split("::")[-1] for n in found] == ["test_two"]
+    assert original_tests.undeclared(found, frozenset({"test_two"})) == []
+    assert "test_two" in original_tests.reason(found)
+    assert (repo / "tests/test_mod.py").read_bytes() != old_test  # the agent's bytes are back
+
+
+def test_the_dossier_finds_the_function_a_task_is_about(tmp_path: Path) -> None:
+    """Benchmark 2026-11-13: 36% of steps searched for code the task names."""
+
+    from karox import task_dossier
+
+    files = {
+        "pkg/core.py": SOURCE.replace(b"flag_value", b"flag_value  # flag_value"),
+        "pkg/other.py": b"def unrelated():\n    return 2\n",
+        "tests/test_core.py": b"from pkg.core import Option\n\ndef test_flag_value():\n    Option.flag_value\n",
+    }
+    core = _runtime(tmp_path, files)
+    git = ["git", "-C", str(core.repository), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    task = "Option ignores `flag_value` when default is True\n\nThe `flag_value` is dropped."
+    dossier = task_dossier.build(core, task)
+    assert [f["path"] for f in dossier["files"]][:1] == ["pkg/core.py"]
+    assert "get_default" in dossier["text"] and "tests/test_core.py" in dossier["text"]
+    assert "pkg/other.py" not in dossier["text"]
