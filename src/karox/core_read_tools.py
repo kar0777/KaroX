@@ -226,6 +226,24 @@ class CoreReadToolsMixin:
             relative = resolved.relative_to(self.repository).as_posix()
             if relative not in relatives:
                 relatives.append(relative)
+        rev = arguments.get("rev")
+        if rev is not None:
+            # A past change, not the working tree: one call shows what a commit
+            # (or an A..B range) did to the given paths. Benchmark 2026-11-13
+            # (click-3239 v40): seven windowed reads of an old revision to
+            # reconstruct one commit's change. It is not review evidence.
+            if not isinstance(rev, str) or not (_REVISION.fullmatch(rev) or _REVISION_RANGE.fullmatch(rev)):
+                raise InvalidCommand("rev must be a commit, tag, branch or A..B range")
+            if staged or complete:
+                raise InvalidCommand("rev cannot be combined with staged or complete")
+            if ".." in rev:
+                history = ["diff", "--no-ext-diff", "--no-color", rev]
+            else:
+                history = ["show", "--no-ext-diff", "--no-color", "--format=%h %s%n", rev]
+            result = self._git([*history, "--", *relatives], deadline_seconds)
+            result["rev"] = rev
+            result["paths"] = list(relatives)
+            return result
         if complete:
             if staged:
                 raise InvalidCommand("complete cannot be combined with staged")

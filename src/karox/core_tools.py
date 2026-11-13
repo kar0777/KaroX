@@ -351,13 +351,15 @@ class ExtendedCoreRuntime(
             description=(
                 "Read the current Git diff, optionally limited to given paths, "
                 "or the whole change since the session's start revision when "
-                "complete=true."
+                "complete=true. With rev, read a past change instead: what one "
+                "commit did, or an A..B range (e.g. v8.2.1..v8.3.0)."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "staged": {"type": "boolean"},
                     "paths": {"type": "array", "items": {"type": "string"}},
+                    "rev": {"type": "string"},
                     "complete": {
                         "type": "boolean",
                         "description": (
