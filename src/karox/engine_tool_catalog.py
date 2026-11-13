@@ -103,61 +103,35 @@ def _finish_provider_tool() -> ProviderTool:
     return ProviderTool(
         FINISH_TOOL_NAME,
         (
-            "Submit the final answer and end the task. Arguments: "
-            '{"answer": "<final answer text>"}. When the task asks for a '
-            "file's contents in the reply (e.g. \"reply with the complete code "
-            'in one code block"), list that file in "answer_files": KaroX '
-            "appends its exact bytes as a fenced code block, so never paste the "
-            "file into answer; keep answer empty when the reply must contain "
-            "only the code. A file the task only asks you to save or create "
-            'stays out of the reply. A web deliverable may also carry "requirements": '
-            "entries for the requirement IDs KaroX lists, quoting results you "
-            "already have; the list is advisory and only an unmet entry keeps "
-            "the run open. After an accepted finish you cannot continue working."
+            'Submit the final answer and end the task. Arguments: {"answer": "<final answer text>"}. When the task asks '
+            "for a file's contents in the reply (e.g. \"reply with the complete code in one code block\"), list that file "
+            'in "answer_files": KaroX appends its exact bytes as a fenced code block, so never paste the file into answer; '
+            "keep answer empty when the reply must contain only the code. A file the task only asks you to save or create "
+            'stays out of the reply. A web deliverable may also carry "requirements": entries for the requirement IDs KaroX '
+            "lists, quoting results you already have; the list is advisory and only an unmet entry keeps the run open. "
+            "After an accepted finish you cannot continue working."
         ),
         {
             "type": "object",
             "properties": {
-                "answer": {
-                    "type": "string",
-                    "description": (
-                        "The final answer to report to the user. May be empty "
-                        "when answer_files carries the whole reply."
-                    ),
-                },
-                "answer_files": {
-                    "type": "array",
-                    "description": (
-                        "Only files whose complete contents the task asks to "
-                        "see in the reply (not files it only asks to save); "
-                        "each is appended verbatim as one fenced code block "
-                        "after answer."
-                    ),
-                    "items": {"type": "string"},
-                },
-                "requirements": {
-                    "type": "array",
-                    "description": (
-                        "Requirement attestation for a web deliverable, one entry "
-                        "per listed requirement ID. status verified: observed is "
-                        "text copied exactly from a browser_command, checks_run or "
-                        "visual_check result received after your last edit. "
-                        "not_applicable: observed says why the line asks nothing "
-                        "of the deliverable. unmet: the requirement is not met."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["verified", "not_applicable", "unmet"],
-                            },
-                            "observed": {"type": "string"},
-                        },
-                        "required": ["id", "status", "observed"],
-                    },
-                },
+                "answer": {"type": "string", "description": (
+                    "The final answer to report to the user. May be empty when answer_files carries the whole reply.")},
+                "answer_files": {"type": "array", "items": {"type": "string"}, "description": (
+                    "Only files whose complete contents the task asks to see in the reply (not files it only asks to "
+                    "save); each is appended verbatim as one fenced code block after answer.")},
+                "superseded_tests": {"type": "array", "description": (
+                    "Existing tests that assert the old behaviour the task explicitly changes and now fail for that "
+                    "reason; reason quotes the task sentence verbatim."), "items": {
+                    "type": "object", "properties": {"test": {"type": "string"}, "reason": {"type": "string"}},
+                    "required": ["test", "reason"]}},
+                "requirements": {"type": "array", "description": (
+                    "Requirement attestation for a web deliverable, one entry per listed requirement ID. status "
+                    "verified: observed is text copied exactly from a browser_command, checks_run or visual_check "
+                    "result received after your last edit. not_applicable: observed says why the line asks nothing "
+                    "of the deliverable. unmet: the requirement is not met."), "items": {
+                    "type": "object", "properties": {"id": {"type": "string"}, "status": {
+                        "type": "string", "enum": ["verified", "not_applicable", "unmet"]}, "observed": {"type": "string"}},
+                    "required": ["id", "status", "observed"]}},
             },
             "required": ["answer"],
             "additionalProperties": False,

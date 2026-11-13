@@ -77,7 +77,7 @@ def stream_error_kind(error_body: Any) -> ProviderErrorKind:
         token in combined for token in ("authentication", "permission", "unauthorized", "forbidden")
     ):
         return ProviderErrorKind.AUTHENTICATION
-    if status == 402:
+    if status == 402 and "insufficient_quota" not in combined:
         # The ladder has to agree with the status path, which reads an explicit
         # 402 as an exhausted allowance rather than a permission problem.
         return ProviderErrorKind.BUDGET_EXCEEDED

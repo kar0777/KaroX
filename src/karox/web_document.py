@@ -117,7 +117,8 @@ def check_page(page: pathlib.Path) -> list[str]:
                 # An absolute path is served from a server root this check cannot
                 # know; only a relative target can be proved missing here.
                 continue
-            target = (page.parent / specifier).resolve()
+            # A cache-busting query or a fragment is not part of the file name.
+            target = (page.parent / specifier.split('?', 1)[0].split('#', 1)[0]).resolve()
             if not target.exists():
                 problems.append(
                     f"{page.name}: imports {specifier!r}, which does not exist"
@@ -197,6 +198,27 @@ def _top_level_declarations(source: str) -> list[str]:
             if source[index + 1] == "*":
                 end = source.find("*/", index + 2)
                 index = length if end < 0 else end + 2
+                continue
+            before = source[:index].rstrip()
+            if not before or before[-1] in "(,=:[!&|?{};+-*%<>~^" or re.search(
+                r"\b(?:return|typeof|case|in|of|void|delete)$", before
+            ):
+                # A regex literal: "/^https?:\/\//" holds "//" that is not a
+                # comment, and skipping its line lost a "{" (false redeclaration).
+                index += 1
+                in_class = False
+                while index < length and source[index] != "\n":
+                    if source[index] == "\\":
+                        index += 2
+                        continue
+                    if source[index] == "[":
+                        in_class = True
+                    elif source[index] == "]":
+                        in_class = False
+                    elif source[index] == "/" and not in_class:
+                        index += 1
+                        break
+                    index += 1
                 continue
         if char == "{":
             depth += 1
@@ -278,7 +300,53 @@ def _duplicate_declarations(name: str, text: str) -> list[str]:
                     "been declared\" before the page runs"
                 )
             seen.add(declared)
+        if "BufferGeometry" in source and len(re.findall(r"\b(?:const|let|var)\s+ind(?:ex|ices)\w*\s*=\s*\[\s*\]", source)) > source.count("setIndex("):
+            problems.append(f"{name}: fills an index list for a BufferGeometry but never calls setIndex(); every three positions then draw as one triangle and the mesh renders as scattered shards")
+        torn = _jittered_polyhedron(source)
+        if torn:
+            problems.append(f"{name}: moves each vertex of {torn} by its own random amount, but that geometry keeps a separate copy of every corner for each face, so the faces split apart and the solid renders cracked; merge first (BufferGeometryUtils.mergeVertices from three/addons/utils/BufferGeometryUtils.js) or displace by a function of the vertex position")
     return problems
+
+
+_POLYHEDRON = re.compile(r"(?:const|let|var)\s+(\w+)\s*=\s*new\s+(?:THREE\.)?((?:Icosahedron|Dodecahedron|Octahedron|Tetrahedron)Geometry)\(")
+_ZERO_ARG_RANDOM = re.compile(r"\b\w*(?:random|rand|rnd|seed|jitter)\w*\s*\(\s*\)", re.IGNORECASE)
+
+
+def _jittered_polyhedron(source: str) -> Optional[str]:
+    """The built-in polyhedron a loop displaces vertex by vertex at random.
+
+    Since three.js r125 these geometries are not indexed: a corner shared by
+    five faces is five vertices, and an independent random offset per vertex
+    tears the faces apart (the 2026-11-12 aquarium shipped cracked stones this
+    way; 3 of 888 earlier pages did it, all broken). An offset computed from the
+    position moves every copy alike and is not reported.
+    """
+
+    if "mergeVertices" in source:
+        return None
+    for made in _POLYHEDRON.finditer(source):
+        tail = source[made.end() : made.end() + 1500]
+        attribute = re.search(
+            r"(?:const|let|var)\s+(\w+)\s*=\s*" + re.escape(made.group(1))
+            + r"\.(?:attributes\.position|getAttribute\(\s*['\"]position['\"]\s*\))",
+            tail,
+        )
+        if not attribute:
+            continue
+        name = re.escape(attribute.group(1))
+        rest = tail[attribute.end() :]
+        loop = re.search(r"for\s*\([^)]*" + name + r"\.count[^)]*\)\s*\{", rest)
+        if not loop:
+            continue
+        body, depth = rest[loop.end() :], 1
+        for index, char in enumerate(body):
+            depth += (char == "{") - (char == "}")
+            if not depth:
+                body = body[:index]
+                break
+        if _ZERO_ARG_RANDOM.search(body) and re.search(name + r"\.set(?:XYZ|X|Y|Z)\(", body):
+            return made.group(2)
+    return None
 
 def _document_problems(name: str, text: str) -> list[str]:
     """Whether this is one complete document rather than the middle of one.

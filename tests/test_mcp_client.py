@@ -241,6 +241,9 @@ def http_server(tmp_path_factory: pytest.TempPathFactory) -> Any:
         yield SimpleNamespace(root=tmp_path_factory.mktemp("mcp-http"), port=port, token=token)
     finally:
         server.should_exit = True
+        # Idle keep-alive client connections held the graceful shutdown until
+        # the 10 s join gave up; nothing is in flight once the module is done.
+        server.force_exit = True
         thread.join(timeout=10)
         if previous is None:
             os.environ.pop("KAROX_MCP_HTTP_TOKEN", None)

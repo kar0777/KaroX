@@ -86,13 +86,7 @@ def _looks_numeric(value: str) -> bool:
     return True
 
 def _accepts_prompt_cache_key(endpoint: str) -> bool:
-    """Only OpenAI's own Chat Completions host documents ``prompt_cache_key``.
-
-    A gateway that rejects the unknown field would trigger the optional-tuning
-    retry, which also drops ``reasoning_effort`` and ``stream_options`` -- a
-    weaker request and no usage report -- to gain nothing: other hosts cache by
-    prefix without the routing hint.
-    """
+    """Only OpenAI's host takes ``prompt_cache_key``; elsewhere it goes as ``user`` (Synthetic cached 0/4 calls without it, 3/4 with)."""
 
     host = (urlsplit(endpoint).hostname or "").lower()
     return host == "api.openai.com"
@@ -102,6 +96,7 @@ _OPTIONAL_TUNING_KEYS = (
     "reasoning",
     "temperature",
     "prompt_cache_key",
+    "user",
     "parallel_tool_calls",
     "stream_options",
 )
@@ -116,6 +111,15 @@ def _replays_reasoning(payload: Mapping[str, Any]) -> bool:
         isinstance(item, Mapping) and _REPLAYED_REASONING_KEY in item
         for item in messages
     )
+
+def _not_a_shape_error(exc: "ProviderError") -> bool:
+    """A 400 that no change of request fields can cure: too much context."""
+
+    text = str(exc).lower()
+    return getattr(exc, "status_code", None) == 413 or any(
+        marker in text for marker in ("context_length", "context_window", "too_many_tokens")
+    )
+
 
 def _has_optional_tuning(payload: Mapping[str, Any]) -> bool:
     return any(key in payload for key in _OPTIONAL_TUNING_KEYS) or _replays_reasoning(
@@ -238,6 +242,8 @@ def _vendor_error_codes(response: httpx.Response) -> tuple[str, ...]:
             text = value if key != "param" else f"param={value}"
             if text not in codes:
                 codes.append(text)
+    if "exceeded your current quota" in str(error.get("message") or "") and "insufficient_quota" not in codes:
+        codes.append("insufficient_quota")  # a LiteLLM proxy keeps only the vendor's message (HARD12 tb2)
     return tuple(codes)
 
 class ProviderError(RuntimeError):

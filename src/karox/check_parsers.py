@@ -343,10 +343,16 @@ def _pytest_section_for(
 ) -> Optional[tuple[str, str, Optional[int], Optional[int], str]]:
     if not tail:
         return None
-    for section in sections:
-        name = section[0]
-        if name == tail or name.endswith(tail) or (tail and tail in name):
-            return section
+    # Exact first, then a whole trailing name, then a substring: a bare
+    # substring pass let "test_parse" take the section of "test_parse_long".
+    for accept in (
+        lambda name: name == tail,
+        lambda name: name.endswith(("." + tail, "::" + tail, " " + tail)),
+        lambda name: tail in name,
+    ):
+        for section in sections:
+            if accept(section[0]):
+                return section
     return None
 
 def _first_error_line(block: str) -> str:

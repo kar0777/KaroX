@@ -173,6 +173,13 @@ def _elided_argument_marker(name: str) -> str:
     )
 
 
+def _unparsed_argument_marker(name: str) -> str:
+    return json.dumps(
+        {"_karo_context_manager": f"{name} arguments were not valid JSON and were not run"},
+        ensure_ascii=False,
+    )
+
+
 def _completed_calls(
     messages: Sequence[Mapping[str, Any]],
 ) -> List[tuple[str, str, int]]:
@@ -227,11 +234,16 @@ def _elide_applied_arguments(call: ToolCall, *, elided: Set[str]) -> ToolCall:
 #: output-limit branch is the engine's own text so a truncated response gets
 #: the same recovery it had in the race.
 _FORMAT_ERROR_TEMPLATE = (
-    '{% if finish_reason is defined and finish_reason in ["length", "tool_calls"] -%}\n'
+    # Only "length" is a cut: "tool_calls" ends every call-carrying response,
+    # and calling an unknown tool or bad JSON a cut hid the real error.
+    '{% if finish_reason is defined and finish_reason == "length" -%}\n'
     "Your previous response reached the output token limit "
     "(finish_reason={{ finish_reason }}) before you produced a complete tool "
-    "call, so it was cut off. Respond more concisely and emit exactly one tool "
-    "call for the next action.\n"
+    "call, so it was cut off and none of it was kept. Do not re-plan the whole "
+    "task or draft a whole file in your thinking: that does not fit in one "
+    "response. Decide only the next step briefly and emit exactly one tool call "
+    "for it; for a large new file, write its first part now (a few hundred "
+    "lines) and add the rest with mode=append in later calls.\n"
     "{%- else -%}\n"
     "Format error:\n\n"
     "<error>\n{{ error }}\n</error>\n\n"
@@ -905,11 +917,23 @@ class EngineProviderModel:
     ) -> Dict[str, Any]:
         message: Dict[str, Any] = {"role": "assistant", "content": response.content}
         if response.tool_calls:
+            # A call whose arguments did not parse is replayed with valid JSON:
+            # gateways reject a history that carries a broken arguments string
+            # (the aquarium step-31 400), and every later request would fail.
+            broken = {
+                str(action.get("tool_call_id") or "")
+                for action in actions
+                if action.get("parse_error")
+            }
             message["tool_calls"] = [
                 {
                     "call_id": call.call_id,
                     "name": call.name,
-                    "raw_arguments": call.raw_arguments,
+                    "raw_arguments": (
+                        _unparsed_argument_marker(call.name)
+                        if call.call_id in broken
+                        else call.raw_arguments
+                    ),
                 }
                 for call in response.tool_calls
             ]

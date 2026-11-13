@@ -71,6 +71,7 @@ from .engine_tool_bodies import (  # noqa: E402,F401
     _compact_diff as _compact_diff,
     _mutation_body as _mutation_body,
     _checks_body as _checks_body,
+    _plain_body as _plain_body,
     _failed_check_report as _failed_check_report,
 )
 from .models import CoreCommand, CoreResult
@@ -219,12 +220,9 @@ class EngineAttachMixin:
             if data.get("probe") is True:
                 detail += " · probe (not verification evidence)"
             if core_name == "tests.run":
-                suite = data.get("suite")
-                count = data.get("target_count")
-                if isinstance(suite, str):
-                    detail += f" · {suite}"
-                if isinstance(count, int) and not isinstance(count, bool):
-                    detail += f" · {count} target(s)"
+                suite, count = data.get("suite"), data.get("target_count")
+                detail += (f" · {suite}" if isinstance(suite, str) else "") + (
+                    f" · {count} target(s)" if isinstance(count, int) and not isinstance(count, bool) else "")
             text = f"[{core_name} {detail}]\n{text}".strip()
             if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
                 returncode = exit_code if exit_code > 0 else 1
@@ -248,21 +246,12 @@ class EngineAttachMixin:
             text = _mutation_body(core_name, data, result.ok)
         elif core_name == "visual.check":
             text = _visual_check_body(data, result.ok)
+        elif result.ok and (plain := _plain_body(core_name, data)) is not None:
+            text = plain
         else:
-            visible = {
-                key: value
-                for key, value in data.items()
-                if key not in _BOOKKEEPING_KEYS
-            }
-            text = json.dumps(
-                {
-                    "ok": result.ok,
-                    "data": visible,
-                    "evidence": [item.evidence_id for item in result.evidence],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+            visible = {key: value for key, value in data.items() if key not in _BOOKKEEPING_KEYS}
+            text = json.dumps({"ok": result.ok, "data": visible, "evidence": [item.evidence_id for item in result.evidence]},
+                              ensure_ascii=False, sort_keys=True)
             line = data.get("affected_tests_line")
             if isinstance(line, str) and line:
                 # The verdict of the tests that failed goes before the JSON:

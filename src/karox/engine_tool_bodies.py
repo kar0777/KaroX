@@ -17,6 +17,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from . import check_baseline
 from .check_report import render_failure_map
 from .test_output import (  # noqa: E402
     CONDENSED_MAX_CHARS_WITH_MAP,
@@ -483,6 +484,19 @@ def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:
             lines.append("failed")
     return "\n".join(lines)
 
+def _plain_body(core_name: str, data: Mapping[str, Any]) -> Optional[str]:
+    """Plain text for search/listing/git results: the JSON envelope (pids, hashes, escaped newlines) cost ~2x the tokens."""
+    if core_name == "repo.search" and isinstance(data.get("matches"), list):
+        head = f"[repo.search {data.get('query')!r}: {data.get('match_count')} match(es) in {data.get('files_scanned')} file(s){', truncated' if data.get('truncated') else ''}]"
+        return "\n".join([head] + [f"{m.get('path')}:{m.get('line')}: {m.get('text')}{' …' if m.get('clipped') else ''}" for m in data["matches"] if isinstance(m, dict)])
+    if core_name == "repo.list_files" and isinstance(data.get("files"), list) and all(isinstance(f, str) for f in data["files"]):
+        return "\n".join([f"[repo.list_files{' truncated' if data.get('truncated') else ''}]"] + data["files"])
+    if core_name.startswith("git.") and isinstance(data.get("stdout"), str):
+        cut = " · output truncated" if data.get("stdout_truncated") else ""
+        err = str(data.get("stderr") or "").strip()
+        return f"[{core_name} exit {data.get('exit_code')}{cut}]\n{data['stdout']}" + (f"\n[stderr]\n{err}" if err else "")
+    return None
+
 def _checks_body(data: Mapping[str, Any]) -> str:
     """What the model reads for one finished check.
 
@@ -515,6 +529,9 @@ def _checks_body(data: Mapping[str, Any]) -> str:
         text = f"{text}\n[stderr]\n{secondary}" if text.strip() else secondary
     if rendered:
         text = f"{rendered}\n{text}" if text.strip() else rendered
+    note = "\n".join(p for p in (check_baseline.render(data), str(data.get("detail") or "")) if p)
+    if note:
+        text = f"{note}\n{text}" if text.strip() else note
     return text
 
 def _failed_check_report(record: Any) -> Optional[Dict[str, Any]]:
@@ -539,7 +556,7 @@ def _failed_check_report(record: Any) -> Optional[Dict[str, Any]]:
             result.get("ok") is True
             and data.get("exit_code") == 0
             and not data.get("timed_out")
-        )
+        ) or data.get("preexisting_only") is True
         if passed:
             return None
         report = data.get("failure_map")

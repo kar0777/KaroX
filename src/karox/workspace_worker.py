@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .check_report import analyze as analyze_check_output
 from .check_report import is_test_path
+from .core_process import STALLED_TEST_SECONDS
 from .core_types import InvalidCommand
 from .models import EvidenceRecord
 from .unified_patch import execute_apply_patch, expected_map, parse_unified_patch
@@ -19,6 +20,7 @@ from .workspace_transaction import MAX_BATCH_OPERATIONS, WorkspaceTransaction
 
 
 MAX_TEST_TARGETS = 200
+FOCUSED_TESTS_MAX_SECONDS = 300.0
 WORKER_PROTOCOL_VERSION = 1
 
 
@@ -392,11 +394,8 @@ def execute_tests(
     timeout_value = _finite_number(timeout, "timeout_seconds")
     if timeout_value <= 0:
         raise InvalidCommand("timeout_seconds must be a positive finite number")
-    effective = min(
-        timeout_value,
-        float(deadline_seconds),
-        runtime.MAX_PROCESS_TIMEOUT_SECONDS,
-    )
+    effective = min(timeout_value, float(deadline_seconds), runtime.MAX_PROCESS_TIMEOUT_SECONDS,
+                    FOCUSED_TESTS_MAX_SECONDS if suite == "focused" else float("inf"))
 
     test_root = runtime.repository / "tests"
     has_python_tests = test_root.is_dir() and bool(_test_files(runtime.repository))
@@ -484,6 +483,8 @@ def execute_tests(
             raise InvalidCommand("full suite does not accept split or part")
 
     result = runtime._run(argv, effective, keep_full=True)
+    if result.get("timed_out"):  # the faulthandler stack (core_process._run) names the hung test
+        result["detail"] = f"timed out after {effective:.0f}s: a test running over {STALLED_TEST_SECONDS}s has its stack under [stderr]; deselect it (-k) or run narrower targets, do not raise the timeout"
     result.update(
         {
             "suite": suite,

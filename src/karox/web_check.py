@@ -190,6 +190,18 @@ def _shared_browser() -> Optional[tuple[Any, Any]]:
             except Exception:
                 pass
         _close_shared_browser_locked()
+        # The configured executable is accepted only by browser_bootstrap:
+        # official Playwright installation, or explicit SHA-pinned host approval.
+        # Never let the repository, a PATH entry or model text choose a browser.
+        from .browser_bootstrap import playwright_chromium_status
+
+        # Resolve it BEFORE this thread starts Playwright: the status check
+        # starts its own sync_playwright(), and a second sync_playwright() in a
+        # thread that already runs one raises ("Sync API inside the asyncio
+        # loop"), which made every render report playwright_unavailable.
+        status = playwright_chromium_status()
+        if not status.ready or not status.executable:
+            return None
         try:
             from playwright.sync_api import sync_playwright
 
@@ -197,16 +209,6 @@ def _shared_browser() -> Optional[tuple[Any, Any]]:
         except Exception:
             return None
         from .browser.render_backend import launch_args, software_args
-
-        # The configured executable is accepted only by browser_bootstrap:
-        # official Playwright installation, or explicit SHA-pinned host approval.
-        # Never let the repository, a PATH entry or model text choose a browser.
-        from .browser_bootstrap import playwright_chromium_status
-
-        status = playwright_chromium_status()
-        if not status.ready or not status.executable:
-            playwright.stop()
-            return None
         browser = None
         for args in (launch_args(), software_args()):
             try:
@@ -531,7 +533,7 @@ def pixel_payload(*, probe: dict | None, shot: bytes) -> dict:
     }
 
 
-def _render_in_browser(page: pathlib.Path) -> dict:
+def _render_in_browser(page: pathlib.Path, url: str | None = None) -> dict:
     """One render, executed in the browser thread.
 
     Returns the raw observations -- console errors, page errors, the probe and
@@ -539,7 +541,7 @@ def _render_in_browser(page: pathlib.Path) -> dict:
     :func:`render_problems` on the caller's side, where it always was.
     """
 
-    outcome = _observe_in_browser(page, settle_ms=0, frames=1)
+    outcome = _observe_in_browser(page, settle_ms=0, frames=1, url=url)
     return {
         "console_errors": outcome["console_errors"],
         "page_errors": outcome["page_errors"],
@@ -889,8 +891,14 @@ def observe_page(
         }
 
 
-def render_page(page: pathlib.Path) -> dict:
-    """Load the page in Chromium and report what a viewer would actually get."""
+def render_page(page: pathlib.Path, serve_root: pathlib.Path | None = None) -> dict:
+    """Load the page in Chromium and report what a viewer would actually get.
+
+    The page is served over loopback HTTP, the way a browser and a grader load
+    it: from ``file://`` Chromium blocks every ``<script type="module">`` by
+    CORS, so a working module page rendered as a blank scene with a console
+    error. ``serve_root`` defaults to the page's own folder.
+    """
 
     from .browser_bootstrap import playwright_chromium_status
 
@@ -898,7 +906,12 @@ def render_page(page: pathlib.Path) -> dict:
     if not status.ready:
         return {"skipped": status.error or "chromium_unavailable"}
     try:
-        outcome = _run_in_browser_thread(lambda: _render_in_browser(page))
+        from .static_server import page_url, serve_repository
+
+        root = pathlib.Path(serve_root or page.resolve().parent).resolve()
+        with serve_repository(root) as base:
+            url = page_url(base, root, page.resolve().relative_to(root).as_posix())
+            outcome = _run_in_browser_thread(lambda: _render_in_browser(page, url))
     except RuntimeError as error:
         if str(error) in {"playwright_unavailable", "the browser thread has been shut down"}:
             return {"skipped": "playwright_unavailable"}
@@ -1036,10 +1049,19 @@ def check(
     pictures = [] if pages else default_pictures(root)
     problems: list[str] = []
     rendered: dict[str, dict] = {}
+    def served_from(item: pathlib.Path) -> pathlib.Path | None:
+        # Serve from the repository root so ../vendor style links resolve as
+        # they do for a grader; a page outside it falls back to its folder.
+        try:
+            item.resolve().relative_to(pathlib.Path(root).resolve())
+        except ValueError:
+            return None
+        return pathlib.Path(root)
+
     for page in selected:
         problems.extend(check_page(page))
         if render:
-            outcome = render_page(page)
+            outcome = render_page(page, serve_root=served_from(page))
             rendered[page.name] = outcome
             problems.extend(outcome.get("problems") or [])
     for picture in pictures:
@@ -1048,7 +1070,7 @@ def check(
         if render and not found:
             # Rendered like a page, so a picture has the same browser proof:
             # loaded in Chromium, errors recorded, pixels measured.
-            outcome = render_page(picture)
+            outcome = render_page(picture, serve_root=served_from(picture))
             rendered[picture.name] = outcome
             problems.extend(outcome.get("problems") or [])
     verdict: dict[str, Any] = {

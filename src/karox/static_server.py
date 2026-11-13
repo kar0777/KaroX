@@ -43,6 +43,20 @@ class RepositoryRequestHandler(SimpleHTTPRequestHandler):
             return str(self._repository_root / "__not_found__")
         return str(candidate)
 
+    def send_head(self):  # type: ignore[no-untyped-def]
+        # Chromium requests /favicon.ico on its own for every served page. A
+        # repository without one is not a page error, but the 404 lands in the
+        # console and the checker reported it as one. Answer that automatic
+        # request with an empty 204 only when the repository has no such file.
+        if self.path.split("?", 1)[0] == "/favicon.ico" and not (
+            self._repository_root / "favicon.ico"
+        ).is_file():
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        return super().send_head()
+
     def log_message(self, format: str, *args: Any) -> None:
         # A page load is not an operator log line; stdout belongs to the agent.
         return

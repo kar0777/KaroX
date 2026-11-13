@@ -6,7 +6,7 @@ import re
 import time
 from typing import Any, Optional
 from .event_bus import EventKind, EventLevel
-from . import git_baseline
+from . import check_baseline, git_baseline
 from .core_types import (
     InvalidCommand,
 )
@@ -203,6 +203,8 @@ class CoreExecuteMixin:
                 # run began with, and neither the model nor a runtime serving
                 # another session can substitute a different base.
                 with git_baseline.session_baseline(record):
+                    # A crashed baseline swap left start bytes: restore them first.
+                    check_baseline.recover_swap(check_baseline.swap_journal_path(self.repository))
                     data = handler(
                         dict(command.arguments), float(command.deadline_seconds)
                     )
@@ -230,6 +232,8 @@ class CoreExecuteMixin:
             ok=not (
                 process_result
                 and (data.get("timed_out") or data.get("exit_code") != 0)
+                # Pre-existing failures only: real exit code, but the check holds.
+                and data.get("preexisting_only") is not True
             ),
             command=command.name,
             data=data,

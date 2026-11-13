@@ -391,6 +391,7 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
         max_output_tokens=max_output_tokens,
         pricing_registry=_load_pricing_registry(),
         reasoning_effort=budget.reasoning_effort,
+        self_review=budget.verification_rung >= 4,
         mode=args.mode,
         request_images=request_images,
         on_event=observer,

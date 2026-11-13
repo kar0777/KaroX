@@ -84,7 +84,7 @@ _TOOL_DESCRIPTION = (
     "served from this machine only: a JS expression, arrow function or "
     "statements with return; promises are awaited and the JSON value comes "
     "back, e.g. window.app.state() -- read state this way instead of writing a "
-    "probe page). Calls in one response run in order, so open, input and "
+    "probe page), census {width?} (three.js pages served from this machine: one table of every top-level object -- share of the frame it covers, screen box, disconnected pieces, main colours and brightness as drawn, world size and centre, hidden or off-camera -- plus the frame's brightness; read it instead of sampling pixels, which on a WebGL canvas read black unless the page keeps its drawing buffer; name your top-level groups). Calls in one response run in order, so open, input and "
     "reads for one check belong in the same response. A headless page pauses "
     "after a few idle seconds between actions and resumes on the next one (its "
     "clock keeps running); use wait_for {milliseconds} when it must keep "

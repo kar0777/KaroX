@@ -87,6 +87,17 @@ _MODIFIER_NAMES = {
 
 _SHORTCUT_MODIFIERS = frozenset({"Control", "Meta", "Alt"})
 
+def _on_screen(box: Mapping[str, float], view: Mapping[str, int]) -> bool:
+    """Whether the box's centre lies inside the viewport."""
+
+    width, height = view.get("width"), view.get("height")
+    if not width or not height:
+        return False
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    return 0 <= x < width and 0 <= y < height
+
+
 def _drag_offset(payload: Mapping[str, Any], name: str) -> float:
     value = payload.get(name, 0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -253,8 +264,15 @@ class BrowserInteractionMixin:
         points: dict[str, list[int]] = {}
 
         def work() -> None:
-            locator.scroll_into_view_if_needed(timeout=timeout)
+            # Scrolling waits for the element to hold still over two animation
+            # frames; on a canvas that draws one frame in 5 s (software WebGL)
+            # that wait outlasts the timeout. An element already on screen
+            # needs no scroll.
             box = locator.bounding_box(timeout=timeout)
+            view = page.viewport_size or {}
+            if not box or not _on_screen(box, view):
+                locator.scroll_into_view_if_needed(timeout=timeout)
+                box = locator.bounding_box(timeout=timeout)
             if not box:
                 raise BrowserError("drag start has no box: the element is hidden or detached")
             start_x = box["x"] + _drag_inset(payload, "x", box["width"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any, Mapping, Optional
 from ..security import redact
+from . import census
 from .errors import (
     BrowserCancelled,
     BrowserError,
@@ -382,6 +383,26 @@ class BrowserObservationMixin:
                     "function, or statements ending in return)"
                 ) from None
         result = bounded_value(redact(value))
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
+    def _census(
+        self,
+        payload: Mapping[str, Any],
+        deadline_seconds: float,
+        cancel: Optional[CancelToken],
+    ) -> dict[str, Any]:
+        """Per-object coverage of the three.js scene the page last drew (see census.py)."""
+
+        page = self._active_page()
+        if not self._is_local_page_url(str(getattr(page, "url", "") or "")):
+            raise BrowserSecurityError("census runs only on pages served from this machine (open page=...)")
+        started = time.monotonic()
+        try:
+            value = page.evaluate(census.CENSUS_JS, {"width": census.census_width(payload.get("width"))})
+        except Exception as exc:  # noqa: BLE001 - reported to the model
+            raise BrowserError(f"census failed: {str(exc)[:600]}") from None
+        result = value if isinstance(value, dict) else {"error": "census returned no table"}
         result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return result
 

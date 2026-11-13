@@ -176,3 +176,51 @@ def test_scratch_svgs_and_explicit_pages_skip_the_picture_check(tmp_path) -> Non
     verdict = check(tmp_path)
     assert verdict["checked"] == ["index.html", "logo.svg"]
     assert any(p.startswith("logo.svg:") for p in verdict["problems"])
+
+
+def test_an_index_list_never_handed_to_the_geometry_is_named(tmp_path: Path) -> None:
+    code = ("const geo = new THREE.BufferGeometry(); const indices = [];"
+            "for (let i = 0; i < 4; i++) indices.push(i, i + 1, i + 3);"
+            "geo.setAttribute('position', attr);")
+    page = _page(tmp_path, f"<script type='module'>{code}</script>")
+    assert any("never calls setIndex()" in item for item in check_page(page))
+    fixed = _page(tmp_path, f"<script type='module'>{code} geo.setIndex(indices);</script>")
+    assert not any("setIndex" in item for item in check_page(fixed))
+
+
+def test_random_offsets_on_a_polyhedron_tear_it_apart(tmp_path: Path) -> None:
+    code = ("const g = new THREE.IcosahedronGeometry(0.4, 1); const pos = g.attributes.position;"
+            "for (let i = 0; i < pos.count; i++) { const s = 0.9 + Math.random() * 0.2;"
+            " pos.setXYZ(i, pos.getX(i) * s, pos.getY(i) * s, pos.getZ(i) * s); }")
+    page = _page(tmp_path, f"<script type='module'>{code}</script>")
+    assert any("IcosahedronGeometry by its own random amount" in item for item in check_page(page))
+    merged = _page(tmp_path, f"<script type='module'>{code} mergeVertices(g);</script>")
+    assert not any("random amount" in item for item in check_page(merged))
+    by_position = code.replace("Math.random()", "Math.sin(pos.getX(i) * 9)")
+    smooth = _page(tmp_path, f"<script type='module'>{by_position}</script>")
+    assert not any("random amount" in item for item in check_page(smooth))
+
+
+def test_a_regex_literal_holding_slashes_is_not_a_comment(tmp_path: Path) -> None:
+    script = (
+        "function load(u) {\n  if (/^https?:\/\//.test(u)) { const mesh = 1; return mesh; }\n}\n"
+        "const mesh = 2;\nconst ratio = a / b / c;\n"
+    )
+    page = _page(tmp_path, "<script type='module'>" + script + "</script>")
+    assert _duplicate_lines(page) == []
+
+
+def test_an_import_with_a_cache_busting_query_resolves_to_its_file(tmp_path: Path) -> None:
+    (tmp_path / "app.js").write_text("export const a = 1;\n", encoding="utf-8")
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<script type="module">import { a } from "./app.js?v=2";</script>\n', encoding="utf-8"
+    )
+    assert not any("does not exist" in item for item in check_page(page))
+
+
+def test_a_verdict_survives_prose_braces_around_it() -> None:
+    from karox.visual_check import parse_verdict
+
+    text = 'The tank {glass} looks right.\n```json\n{"verdict": "pass", "issues": []}\n```\nNote: {none}'
+    assert parse_verdict(text) == ("pass", [])

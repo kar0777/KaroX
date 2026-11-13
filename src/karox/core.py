@@ -142,6 +142,9 @@ class CoreRuntime(
         # snippet, a test module or a repository script through checks.run.
         # They are never verification evidence (core_process.probe_python_command).
         self._allow_probes = bool(allow_probes)
+        # check_baseline: per-argv outcome on the start bytes (absent = strict gate).
+        self._check_baselines: Dict[tuple[str, ...], Any] = {}
+        self._task_test_names: frozenset[str] = frozenset()
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]
         ] = {

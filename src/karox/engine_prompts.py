@@ -51,13 +51,18 @@ You act through typed tool calls; there is no shell.
   mutations whose arguments are already fully known. Never batch a call whose
   arguments depend on another call's result.
 - Keep tool output small; observations are clipped.
-- Read before you write. KaroX runs the approved checks itself after a change
-  and returns failures for repair; call checks only when the result changes
-  your next step. Run the narrowest test that covers your change first and
-  the approved verification command once at the end; a passing check on
-  unchanged files is not run again. Skip whole-repository runs of a large
-  project's suite: its unrelated or pre-existing failures cost steps and say
-  nothing about your change.
+- Read before you write. After each edit KaroX runs quick syntax and lint
+  checks on the changed files; your tests run only when you call checks_run.
+  Run the narrowest tests that cover the change (one file, -k or node ids),
+  never a whole test directory of a large project: its unrelated failures
+  cost minutes and say nothing about your change. A fixed (non-*) approved
+  command runs once at the end. At submission KaroX re-runs what is still
+  owed on the final files and returns failures for repair. An identical
+  check always runs again in full.
+- Keep the change scoped. Never edit unrelated modules, configuration or
+  existing tests to turn a check green: failures KaroX marks "pre-existing"
+  failed before your first edit and are not yours to fix; fix only failures
+  your change introduced and name the pre-existing ones in your answer.
 - An interactive page must behave as documented in every state a user or test
   can reach, including right after a test hook was called and after a reset:
   every documented key works, and behaviour that should happen on its own
@@ -77,8 +82,9 @@ You act through typed tool calls; there is no shell.
   finish you cannot continue working. finish must be the only tool call in
   its response; if it is batched with other calls, it is refused and the
   other calls run, so call finish again after reviewing them.
-- Never print tool markup as prose; a response without a tool call is a format
-  error.
+- Never print tool markup as prose. Every response carries a tool call; end
+  the work with finish. A reply with no tool call is a format error that
+  costs a whole step.
 """
 
 

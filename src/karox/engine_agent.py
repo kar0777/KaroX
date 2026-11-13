@@ -589,7 +589,9 @@ class _EngineAgentMixin:
                 self.cost += float(
                     error.messages[0].get("extra", {}).get("cost") or 0.0
                 )
-                self.n_consecutive_format_errors += 1
+                # Deliberation that ran out of output budget is not a format failure: up to 8 cuts are retried (HARD12 tb1).
+                self._length_cuts = getattr(self, "_length_cuts", 0) + ("output token limit" in str(error.messages[0].get("content", "")))
+                self.n_consecutive_format_errors += 0 if "output token limit" in str(error.messages[0].get("content", "")) and self._length_cuts <= 8 else 1
                 if (
                     0
                     < self.config.max_consecutive_format_errors

@@ -30,7 +30,7 @@ def test_web_3d_skill_stays_general() -> None:
 
 def test_web_3d_skill_keeps_its_technique_and_scope() -> None:
     text = SKILL.read_text(encoding="utf-8").lower()
-    assert "version: 1.7.0" in text
+    assert "version: 1.9.0" in text
     assert "read the task's requirements" in text
     assert "lathegeometry" in text
     assert "depthtest: false" in text

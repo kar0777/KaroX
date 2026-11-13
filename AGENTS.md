@@ -80,7 +80,7 @@ Source, tests and the release gates are authoritative when prose disagrees.
 ```text
 python -m ruff check src tests scripts
 python -m mypy src/karox/cli.py src/karox/entrypoint.py src/karox/tui
-python -m pytest
+python -m pytest -n 8          # ~4 min in parallel (16 min serial); -n0 for a single test
 python -m build --wheel
 python scripts/check_tree.py
 ```

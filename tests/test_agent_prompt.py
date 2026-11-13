@@ -41,5 +41,11 @@ def test_system_prompt_asks_for_short_reasoning_and_no_drafts() -> None:
     draft of the files the tool call then wrote again; with this rule the same
     request took 23-42 s and mostly 0.6-1.6K reasoning tokens for files of similar size.
     """
-    assert "reasoning included" in SYSTEM_PROMPT
-    assert "the tool call is the draft" in SYSTEM_PROMPT
+    # HARD12 (2026-11-11): "minimize reasoning" also cut the problem analysis;
+    # KaroX trailed DeepSeek Harness on root cause and edge cases. Thinking about
+    # the problem is allowed again; drafting files in reasoning is still not.
+    assert "do not draft file contents" in SYSTEM_PROMPT
+    # HARD12 gha3 (v19, "think as long as needed"): +60% tokens, same solve rate;
+    # v20 keeps the economy rule and the root-cause/edge-case guidance.
+    assert "correctness comes first" in SYSTEM_PROMPT
+    assert "find the root cause" in SYSTEM_PROMPT

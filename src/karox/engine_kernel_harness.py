@@ -114,7 +114,9 @@ class EngineHarnessMixin:
             ]
             if not commands:
                 return ()
-            argv = [item for item in commands[0] if item != "*"]
+            # A wildcard grant is not a command: stripping "*" ran a whole large
+            # suite (10 min on HARD12). Re-run the model's last passing check instead.
+            argv = _last_passing_check(record) or [item for item in commands[0] if item != "*"]
             if not argv:
                 return ()
             calls.append(("checks.run", {"argv": argv}))
@@ -291,14 +293,14 @@ class EngineHarnessMixin:
         refusals = int(getattr(environment, "_coverage_refusals", 0) or 0)
         return refusals >= COVERAGE_REFUSAL_LIMIT
 
-    def _append_repair_prompt(self, agent: EngineAgent, failure: str) -> None:
+    def _append_repair_prompt(self, agent: EngineAgent, failure: str, prompt: str = "") -> None:
         """Give the model one bounded repair turn with the failure in front."""
         last_assistant: Optional[Dict[str, Any]] = None
         for message in reversed(agent.messages):
             if message.get("role") == "assistant":
                 last_assistant = message
                 break
-        prompt = (
+        prompt = prompt or (
             "Verification failed after your finish. Repair the work and call "
             "finish again.\n\nFailure summary:\n"
             f"{failure}\n\n"
@@ -341,6 +343,32 @@ class EngineHarnessMixin:
         if not delivered:
             agent.add_messages({"role": "user", "content": prompt, "kind": "engine_repair"})
 
+    def _unopened_files_note(self, agent: Any, session_id: str) -> str:
+        """Point the review at files the task names but the run never opened."""
+
+        try:
+            from . import task_files
+
+            record = self.sessions.load(session_id)
+            missed = task_files.unopened(
+                record.task,
+                pathlib.Path(self.core.repository),
+                agent.messages,
+                record.changed_files or (),
+            )
+            return task_files.review_note(missed)
+        except Exception:  # noqa: BLE001 - the review stands without the note
+            return ""
+
+    def _review_turn_due(self) -> bool:
+        """The run owes its one maintainer review (code changed, time left)."""
+        environment = self._environment
+        owed = getattr(environment, "_self_review_owed", None)
+        if not callable(owed) or not owed() or self.remaining_seconds() < 60:
+            return False
+        environment._self_review_done = True  # type: ignore[union-attr]
+        return True
+
     def _failure_summary(self, record: SessionRecord) -> str:
         """What the repair turn is told, in the order a fix needs it.
 
@@ -373,7 +401,7 @@ class EngineHarnessMixin:
                 result.get("ok") is True
                 and data.get("exit_code") == 0
                 and not data.get("timed_out")
-            ):
+            ) or data.get("preexisting_only") is True:
                 continue
             failed.append(data)
         detail = ""
@@ -423,9 +451,23 @@ class EngineHarnessMixin:
                 result.get("ok") is True
                 and data.get("exit_code") == 0
                 and not data.get("timed_out")
-            )
+            ) or data.get("preexisting_only") is True
             if passed:
                 return None
             report = data.get("failure_map")
             return dict(report) if isinstance(report, dict) else None
         return None
+
+
+def _last_passing_check(record: SessionRecord) -> List[str]:
+    """argv of the most recent passing, verification-eligible, non-inline check."""
+    for entry in reversed(record.provider_history):
+        result = entry.get("result") if entry.get("core_name") == "checks.run" else None
+        data = result.get("data") if isinstance(result, dict) else None
+        argv = data.get("argv") if isinstance(data, dict) else None
+        if (
+            isinstance(argv, list) and len(argv) > 1 and argv[1] != "-c"
+            and data.get("verification_eligible") is True and result.get("ok") is True
+        ):
+            return [str(a) for a in argv]
+    return []

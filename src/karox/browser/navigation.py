@@ -11,7 +11,7 @@ from .errors import (
     BrowserSecurityError,
     BrowserSessionError,
 )
-from . import code_sources
+from . import census, code_sources
 from .netpolicy import (
     is_local_browser_url,
     same_navigation_target,
@@ -62,6 +62,13 @@ class BrowserNavigationMixin:
                 return
             route.abort()
             return
+        if census.wants(request.url) and is_local_browser_url(str(request.url)):
+            try:  # a repository copy of three.js gets the same census hook as a CDN one
+                fetched = route.fetch()
+                route.fulfill(response=fetched, body=census.instrument(request.url, fetched.body()))
+                return
+            except Exception:  # noqa: BLE001 - the page still loads uninstrumented
+                pass
         route.continue_()
 
     def _fulfill_code_source(self, route: Any, request: Any) -> bool:
@@ -93,7 +100,7 @@ class BrowserNavigationMixin:
             route.fulfill(
                 status=response.status,
                 headers=code_sources.response_headers(response),
-                body=response.body,
+                body=census.instrument(url, response.body),
             )
         except Exception:
             return False

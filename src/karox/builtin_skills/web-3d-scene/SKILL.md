@@ -1,6 +1,6 @@
 ---
 name: web-3d-scene
-version: 1.7.0
+version: 1.9.0
 description: Build or fix a three.js scene that runs in the browser.
 when_to_use: 3D, three.js, WebGL, animated scenes, product viewers, particles, models in a page.
 triggers: [three, webgl, canvas, "*.html"]
@@ -37,6 +37,8 @@ const profile = [
 ].map(([r, y]) => new THREE.Vector2(r, y));
 const body = new THREE.Mesh(new THREE.LatheGeometry(profile, 32), material);
 ```
+- A hand-built BufferGeometry with an index list needs `geometry.setIndex(indices)` before `computeVertexNormals()`. Without it every three positions in order form one triangle, and a strip (a leaf, ribbon or flag) renders as scattered shards; no console error says so. Prefer PlaneGeometry/ShapeGeometry and move its vertices when they fit.
+- Icosahedron, Dodecahedron, Octahedron and Tetrahedron geometries are not indexed: each face has its own copy of every corner. A random offset per vertex (a lumpy rock or pebble) tears the faces apart and the solid renders cracked. Call `BufferGeometryUtils.mergeVertices(geometry)` (from `three/addons/utils/BufferGeometryUtils.js`) before displacing, or compute the offset from the vertex position so every copy moves alike.
 - Use separate materials for parts that should read differently (matte body, brighter metal, emissive detail). Do not rely on one material for the whole object.
 - Symmetry helps machinery; asymmetry helps organic forms. Whichever you choose, keep the parts aligned to a single local axis and orient moving objects along their velocity.
 
@@ -68,7 +70,18 @@ Keep the implementation economical
 - For a large single-file deliverable, do not spend one enormous model turn regenerating the whole file after it exists. Create a coherent first version, then use targeted edits. If one initial write would become unusually large, use bounded create/append chunks at stable section boundaries instead of one giant JSON tool argument.
 - Keep module-level declaration names unique. A duplicate `const` or `class` at top level aborts the module before the first frame renders.
 
+Silent three.js mistakes (no console error; each renders wrong). Adapted from CloudAI-X/threejs-skills (MIT) and kept to what holds for the WebGL renderer of the pinned version:
+- Changed attribute values (positions, colors) need `attribute.needsUpdate = true`; moved vertices also need `computeVertexNormals()` and `computeBoundingSphere()`, or lighting and culling use the old shape. Arrays cannot grow after the first render: allocate the maximum and limit with `setDrawRange`.
+- InstancedMesh: `instanceMatrix.needsUpdate = true` after a batch of `setMatrixAt`, `instanceColor.needsUpdate = true` after `setColorAt`, indices below the constructor count. Instances moved far from the origin need `computeBoundingSphere()` or `frustumCulled = false`, or they vanish at the screen edge.
+- A setting compiled into the shader (`transparent`, `side`, `vertexColors`, `flatShading`, `blending`) changed after the first render needs `material.needsUpdate = true`.
+- onBeforeCompile edits the source before includes resolve: displace after `#include <begin_vertex>` (it declares `transformed`), bend normals after `#include <beginnormal_vertex>`. Materials whose injected code differs need distinct `customProgramCacheKey()` values or they share one cached program. A displaced mesh that casts shadows needs the same displacement in its `customDepthMaterial`, or its shadow stays undisplaced.
+- Transparent meshes are sorted per object, back to front, after opaque ones; intersecting or nested transparent meshes misorder. Fix with `renderOrder` and `depthWrite: false`, or use `alphaTest` cut-outs, which stay in the opaque pass.
+- `linewidth` is ignored (lines are 1 px); bytes in a BufferAttribute need `normalized: true`; Uint16 indices reach only 65534 vertices.
+- Allocate geometries, materials and vectors once, outside the frame loop; reuse scratch vectors instead of `new THREE.Vector3()` per frame.
+- Names differ between releases (for example `TextGeometry` `height` became `depth` in r163, `Clock` gave way to `Timer` only in r183). Use the names of the version the page imports.
+
 Before you finish
 - No console errors. The page loads from a clean start and the first frame is not blank.
+- Name every top-level group (`group.name = 'enclosure'`). With the browser, open the page and call `census` once: one table gives each named object's share of the frame, its screen box, world size and centre, whether it is hidden or off camera, and how many separate regions one of its meshes draws as (1-2 for a solid part), and the main colours and brightness each object shows as drawn. Fix what it shows; do not sample pixels by hand: reading a WebGL canvas with drawImage, getImageData or toDataURL returns black unless the renderer keeps its drawing buffer, which says nothing about the scene.
 - If a visual checker is offered, call it and fix what it reports. The subject must be recognizable at first glance and the stated requirements must be visible in the frame.
 - When the scene meets the requirements and the check passes, stop changing the look. Further decoration after a pass is how a clear scene becomes hazy; only fix a requirement the goal still names, then check again.

@@ -56,6 +56,8 @@ from .engine_kernel_control import EngineControlMixin
 from .engine_kernel_io import EngineIoMixin
 from .engine_kernel_finish import EngineFinishMixin
 from .engine_kernel_harness import EngineHarnessMixin
+from .prompts import self_review_text
+from . import check_baseline
 from .engine_prompts import (  # noqa: E402
     _ENGINE_CONTRACT,
 )
@@ -197,6 +199,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         restore_on_regression: bool = True,
         mode: Optional[str] = None,
         maintenance_mode: bool = False,
+        self_review: bool = False,
         request_images: Tuple[ImageAttachment, ...] = (),
         pricing_registry: Optional[Any] = None,
         on_event: Optional[Callable[[AgentEvent], None]] = None,
@@ -223,6 +226,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         self.project_context: Dict[str, Any] = dict(project_context or {})
         self.require_change = bool(require_change)
         self.maintenance_mode = bool(maintenance_mode)
+        self.self_review = bool(self_review)  # one maintainer review before finish
         if self.maintenance_mode and self.require_change:
             raise ValueError("maintenance mode plans cleanup but never mutates directly")
         self.mode = None if mode is None else normalize_mode(mode)
@@ -378,6 +382,9 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         try:
             record = self.sessions.load(session_id)
             self.sessions.validate_repository(record, self.core.repository)
+            # Tests the task names are its targets: one that failed before the
+            # edits and still fails is unfinished work, not pre-existing noise.
+            self.core._task_test_names = check_baseline.task_test_names(record.task)
             if record.revoked:
                 raise AgentError("session access has been revoked")
             if record.status == "verified" and self._completed(record):
@@ -538,53 +545,62 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 # evidence itself and giving the model bounded repair rounds
                 # when a check fails.
                 repair_attempts = 0
+                # One maintainer review before KaroX verifies a code change; prose
+                # submissions skip finish, so it lives here, not only in finish.
+                review_due = self._review_turn_due()
                 while True:
-                    self._run_harness_final_calls(session_id, lease, self._deadline)
-                    record = self.sessions.load(session_id)
-                    if self._completed(record):
-                        reason = "answer" if self._answer_complete(record) else "submitted"
-                        self._snapshot_verified_state(session_id, lease, record)
-                        return self._finish(
-                            session_id, lease, "verified", "verification", reason, provider_message
+                    if review_due:
+                        review_due = False
+                        self._append_repair_prompt(
+                            agent, "", prompt=self_review_text() + self._unopened_files_note(agent, session_id)
                         )
-                    if exit_status != "Submitted":
-                        break
-                    failure = self._failure_summary(record)
-                    floor_now = completion_gate.floor(self.core, record)
-                    if completion_gate.only_attestation(floor_now) and self._attestation_spent():
+                    else:
+                        self._run_harness_final_calls(session_id, lease, self._deadline)
+                        record = self.sessions.load(session_id)
+                        if self._completed(record):
+                            reason = "answer" if self._answer_complete(record) else "submitted"
+                            self._snapshot_verified_state(session_id, lease, record)
+                            return self._finish(
+                                session_id, lease, "verified", "verification", reason, provider_message
+                            )
+                        if exit_status != "Submitted":
+                            break
+                        failure = self._failure_summary(record)
+                        floor_now = completion_gate.floor(self.core, record)
+                        if completion_gate.only_attestation(floor_now) and self._attestation_spent():
+                            self._emit(
+                                AgentEventKind.WARNING,
+                                reason="attestation_open",
+                                detail="requirements stayed unattested after the bounded refusals",
+                            )
+                            break
+                        if completion_gate.only_unproducible(floor_now):
+                            # A repair turn cannot produce this proof: no approved
+                            # command exists for it. Asking the model to try again
+                            # spends turns and tokens on an impossible obligation.
+                            self._emit(
+                                AgentEventKind.WARNING,
+                                reason="unproducible_requirement",
+                                detail=(
+                                    "the remaining proof cannot be produced by an "
+                                    "approved command"
+                                ),
+                            )
+                            break
+                        remaining = self._deadline - self.monotonic()
+                        if (
+                            not failure
+                            or repair_attempts >= self.limits.max_repair_prompts
+                            or remaining < 1.0
+                        ):
+                            break
+                        repair_attempts += 1
                         self._emit(
                             AgentEventKind.WARNING,
-                            reason="attestation_open",
-                            detail="requirements stayed unattested after the bounded refusals",
+                            reason="engine_repair_prompt",
+                            detail="verification failed; one bounded repair turn follows",
                         )
-                        break
-                    if completion_gate.only_unproducible(floor_now):
-                        # A repair turn cannot produce this proof: no approved
-                        # command exists for it. Asking the model to try again
-                        # spends turns and tokens on an impossible obligation.
-                        self._emit(
-                            AgentEventKind.WARNING,
-                            reason="unproducible_requirement",
-                            detail=(
-                                "the remaining proof cannot be produced by an "
-                                "approved command"
-                            ),
-                        )
-                        break
-                    remaining = self._deadline - self.monotonic()
-                    if (
-                        not failure
-                        or repair_attempts >= self.limits.max_repair_prompts
-                        or remaining < 1.0
-                    ):
-                        break
-                    repair_attempts += 1
-                    self._emit(
-                        AgentEventKind.WARNING,
-                        reason="engine_repair_prompt",
-                        detail="verification failed; one bounded repair turn follows",
-                    )
-                    self._append_repair_prompt(agent, failure)
+                        self._append_repair_prompt(agent, failure)
                     try:
                         exit_extra = agent.continue_run()
                     except _EngineBudgetExceeded as exc:
@@ -619,6 +635,12 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                         )
                     exit_status = str(exit_extra.get("exit_status") or "")
                     provider_message = self._provider_message()
+                    if exit_status != "Submitted":
+                        # A repair or review turn that ended on a cancel, a
+                        # limit or a format-error budget was not submitted:
+                        # running the final checks now could still return
+                        # "verified" after the user said stop.
+                        break
             reason = self._terminal_reason(session_id, exit_status)
             current = self.sessions.load(session_id)
             phase = "verification" if current.changed_files else "execution"

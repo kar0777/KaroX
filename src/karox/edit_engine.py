@@ -258,11 +258,27 @@ def _normalized_unique_span(text: str, old: str) -> tuple[int | None, int | None
     wanted, _ = _normalize(old)
     if not wanted:
         return None, None
-    first = normalized.find(wanted)
-    if first == -1:
+    def inside_word(at: int) -> bool:
+        # A fold drops trailing blanks, so "items = 1 " would otherwise land
+        # inside "max_items = 10" and splice into the middle of a token.
+        end = at + len(wanted)
+        joins_before = at > 0 and (normalized[at - 1].isalnum() or normalized[at - 1] == "_") and (
+            wanted[0].isalnum() or wanted[0] == "_"
+        )
+        joins_after = end < len(normalized) and (normalized[end].isalnum() or normalized[end] == "_") and (
+            wanted[-1].isalnum() or wanted[-1] == "_"
+        )
+        return joins_before or joins_after
+
+    hits = []
+    at = normalized.find(wanted)
+    while at != -1:
+        if not inside_word(at):
+            hits.append(at)
+        at = normalized.find(wanted, at + 1)
+    if len(hits) != 1:
         return None, None
-    if normalized.find(wanted, first + 1) != -1:
-        return None, None
+    first = hits[0]
     # Spans hold absolute original offsets, so the match end is the last
     # normalized character's own end, not its start plus a length.
     return spans[first].start, spans[first + len(wanted) - 1].end
@@ -306,6 +322,10 @@ def _normalize(text: str) -> tuple[str, list[_Span]]:
 def _replacement(text: str, span: _Span, op: EditOp) -> str:
     """The new content for one located span, with the original line endings."""
     covered = text[span.start : span.end]
+    if op.new == "":
+        # A deletion removes the covered lines whole; restoring their ending
+        # below would leave a blank line where "import os\n" used to be.
+        return ""
     if "\r\n" in covered:
         ending = "\r\n"
     elif "\n" in covered:

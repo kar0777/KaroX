@@ -152,6 +152,7 @@ BROWSER_ACTION_RISK_KINDS: Mapping[str, str] = {
     "type": "browser.input",
     "cookies": "browser.read",
     "page_info": "browser.read",
+    "census": "browser.read",
     "recover": "browser.read",
     "reconnect": "browser.input",
     # Script on a page served from this machine; it can change page state.

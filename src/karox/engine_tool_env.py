@@ -251,6 +251,7 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
         self._viewports: Dict[tuple, int] = {}
         self._current_view: Optional[tuple] = None
         self._layout_refusals = 0
+        self._self_review_done = not getattr(kernel, "self_review", False)
 
     # -- Environment protocol ----------------------------------------------
 

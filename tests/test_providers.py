@@ -271,16 +271,15 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         self.assertEqual(second["tools"][0]["function"]["name"], "repo_read_file")
         self.assertEqual(second["max_tokens"], 123)
 
-    def test_tuning_fallback_is_remembered_for_later_requests(self) -> None:
+    def test_tuning_fallback_is_remembered_after_it_rescues_two_requests(self) -> None:
+        ok = lambda text: sse_response(  # noqa: E731
+            [{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}]
+        )
         client = FakeClient(
             [
-                error_response(400, "bad reasoning_effort"),
-                sse_response(
-                    [{"choices": [{"delta": {"content": "one"}, "finish_reason": "stop"}]}]
-                ),
-                sse_response(
-                    [{"choices": [{"delta": {"content": "two"}, "finish_reason": "stop"}]}]
-                ),
+                error_response(400, "bad reasoning_effort"), ok("one"),
+                error_response(400, "bad reasoning_effort"), ok("two"),
+                ok("three"),
             ]
         )
         provider = OpenAIChatCompletionsProvider(
@@ -288,25 +287,37 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         )
         request = replace(self.request(), reasoning_effort="medium")
         with patch("karox.providers.httpx.Client", return_value=client):
-            first = provider.complete(request)
-            second = provider.complete(request)
+            texts = [provider.complete(request).content for _ in range(3)]
 
-        self.assertEqual((first.content, second.content), ("one", "two"))
-        self.assertEqual(len(client.calls), 3)
-        self.assertIn("reasoning_effort", client.calls[0]["json"])
-        self.assertNotIn("reasoning_effort", client.calls[1]["json"])
-        # The second request starts without the field: no failed attempt paid.
-        self.assertNotIn("reasoning_effort", client.calls[2]["json"])
+        self.assertEqual(texts, ["one", "two", "three"])
+        sent = ["reasoning_effort" in call["json"] for call in client.calls]
+        # One rescue is not enough to drop the field for good; the second is,
+        # and the third request starts without it: no failed attempt paid.
+        self.assertEqual(sent, [True, False, True, False, False])
 
-    def test_rejected_level_above_high_retries_at_high_and_remembers_it(self) -> None:
+    def test_one_transient_rejection_does_not_downgrade_later_requests(self) -> None:
+        ok = lambda text: sse_response(  # noqa: E731
+            [{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}]
+        )
+        client = FakeClient([error_response(400, "glitch"), ok("one"), ok("two")])
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="max")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            provider.complete(request)
+            provider.complete(request)
+
+        efforts = [call["json"].get("reasoning_effort") for call in client.calls]
+        self.assertEqual(efforts, ["max", "high", "max"])
+        self.assertIn("stream_options", client.calls[2]["json"])
+
+    def test_context_overflow_is_reported_without_stripping_fields(self) -> None:
         client = FakeClient(
             [
-                error_response(400, "bad reasoning_effort"),
-                sse_response(
-                    [{"choices": [{"delta": {"content": "one"}, "finish_reason": "stop"}]}]
-                ),
-                sse_response(
-                    [{"choices": [{"delta": {"content": "two"}, "finish_reason": "stop"}]}]
+                error_response(
+                    400,
+                    json.dumps({"error": {"code": "context_length_exceeded", "type": "invalid_request_error"}}),
                 ),
             ]
         )
@@ -315,13 +326,34 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         )
         request = replace(self.request(), reasoning_effort="max")
         with patch("karox.providers.httpx.Client", return_value=client):
-            first = provider.complete(request)
-            second = provider.complete(request)
+            with self.assertRaises(ProviderError) as caught:
+                provider.complete(request)
 
-        self.assertEqual((first.content, second.content), ("one", "two"))
+        self.assertIs(caught.exception.kind, ProviderErrorKind.INVALID_REQUEST)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_rejected_level_above_high_retries_at_high_and_remembers_it(self) -> None:
+        ok = lambda text: sse_response(  # noqa: E731
+            [{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}]
+        )
+        client = FakeClient(
+            [
+                error_response(400, "bad reasoning_effort"), ok("one"),
+                error_response(400, "bad reasoning_effort"), ok("two"),
+                ok("three"),
+            ]
+        )
+        provider = OpenAIChatCompletionsProvider(
+            "https://provider.example/v1", max_transport_retries=0
+        )
+        request = replace(self.request(), reasoning_effort="max")
+        with patch("karox.providers.httpx.Client", return_value=client):
+            texts = [provider.complete(request).content for _ in range(3)]
+
+        self.assertEqual(texts, ["one", "two", "three"])
         efforts = [call["json"].get("reasoning_effort") for call in client.calls]
-        # One rejected attempt at max, then high; the next request starts at high.
-        self.assertEqual(efforts, ["max", "high", "high"])
+        # Two rescues at high, then the next request starts at high.
+        self.assertEqual(efforts, ["max", "high", "max", "high", "high"])
         # Only the level changed: the other tuning fields are still sent.
         self.assertIn("temperature", client.calls[1]["json"])
         self.assertEqual(client.calls[1]["json"]["max_tokens"], 123)
@@ -983,6 +1015,17 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
                     self.assertTrue(message.endswith("Bad Request"), message)
                 self.assertNotIn("private", message)
                 self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", message)
+
+    def test_a_proxied_402_quota_throttle_is_retryable(self) -> None:
+        # LiteLLM drops the vendor code and keeps only its message (HARD12 tb2).
+        body = {"error": {"message": "litellm.APIError: You exceeded your current quota, please check", "code": "402"}}
+        client = FakeClient([error_response(402, json.dumps(body)) for _ in range(2)])
+        with (
+            patch("karox.providers.httpx.Client", return_value=client),
+            self.assertRaises(ProviderError) as raised,
+        ):
+            OpenAIChatCompletionsProvider("https://provider.example/v1").complete(self.request())
+        self.assertEqual(raised.exception.kind, ProviderErrorKind.RATE_LIMIT)
 
     def test_an_empty_type_is_a_fragment_not_a_foreign_tool_call(self) -> None:
         # Measured on StepFun's Step Plan endpoint: one tool call streams as a
@@ -2618,6 +2661,14 @@ class StreamedErrorKindTests(unittest.TestCase):
             ProviderErrorKind.BUDGET_EXCEEDED,
         )
 
+    def test_a_402_quota_throttle_is_retryable(self) -> None:
+        # W&B answers a transient quota throttle with 402 insufficient_quota
+        # and serves the next calls again (HARD12 tb1): "not now", not "never".
+        self.assertIs(
+            stream_error_kind({"code": 402, "type": "insufficient_quota", "message": "exceeded your current quota"}),
+            ProviderErrorKind.RATE_LIMIT,
+        )
+
     def test_a_credit_hint_without_a_code_stays_a_permission_problem(self) -> None:
         self.assertIs(
             stream_error_kind(
@@ -2625,3 +2676,51 @@ class StreamedErrorKindTests(unittest.TestCase):
             ),
             ProviderErrorKind.PERMISSION,
         )
+
+
+class _BrokenAfterDone:
+    """A stream whose socket breaks once [DONE] has been sent."""
+
+    status_code = 200
+
+    def __init__(self, lines: list, error: BaseException) -> None:
+        self._lines, self._error = lines, error
+
+    def iter_lines(self):  # type: ignore[no-untyped-def]
+        yield from self._lines
+        raise self._error
+
+
+def _events(lines: list, error: BaseException) -> list:
+    import time as _time
+
+    return list(
+        OpenAIChatCompletionsProvider._stream_events(  # type: ignore[attr-defined]
+            _BrokenAfterDone(lines, error), 1, _time.monotonic() + 60
+        )
+    )
+
+
+def test_a_connection_lost_after_done_keeps_the_finished_answer() -> None:
+    chunk = json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]})
+    events = _events([f"data: {chunk}", "", "data: [DONE]", ""], httpx.RemoteProtocolError("peer closed"))
+    assert events[-1].kind.name == "COMPLETION"
+
+
+def test_a_connection_lost_before_done_is_still_a_transport_failure() -> None:
+    chunk = json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]})
+    try:
+        _events([f"data: {chunk}", ""], httpx.RemoteProtocolError("peer closed"))
+    except httpx.TransportError:
+        return
+    raise AssertionError("an unfinished stream must not complete")
+
+
+def test_an_error_inside_a_200_stream_is_classified_like_its_status() -> None:
+    body = json.dumps({"error": {"code": 429, "message": "slow down"}})
+    try:
+        _events([f"data: {body}", ""], httpx.RemoteProtocolError("unused"))
+    except ProviderError as exc:
+        assert exc.kind is ProviderErrorKind.RATE_LIMIT
+        return
+    raise AssertionError("the in-stream error must raise")

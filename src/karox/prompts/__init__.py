@@ -1,6 +1,6 @@
 """Reviewed prompt text that ships with the wheel.
 
-Only the visual-checker prompt is assembled from a file: the agent's own
+The visual-checker prompt and the self-review request are files: the agent's own
 contract lives in ``karox.agent.SYSTEM_PROMPT`` (one copy of those words), and
 the v7 profile assembler was retired with the loop that used it.
 """
@@ -25,3 +25,7 @@ def visual_checker_text() -> str:
     """The separate prompt the visual checker answers with, without task history."""
 
     return _read_text(VISUAL_CHECKER_FILE)
+
+def self_review_text() -> str:
+    """The one maintainer-review request before a code run's first finish."""
+    return _read_text("self_review.md")

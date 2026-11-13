@@ -112,7 +112,10 @@ SLOW_FRAME_NOTE = (
     "timeouts fail. Make one frame cheaper: drawing only on change hides the "
     "cost while the page is idle, not during a drag, camera damping or a "
     "tween, which draw every frame. " + FRAME_COST_ADVICE + " Then drag or "
-    "click once: the result reports the frames the page drew in response."
+    "click once: the result reports the frames the page drew in response. "
+    "Each reload of a page this slow also takes about a minute before it "
+    "answers (shaders and the first frames run on the CPU): make every edit "
+    "the last reading called for, then reload once."
 )
 
 #: A page that once drew slow frames and now reads fast may only have stopped

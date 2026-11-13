@@ -214,6 +214,9 @@ READ_ACTIONS: frozenset[str] = frozenset(
         "download_status",
         "cookies",
         "page_info",
+        # Renders the page's own three.js scene once more off-screen with flat
+        # ID colours and restores it: a measurement, not page input.
+        "census",
         "recover",
         # Handing control to the human and taking it back is session-state
         # bookkeeping, not page input; the shared risk vocabulary grades both

@@ -74,8 +74,22 @@ class ProviderStreamMixin:
         total_chars = 0
         terminal_event: Optional[ModelEvent] = None
 
-        for line in response.iter_lines():
+        lines = response.iter_lines()
+        while True:
+            # After [DONE] the answer is complete and paid for: a connection
+            # that then breaks or idles past the deadline must not turn it into
+            # a transport failure that re-sends (and re-bills) the request.
+            try:
+                line = next(lines)
+            except StopIteration:
+                break
+            except httpx.TransportError:
+                if terminal_event is not None:
+                    break
+                raise
             if time.monotonic() >= deadline:
+                if terminal_event is not None:
+                    break
                 raise ProviderError(
                     ProviderErrorKind.TRANSPORT,
                     "provider request deadline expired while reading stream",
@@ -191,6 +205,18 @@ class ProviderStreamMixin:
                 status_code=status_code,
             ) from exc
 
+        if isinstance(value, dict) and "choices" not in value and isinstance(value.get("error"), dict):
+            # LiteLLM/vLLM gateways report an overload, rate limit or quota
+            # inside a 200 stream; it is classified like the same error sent
+            # with a status code, not as a malformed answer.
+            from .provider_adapter_base import stream_error_kind
+
+            raise ProviderError(
+                stream_error_kind(value["error"]),
+                "provider reported an error inside the stream",
+                status_code=status_code,
+                transport_attempts=attempts,
+            )
         try:
             if not isinstance(value, dict):
                 raise ValueError("event root must be an object")
@@ -500,7 +526,7 @@ class ProviderStreamMixin:
             kind = ProviderErrorKind.MODEL_UNAVAILABLE
         elif status in {400, 405, 409, 415, 422}:
             kind = ProviderErrorKind.INVALID_REQUEST
-        elif status >= 500:
+        elif status >= 500 or status == 408:  # 408: the gateway timed out waiting upstream
             kind = ProviderErrorKind.PROVIDER_INTERNAL
         else:
             kind = ProviderErrorKind.INVALID_REQUEST
@@ -509,6 +535,8 @@ class ProviderStreamMixin:
             retry_after = cls._rate_limit_reset(response.headers)
         detail = response.reason_phrase or "provider request failed"
         codes = _vendor_error_codes(response)
+        if status == 402 and "insufficient_quota" in codes:  # a gateway quota throttle: "not now" (W&B, HARD12 tb1)
+            kind = ProviderErrorKind.RATE_LIMIT
         if codes:
             detail = f"{detail} ({', '.join(codes)})"
         return ProviderError(

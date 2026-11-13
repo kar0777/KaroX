@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+from . import check_baseline
 from .check_report import analyze as analyze_check_output
 from .core_types import InvalidCommand, VerificationCommandNotApproved, _path_label
 from .models import EvidenceRecord
@@ -128,6 +129,7 @@ def _karox_module_launch(argv: Sequence[str]) -> List[str]:
     ]
 
 WILDCARD_ARGUMENT = "*"
+STALLED_TEST_SECONDS = 20  # pytest faulthandler_timeout for every run KaroX starts
 # Options that hand a program text to the executable instead of a file to work
 # on.  A rule's literal prefix is what the user actually approved; the wildcard
 # tail is not, so it must not be able to turn "run my test suite" into "run
@@ -310,6 +312,13 @@ def probe_forms_text(interpreters: Sequence[str]) -> str:
 
 
 
+def _max_check_seconds() -> float:
+    """The longest one checks.run may take (KAROX_MAX_CHECK_SECONDS, default 300)."""
+    raw = os.environ.get("KAROX_MAX_CHECK_SECONDS", "300")
+    value = float(raw) if raw.replace(".", "", 1).isdigit() else 300.0
+    return value if 0 < value < math.inf else 300.0
+
+
 @dataclass(frozen=True)
 class CheckPlan:
     argv: List[str]
@@ -344,6 +353,8 @@ class ProcessToolsMixin:
     MAX_MAP_BYTES: int = 2_000_000
     #: Whether checks.run admits reproduction probes (probe_python_command).
     _allow_probes: bool = False
+    #: Pre-existing failures per approved argv (check_baseline), set by CoreRuntime.
+    _check_baselines: Dict[tuple[str, ...], Any]
     MIN_PROCESS_TIMEOUT_SECONDS: float
     MAX_PROCESS_TIMEOUT_SECONDS: float
     DEFAULT_CHECK_TIMEOUT_SECONDS: float
@@ -446,6 +457,7 @@ class ProcessToolsMixin:
             env = child_process_environment()
         if extra_environment:
             env.update({str(k): str(v) for k, v in extra_environment.items()})
+        env.update({"PYTEST_ADDOPTS": f"{env.get('PYTEST_ADDOPTS', '')} -o faulthandler_timeout={STALLED_TEST_SECONDS}".strip()} if "pytest" in argv[:3] or Path(argv[0]).stem == "pytest" else {})  # a slow test leaves its stack
         ours = _is_karox_module_command(argv)
         if ours:
             # A check that runs one of KaroX's own modules must not be shadowed by
@@ -647,8 +659,37 @@ class ProcessToolsMixin:
                 "shadows karox.web_check"
             )
         result["verification_eligible"] = plan.verification_eligible
+        if tool := check_baseline.missing_tool(plan.argv, result):  # offline image: neither proof nor owed
+            result["tool_unavailable"], result["detail"] = tool, f"{tool} is not installed and the sandbox is offline: it is not owed; do not run or install it again, verify with the project's tests"
         if plan.probe:
             result["probe"] = True
+        baseline = None
+        current = check_baseline.of_result(result)
+        if plan.inline_code is None and not plan.probe:
+            baselines = getattr(self, "_check_baselines", None)
+            if baselines is not None:
+                baseline = baselines.get(tuple(plan.argv))
+                if (
+                    baseline is None
+                    and tuple(plan.argv) not in baselines
+                    and plan.verification_eligible
+                    and check_baseline.is_pytest(plan.argv)
+                    and current.exit_code != 0
+                    and current.parsed
+                    and current.failing
+                    and float(result.get("duration_ms") or 0.0)
+                    <= check_baseline.SWAP_MAX_CHECK_SECONDS * 1000
+                ):
+                    baseline = self._baseline_on_start_files(plan)
+                    baselines[tuple(plan.argv)] = baseline
+        if baseline is not None:
+            info = check_baseline.compare(
+                baseline, current, getattr(self, "_task_test_names", frozenset())
+            )
+            if info is not None:
+                result["baseline"] = info
+                if info["preexisting_only"] and plan.verification_eligible:
+                    result["preexisting_only"] = True
         # Extracted from the unelided streams: the result the model reads has
         # its middle cut, and for a many-failure suite that is exactly where
         # the FAILURES blocks live. The map keeps every failure's file, line
@@ -664,17 +705,13 @@ class ProcessToolsMixin:
         result["requested_timeout"] = plan.requested_timeout
         result["effective_timeout"] = plan.effective_timeout
         result["timeout_clamped_by"] = plan.clamped_by
+        if float(result.get("duration_ms") or 0) > 90_000 and not result["timed_out"]:  # slow checks were 70-90% of slow HARD12 runs
+            result["detail"] = "this check took over 90 s: prefer one test file, -k or node ids"
         if result["timed_out"]:
-            detail = (
-                f"the check was stopped after {plan.effective_timeout:g}s and its "
-                "process tree was terminated"
-            )
+            detail = f"the check was stopped after {plan.effective_timeout:g}s and its process tree was terminated"
             if plan.clamped_by is not None:
-                detail += (
-                    f"; the requested {plan.requested_timeout:g}s was reduced by "
-                    f"{plan.clamped_by}"
-                )
-            result["detail"] = detail
+                detail += f"; the requested {plan.requested_timeout:g}s was reduced by {plan.clamped_by}"
+            result["detail"] = detail + f"; it proves nothing (not owed either): a test over {STALLED_TEST_SECONDS}s left its stack under [stderr]; deselect it (-k) or run the narrowest tests that cover the change (one file, -k or node ids)"
         display_argv = result["argv"]
         outcome = "passed" if result["exit_code"] == 0 else "failed"
         result["_evidence"] = [
@@ -692,6 +729,59 @@ class ProcessToolsMixin:
             )
         ]
         return result
+
+    def _baseline_on_start_files(self, plan: CheckPlan) -> Optional[Any]:
+        """``git stash; pytest; git stash pop`` for the session's changed files:
+        journaled outside the repo, every byte restored and verified; None = strict."""
+        from . import git_baseline
+
+        start = git_baseline.current()
+        changed = [p for p in git_baseline.changed_paths() if p]
+        if not start or start.get("kind") != "commit":
+            return None
+        if not 0 < len(changed) <= check_baseline.SWAP_MAX_FILES:
+            return None
+        commit = str(start.get("commit"))
+        journal = check_baseline.swap_journal_path(self.repository)
+        check_baseline.recover_swap(journal)
+        saved: Dict[str, Optional[bytes]] = {}
+        start_bytes: Dict[str, Optional[bytes]] = {}
+        for relative in changed:
+            try:
+                path = self.safe_path(relative)
+            except Exception:  # noqa: BLE001 - nothing moved yet: no baseline
+                return None
+            current_bytes = path.read_bytes() if path.is_file() else None
+            if path.is_dir() or len(current_bytes or b"") > check_baseline.SWAP_MAX_BYTES:
+                return None
+            shown = subprocess.run(
+                ["git", "show", f"{commit}:{Path(relative).as_posix()}"], cwd=str(self.repository),
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                env=child_process_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            saved[str(path)] = current_bytes
+            start_bytes[str(path)] = shown.stdout if shown.returncode == 0 else None
+        if all(saved[p] == start_bytes[p] for p in saved):
+            return None
+        check_baseline.write_swap_journal(journal, saved)
+        try:
+            check_baseline.place(start_bytes)
+            result = self._run(
+                plan.argv,
+                min(plan.effective_timeout, check_baseline.BASELINE_TIMEOUT_SECONDS),
+                keep_full=True,
+            )
+        except Exception:  # noqa: BLE001 - restore below; no baseline
+            result = None
+        finally:
+            check_baseline.place(saved)
+            if not check_baseline.verify_placed(saved):
+                raise RuntimeError(
+                    "KaroX could not restore the working tree after a baseline "
+                    f"check; the journal {journal} holds the bytes"
+                )
+            journal.unlink(missing_ok=True)
+        return None if result is None else check_baseline.of_result(result)
 
     def _run_inline_check(self, plan: CheckPlan) -> Dict[str, Any]:
         """Run ``python -c CODE`` from a temporary file outside the repository.
@@ -766,10 +856,9 @@ class ProcessToolsMixin:
                 for rule in self._verification_rules
             ):
                 hint = (
-                    "; inline code options (-c/-e) are refused under a wildcard "
-                    "rule: write the snippet to a scratch .py file in the "
-                    "repository, run it as '<interpreter> <file>.py', and delete "
-                    "it when it has answered"
+                    "; under a wildcard rule inline code runs only as exactly "
+                    "'<interpreter> -c CODE' (no other flags such as -W or -X); "
+                    "otherwise write a scratch .py file, run it, then delete it"
                 )
             interpreters = (
                 probe_interpreters(self._verification_rules)
@@ -802,6 +891,14 @@ class ProcessToolsMixin:
         if effective > self.MAX_PROCESS_TIMEOUT_SECONDS:
             effective = self.MAX_PROCESS_TIMEOUT_SECONDS
             causes.append("runtime_maximum")
+        # One check may not eat the run: HARD12 runs spent 30-60 minutes of a
+        # 60-minute budget on whole-suite checks the model gave 1800-3600 s.
+        # The cap (KAROX_MAX_CHECK_SECONDS, default 600) keeps the narrow test
+        # loop fast; a check that needs more is a check that should be narrower.
+        check_cap = _max_check_seconds()
+        if effective > check_cap:
+            effective = check_cap
+            causes.append("check_cap")
         if effective < self.MIN_PROCESS_TIMEOUT_SECONDS:
             effective = self.MIN_PROCESS_TIMEOUT_SECONDS
             causes.append("runtime_minimum")

@@ -105,6 +105,17 @@ class EngineFinishMixin:
         except Exception:  # noqa: BLE001 - unknown means nothing is owed
             return False
 
+    def _self_review_owed(self) -> bool:
+        """Once per run, when the run changed code (not only docs); fail-open."""
+
+        if getattr(self, "_self_review_done", True):
+            return False
+        try:
+            record = self._core.sessions.load(self._session_id)
+            return any(not completion_gate.is_doc(p) for p in record.changed_files or ())
+        except Exception:  # noqa: BLE001 - unknown means no extra turn
+            return False
+
     def _finish(self, action: Mapping[str, Any]) -> Dict[str, Any]:
         arguments = action.get("arguments")
         answer = ""

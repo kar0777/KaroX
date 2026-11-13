@@ -38,6 +38,7 @@ from .provider_types import (  # noqa: F401
     _effort_scale_stops_at_high as _effort_scale_stops_at_high,
     _go_duration_seconds as _go_duration_seconds,
     _has_optional_tuning as _has_optional_tuning,
+    _not_a_shape_error as _not_a_shape_error,
     _join_identity_fragments as _join_identity_fragments,
     _looks_numeric as _looks_numeric,
     _replays_reasoning as _replays_reasoning,
@@ -249,6 +250,10 @@ class OpenAIChatCompletionsProvider(ProviderStreamMixin):
         self._omit_optional_tuning_models: set[str] = set()
         self._reduced_failed_models: set[str] = set()
         self._effort_clamped_models: set[str] = set()
+        # A reduced shape becomes the model's default only after it rescued
+        # two separate requests: one transient 400 must not cost the rest of
+        # the run its effort, usage stream and cache-routing key.
+        self._reduced_wins: Dict[tuple[str, str], int] = {}
 
     def _http_client(self) -> httpx.Client:
         client = self._client
@@ -480,7 +485,7 @@ class OpenAIChatCompletionsProvider(ProviderStreamMixin):
         ):
             payload["reasoning"] = {"summary": "auto"}
         if "prompt_cache_key" in payload and not _accepts_prompt_cache_key(self.endpoint):
-            payload.pop("prompt_cache_key")
+            payload.setdefault("user", payload.pop("prompt_cache_key"))  # session-sticky routing keeps the prefix cache
         if request.model in self._omit_optional_tuning_models:
             payload = _without_optional_tuning(payload)
         tuning_retry = False
@@ -553,12 +558,23 @@ class OpenAIChatCompletionsProvider(ProviderStreamMixin):
                         raise
                     # The reduced request was accepted: start reduced for this
                     # model next time instead of paying the rejection again.
-                    if tuning_retry:
-                        self._omit_optional_tuning_models.add(request.model)
-                    elif effort_retry:
-                        self._effort_clamped_models.add(request.model)
+                    if tuning_retry or effort_retry:
+                        shape = "tuning" if tuning_retry else "effort"
+                        wins = self._reduced_wins.get((request.model, shape), 0) + 1
+                        self._reduced_wins[(request.model, shape)] = wins
+                        if wins >= 2:
+                            if tuning_retry:
+                                self._omit_optional_tuning_models.add(request.model)
+                            else:
+                                self._effort_clamped_models.add(request.model)
                     return
             except ProviderError as exc:
+                if exc.kind is ProviderErrorKind.INVALID_REQUEST and _not_a_shape_error(exc):
+                    # Too much context is not a field the gateway refuses:
+                    # stripping tuning (and the replayed reasoning) could
+                    # squeeze it through once and then downgrade every
+                    # later request. Report it as it is.
+                    raise
                 if (
                     exc.kind is ProviderErrorKind.INVALID_REQUEST
                     and not effort_retry

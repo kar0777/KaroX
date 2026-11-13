@@ -112,12 +112,19 @@ class SessionGuardsMixin:
                 raise
 
     def _locator_metadata(self, locator: Any) -> dict[str, str]:
+        from .pageperf import INPUT_TIMEOUT_SECONDS
+
         try:
-            data = locator.evaluate(
-                LOCATOR_METADATA_JS
-            )
+            # Bounded like the action itself: the context default (30 s) made a
+            # missing selector wait 30 s and then read as a security refusal.
+            data = locator.evaluate(LOCATOR_METADATA_JS, timeout=INPUT_TIMEOUT_SECONDS * 1000)
             return {str(k): str(v) for k, v in (data or {}).items()}
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - fail closed below
+            if type(exc).__name__ == "TimeoutError":
+                raise BrowserError(
+                    "not_found: no element matched the target within "
+                    f"{INPUT_TIMEOUT_SECONDS:g} s; take a fresh snapshot and use a selector from it"
+                ) from None
             return {}
 
     def _assert_action_safe(self, locator: Any) -> None:

@@ -174,6 +174,7 @@ def _verification_block(history: Sequence[Mapping[str, Any]]) -> str:
         and data.get("exit_code") == 0
         and not data.get("timed_out")
     )
+    preexisting = data.get("preexisting_only") is True
     freshness = (
         " (predates the latest edit)"
         if _last_mutation_index(history) > index
@@ -182,6 +183,8 @@ def _verification_block(history: Sequence[Mapping[str, Any]]) -> str:
     command = f"`{argv}`" if argv else "the approved check"
     if passed:
         return f"Verification: {command} passed{freshness}."
+    if preexisting:
+        return f"Verification: {command} has no new failures{freshness}; the rest predate you."
     status = "timed out" if data.get("timed_out") else "failed"
     lines = [f"Verification: {command} {status}{freshness}."]
     failures = _failure_lines(data.get("failure_map"))

@@ -216,7 +216,8 @@ def _sent_payload(endpoint: str) -> Dict[str, Any]:
 
 def test_chat_completions_sends_the_key_only_to_openai() -> None:
     assert _sent_payload("https://api.openai.com/v1")["prompt_cache_key"] == "karox-abc-123"
-    assert "prompt_cache_key" not in _sent_payload("https://api.deepseek.com/v1")
+    other = _sent_payload("https://api.deepseek.com/v1")
+    assert "prompt_cache_key" not in other and other["user"] == "karox-abc-123"  # sticky routing elsewhere
 
 
 def test_responses_sends_the_key_only_to_openai() -> None:

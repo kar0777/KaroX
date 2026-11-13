@@ -208,6 +208,9 @@ def test_tests_run_uses_the_project_interpreter(tmp_path: Path) -> None:
 
     assert result["argv"][0] == str(interpreter)
     assert result["argv"][1:] == ["-m", "pytest", "tests/test_a.py"]
+    assert result["effective_timeout"] == 60.0
+    capped = workspace_worker.execute_tests(runtime, {"suite": "focused", "targets": ["tests/test_a.py"], "timeout_seconds": 900}, 3600.0)
+    assert capped["effective_timeout"] == workspace_worker.FOCUSED_TESTS_MAX_SECONDS
 
 
 def test_workspace_worker_selects_pytest_targets_and_splits(tmp_path: Path) -> None:

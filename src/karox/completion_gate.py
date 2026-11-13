@@ -67,7 +67,7 @@ import subprocess
 from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
-from . import requirement_coverage
+from . import check_baseline, git_baseline, requirement_coverage
 from .web_check import default_pages, default_pictures, is_scratch_page
 
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -229,7 +229,7 @@ def floor(core: Any, record: Any) -> list[str]:
     #: deterministic measurement. A later result that actually saw page/console
     #: errors still wins.
     visual_passes: set[str] = set()
-    reasons = []
+    reasons, outdated = [], check_baseline.superseded(record)  # tests the task itself contradicts
     if (
         _explicit_test_change_required(record)
         and not any(_is_test_path(path) for path in record.changed_files)
@@ -268,6 +268,8 @@ def floor(core: Any, record: Any) -> list[str]:
         or _review_skips_a_change(core, record, review)
     ):
         reasons.append("missing current change review")
+        if (start := getattr(record, "git_baseline", None)) and isinstance(start, dict) and start.get("reason") == git_baseline.REASON_NOT_A_REPOSITORY:
+            reasons.append(NO_PRODUCER + "current change review")  # no start revision: a repair loop (4 min, aquarium 11-12) can never review
     for entry in record.provider_history:
         result = entry.get("result")
         if entry.get("role") != "tool" or not isinstance(result, dict):
@@ -316,6 +318,8 @@ def floor(core: Any, record: Any) -> list[str]:
             # sandbox it fails by design (swer5-k3 cbi: pip install flake8 ...)
             # and must not stay owed as a "failed check" on a correct patch.
             continue
+        if name == "checks.run" and (data.get("tool_unavailable") or data.get("timed_out")):
+            continue  # a tool the image lacks, or a cut-off run: no evidence either way (HARD12 gha4)
         if name == "checks.run" and _pytest_ran_nothing(data):
             # pytest exit 4 (usage error) / 5 (no tests collected) ran no test at
             # all: neither proof nor a failure of the change. A suite that the
@@ -328,7 +332,12 @@ def floor(core: Any, record: Any) -> list[str]:
             # discharge it, and neither can a pass on older bytes.
             ran = tuple(data.get("argv") or [])
             ok = result.get("ok") is True and data.get("exit_code") == 0 and not data.get("timed_out")
-            if not (ok and ("browser" not in command_classes(ran) or browser_proof(data))):
+            # Pre-existing failures only (check_baseline) are not owed; neither is
+            # a red `python -c` diagnostic snippet, which is never re-run verbatim.
+            ok = ok or data.get("preexisting_only") is True or check_baseline.only_superseded(data, outdated)
+            if not ok and _inline_probe(ran):
+                pass
+            elif not (ok and ("browser" not in command_classes(ran) or browser_proof(data))):
                 failed_ever[ran] = None
         proof = data.get("completion_identity")
         if proof != current or not proof:
@@ -367,8 +376,11 @@ def floor(core: Any, record: Any) -> list[str]:
         # Core-approved checks retain generic authority, not specialized proof.
         classes = command_classes(argv) or {"behavioral"}
         passed = result.get("ok") is True and data.get("exit_code") == 0 and not data.get("timed_out")
+        passed = passed or data.get("preexisting_only") is True or check_baseline.only_superseded(data, outdated)
         if "browser" in classes:
             passed = passed and browser_proof(data)
+        if not passed and _inline_probe(argv):
+            continue  # diagnostic snippet: neither owed nor proof when red
         latest[argv] = (passed, classes)
     for argv, (passed, _) in latest.items():
         if not passed:
@@ -515,6 +527,12 @@ def _is_runtime_entry(core: Any, relative: str) -> bool:
     except Exception:
         return True
     return bool(_MAIN_GUARD.search(text))
+
+
+def _inline_probe(argv: Sequence[str]) -> bool:
+    """``python -c CODE``: an inline snippet, never a deliverable check."""
+    parts = [str(p) for p in argv]
+    return len(parts) >= 3 and Path(parts[0]).stem.lower().startswith("python") and parts[1] == "-c"
 
 
 def _pytest_ran_nothing(data: dict[str, Any]) -> bool:

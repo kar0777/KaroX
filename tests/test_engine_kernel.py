@@ -1363,6 +1363,37 @@ def test_engine_batch_keeps_valid_calls_when_one_is_malformed(
     assert refused, "the rejected call must be visible in the durable transcript"
     assert refused[0]["error"]["type"] == "malformed_arguments"
     assert "parsing tool call arguments" in refused[0]["error"]["message"].lower()
+    # The next request replays the bad call with valid JSON: a gateway refuses
+    # a history whose arguments string does not parse, and would 400 forever.
+    replay = repr(harness.provider.requests[1])
+    assert "{not json" not in replay
+    assert "were not valid JSON" in replay
+
+
+def test_an_unknown_tool_on_a_tool_calls_finish_is_named_not_called_a_cut(
+    tmp_path: Path, repository: Path
+) -> None:
+    """finish_reason=tool_calls ends every call response; it is not an output cut."""
+
+    unknown = ToolCall(call_id="c1", name="repo_grep", raw_arguments='{"q": "x"}')
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((unknown,), finish_reason="tool_calls"),
+            _response((_write_call("c2", "hello.txt", "hi"),)),
+            _response((_finish_call("c3", "created hello.txt"),)),
+        ],
+    )
+    harness.run()
+
+    notes = " ".join(
+        str(entry.get("content"))
+        for entry in harness.record().provider_history
+        if entry.get("kind") == "engine_note"
+    )
+    assert "Unknown tool 'repo_grep'" in notes
+    assert "output token limit" not in notes
 
 
 def test_engine_single_malformed_call_still_gets_the_format_error_nudge(
@@ -5027,3 +5058,90 @@ def test_the_closing_call_refuses_more_work(tmp_path: Path, repository: Path) ->
     assert report.reason == "visual_budget_exhausted"
     assert "Tank" not in (repository / "index.html").read_text(encoding="utf-8")
     assert len(harness.provider.requests) == 3
+
+
+def test_self_review_refuses_the_first_finish_once_then_accepts(
+    tmp_path: Path, repository: Path
+) -> None:
+    """HARD12: fixes stopped at the issue's example; one maintainer review first."""
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
+            _response((_tool_call("c2", "finish", {"answer": "done"}),)),
+            _response((_tool_call("c3", "finish", {"answer": "done"}),)),
+        ],
+    )
+    harness.kernel.implementation.self_review = True
+    report = harness.run()
+
+    observed = "\n".join(_tool_messages(harness))
+    assert "review the change once as the project's maintainer" in observed
+    assert observed.count("review the change once") == 1
+    assert report.verified is True, report.reason
+
+
+def test_self_review_names_a_task_file_the_run_never_opened(
+    tmp_path: Path, repository: Path
+) -> None:
+    """rebench exstruct-113: the task listed engine.py; the run never opened it."""
+
+    (repository / "lib").mkdir()
+    (repository / "lib" / "engine.py").write_text("import json\n", encoding="utf-8")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
+            _response((_tool_call("c2", "finish", {"answer": "done"}),)),
+            _response((_tool_call("c3", "finish", {"answer": "done"}),)),
+        ],
+        task="make imports lighter in tool.py and possibly `lib/engine.py`",
+    )
+    harness.kernel.implementation.self_review = True
+    harness.run()
+
+    observed = "\n".join(_tool_messages(harness))
+    assert "The task names lib/engine.py, and this run never opened it" in observed
+
+
+def test_self_review_also_reaches_a_prose_submission(tmp_path: Path, repository: Path) -> None:
+    """HARD12 gha1: every KaroX run ended in prose, so a finish-only review never fired."""
+
+    prose = _response(content="The fix is complete.", finish_reason="stop")
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
+            prose, prose, prose,
+            _response((_finish_call("c2", "done"),)),
+        ],
+    )
+    harness.kernel.implementation.self_review = True
+    harness.run()
+
+    seen = "\n".join(_user_messages(harness) + _tool_messages(harness))
+    assert seen.count("review the change once as the project's maintainer") == 1
+
+
+def test_a_review_turn_that_hits_a_limit_is_not_verified(tmp_path: Path, repository: Path) -> None:
+    """Audit 2026-11-13: only a submission may be verified, repair turns included."""
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
+            _response((_tool_call("c2", "finish", {"answer": "done"}),)),
+            _response((_write_call("c3", "tool.py", "def f():\n    return 2\n"),)),
+            _response((_tool_call("c4", "finish", {"answer": "done"}),)),
+        ],
+        max_steps=3,
+    )
+    harness.kernel.implementation.self_review = True
+    report = harness.run()
+
+    assert report.verified is False, report.reason

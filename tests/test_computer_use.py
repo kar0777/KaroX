@@ -928,6 +928,11 @@ def test_adapter_input_without_attach_is_refused(tmp_path: Path) -> None:
 
 def test_adapter_consequential_action_requires_one_shot_approval(tmp_path: Path) -> None:
     probe = FakeProbe()
+    # The launched terminal shows its window at once; without it the approved
+    # launch sat out two 15 s window waits (30 s of a 16-minute suite).
+    probe.on_shell_execute = lambda *_: probe.add_window(
+        FakeWindow(probe.new_hwnd(), "cmd", "ConsoleWindowClass", (0, 0, 800, 600), probe.shell_result)
+    )
     adapter = make_adapter(tmp_path, probe)
     payload = {"shell": "cmd", "keep_open": True}
 

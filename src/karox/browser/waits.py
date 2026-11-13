@@ -54,8 +54,11 @@ class BrowserWaitsMixin:
                             f"element_not_found: wait_for {state} timed out on target"
                         ) from None
         milliseconds = payload.get("milliseconds", 250)
-        if not isinstance(milliseconds, (int, float)) or not 0 < milliseconds <= 10_000:
-            raise BrowserError("milliseconds must be between 0 and 10000")
+        if isinstance(milliseconds, bool) or not isinstance(milliseconds, (int, float)) or milliseconds <= 0:
+            raise BrowserError("milliseconds must be a positive number (at most 10000)")
+        # A longer wait is cut to the cap rather than refused: the caller
+        # wanted the page to settle, and a refusal costs a whole model turn.
+        milliseconds = min(milliseconds, 10_000)
         if cancel is not None:
             cancel.sleep(milliseconds / 1000.0)
             cancel.raise_if_cancelled()

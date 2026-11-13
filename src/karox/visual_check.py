@@ -93,6 +93,24 @@ _TASK_SIGNALS = (
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
+def _json_objects(text: str) -> list[str]:
+    """Every balanced {...} span: prose braces around a JSON answer ("the tank
+    {glass}") made the greedy span invalid and threw a paid verdict away."""
+
+    spans: list[str] = []
+    decoder = json.JSONDecoder()
+    at = text.find("{")
+    while at != -1:
+        try:
+            _, end = decoder.raw_decode(text, at)
+        except ValueError:
+            at = text.find("{", at + 1)
+            continue
+        spans.append(text[at:end])
+        at = text.find("{", end)
+    return spans
+
+
 def is_visual_task(text: object) -> bool:
     """Whether a task asks for something that has to be looked at."""
 
@@ -132,7 +150,7 @@ def parse_verdict(text: object) -> Optional[tuple[str, list[str]]]:
 
     if not isinstance(text, str) or not text.strip():
         return None
-    for candidate in (text, *_JSON_OBJECT.findall(text)):
+    for candidate in (text, *_JSON_OBJECT.findall(text), *_json_objects(text)):
         try:
             value = json.loads(candidate)
         except (ValueError, TypeError):
