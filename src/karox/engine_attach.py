@@ -129,6 +129,14 @@ class EngineAttachMixin:
         test file or an exhausted budget leaves the edit result unchanged.
         """
 
+        arguments = (action or {}).get("arguments") if isinstance(action, Mapping) else None
+        if isinstance(arguments, Mapping) and str(arguments.get("path") or "").endswith(".py"):
+            pieces = [arguments.get(k) for k in ("new_string", "content", "new")]
+            pieces += [e.get("new") for e in arguments.get("edits") or () if isinstance(e, Mapping)]
+            text = "\n".join(p for p in pieces if isinstance(p, str))
+            if text:
+                # The code just written names what its tests use.
+                self._code_hint = (text + "\n" + str(getattr(self, "_code_hint", "")))[:20_000]
         if not _batch_tail(action):
             return
         if "tests.run" not in self._definitions or not isinstance(result.data, dict):
@@ -148,9 +156,12 @@ class EngineAttachMixin:
             # source, so the edit result already says whether they still pass.
             from . import task_dossier
 
-            path = data.get("path")
+            sources = [
+                p for p in dict.fromkeys(getattr(record, "changed_files", ()) or ())
+                if isinstance(p, str) and p.endswith(".py")
+            ][-3:]
             try:
-                targets = task_dossier.related_tests(self._core, path) if isinstance(path, str) else []
+                targets = task_dossier.related_tests(self._core, sources, getattr(self, "_code_hint", ""))
             except Exception:  # noqa: BLE001 - advisory only
                 targets = []
         if not targets:
@@ -193,9 +204,14 @@ class EngineAttachMixin:
         if payload.get("timed_out"):
             line = "affected tests: timed out (advisory, not evidence)"
         elif outcome.ok:
+            from . import check_baseline
+
+            passed = check_baseline.of_result(payload).passed
+            count = f"{passed} passed" if passed else "passed"
             line = (
-                f"affected tests: passed ({len(targets)} target(s); "
-                "advisory, not evidence)"
+                f"affected tests: KaroX ran {', '.join(targets)} on the edited code: {count}. "
+                "Do not run these again until you change code; run other tests only "
+                "if the change reaches beyond them."
             )
         elif not isinstance(parsed, int) or isinstance(parsed, bool) or parsed <= 0:
             # A red exit code with no parsed failure is a runner problem (a

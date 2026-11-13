@@ -289,40 +289,59 @@ def _render(core: Any, files: Sequence[Dict[str, Any]], tests_for: Dict[str, set
     return text if len(text) <= MAX_TEXT else text[: MAX_TEXT - 20] + "\n[dossier clipped]"
 
 
-def related_tests(core: Any, source: str, limit: int = 3) -> List[str]:
-    """Test files for a changed Python source: by file name first, then by import.
+def related_tests(core: Any, sources: Sequence[str], hint: str = "", limit: int = 2) -> List[str]:
+    """Test files for changed Python sources.
 
-    Benchmark 2026-11-13: 10% of all steps only ran the tests next to the
-    file just edited. The harness runs them with the edit instead.
+    Benchmark 2026-11-13 (click-3239 v46): picking tests by import alone ran
+    two files that never touch the edited function, reported "passed", and the
+    model reran the real ones itself. Ranking is now: a test named after the
+    module, then tests that use the names in the edited code (rarest first),
+    then tests importing the module.
     """
 
-    if not source.endswith(".py") or _TEST_PATH.search(source.lower()):
+    sources = [s for s in sources if s.endswith(".py") and not _TEST_PATH.search(s.lower())]
+    if not sources:
         return []
     tracked = [line for line in _git(core, ["ls-files", "*.py"]).splitlines() if line]
     tests = [path for path in tracked if _TEST_PATH.search(path.lower()) and not path.endswith("conftest.py")]
-    stem = source.rsplit("/", 1)[-1][:-3]
-    if stem == "__init__":
-        stem = source.rsplit("/", 2)[-2] if "/" in source else stem
-    named = [t for t in tests if t.rsplit("/", 1)[-1] in (f"test_{stem}.py", f"{stem}_test.py", f"test_{stem.lstrip('_')}.py")]
-    found = list(named)
-    if len(found) < limit:
+    found: List[str] = []
+    for source in sources:
+        stem = source.rsplit("/", 1)[-1][:-3]
+        found += [t for t in tests if t.rsplit("/", 1)[-1] in (f"test_{stem}.py", f"{stem}_test.py", f"test_{stem.lstrip('_')}.py") and t not in found]
+    texts: Dict[str, str] = {}
+    for path in tests[:3000]:
+        try:
+            texts[path] = (core.repository / path).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+    names = {w for w in _WORD.findall(hint or "") if ("_" in w.strip("_") or any(c.isupper() for c in w[1:])) and w.lower() not in _STOP}
+    if names and len(found) < limit:
+        pattern = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)[:60]) + r")(?![A-Za-z0-9_])")
+        counts: Dict[str, Dict[str, int]] = {}
+        for path, text in texts.items():
+            hits: Dict[str, int] = defaultdict(int)
+            for token in pattern.findall(text):
+                hits[token] += 1
+            if hits:
+                counts[path] = hits
+        df: Dict[str, int] = defaultdict(int)
+        for hits in counts.values():
+            for token in hits:
+                df[token] += 1
+        total = max(len(texts), 1)
+        scored = sorted(
+            counts,
+            key=lambda p: -sum(math.log(1 + total / df[t]) * (1 + math.log(n)) for t, n in counts[p].items()),
+        )
+        found += [p for p in scored if p not in found][: limit - len(found)]
+    for source in sources:
+        if len(found) >= limit:
+            break
         module = source[:-3]
         for prefix in ("src/", "lib/"):
             if module.startswith(prefix):
                 module = module[len(prefix):]
-        dotted = module.replace("/", ".")
-        if dotted.endswith(".__init__"):
-            dotted = dotted[: -len(".__init__")]
-        pattern = re.compile(r"(?:from|import)\s+" + re.escape(dotted) + r"(?![\w])")
-        for path in tests:
-            if path in found:
-                continue
-            try:
-                text = (core.repository / path).read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            if pattern.search(text):
-                found.append(path)
-            if len(found) >= limit:
-                break
+        dotted = module.replace("/", ".").removesuffix(".__init__")
+        imports = re.compile(r"(?:from|import)\s+" + re.escape(dotted) + r"(?![\w])")
+        found += [p for p, text in texts.items() if p not in found and imports.search(text)][: limit - len(found)]
     return found[:limit]

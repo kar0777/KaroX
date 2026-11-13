@@ -3231,7 +3231,7 @@ def test_failed_check_hands_the_model_a_parsed_failure_map(
     assert affected["ok"] is True
     assert affected["targets"] == ["tests/test_calc.py::test_add"]
     assert "verification_eligible" not in affected
-    assert "affected tests: passed" in repair_edit["content"]
+    assert "affected tests: KaroX ran" in repair_edit["content"] and "passed" in repair_edit["content"]
     # No extra approved check and no fabricated tool entry: this is feedback,
     # not a second verification pass.
     assert (
