@@ -70,3 +70,17 @@ def test_the_unopened_note_comes_before_finish_now() -> None:
     assert text.index("7. The task names") < text.index("finish now")
     assert text.rstrip().endswith("finish now with the same answer.")
     assert _with_review_note("a\nb", "") == "a\nb"
+
+
+def test_a_repeated_long_tool_output_is_sent_once() -> None:
+    """Benchmark 2026-11-13: one 35 KB git_diff went out twice on every turn."""
+
+    from karox.engine_provider_bridge import _repeated_output
+
+    shown: dict = {}
+    diff = "<returncode>0</returncode>\n<output>\n" + "+line\n" * 1000 + "</output>"
+    assert _repeated_output(diff, "git_diff", shown) == diff
+    note = _repeated_output(diff, "git_diff", shown)
+    assert note is not None and "identical to the output of git_diff" in note and len(note) < 300
+    assert _repeated_output("short", "git_diff", shown) == "short"
+    assert _repeated_output("short", "git_diff", shown) == "short"

@@ -488,7 +488,18 @@ def _plain_body(core_name: str, data: Mapping[str, Any]) -> Optional[str]:
     """Plain text for search/listing/git results: the JSON envelope (pids, hashes, escaped newlines) cost ~2x the tokens."""
     if core_name == "repo.search" and isinstance(data.get("matches"), list):
         head = f"[repo.search {data.get('query')!r}: {data.get('match_count')} match(es) in {data.get('files_scanned')} file(s){', truncated' if data.get('truncated') else ''}]"
-        return "\n".join([head] + [f"{m.get('path')}:{m.get('line')}: {m.get('text')}{' …' if m.get('clipped') else ''}" for m in data["matches"] if isinstance(m, dict)])
+        rows = [head]
+        for m in data["matches"]:
+            if not isinstance(m, dict):
+                continue
+            rows.append(f"{m.get('path')}:{m.get('line')}: {m.get('text')}{' …' if m.get('clipped') else ''}")
+            found = m.get("definition")
+            if isinstance(found, dict) and isinstance(found.get("text"), str):
+                start = int(found.get("start") or m.get("line") or 1)
+                more = "" if found.get("complete") else " (continues; read_lines for the rest)"
+                rows.append(f"[definition, lines {start}-{found.get('end')}{more}]")
+                rows.extend(f"{start + i:>6}\t{line}" for i, line in enumerate(found["text"].split("\n")))
+        return "\n".join(rows)
     if core_name == "repo.list_files" and isinstance(data.get("files"), list) and all(isinstance(f, str) for f in data["files"]):
         return "\n".join([f"[repo.list_files{' truncated' if data.get('truncated') else ''}]"] + data["files"])
     if core_name.startswith("git.") and isinstance(data.get("stdout"), str):

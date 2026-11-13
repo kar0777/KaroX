@@ -71,6 +71,22 @@ _SAFE_CHILD_ENVIRONMENT = frozenset(
 )
 
 
+_FILE_PATH_KEY = re.compile(r"[\\/]|^[\w.-]+\.(?:py|pyi|js|mjs|cjs|ts|tsx|jsx|json|ya?ml|toml|cfg|ini|md|rst|txt|html|css|go|rs|java|rb|php|c|h|cc|cpp|sh)$", re.I)
+
+
+def _is_file_path(key: str) -> bool:
+    """A mapping key that is a repository path names a file, not a secret.
+
+    Benchmark 2026-11-13 (line-bot-981, four runs): the completion identity
+    maps ``.../channel_access_token.py`` to its digest; key-name redaction
+    replaced that digest with ``[REDACTED]``, the stored identity never matched
+    the current one again, and every correct finish was refused until the
+    repair budget ran out. Values under such keys are still pattern-scanned.
+    """
+
+    return bool(_FILE_PATH_KEY.search(key))
+
+
 def contains_credential(value: str) -> bool:
     return any(pattern.search(value) for pattern in SECRET_VALUE_PATTERNS)
 
@@ -105,7 +121,7 @@ def redact(
         and not isinstance(value, bool)
         and value >= 0
     )
-    if key and SECRET_NAME.search(key) and not token_counter:
+    if key and SECRET_NAME.search(key) and not token_counter and not _is_file_path(key):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {

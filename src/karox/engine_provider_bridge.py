@@ -173,6 +173,32 @@ def _elided_argument_marker(name: str) -> str:
     )
 
 
+#: Below this size a repeated output costs less than the note replacing it.
+_REPEAT_MIN_CHARS = 2000
+
+
+def _repeated_output(text: Optional[str], name: str, shown: Dict[str, str]) -> Optional[str]:
+    """A long tool output identical to one already in this request, as a note.
+
+    Benchmark 2026-11-13 (line-bot-981): the same 35 KB ``git_diff`` was sent
+    twice and then carried on every later turn. The first copy is still in the
+    request, so the note loses nothing; it is decided from the request alone,
+    so the prefix stays stable for the prompt cache.
+    """
+
+    if text is None or len(text) < _REPEAT_MIN_CHARS:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    earlier = shown.get(digest)
+    if earlier is None:
+        shown[digest] = name or "an earlier call"
+        return text
+    return (
+        f"<output>\n[identical to the output of {earlier} shown earlier in this "
+        f"conversation ({len(text)} characters); nothing in it changed since]\n</output>"
+    )
+
+
 def _unparsed_argument_marker(name: str) -> str:
     return json.dumps(
         {"_karo_context_manager": f"{name} arguments were not valid JSON and were not run"},
@@ -663,6 +689,8 @@ class EngineProviderModel:
             self.elide_calls(call_id for call_id, _, _ in pending)
         first_user_seen = False
         converted: List[ModelMessage] = []
+        call_names: Dict[str, str] = {}
+        shown: Dict[str, str] = {}
         for entry in entries:
             role = str(entry.get("role", "user"))
             if role == "exit":
@@ -670,6 +698,9 @@ class EngineProviderModel:
             content = entry.get("content")
             text = None if content is None else str(content)
             if role == "assistant":
+                for raw_call in entry.get("tool_calls") or ():
+                    if isinstance(raw_call, Mapping):
+                        call_names[str(raw_call.get("call_id", ""))] = str(raw_call.get("name", ""))
                 calls = tuple(
                     _elide_applied_arguments(call, elided=self._elided_calls)
                     for call in _engine_tool_calls(entry)
@@ -691,7 +722,9 @@ class EngineProviderModel:
                 call_id = str(entry.get("tool_call_id", ""))
                 if not call_id:
                     continue
-                converted.append(ModelMessage("tool", text, tool_call_id=call_id))
+                converted.append(
+                    ModelMessage("tool", _repeated_output(text, call_names.get(call_id, ""), shown), tool_call_id=call_id)
+                )
                 continue
             images: Tuple[ImageAttachment, ...] = ()
             if role == "user" and self._images and not first_user_seen:

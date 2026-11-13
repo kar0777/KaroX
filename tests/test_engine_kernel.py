@@ -271,6 +271,28 @@ def test_engine_run_verifies_a_change_end_to_end(tmp_path: Path, repository: Pat
     assert record.evidence, "a verified run must persist evidence"
 
 
+def test_a_change_to_a_file_named_like_a_secret_can_be_verified(
+    tmp_path: Path, repository: Path
+) -> None:
+    """Benchmark 2026-11-13 (line-bot-981, 4 of 4 runs): ``channel_access_token.py``.
+
+    Key-name redaction turned that file's digest in the stored completion
+    identity into ``[REDACTED]``; it never matched again and every correct
+    finish was refused until the repair budget ran out.
+    """
+
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("c1", "api/channel_access_token.py", "X = 1\n"),)),
+            _response((_finish_call("c2", "added X"),)),
+        ],
+    )
+    report = harness.run()
+    assert report.verified is True, (report.reason, getattr(report, "unmet", None))
+
+
 def test_engine_does_not_rerun_a_check_the_model_already_passed(
     tmp_path: Path, repository: Path
 ) -> None:

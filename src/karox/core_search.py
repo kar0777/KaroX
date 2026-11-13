@@ -17,6 +17,11 @@ from typing import Any, Dict, List, Optional
 from .core_types import CoreError, InvalidCommand, InvalidPath, _path_label
 
 
+
+#: A query naming a definition: "def get_default", "class Option", "function foo".
+_DEFINITION_QUERY = re.compile(r"^\s*(?:async\s+def|def|class|function|fn|func)\s+[A-Za-z_][\w]*\s*\(?\s*$")
+_DEFINITION_LINES = 60
+
 class SearchToolsMixin:
     """Search methods mixed into :class:`karox.core.CoreRuntime`."""
 
@@ -547,6 +552,54 @@ class SearchToolsMixin:
         return cleaned + "/**/*"
 
     def _search(
+        self, arguments: Dict[str, Any], deadline_seconds: float
+    ) -> Dict[str, Any]:
+        result = self._search_matches(arguments, deadline_seconds)
+        try:
+            self._attach_definitions(arguments, result)
+        except Exception:  # noqa: BLE001 - an optional extra never fails a search
+            pass
+        return result
+
+    def _attach_definitions(self, arguments: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """Add the body of a looked-up definition when the search pins it down.
+
+        Benchmark 2026-11-13 (click-3239): "search def get_default" was followed
+        by a read_lines of the hit three times in one run -- a whole model turn
+        each, at 50-70k tokens of context. One or two hits for a definition
+        query now carry up to 60 lines from the definition down.
+        """
+
+        query = str(arguments.get("query") or "")
+        if arguments.get("regex") or not _DEFINITION_QUERY.match(query):
+            return
+        matches = result.get("matches") or []
+        if not 1 <= len(matches) <= 2:
+            return
+        for match in matches:
+            path = self.safe_path(str(match["path"]))
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+            start = int(match["line"]) - 1
+            if not 0 <= start < len(lines):
+                continue
+            head = lines[start]
+            indent = len(head) - len(head.lstrip())
+            body = [head]
+            for line in lines[start + 1 : start + _DEFINITION_LINES]:
+                stripped = line.strip()
+                if stripped and len(line) - len(line.lstrip()) <= indent and not stripped.startswith((")", "]", "}", "@", "#")):
+                    break
+                body.append(line)
+            while body and not body[-1].strip():
+                body.pop()
+            match["definition"] = {
+                "start": start + 1,
+                "end": start + len(body),
+                "text": "\n".join(body),
+                "complete": len(body) < _DEFINITION_LINES - 1,
+            }
+
+    def _search_matches(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
         query = self._required(arguments, "query", str)

@@ -75,7 +75,7 @@ def test_django_tests_module_and_conftest_are_test_files() -> None:
 
 def _runtime(tmp_path: Path, files: dict[str, bytes]) -> ExtendedCoreRuntime:
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     for name, data in files.items():
         target = repo / name
@@ -113,3 +113,27 @@ def test_the_python_backend_skips_the_same_directories(tmp_path: Path) -> None:
     ):
         found = _runtime(tmp_path, FILES)._search({"query": "needle"}, 30)
     assert sorted(m["path"] for m in found["matches"]) == WANTED
+
+
+SOURCE = (
+    b"import os\n\n\nclass Option:\n    def get_default(self, ctx):\n"
+    b"        value = self.default\n        if value is True:\n"
+    b"            value = self.flag_value\n        return value\n\n"
+    b"    def other(self):\n        return 1\n"
+)
+
+
+def test_a_definition_lookup_carries_the_body(tmp_path: Path) -> None:
+    """Benchmark 2026-11-13: 'search def X' then 'read_lines' cost a turn each time."""
+
+    from karox.engine_tool_bodies import _plain_body
+
+    found = _runtime(tmp_path, {"core.py": SOURCE})._search({"query": "def get_default"}, 30)
+    body = found["matches"][0]["definition"]
+    assert body["start"] == 5 and body["end"] == 9 and "return value" in body["text"]
+    assert "def other" not in body["text"]
+    shown = _plain_body("repo.search", found)
+    assert shown is not None and "[definition, lines 5-9]" in shown and "return value" in shown
+
+    plain = _runtime(tmp_path / "b", {"core.py": SOURCE})._search({"query": "flag_value"}, 30)
+    assert "definition" not in plain["matches"][0]
