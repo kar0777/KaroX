@@ -16,9 +16,11 @@ from .security import contains_credential, redact_content
 
 def is_ignored_path(relative: str) -> bool:
     """True when a repository-relative path sits inside an ignored directory."""
-    for part in Path(relative).parts[:-1] or ():
+    for depth, part in enumerate(Path(relative).parts[:-1] or ()):
         lowered = part.lower()
         if lowered in IGNORED_DIRECTORY_NAMES:
+            return True
+        if depth == 0 and lowered in ROOT_IGNORED_DIRECTORY_NAMES:
             return True
         if lowered.endswith(_IGNORED_DIRECTORY_SUFFIXES):
             return True
@@ -54,16 +56,18 @@ IGNORED_DIRECTORY_NAMES = frozenset(
         ".vite",
         ".zcode",
         "__pycache__",
-        "build",
-        "coverage",
-        "dist",
         "node_modules",
-        "out",
         "site-packages",
-        "target",
         "venv",
     }
 )
+
+
+#: Generated-output names that are also ordinary package names deeper down
+#: (pip's ``operations/build``, a ``lib/out`` module), so only the repository
+#: root's copy is skipped. ``coverage`` is not here at all: it is the package
+#: directory of coverage.py itself.
+ROOT_IGNORED_DIRECTORY_NAMES = frozenset({"build", "dist", "out", "target"})
 
 
 class CoreReadToolsMixin:

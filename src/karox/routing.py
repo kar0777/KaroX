@@ -399,6 +399,27 @@ class RoutedProvider:
                 )
         return provider, model
 
+    def _runnable_after(
+        self,
+        route_sequence: list[tuple[int, RouteTarget]],
+        position: int,
+        request: ModelRequest,
+    ) -> bool:
+        """Whether a later route would pass preflight and could take the call.
+
+        Counting every later route let a 429 on the only usable one skip its
+        retries, fall through to a route preflight rejects, and report that
+        rejection instead of the real failure.
+        """
+
+        for _, target in route_sequence[position + 1 :]:
+            try:
+                self._preflight(target, request)
+            except Exception:  # noqa: BLE001 - not runnable, whatever the reason
+                continue
+            return True
+        return False
+
     def _request_with_remaining_deadline(
         self,
         request: ModelRequest,
@@ -588,7 +609,7 @@ class RoutedProvider:
         last_rejection: ProviderError | None = None
         route_sequence = self._route_sequence(request)
         for position, (index, target) in enumerate(route_sequence):
-            has_fallback = position + 1 < len(route_sequence)
+            has_fallback = self._runnable_after(route_sequence, position, request)
             try:
                 provider_record, model_record = self._preflight(target, request)
             except ProviderError as exc:
@@ -733,7 +754,7 @@ class RoutedProvider:
         last_rejection: ProviderError | None = None
         route_sequence = self._route_sequence(request)
         for position, (index, target) in enumerate(route_sequence):
-            has_fallback = position + 1 < len(route_sequence)
+            has_fallback = self._runnable_after(route_sequence, position, request)
             try:
                 provider_record, model_record = self._preflight(target, request)
             except ProviderError as exc:

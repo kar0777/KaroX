@@ -381,7 +381,7 @@ def _project_instructions(
             raw = resolved.read_bytes()[: per_file + 1]
         except OSError:
             continue
-        text = raw.decode("utf-8", "replace").strip()
+        text = raw.decode("utf-8", "replace").removeprefix("\ufeff").strip()
         if not text:
             continue
         if len(raw) > per_file or len(text) > per_file:

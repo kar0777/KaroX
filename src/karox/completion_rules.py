@@ -23,11 +23,11 @@ _ROOT_DOC_PREFIXES = (
     "support", "code_of_conduct", "quickstart", "release_notes",
 )
 
-_BEHAVIOR = re.compile(r"\b(?:implement|bugfix|refactor|runtime|behavior|behaviour|execute|launch)\b|исправ.*ошиб|поведен|запуск", re.I)
+_BEHAVIOR = re.compile(r"\b(?:implement|bugfix|refactor|runtime|behavior|behaviour|execute|launch|bugs?|crash(?:es|ed)?|raises?|exceptions?|regression|traceback|\w+Error)\b|исправ.*ошиб|поведен|запуск", re.I)
 
 _TEST_CHANGE_REQUEST = re.compile(
     r"\b(?:add|write|create|update|modify|change|extend|adjust|revise)\w*\b"
-    r".{0,80}(?<![-_.])\b(?:tests?|test\s+cases?|specs?)\b"
+    r".{0,80}(?<![-_.])\b(?:tests?|test\s+cases?|spec\s+(?:files?|tests?)|specs\s+for)\b"
     r"|(?:добав\w*|напиш\w*|созда\w*|обнов\w*|измен\w*|расшир\w*|допол\w*)"
     r".{0,80}(?:тест\w*|спек\w*)",
     re.I,
@@ -46,6 +46,19 @@ _NEGATED_TEST_CHANGE = re.compile(
 )
 
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+|\n+")
+
+#: The matched verb is a noun ("the change", "all changes", "an update").
+_VERB_AS_NOUN = re.compile(
+    r"(?i)\b(?:the|a|an|all|any|this|that|these|those|its|my|our|their|of|no|recent|latest)\s*$"
+)
+#: The test noun belongs to the reporter ("my test") or names a suite that broke.
+_NOT_A_REQUEST = re.compile(
+    r"(?i)\b(?:my|our)\s+(?:\w+\s+)?tests?\b|\bbroke\b|\bbreaks\b|\bfails?\b|\bfailing\b"
+)
+_ALREADY_DONE = re.compile(
+    r"(?i)\balready\b.{0,40}\b(?:taken care|changed|modified|updated|written|added|done)\b"
+    r"|\btaken care of\b"
+)
 
 _CONDITIONAL_REQUEST = re.compile(
     r"^\s*(?:[-*+]|\d+[.)])?\s*\[[ xX]?\]"
@@ -166,6 +179,15 @@ def _explicit_test_change_required(record: Any) -> bool:
                 # phrasing, so reject matches whose path to the test noun crosses
                 # an execution verb.
                 if _TEST_EXECUTION_IN_MATCH.search(match.group(0)):
+                    continue
+                # Audit 2026-11-13: the SWE-bench preamble ("all changes to
+                # any of the test files ... already taken care of") and bug
+                # reports ("the change in 3.1 broke the test suite", "a
+                # fixture in my test") read as requests, so a correct source
+                # fix was held for an unedited test and lost its test ban.
+                if _VERB_AS_NOUN.search(cleaned[: match.start()]):
+                    continue
+                if _NOT_A_REQUEST.search(match.group(0)) or _ALREADY_DONE.search(sentence):
                     continue
                 return True
     return False
@@ -290,6 +312,8 @@ def _is_test_path(relative: str) -> bool:
         return True
     name = path.name.lower()
     stem = path.stem.lower()
+    if name in {"tests.py", "conftest.py"}:
+        return True
     return (
         name.startswith(("test_", "test-", "spec_", "spec-"))
         or stem.endswith(("_test", "_spec"))

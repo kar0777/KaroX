@@ -63,6 +63,10 @@ class SearchToolsMixin:
                 argv.extend(["--glob", f"!**/{ignored}/**"])
             for suffix in getattr(self, "SEARCH_IGNORED_DIRECTORY_SUFFIXES", ()):
                 argv.extend(["--glob", f"!**/*{suffix}/**"])
+            for ignored in sorted(
+                str(item) for item in getattr(self, "SEARCH_ROOT_IGNORED_DIRECTORY_NAMES", ())
+            ):
+                argv.extend(["--glob", f"!/{ignored}/**"])
             for prefix in getattr(self, "SEARCH_IGNORED_DIRECTORY_PREFIXES", ()):
                 argv.extend(["--glob", f"!**/{prefix}*/**"])
         argv.extend(
@@ -112,7 +116,8 @@ class SearchToolsMixin:
                 stats = data.get("stats")
                 if isinstance(stats, dict):
                     searches = stats.get("searches")
-                    total_matches = stats.get("matches")
+                    # matched_lines, not matches: "foo foo" is one result line but two matches.
+                    total_matches = stats.get("matched_lines", stats.get("matches"))
                     if isinstance(searches, int):
                         files_scanned = searches
                     if isinstance(total_matches, int):
@@ -202,6 +207,10 @@ class SearchToolsMixin:
             str(item).lower()
             for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_SUFFIXES", ())
         )
+        root_ignored = frozenset(
+            str(item).lower()
+            for item in getattr(self, "SEARCH_ROOT_IGNORED_DIRECTORY_NAMES", ())
+        )
         stack: List[Path] = [self.repository]
         while stack:
             directory = stack.pop()
@@ -223,6 +232,7 @@ class SearchToolsMixin:
                         lowered_name = entry.name.lower()
                         if (
                             lowered_name in ignored_directory_names
+                            or (directory == self.repository and lowered_name in root_ignored)
                             or any(
                                 lowered_name.endswith(suffix)
                                 for suffix in ignored_directory_suffixes
@@ -410,6 +420,10 @@ class SearchToolsMixin:
             str(item).lower()
             for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_PREFIXES", ())
         )
+        root_ignored = {
+            str(item).lower()
+            for item in getattr(self, "SEARCH_ROOT_IGNORED_DIRECTORY_NAMES", ())
+        }
         for raw in raw_candidates:
             relative = raw.strip().replace("\\", "/")
             if not relative:
@@ -422,6 +436,8 @@ class SearchToolsMixin:
             if normalized.startswith(".karox/"):
                 continue
             parts = [part.lower() for part in Path(normalized).parts[:-1]]
+            if parts and parts[0] in root_ignored:
+                continue
             if any(
                 part in ignored_names
                 or any(part.endswith(suffix) for suffix in ignored_suffixes)

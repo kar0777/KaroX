@@ -377,7 +377,7 @@ def discover_project_context(
         # Decoded with replacement rather than refused: an instruction file with
         # one bad byte is still worth reading, and refusing it silently would
         # look identical to the file not existing.
-        text = raw[:limit].decode("utf-8", errors="replace")
+        text = raw[:limit].decode("utf-8", errors="replace").removeprefix("\ufeff")
         if truncated:
             text += _TRUNCATION_NOTICE.format(limit=limit)
         if not text.strip():
@@ -446,7 +446,7 @@ def discover_project_context(
                 skipped.append(f"{relative} could not be read")
                 continue
             truncated = len(raw) > limit
-            text = raw[:limit].decode("utf-8", errors="replace")
+            text = raw[:limit].decode("utf-8", errors="replace").removeprefix("\ufeff")
             if truncated:
                 text += _TRUNCATION_NOTICE.format(limit=limit)
             if not text.strip():

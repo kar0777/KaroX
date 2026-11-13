@@ -43,6 +43,7 @@ from .core_edit_tools import CoreEditToolsMixin
 from .core_read_tools import (
     CoreReadToolsMixin,
     IGNORED_DIRECTORY_NAMES as IGNORED_DIRECTORY_NAMES,
+    ROOT_IGNORED_DIRECTORY_NAMES as ROOT_IGNORED_DIRECTORY_NAMES,
     _IGNORED_DIRECTORY_PREFIXES as _IGNORED_DIRECTORY_PREFIXES,
     _IGNORED_DIRECTORY_SUFFIXES as _IGNORED_DIRECTORY_SUFFIXES,
     is_ignored_path as is_ignored_path,
@@ -246,6 +247,7 @@ class ExtendedCoreRuntime(
     # so dependency/build filtering stays owned by this Extended Core module
     # without creating a core.py -> core_tools.py import cycle.
     SEARCH_IGNORED_DIRECTORY_NAMES = IGNORED_DIRECTORY_NAMES
+    SEARCH_ROOT_IGNORED_DIRECTORY_NAMES = ROOT_IGNORED_DIRECTORY_NAMES
     SEARCH_IGNORED_DIRECTORY_SUFFIXES = _IGNORED_DIRECTORY_SUFFIXES
     SEARCH_IGNORED_DIRECTORY_PREFIXES = _IGNORED_DIRECTORY_PREFIXES
 

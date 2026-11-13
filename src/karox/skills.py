@@ -411,7 +411,8 @@ def _bounded_frontmatter(path: Path, limit: int) -> tuple[bytes, int, _FileIdent
                 raise SkillError(f"Skill manifest changed before it was read: {path}")
             opening = handle.readline(limit + 1)
             consumed += len(opening)
-            if len(opening) > limit or opening.rstrip(b"\r\n") != b"---":
+            # A Windows editor's UTF-8 BOM must not hide the frontmatter.
+            if len(opening) > limit or opening.removeprefix(b"\xef\xbb\xbf").rstrip(b"\r\n") != b"---":
                 raise SkillError("SKILL.md must begin with YAML frontmatter")
             pieces.append(opening)
             while True:
@@ -674,6 +675,15 @@ class SkillCatalog:
             resolved_root = root.resolve(strict=True)
             if not resolved_root.is_dir():
                 raise SkillError("source path is not a directory")
+            if source_kind.startswith("repository_"):
+                # Only the last component was link-checked: a ``.claude``
+                # junction or a git symlink ``.claude -> ../..`` led outside.
+                try:
+                    resolved_root.relative_to(self.repository.resolve(strict=True))
+                except ValueError:
+                    raise SkillError(
+                        "repository skill source resolves outside the repository"
+                    ) from None
             children = sorted(resolved_root.iterdir(), key=lambda item: item.name)
         except (OSError, SkillError) as exc:
             self._diagnostics.append(
@@ -741,6 +751,9 @@ class SkillCatalog:
             or len(description) > 2000
         ):
             raise SkillError("Skill description must contain 1-2000 characters")
+        # One catalog line in the system prompt: a newline in a description
+        # would start a line of its own there ("SYSTEM OVERRIDE: ...").
+        description = " ".join(description.split())
         nested = value.get("metadata")
         if nested is not None and not isinstance(nested, dict):
             raise SkillError("Skill metadata.metadata must be a mapping")
@@ -891,7 +904,7 @@ class SkillCatalog:
             pieces.append(line)
             offset += len(line)
             stripped = line.rstrip(b"\r\n")
-            if index == 0 and stripped != b"---":
+            if index == 0 and stripped.removeprefix(b"\xef\xbb\xbf") != b"---":
                 raise SkillError("SKILL.md must begin with YAML frontmatter")
             if index > 0 and stripped in {b"---", b"..."}:
                 return b"".join(pieces), offset
