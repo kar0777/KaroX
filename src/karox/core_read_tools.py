@@ -240,7 +240,13 @@ class CoreReadToolsMixin:
                 history = ["diff", "--no-ext-diff", "--no-color", rev]
             else:
                 history = ["show", "--no-ext-diff", "--no-color", "--format=%h %s%n", rev]
+            if not relatives:
+                # Without paths a past commit can be a whole release; benchmark
+                # click-3239 v41 got 19k characters. Name the files first.
+                history.append("--stat")
             result = self._git([*history, "--", *relatives], deadline_seconds)
+            if not relatives:
+                result["note"] = "file summary only; pass paths to read the change itself"
             result["rev"] = rev
             result["paths"] = list(relatives)
             return result

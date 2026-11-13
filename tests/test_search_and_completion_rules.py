@@ -160,8 +160,11 @@ def test_history_reads_are_one_call(tmp_path: Path) -> None:
     change = core._git_diff_paths({"rev": "HEAD", "paths": ["core.py"]}, 30)
     assert "refactor flags" in change["stdout"] and "+NEW = 2" in change["stdout"]
     assert "_evidence" not in change
-    span = core._git_diff_paths({"rev": "v8.2.0..HEAD"}, 30)["stdout"]
+    span = core._git_diff_paths({"rev": "v8.2.0..HEAD", "paths": ["core.py"]}, 30)["stdout"]
     assert "-OLD = 1" in span and "+NEW = 2" in span
+    summary = core._git_diff_paths({"rev": "HEAD"}, 30)
+    assert "core.py" in summary["stdout"] and "+NEW" not in summary["stdout"]
+    assert "paths" in summary["note"]
     with pytest.raises(Exception):
         core._git_diff_paths({"rev": "--output=x"}, 30)
     for bad in ("--output=x", "a b", "../x"):
