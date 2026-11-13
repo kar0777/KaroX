@@ -474,6 +474,7 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
         output = self._render_output(core_name, result)
         notices = (
             self._research_notice(definition),
+            self._batching_notice(definition, action),
             self._browser_notice(),
             self._time_left_notice(),
             self._interaction_hint(core_name),

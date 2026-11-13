@@ -239,6 +239,14 @@ def additional_tool_definitions(
                             "capped at 1500."
                         ),
                     },
+                    "rev": {
+                        "type": "string",
+                        "description": (
+                            "Read the file as it was at this commit, tag or "
+                            "branch (e.g. v8.2.1, 9c632c0^) instead of the "
+                            "working tree."
+                        ),
+                    },
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -543,12 +551,19 @@ def additional_tool_definitions(
         ),
         "git.log": ToolDefinition(
             "git.log",
-            "Read recent commit history.",
+            "Read commit history: newest first, optionally only commits whose "
+            "message matches grep, reachable from rev (a tag, branch or A..B "
+            "range), or touching path.",
             Capability.GIT_READ,
             False,
             {
                 "type": "object",
-                "properties": {"limit": {"type": "number"}},
+                "properties": {
+                    "limit": {"type": "number"},
+                    "grep": {"type": "string"},
+                    "rev": {"type": "string"},
+                    "path": {"type": "string"},
+                },
                 "additionalProperties": False,
             },
         ),

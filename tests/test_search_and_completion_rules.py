@@ -137,3 +137,26 @@ def test_a_definition_lookup_carries_the_body(tmp_path: Path) -> None:
 
     plain = _runtime(tmp_path / "b", {"core.py": SOURCE})._search({"query": "flag_value"}, 30)
     assert "definition" not in plain["matches"][0]
+
+
+def test_history_reads_are_one_call(tmp_path: Path) -> None:
+    """Benchmark 2026-11-13 (click-3239 v39): 25 python -c git turns to read old code."""
+
+    core = _runtime(tmp_path, {"core.py": b"OLD = 1\n"})
+    repo = core.repository
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "Release version 8.2.0"], check=True)
+    subprocess.run([*git, "tag", "v8.2.0"], check=True)
+    (repo / "core.py").write_text("NEW = 2\n")
+    subprocess.run([*git, "commit", "-qam", "refactor flags"], check=True)
+
+    old = core._read_lines({"path": "core.py", "rev": "v8.2.0"}, 30)
+    assert old["lines"] == ["OLD = 1"] and old["rev"] == "v8.2.0"
+    assert core._read_lines({"path": "core.py"}, 30)["lines"] == ["NEW = 2"]
+    log = core._git_log({"grep": "release version", "limit": 5}, 30)
+    assert "Release version 8.2.0" in log["stdout"] and "refactor" not in log["stdout"]
+    assert "refactor" in core._git_log({"path": "core.py", "rev": "v8.2.0..HEAD"}, 30)["stdout"]
+    for bad in ("--output=x", "a b", "../x"):
+        with pytest.raises(Exception):
+            core._read_lines({"path": "core.py", "rev": bad}, 30)

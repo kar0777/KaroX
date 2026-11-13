@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from .core import (
@@ -70,12 +71,20 @@ IGNORED_DIRECTORY_NAMES = frozenset(
 ROOT_IGNORED_DIRECTORY_NAMES = frozenset({"build", "dist", "out", "target"})
 
 
+#: A revision a read or log may name: hashes, tags, branches, ^ and ~ suffixes.
+_REVISION = re.compile(r"(?!-)[A-Za-z0-9._/@{}^~+-]{1,120}")
+_REVISION_RANGE = re.compile(r"(?!-)[A-Za-z0-9._/@{}^~+-]{1,120}\.\.\.?[A-Za-z0-9._/@{}^~+-]{0,120}")
+
+
 class CoreReadToolsMixin:
     """Methods composed into ExtendedCoreRuntime; see core_tools.py."""
 
     def _read_lines(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
+        rev = arguments.get("rev")
+        if rev is not None:
+            return self._read_lines_at(arguments, str(rev), deadline_seconds)
         path = self.safe_path(self._required(arguments, "path", str))
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -86,6 +95,35 @@ class CoreReadToolsMixin:
             text = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CoreError("repo.read_lines supports UTF-8 text only") from exc
+        return self._line_window(arguments, path.relative_to(self.repository).as_posix(), text)
+
+    def _read_lines_at(
+        self, arguments: Dict[str, Any], rev: str, deadline_seconds: float
+    ) -> Dict[str, Any]:
+        """The same window of a file as it was at a commit, tag or branch.
+
+        Benchmark 2026-11-13 (click-3239, v39): a regression task compared old
+        versions of core.py through 25 separate python -c subprocess turns.
+        A read at a revision is one batched call like any other read.
+        """
+
+        if not _REVISION.fullmatch(rev):
+            raise InvalidCommand("rev must be a commit, tag or branch name (e.g. v8.2.1, HEAD~3, 9c632c0^)")
+        raw = self._required(arguments, "path", str)
+        if raw.startswith(("/", "\\")) or ".." in raw.replace("\\", "/").split("/"):
+            raise InvalidCommand("path must be repository-relative")
+        relative = raw.replace("\\", "/").removeprefix("./")
+        result = self._git(["show", f"{rev}:{relative}"], deadline_seconds, redact_output=False)
+        if result.get("exit_code") != 0:
+            detail = str(result.get("stderr") or "").strip().splitlines()
+            raise CoreError(f"git show {rev}:{relative} failed: {detail[-1] if detail else 'unknown error'}")
+        if result.get("stdout_truncated"):
+            raise CoreError("the file at that revision is larger than the read limit")
+        window = self._line_window(arguments, relative, str(result.get("stdout") or ""))
+        window["rev"] = rev
+        return window
+
+    def _line_window(self, arguments: Dict[str, Any], relative: str, text: str) -> Dict[str, Any]:
         start = self._bounded_number(arguments, "start", 1, 1)
         count = self._bounded_number(
             arguments, "count", self.MAX_READ_LINES, 1, self.MAX_READ_LINES
@@ -97,7 +135,7 @@ class CoreReadToolsMixin:
         # and a file edited outside the range has not changed the answer.
         returned = "\n".join(selected)
         return {
-            "path": path.relative_to(self.repository).as_posix(),
+            "path": relative,
             "start": start,
             "count": len(selected),
             "total_lines": len(lines),
@@ -133,16 +171,30 @@ class CoreReadToolsMixin:
         limit = self._bounded_number(
             arguments, "limit", 20, 1, self.MAX_LOG_ENTRIES
         )
-        result = self._git(
-            [
-                "log",
-                f"--max-count={limit}",
-                "--no-decorate",
-                "--date=iso-strict",
-                "--pretty=format:%h%x09%ad%x09%an%x09%s",
-            ],
-            deadline_seconds,
-        )
+        argv = [
+            "log",
+            f"--max-count={limit}",
+            "--no-decorate",
+            "--date=iso-strict",
+            "--pretty=format:%h%x09%ad%x09%an%x09%s",
+        ]
+        grep = arguments.get("grep")
+        if grep is not None:
+            if not isinstance(grep, str) or not grep or len(grep) > 200 or "\x00" in grep:
+                raise InvalidCommand("grep must be 1-200 characters")
+            argv += ["-i", f"--grep={grep}"]
+        rev = arguments.get("rev")
+        if rev is not None:
+            if not isinstance(rev, str) or not (_REVISION.fullmatch(rev) or _REVISION_RANGE.fullmatch(rev)):
+                raise InvalidCommand("rev must be a commit, tag, branch or A..B range")
+            argv.append(rev)
+        path = arguments.get("path")
+        if path is not None:
+            relative = str(path).replace(chr(92), "/").removeprefix("./")
+            if not relative or relative.startswith(("/", "-")) or ".." in relative.split("/") or ":" in relative:
+                raise InvalidCommand("path must be repository-relative")
+            argv += ["--", relative]
+        result = self._git(argv, deadline_seconds)
         result["limit"] = limit
         result["_evidence"] = [self._git_evidence("git_log", result)]
         return result

@@ -293,6 +293,25 @@ def test_a_change_to_a_file_named_like_a_secret_can_be_verified(
     assert report.verified is True, (report.reason, getattr(report, "unmet", None))
 
 
+def test_serial_single_reads_get_one_batching_nudge(tmp_path: Path, repository: Path) -> None:
+    """Benchmark 2026-11-13 (click-3239 v39): 25 one-read responses in a row."""
+
+    reads = [
+        _response((_tool_call(f"r{i}", "repo_read_lines", {"path": "seed.txt", "count": 1}),))
+        for i in range(6)
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [*reads, _response((_write_call("w", "hello.txt", "hi"),)), _response((_finish_call("f", "done"),))],
+        runtime_cls=ExtendedCoreRuntime,
+    )
+    harness.run()
+    tools = [m for m in harness.record().provider_history if m.get("role") == "tool"]
+    nudged = [m for m in tools if "each made a single read" in str(m.get("content"))]
+    assert len(nudged) == 1
+
+
 def test_engine_does_not_rerun_a_check_the_model_already_passed(
     tmp_path: Path, repository: Path
 ) -> None:

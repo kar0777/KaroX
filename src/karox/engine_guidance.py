@@ -76,6 +76,10 @@ from .engine_tool_bodies import (  # noqa: E402,F401
 from .security import redact
 
 
+BATCHING_NOTICE_STREAK = 4
+BATCHING_NOTICES = 3
+
+
 class EngineGuidanceMixin:
     """Methods composed into CoreToolEnvironment; see engine_tool_env.py."""
 
@@ -202,6 +206,33 @@ class EngineGuidanceMixin:
             "exercise only the interaction the task names, fix what the last "
             "probe showed, then run the visual check and finish. Browser calls "
             f"stop at {BROWSER_CALLS_EXHAUSTED}."
+        )
+
+    def _batching_notice(self, definition: ToolDefinition, action: Mapping[str, Any]) -> str:
+        """A nudge after several responses that each made one read.
+
+        Benchmark 2026-11-13 (click-3239 v39): 25 consecutive responses each
+        ran one git or read call; every response re-sent ~60k tokens of
+        context. Reads the model already knows it needs belong in one response.
+        """
+
+        step = int(getattr(self._kernel, "_step", 0) or 0)
+        lone = not definition.mutates and int(action.get("batch_size") or 1) <= 1
+        if not lone:
+            self._lone_read_steps = []
+            return ""
+        steps = [n for n in getattr(self, "_lone_read_steps", []) if n != step] + [step]
+        consecutive = all(b - a == 1 for a, b in zip(steps, steps[1:]))
+        self._lone_read_steps = steps if consecutive else [step]
+        sent = int(getattr(self, "_batching_notices", 0) or 0)
+        if len(self._lone_read_steps) < BATCHING_NOTICE_STREAK or sent >= BATCHING_NOTICES:
+            return ""
+        self._batching_notices = sent + 1
+        self._lone_read_steps = []
+        return (
+            f"Your last {BATCHING_NOTICE_STREAK} responses each made a single read, and "
+            "every response re-sends the whole conversation. Put the reads, "
+            "searches and probes you already know you need into one response."
         )
 
     def _time_left_notice(self) -> str:
