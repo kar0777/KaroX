@@ -312,6 +312,33 @@ def test_serial_single_reads_get_one_batching_nudge(tmp_path: Path, repository: 
     assert len(nudged) == 1
 
 
+def test_reprobing_after_green_tests_gets_a_settle_nudge(tmp_path: Path, repository: Path) -> None:
+    """Benchmark 2026-11-13 (sqlglot-7457): 14 responses of re-probing after green tests."""
+
+    green = ("python", "-c", "print('ok')", "pytest")
+    probes = [
+        _response((_tool_call(f"p{i}", "repo_read_lines", {"path": "seed.txt", "count": 1}),
+                   _tool_call(f"q{i}", "repo_read_lines", {"path": "seed.txt", "start": 1}),))
+        for i in range(6)
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_write_call("w", "hello.txt", "hi"),)),
+            _response((_tool_call("t", "checks_run", {"argv": list(green)}),)),
+            *probes,
+            _response((_finish_call("f", "created hello.txt with hi"),)),
+        ],
+        runtime_cls=ExtendedCoreRuntime,
+        verification=(green,),
+    )
+    harness.run()
+    tools = [m for m in harness.record().provider_history if m.get("role") == "tool"]
+    nudged = [m for m in tools if "nothing has been edited since" in str(m.get("content"))]
+    assert len(nudged) == 1
+
+
 def test_engine_does_not_rerun_a_check_the_model_already_passed(
     tmp_path: Path, repository: Path
 ) -> None:

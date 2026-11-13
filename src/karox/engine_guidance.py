@@ -78,6 +78,9 @@ from .security import redact
 
 BATCHING_NOTICE_STREAK = 4
 BATCHING_NOTICES = 3
+#: Responses without an edit after a passing test run before the settle nudge.
+SETTLE_NOTICE_STEPS = 4
+SETTLE_NOTICES = 2
 
 
 class EngineGuidanceMixin:
@@ -233,6 +236,41 @@ class EngineGuidanceMixin:
             f"Your last {BATCHING_NOTICE_STREAK} responses each made a single read, and "
             "every response re-sends the whole conversation. Put the reads, "
             "searches and probes you already know you need into one response."
+        )
+
+    def _settle_notice(self, core_name: str, arguments: Mapping[str, Any], data: Mapping[str, Any]) -> str:
+        """A nudge to finish once tests pass and responses stop changing code.
+
+        Benchmark 2026-11-13 (rebench26 sqlglot-7457, sqlfluff-7617, click-3239):
+        after the covering tests passed, 9-14 more responses re-probed, re-read
+        and re-linted without an edit -- a third of each run's output -- and the
+        finish review then asked for the same checks again.
+        """
+
+        step = int(getattr(self._kernel, "_step", 0) or 0)
+        seq = int(getattr(self, "_action_seq", 0) or 0)
+        if seq and seq == int(getattr(self, "_last_change_seq", 0) or 0):
+            self._green_step = None
+            return ""
+        argv = arguments.get("argv")
+        command = " ".join(str(item) for item in argv) if isinstance(argv, list) else ""
+        is_test = core_name in ("tests.run", "checks.run_affected") or (
+            core_name == "checks.run" and ("pytest" in command or " test" in command)
+        )
+        exit_code = data.get("exit_code", data.get("returncode"))
+        if is_test and exit_code == 0 and getattr(self, "_green_step", None) is None:
+            self._green_step = step
+            return ""
+        green = getattr(self, "_green_step", None)
+        sent = int(getattr(self, "_settle_notices", 0) or 0)
+        if green is None or sent >= SETTLE_NOTICES or step - green < SETTLE_NOTICE_STEPS:
+            return ""
+        self._settle_notices = sent + 1
+        self._green_step = step
+        return (
+            f"The tests passed {SETTLE_NOTICE_STEPS}+ responses ago and nothing has been "
+            "edited since. Unless a behaviour the task states is still unobserved, "
+            "finish now: the finish review will name anything missing."
         )
 
     def _time_left_notice(self) -> str:
