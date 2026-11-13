@@ -107,6 +107,20 @@ from .sessions import MutationLease, SessionStore  # noqa: E402
 _MODEL_REQUEST_DEADLINE_SECONDS = 300.0
 
 
+def _with_review_note(review: str, note: str) -> str:
+    """Put the review's extra item before its closing "finish now" line.
+
+    Appended after it, the model read "finish now" before "read each now".
+    """
+
+    if not note:
+        return review
+    head, sep, closing = review.rstrip().rpartition("\n")
+    if not sep:
+        return review + note
+    return head + note + "\n" + closing
+
+
 def _model_request_deadline(remaining_seconds: float) -> float:
     return min(_MODEL_REQUEST_DEADLINE_SECONDS, max(5.0, remaining_seconds))
 
@@ -552,7 +566,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     if review_due:
                         review_due = False
                         self._append_repair_prompt(
-                            agent, "", prompt=self_review_text() + self._unopened_files_note(agent, session_id)
+                            agent, "", prompt=_with_review_note(self_review_text(), self._unopened_files_note(agent, session_id))
                         )
                     else:
                         self._run_harness_final_calls(session_id, lease, self._deadline)

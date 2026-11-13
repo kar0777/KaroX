@@ -313,11 +313,17 @@ def render_problems(
     measured: dict | None = None,
     probe: dict | None = None,
     resize: dict | None = None,
+    dark_intended: bool = False,
 ) -> dict:
     """Turn what a render observed into a verdict, without touching a browser.
 
     Kept pure so the thresholds and the wording are testable on the numbers the
     calibration measured, while the browser I/O stays in :func:`render_page`.
+
+    ``dark_intended`` drops the two darkness rules (black bottom quarter, dark
+    near-flat frame): a correct starfield or night scene trips both, and with
+    no vision model they were the whole verdict, so such a page could never
+    pass. Only a caller that knows the goal asks for a dark scene sets it.
     """
 
     problems: list[str] = []
@@ -460,6 +466,7 @@ def render_problems(
             # below it: the Snake page passed its grader while this rule kept
             # reporting the page background and spent the whole visual budget.
             draws_with_three
+            and not dark_intended
             and isinstance(dark_share, float)
             and isinstance(bottom_sampled, int)
             and not isinstance(bottom_sampled, bool)
@@ -489,6 +496,7 @@ def render_problems(
             )
         if (
             draws_with_three
+            and not dark_intended
             and isinstance(luma_mean, float)
             and isinstance(luma_std, float)
             and isinstance(dominant_share, float)

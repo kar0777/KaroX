@@ -91,6 +91,13 @@ _TASK_SIGNALS = (
 )
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+# A brief that asks for a dark scene: its frame is meant to be mostly black, so
+# the render heuristics' darkness rules say nothing about it. Read from the
+# task brief only -- a caller's focus text could otherwise switch the rule off.
+_DARK_SCENE = re.compile(
+    r"(?i)\b(?:outer space|space scene|starfield|star field|starry|stars|galax(?:y|ies)|"
+    r"solar system|planets?|night(?:time)?|nebula|cosmos|cosmic|universe)\b"
+)
 
 
 def _json_objects(text: str) -> list[str]:
@@ -378,6 +385,7 @@ class VisualChecker:
             measured=measured,
             probe=probe,
             resize=observation.get("resize"),
+            dark_intended=bool(_DARK_SCENE.search(base_goal)),
         )
         issues = list(judged.get("problems") or [])
         resize = judged.get("resize")

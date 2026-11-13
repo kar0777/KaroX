@@ -247,10 +247,9 @@ _FORMAT_ERROR_TEMPLATE = (
     "{%- else -%}\n"
     "Format error:\n\n"
     "<error>\n{{ error }}\n</error>\n\n"
-    "Every response must carry its action as a tool call (exactly one preferred). "
-    "When the task is finished, call the finish tool with the final answer. Do "
-    "not answer in prose without a tool call; prose is only accepted as the "
-    "final answer after repeated format errors.\n"
+    "Every response must carry its actions as tool calls (batch independent "
+    "ones). When the task is finished, call the finish tool with the final "
+    "answer. Do not answer in prose without a tool call.\n"
     "{%- endif %}"
 )
 

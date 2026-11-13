@@ -31,6 +31,14 @@ def test_a_post_processed_scene_is_kept_as_a_fallback() -> None:
     assert "__karoxThree || globalThis.__karoxThreeOffscreen" in census.CENSUS_JS
 
 
+def test_hidden_hitboxes_and_the_time_budget_are_in_the_census() -> None:
+    """Audit 2026-11-13: material.visible=false hitboxes counted as solid objects."""
+
+    assert "x.visible !== false" in census.CENSUS_JS and "x.colorWrite !== false" in census.CENSUS_JS
+    assert "o.isMesh && o.visible && mats(o).some(paints)" in census.CENSUS_JS
+    assert "budget_ms" in census.CENSUS_JS and "partial:" in census.CENSUS_JS
+
+
 def test_other_files_and_minified_builds_are_served_unchanged() -> None:
     assert census.instrument("https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js", THREE) == THREE
     assert census.instrument("https://unpkg.com/three@0.160.0/build/three.module.min.js", THREE) == THREE
@@ -50,3 +58,33 @@ def test_a_drag_target_already_on_screen_needs_no_scroll() -> None:
     assert _on_screen({"x": 0, "y": 0, "width": 1280, "height": 800}, view)
     assert not _on_screen({"x": 0, "y": 900, "width": 100, "height": 100}, view)
     assert not _on_screen({"x": 0, "y": 0, "width": 10, "height": 10}, {})
+
+
+def test_locator_inspection_tells_a_missing_target_from_a_busy_page() -> None:
+    """Audit 2026-11-13: a missing selector read as a security refusal after 30 s."""
+
+    import pytest
+
+    from karox.browser.errors import BrowserError, BrowserSecurityError
+    from karox.browser.guards import SessionGuardsMixin
+
+    class TimeoutError(Exception):  # the name Playwright's timeout carries
+        pass
+
+    class Locator:
+        def __init__(self, count: int) -> None:
+            self._count = count
+
+        def evaluate(self, script: str, timeout: float) -> dict:
+            assert timeout == 15_000
+            raise TimeoutError("Timeout 15000ms exceeded")
+
+        def count(self) -> int:
+            return self._count
+
+    guard = SessionGuardsMixin.__new__(SessionGuardsMixin)
+    with pytest.raises(BrowserError, match="not_found") as missing:
+        guard._locator_metadata(Locator(0))
+    assert not isinstance(missing.value, BrowserSecurityError)
+    with pytest.raises(BrowserError, match="busy"):
+        guard._locator_metadata(Locator(1))

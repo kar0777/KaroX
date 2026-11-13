@@ -73,6 +73,7 @@ class ProviderStreamMixin:
         event_count = 0
         total_chars = 0
         terminal_event: Optional[ModelEvent] = None
+        delivered = False
 
         lines = response.iter_lines()
         while True:
@@ -89,6 +90,18 @@ class ProviderStreamMixin:
                 raise
             if time.monotonic() >= deadline:
                 if terminal_event is not None:
+                    break
+                if delivered:
+                    # The reply is paid for up to here and the caller holds
+                    # it. Re-sending would buy the same long generation again
+                    # (retried up to six times, each likely cut again); end it
+                    # as a length cut, which the model is told about.
+                    terminal_event = ModelEvent(
+                        ModelEventKind.COMPLETION,
+                        finish_reason="length",
+                        response_id=response_id,
+                        transport_attempts=attempts,
+                    )
                     break
                 raise ProviderError(
                     ProviderErrorKind.TRANSPORT,
@@ -152,6 +165,8 @@ class ProviderStreamMixin:
                             status_code=response.status_code,
                         )
                     response_id = chunk_id
+                if events:
+                    delivered = True
                 yield from events
                 continue
             if line.startswith(":"):

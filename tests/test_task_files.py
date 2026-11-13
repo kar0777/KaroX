@@ -50,3 +50,23 @@ def test_nothing_is_owed_when_every_named_file_was_opened_or_is_absent(tmp_path)
     assert task_files.unopened(TASK, repo, messages) == []
     assert task_files.unopened("edit lib/missing.py", repo, []) == []
     assert task_files.review_note([]) == ""
+
+
+def test_root_level_files_the_task_names_are_found() -> None:
+    """Audit 2026-11-13: setup.py or index.html in the repo root were never flagged."""
+
+    from karox.task_files import named_paths
+
+    assert named_paths("Fix setup.py and src/pkg/mod.py; open index.html") == [
+        "setup.py", "src/pkg/mod.py", "index.html",
+    ]
+
+
+def test_the_unopened_note_comes_before_finish_now() -> None:
+    from karox.engine_kernel import _with_review_note
+    from karox.prompts import self_review_text
+
+    text = _with_review_note(self_review_text(), "\n7. The task names setup.py")
+    assert text.index("7. The task names") < text.index("finish now")
+    assert text.rstrip().endswith("finish now with the same answer.")
+    assert _with_review_note("a\nb", "") == "a\nb"

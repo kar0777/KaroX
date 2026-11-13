@@ -241,6 +241,32 @@ def test_a_dark_floor_with_visible_lane_structure_is_not_a_missing_floor() -> No
     assert not any("bottom quarter" in item for item in result["problems"])
 
 
+def test_a_starfield_the_task_asks_for_is_not_a_dark_scene_failure() -> None:
+    """Audit 2026-11-13: a valid space scene tripped both darkness rules.
+
+    Without a vision model those rules were the whole verdict, so a correct
+    solar system could never pass. Only the task brief can say dark is meant.
+    """
+
+    from karox.visual_check import _DARK_SCENE
+
+    measured = _measured()
+    measured.update(
+        dark_bottom_share=0.93, bottom_sampled=200, bottom_structured_share=0.015,
+        luma_mean=0.05, luma_std=0.06, dominant_share=0.85, structured=2,
+    )
+    args = dict(page_errors=(), console_errors=(), measured=measured,
+                probe={**_probe(), "paints_with_three": True}, resize={"ok": True})
+
+    strict = render_problems("space.html", **args)
+    assert any("bottom quarter" in item for item in strict["problems"])
+    assert any("dark near-flat" in item for item in strict["problems"])
+    meant = render_problems("space.html", dark_intended=True, **args)
+    assert not any("bottom quarter" in item or "dark near-flat" in item for item in meant["problems"])
+    assert _DARK_SCENE.search("Render the solar system: the sun and eight planets")
+    assert not _DARK_SCENE.search("an aquarium with fish and gravel; a starship racer")
+
+
 def test_the_visual_checker_prompt_scopes_games_to_required_facts() -> None:
     from karox.prompts import visual_checker_text
 

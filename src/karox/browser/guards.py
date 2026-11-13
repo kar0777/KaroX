@@ -112,18 +112,28 @@ class SessionGuardsMixin:
                 raise
 
     def _locator_metadata(self, locator: Any) -> dict[str, str]:
-        from .pageperf import INPUT_TIMEOUT_SECONDS
-
+        bound_seconds = 15.0
         try:
-            # Bounded like the action itself: the context default (30 s) made a
-            # missing selector wait 30 s and then read as a security refusal.
-            data = locator.evaluate(LOCATOR_METADATA_JS, timeout=INPUT_TIMEOUT_SECONDS * 1000)
+            # Bounded: the context default (30 s) made a missing selector wait
+            # 30 s and then read as a security refusal. 15 s, not the 6 s input
+            # timeout: a software-WebGL page can take seconds per frame to answer.
+            data = locator.evaluate(LOCATOR_METADATA_JS, timeout=bound_seconds * 1000)
             return {str(k): str(v) for k, v in (data or {}).items()}
         except Exception as exc:  # noqa: BLE001 - fail closed below
             if type(exc).__name__ == "TimeoutError":
+                try:
+                    present = int(locator.count()) > 0
+                except Exception:  # noqa: BLE001 - unknown: say what is known
+                    present = True
+                if not present:
+                    raise BrowserError(
+                        "not_found: no element matches the target; take a fresh "
+                        "snapshot and use a selector from it"
+                    ) from None
                 raise BrowserError(
-                    "not_found: no element matched the target within "
-                    f"{INPUT_TIMEOUT_SECONDS:g} s; take a fresh snapshot and use a selector from it"
+                    f"busy: the page did not answer within {bound_seconds:g} s while "
+                    "KaroX inspected the target; a page drawing slowly holds every "
+                    "action, so retry once it settles"
                 ) from None
             return {}
 

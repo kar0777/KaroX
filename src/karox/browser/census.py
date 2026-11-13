@@ -80,8 +80,15 @@ CENSUS_JS = r"""(opts) => {
     return { error: 'no three.js frame seen: census needs the page to import an unminified three.module.js (or three.core.js) and render to the screen at least once' };
   }
   const { renderer, scene, camera } = H;
-  const drawable = (o) => o.isMesh && o.visible;
+  // Each pass is a full render plus a readback; on a software-WebGL page a
+  // census of many objects could hold the browser for minutes.
+  const started = performance.now(), budget = opts.budget_ms || 20000;
+  let skipped = 0;
   const mats = (m) => Array.isArray(m.material) ? m.material : [m.material];
+  // A raycast hitbox keeps mesh.visible but hides its material; the census
+  // swaps materials, so it would draw such a mesh as a solid object.
+  const paints = (x) => x && x.visible !== false && x.colorWrite !== false && !(x.transparent && x.opacity <= 0.01);
+  const drawable = (o) => o.isMesh && o.visible && mats(o).some(paints);
   const seeThrough = (m) => mats(m).every((x) => x && (((x.transmission || 0) > 0.3) || (x.transparent && x.opacity < 0.6)));
   const label = (o, i) => o.name || (o.type + '#' + i + (o.children && o.children[0] && o.children[0].name ? ' (' + o.children[0].name + ')' : ''));
   const collect = (level) => {
@@ -231,7 +238,9 @@ CENSUS_JS = r"""(opts) => {
       const seen = summary(together.get(k + 1));
       let solo = null, regions = null;
       const own = new Map(e.meshes.slice(0, 255).map((m, i) => [m, i + 1]));
-      if (!seen.count || e.see_through) {
+      const late = performance.now() - started > budget;
+      if (late) skipped++;
+      if (!late && (!seen.count || e.see_through)) {
         // The object alone: its own coverage and box with nothing in front.
         const alone = pass((m) => (own.has(m) && (e.see_through || !seeThrough(m))) ? own.get(m) : 0);
         let count = 0, x0 = 101, y0 = 101, x1 = -1, y1 = -1;
@@ -248,7 +257,7 @@ CENSUS_JS = r"""(opts) => {
       const solid = e.meshes.filter((m) => e.see_through || !seeThrough(m));
       const sample = solid.length <= 8 ? solid : Array.from({ length: 8 }, (_, i) => solid[Math.floor(i * solid.length / 8)]);
       regions = [];
-      for (const target of sample) {
+      for (const target of late ? [] : sample) {
         const s = pass((m) => m === target ? 1 : 0).get(1);
         // An instanced mesh draws one region per instance by design.
         const copies = target.isInstancedMesh ? Math.max(1, target.count) : 1;
@@ -257,9 +266,9 @@ CENSUS_JS = r"""(opts) => {
       const box = new T.Box3().setFromObject(e.obj);
       const dims = box.isEmpty() ? null : box.getSize(new T.Vector3()).toArray().map((v) => +v.toFixed(2));
       const centre = box.isEmpty() ? null : box.getCenter(new T.Vector3()).toArray().map((v) => +v.toFixed(2));
-      const shownCount = e.see_through ? solo.count : seen.count;
+      const shownCount = e.see_through ? (solo ? solo.count : seen.count) : seen.count;
       const row = { object: e.label, meshes: e.meshes.length, instances: e.instances,
-        frame_pct: +(100 * shownCount / (W * Hh)).toFixed(2), screen_box_pct: e.see_through ? solo.box : seen.box,
+        frame_pct: +(100 * shownCount / (W * Hh)).toFixed(2), screen_box_pct: e.see_through && solo ? solo.box : seen.box,
         pieces: seen.pieces, largest_piece_pct: seen.count ? Math.round(100 * seen.largest / seen.count) : 0,
         world_size: dims, world_centre: centre };
       if (e.see_through) row.see_through = true;
@@ -270,7 +279,7 @@ CENSUS_JS = r"""(opts) => {
         row.regions_per_mesh = regions[Math.floor(regions.length / 2)];
       }
       if (!shownCount) {
-        row.note = (!e.see_through && solo && solo.count) ? 'hidden behind other objects from this camera' : 'outside the camera frame or too small to cover a pixel';
+        row.note = late ? 'not drawn in the combined frame; skipped the solo look (census time budget spent)' : (!e.see_through && solo && solo.count) ? 'hidden behind other objects from this camera' : 'outside the camera frame or too small to cover a pixel';
       } else if ((row.regions_per_mesh || 0) >= 4) {
         row.note = 'one of its meshes draws as ' + row.regions_per_mesh + ' separate regions when drawn alone (median over ' + regions.length + ' meshes): a solid part is rendering as scattered fragments. Usual causes: vertices displaced one by one on a non-indexed geometry (Icosahedron, Dodecahedron, Octahedron, Tetrahedron and most built-ins after toNonIndexed keep one copy of each corner per face, so random jitter tears the faces apart: merge with BufferGeometryUtils.mergeVertices before displacing, or displace by a function of the position), an index list never passed to setIndex, or degenerate triangles';
       }
@@ -287,7 +296,8 @@ CENSUS_JS = r"""(opts) => {
     cache.forEach((m) => m.dispose());
   }
   const covered = rows.reduce((n, r) => n + (r.see_through ? 0 : r.frame_pct), 0);
-  return { frame: [W, Hh], camera: { position: camera.position.toArray().map((v) => +v.toFixed(2)) },
+  return { partial: skipped ? skipped + ' objects got no solo or fragment look: the census time budget was spent; census again with fewer objects in view for those' : undefined,
+    frame: [W, Hh], camera: { position: camera.position.toArray().map((v) => +v.toFixed(2)) },
     objects_covered_pct: +covered.toFixed(1), look, objects: rows,
     how_to_read: 'one row per top-level object (name your groups); frame_pct is the share of the frame it covers in front of the others, screen_box_pct is [left, top, right, bottom] in % of the frame, pieces counts its disconnected regions of 3+ pixels, regions_per_mesh how many regions one of its meshes draws as when shown alone (1-2 for a solid part); see-through objects (glass, water) do not hide others here; colours are its main colours as [hex, % of its visible pixels] and brightness (0-255) their mean, in the frame as the page draws it, and look gives the whole frame (dark_pct below 20 brightness, blown_out_pct above 240, both over the pixels the canvas draws; transparent_pct is where a transparent canvas lets the page background show) -- read these instead of sampling the canvas, which reads black unless the page keeps its drawing buffer' };
 }"""

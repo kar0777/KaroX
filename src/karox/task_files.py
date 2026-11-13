@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Mapping
 
 _PATH = re.compile(
-    r"(?<![\w/.:-])((?:[\w.-]+/)+[\w.-]+\.(?:py|pyi|js|mjs|cjs|ts|tsx|jsx|rs|go|java|kt|rb|php"
+    r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.(?:py|pyi|js|mjs|cjs|ts|tsx|jsx|rs|go|java|kt|rb|php"
     r"|c|h|cc|cpp|hpp|cs|swift|toml|cfg|ini|ya?ml|json|md|rst|html|css|scss|sh|sql))(?![\w/])"
 )
 _LIMIT = 6

@@ -2724,3 +2724,42 @@ def test_an_error_inside_a_200_stream_is_classified_like_its_status() -> None:
         assert exc.kind is ProviderErrorKind.RATE_LIMIT
         return
     raise AssertionError("the in-stream error must raise")
+
+
+def test_a_deadline_after_partial_text_ends_as_a_length_cut_not_a_resend() -> None:
+    """Audit 2026-11-13: an expired deadline re-sent (and re-billed) the whole reply."""
+
+    import time as _time
+
+    class _Slow:
+        status_code = 200
+
+        def __init__(self, lines: list) -> None:
+            self._lines = lines
+
+        def iter_lines(self):  # type: ignore[no-untyped-def]
+            for line in self._lines:
+                yield line
+                _time.sleep(0.02)
+
+    chunk = json.dumps({"choices": [{"delta": {"content": "half a file"}, "finish_reason": None}]})
+    # Unbounded data lines after the first event: only the deadline can end it.
+    lines = [f"data: {chunk}", ""] + [": keep-alive"] * 50
+    events = list(
+        OpenAIChatCompletionsProvider._stream_events(  # type: ignore[attr-defined]
+            _Slow(lines), 1, _time.monotonic() + 0.1
+        )
+    )
+    assert events[0].kind.name != "COMPLETION"
+    assert events[-1].kind.name == "COMPLETION" and events[-1].finish_reason == "length"
+
+    try:
+        list(
+            OpenAIChatCompletionsProvider._stream_events(  # type: ignore[attr-defined]
+                _Slow([": keep-alive"] * 50), 1, _time.monotonic() + 0.1
+            )
+        )
+    except ProviderError as exc:
+        assert exc.kind is ProviderErrorKind.TRANSPORT
+    else:
+        raise AssertionError("a deadline before any reply text stays a retryable failure")
