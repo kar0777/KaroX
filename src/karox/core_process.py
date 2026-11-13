@@ -176,6 +176,10 @@ def inline_python_rule(
         return prefix, tail[1], rest
     return None
 
+#: POSIX shells a verification rule may approve by name (``bash -lc *``).
+_APPROVABLE_SHELLS = frozenset({"bash", "sh", "dash", "zsh"})
+
+
 def is_plain_argument(value: str) -> bool:
     """True when a wildcard tail argument is one this rule will admit.
 
@@ -360,7 +364,16 @@ class ProcessToolsMixin:
     DEFAULT_CHECK_TIMEOUT_SECONDS: float
 
     @staticmethod
-    def _validate_process(argv: Iterable[str]) -> List[str]:
+    def _validate_process(argv: Iterable[str], approved_shell: bool = False) -> List[str]:
+        """Refuse argv that can carry an external effect.
+
+        ``approved_shell``: the argv matches a verification rule whose literal
+        prefix is this shell (the user approved e.g. ``bash -lc *``). Then the
+        shell runs, and only its script is screened for push/publish/auth/
+        remote actions. Benchmark 2026-11-13 (TB 4.1 risk-scorer-replay): every
+        ``bash -lc`` was refused under such a rule, so the task's own
+        ``rebuild_parity_report.sh`` never ran once.
+        """
         values = list(argv)
         if not values or len(values) > 100 or not all(isinstance(item, str) for item in values):
             raise InvalidCommand(
@@ -384,6 +397,13 @@ class ProcessToolsMixin:
                 executable = executable[: -len(suffix)]
                 break
         joined = " ".join(lowered[:4])
+        if approved_shell and executable in _APPROVABLE_SHELLS:
+            from .command_guard import shell_script_block_reason
+
+            reason = shell_script_block_reason(" ".join(values[1:]))
+            if reason is not None:
+                raise InvalidCommand(reason)
+            return values
         denied = (
             executable
             in {
@@ -813,11 +833,25 @@ class ProcessToolsMixin:
         result["inline_code_from_file"] = True
         return result
 
+    def _shell_rule_matches(self, raw: Any) -> bool:
+        """True when an approved rule names this shell literally and matches ``raw``."""
+
+        rules = self._verification_rules
+        if not rules or not isinstance(raw, list) or not raw or not all(isinstance(a, str) for a in raw):
+            return False
+        return any(
+            rule.prefix
+            and rule.prefix[0] == raw[0]
+            and raw[0].replace("\\", "/").rsplit("/", 1)[-1].lower() in _APPROVABLE_SHELLS
+            and rule.matches(raw)
+            for rule in rules
+        )
+
     def _prepare_check(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> CheckPlan:
         raw = self._required(arguments, "argv", list)
-        argv = self._validate_process(raw)
+        argv = self._validate_process(raw, approved_shell=self._shell_rule_matches(raw))
         eligible = self._verification_rules is not None and any(
             rule.matches(argv) for rule in self._verification_rules
         )

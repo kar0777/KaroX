@@ -27,3 +27,23 @@ def test_a_check_cannot_kill_processes_by_image_name() -> None:
 def test_a_check_may_stop_one_process_by_pid() -> None:
     argv = ["taskkill", "/PID", "424242", "/T", "/F"]
     assert CoreRuntime._validate_process(argv) == argv
+
+
+def _rules(*entries):
+    from types import SimpleNamespace
+
+    from karox.core_support import VerificationRule
+
+    return SimpleNamespace(_verification_rules=tuple(VerificationRule.parse(e) for e in entries))
+
+
+def test_an_approved_shell_rule_runs_its_script() -> None:
+    core = _rules(["bash", "-lc", "*"])
+    script = ["bash", "-lc", "cd /app && sh rebuild_parity_report.sh && legacy-score --failed-logins 3"]
+    assert CoreRuntime._shell_rule_matches(core, script)
+    assert CoreRuntime._validate_process(script, approved_shell=True) == script
+    with pytest.raises(InvalidCommand, match="shell"):
+        CoreRuntime._validate_process(["bash", "-lc", "sh x.sh && git push origin main"], approved_shell=True)
+    with pytest.raises(InvalidCommand, match="blocked"):
+        CoreRuntime._validate_process(script)
+    assert not CoreRuntime._shell_rule_matches(_rules(["python", "*"]), script)

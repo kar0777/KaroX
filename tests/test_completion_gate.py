@@ -592,8 +592,9 @@ def test_a_folder_without_git_owes_a_review_nothing_can_produce(tmp_path: Path) 
     reasons = completion_gate.floor(core, record)
     assert completion_gate.NO_PRODUCER + "current change review" in reasons
     assert completion_gate.only_unproducible(["missing current change review", completion_gate.NO_PRODUCER + "current change review"])
+    # No git binary at all (TB 4.1 images): no git.diff can run either.
     record.git_baseline = {"version": 1, "kind": "unavailable", "reason": "git-unavailable"}
-    assert completion_gate.NO_PRODUCER + "current change review" not in completion_gate.floor(core, record)
+    assert completion_gate.NO_PRODUCER + "current change review" in completion_gate.floor(core, record)
 
 
 _START_COMMIT = "0123456789abcdef0123456789abcdef01234567"

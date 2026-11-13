@@ -232,6 +232,50 @@ def process_kill_block_reason(argv: Sequence[str]) -> str | None:
     return _process_kill_reason(values)
 
 
+_REMOTE_ACTION_PATTERNS = (
+    r"\bgit\s+push\b",
+    r"\b(?:npm|pnpm|yarn|bun|cargo|poetry|twine|uv|hatch|flit)\b.{0,80}\bpublish\b",
+    r"\b(?:vercel|netlify|fly|railway|firebase|wrangler|gcloud)\b.{0,80}\bdeploy\b",
+    r"\b(?:gh|docker|npm|gcloud|az|vercel|netlify|hf|huggingface-cli)\b.{0,80}\b(?:auth|login|logout)\b",
+    r"\btaskkill\b.{0,80}[/-](?:im|fi)\b",
+    r"\b(?:pkill|killall)\b",
+    # PowerShell's by-name forms, spawned from inline code: any
+    # Stop-Process that does not start with -Id, and Get-Process piped
+    # into Stop-Process.
+    r"\b(?:stop-process|spps)\b(?![\s'\",]+-id\b)",
+    r"\bget-process\b.{0,160}\|\s*(?:stop-process|spps|kill)\b",
+    # psutil sweeps: iterate every process, kill the ones that match.
+    r"\bprocess_iter\b.{0,400}\.(?:kill|terminate)\s*\(",
+)
+
+# A shell script can also open a remote session or nest another shell around
+# a hidden action; those stay blocked even under an approved shell rule.
+_SHELL_SCRIPT_PATTERNS = _REMOTE_ACTION_PATTERNS + (
+    r"(?:^|[\s;&|(`])(?:ssh|scp|sftp)\s",
+    r"\bgh\s+(?:auth|release|api)\b",
+    r"\bdocker\s+push\b",
+)
+
+
+def _has_remote_action(payload: str, patterns: Sequence[str]) -> bool:
+    text = payload.casefold()
+    return any(re.search(pattern, text, flags=re.DOTALL) for pattern in patterns)
+
+
+def shell_script_block_reason(script: str) -> str | None:
+    """Reason a script run under a user-approved shell rule is still refused.
+
+    The user approved the shell itself (``bash -lc *``), so ordinary scripts
+    run; only the external effects that never belong to a local check --
+    push, publish, deploy, auth, remote sessions, by-name process kills -- are
+    refused, the same set inline Python/Node code is held to.
+    """
+
+    if _has_remote_action(script, _SHELL_SCRIPT_PATTERNS):
+        return "the shell script contains a blocked push/publish/deploy/auth/remote-session/process-kill action"
+    return None
+
+
 def _contains_inline_remote_action(argv: Sequence[str]) -> bool:
     """Catch obvious attempts to hide a forbidden command in Python/Node eval text."""
 
@@ -244,23 +288,7 @@ def _contains_inline_remote_action(argv: Sequence[str]) -> bool:
     for index, item in enumerate(argv[1:-1], start=1):
         if item.casefold() not in inline_flags:
             continue
-        payload = argv[index + 1].casefold()
-        patterns = (
-            r"\bgit\s+push\b",
-            r"\b(?:npm|pnpm|yarn|bun|cargo|poetry|twine|uv|hatch|flit)\b.{0,80}\bpublish\b",
-            r"\b(?:vercel|netlify|fly|railway|firebase|wrangler|gcloud)\b.{0,80}\bdeploy\b",
-            r"\b(?:gh|docker|npm|gcloud|az|vercel|netlify|hf|huggingface-cli)\b.{0,80}\b(?:auth|login|logout)\b",
-            r"\btaskkill\b.{0,80}[/-](?:im|fi)\b",
-            r"\b(?:pkill|killall)\b",
-            # PowerShell's by-name forms, spawned from inline code: any
-            # Stop-Process that does not start with -Id, and Get-Process piped
-            # into Stop-Process.
-            r"\b(?:stop-process|spps)\b(?![\s'\",]+-id\b)",
-            r"\bget-process\b.{0,160}\|\s*(?:stop-process|spps|kill)\b",
-            # psutil sweeps: iterate every process, kill the ones that match.
-            r"\bprocess_iter\b.{0,400}\.(?:kill|terminate)\s*\(",
-        )
-        return any(re.search(pattern, payload, flags=re.DOTALL) for pattern in patterns)
+        return _has_remote_action(argv[index + 1], _REMOTE_ACTION_PATTERNS)
     return False
 
 
@@ -367,5 +395,6 @@ def validate_developer_command_argv(argv: Sequence[str]) -> tuple[str, ...]:
 __all__ = [
     "DeveloperCommandBlocked",
     "process_kill_block_reason",
+    "shell_script_block_reason",
     "validate_developer_command_argv",
 ]

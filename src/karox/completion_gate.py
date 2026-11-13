@@ -278,8 +278,14 @@ def floor(core: Any, record: Any) -> list[str]:
         or _review_skips_a_change(core, record, review)
     ):
         reasons.append("missing current change review")
-        if (start := getattr(record, "git_baseline", None)) and isinstance(start, dict) and start.get("reason") == git_baseline.REASON_NOT_A_REPOSITORY:
-            reasons.append(NO_PRODUCER + "current change review")  # no start revision: a repair loop (4 min, aquarium 11-12) can never review
+        # No start revision: a repair loop (4 min, aquarium 11-12) can never
+        # review. TB 4.1 images have no git binary at all (git-unavailable):
+        # two finish refusals and three refused git.diff calls per task.
+        if (start := getattr(record, "git_baseline", None)) and isinstance(start, dict) and start.get("reason") in (
+            git_baseline.REASON_NOT_A_REPOSITORY,
+            git_baseline.REASON_GIT_UNAVAILABLE,
+        ):
+            reasons.append(NO_PRODUCER + "current change review")
     for entry in record.provider_history:
         result = entry.get("result")
         if entry.get("role") != "tool" or not isinstance(result, dict):
