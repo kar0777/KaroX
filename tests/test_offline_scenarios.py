@@ -227,3 +227,27 @@ def test_a_repository_without_git_finishes_without_a_review_loop(
     assert code == 0, report
     assert finish_requests <= 2, report
     assert report["verified"] is True, report.get("reason")
+
+
+def test_a_read_only_directory_still_lets_writable_files_be_edited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TB 4.1 risk-scorer (v48 and the cloud replay): /app is root-owned and
+    the agent user cannot create the sibling temporary an atomic write needs,
+    while the files inside stay writable."""
+
+    import tempfile
+
+    from karox import atomic_io
+
+    target = tmp_path / "mod.py"
+    target.write_bytes(b"VALUE = 1\n")
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(tempfile, "mkstemp", refuse)
+    atomic_io.atomic_write(target, b"VALUE = 22\n")
+    assert target.read_bytes() == b"VALUE = 22\n"
+    with pytest.raises(PermissionError, match="not writable by this process"):
+        atomic_io.atomic_write(tmp_path / "new.py", b"x = 1\n")

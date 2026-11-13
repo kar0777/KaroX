@@ -35,7 +35,22 @@ def atomic_write(path: Path, content: bytes, mode: Optional[int] = None) -> None
 
     path.parent.mkdir(parents=True, exist_ok=True)
     previous_mtime_ns = _bytecode_source_mtime_ns(path)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    except PermissionError:
+        # A read-only directory holding writable files (TB 4.1 risk-scorer:
+        # /app owned by root, its files writable by the agent user). The
+        # sibling temporary cannot exist there, but the file itself can still
+        # be rewritten in place.
+        if path.is_file() and os.access(path, os.W_OK):
+            _write_in_place(path, content, mode)
+            if previous_mtime_ns is not None:
+                _advance_past_cached_bytecode(path, previous_mtime_ns)
+            return
+        raise PermissionError(
+            f"{path.parent} is not writable by this process, so {path.name} cannot be "
+            "created there; existing writable files in it can still be edited"
+        ) from None
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
@@ -51,6 +66,19 @@ def atomic_write(path: Path, content: bytes, mode: Optional[int] = None) -> None
             pass
     if previous_mtime_ns is not None:
         _advance_past_cached_bytecode(path, previous_mtime_ns)
+
+
+def _write_in_place(path: Path, content: bytes, mode: Optional[int]) -> None:
+    with open(path, "r+b") as handle:
+        handle.write(content)
+        handle.truncate()
+        handle.flush()
+        if mode is not None and hasattr(os, "fchmod"):
+            try:
+                os.fchmod(handle.fileno(), mode)
+            except OSError:
+                pass
+        os.fsync(handle.fileno())
 
 
 def _bytecode_source_mtime_ns(path: Path) -> Optional[int]:
