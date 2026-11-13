@@ -178,6 +178,10 @@ def _not_found_failure(text: str, index: int, op: EditOp) -> EditFailure:
         "exact string not found; the normalized retry (line endings and "
         "trailing whitespace folded) also has no unique match"
     )
+    if op.new.strip() and op.new in text:
+        # OpenCode V2's miss hint: a model that re-sends an edit it already
+        # made otherwise re-reads the file to find out why it "failed".
+        hint += "; new_string is already in the file, so this edit may already be applied"
     block = _closest_block(text, op.old)
     if block is not None:
         line, quoted = block

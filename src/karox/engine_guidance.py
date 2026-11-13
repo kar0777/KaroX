@@ -38,6 +38,7 @@ from .engine_tool_support import (  # noqa: F401
 )
 
 import hashlib
+import json
 import shlex
 from typing import Any, Dict, Mapping
 from .agent import AgentEventKind
@@ -81,6 +82,8 @@ BATCHING_NOTICES = 3
 #: Responses without an edit after a passing test run before the settle nudge.
 SETTLE_NOTICE_STEPS = 4
 SETTLE_NOTICES = 2
+#: Counts of one exact call at which the repeat notice names the loop.
+REPEAT_NOTICE_AT = (3, 5, 8)
 
 
 class EngineGuidanceMixin:
@@ -269,8 +272,32 @@ class EngineGuidanceMixin:
         self._green_step = step
         return (
             f"The tests passed {SETTLE_NOTICE_STEPS}+ responses ago and nothing has been "
-            "edited since. Unless a behaviour the task states is still unobserved, "
+            "edited since. Unless a behaviour the task states, or a variation real "
+            "use would bring (several items, other values), is still unprobed, "
             "finish now: the finish review will name anything missing."
+        )
+
+    def _repeat_notice(self, core_name: str, arguments: Mapping[str, Any]) -> str:
+        """Name a loop once the exact same call comes back 3, 5 and 8 times.
+
+        DeepSeek Harness (repeat-tool-reminder) breaks Flash's loops this way:
+        the call still runs, the model is only told it has seen this result.
+        """
+
+        try:
+            key = core_name + "\x00" + json.dumps(arguments, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return ""
+        counts = getattr(self, "_repeat_counts", None)
+        if counts is None:
+            counts = self._repeat_counts = {}
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] not in REPEAT_NOTICE_AT:
+            return ""
+        return (
+            f"You have made this exact {core_name} call {counts[key]} times. Its result "
+            "will not change unless something else changes first. Use what you already "
+            "have, or try a different approach."
         )
 
     def _time_left_notice(self) -> str:

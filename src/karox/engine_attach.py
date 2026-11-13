@@ -241,7 +241,15 @@ class EngineAttachMixin:
             exit_code = data.get("exit_code")
             detail = f"exit {exit_code}" if isinstance(exit_code, int) else "finished"
             if data.get("timed_out"):
-                detail = "timed out"
+                # OpenCode V2 / DeepSeek Harness name the limit and the way out;
+                # "timed out" alone read as a hang, and the same call was re-sent.
+                limit = data.get("effective_timeout")
+                detail = (
+                    f"timed out after {int(limit)}s; the command was stopped -- if it was "
+                    "making progress, rerun it with a larger timeout_seconds or a narrower target"
+                    if isinstance(limit, (int, float)) and not isinstance(limit, bool)
+                    else "timed out"
+                )
             if data.get("probe") is True:
                 detail += " · probe (not verification evidence)"
             if core_name == "tests.run":

@@ -45,7 +45,9 @@ _ENGINE_CONTRACT = """
 
 # KaroX engine execution contract
 
-You act through typed tool calls; there is no shell.
+You act through typed tool calls. Commands run through checks_run in the
+forms the approved command set lists; when it approves a shell (for example
+bash -lc *), checks_run runs a whole script that way.
 - Batch independent actions: several tool calls in one response execute in
   order and their observations return together. Batch reads, and batch 2-4
   mutations whose arguments are already fully known. Never batch a call whose

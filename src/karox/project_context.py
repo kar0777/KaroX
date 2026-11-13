@@ -22,6 +22,7 @@ and a handoff document carries no third-party text.
 
 from __future__ import annotations
 
+import os
 import platform
 from dataclasses import dataclass
 from pathlib import Path
@@ -470,6 +471,52 @@ def discover_project_context(
     )
 
 
+#: Toolchain executables worth naming up front: each one a run otherwise
+#: discovers with a probe (or by a failed command) in its first steps.
+_TOOLCHAIN = (
+    "python3", "python", "pytest", "uv", "node", "npm", "bun", "gcc", "g++",
+    "clang", "make", "cmake", "cargo", "go", "java", "ruby", "bash", "git", "sqlite3",
+)
+_TOP_LEVEL_LIMIT = 40
+
+
+def _workspace_facts(repository: Path) -> list[str]:
+    """Top-level layout, installed toolchain, Git state and memory, in a few lines.
+
+    Meta-Harness (Terminal-Bench 2, 2026) put this snapshot before step one and
+    saved two to five exploration turns per task; a container without git or
+    with an unusual layout is otherwise learned through refused calls.
+    """
+
+    import shutil
+
+    facts: list[str] = []
+    try:
+        entries = sorted(repository.iterdir(), key=lambda p: p.name.lower())
+        shown = [e.name + ("/" if e.is_dir() else "") for e in entries if e.name not in {".git", "__pycache__"}]
+        more = len(shown) - _TOP_LEVEL_LIMIT
+        facts.append(
+            "top level: " + ", ".join(shown[:_TOP_LEVEL_LIMIT]) + (f" (+{more} more)" if more > 0 else "")
+            if shown
+            else "top level: empty"
+        )
+    except OSError:
+        pass
+    found = [name for name in _TOOLCHAIN if shutil.which(name)]
+    if found:
+        facts.append("installed: " + ", ".join(found))
+    if not shutil.which("git"):
+        facts.append("git: not installed; there is no Git history or diff in this workspace")
+    elif not (repository / ".git").exists():
+        facts.append("git: this folder is not a Git repository; there is no history or diff")
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")  # type: ignore[attr-defined]
+        facts.append(f"memory: {pages // (1 << 20)} MB, cpus: {os.cpu_count() or '?'}")
+    except (AttributeError, ValueError, OSError):
+        pass
+    return facts
+
+
 def render_environment(
     repository: Path,
     *,
@@ -486,6 +533,7 @@ def render_environment(
     ]
     if branch:
         lines.append(f"git branch: {branch}")
+    lines.extend(_workspace_facts(repository))
     approved = [list(item) for item in verification_commands]
     if approved:
         lines.append(

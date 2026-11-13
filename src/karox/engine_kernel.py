@@ -568,7 +568,10 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     if review_due:
                         review_due = False
                         self._append_repair_prompt(
-                            agent, "", prompt=_with_review_note(self_review_text(), self._unopened_files_note(agent, session_id))
+                            agent, "", prompt=_with_review_note(
+                                self_review_text(),
+                                self._unopened_files_note(agent, session_id) + self._time_used_note(),
+                            )
                         )
                     else:
                         self._run_harness_final_calls(session_id, lease, self._deadline)
@@ -667,6 +670,28 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
 
 
     # -- construction helpers ----------------------------------------------
+
+    def _time_used_note(self) -> str:
+        """Tell an early finisher how much of its budget is left.
+
+        TB 4.1 (2026-11-13): mvcc-lsm-compaction finished after 8 of 60
+        minutes with only the reported case covered; the review was answered
+        by re-reading files. Seeing the unused budget makes the probes the
+        review asks for the rational next step.
+        """
+
+        try:
+            total = float(self.limits.max_seconds)
+            left = float(self.remaining_seconds())
+        except Exception:  # noqa: BLE001 - the review stands without the note
+            return ""
+        if total < 600 or left < total * 0.5:
+            return ""
+        used = max(1, int((total - left) // 60))
+        return (
+            f"\nYou have used about {used} of {int(total // 60)} minutes. There is time to "
+            "run the variation and edge-case probes above; use it before finishing."
+        )
 
     def _task_dossier(self, record: Any) -> str:
         """Candidate files, the functions they hold and their tests, found before step one.
