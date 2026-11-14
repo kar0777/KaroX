@@ -367,6 +367,9 @@ class EngineHarnessMixin:
         if not callable(owed) or not owed() or self.remaining_seconds() < 60:
             return False
         environment._self_review_done = True  # type: ignore[union-attr]
+        # wtforms-892 duel1: a settle notice right after the review request
+        # said "finish now" and the review's findings were never acted on.
+        environment._review_hold_seq = int(getattr(environment, "_last_change_seq", 0) or 0)  # type: ignore[union-attr]
         return True
 
     def _failure_summary(self, record: SessionRecord) -> str:

@@ -73,6 +73,7 @@ def _run(
     task: str = "div(a, 0) must raise ZeroDivisionError('b must not be zero')",
     commands: Sequence[Sequence[str]] = (),
     finishes: int = 4,
+    extra: Sequence[str] = (),
 ) -> tuple[int, dict, ScriptedProvider]:
     from karox import cli
 
@@ -91,6 +92,7 @@ def _run(
     ]
     for command in commands:
         arguments += ["--verification-command", json.dumps(list(command))]
+    arguments += list(extra)
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         code = cli.main(arguments)
@@ -381,3 +383,17 @@ def test_a_change_task_with_an_edit_gets_no_measurement_pass(
 ) -> None:
     _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), [_fix_call("c1"), _probe_call("c2")])
     assert all(UNCHANGED_PASS not in _request_text(request) for request in provider.requests)
+
+
+def test_the_review_request_is_not_followed_by_finish_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wtforms-892 duel1: "finish now" landed right after the review request."""
+
+    read = {"path": "calc.py", "start": 1, "count": 2}
+    calls = [_fix_call("c1"), _green_call("g1"), _finish_call("f-early", "div raises on zero")] + [
+        _tool_call(f"r{i}", "repo_read_lines", dict(read, count=2 + i)) for i in range(5)
+    ]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"])
+    assert any("review the change once" in _request_text(request) for request in provider.requests)
+    assert not _settle_seen(provider)

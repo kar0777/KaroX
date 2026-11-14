@@ -258,7 +258,8 @@ class EngineGuidanceMixin:
         seq = int(getattr(self, "_action_seq", 0) or 0)
         # exstruct-113 v52: a green baseline before any edit was read as "the
         # task is done" and the run finished with an unchanged tree.
-        if not int(getattr(self, "_last_change_seq", 0) or 0):
+        last_change = int(getattr(self, "_last_change_seq", 0) or 0)
+        if not last_change or getattr(self, "_review_hold_seq", None) == last_change:
             return ""
         if seq and seq == int(getattr(self, "_last_change_seq", 0) or 0):
             self._green_step = None
