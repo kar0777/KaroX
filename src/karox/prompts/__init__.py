@@ -29,3 +29,8 @@ def visual_checker_text() -> str:
 def self_review_text() -> str:
     """The one maintainer-review request before a code run's first finish."""
     return _read_text("self_review.md")
+
+
+def deep_pass_text() -> str:
+    """The one adversarial pass for an early finish proven only by probes."""
+    return _read_text("deep_pass.md")

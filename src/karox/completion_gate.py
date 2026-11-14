@@ -555,14 +555,18 @@ def _inline_probe(argv: Sequence[str]) -> bool:
     refusals and a hand-made "review" instead of work.
     """
     parts = [str(p) for p in argv]
+    if len(parts) >= 2 and Path(parts[0]).stem.lower().startswith("python") and parts[1].startswith("/tmp/"):
+        return True
     if len(parts) < 3:
         return False
     if Path(parts[0]).stem.lower().startswith("python") and parts[1] == "-c":
         return True
+    # A script under /tmp is scratch outside the repository (risk-scorer v50:
+    # "cd /tmp && python3 p8.py" probes stayed owed until the wall-time limit).
     return (
         Path(parts[0]).name.lower() in {"bash", "sh", "dash", "zsh"}
         and parts[1] in {"-c", "-lc"}
-        and "<<" in parts[2]
+        and ("<<" in parts[2] or parts[2].lstrip().startswith("cd /tmp") or " /tmp/" in f" {parts[2]}")
     )
 
 

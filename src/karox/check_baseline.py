@@ -51,9 +51,38 @@ def missing_tool(argv: Sequence[str], result: Mapping[str, Any]) -> str:
     return mod if code == 127 or re.search(rf"No module named '?{re.escape(mod)}(?![\w.])", text) else ""
 
 
+_QUOTE_FOLD = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "\\": None, "*": None, "`": None})
+_QUOTED = re.compile(r'"([^"]{20,})"')
+_SENTENCE_END = re.compile(r"(?<=[.!?:])\s+|\n+")
+
+
+def _fold(text: str) -> str:
+    return " ".join(text.translate(_QUOTE_FOLD).split()).lower()
+
+
+def _quotes_task(reason: str, task: str, sentences: Sequence[str]) -> bool:
+    """The reason carries a verbatim piece of the task.
+
+    Models wrap the quote ('The task specifies: "..." This case expects ...')
+    and JSON-escape its inner quotes; requiring the whole reason to be task
+    text refused a correct declaration on click-3239 (v50, both attempts).
+    """
+
+    r = _fold(reason)
+    if len(r) < 20:
+        return False
+    if r in task:
+        return True
+    if any(len(q.strip()) >= 20 and q.strip() in task for q in _QUOTED.findall(r)):
+        return True
+    return any(sentence in r for sentence in sentences)
+
+
 def superseded(record: Any) -> frozenset[str]:
     """Tests the last finish call declares outdated by the task, each with a verbatim task quote."""
-    task, calls = " ".join(str(getattr(record, "task", "")).split()).lower(), []
+    raw_task = str(getattr(record, "task", ""))
+    task, calls = _fold(raw_task), []
+    sentences = [f for piece in _SENTENCE_END.split(raw_task) if len(f := _fold(piece)) >= 20]
     for entry in getattr(record, "provider_history", None) or ():
         calls += [c for c in (entry.get("tool_calls") or ()) if isinstance(c, Mapping) and c.get("name") == "finish"]
     try:
@@ -63,7 +92,7 @@ def superseded(record: Any) -> frozenset[str]:
         return frozenset()
     quoted = (e for e in items if isinstance(e, Mapping) and str(e.get("test") or "").strip())
     return frozenset(str(e["test"]).strip() for e in quoted
-                     if len(r := " ".join(str(e.get("reason") or "").split()).lower()) >= 20 and r in task)
+                     if _quotes_task(str(e.get("reason") or ""), task, sentences))
 
 
 def only_superseded(data: Mapping[str, Any], names: frozenset[str]) -> bool:

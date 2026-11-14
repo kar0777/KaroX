@@ -251,3 +251,59 @@ def test_a_read_only_directory_still_lets_writable_files_be_edited(
     assert target.read_bytes() == b"VALUE = 22\n"
     with pytest.raises(PermissionError, match="not writable by this process"):
         atomic_io.atomic_write(tmp_path / "new.py", b"x = 1\n")
+
+
+def test_a_long_command_streak_after_an_edit_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TB 4.1 risk-scorer v50: 129 commands, 9 edits, wall-time limit."""
+
+    calls: List[Any] = [_fix_call("c1")]
+    calls += [_tool_call(f"p{index}", "checks_run", {"argv": [sys.executable, "-c", f"print({index})"]}) for index in range(12)]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
+    assert "commands since your last code change" not in _request_text(provider.requests[12])
+    assert "12 commands since your last code change" in _request_text(provider.requests[13])
+
+
+def _run_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commands: Sequence[Sequence[str]], seconds: int) -> ScriptedProvider:
+    from karox import cli
+
+    monkeypatch.setenv("KAROX_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KAROX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    responses = [_response((_fix_call("c1"),)), _response((_probe_call("c2"),))]
+    responses += [_response((_finish_call(f"f{index}", "div raises on zero"),)) for index in range(5)]
+    provider = ScriptedProvider(responses)
+    monkeypatch.setattr("karox.cli_runtime.OpenAIChatCompletionsProvider", lambda *a, **k: provider)
+    arguments = [
+        "agent", "run", "--repository", str(_repo(tmp_path)), "--task", "div(a, 0) must raise ZeroDivisionError",
+        "--model", "scripted-model", "--base-url", "http://127.0.0.1:9/v1", "--session-id", "deep-1",
+        "--max-steps", "30", "--max-seconds", str(seconds), "--stream-json",
+    ]
+    for command in commands:
+        arguments += ["--verification-command", json.dumps(list(command))]
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli.main(arguments)
+    return provider
+
+
+def test_an_early_probe_only_finish_gets_one_adversarial_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TB 4.1 v50: mvcc finished verified after 5 of 59 minutes and failed."""
+
+    provider = _run_budget(tmp_path, monkeypatch, [[sys.executable, "*"]], 3600)
+    assert _request_text(provider.requests[-1]).count("one adversarial pass (asked only once)") == 1
+
+
+def test_a_run_with_an_approved_test_suite_skips_the_adversarial_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _run_budget(tmp_path, monkeypatch, [[sys.executable, "-m", "pytest", "*"], [sys.executable, "*"]], 3600)
+    assert "adversarial pass" not in _request_text(provider.requests[-1])
+
+
+def test_a_short_budget_skips_the_adversarial_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _run_budget(tmp_path, monkeypatch, [[sys.executable, "*"]], 600)
+    assert "adversarial pass" not in _request_text(provider.requests[-1])

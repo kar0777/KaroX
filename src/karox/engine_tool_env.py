@@ -477,6 +477,7 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
             self._batching_notice(definition, action),
             self._settle_notice(core_name, arguments, data),
             self._repeat_notice(core_name, arguments),
+            self._probe_streak_notice(core_name),
             self._browser_notice(),
             self._time_left_notice(),
             self._interaction_hint(core_name),

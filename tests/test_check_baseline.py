@@ -403,3 +403,18 @@ def test_a_broken_submodule_import_is_not_a_missing_tool() -> None:
     assert missing(["python", "-m", "mypkg.cli"], "No module named 'mypkg.utils'") == ""
     assert missing(["python", "-m", "ruff", "check"], "No module named ruff") == "ruff"
     assert missing(["python", "-m", "mypkg.cli"], "No module named 'mypkg'") == "mypkg"
+
+
+def test_a_wrapped_and_escaped_task_quote_still_counts() -> None:
+    """click-3239 (v50): the model wrapped the quote in its own words and
+    JSON-escaped the task's inner quotes; both attempts were refused."""
+
+    task = 'Intro. Here, "disabled" means that the flag is *not* passed, which means the `default=True` value is used.'
+    wrapped = {
+        "test": "tests/t.py::test_old",
+        "reason": 'The task specifies: "Here, \\"disabled\\" means that the flag is *not* passed, which means the '
+        '`default=True` value is used." This case expects the old special-case behaviour.',
+    }
+    partial = {"test": "tests/t.py::test_part", "reason": 'Per the task, "the flag is not passed, which means the default" holds.'}
+    record = SimpleNamespace(task=task, provider_history=[_finish({"answer": "x", "superseded_tests": [wrapped, partial]})])
+    assert check_baseline.superseded(record) == {"tests/t.py::test_old", "tests/t.py::test_part"}

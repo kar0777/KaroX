@@ -82,6 +82,8 @@ BATCHING_NOTICES = 3
 #: Responses without an edit after a passing test run before the settle nudge.
 SETTLE_NOTICE_STEPS = 4
 SETTLE_NOTICES = 2
+#: Commands run since the last code change at which the probe-streak notice fires.
+PROBE_STREAK_AT = (12, 24)
 #: Counts of one exact call at which the repeat notice names the loop.
 REPEAT_NOTICE_AT = (3, 5, 8)
 
@@ -275,6 +277,30 @@ class EngineGuidanceMixin:
             "edited since. Unless a behaviour the task states, or a variation real "
             "use would bring (several items, other values), is still unprobed, "
             "finish now: the finish review will name anything missing."
+        )
+
+    def _probe_streak_notice(self, core_name: str) -> str:
+        """Name a long run of commands after an edit that changed nothing.
+
+        TB 4.1 risk-scorer (v48 159 requests, v50 149 and the wall-time limit):
+        after the fix, 100+ scratch scripts in /tmp re-derived what earlier
+        ones had shown. The settle notice never fired: no pytest went green.
+        """
+
+        if core_name not in ("checks.run", "tests.run", "checks.run_affected"):
+            return ""
+        changed = int(getattr(self, "_last_change_seq", 0) or 0)
+        if not changed:
+            return ""
+        if getattr(self, "_streak_base", None) != changed:
+            self._streak_base, self._streak_runs = changed, 0
+        self._streak_runs = int(getattr(self, "_streak_runs", 0) or 0) + 1
+        if self._streak_runs not in PROBE_STREAK_AT:
+            return ""
+        return (
+            f"You have run {self._streak_runs} commands since your last code change. "
+            "Decide from what they already showed: edit the code if a probe found a "
+            "defect, otherwise finish -- the finish review names anything missing."
         )
 
     def _repeat_notice(self, core_name: str, arguments: Mapping[str, Any]) -> str:
