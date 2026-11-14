@@ -81,6 +81,7 @@ BATCHING_NOTICE_STREAK = 4
 BATCHING_NOTICES = 3
 #: Responses without an edit after a passing test run before the settle nudge.
 SETTLE_NOTICE_STEPS = 4
+REVIEW_HOLD_STEPS = 8
 SETTLE_NOTICES = 2
 #: Commands run since the last code change at which the probe-streak notice fires.
 PROBE_STREAK_AT = (12, 24)
@@ -146,10 +147,10 @@ class EngineGuidanceMixin:
             if milestone == RESEARCH_BUDGET_STEPS:
                 return (
                     f"Research budget: {milestone} model steps have passed without a "
-                    "repository change. Stop collecting references: name the part of the "
-                    "task the current code does not meet yet, measured the way the task "
-                    "states it, make the smallest edit for it, then run the covering "
-                    "check. More reading will not produce a different answer."
+                    "repository change. Stop collecting references: check the covering "
+                    "tests for the touched area, name the gap against the task measured "
+                    "the way those tests or the task state it, make the smallest edit "
+                    "for it, then run that test."
                 )
             return (
                 f"Research budget exhausted: {milestone} steps without a change. Make "
@@ -259,17 +260,31 @@ class EngineGuidanceMixin:
         # exstruct-113 v52: a green baseline before any edit was read as "the
         # task is done" and the run finished with an unchanged tree.
         last_change = int(getattr(self, "_last_change_seq", 0) or 0)
-        if not last_change or getattr(self, "_review_hold_seq", None) == last_change:
+        # The hold after the review request is bounded (codex review): a review that
+        # finds nothing to edit must not silence the notice for the rest of the run.
+        held = getattr(self, "_review_hold_seq", None) == last_change and step - int(
+            getattr(self, "_review_hold_step", step) or 0) < REVIEW_HOLD_STEPS
+        if not last_change or held:
             return ""
         if seq and seq == int(getattr(self, "_last_change_seq", 0) or 0):
             self._green_step = None
             return ""
         argv = arguments.get("argv")
         command = " ".join(str(item) for item in argv) if isinstance(argv, list) else ""
+        is_checkfamily = core_name in ("tests.run", "checks.run_affected", "checks.run")
         is_test = core_name in ("tests.run", "checks.run_affected") or (
             core_name == "checks.run" and ("pytest" in command or " test" in command)
         )
         exit_code = data.get("exit_code", data.get("returncode"))
+        failed_exit = (
+            is_checkfamily
+            and isinstance(exit_code, int)
+            and not isinstance(exit_code, bool)
+            and exit_code != 0
+        )
+        if failed_exit:
+            self._green_step = None
+            return ""
         if is_test and exit_code == 0 and getattr(self, "_green_step", None) is None:
             self._green_step = step
             return ""
@@ -281,10 +296,9 @@ class EngineGuidanceMixin:
         self._green_step = step
         return (
             f"The tests passed {SETTLE_NOTICE_STEPS}+ responses ago and nothing has been "
-            "edited since. Unless a behaviour the task states, a variation real "
-            "use would bring (several items, other values), or a doubt you stated "
-            "about the result (its type, shape or default use) is still unresolved, "
-            "finish now: the finish review will name anything missing."
+            "edited since. If you have already probed the stated variations, framework "
+            "return shapes and sibling test measures on printed output, finish now; "
+            "otherwise run that probe or edit first."
         )
 
     def _probe_streak_notice(self, core_name: str) -> str:
@@ -308,8 +322,8 @@ class EngineGuidanceMixin:
         return (
             f"You have run {self._streak_runs} commands since your last code change. "
             "Decide from what they already showed: edit the code if a probe found a "
-            "defect or a doubt you stated is still open, otherwise finish -- the "
-            "finish review names anything missing."
+            "defect or identical outputs for distinct cases, otherwise finish with the "
+            "passing outputs."
         )
 
     def _repeat_notice(self, core_name: str, arguments: Mapping[str, Any]) -> str:

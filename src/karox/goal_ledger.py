@@ -35,13 +35,35 @@ def parse(value: Any) -> List[Tuple[str, str]]:
     return pairs
 
 
+def _fresh_passing_observations(history: Sequence[Mapping[str, Any]]) -> List[str]:
+    """Normalized behavioural results that passed after the last deliverable edit."""
+
+    start = rc.last_deliverable_edit(history) + 1
+    seen: List[str] = []
+    for entry in history[start:]:
+        if entry.get("role") != "tool" or entry.get("core_name") not in rc.OBSERVATION_TOOLS:
+            continue
+        result = entry.get("result")
+        if not isinstance(result, Mapping) or result.get("ok") is False:
+            continue
+        data = result.get("data")
+        if isinstance(data, Mapping):
+            exit_code = data.get("exit_code", data.get("returncode"))
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+                continue
+        text = rc.normalize(str(entry.get("content") or ""))
+        if text:
+            seen.append(f" {text} ")
+    return seen
+
+
 def problems(value: Any, history: Sequence[Mapping[str, Any]]) -> List[str]:
     """What keeps this finish from showing its goals; [] lets it through."""
 
     pairs = parse(value)
     if len(pairs) < _MIN_GOALS:
         return ["missing"]
-    observations = rc.fresh_observations(history)
+    observations = _fresh_passing_observations(history)
     runs = rc._copied_runs(observations)
     missing: List[str] = []
     for goal, observed in pairs:

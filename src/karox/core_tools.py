@@ -81,7 +81,8 @@ from .tool_schemas import additional_tool_definitions
 # turn has to pay for.
 #: Files visual.check can render. A standalone SVG is a picture the browser
 #: draws on its own, so it is judged exactly like a page.
-OUTPUT_ELISION_TRIGGER_CHARS = 5_000
+# Head + tail keep 5_000; eliding less than ~1.5k saves nothing after the marker.
+OUTPUT_ELISION_TRIGGER_CHARS = 6_500
 OUTPUT_ELISION_HEAD_CHARS = 2_000
 OUTPUT_ELISION_TAIL_CHARS = 3_000
 OUTPUT_ELISION_TOOLS = frozenset({"checks.run", "repo.command", "dev.command"})

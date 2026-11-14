@@ -445,3 +445,63 @@ def test_a_run_without_the_review_is_never_asked_for_goals(
 ) -> None:
     _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), [_fix_call("c1"), _probe_call("c2")])
     assert all(GOAL_REFUSAL not in _request_text(request) for request in provider.requests)
+
+
+def test_prompt_and_review_stay_concise_and_name_repo_measures() -> None:
+    from karox.agent import SYSTEM_PROMPT
+    from karox.prompts import self_review_text
+
+    review = self_review_text()
+    assert len(SYSTEM_PROMPT) < 7500
+    assert len(review) < 2500
+    assert "Match the repository's own test measure" in SYSTEM_PROMPT
+    assert "Check framework and caller shapes" in SYSTEM_PROMPT
+    assert "Never add a new error for an argument combination nothing forbids" in SYSTEM_PROMPT
+    assert "same measure existing tests use" in review
+
+
+def test_failing_probe_after_green_test_clears_settle_and_avoids_review_punt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read = {"path": "calc.py", "start": 1, "count": 2}
+    failing_probe = _tool_call(
+        "p_fail",
+        "checks_run",
+        {"argv": [sys.executable, "-c", "print('still broken'); raise SystemExit(1)"]},
+    )
+    calls = [_fix_call("c1"), _green_call("g1"), failing_probe] + [
+        _tool_call(f"r{i}", "repo_read_lines", dict(read, count=2 + i)) for i in range(5)
+    ]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
+    observed = "".join(_request_text(request) for request in provider.requests)
+    assert not _settle_seen(provider)
+    assert "finish review will name anything missing" not in observed
+    assert "finish review names anything missing" not in observed
+
+
+def test_goal_ledger_rejects_quotes_copied_from_a_failing_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failing_probe = _tool_call(
+        "p_fail",
+        "checks_run",
+        {"argv": [sys.executable, "-c", "print('probe mismatch output'); raise SystemExit(1)"]},
+    )
+    bad_goals = [{"goal": "div raises on zero", "observed": "probe mismatch output"}]
+    good_goals = [{"goal": "div raises on zero", "observed": "probe ok 2.0"}]
+    calls = [
+        _fix_call("c1"),
+        failing_probe,
+        _finish_call("f0", "done"),
+        _tool_call("f1", "finish", {"answer": "done", "goals": bad_goals}),
+        _probe_call("c2"),
+        _tool_call("f2", "finish", {"answer": "done", "goals": good_goals}),
+    ]
+    code, report, provider = _run(
+        tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"]
+    )
+    last_request = _request_text(provider.requests[-1])
+    assert "These goals quote no output received after your last edit: div raises on zero" in last_request
+    assert last_request.count(GOAL_REFUSAL) == 1
+    assert code == 0, report
+    assert report["verified"] is True, report.get("reason")
