@@ -218,7 +218,8 @@ RESEARCH_HARD_BUDGET_STEPS = 24
 #: wrong. Plan/ideate and maintenance runs also never mutate.
 _CHANGE_INTENT = re.compile(
     r"\b(?:build|create|implement|fix|bug|refactor|add|update|change|remove|"
-    r"delete|migrate|rename|repair|patch)\b"
+    r"delete|migrate|rename|repair|patch|optimi[sz]e|improve|introduce|reduce|"
+    r"support|speed|defer|replace|extend|enable|prevent)\b"
     r"|исправ|добав|созда|реализ|почини|переимен|обнови|удали",
     re.IGNORECASE,
 )

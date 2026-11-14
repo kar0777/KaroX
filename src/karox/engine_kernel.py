@@ -56,7 +56,8 @@ from .engine_kernel_control import EngineControlMixin
 from .engine_kernel_io import EngineIoMixin
 from .engine_kernel_finish import EngineFinishMixin
 from .engine_kernel_harness import EngineHarnessMixin
-from .prompts import deep_pass_text, self_review_text
+from .prompts import deep_pass_text, self_review_text, unchanged_pass_text
+from .engine_tool_support import _CHANGE_INTENT
 from . import check_baseline
 from .engine_prompts import (  # noqa: E402
     _ENGINE_CONTRACT,
@@ -564,9 +565,12 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 # One maintainer review before KaroX verifies a code change; prose
                 # submissions skip finish, so it lives here, not only in finish.
                 review_due = self._review_turn_due()
-                deep_due = False
+                deep_due = unchanged_due = False
                 while True:
-                    if review_due:
+                    if unchanged_due:
+                        unchanged_due = False
+                        self._append_repair_prompt(agent, "", prompt=unchanged_pass_text())
+                    elif review_due:
                         review_due = False
                         self._append_repair_prompt(
                             agent, "", prompt=_with_review_note(
@@ -580,6 +584,9 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     else:
                         self._run_harness_final_calls(session_id, lease, self._deadline)
                         record = self.sessions.load(session_id)
+                        if self._completed(record) and self._unchanged_pass_due(record):
+                            unchanged_due = True
+                            continue
                         if self._completed(record) and self._deep_pass_due(record):
                             deep_due = True
                             continue
@@ -677,6 +684,29 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
 
 
     # -- construction helpers ----------------------------------------------
+
+    def _unchanged_pass_due(self, record: Any) -> bool:
+        """One measurement pass before a change task is accepted with no change.
+
+        rebench26 exstruct-113 (v52, both attempts): the lazy package exports
+        already existed, the agent's own probe showed the engine module still
+        importing pandas, and it finished "already implemented" with an
+        unchanged tree, verified as an answer.
+        """
+
+        if getattr(self, "_unchanged_pass_done", False) or getattr(record, "changed_files", None):
+            return False
+        if getattr(self, "maintenance_mode", False) or self.mode in {"plan", "ideate"}:
+            return False
+        if not _CHANGE_INTENT.search(str(getattr(record, "task", "") or "")):
+            return False
+        try:
+            if float(self.remaining_seconds()) < 120:
+                return False
+        except Exception:  # noqa: BLE001 - no budget, no pass
+            return False
+        self._unchanged_pass_done = True
+        return True
 
     def _deep_pass_due(self, record: Any) -> bool:
         """One adversarial pass for an early finish that only probes can prove.

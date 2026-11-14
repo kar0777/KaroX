@@ -34,3 +34,8 @@ def self_review_text() -> str:
 def deep_pass_text() -> str:
     """The one adversarial pass for an early finish proven only by probes."""
     return _read_text("deep_pass.md")
+
+
+def unchanged_pass_text() -> str:
+    """The one measurement pass for a change task about to finish with no change."""
+    return _read_text("unchanged_pass.md")

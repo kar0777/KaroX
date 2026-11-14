@@ -319,3 +319,65 @@ def test_rerunning_a_probe_after_an_edit_is_not_called_a_loop(
              _tool_call("r2", "repo_read_lines", read), _probe_call("c2")]
     _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
     assert all("exact repo.read_lines call" not in _request_text(request) for request in provider.requests)
+
+
+def _green_call(call_id: str) -> Any:
+    return _tool_call(call_id, "checks_run", {"argv": [sys.executable, "-c", "print('pytest: 3 passed')"]})
+
+
+def _settle_seen(provider: ScriptedProvider) -> bool:
+    return any("responses ago and nothing has been edited" in _request_text(request) for request in provider.requests)
+
+
+def test_a_green_suite_before_any_edit_does_not_say_finish_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exstruct-113 v52: a passing baseline before any edit was taken as "done"."""
+
+    read = {"path": "calc.py", "start": 1, "count": 2}
+    calls = [_green_call("g1")] + [_tool_call(f"r{i}", "repo_read_lines", dict(read, count=2 + i)) for i in range(5)]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
+    assert not _settle_seen(provider)
+
+
+def test_a_green_suite_after_an_edit_still_says_finish_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read = {"path": "calc.py", "start": 1, "count": 2}
+    calls = [_fix_call("c1"), _green_call("g1")] + [
+        _tool_call(f"r{i}", "repo_read_lines", dict(read, count=2 + i)) for i in range(5)
+    ]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
+    assert _settle_seen(provider)
+
+
+UNCHANGED_PASS = "finishing without changing any file, but the task asks for a change"
+
+
+def test_a_change_task_finishing_unchanged_gets_one_measurement_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exstruct-113 v52: "already implemented", unchanged tree, verified answer."""
+
+    calls = [_tool_call("r1", "repo_read_lines", {"path": "calc.py"})]
+    _code, _report, provider = _run(
+        tmp_path, monkeypatch, _repo(tmp_path), calls, task="Optimize div so the module imports faster"
+    )
+    assert _request_text(provider.requests[-1]).count(UNCHANGED_PASS) == 1
+
+
+def test_a_question_finishing_unchanged_gets_no_measurement_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = [_tool_call("r1", "repo_read_lines", {"path": "calc.py"})]
+    _code, _report, provider = _run(
+        tmp_path, monkeypatch, _repo(tmp_path), calls, task="What does div return for 6 and 3?"
+    )
+    assert all(UNCHANGED_PASS not in _request_text(request) for request in provider.requests)
+
+
+def test_a_change_task_with_an_edit_gets_no_measurement_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), [_fix_call("c1"), _probe_call("c2")])
+    assert all(UNCHANGED_PASS not in _request_text(request) for request in provider.requests)

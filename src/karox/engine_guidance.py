@@ -146,14 +146,16 @@ class EngineGuidanceMixin:
             if milestone == RESEARCH_BUDGET_STEPS:
                 return (
                     f"Research budget: {milestone} model steps have passed without a "
-                    "repository change. Stop collecting references: make the smallest "
-                    "edit that addresses the public check, then run it. More reading "
-                    "will not produce a different answer."
+                    "repository change. Stop collecting references: name the part of the "
+                    "task the current code does not meet yet, measured the way the task "
+                    "states it, make the smallest edit for it, then run the covering "
+                    "check. More reading will not produce a different answer."
                 )
             return (
                 f"Research budget exhausted: {milestone} steps without a change. Make "
-                "an edit now, or finish and say why no change is needed. Further "
-                "reading is not the task."
+                "the edit now. Finish without one only if a probe that measures the "
+                "task's goal the way the task states it shows it already holds. "
+                "Further reading is not the task."
             )
         return ""
 
@@ -254,6 +256,10 @@ class EngineGuidanceMixin:
 
         step = int(getattr(self._kernel, "_step", 0) or 0)
         seq = int(getattr(self, "_action_seq", 0) or 0)
+        # exstruct-113 v52: a green baseline before any edit was read as "the
+        # task is done" and the run finished with an unchanged tree.
+        if not int(getattr(self, "_last_change_seq", 0) or 0):
+            return ""
         if seq and seq == int(getattr(self, "_last_change_seq", 0) or 0):
             self._green_step = None
             return ""
