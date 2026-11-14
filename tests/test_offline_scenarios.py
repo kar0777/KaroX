@@ -453,7 +453,11 @@ def test_prompt_and_review_stay_concise_and_name_repo_measures() -> None:
 
     review = self_review_text()
     assert len(SYSTEM_PROMPT) < 7500
-    assert len(review) < 2500
+    assert len(review) < 3000
+    # v58 wtforms/exstruct: compaction dropped these two and both tasks regressed.
+    assert "an argument at call or render time" in SYSTEM_PROMPT
+    assert "add its direct form" in review
+    assert "never a reason to skip it" in SYSTEM_PROMPT
     assert "Match the repository's own test measure" in SYSTEM_PROMPT
     assert "Check framework and caller shapes" in SYSTEM_PROMPT
     assert "Never add a new error for an argument combination nothing forbids" in SYSTEM_PROMPT

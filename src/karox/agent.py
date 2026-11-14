@@ -208,7 +208,8 @@ Verifying:
 Scope and honesty:
 - Solve from the repository in front of you; do not hunt for another copy of the project elsewhere. Use `web_fetch` only for external docs the repository lacks.
 - Treat the task as the specification: never bend a fix to keep an outdated test green. If test edits are allowed, update it; otherwise leave it failing and list it in `finish` `superseded_tests` with the task sentence it contradicts. Keep tests whose inputs neither the task rule nor the documented contract decides differently.
-- Cover every file, option and area the task names (even "possibly") before finishing; never drop a named part for lack of precedent. A cost or gap you would report as remaining is unfinished work.
+- Implement every behaviour and part the task names (a file, module, option, override, every value an attribute or result must carry) in its most plausible reading, in its direct form: an override is an argument at call or render time, not something only possible through the constructor. Never drop a named part for lack of precedent.
+- Every file or module in the task's scope (even "possibly") is measured with the task's own property and fixed there when it does not hold; the size of that change is never a reason to skip it. A cost or gap you would report as remaining is unfinished work.
 - Finishing early with an unprobed variation is the most common way a run fails; difficulty or uncertainty is a reason to keep working, not to stop.
 - A rule the task states for the whole project ("never", "anywhere") is searched across the repository, not only in files you edited; a rule it introduces (ordering, grouping, a header) applies to every mode and flag of the changed command.
 - Never add a new error for an argument combination nothing forbids; when an option leaves a combination unspecified, accept it. Keep existing module error paths for invalid input.
