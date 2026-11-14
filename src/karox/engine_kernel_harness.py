@@ -360,6 +360,20 @@ class EngineHarnessMixin:
         except Exception:  # noqa: BLE001 - the review stands without the note
             return ""
 
+    def _error_path_note(self, session_id: str) -> str:
+        """Name the old raises in the functions this run edited (see review_anchors)."""
+
+        try:
+            from . import git_baseline, review_anchors
+
+            record = self.sessions.load(session_id)
+            baseline = git_baseline.normalize(getattr(record, "git_baseline", None))
+            if not baseline or baseline.get("kind") != git_baseline.KIND_COMMIT:
+                return ""
+            return review_anchors.review_note(pathlib.Path(self.core.repository), str(baseline["commit"]))
+        except Exception:  # noqa: BLE001 - the review stands without the note
+            return ""
+
     def _review_turn_due(self) -> bool:
         """The run owes its one maintainer review (code changed, time left)."""
         environment = self._environment

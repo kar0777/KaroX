@@ -575,7 +575,9 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                         self._append_repair_prompt(
                             agent, "", prompt=_with_review_note(
                                 self_review_text(),
-                                self._unopened_files_note(agent, session_id) + self._time_used_note(),
+                                self._unopened_files_note(agent, session_id)
+                                + self._error_path_note(session_id)
+                                + self._time_used_note(),
                             )
                         )
                     elif deep_due:

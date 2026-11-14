@@ -397,3 +397,19 @@ def test_the_review_request_is_not_followed_by_finish_now(
     _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"])
     assert any("review the change once" in _request_text(request) for request in provider.requests)
     assert not _settle_seen(provider)
+
+
+def test_the_review_names_old_raises_in_the_edited_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """datamodel-3070 v54: the review item about old raises was dismissed unprobed."""
+
+    repository = _repo(tmp_path)
+    (repository / "calc.py").write_text(
+        "def div(a, b):\n    if a is None:\n        raise TypeError('a is required')\n    return a / b\n", encoding="utf-8"
+    )
+    _git(repository, "commit", "-qam", "guard")
+    calls = [_fix_call("c1"), _probe_call("c2")]
+    _code, _report, provider = _run(tmp_path, monkeypatch, repository, calls, extra=["--effort-level", "high"])
+    observed = "".join(_request_text(request) for request in provider.requests)
+    assert "calc.py:3 `if a is None: raise TypeError('a is required')`" in observed

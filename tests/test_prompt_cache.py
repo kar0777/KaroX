@@ -813,8 +813,8 @@ def test_state_briefing_preserves_prefix_and_advances_compaction_boundary(tmp_pa
     from karox.models import AccessProfile
     from karox.state_briefing import HEADER
 
-    tight = ContextBudget(max_input_tokens=7_000, utilization=0.8, window_source="advertised")
-    # Budget is int(7000 * 0.8 * 0.75) = 4200 tokens (~16800 chars; system+task is ~3000 tokens
+    tight = ContextBudget(max_input_tokens=7_500, utilization=0.8, window_source="advertised")
+    # Budget is int(7500 * 0.8 * 0.75) = 4500 tokens (~18000 chars; system+task is ~3000 tokens
     # since the prompt names variation probes and the environment block lists the workspace).
     chunk_1 = "value = 10\n" + ("# step_chunk_1\n" * 450)
     chunk_2 = "value = 20\n" + ("# step_chunk_2\n" * 450)
