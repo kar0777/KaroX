@@ -413,3 +413,35 @@ def test_the_review_names_old_raises_in_the_edited_function(
     _code, _report, provider = _run(tmp_path, monkeypatch, repository, calls, extra=["--effort-level", "high"])
     observed = "".join(_request_text(request) for request in provider.requests)
     assert "calc.py:3 `if a is None: raise TypeError('a is required')`" in observed
+
+
+GOAL_REFUSAL = 'list each goal the task states in finish "goals"'
+
+
+def test_after_the_review_a_finish_without_goal_evidence_is_refused_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v55 exstruct/wtforms: the agent's own output showed the goal unmet and it finished."""
+
+    calls = [_fix_call("c1"), _probe_call("c2")]
+    code, report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"])
+    observed = "".join(_request_text(request) for request in provider.requests)
+    assert observed.count(GOAL_REFUSAL) == 1
+    assert report["verified"] is True, report.get("reason")
+
+
+def test_goals_quoting_fresh_output_pass_without_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    goals = [{"goal": "div(6, 3) still divides", "observed": "probe ok 2.0"}]
+    calls = [_fix_call("c1"), _probe_call("c2"), _finish_call("f0", "done"),
+             _tool_call("f1", "finish", {"answer": "done", "goals": goals})]
+    _code, report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"])
+    assert all(GOAL_REFUSAL not in _request_text(request) for request in provider.requests)
+
+
+def test_a_run_without_the_review_is_never_asked_for_goals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), [_fix_call("c1"), _probe_call("c2")])
+    assert all(GOAL_REFUSAL not in _request_text(request) for request in provider.requests)

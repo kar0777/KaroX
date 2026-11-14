@@ -215,9 +215,9 @@ def additional_tool_definitions(
         ),
         "repo.read_lines": ToolDefinition(
             "repo.read_lines",
-            "Read a UTF-8 repository file: the whole file by default (up to "
-            "1500 lines), or the window start/count; rev reads it as of a "
-            "commit, tag or branch.",
+            "Read a UTF-8 repository file: the first 400 lines by default "
+            "(has_more/total_lines tell what is left), or the window "
+            "start/count (up to 1500); rev reads it as of a commit, tag or branch.",
             Capability.REPO_READ,
             False,
             {
@@ -237,7 +237,7 @@ def additional_tool_definitions(
                         "minimum": 1,
                         "maximum": 1_500,
                         "description": (
-                            "How many lines to return. Defaults to and is "
+                            "How many lines to return. Defaults to 400, "
                             "capped at 1500."
                         ),
                     },

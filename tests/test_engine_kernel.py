@@ -5144,12 +5144,15 @@ def test_self_review_refuses_the_first_finish_once_then_accepts(
             _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
             _response((_tool_call("c2", "finish", {"answer": "done"}),)),
             _response((_tool_call("c3", "finish", {"answer": "done"}),)),
+            # v57: the finish after the review is asked once for goal evidence.
+            _response((_tool_call("c4", "finish", {"answer": "done"}),)),
         ],
     )
     harness.kernel.implementation.self_review = True
     report = harness.run()
 
-    observed = "\n".join(_tool_messages(harness))
+    # The last request carries the whole history once: the review appears once.
+    observed = "\n".join(m.content for m in harness.provider.requests[-1].messages if m.content)
     assert "review the change once as the project's maintainer" in observed
     assert observed.count("review the change once") == 1
     assert report.verified is True, report.reason
@@ -5190,12 +5193,13 @@ def test_self_review_also_reaches_a_prose_submission(tmp_path: Path, repository:
             _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
             prose, prose, prose,
             _response((_finish_call("c2", "done"),)),
+            _response((_finish_call("c3", "done"),)),
         ],
     )
     harness.kernel.implementation.self_review = True
     harness.run()
 
-    seen = "\n".join(_user_messages(harness) + _tool_messages(harness))
+    seen = "\n".join(m.content for m in harness.provider.requests[-1].messages if m.content)
     assert seen.count("review the change once as the project's maintainer") == 1
 
 

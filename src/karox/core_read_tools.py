@@ -126,7 +126,7 @@ class CoreReadToolsMixin:
     def _line_window(self, arguments: Dict[str, Any], relative: str, text: str) -> Dict[str, Any]:
         start = self._bounded_number(arguments, "start", 1, 1)
         count = self._bounded_number(
-            arguments, "count", self.MAX_READ_LINES, 1, self.MAX_READ_LINES
+            arguments, "count", self.DEFAULT_READ_LINES, 1, self.MAX_READ_LINES
         )
         lines = text.splitlines()
         selected = lines[start - 1 : start - 1 + count]

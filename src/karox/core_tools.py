@@ -81,7 +81,7 @@ from .tool_schemas import additional_tool_definitions
 # turn has to pay for.
 #: Files visual.check can render. A standalone SVG is a picture the browser
 #: draws on its own, so it is judged exactly like a page.
-OUTPUT_ELISION_TRIGGER_CHARS = 8_000
+OUTPUT_ELISION_TRIGGER_CHARS = 5_000
 OUTPUT_ELISION_HEAD_CHARS = 2_000
 OUTPUT_ELISION_TAIL_CHARS = 3_000
 OUTPUT_ELISION_TOOLS = frozenset({"checks.run", "repo.command", "dev.command"})
@@ -252,6 +252,10 @@ class ExtendedCoreRuntime(
     SEARCH_IGNORED_DIRECTORY_PREFIXES = _IGNORED_DIRECTORY_PREFIXES
 
     MAX_READ_LINES = 1_500
+    # A read without count returns this many lines (has_more/total_lines say
+    # what is left). Token audit 2026-11-14: reads past line 400 were ~8% of
+    # all input, re-sent with every later request.
+    DEFAULT_READ_LINES = 400
     MAX_EDIT_OCCURRENCES = 200
     MAX_EDIT_BATCH = 20
     EDIT_DIFF_MAX_CHARS = 4_000

@@ -40,7 +40,7 @@ from .engine_tool_support import (  # noqa: F401
 import hashlib
 from typing import Any, Dict, List, Mapping, Optional
 from . import completion_gate
-from . import requirement_coverage
+from . import goal_ledger, requirement_coverage
 from .engine.exceptions import Submitted
 from .engine_tool_bodies import (  # noqa: E402,F401
     _FENCE_LANGUAGES as _FENCE_LANGUAGES,
@@ -138,6 +138,13 @@ class EngineFinishMixin:
             answer = f"{answer.rstrip()}\n\n{attached}" if answer.strip() else attached
         # In the closing call the run is already stopped unverified; a refusal
         # could only cost the user the answer.
+        goal_gap = [] if self._closing_turn() else self._goal_problems(arguments)
+        if goal_gap:
+            self._goal_refusals = int(getattr(self, "_goal_refusals", 0) or 0) + 1
+            keep_open = getattr(self._kernel, "note_coverage_refusal", None)
+            if callable(keep_open):
+                keep_open()
+            return self._refusal(action, "goal_evidence", goal_ledger.refusal(goal_gap))
         problems = [] if self._closing_turn() else self._coverage_problems(arguments)
         if problems:
             self._coverage_refusals += 1
@@ -339,6 +346,22 @@ class EngineFinishMixin:
             "harness page spends the visual budget and proves nothing about the "
             "deliverable."
         )
+
+    def _goal_problems(self, arguments: Any) -> List[str]:
+        """Goals without a fresh output quote, once the review was asked (see goal_ledger)."""
+
+        if getattr(self, "_review_hold_seq", None) is None:
+            return []
+        if int(getattr(self, "_goal_refusals", 0) or 0) >= goal_ledger.REFUSALS:
+            return []
+        try:
+            record = self._core.sessions.load(self._session_id)
+            if not any(not completion_gate.is_doc(p) for p in record.changed_files or ()):
+                return []
+            value = arguments.get(goal_ledger.FIELD) if isinstance(arguments, dict) else None
+            return goal_ledger.problems(value, list(record.provider_history or ()))
+        except Exception:  # noqa: BLE001 - the floor still judges the submission
+            return []
 
     def _coverage_problems(self, arguments: Any) -> List[Any]:
         """Open requirements of this finish's attestation; [] lets it submit.

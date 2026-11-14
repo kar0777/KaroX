@@ -154,6 +154,11 @@ def _finish_provider_tool() -> ProviderTool:
                     "reason; reason quotes the task sentence verbatim."), "items": {
                     "type": "object", "properties": {"test": {"type": "string"}, "reason": {"type": "string"}},
                     "required": ["test", "reason"]}},
+                "goals": {"type": "array", "description": (
+                    "After the maintainer review: each goal the task states, with observed copied exactly from a "
+                    "check or test output received after your last edit that shows it holds."), "items": {
+                    "type": "object", "properties": {"goal": {"type": "string"}, "observed": {"type": "string"}},
+                    "required": ["goal", "observed"]}},
                 "requirements": {"type": "array", "description": (
                     "Requirement attestation for a web deliverable, one entry per listed requirement ID. status "
                     "verified: observed is text copied exactly from a browser_command, checks_run or visual_check "
