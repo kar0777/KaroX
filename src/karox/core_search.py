@@ -409,7 +409,11 @@ class SearchToolsMixin:
         if not case_sensitive:
             arguments.append("-i")
         arguments.extend(["-e", query, "--"])
-        result = self._git(arguments, deadline_seconds, redact_output=False)
+        try:
+            result = self._git(arguments, deadline_seconds, redact_output=False)
+        except OSError:
+            # No git binary (TB 4.1 images): the Python scan answers instead.
+            return None
         exit_code = result.get("exit_code")
         if exit_code not in {0, 1, None}:
             return None

@@ -292,10 +292,15 @@ class CoreReadToolsMixin:
         candidates: Iterable[str | Path]
         tail = pattern[3:] if pattern.startswith("**/") else ""
         if pattern == "**/*":
-            result = self._git(
-                ["ls-files", "--cached", "--others", "--exclude-standard"],
-                deadline_seconds,
-            )
+            try:
+                result = self._git(
+                    ["ls-files", "--cached", "--others", "--exclude-standard"],
+                    deadline_seconds,
+                )
+            except OSError:
+                # TB 4.1 images ship without a git binary at all: the call
+                # raised FileNotFoundError and list_files refused outright.
+                result = {"exit_code": None}
             # Outside a git checkout (a benchmark's /app, a downloaded tree)
             # ls-files fails and used to list nothing at all, which reads as
             # an empty project.

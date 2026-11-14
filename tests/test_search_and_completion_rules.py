@@ -280,3 +280,20 @@ def test_the_dossier_works_outside_a_git_checkout(tmp_path: Path) -> None:
     core = _plain_tree(tmp_path, files)
     dossier = task_dossier.build(core, "Option ignores `flag_value` when default is True")
     assert [f["path"] for f in dossier["files"]][:1] == ["pkg/core.py"]
+
+
+def test_list_files_and_search_work_without_a_git_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TB 4.1 images have no git at all: both tools raised FileNotFoundError."""
+
+    core = _plain_tree(tmp_path, {**SCOPED, **{f"pad/f{i}.txt": b"x\n" for i in range(400)}})
+
+    def no_git(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(core, "_git", no_git)
+    # The ripgrep and small-tree paths answer first where they can; force the git one.
+    monkeypatch.setattr(core, "_search_ripgrep", lambda **kwargs: None)
+    monkeypatch.setattr(core, "_search_small_tree", lambda **kwargs: None)
+    assert "top.py" in core._list_files({}, 30)["files"]
+    found = core._search({"query": "needle"}, 30)
+    assert sorted(m["path"] for m in found["matches"]) == ["src/pkg/a.py", "src/pkg/notes.txt", "top.py"]
