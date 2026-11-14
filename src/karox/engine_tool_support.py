@@ -87,6 +87,16 @@ REFUSAL_DISABLE_AFTER = 6
 #: seven turns. The refusal message names the working alternative.
 TOOL_FAILURE_LIMITS = {"repo.apply_patch": 2, "tests.run": 2}
 
+#: The working loop itself is never disabled: read, search, edit and the check
+#: runner have no alternative, and their refusals are argument mistakes the
+#: refusal text already corrects. A model that sent six unapproved commands
+#: (ls, grep, cat...) before its first test would otherwise lose checks.run,
+#: and with it every chance to verify, for the rest of the run.
+NEVER_DISABLED_TOOLS = frozenset({
+    "checks.run", "repo.read_file", "repo.read_lines", "repo.search",
+    "repo.edit_file", "repo.write_file", "repo.list_files",
+})
+
 _TOOL_ALTERNATIVE = {
     "repo.apply_patch": (
         "Use repo.edit_file with old_string/new_string, or repo.write_file for "

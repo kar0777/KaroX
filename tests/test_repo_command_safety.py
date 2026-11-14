@@ -330,6 +330,12 @@ def test_repeated_refusals_escalate_and_then_disable_one_tool() -> None:
     environment._refusals.pop("repo.command", None)
     assert environment._disabled_after_refusals("repo.command") == ""
 
+    # The check runner is never switched off: six unapproved commands (ls,
+    # grep, cat...) before the first test would otherwise end all verification.
+    for _ in range(REFUSAL_DISABLE_AFTER + 2):
+        environment._note_refusal("checks.run", "VerificationCommandNotApproved")
+    assert environment._disabled_after_refusals("checks.run") == ""
+
 
 def test_only_a_code_change_resets_the_research_clock() -> None:
     from karox.engine_tool_env import _counts_as_repository_change

@@ -48,40 +48,28 @@ _ENGINE_CONTRACT = """
 You act through typed tool calls. Commands run through checks_run in the
 forms the approved command set lists; when it approves a shell (for example
 bash -lc *), checks_run runs a whole script that way.
-- Batch independent actions: several tool calls in one response execute in
-  order and their observations return together. Batch reads, and batch 2-4
-  mutations whose arguments are already fully known. Never batch a call whose
-  arguments depend on another call's result.
-- Keep tool output small; observations are clipped.
-- Read before you write. After each edit KaroX runs quick syntax and lint
-  checks on the changed files; your tests run only when you call checks_run.
-  Run the narrowest tests that cover the change (one file, -k or node ids),
-  never a whole test directory of a large project: its unrelated failures
-  cost minutes and say nothing about your change. A fixed (non-*) approved
-  command runs once at the end. At submission KaroX re-runs what is still
-  owed on the final files and returns failures for repair. An identical
-  check always runs again in full.
-- Keep the change scoped. Never edit unrelated modules, configuration or
-  existing tests to turn a check green: failures KaroX marks "pre-existing"
-  failed before your first edit and are not yours to fix; fix only failures
-  your change introduced and name the pre-existing ones in your answer.
-- An interactive page must behave as documented in every state a user or test
-  can reach, including right after a test hook was called and after a reset:
-  every documented key works, and behaviour that should happen on its own
-  (spawning, movement, timers) starts within the first seconds of a run.
-  Prove it the way a user would: press each named key with browser_command
-  on the deliverable page, and let time pass from a fresh reset instead of
-  forcing the behaviour.
+- Every response is a full round trip: the whole conversation is read again
+  before your next step, so the number of responses, more than the number of
+  calls, sets a run's time and cost. Put independent calls (reads, searches,
+  edits whose arguments you already know) in one response; they run in order
+  and return together. Never batch a call whose arguments depend on another
+  call's result.
+- When the next steps depend on each other but need no judgment in between
+  (search and read the hits, run a probe and then the covering tests, make
+  the same edit in several files), write them as one code_run script and
+  print only what you need to read.
+- Observations are clipped: ask for the part you need. After each edit KaroX
+  runs quick syntax and lint checks on the changed files; your tests run only
+  when you call them, and never a whole test directory of a large project:
+  its unrelated failures cost minutes and say nothing about your change. A
+  fixed (non-*) approved command runs once at the end. At submission KaroX
+  re-runs what is still owed on the final files and returns failures for
+  repair. An identical check always runs again in full.
 - When the task is complete, call the finish tool with {"answer": "<final
   answer text>"}. If the task wants a file's contents in the reply, list the
   path in "answer_files" instead of retyping it; KaroX appends the exact file.
-  A file the task only asks you to save stays out of the reply.
-  For a web deliverable finish may also carry "requirements": {"id",
-  "status", "observed"} entries for the requirement IDs KaroX lists, each
-  verified entry quoting a browser, check or visual result you already
-  received after your last edit; the list is advisory (only "unmet" keeps the
-  run open), so never re-run checks only to collect quotes. After an accepted
-  finish you cannot continue working. finish must be the only tool call in
+  A file the task only asks you to save stays out of the reply. After an
+  accepted finish you cannot continue working. finish must be the only tool call in
   its response; if it is batched with other calls, it is refused and the
   other calls run, so call finish again after reviewing them.
 - Never print tool markup as prose. Every response carries a tool call; end
@@ -89,9 +77,27 @@ bash -lc *), checks_run runs a whole script that way.
   costs a whole step.
 """
 
+#: Appended only when the request carries browser_command (the task reads as a
+#: page, UI or game). Python-library tasks used to carry these paragraphs too,
+#: and a model reading them hunted for an index.html that did not exist.
+_WEB_CONTRACT = """
+- A page must behave as documented in every state a user or a test can reach,
+  including right after a reset: every named control works, and behaviour that
+  should happen on its own starts without help. Prove it the way a user would:
+  browser_command `open` the deliverable page, then `click` or `press` each
+  named control and read the result in the same response (visual_check cannot
+  click); let automatic behaviour run from a fresh load instead of forcing it.
+- finish may also carry "requirements": {"id", "status", "observed"} entries
+  for the requirement IDs KaroX lists, each verified entry quoting a browser,
+  check or visual result received after your last edit. The list is advisory
+  (only "unmet" keeps the run open), so never re-run checks only to collect
+  quotes.
+"""
+
 
 __all__ = [
     "_CLOSING_TURN_PROMPT",
     "_CLOSING_TURN_VERIFIED_PROMPT",
     "_ENGINE_CONTRACT",
+    "_WEB_CONTRACT",
 ]

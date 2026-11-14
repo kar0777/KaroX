@@ -714,11 +714,11 @@ class ProcessToolsMixin:
         # its middle cut, and for a many-failure suite that is exactly where
         # the FAILURES blocks live. The map keeps every failure's file, line
         # and test id even when the raw log later loses them.
+        full_stdout = str(result.pop("_map_stdout", result.get("stdout") or ""))
+        full_stderr = str(result.pop("_map_stderr", result.get("stderr") or ""))
         if result.get("exit_code") != 0 or result.get("timed_out"):
             result["failure_map"] = analyze_check_output(
-                str(result.pop("_map_stdout", result.get("stdout") or "")),
-                str(result.pop("_map_stderr", result.get("stderr") or "")),
-                root=self.repository,
+                full_stdout, full_stderr, root=self.repository
             )
         # A caller that asked for ten minutes and silently got the host's deadline
         # cannot tell a genuine hang from a clamp, so both numbers are reported.
@@ -731,7 +731,15 @@ class ProcessToolsMixin:
             detail = f"the check was stopped after {plan.effective_timeout:g}s and its process tree was terminated"
             if plan.clamped_by is not None:
                 detail += f"; the requested {plan.requested_timeout:g}s was reduced by {plan.clamped_by}"
-            result["detail"] = detail + f"; it proves nothing (not owed either): a test over {STALLED_TEST_SECONDS}s left its stack under [stderr]; deselect it (-k) or run the narrowest tests that cover the change (one file, -k or node ids)"
+            pytest_run = check_baseline.is_pytest(plan.argv)
+            # The stack dump and -k advice are pytest's; a hung npm or cargo run
+            # sent the model looking for a [stderr] stack that was never written.
+            hint = (
+                f"a test over {STALLED_TEST_SECONDS}s left its stack under [stderr]; deselect it (-k) or run the narrowest tests that cover the change (one file, -k or node ids)"
+                if pytest_run
+                else "run a narrower command, or find what waits for input or never exits"
+            )
+            result["detail"] = detail + f"; it proves nothing (not owed either): {hint}"
         display_argv = result["argv"]
         outcome = "passed" if result["exit_code"] == 0 else "failed"
         result["_evidence"] = [

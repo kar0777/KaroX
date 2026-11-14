@@ -720,7 +720,10 @@ class EngineProviderModel:
                 continue
             if role == "tool":
                 call_id = str(entry.get("tool_call_id", ""))
-                if not call_id:
+                if not call_id or call_id not in call_names:
+                    # A result no assistant call asked for (a resumed
+                    # harness check) is refused by every tool-calling
+                    # transport; it is evidence in the session, not a turn.
                     continue
                 converted.append(
                     ModelMessage("tool", _repeated_output(text, call_names.get(call_id, ""), shown), tool_call_id=call_id)

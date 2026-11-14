@@ -267,7 +267,12 @@ def _pytest(text: str) -> list[dict[str, object]]:
             continue
         node_path = node.split("::", 1)[0]
         tail = node.split("::")[-1] if "::" in node else ""
-        section = _pytest_section_for(tail, sections)
+        # pytest titles a method's block "Class.method": two classes with a
+        # same-named test used to share the first class's block.
+        qualified = ".".join(node.split("::")[1:]) if "::" in node else ""
+        section = (
+            _pytest_section_for(qualified, sections) if "." in qualified else None
+        ) or _pytest_section_for(tail, sections)
         # The deepest traceback frame may live in the module under test, not
         # in the test file. Its path and line must travel together: pairing the
         # node's test file with the source file's line sends the repair to a

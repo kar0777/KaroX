@@ -340,6 +340,16 @@ class CoreEditToolsMixin:
             # No-op entries in a mixed batch are skipped by the engine.
             edits_applied = sum(1 for op in ops if op.old != op.new)
             line_ending_adapted = False
+        elif expected == 1 and _legacy_miss(text, ops[0]):
+            # A missing old_string used to be a bare "found 0" refusal, while
+            # the edits form retried with folded whitespace and indentation and
+            # named the closest lines. The common one-edit form gets the same.
+            updated, failures = apply_edits(text, [EditOp(ops[0].old, ops[0].new, UNIQUE)])
+            if failures:
+                return self._edit_failure_payload(relative, failures, previous_digest)
+            replacements = found = 1
+            edits_applied = 1
+            line_ending_adapted = False
         else:
             replacement_old, replacement_new, found, line_ending_adapted = (
                 self._legacy_match(text, ops[0], expected)
@@ -508,3 +518,15 @@ class CoreEditToolsMixin:
             "items": len(items),
             "done": sum(1 for item in items if item["status"] == "done"),
         }
+
+
+def _legacy_miss(text: str, op: EditOp) -> bool:
+    """Whether old_string is absent even after the CRLF/LF swap _legacy_match makes."""
+
+    if op.old in text:
+        return False
+    if "\r\n" in text and "\r\n" not in op.old and op.old.replace("\n", "\r\n") in text:
+        return False
+    if "\r\n" not in text and "\r\n" in op.old and op.old.replace("\r\n", "\n") in text:
+        return False
+    return True

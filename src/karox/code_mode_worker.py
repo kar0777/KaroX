@@ -1,0 +1,413 @@
+"""KaroX code-mode worker: model-written Python whose only reach is tool calls.
+
+KaroX starts this file as ``python -I -S code_mode_worker.py`` with an empty
+environment and a scratch working directory. The model's scripts run here, in
+one persistent namespace, and every tool they call is a message back to KaroX,
+which runs it through the same capability policy, risk engine and audit as a
+direct tool call. Before any script runs, an audit hook refuses process
+creation, sockets, native-code loading, file writes, reads outside the
+standard library and the introspection that could reach the hook. The hook is
+defense in depth; the boundary is that no credential, environment variable or
+repository handle ever reaches this process.
+
+The protocol is one JSON object per line. Host to worker: ``eval`` (code and
+the tool list) and ``ret`` (one tool result) or ``abort``. Worker to host:
+``ready``, ``call`` (a tool call plus the output printed since the last
+message) and ``done`` (remaining output, the last expression's value and the
+error, if any). This file imports nothing from KaroX.
+"""
+
+from __future__ import annotations
+
+import ast
+import builtins
+import io
+import json
+import linecache
+import os
+import pprint
+import sys
+import traceback
+
+#: Output kept per script; the host clips again to what the model is shown.
+OUTPUT_CAP = 200_000
+#: A protocol line longer than this is a broken host, not a message.
+LINE_CAP = 16 * 1024 * 1024
+
+_PROTOCOL_OUT = sys.stdout.buffer
+_PROTOCOL_IN = sys.stdin.buffer
+
+#: Standard modules loaded before the hook, so a script can import them
+#: without touching the file system.
+_PRELOAD = (
+    "base64", "bisect", "collections", "copy", "csv", "dataclasses", "datetime",
+    "decimal", "difflib", "enum", "fnmatch", "fractions", "functools", "hashlib",
+    "heapq", "itertools", "json", "math", "operator", "pathlib", "pprint", "random",
+    "re", "shlex", "statistics", "string", "textwrap", "typing", "unicodedata",
+)
+#: Modules whose only purpose here would be to escape the worker.
+_DENIED_IMPORTS = frozenset({
+    "ctypes", "_ctypes", "_winapi", "winreg", "msvcrt", "_posixsubprocess",
+    "subprocess", "socket", "_socket", "ssl", "_ssl", "mmap", "multiprocessing",
+    "_multiprocessing", "_overlapped", "asyncio", "select", "selectors",
+    "concurrent", "sqlite3", "_sqlite3", "urllib.request", "http.client",
+    "http.server", "ftplib", "smtplib", "webbrowser", "pty", "resource",
+})
+#: Audit events refused outright (prefix match).
+_DENIED_EVENTS = (
+    "subprocess.", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
+    "os.forkpty", "os.startfile", "os.kill", "os.remove", "os.rename", "os.rmdir",
+    "os.mkdir", "os.chmod", "os.chown", "os.chflags", "os.lchflags", "os.link",
+    "os.symlink", "os.truncate", "os.utime", "os.putenv", "os.unsetenv",
+    "os.chdir", "os.add_dll_directory", "os.mkfifo",
+    "os.mknod", "os.getxattr", "os.setxattr", "os.removexattr", "os.listxattr",
+    "glob.", "shutil.", "socket.", "ctypes.", "_winapi.", "winreg.", "msvcrt.",
+    "urllib.", "http.", "ftplib.", "smtplib.", "poplib.", "imaplib.", "nntplib.",
+    "telnetlib.", "webbrowser.", "pty.", "sqlite3.", "mmap.", "resource.",
+    "signal.", "syslog.", "_thread.", "gc.get_objects", "gc.get_referrers",
+    "gc.get_referents", "sys.settrace", "sys.setprofile", "builtins.input",
+    "tempfile.", "sys.remote_exec", "sys._getframe", "sys._current_frames",
+    "sys._current_exceptions", "_posixsubprocess.", "code.__new__",
+)
+#: Attribute reads that hand out a frame, whose locals reach the audit hook.
+_FRAME_ATTRIBUTES = frozenset({"tb_frame", "gi_frame", "cr_frame", "ag_frame", "f_back"})
+_GUARDED_ATTRIBUTES = frozenset(
+    {"__code__", "__globals__", "__closure__", "__defaults__", "__kwdefaults__"}
+)
+_NO_FILES = (
+    "code_run has no direct file, process or network access: call the tools "
+    "instead (repo_read_lines, repo_search, repo_edit_file, checks_run)"
+)
+
+
+class _Stopped(BaseException):
+    """The host stopped the script; not catchable by ``except Exception``."""
+
+
+class ToolResult(str):
+    """What a tool returned: the text KaroX shows for it, plus fields.
+
+    ``ok`` is the tool's own verdict, ``data`` its structured result and
+    ``exit_code`` the exit status of a command (``None`` for other tools).
+    """
+
+    ok: bool
+    data: dict
+
+    def __new__(cls, text: str, ok: bool, data: object) -> "ToolResult":
+        value = super().__new__(cls, text)
+        value.ok = bool(ok)
+        value.data = data if isinstance(data, dict) else {}
+        return value
+
+    @property
+    def exit_code(self) -> object:
+        return self.data.get("exit_code", self.data.get("returncode"))
+
+
+class _Capture:
+    """Collects what a script prints, bounded, handed out as increments."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self) -> None:
+        self._pending: list[str] = []
+        self.size = 0
+        self.dropped = 0
+
+    def write(self, text: object) -> int:
+        value = str(text)
+        room = OUTPUT_CAP - self.size
+        if room > 0:
+            kept = value[:room]
+            self._pending.append(kept)
+            self.size += len(kept)
+        self.dropped += max(0, len(value) - max(0, room))
+        return len(value)
+
+    def writelines(self, lines: object) -> None:
+        for line in lines:  # type: ignore[attr-defined]
+            self.write(line)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def take(self) -> str:
+        text = "".join(self._pending)
+        self._pending = []
+        return text
+
+    def reset(self) -> None:
+        self._pending = []
+        self.size = 0
+        self.dropped = 0
+
+
+_capture = _Capture()
+_namespace: dict = {"__name__": "__code_run__", "__builtins__": builtins}
+
+
+def _send(message: dict) -> None:
+    line = json.dumps(message, ensure_ascii=False, default=str) + "\n"
+    _PROTOCOL_OUT.write(line.encode("utf-8", "replace"))
+    _PROTOCOL_OUT.flush()
+
+
+def _receive() -> dict:
+    line = _PROTOCOL_IN.readline(LINE_CAP)
+    if not line:
+        os._exit(0)
+    value = json.loads(line.decode("utf-8", "replace"))
+    return value if isinstance(value, dict) else {}
+
+
+def _call(name: str, arguments: dict) -> ToolResult:
+    _send({"t": "call", "name": name, "args": arguments, "out": _capture.take()})
+    reply = _receive()
+    if reply.get("t") == "abort":
+        raise _Stopped(str(reply.get("reason") or "stopped by KaroX"))
+    return ToolResult(str(reply.get("text") or ""), bool(reply.get("ok")), reply.get("data"))
+
+
+def _tool(name: str, required: tuple) -> object:
+    def tool(*args: object, **kwargs: object) -> ToolResult:
+        if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
+            return _call(name, dict(args[0]))
+        if len(args) > len(required):
+            raise TypeError(
+                f"{name}() takes at most {len(required)} positional argument(s) "
+                f"({', '.join(required) or 'none'}); pass the rest by name"
+            )
+        arguments = dict(zip(required, args))
+        for key, value in kwargs.items():
+            if key in arguments:
+                raise TypeError(f"{name}() got {key!r} twice")
+            arguments[key] = value
+        return _call(name, arguments)
+
+    tool.__name__ = name
+    tool.__qualname__ = name
+    return tool
+
+
+def _format_error(error: BaseException, filename: str, source: list, frames_allowed: list) -> str:
+    entries = []
+    frames_allowed[0] = True
+    try:
+        tb = error.__traceback__
+        while tb is not None and len(entries) < 200:
+            if tb.tb_frame.f_code.co_filename == filename:
+                entries.append(tb.tb_lineno)
+            tb = tb.tb_next
+    except Exception:  # noqa: BLE001 - a broken traceback still reports its error
+        pass
+    finally:
+        frames_allowed[0] = False
+    lines = []
+    if entries:
+        lines.append("Traceback (script lines, most recent last):")
+        for number in entries[-6:]:
+            text = source[number - 1].strip() if 0 < number <= len(source) else ""
+            lines.append(f"  line {number}: {text}")
+    try:
+        lines.extend(
+            part.rstrip("\n") for part in traceback.format_exception_only(type(error), error)
+        )
+    except Exception:  # noqa: BLE001 - it walks chained tracebacks, whose frames stay closed
+        try:
+            detail = str(error)
+        except Exception:  # noqa: BLE001 - a __str__ that raises still names its type
+            detail = ""
+        name = type(error).__name__
+        lines.append(f"{name}: {detail}" if detail else name)
+    return "\n".join(lines)
+
+
+def _show(value: object) -> str:
+    if isinstance(value, str):
+        return str(value)
+    try:
+        return pprint.pformat(value, width=110, compact=True, sort_dicts=False)
+    except Exception:  # noqa: BLE001 - a broken __repr__ still gets a line
+        return object.__repr__(value)
+
+
+def _evaluate(message: dict, frames_allowed: list) -> None:
+    code = str(message.get("code") or "")
+    filename = f"<code_run {message.get('id')}>"
+    linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
+    for item in message.get("tools") or ():
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            required = tuple(str(key) for key in item.get("required") or ())
+            _namespace[item["name"]] = _tool(item["name"], required)
+    _capture.reset()
+    shown = None
+    error = None
+    saved = sys.stdout, sys.stderr, sys.stdin
+    sys.stdout = sys.stderr = _capture  # type: ignore[assignment]
+    sys.stdin = io.StringIO("")
+    try:
+        tree = ast.parse(code, filename, "exec")
+        last = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            last = ast.Expression(tree.body.pop().value)
+        exec(compile(tree, filename, "exec"), _namespace)
+        if last is not None:
+            value = eval(compile(last, filename, "eval"), _namespace)
+            if value is not None:
+                shown = _show(value)[:OUTPUT_CAP]
+    except _Stopped as stopped:
+        error = f"stopped: {stopped}"
+    except SystemExit as stop:
+        if stop.code not in (None, 0):
+            error = f"SystemExit({stop.code!r})"
+    except BaseException as failure:  # noqa: BLE001 - every failure is reported
+        error = _format_error(failure, filename, code.splitlines(), frames_allowed)
+    finally:
+        sys.stdout, sys.stderr, sys.stdin = saved
+    _send(
+        {
+            "t": "done",
+            "out": _capture.take(),
+            "dropped": _capture.dropped,
+            "value": shown,
+            "error": error,
+        }
+    )
+
+
+def _key(path: str, windows: bool) -> str:
+    """A comparable form of a path using only str methods (nothing a script can patch)."""
+
+    text = path.replace("\\", "/") if windows else path
+    if windows:
+        text = text.lower()
+        if text.startswith("//?/"):
+            text = text[4:]
+    return text.rstrip("/") + "/"
+
+
+def _stdlib_roots(windows: bool) -> tuple:
+    base = os.path.dirname(os.__file__)
+    candidates = [base, os.path.join(base, "lib-dynload"), os.path.join(sys.base_prefix, "DLLs")]
+    candidates.extend(entry for entry in sys.path if entry)
+    roots = []
+    for path in candidates:
+        if os.path.isdir(path):
+            for form in (path, os.path.realpath(path)):
+                key = _key(os.path.abspath(form), windows)
+                if key not in roots:
+                    roots.append(key)
+    return tuple(roots)
+
+
+def _seal() -> list:
+    """Install the audit hook; return the switch that lets the worker read frames.
+
+    The hook only ever calls what it bound here, never a global or builtin by
+    name, and it judges only exact ``str`` values: a script can rebind this
+    module's globals (``import __main__``) and the builtins, and a str subclass
+    or path object would run script code inside the check.
+    """
+
+    windows = os.name == "nt"
+    roots = _stdlib_roots(windows)
+    write_flags = os.O_WRONLY | os.O_RDWR
+    for flag in ("O_CREAT", "O_TRUNC", "O_APPEND"):
+        write_flags |= getattr(os, flag, 0)
+    denied_events = _DENIED_EVENTS
+    denied_imports = _DENIED_IMPORTS
+    guarded = _GUARDED_ATTRIBUTES
+    frame_attributes = _FRAME_ATTRIBUTES
+    message = _NO_FILES
+    key_of = _key
+    str_type, int_type, type_of, length, range_of = str, int, type, len, range
+    permission_error, import_error = PermissionError, ImportError
+    frames_allowed = [False]
+
+    def inside(path: object) -> bool:
+        if type_of(path) is not str_type or "\x00" in path:  # type: ignore[operator]
+            return False
+        key = key_of(path, windows)
+        return "/../" not in key and "/./" not in key and key.startswith(roots)
+
+    def audit(event: str, args: tuple) -> None:
+        if event == "object.__getattr__":
+            if length(args) > 1 and args[1] in frame_attributes and not frames_allowed[0]:
+                raise permission_error("code_run cannot inspect frames")
+            return
+        if event in ("os.listdir", "os.scandir"):
+            # The import system lists standard-library directories to find
+            # a module; any other directory stays unreadable.
+            if not args or not inside(args[0]):
+                raise permission_error(message)
+            return
+        if event == "open":
+            path = args[0] if args else None
+            mode = args[1] if length(args) > 1 else None
+            flags = args[2] if length(args) > 2 else None
+            if mode is not None and (type_of(mode) is not str_type or "w" in mode
+                                     or "a" in mode or "x" in mode or "+" in mode):
+                raise permission_error(message)
+            if flags is not None and (type_of(flags) is not int_type or flags & write_flags):
+                raise permission_error(message)
+            if not inside(path):
+                raise permission_error(message)
+            return
+        if event == "import":
+            module = args[0] if args else None
+            if type_of(module) is not str_type:
+                raise import_error("code_run imports modules by plain name only")
+            parts = module.split(".")  # type: ignore[union-attr]
+            for size in range_of(1, length(parts) + 1):
+                if ".".join(parts[:size]) in denied_imports:
+                    raise import_error(f"{module} is not available in code_run")
+            return
+        if event == "sys._getframemodulename":
+            # namedtuple and enum ask for a module name, never a frame.
+            return
+        if event.startswith(denied_events):
+            raise permission_error(f"{event} is not available in code_run. {message}")
+        if event == "object.__setattr__" and length(args) > 1 and args[1] in guarded:
+            raise permission_error("code_run cannot rewrite functions")
+
+    sys.addaudithook(audit)
+    return frames_allowed
+
+
+def _limit_memory() -> None:
+    try:
+        import resource
+    except ImportError:
+        return
+    limit = 2 * 1024 * 1024 * 1024
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (ValueError, OSError):
+        pass
+
+
+def main() -> None:
+    _limit_memory()
+    for name in _PRELOAD:
+        try:
+            __import__(name)
+        except ImportError:
+            pass
+    frames_allowed = _seal()
+    _send({"t": "ready", "python": sys.version.split()[0]})
+    while True:
+        message = _receive()
+        if message.get("t") == "eval":
+            _evaluate(message, frames_allowed)
+
+
+if __name__ == "__main__":
+    main()

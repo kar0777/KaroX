@@ -145,6 +145,11 @@ class CoreValidationMixin:
                     if alias in args:
                         args["count"] = args.pop(alias)
                         break
+            # JSON has one number type: 120.0 is the line 120 a model meant.
+            if isinstance(end, float) and end.is_integer():
+                end = int(end)
+            if isinstance(args.get("start"), float) and float(args["start"]).is_integer():
+                args["start"] = int(args["start"])
             if end is not None and "count" not in args:
                 start = args.get("start", 1)
                 if (

@@ -59,9 +59,17 @@ class SearchToolsMixin:
             "!.karox/**",
         ]
         # Repository-wide search should inspect source, not generated copies.
-        # Keep explicit user globs authoritative, but for the default scope skip
-        # dependency/build/runtime directories consistently across backends.
-        if pattern == "**/*":
+        # A glob that names such a directory stays authoritative; any other
+        # scope ("*.py", "src/**/*") skips dependency/build/runtime trees too,
+        # or a search for one name returned matches from the whole venv.
+        ignored_names = tuple(
+            str(item) for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_NAMES", ())
+        )
+        if pattern != "**/*":
+            # Before the exclusions: ripgrep lets a later glob win, so an
+            # include written last re-admitted every .py file in a venv.
+            argv.extend(["--glob", pattern])
+        if pattern == "**/*" or not any(name in pattern for name in ignored_names):
             for ignored in sorted(
                 str(item) for item in getattr(self, "SEARCH_IGNORED_DIRECTORY_NAMES", ())
             ):
@@ -92,8 +100,6 @@ class SearchToolsMixin:
             argv.append("--ignore-case")
         if not use_regex:
             argv.append("--fixed-strings")
-        if pattern != "**/*":
-            argv.extend(["--glob", pattern])
         argv.extend(["--", query, "."])
 
         result = self._run(argv, deadline_seconds, redact_output=False)
@@ -628,6 +634,16 @@ class SearchToolsMixin:
             # Models scope searches with `path` far more often than with a glob
             # (swer5-k3: 13 rejected calls in one run). Treat it as the glob it means.
             pattern = self._search_scope_pattern(arguments.get("path"))
+        elif (
+            isinstance(pattern, str)
+            and isinstance(arguments.get("path"), str)
+            and "/" not in pattern.replace("\\", "/")
+        ):
+            # path="src/pkg" with pattern="*.py" means the .py files under
+            # src/pkg; dropping the path searched the whole repository.
+            scope = self._search_scope_pattern(arguments.get("path"))
+            if isinstance(scope, str) and scope.endswith("/**/*"):
+                pattern = scope[: -len("*")] + pattern
         raw_pattern = Path(pattern) if isinstance(pattern, str) else None
         if (
             raw_pattern is None

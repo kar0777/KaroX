@@ -587,7 +587,8 @@ def test_checks_body_keeps_the_map_and_only_a_slice_of_the_log() -> None:
     assert body.startswith("[KaroX failure map")
     assert "test_sample.py:9" in body
     assert len(body) < 4_500
-    assert "KaroX omitted" in body or len(long_log) < 4_500
+    # Context lines of a failure block go first; only then is the middle cut.
+    assert "KaroX omitted" in body or "source-context lines" in body
 
 
 def test_checks_body_without_a_map_keeps_the_bounded_log() -> None:

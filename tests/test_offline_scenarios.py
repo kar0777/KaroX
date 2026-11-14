@@ -38,6 +38,7 @@ CALC = '''def div(a, b):
 #: this set made 1.4% of calls). Hidden tools stay callable.
 PLAIN_SURFACE = {
     "checks_run",
+    "code_run",
     "finish",
     "git_diff",
     "git_log",
@@ -130,6 +131,23 @@ def test_a_plain_repair_pays_for_a_small_tool_surface(
     advertised = _request_tools(provider.requests[0])
     assert advertised == PLAIN_SURFACE
     assert report["verified"] is True
+
+
+def test_page_guidance_rides_only_on_requests_that_carry_the_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A library repair used to read three paragraphs about pages and
+    # requirement IDs; a page task still gets them.
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "page").mkdir()
+    _, _, plain = _run(tmp_path / "plain", monkeypatch, _repo(tmp_path / "plain"), [_fix_call("c1")])
+    assert "browser_command `open`" not in _request_text(plain.requests[0])
+    _, _, page = _run(
+        tmp_path / "page", monkeypatch, _repo(tmp_path / "page"), [_fix_call("c1")],
+        task="make the start button on the html page call div(a, 0) safely",
+    )
+    assert "browser_command" in _request_tools(page.requests[0])
+    assert "browser_command `open`" in _request_text(page.requests[0])
 
 
 def test_hidden_tools_stay_callable_by_name(
@@ -454,14 +472,41 @@ def test_prompt_and_review_stay_concise_and_name_repo_measures() -> None:
     review = self_review_text()
     assert len(SYSTEM_PROMPT) < 7500
     assert len(review) < 3000
-    # v58 wtforms/exstruct: compaction dropped these two and both tasks regressed.
-    assert "an argument at call or render time" in SYSTEM_PROMPT
+    # v58: compaction dropped the direct-form and named-module rules and two
+    # tasks regressed; they stay, stated as principles rather than examples.
+    assert "in the form its users would reach for first" in SYSTEM_PROMPT
     assert "add its direct form" in review
     assert "never a reason to skip it" in SYSTEM_PROMPT
-    assert "Match the repository's own test measure" in SYSTEM_PROMPT
-    assert "Check framework and caller shapes" in SYSTEM_PROMPT
-    assert "Never add a new error for an argument combination nothing forbids" in SYSTEM_PROMPT
-    assert "same measure existing tests use" in review
+    assert "Measure the way the repository measures" in SYSTEM_PROMPT
+    assert "what existing callers of that interface expect" in SYSTEM_PROMPT
+    assert "never add a new error for a combination nothing forbids" in SYSTEM_PROMPT
+    assert "the way existing tests check sibling code" in review
+
+
+def test_prompt_and_review_carry_no_examples_lifted_from_benchmark_tasks() -> None:
+    """Rules came from analysed tasks; their examples named those tasks' fixes.
+
+    An example such as "a dict like sibling dump methods" or "sys.modules
+    submodules" tunes every run toward one task's hidden test. The principle
+    stays; the task's own answer does not.
+    """
+
+    from karox.agent import SYSTEM_PROMPT
+    from karox.engine_prompts import _ENGINE_CONTRACT
+    from karox.prompts import self_review_text
+
+    text = (SYSTEM_PROMPT + _ENGINE_CONTRACT + self_review_text()).lower()
+    for fragment in (
+        "sys.modules",
+        "dump method",
+        "render time",
+        "constructor",
+        "leftover header",
+        "module still loaded",
+        "partial mapping",
+        "pre-encoded",
+    ):
+        assert fragment not in text, fragment
 
 
 def test_failing_probe_after_green_test_clears_settle_and_avoids_review_punt(

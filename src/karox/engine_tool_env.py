@@ -52,6 +52,8 @@ from .engine_tool_support import (  # noqa: F401
 from .engine_finish import EngineFinishMixin
 from .engine_guidance import EngineGuidanceMixin
 from .engine_attach import EngineAttachMixin
+from .engine_code_mode import EngineCodeModeMixin
+from .code_mode import CODE_TOOL_NAME, SCRIPT_REQUESTED_BY
 
 import hashlib
 import os
@@ -168,7 +170,9 @@ if TYPE_CHECKING:
 
 
 
-class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMixin):
+class CoreToolEnvironment(
+    EngineFinishMixin, EngineGuidanceMixin, EngineAttachMixin, EngineCodeModeMixin
+):
     """The engine's Environment protocol on CoreRuntime's typed tools.
 
     Every engine action becomes one audited Core command: capability policy
@@ -312,6 +316,14 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
             )
         if name is None:
             return self._fenced_command(action)
+        if name == CODE_TOOL_NAME and requested_by == "model":
+            if not self._kernel.code_mode_allowed():
+                return self._refusal(
+                    action,
+                    "tool_not_permitted",
+                    "code_run is not available in this session; call the tools directly.",
+                )
+            return self._code_run(action)
         core_name = self._aliases.get(str(name))
         if core_name is None:
             return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
@@ -388,6 +400,11 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
         if core_name in _TEST_TOOLS:
             self._kernel._emit(AgentEventKind.TEST_STARTED, tool=display, call_id=call_id or None)
         remaining = max(0.1, self._kernel.remaining_seconds())
+        script_deadline = self._script_deadline
+        if requested_by == SCRIPT_REQUESTED_BY and script_deadline is not None:
+            # A script's call ends with its script: a long check inside a
+            # five-second script must not run on to the run's own deadline.
+            remaining = max(0.1, min(remaining, script_deadline - self._kernel.monotonic()))
         identity = f"{self._session_id}\0{call_id}\0{core_name}".encode("utf-8")
         digest = hashlib.sha256(identity).hexdigest()
         command = CoreCommand(
@@ -474,7 +491,9 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
         output = self._render_output(core_name, result)
         notices = (
             self._research_notice(definition),
-            self._batching_notice(definition, action),
+            ""
+            if requested_by == SCRIPT_REQUESTED_BY
+            else self._batching_notice(definition, action),
             self._settle_notice(core_name, arguments, data),
             self._repeat_notice(core_name, arguments),
             self._probe_streak_notice(core_name),
@@ -483,7 +502,12 @@ class CoreToolEnvironment(EngineFinishMixin, EngineGuidanceMixin, EngineAttachMi
             self._interaction_hint(core_name),
         )
         notice = "\n\n".join(item for item in notices if item)
-        if notice:
+        script_notices = self._script_notices
+        if requested_by == SCRIPT_REQUESTED_BY and script_notices is not None:
+            # A script's calls report their notices once, under its output.
+            script_notices.extend(item for item in notices if item)
+            self._script_last = (data, result_summary(core_name, data, result.ok, arguments))
+        elif notice:
             combined = f"{notice}\n\n{output['output']}"
             output["output"] = clip_output(combined, int(self.config.output_char_limit))
             output["observation"] = output["output"]

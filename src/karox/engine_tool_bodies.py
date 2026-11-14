@@ -482,6 +482,18 @@ def _mutation_body(core_name: str, data: Mapping[str, Any], ok: bool) -> str:
             lines.append("error: " + error.strip()[:2_000])
         elif len(lines) == 1:
             lines.append("failed")
+        # A one-line anchor that missed has no closest block in the message;
+        # its nearest file lines spare the model a re-read to find them.
+        if "closest block" not in str(error or ""):
+            similar: List[str] = []
+            for failure in data.get("failures") or ():
+                if not isinstance(failure, Mapping):
+                    continue
+                for candidate in failure.get("candidates") or ():
+                    if isinstance(candidate, Mapping) and candidate.get("line"):
+                        similar.append(f"  line {candidate.get('line')}: {candidate.get('fragment')}")
+            if similar:
+                lines.append("similar lines in the file:\n" + "\n".join(similar[:6]))
     return "\n".join(lines)
 
 def _plain_body(core_name: str, data: Mapping[str, Any]) -> Optional[str]:

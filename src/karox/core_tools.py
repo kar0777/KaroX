@@ -67,6 +67,7 @@ from .core import (
 from .models import CoreCommand, CoreResult, EvidenceRecord
 from .security import contains_credential, redact, redact_content
 from .sessions import MutationLease
+from .test_output import condense_test_output
 from .tool_schemas import additional_tool_definitions
 
 
@@ -479,12 +480,23 @@ class ExtendedCoreRuntime(
             artifact_id = self._store_output_artifact(
                 command.session_id, command.name, field, text
             )
-            omitted = len(text) - OUTPUT_ELISION_HEAD_CHARS - OUTPUT_ELISION_TAIL_CHARS
-            data[field] = (
-                text[:OUTPUT_ELISION_HEAD_CHARS]
-                + f"\n…[{omitted} chars omitted, artifact {artifact_id}]…\n"
-                + text[-OUTPUT_ELISION_TAIL_CHARS:]
+            # A test log is condensed before anything is cut: a blind head and
+            # tail of a verbose pytest run kept PASSED lines and dropped the
+            # assertion diffs in the middle, which are the reason to run it.
+            condensed = (
+                condense_test_output(text, max_chars=OUTPUT_ELISION_TRIGGER_CHARS)
+                if command.name == "checks.run"
+                else None
             )
+            if condensed is not None:
+                data[field] = str(condensed["text"])
+            else:
+                omitted = len(text) - OUTPUT_ELISION_HEAD_CHARS - OUTPUT_ELISION_TAIL_CHARS
+                data[field] = (
+                    text[:OUTPUT_ELISION_HEAD_CHARS]
+                    + f"\n…[{omitted} chars omitted; run a narrower command to see them]…\n"
+                    + text[-OUTPUT_ELISION_TAIL_CHARS:]
+                )
             data[f"{field}_artifact_id"] = artifact_id
             # The full length, so a reader can tell how much the middle held and
             # know that the artifact is the whole text rather than the window.

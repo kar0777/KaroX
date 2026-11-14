@@ -59,8 +59,10 @@ from .engine_kernel_harness import EngineHarnessMixin
 from .prompts import deep_pass_text, self_review_text, unchanged_pass_text
 from .engine_tool_support import _CHANGE_INTENT
 from . import check_baseline
+from . import code_mode
 from .engine_prompts import (  # noqa: E402
     _ENGINE_CONTRACT,
+    _WEB_CONTRACT,
 )
 from .engine_agent import (  # noqa: E402
     _EngineAgentMixin,
@@ -291,6 +293,9 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         self._lease: Optional[MutationLease] = None
         self._environment: Optional[CoreToolEnvironment] = None
         self._persisted_call_ids: Set[str] = set()
+        #: The code_run call whose script is making tool calls right now.
+        self._script_parent_call: Optional[str] = None
+        self._request_tools: Tuple[ProviderTool, ...] = ()
         approved_checks = core.verification_commands
         if not approved_checks and not self.maintenance_mode:
             raise AgentError(
@@ -409,11 +414,14 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     provider_message=session_analysis.last_provider_message(record),
                 )
             resume_messages, resume_calls = self._seed_history(session_id, lease, record)
+            self._request_tools = self._advertised_tools(record.task or "")
             model = EngineProviderModel(
                 provider=self.provider,
                 model_id=self.model,
-                tools=self._advertised_tools(record.task or ""),
-                known_names=set(self.engine_tool_aliases) | {FINISH_TOOL_NAME},
+                tools=self._request_tools,
+                known_names=set(self.engine_tool_aliases)
+                | {FINISH_TOOL_NAME}
+                | ({code_mode.CODE_TOOL_NAME} if self.code_mode_allowed() else set()),
                 max_output_tokens=self.max_output_tokens,
                 reasoning_effort=self.reasoning_effort,
                 event=self._model_event,
@@ -459,7 +467,12 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 exit_extra = agent.run(
                     record.task,
                     resume_messages=resume_messages,
-                    system_prompt=self.system_prompt,
+                    system_prompt=self.system_prompt
+                    + (
+                        _WEB_CONTRACT
+                        if any(t.name == "browser_command" for t in self._request_tools)
+                        else ""
+                    ),
                     instance_contract="Solve the task in the repository above.",
                     finish_checklist=""
                     if resume_messages
@@ -681,6 +694,8 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
             phase = "verification" if current.changed_files else "execution"
             return self._finish(session_id, lease, "stopped", phase, reason, provider_message)
         finally:
+            if self._environment is not None:
+                self._environment.close_code_mode()
             self.sessions.release(lease)
             self._environment = None
 
@@ -795,7 +810,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         only in what every unrelated request has to carry.
         """
 
-        return tuple(
+        tools = tuple(
             _engine_provider_tool(alias, self._definitions[core_name])
             for alias, core_name in self._permitted_tool_pairs
             if _tool_relevant_for_task(
@@ -806,7 +821,36 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
             )
             and (core_name != "lsp.diagnostics" or self._language_server_available)
             and self._surface_tool_advertised(core_name)
-        ) + (_finish_provider_tool(),)
+        )
+        code = (code_mode.provider_tool(),) if self.code_mode_allowed() and tools else ()
+        return tools + code + (_finish_provider_tool(),)
+
+    def code_mode_allowed(self) -> bool:
+        """Whether this origin gets code_run at all.
+
+        Only where it already may write files and run an approved check: that
+        pair can already run any code the model writes (a conftest, a test, a
+        probe), so a script that escaped its worker would gain nothing the
+        session did not have. A read-only or planning session never gets it.
+        """
+
+        if not code_mode.enabled():
+            return False
+        permitted = {core_name for _, core_name in self._permitted_tool_pairs}
+        writes = bool(permitted & {"repo.write_file", "repo.edit_file"})
+        return writes and "checks.run" in permitted and self.mode != "plan"
+
+    def script_tools(self) -> Tuple[ProviderTool, ...]:
+        """The tools a code_run script may call: every tool this origin may use.
+
+        A name in the script's namespace costs no request tokens, so hidden
+        but callable tools (git_status, repo_command) are functions there too.
+        """
+
+        return tuple(
+            _engine_provider_tool(alias, self._definitions[core_name])
+            for alias, core_name in self._permitted_tool_pairs
+        )
 
     def _surface_tool_advertised(self, core_name: str) -> bool:
         """Redundant schemas stay off the wire; skill schemas follow the prompt.

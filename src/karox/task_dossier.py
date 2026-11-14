@@ -96,12 +96,34 @@ def _git(core: Any, argv: List[str]) -> str:
     return str(result.get("stdout") or "")
 
 
+def _tracked(core: Any, suffix: str = "") -> List[str]:
+    """The repository's files: git's list, or a pruned walk outside a checkout.
+
+    A benchmark's /app is often not a git checkout; ls-files then lists nothing
+    and the whole dossier (candidate files, their tests) silently disappeared.
+    """
+    listed = [line for line in _git(core, ["ls-files"]).splitlines() if line]
+    if not listed:
+        walk = getattr(core, "_walk_files", None)
+        if callable(walk):
+            try:
+                root = core.repository
+                listed = []
+                for path in walk():
+                    listed.append(path.relative_to(root).as_posix())
+                    if len(listed) >= 20_000:
+                        break
+            except Exception:  # noqa: BLE001 - the dossier is optional context
+                listed = []
+    return [path for path in listed if path.endswith(suffix)] if suffix else listed
+
+
 def build(core: Any, task: str) -> Dict[str, Any]:
     """Rank candidate files for ``task`` and render the dossier text."""
 
     names = _identifiers(task or "")
     paths_named = {m.strip("./") for m in _PATHLIKE.findall(task or "")}
-    tracked = [line for line in _git(core, ["ls-files"]).splitlines() if line]
+    tracked = _tracked(core)
     sources = [path for path in tracked if _is_source(path)]
     if not sources:
         return {"files": [], "text": ""}
@@ -302,7 +324,7 @@ def related_tests(core: Any, sources: Sequence[str], hint: str = "", limit: int 
     sources = [s for s in sources if s.endswith(".py") and not _TEST_PATH.search(s.lower())]
     if not sources:
         return []
-    tracked = [line for line in _git(core, ["ls-files", "*.py"]).splitlines() if line]
+    tracked = _tracked(core, ".py")
     tests = [path for path in tracked if _TEST_PATH.search(path.lower()) and not path.endswith("conftest.py")]
     found: List[str] = []
     for source in sources:

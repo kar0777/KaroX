@@ -17,6 +17,7 @@ from .engine_tool_support import (  # noqa: F401
     REFUSAL_GUIDANCE_AFTER as REFUSAL_GUIDANCE_AFTER,
     REFUSAL_DISABLE_AFTER as REFUSAL_DISABLE_AFTER,
     TOOL_FAILURE_LIMITS as TOOL_FAILURE_LIMITS,
+    NEVER_DISABLED_TOOLS as NEVER_DISABLED_TOOLS,
     _TOOL_ALTERNATIVE as _TOOL_ALTERNATIVE,
     BROWSER_CALLS_NOTICE as BROWSER_CALLS_NOTICE,
     BROWSER_CALLS_EXHAUSTED as BROWSER_CALLS_EXHAUSTED,
@@ -377,7 +378,7 @@ class EngineGuidanceMixin:
     def _disabled_after_refusals(self, core_name: str) -> str:
         count = self._refusals.get(core_name, 0)
         limit = TOOL_FAILURE_LIMITS.get(core_name, REFUSAL_DISABLE_AFTER)
-        if count < limit:
+        if count < limit or core_name in NEVER_DISABLED_TOOLS:
             return ""
         alternative = _TOOL_ALTERNATIVE.get(
             core_name, "stop retrying it and finish with the work already verified."

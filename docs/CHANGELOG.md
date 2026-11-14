@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Code mode: the agent gets one `code_run` tool that runs a Python script whose
+  functions are the agent's other tools. Dependent steps that need no judgment
+  in between (search then read, probe then covering tests, the same edit in
+  several files) take one model round trip instead of several. The script runs
+  in a separate stdlib-only process with no file, process or network access of
+  its own; every tool call it makes goes through the normal policy, risk and
+  evidence path and is recorded as nested in its script. It is offered only to
+  sessions that may already write files and run an approved check, never in
+  plan mode. `KAROX_CODE_MODE=0` turns it off.
+
+### Changed
+
+- The system prompt, engine contract and self-review were rewritten as general
+  engineering guidance; the page/browser paragraphs are sent only when the
+  request carries `browser_command`.
+- Long pytest output keeps every failure's failing line, `E` lines and locator
+  and drops progress lines and source context, instead of a head/tail cut that
+  could hide the assertion diff.
+- `repo.search` with both `path` and `pattern` searches the pattern under the
+  path, and a glob scope no longer reaches into dependency trees.
+- `repo.list_files` and the task dossier work outside a git checkout, and
+  `**/` patterns no longer walk `.venv` or `node_modules`.
+- Read, search, edit and `checks.run` are never disabled by a refusal streak.
+- A failed edit lists the closest lines in the file, and `old_string` gets the
+  same whitespace- and indentation-tolerant retry as `edits`.
+- In a CRLF file, folded edit matches honour `occurrence`, and a line replaced
+  by several keeps CRLF endings.
+- A timed-out non-pytest check no longer gets pytest's `-k`/stack advice.
+
+### Fixed
+
+- A resumed transcript no longer sends tool results whose call the model never
+  made.
+- A repair turn starts with a fresh repeated-step streak.
+
 ## 5.0.0 — 2026-11-07
 
 Stable fifth-line release built from the verified clean kernel. The release keeps

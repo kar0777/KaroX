@@ -139,18 +139,17 @@ def _locate(text: str, index: int, op: EditOp) -> tuple[list[_Span], EditFailure
         )
     spans = _exact_spans(text, op.old)
     if not spans:
-        normalized_start, normalized_end = _normalized_unique_span(text, op.old)
-        if normalized_start is None or normalized_end is None:
+        # A CRLF file or trailing blanks: the folded match obeys the same
+        # occurrence rules, so "all" and "2" are not silently read as unique.
+        spans = [
+            _Span(start=start, end=end, line=text.count("\n", 0, start) + 1)
+            for start, end in _normalized_spans(text, op.old)
+        ]
+        if not spans:
             shifted = _reindented_unique_span(text, op)
             if shifted is not None:
                 return [shifted], None
             return [], _not_found_failure(text, index, op)
-        span = _Span(
-            start=normalized_start,
-            end=normalized_end,
-            line=text.count("\n", 0, normalized_start) + 1,
-        )
-        return [span], None
     if op.occurrence == ALL:
         return spans, None
     if isinstance(op.occurrence, bool) or not isinstance(op.occurrence, int):
@@ -251,17 +250,16 @@ def _exact_spans(text: str, old: str) -> list[_Span]:
     return spans
 
 
-def _normalized_unique_span(text: str, old: str) -> tuple[int | None, int | None]:
-    """Locate ``old`` after folding line endings and trailing whitespace.
+def _normalized_spans(text: str, old: str) -> list[tuple[int, int]]:
+    """Every match of ``old`` after folding line endings and trailing whitespace.
 
-    Returns the original-text offsets of the match, or ``(None, None)`` when
-    the normalized search is missing or ambiguous.
+    Returns the original-text offsets of each match, in file order.
     """
 
     normalized, spans = _normalize(text)
     wanted, _ = _normalize(old)
     if not wanted:
-        return None, None
+        return []
     def inside_word(at: int) -> bool:
         # A fold drops trailing blanks, so "items = 1 " would otherwise land
         # inside "max_items = 10" and splice into the middle of a token.
@@ -274,18 +272,17 @@ def _normalized_unique_span(text: str, old: str) -> tuple[int | None, int | None
         )
         return joins_before or joins_after
 
-    hits = []
+    hits: list[tuple[int, int]] = []
     at = normalized.find(wanted)
     while at != -1:
-        if not inside_word(at):
-            hits.append(at)
-        at = normalized.find(wanted, at + 1)
-    if len(hits) != 1:
-        return None, None
-    first = hits[0]
-    # Spans hold absolute original offsets, so the match end is the last
-    # normalized character's own end, not its start plus a length.
-    return spans[first].start, spans[first + len(wanted) - 1].end
+        if inside_word(at):
+            at = normalized.find(wanted, at + 1)
+            continue
+        # Spans hold absolute original offsets, so the match end is the last
+        # normalized character's own end, not its start plus a length.
+        hits.append((spans[at].start, spans[at + len(wanted) - 1].end))
+        at = normalized.find(wanted, at + len(wanted))
+    return hits
 
 
 def _normalize(text: str) -> tuple[str, list[_Span]]:
@@ -336,6 +333,10 @@ def _replacement(text: str, span: _Span, op: EditOp) -> str:
         ending = "\n"
     elif "\r" in covered:
         ending = "\r"
+    elif "\n" in op.new and "\r\n" in text:
+        # One line becoming several in a CRLF file: the new lines take the
+        # file's ending instead of a bare LF in the middle of CRLF text.
+        ending = "\r\n"
     else:
         # No line ending inside the covered region: a single-line replacement
         # keeps the new content verbatim.

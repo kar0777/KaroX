@@ -219,3 +219,64 @@ def test_the_dossier_finds_the_function_a_task_is_about(tmp_path: Path) -> None:
     assert [f["path"] for f in dossier["files"]][:1] == ["pkg/core.py"]
     assert "get_default" in dossier["text"] and "tests/test_core.py" in dossier["text"]
     assert "pkg/other.py" not in dossier["text"]
+
+
+SCOPED = {
+    "src/pkg/a.py": b"needle = 1\n",
+    "src/pkg/notes.txt": b"needle\n",
+    "top.py": b"needle = 3\n",
+    ".venv/lib/b.py": b"needle = 2\n",
+    "node_modules/x/c.py": b"needle = 4\n",
+}
+
+
+def test_a_glob_scope_still_skips_dependency_trees(tmp_path: Path) -> None:
+    """pattern="*.py" searched every .py file in the venv too."""
+
+    found = _runtime(tmp_path, SCOPED)._search({"query": "needle", "pattern": "*.py"}, 30)
+    assert sorted(m["path"] for m in found["matches"]) == ["src/pkg/a.py", "top.py"]
+
+
+def test_path_and_pattern_together_mean_the_files_under_path(tmp_path: Path) -> None:
+    found = _runtime(tmp_path, SCOPED)._search(
+        {"query": "needle", "path": "src/pkg", "pattern": "*.py"}, 30
+    )
+    assert [m["path"] for m in found["matches"]] == ["src/pkg/a.py"]
+
+
+def test_a_glob_naming_a_dependency_tree_is_honoured(tmp_path: Path) -> None:
+    found = _runtime(tmp_path, SCOPED)._search(
+        {"query": "needle", "pattern": ".venv/**/*.py"}, 30
+    )
+    assert [m["path"] for m in found["matches"]] == [".venv/lib/b.py"]
+
+
+
+def _plain_tree(tmp_path: Path, files: dict[str, bytes]) -> ExtendedCoreRuntime:
+    """A project that is not a git checkout, like a benchmark's /app."""
+
+    core = _runtime(tmp_path, files)
+    for item in sorted((core.repository / ".git").rglob("*"), reverse=True):
+        item.unlink() if item.is_file() else item.rmdir()
+    (core.repository / ".git").rmdir()
+    return core
+
+
+def test_list_files_outside_a_git_checkout_still_lists_the_project(tmp_path: Path) -> None:
+    """ls-files failed outside git and the listing came back empty."""
+
+    core = _plain_tree(tmp_path, SCOPED)
+    assert core._list_files({}, 30)["files"] == ["src/pkg/a.py", "src/pkg/notes.txt", "top.py"]
+    assert core._list_files({"pattern": "**/*.py"}, 30)["files"] == ["src/pkg/a.py", "top.py"]
+
+
+def test_the_dossier_works_outside_a_git_checkout(tmp_path: Path) -> None:
+    from karox import task_dossier
+
+    files = {
+        "pkg/core.py": SOURCE.replace(b"flag_value", b"flag_value  # flag_value"),
+        "pkg/other.py": b"def unrelated():\n    return 2\n",
+    }
+    core = _plain_tree(tmp_path, files)
+    dossier = task_dossier.build(core, "Option ignores `flag_value` when default is True")
+    assert [f["path"] for f in dossier["files"]][:1] == ["pkg/core.py"]

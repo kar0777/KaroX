@@ -181,6 +181,15 @@ design error; so is a tool handler importing `cli`.
   requirements, open plan, changed files, the latest approved check and its
   parsed failures. A later message is always newer than that snapshot.
 - Approval cannot be widened by editing prompt text; it is a policy decision.
+- Code mode (`code_run`) adds no authority. A script runs in a separate
+  `python -I -S` worker (`code_mode_worker.py`) with an empty environment and a
+  scratch directory; every tool it calls is an ordinary call through
+  `CoreToolEnvironment._execute` (policy, risk, lease, idempotency, evidence),
+  persisted with `nested_in` naming its script and bounded by the script's
+  deadline. The worker's audit hook is defense in depth, not the boundary:
+  code mode is offered only to a session that may already write files and run
+  an approved check — a pair that can already run code the model writes — and
+  never in plan mode. `KAROX_CODE_MODE=0` removes it.
 - The UI adds no authority. Every action it triggers goes through the same CLI
   path a script would use.
 - A hosted client gets only the tools explicitly selected at launch. OAuth

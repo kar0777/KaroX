@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 from .core import (
     CoreError,
@@ -289,14 +290,29 @@ class CoreReadToolsMixin:
         # repository index and ignore rules; use it for the broad listing and
         # keep globbing only for an explicitly bounded pattern.
         candidates: Iterable[str | Path]
+        tail = pattern[3:] if pattern.startswith("**/") else ""
         if pattern == "**/*":
             result = self._git(
                 ["ls-files", "--cached", "--others", "--exclude-standard"],
                 deadline_seconds,
             )
-            candidates = [
-                line for line in result.get("stdout", "").splitlines() if line
-            ]
+            # Outside a git checkout (a benchmark's /app, a downloaded tree)
+            # ls-files fails and used to list nothing at all, which reads as
+            # an empty project.
+            candidates = (
+                [line for line in result.get("stdout", "").splitlines() if line]
+                if result.get("exit_code") == 0
+                else self._walk_files()
+            )
+        elif tail and "**" not in tail and ".." not in tail:
+            # "**/*.py" through Path.glob descends into .venv and node_modules
+            # before the ignore filter sees a path; a pruned walk never enters
+            # them. PurePosixPath.match compares from the right, as "**/" means.
+            candidates = (
+                path
+                for path in self._walk_files()
+                if PurePosixPath(path.relative_to(self.repository).as_posix()).match(tail)
+            )
         else:
             try:
                 candidates = self.repository.glob(pattern)
@@ -332,3 +348,28 @@ class CoreReadToolsMixin:
             "files": sorted(items),
             "truncated": truncated,
         }
+
+    def _walk_files(self) -> Iterable[Path]:
+        """Every file under the repository, never entering an ignored directory."""
+
+        root = self.repository
+        real_root = os.path.realpath(root)
+        for current, directories, files in os.walk(root):
+            base = Path(current)
+            relative = base.relative_to(root).as_posix()
+            prefix = "" if relative == "." else relative + "/"
+            directories[:] = sorted(
+                name
+                for name in directories
+                if name.lower() not in {".git", ".karox"}
+                and not is_ignored_path(f"{prefix}{name}/x")
+            )
+            for name in sorted(files):
+                path = base / name
+                if path.is_symlink():
+                    # The dossier reads what this lists without safe_path: a
+                    # link out of the repository must not lead it outside.
+                    target = os.path.realpath(path)
+                    if not (target == real_root or target.startswith(real_root + os.sep)):
+                        continue
+                yield path

@@ -83,6 +83,11 @@ class EngineIoMixin:
                 call_id = str(entry.get("tool_call_id", ""))
                 if not call_id:
                     continue
+                if entry.get("nested_in"):
+                    # A code_run script's own call: the model saw it only
+                    # through the script's output, which is replayed below.
+                    self._persisted_call_ids.add(call_id)
+                    continue
                 message["tool_call_id"] = call_id
                 self._persisted_call_ids.add(call_id)
             messages.append(message)
@@ -404,6 +409,9 @@ class EngineIoMixin:
                 "core_name": core_name,
                 "result": redact_content(result_value),
             }
+            parent = getattr(self, "_script_parent_call", None)
+            if parent:
+                entry["nested_in"] = parent
         else:
             # A fenced command without a tool call id: the engine itself feeds
             # this back as a user observation, and the durable record matches.
@@ -470,6 +478,9 @@ class EngineIoMixin:
                 "core_name": core_name,
                 "error": payload["error"],
             }
+            parent = getattr(self, "_script_parent_call", None)
+            if parent:
+                entry["nested_in"] = parent
         else:
             entry = {
                 "role": "user",

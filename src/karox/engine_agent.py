@@ -575,6 +575,12 @@ class _EngineAgentMixin:
         # A repair turn is a fresh chance: format errors spent before the
         # submission must not make its first malformed response the last.
         self.n_consecutive_format_errors = 0
+        # Nor may a repeat streak from before it: the same read the repair
+        # needs first would otherwise count as the fourth identical step and
+        # submit the unrepaired work again at once.
+        self._same_step_streak = 0
+        self._last_action_key = ""
+        self._recent_step_keys = []
         return self._loop()
 
     def _loop(self) -> Dict[str, Any]:
