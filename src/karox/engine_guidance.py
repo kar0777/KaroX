@@ -274,8 +274,9 @@ class EngineGuidanceMixin:
         self._green_step = step
         return (
             f"The tests passed {SETTLE_NOTICE_STEPS}+ responses ago and nothing has been "
-            "edited since. Unless a behaviour the task states, or a variation real "
-            "use would bring (several items, other values), is still unprobed, "
+            "edited since. Unless a behaviour the task states, a variation real "
+            "use would bring (several items, other values), or a doubt you stated "
+            "about the result (its type, shape or default use) is still unresolved, "
             "finish now: the finish review will name anything missing."
         )
 
@@ -300,7 +301,8 @@ class EngineGuidanceMixin:
         return (
             f"You have run {self._streak_runs} commands since your last code change. "
             "Decide from what they already showed: edit the code if a probe found a "
-            "defect, otherwise finish -- the finish review names anything missing."
+            "defect or a doubt you stated is still open, otherwise finish -- the "
+            "finish review names anything missing."
         )
 
     def _repeat_notice(self, core_name: str, arguments: Mapping[str, Any]) -> str:
@@ -310,8 +312,11 @@ class EngineGuidanceMixin:
         the call still runs, the model is only told it has seen this result.
         """
 
+        # The same call after an edit is a new observation (scim2 duel1: a
+        # re-run of an edited probe was told "its result will not change").
+        changed = int(getattr(self, "_last_change_seq", 0) or 0)
         try:
-            key = core_name + "\x00" + json.dumps(arguments, sort_keys=True, default=str)
+            key = f"{changed}\x00{core_name}\x00" + json.dumps(arguments, sort_keys=True, default=str)
         except (TypeError, ValueError):
             return ""
         counts = getattr(self, "_repeat_counts", None)

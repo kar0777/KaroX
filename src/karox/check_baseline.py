@@ -101,7 +101,13 @@ def only_superseded(data: Mapping[str, Any], names: frozenset[str]) -> bool:
     return bool(names and new) and all(any(n == d or n.endswith("::" + d) for d in names) for n in new)
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
 def outcome(text: str, exit_code: Any, timed_out: Any) -> Outcome:
+    # Colour codes (pygmt duel1: --color=yes in the project's pytest config)
+    # hid every summary row, so no baseline was ever taken.
+    text = _ANSI.sub("", text or "")
     nodes = (m.group("node").strip() for m in _SUMMARY_ROW.finditer(text or ""))
     finals = list(_FINAL.finditer(text or ""))
     passed = sum(
@@ -152,7 +158,8 @@ def compare(
         "preexisting_only": not new
         and not targets
         and current.exit_code == baseline.exit_code
-        and 0 < current.passed
+        # A node-id rerun of failures only passes nothing on either side.
+        and (0 < current.passed or baseline.passed == 0)
         and baseline.passed <= current.passed,
     }
 

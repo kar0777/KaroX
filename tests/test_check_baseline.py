@@ -418,3 +418,22 @@ def test_a_wrapped_and_escaped_task_quote_still_counts() -> None:
     partial = {"test": "tests/t.py::test_part", "reason": 'Per the task, "the flag is not passed, which means the default" holds.'}
     record = SimpleNamespace(task=task, provider_history=[_finish({"answer": "x", "superseded_tests": [wrapped, partial]})])
     assert check_baseline.superseded(record) == {"tests/t.py::test_old", "tests/t.py::test_part"}
+
+
+def test_coloured_pytest_output_still_parses() -> None:
+    """pygmt duel1: --color=yes hid every summary row, so no baseline was taken."""
+
+    esc = chr(27)
+    text = (
+        f"{esc}[31mFAILED{esc}[0m pygmt/tests/test_x.py::test_a - OSError\n"
+        f"{esc}[31m===== {esc}[31m{esc}[1m1 failed{esc}[0m, {esc}[32m8 passed{esc}[0m{esc}[31m in 2.10s{esc}[0m{esc}[31m ====={esc}[0m\n"
+    )
+    result = check_baseline.outcome(text, 1, False)
+    assert result.parsed and result.passed == 8
+    assert result.failing == {"pygmt/tests/test_x.py::test_a"}
+
+
+def test_a_node_id_rerun_of_old_failures_counts_as_preexisting() -> None:
+    start = check_baseline.Outcome(1, False, frozenset({"t.py::test_a"}), 0, True)
+    now = check_baseline.Outcome(1, False, frozenset({"t.py::test_a"}), 0, True)
+    assert check_baseline.compare(start, now)["preexisting_only"] is True

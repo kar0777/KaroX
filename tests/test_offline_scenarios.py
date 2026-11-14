@@ -307,3 +307,15 @@ def test_a_short_budget_skips_the_adversarial_pass(
 ) -> None:
     provider = _run_budget(tmp_path, monkeypatch, [[sys.executable, "*"]], 600)
     assert "adversarial pass" not in _request_text(provider.requests[-1])
+
+
+def test_rerunning_a_probe_after_an_edit_is_not_called_a_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scim2 duel1: an edited probe re-run was told its result would not change."""
+
+    read = {"path": "calc.py", "start": 1, "count": 5}
+    calls = [_tool_call("r0", "repo_read_lines", read), _tool_call("r1", "repo_read_lines", read), _fix_call("c1"),
+             _tool_call("r2", "repo_read_lines", read), _probe_call("c2")]
+    _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls)
+    assert all("exact repo.read_lines call" not in _request_text(request) for request in provider.requests)
