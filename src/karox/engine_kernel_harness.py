@@ -28,6 +28,7 @@ from .engine_prompts import (  # noqa: E402
 from . import completion_gate
 from . import check_report
 from . import session_analysis
+from . import pytest_selection
 from .agent import (  # noqa: E402
     AgentEventKind,
     _bounded_failure_summary,
@@ -40,6 +41,15 @@ from .sessions import MutationLease, SessionRecord
 #: The closing answer call needs a provider round trip; with less time left the
 #: stop reports without it.
 _CLOSING_TURN_MIN_SECONDS = 20.0
+
+#: Repair advice when an owed failure is a pytest run. rebench26 v60h: a
+#: --cov run failed on the environment and the repair rewrote site-packages
+#: until that exact command passed.
+OPTION_FAILURE_HINT = (
+    "If a failure above happens only under coverage measurement, a passing run of "
+    "the same tests without coverage on the current files settles it. Never change "
+    "files outside the repository to make a check pass."
+)
 
 
 class EngineHarnessMixin:
@@ -410,6 +420,10 @@ class EngineHarnessMixin:
             reason.startswith(("active failed check:", "unresolved failed check:"))
             for reason in pieces
         )
+        if failed_owed:
+            # KaroX reads the final diff itself once the checks are green;
+            # naming it here sent the toqito v60h repair to call git_diff.
+            pieces = [p for p in pieces if p != "missing current change review"]
         entries = record.provider_history if failed_owed else ()
         for entry in entries:
             if entry.get("role") != "tool" or entry.get("core_name") != "checks.run":
@@ -455,6 +469,12 @@ class EngineHarnessMixin:
                     "earlier run(s): the last change did not alter it."
                 )
         hint = check_report.render_targets(check_report.rerun_targets(last_report, 4))
+        if any(
+            pytest_selection.measures_coverage(data.get("argv") or [])
+            and pytest_selection.selection(data.get("argv") or [], str(self.core.repository)) is not None
+            for data in failed
+        ):
+            hint = "\n".join(part for part in (hint, OPTION_FAILURE_HINT) if part)
         return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
     @staticmethod

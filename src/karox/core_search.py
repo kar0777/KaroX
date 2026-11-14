@@ -6,6 +6,7 @@ the process/Git methods CoreRuntime already provides.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .core_types import CoreError, InvalidCommand, InvalidPath, _path_label
+from .text_lines import decode_source, physical_lines
 
 
 
@@ -112,7 +114,9 @@ class SearchToolsMixin:
         matches: List[Dict[str, Any]] = []
         files_scanned = 0
         stats_matches: Optional[int] = None
-        for raw_line in str(result.get("stdout", "")).splitlines():
+        # JSON lines: a raw U+2028 inside a matched line is legal JSON, and
+        # splitlines would cut that event in two and lose the match.
+        for raw_line in str(result.get("stdout", "")).split("\n"):
             try:
                 event = json.loads(raw_line)
             except json.JSONDecodeError:
@@ -142,6 +146,13 @@ class SearchToolsMixin:
                 continue
             path_text = path_data.get("text")
             line_text = lines_data.get("text")
+            if line_text is None and isinstance(lines_data.get("bytes"), str):
+                # ripgrep sends a line that is not UTF-8 as base64 bytes; read
+                # it the way the read and edit tools do instead of dropping it.
+                try:
+                    line_text = decode_source(base64.b64decode(lines_data["bytes"]))[0]
+                except (ValueError, UnicodeDecodeError):
+                    line_text = None
             line_number = data.get("line_number")
             if not isinstance(path_text, str) or not isinstance(line_text, str):
                 continue
@@ -286,11 +297,11 @@ class SearchToolsMixin:
                     return True, False, []
                 if path.stat().st_size > self.MAX_FILE_BYTES:
                     return False, True, []
-                text = path.read_bytes().decode("utf-8")
+                text = decode_source(path.read_bytes())[0]
             except (OSError, UnicodeDecodeError):
                 return False, True, []
             file_matches: List[Dict[str, Any]] = []
-            for number, line in enumerate(text.splitlines(), start=1):
+            for number, line in enumerate(physical_lines(text), start=1):
                 if not matcher.search(line):
                     continue
                 encoded = line.encode("utf-8")
@@ -479,12 +490,12 @@ class SearchToolsMixin:
                 if path.stat().st_size > self.MAX_FILE_BYTES:
                     skipped += 1
                     continue
-                text = path.read_bytes().decode("utf-8")
+                text = decode_source(path.read_bytes())[0]
             except (InvalidPath, OSError, UnicodeDecodeError):
                 skipped += 1
                 continue
             scanned += 1
-            for number, line in enumerate(text.splitlines(), start=1):
+            for number, line in enumerate(physical_lines(text), start=1):
                 if not matcher.search(line):
                     continue
                 encoded = line.encode("utf-8")
@@ -713,12 +724,12 @@ class SearchToolsMixin:
                 if path.stat().st_size > self.MAX_FILE_BYTES:
                     skipped += 1
                     continue
-                text = path.read_bytes().decode("utf-8")
+                text = decode_source(path.read_bytes())[0]
             except (InvalidPath, OSError, UnicodeDecodeError):
                 skipped += 1
                 continue
             scanned += 1
-            for number, line in enumerate(text.splitlines(), start=1):
+            for number, line in enumerate(physical_lines(text), start=1):
                 if not matcher.search(line):
                     continue
                 encoded = line.encode("utf-8")

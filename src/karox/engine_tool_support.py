@@ -233,3 +233,32 @@ _CHANGE_INTENT = re.compile(
     r"|исправ|добав|созда|реализ|почини|переимен|обнови|удали",
     re.IGNORECASE,
 )
+
+#: A one-line question about the code ("What versions does this support?",
+#: "Как работает reduce?") uses change words without asking for a change; the
+#: 2026-11-13 review saw such a question told to "make the edit now". Only an
+#: information question counts: yes/no forms ("Could you fix ...?", "Would it
+#: be possible to add ...?") and "how do I fix" are requests often enough that
+#: treating them as questions would skip the change checks on real work.
+_QUESTION_OPENING = re.compile(
+    r"^\s*(?:what|why|where|which|who|when|explain|describe|"
+    r"что|почему|зачем|где|какой|какая|какие|кто|когда|объясни|опиши)\b",
+    re.IGNORECASE,
+)
+_REQUEST_MARKER = re.compile(r"\b(?:please|пожалуйста)\b", re.IGNORECASE)
+
+
+def task_expects_change(task: str) -> bool:
+    """Whether the task's deliverable is a change to the repository."""
+
+    text = (task or "").strip()
+    if not _CHANGE_INTENT.search(text):
+        return False
+    question = (
+        "\n" not in text
+        and text.endswith("?")
+        and text.count("?") == 1
+        and bool(_QUESTION_OPENING.search(text))
+        and not _REQUEST_MARKER.search(text)
+    )
+    return not question

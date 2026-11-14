@@ -23,6 +23,7 @@ from .security import (
     redact_content,
 )
 from .sessions import SessionRecord
+from .text_lines import LATIN_1, decode_source
 from .core_support import (  # noqa: F401
     WRITE_MODE_CREATE as WRITE_MODE_CREATE,
     WRITE_MODE_APPEND as WRITE_MODE_APPEND,
@@ -167,11 +168,11 @@ class CoreFilesMixin:
         size = path.stat().st_size
         if size > self.MAX_FILE_BYTES:
             raise CoreError(f"file is larger than {self.MAX_FILE_BYTES} bytes")
+        raw_content = path.read_bytes()
         try:
-            raw_content = path.read_bytes()
-            content = raw_content.decode("utf-8")
+            content, encoding = decode_source(raw_content)
         except UnicodeDecodeError as exc:
-            raise CoreError("repo.read_file supports UTF-8 text only") from exc
+            raise CoreError("repo.read_file reads text files only; this one holds binary data") from exc
         # Content is the caller's working material, so it is returned byte for
         # byte. Pattern redaction here used to rewrite token-shaped literals
         # inside real source, which made an exact-match edit anchor copied from
@@ -198,12 +199,19 @@ class CoreFilesMixin:
                 "included; use repo.read_lines for a specific range and do not "
                 "write this content back as a whole file"
             )
+        if encoding == LATIN_1:
+            payload["encoding"] = LATIN_1
+            payload.setdefault(
+                "detail",
+                "the file is not UTF-8 and was read as Latin-1; repo.edit_file keeps "
+                "that encoding, a whole-file write would store UTF-8",
+            )
         return payload
 
     def _write_file(
-        self, arguments: Dict[str, Any], deadline_seconds: float
+        self, arguments: Dict[str, Any], deadline_seconds: float, *, encoding: str = "utf-8"
     ) -> Dict[str, Any]:
-        relative, encoded, path, mode = self._prepare_write(arguments)
+        relative, encoded, path, mode = self._prepare_write(arguments, encoding)
         appended_bytes = 0
         if mode == WRITE_MODE_APPEND:
             # An append names a file that is already there: it adds to existing
@@ -303,11 +311,11 @@ class CoreFilesMixin:
         return digest.hexdigest()
 
     def _prepare_write(
-        self, arguments: Dict[str, Any]
+        self, arguments: Dict[str, Any], encoding: str = "utf-8"
     ) -> tuple[str, bytes, Path, str]:
         relative = self._required(arguments, "path", str)
         content = self._required(arguments, "content", str)
-        encoded = content.encode("utf-8")
+        encoded = content.encode(encoding)
         if len(encoded) > self.MAX_FILE_BYTES:
             raise CoreError(f"content is larger than {self.MAX_FILE_BYTES} bytes")
         mode = arguments.get("mode", WRITE_MODE_CREATE)

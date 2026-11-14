@@ -35,6 +35,7 @@ from .engine_tool_support import (  # noqa: F401
     RESEARCH_BUDGET_STEPS as RESEARCH_BUDGET_STEPS,
     RESEARCH_HARD_BUDGET_STEPS as RESEARCH_HARD_BUDGET_STEPS,
     _CHANGE_INTENT as _CHANGE_INTENT,
+    task_expects_change,
 )
 
 import hashlib
@@ -418,4 +419,4 @@ class EngineFinishMixin:
             task = self._core.sessions.load(self._session_id).task
         except Exception:  # noqa: BLE001 - a missing record means no nudge
             return False
-        return bool(_CHANGE_INTENT.search(task or ""))
+        return task_expects_change(task or "")

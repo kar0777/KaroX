@@ -32,12 +32,34 @@
 - In a CRLF file, folded edit matches honour `occurrence`, and a line replaced
   by several keeps CRLF endings.
 - A timed-out non-pytest check no longer gets pytest's `-k`/stack advice.
+- Read, search and edit tools count lines at newlines only, so a form feed or a
+  U+2028 inside a literal no longer shifts line numbers away from grep and
+  tracebacks. A file that is not UTF-8 (and holds no NUL byte) is read as
+  Latin-1 and edited byte for byte instead of being refused, and a ripgrep
+  match on such a line is no longer dropped.
+- `git.log` and `read_lines` with `rev` accept an absolute path inside the
+  repository, like every other file tool.
+- The `code_run` paragraph of the engine contract is sent only when the
+  request carries `code_run`; a one-line question that merely contains a
+  change word is no longer treated as a change task.
+- A failed pytest run no longer stays owed when a run on the same files that
+  selects the same tests without narrowing them (no `-k`, `-m`, deselect,
+  ignore or config override) passes: an option-only failure such as `--cov`
+  tripping over the environment is settled by the plain run. The repair turn
+  says so, forbids changing files outside the repository to make a check pass,
+  and no longer names the diff review KaroX collects itself.
+- A command that only asks which tools are installed (`which ruff`,
+  `mypy --version`, `command -v black`) is never owed as a failed check.
+- The deep pass names general states (empty, boundary, several, interleaved,
+  partial then repeated, removal) instead of one task's data model.
 
 ### Fixed
 
 - A resumed transcript no longer sends tool results whose call the model never
   made.
 - A repair turn starts with a fresh repeated-step streak.
+- No review, unchanged or deep pass starts when fewer than two model calls
+  remain, so a submitted run no longer ends on `step_limit`.
 
 ## 5.0.0 — 2026-11-07
 

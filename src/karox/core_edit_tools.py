@@ -20,6 +20,7 @@ from .edit_engine import ALL, UNIQUE, EditFailure, EditOp, apply_edits
 from .models import CoreCommand, CoreResult, EvidenceRecord
 from .security import contains_credential
 from .sessions import SessionRecord
+from .text_lines import LATIN_1, decode_source, physical_lines
 
 
 def _replaced_occurrences(text: str, ops: Sequence[EditOp]) -> int:
@@ -42,8 +43,8 @@ def _edit_diff(relative: str, before: str, after: str) -> str:
     """Unified diff of one edit, bounded so it cannot flood a turn."""
     diff = "".join(
         difflib.unified_diff(
-            before.splitlines(keepends=True),
-            after.splitlines(keepends=True),
+            physical_lines(before, keepends=True),
+            physical_lines(after, keepends=True),
             fromfile=f"a/{relative}",
             tofile=f"b/{relative}",
             n=3,
@@ -329,9 +330,9 @@ class CoreEditToolsMixin:
                     f"{expected_digest.lower()} but found {previous_digest}"
                 )
         try:
-            text = raw.decode("utf-8")
+            text, encoding = decode_source(raw)
         except UnicodeDecodeError as exc:
-            raise CoreError("repo.edit_file supports UTF-8 text only") from exc
+            raise CoreError("repo.edit_file edits text files only; this one holds binary data") from exc
         if batch:
             updated, failures = apply_edits(text, ops)
             if failures:
@@ -373,6 +374,15 @@ class CoreEditToolsMixin:
                 )
             replacements = found
             edits_applied = 1
+        if encoding == LATIN_1:
+            try:
+                updated.encode(LATIN_1)
+            except UnicodeEncodeError as exc:
+                raise InvalidCommand(
+                    f"{relative} is a Latin-1 file and the new text holds "
+                    f"{updated[exc.start]!r}, which Latin-1 cannot store; use an "
+                    "ASCII spelling or an escape"
+                ) from exc
         # Reuse the audited atomic writer so permissions, fsync, temporary file
         # cleanup and the size ceiling behave exactly as for repo.write_file.
         result = self._write_file(
@@ -384,6 +394,7 @@ class CoreEditToolsMixin:
                 "allow_secret_literal": self._secret_literal_allowed(arguments),
             },
             deadline_seconds,
+            encoding=encoding,
         )
         result["replacements"] = replacements
         result["edits_applied"] = edits_applied

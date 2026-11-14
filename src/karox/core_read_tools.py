@@ -14,6 +14,7 @@ from .core import (
     _path_label,
 )
 from .security import contains_credential, redact_content
+from .text_lines import LATIN_1, decode_source, physical_lines
 
 
 def is_ignored_path(relative: str) -> bool:
@@ -93,10 +94,13 @@ class CoreReadToolsMixin:
         if size > self.MAX_FILE_BYTES:
             raise CoreError(f"file is larger than {self.MAX_FILE_BYTES} bytes")
         try:
-            text = path.read_bytes().decode("utf-8")
+            text, encoding = decode_source(path.read_bytes())
         except UnicodeDecodeError as exc:
-            raise CoreError("repo.read_lines supports UTF-8 text only") from exc
-        return self._line_window(arguments, path.relative_to(self.repository).as_posix(), text)
+            raise CoreError("repo.read_lines reads text files only; this one holds binary data") from exc
+        window = self._line_window(arguments, path.relative_to(self.repository).as_posix(), text)
+        if encoding == LATIN_1:
+            window["encoding"] = LATIN_1
+        return window
 
     def _read_lines_at(
         self, arguments: Dict[str, Any], rev: str, deadline_seconds: float
@@ -110,10 +114,7 @@ class CoreReadToolsMixin:
 
         if not _REVISION.fullmatch(rev):
             raise InvalidCommand("rev must be a commit, tag or branch name (e.g. v8.2.1, HEAD~3, 9c632c0^)")
-        raw = self._required(arguments, "path", str)
-        if raw.startswith(("/", "\\")) or ".." in raw.replace("\\", "/").split("/"):
-            raise InvalidCommand("path must be repository-relative")
-        relative = raw.replace("\\", "/").removeprefix("./")
+        relative = self._history_path(self._required(arguments, "path", str))
         result = self._git(["show", f"{rev}:{relative}"], deadline_seconds, redact_output=False)
         if result.get("exit_code") != 0:
             detail = str(result.get("stderr") or "").strip().splitlines()
@@ -129,7 +130,7 @@ class CoreReadToolsMixin:
         count = self._bounded_number(
             arguments, "count", self.DEFAULT_READ_LINES, 1, self.MAX_READ_LINES
         )
-        lines = text.splitlines()
+        lines = physical_lines(text)
         selected = lines[start - 1 : start - 1 + count]
         # The digest of the range as returned, not of the whole file: a caller
         # that compares two reads of the same window is asking about the window,
@@ -166,6 +167,23 @@ class CoreReadToolsMixin:
             value = min(value, maximum)
         return value
 
+    def _history_path(self, path: Any) -> str:
+        """The repository-relative spelling a history lookup passes to git.
+
+        Tasks name files absolutely ("/app/src/x.py") and every other file tool
+        accepts that spelling; git.log and read_lines(rev=...) refused it. A
+        relative path may name a file that no longer exists, so it is checked
+        lexically rather than resolved.
+        """
+
+        text = str(path)
+        if text.startswith(("/", "\\")) or (len(text) > 2 and text[1] == ":"):
+            return self.safe_path(text).relative_to(self.repository).as_posix()
+        relative = text.replace(chr(92), "/").removeprefix("./")
+        if not relative or relative.startswith("-") or ".." in relative.split("/") or ":" in relative:
+            raise InvalidCommand("path must be repository-relative")
+        return relative
+
     def _git_log(
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
@@ -191,10 +209,7 @@ class CoreReadToolsMixin:
             argv.append(rev)
         path = arguments.get("path")
         if path is not None:
-            relative = str(path).replace(chr(92), "/").removeprefix("./")
-            if not relative or relative.startswith(("/", "-")) or ".." in relative.split("/") or ":" in relative:
-                raise InvalidCommand("path must be repository-relative")
-            argv += ["--", relative]
+            argv += ["--", self._history_path(path)]
         result = self._git(argv, deadline_seconds)
         result["limit"] = limit
         result["_evidence"] = [self._git_evidence("git_log", result)]

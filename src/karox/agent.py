@@ -189,7 +189,7 @@ Understanding the task:
 - The task is the specification. Its text and the project's design docs outweigh code comments that justify the old behaviour.
 - Implement every part the task names (each file, module, option and value) in the form its users would reach for first. A part that is only possible indirectly, or only in some modes, is not implemented yet; never drop a named part because nothing similar exists.
 - A rule the task states for the whole project is searched for across the repository, not only in the files you edited; behaviour it introduces for a command holds in every mode and flag of that command.
-- Every file or module in the task's scope (including "possibly" or "also") is checked against the task's own property and fixed where it fails; the size of that fix is never a reason to skip it. A gap you would report as remaining is unfinished work.
+- Every file or module in the task's scope (including "possibly" or "also") is checked against the task's own property and fixed where it fails; the size of that fix is never a reason to skip it. A gap you could still close is unfinished work; report only the ones you cannot.
 - Stop exploring once you can name the code to change and the tests that cover it. Use the project-map block when provided, otherwise repo_search; skip changelogs, docs and history unless the task asks for them. Excerpts you already hold are read evidence: do not reread unchanged ranges.
 
 Changing code:
@@ -202,7 +202,7 @@ Verifying:
 - Reproduce a reported failure with a short probe before the fix, and run it again after.
 - Measure the way the repository measures: see how existing tests check the same property on sibling code (which fields, which types, which side effects) and probe your change the same way, not with a proxy of your own. What you return must be what existing callers of that interface expect, as in sibling implementations.
 - Probe concrete, observable facts the task requires on real variations: empty, boundary, several or interleaved items, cases that must differ. A check that compares a value to itself, or that cannot fail, proves nothing; when inputs the feature must tell apart print identical output, the feature is broken. Check initial conditions the task specifies after initialization or a reset. Any claim about behaviour needs a probe's printed output, not a reading of the code.
-- Run the narrowest tests that cover the change (one file, `-k` or node ids). Failures KaroX marks pre-existing are not yours to fix. Do not call checks_run or git_diff only to prove completion; KaroX collects the final evidence itself.
+- Run the narrowest tests that cover the change (one file, `-k` or node ids) after your last edit. Failures KaroX marks pre-existing are not yours to fix. Never repeat an unchanged passing run, or call git_diff, only to prove completion; KaroX collects the final evidence itself.
 - If two or three attempts at the same problem fail, stop, list five to seven possible causes, and test them one by one.
 - Finishing with an unprobed variation is the most common way a run fails; difficulty or uncertainty is a reason to keep working, not to stop.
 - Use only installed tools (never `pip install`) and skip missing optional linters. Delete scratch probe files once they have answered their question and you no longer need them.

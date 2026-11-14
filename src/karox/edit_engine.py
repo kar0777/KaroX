@@ -23,6 +23,8 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from .text_lines import physical_lines
+
 __all__ = ["EditOp", "EditFailure", "apply_edits"]
 
 UNIQUE = "unique"
@@ -368,7 +370,7 @@ def _nearest_lines(text: str, old: str) -> list[tuple[int, str]]:
         return []
     matcher = difflib.SequenceMatcher(None, first_line, "")
     scored: list[tuple[float, int, str]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(physical_lines(text), start=1):
         stripped = line.strip()
         if not stripped:
             continue
@@ -390,7 +392,7 @@ def _closest_block(text: str, old: str) -> tuple[int, str] | None:
     wanted = [line.rstrip() for line in old.strip("\n").split("\n")]
     if len(wanted) < 2 or len(wanted) > _BLOCK_MAX_LINES:
         return None
-    lines = text.splitlines()
+    lines = physical_lines(text)
     size = len(wanted)
     if len(lines) < size:
         return None
@@ -438,7 +440,7 @@ def _reindented_unique_span(text: str, op: EditOp) -> _Span | None:
     old_lines = [line.rstrip() for line in old.replace("\r\n", "\n").split("\n")]
     if not old_lines[0].strip() or not old_lines[-1].strip():
         return None
-    file_lines = text.splitlines(keepends=True)
+    file_lines = physical_lines(text, keepends=True)
     contents = [line.rstrip("\r\n").rstrip() for line in file_lines]
     size = len(old_lines)
     matches: list[tuple[int, tuple[str, str]]] = []

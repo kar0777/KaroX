@@ -57,10 +57,11 @@ from .engine_kernel_io import EngineIoMixin
 from .engine_kernel_finish import EngineFinishMixin
 from .engine_kernel_harness import EngineHarnessMixin
 from .prompts import deep_pass_text, self_review_text, unchanged_pass_text
-from .engine_tool_support import _CHANGE_INTENT
+from .engine_tool_support import task_expects_change
 from . import check_baseline
 from . import code_mode
 from .engine_prompts import (  # noqa: E402
+    _CODE_MODE_CONTRACT,
     _ENGINE_CONTRACT,
     _WEB_CONTRACT,
 )
@@ -122,6 +123,19 @@ def _with_review_note(review: str, note: str) -> str:
     if not sep:
         return review + note
     return head + note + "\n" + closing
+
+
+def _steps_left(agent: Any) -> int:
+    """Model calls the agent may still make; a pass needs an answer and a finish.
+
+    A review, unchanged or deep pass started on the last allowed call ended the
+    run on step_limit straight after a normal submission (2026-11-13 review).
+    """
+
+    limit = int(getattr(getattr(agent, "config", None), "step_limit", 0) or 0)
+    if limit <= 0:
+        return 1 << 30
+    return limit - int(getattr(agent, "n_calls", 0) or 0)
 
 
 def _model_request_deadline(remaining_seconds: float) -> float:
@@ -469,6 +483,11 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     resume_messages=resume_messages,
                     system_prompt=self.system_prompt
                     + (
+                        _CODE_MODE_CONTRACT
+                        if any(t.name == "code_run" for t in self._request_tools)
+                        else ""
+                    )
+                    + (
                         _WEB_CONTRACT
                         if any(t.name == "browser_command" for t in self._request_tools)
                         else ""
@@ -577,7 +596,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 repair_attempts = 0
                 # One maintainer review before KaroX verifies a code change; prose
                 # submissions skip finish, so it lives here, not only in finish.
-                review_due = self._review_turn_due()
+                review_due = _steps_left(agent) >= 2 and self._review_turn_due()
                 deep_due = unchanged_due = False
                 while True:
                     if unchanged_due:
@@ -599,10 +618,10 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     else:
                         self._run_harness_final_calls(session_id, lease, self._deadline)
                         record = self.sessions.load(session_id)
-                        if self._completed(record) and self._unchanged_pass_due(record):
+                        if self._completed(record) and _steps_left(agent) >= 2 and self._unchanged_pass_due(record):
                             unchanged_due = True
                             continue
-                        if self._completed(record) and self._deep_pass_due(record):
+                        if self._completed(record) and _steps_left(agent) >= 2 and self._deep_pass_due(record):
                             deep_due = True
                             continue
                         if self._completed(record):
@@ -715,7 +734,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
             return False
         if getattr(self, "maintenance_mode", False) or self.mode in {"plan", "ideate"}:
             return False
-        if not _CHANGE_INTENT.search(str(getattr(record, "task", "") or "")):
+        if not task_expects_change(str(getattr(record, "task", "") or "")):
             return False
         try:
             if float(self.remaining_seconds()) < 120:

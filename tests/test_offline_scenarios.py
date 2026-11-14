@@ -396,6 +396,21 @@ def test_a_question_finishing_unchanged_gets_no_measurement_pass(
     assert all(UNCHANGED_PASS not in _request_text(request) for request in provider.requests)
 
 
+def test_a_one_line_question_with_a_change_word_is_not_a_change_task() -> None:
+    from karox.engine_tool_support import task_expects_change
+
+    assert not task_expects_change("What versions does this library support?")
+    assert not task_expects_change("Зачем функция reduce вызывает update дважды?")
+    assert task_expects_change("Can you fix the parser?")
+    assert task_expects_change("Would it be possible to fix the parser?")
+    assert task_expects_change("How do I fix the parser?")
+    assert task_expects_change("Как исправить ошибку? Исправь её?")
+    assert task_expects_change("What is wrong here? Please fix it?")
+    assert task_expects_change("Fix the parser so empty input works")
+    assert task_expects_change("Why does it crash?\nPlease fix it so the bug is gone.")
+    assert not task_expects_change("Summarise the architecture")
+
+
 def test_a_change_task_with_an_edit_gets_no_measurement_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -415,6 +430,19 @@ def test_the_review_request_is_not_followed_by_finish_now(
     _code, _report, provider = _run(tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high"])
     assert any("review the change once" in _request_text(request) for request in provider.requests)
     assert not _settle_seen(provider)
+
+
+def test_no_review_is_started_on_the_last_allowed_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A review begun with no model call left ended a submitted run on step_limit."""
+
+    calls = [_fix_call("c1"), _green_call("g1")]
+    _code, report, provider = _run(
+        tmp_path, monkeypatch, _repo(tmp_path), calls, extra=["--effort-level", "high", "--max-steps", "3"]
+    )
+    assert all("review the change once" not in _request_text(request) for request in provider.requests)
+    assert "step_limit" not in json.dumps(report)
 
 
 def test_the_review_names_old_raises_in_the_edited_function(

@@ -52,12 +52,8 @@ bash -lc *), checks_run runs a whole script that way.
   before your next step, so the number of responses, more than the number of
   calls, sets a run's time and cost. Put independent calls (reads, searches,
   edits whose arguments you already know) in one response; they run in order
-  and return together. Never batch a call whose arguments depend on another
-  call's result.
-- When the next steps depend on each other but need no judgment in between
-  (search and read the hits, run a probe and then the covering tests, make
-  the same edit in several files), write them as one code_run script and
-  print only what you need to read.
+  and return together. A call whose arguments depend on another call's
+  result goes in a later response.
 - Observations are clipped: ask for the part you need. After each edit KaroX
   runs quick syntax and lint checks on the changed files; your tests run only
   when you call them, and never a whole test directory of a large project:
@@ -75,6 +71,16 @@ bash -lc *), checks_run runs a whole script that way.
 - Never print tool markup as prose. Every response carries a tool call; end
   the work with finish. A reply with no tool call is a format error that
   costs a whole step.
+"""
+
+#: Appended only when the request carries code_run: sessions without write and
+#: check rights never get the tool, and a contract naming it there sent the
+#: model after a tool it did not have.
+_CODE_MODE_CONTRACT = """
+- When the next steps depend on each other but need no judgment in between
+  (search and read the hits, run a probe and then the covering tests, make
+  the same edit in several files), write them as one code_run script and
+  print only what you need to read.
 """
 
 #: Appended only when the request carries browser_command (the task reads as a
@@ -98,6 +104,7 @@ _WEB_CONTRACT = """
 __all__ = [
     "_CLOSING_TURN_PROMPT",
     "_CLOSING_TURN_VERIFIED_PROMPT",
+    "_CODE_MODE_CONTRACT",
     "_ENGINE_CONTRACT",
     "_WEB_CONTRACT",
 ]

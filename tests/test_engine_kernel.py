@@ -5204,7 +5204,11 @@ def test_self_review_also_reaches_a_prose_submission(tmp_path: Path, repository:
 
 
 def test_a_review_turn_that_hits_a_limit_is_not_verified(tmp_path: Path, repository: Path) -> None:
-    """Audit 2026-11-13: only a submission may be verified, repair turns included."""
+    """Audit 2026-11-13: only a submission may be verified, repair turns included.
+
+    The review starts with two calls left (one fewer and it is not started at
+    all) and spends both on edits, so it ends on the step limit.
+    """
 
     harness = Harness(
         repository,
@@ -5213,9 +5217,10 @@ def test_a_review_turn_that_hits_a_limit_is_not_verified(tmp_path: Path, reposit
             _response((_write_call("c1", "tool.py", "def f():\n    return 1\n"),)),
             _response((_tool_call("c2", "finish", {"answer": "done"}),)),
             _response((_write_call("c3", "tool.py", "def f():\n    return 2\n"),)),
-            _response((_tool_call("c4", "finish", {"answer": "done"}),)),
+            _response((_write_call("c4", "tool.py", "def f():\n    return 3\n"),)),
+            _response((_tool_call("c5", "finish", {"answer": "done"}),)),
         ],
-        max_steps=3,
+        max_steps=4,
     )
     harness.kernel.implementation.self_review = True
     report = harness.run()

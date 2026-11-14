@@ -262,4 +262,13 @@ def test_a_session_that_cannot_write_and_check_gets_no_code_run(tmp_path: Path, 
     )
     harness.run()
     assert "code_run" not in _request_tools(harness.provider.requests[0])
+    # The contract must not send the model after a tool it does not have.
+    assert "code_run" not in _request_text(harness.provider.requests[0])
     assert not [event for event in harness.events if getattr(event, "tool", None) == "code.run"]
+
+
+def test_the_code_run_contract_rides_with_the_tool(tmp_path: Path, repository: Path) -> None:
+    harness = Harness(repository, tmp_path, [_response((_finish_call("c1", "done"),))])
+    harness.run()
+    assert "code_run" in _request_tools(harness.provider.requests[0])
+    assert "one code_run script" in _request_text(harness.provider.requests[0])

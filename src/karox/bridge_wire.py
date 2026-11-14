@@ -75,8 +75,8 @@ _SAFE_INVALID_REQUEST_PREFIXES: tuple[str, ...] = (
     "write blocked by credential scanner",
     "file changed since it was read",
     "expected_sha256 must be",
-    "repo.edit_file supports UTF-8 text only",
-    "repo.read_file supports UTF-8 text only",
+    "repo.edit_file edits text files only",
+    "repo.read_file reads text files only",
 )
 
 # Denials whose text is server-authored and names a transient, recoverable

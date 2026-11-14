@@ -67,7 +67,7 @@ import subprocess
 from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
-from . import check_baseline, git_baseline, requirement_coverage
+from . import check_baseline, git_baseline, pytest_selection, requirement_coverage
 from .web_check import default_pages, default_pictures, is_scratch_page
 
 # Prefix of a floor reason naming an owed proof class Core has no command for.
@@ -221,8 +221,11 @@ def floor(core: Any, record: Any) -> list[str]:
     #: The run's own unreferenced harness pages: like scratch probes, their
     #: verdicts are diagnostics, neither owed failures nor proof.
     harness_pages = diagnostic_paths(core, record)
+    root = str(core.repository)
     latest: dict[tuple[str, ...], tuple[bool, set[str]]] = {}
     failed_ever: dict[tuple[str, ...], None] = {}
+    #: Test selections of pytest runs that passed on the current bytes.
+    current_passes: list[pytest_selection.Selection] = []
     structural: dict[str, bool] = {}
     #: Pages with a pass on the current identity. A later aesthetic re-judgment
     #: of the same bytes must not erase it; the checker is a model, not a
@@ -329,7 +332,9 @@ def floor(core: Any, record: Any) -> list[str]:
                     )
         if name not in {"checks.run", "visual.check"}:
             continue
-        if name == "checks.run" and _is_environment_setup(data.get("argv") or []):
+        if name == "checks.run" and (
+            _is_environment_setup(data.get("argv") or []) or _is_tool_query(data.get("argv") or [])
+        ):
             # Installing tools is not a claim about the change. In an offline
             # sandbox it fails by design (swer5-k3 cbi: pip install flake8 ...)
             # and must not stay owed as a "failed check" on a correct patch.
@@ -398,11 +403,23 @@ def floor(core: Any, record: Any) -> list[str]:
         if not passed and _inline_probe(argv):
             continue  # diagnostic snippet: neither owed nor proof when red
         latest[argv] = (passed, classes)
+        # Only a real green run (exit 0) may stand in for another argv.
+        green = result.get("ok") is True and data.get("exit_code") == 0 and not data.get("timed_out")
+        chosen = pytest_selection.selection(argv, root) if green else None
+        if chosen is not None:
+            current_passes.append(chosen)
+
+    def discharged(argv: tuple[str, ...]) -> bool:
+        # A pytest failure the same tests pass without its extra options
+        # (--cov, -q, ...) on these bytes is the options' failure, not the change's.
+        chosen = pytest_selection.selection(argv, root)
+        return chosen is not None and pytest_selection.covered(chosen, current_passes)
+
     for argv, (passed, _) in latest.items():
-        if not passed:
+        if not passed and not discharged(argv):
             reasons.append("active failed check: " + " ".join(argv))
     for argv in failed_ever:
-        if argv not in latest and not _moot_scratch_check(core, argv):
+        if argv not in latest and not _moot_scratch_check(core, argv) and not discharged(argv):
             reasons.append("unresolved failed check: " + " ".join(argv))
     passed_classes = set().union(*(classes for passed, classes in latest.values() if passed)) if latest else set()
     # A vision-passed visual.check on the changed page is browser-runtime proof:
@@ -510,6 +527,32 @@ def _is_environment_setup(argv: Sequence[str]) -> bool:
     if exe in {"pip", "pip3"} and len(parts) > 1:
         return parts[1] in _SETUP_SUBCOMMANDS
     return False
+
+
+_TOOL_QUERY = re.compile(
+    r"(?:which(?:\s+-a)?(?:\s+[\w.+-]+)+|command\s+-v\s+[\w.+-]+|type\s+(?:-[a-zA-Z]+\s+)?[\w.+-]+"
+    r"|hash\s+[\w.+-]+|(?:python[\d.]*\s+-m\s+)?[\w.+-]+\s+(?:--version|-V|version)"
+    r"|cd\s+[\w./-]+|true|false|echo(?:\s+[\w.:=/+-]+)*)"
+)
+_QUIET_REDIRECT = re.compile(r"\s*(?:[12]?>\s*/dev/null|2>&1)")
+
+
+def _is_tool_query(argv: Sequence[str]) -> bool:
+    """`which ruff && ruff --version`: asking what the image has installed, not proof.
+
+    rebench26 v60h: such a query failed because ruff was absent, and both repair
+    turns were spent on a check nothing in the repository could make pass.
+    """
+    parts = [str(p) for p in argv]
+    if not parts:
+        return False
+    if Path(parts[0]).name in {"bash", "sh"} and len(parts) == 3 and parts[1] in {"-c", "-lc"}:
+        script = parts[2]
+    else:
+        script = " ".join(parts)
+    pieces = [_QUIET_REDIRECT.sub("", piece).strip() for piece in re.split(r"&&|\|\||;|\n", script)]
+    pieces = [piece for piece in pieces if piece]
+    return bool(pieces) and all(_TOOL_QUERY.fullmatch(piece) for piece in pieces)
 
 
 _MAIN_GUARD = re.compile(r"""^if\s+__name__\s*==\s*['"]__main__['"]\s*:""", re.M)
