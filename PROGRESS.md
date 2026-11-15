@@ -254,3 +254,9 @@ git diff --check
   with no default limit, and "do not commit unless asked" waits for its own A/B.
 - 6.0.0.dev5 = dev2 prompt + tool fixes (`job_output` timeout waits, `edit` exact match on
   changed files) + MCP brief log + outage retries. It goes to the final held-out run.
+- B1 post-mortem (dev pool only): the lost tasks did not probe less (edge-case probes after
+  the first edit: 32: 9 vs 6 in E1, 57: 12 vs 4, 39: 5 vs 5), so the losses look like
+  single-attempt noise rather than the edge-case clause at work; the 21% fewer calls are
+  the consistent part. Candidate for a later A/B with 2 attempts per task.
+- Final held-out run k6h3s started 21:55 UTC (run 43766318734, Synthetic, 50 tasks, 1
+  attempt, parallel 3, wheel 6.0.0.dev5).
