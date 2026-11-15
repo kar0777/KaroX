@@ -14,7 +14,7 @@ def brief(arguments: str, limit: int = 120) -> str:
     except json.JSONDecodeError:
         value = arguments
     if isinstance(value, dict):
-        for key in ("command", "file_path", "path", "pattern", "job_id", "description"):
+        for key in ("command", "file_path", "path", "pattern", "job_id", "description", "code"):
             if key in value:
                 text = str(value[key])
                 break

@@ -288,3 +288,7 @@ git diff --check
   the same reference as B1 (E1 on its 9 clean tasks, k6d1 on 68/71: 9 solved, 55 LLM
   calls per task on the 9): adopt if C1 solves >= 9 with <= 55 calls per task on those 9;
   otherwise code mode stays an opt-in flag.
+- Code mode replay in real hard12 images (run 43769569759, scenario `karox6_code`, no
+  model): a program called bash, write and read and caught a ToolError; a refused nested
+  `rm -rf /` failed the program (exit 1, nothing after it ran); an empty program reported
+  so. Passed on all three images. C1 is queued to start when k6h3s finishes.

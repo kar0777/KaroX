@@ -145,6 +145,18 @@ Example for a client that starts servers itself (Claude Desktop, Cursor and simi
 
 Using KaroX from ChatGPT on the web: [chatgpt.md](chatgpt.md).
 
+## Experimental options
+
+Both are off by default and stay so until they win an A/B run on the benchmark.
+
+- `--code-mode` adds `run_code`: the agent writes one Python program that calls the other
+  tools as functions (`tools.bash(command=...)`, `tools.read(file_path=...)`, ...) and gets
+  back only what the program prints, so several tool calls cost one step. Nested calls go
+  through the same checks and approvals as direct ones; a failing call raises `ToolError`
+  and, unless caught, fails the program. Programs are kept in `<session>/code/`.
+- `--subagents` adds `agent`: the agent hands an investigation to a child session with a
+  fresh context (read, search and shell only) and gets back only its report.
+
 ## Troubleshooting
 
 - `--model is required`: pass `-m` or set `model` in `config.toml`.
