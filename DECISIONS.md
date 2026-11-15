@@ -72,3 +72,8 @@ are marked **[user]** and are not revisited without asking the user.
   upstream of the D-022 baseline). ReformBoss was too slow: it refuses a key seen from more
   than 3 client IPs in 10 minutes, and parallel GitHub runners keep tripping it. The first
   held-out run on ReformBoss (43723372988) was cancelled before any task finished.
+- **D-026** [user, 2026-11-15] Free fast dev lane: GLM-5.3-Flash on FreeInference (Harvard
+  SEAS; free, $80/day quota, 2 concurrent requests per key, prompts logged for research),
+  bench `upstream=freeinference`. A different model from D-022: A/B tests and development
+  runs may use it, with every rival re-run on GLM for comparison (never scored against the
+  DSV4.1-Flash-1017 baseline). The M2 verdict stays on DeepSeek-V4.1-Flash-1017.
