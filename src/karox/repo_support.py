@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
+from .text_lines import physical_lines
+
 
 REPO_INSPECT_SCHEMA_VERSION = 3
 
@@ -374,10 +376,17 @@ def _status_entries(status: str) -> Iterable[tuple[str, str]]:
                 yield code, source
 
 def _read_lines(path: Path, max_bytes: int) -> list[str]:
+    """The file's physical lines, numbered as ripgrep and read_lines number them.
+
+    ``read_text().splitlines()`` also broke lines at a form feed, U+2028 or a
+    lone carriage return, so every later match in the search fallback and the
+    import index reported a line number past the real one.
+    """
+
     try:
         if path.stat().st_size > max_bytes:
             return []
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return physical_lines(path.read_bytes().decode("utf-8", errors="replace"))
     except OSError:
         return []
 

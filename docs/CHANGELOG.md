@@ -188,6 +188,56 @@
 - A repair turn starts with a fresh repeated-step streak.
 - No review, unchanged or deep pass starts when fewer than two model calls
   remain, so a submitted run no longer ends on `step_limit`.
+- Terminal client stop (Esc / Ctrl+C):
+  - The next task after a stopped or crashed run continues its session instead
+    of failing with "resume task differs".
+  - A stop pressed before the run's process had started used to find nothing
+    to signal, and the run then went on with the screen stuck on "stopping".
+    Now the run is never started.
+  - The run is stopped the way Ctrl+C stops it in a terminal: it records the
+    turn as stopped and cancels its own commands. If it does not exit within
+    3 s, the client kills it together with every process it started; it used
+    to kill only the CLI process, and the test runners and servers it had
+    started kept running.
+  - A `NaN` or `Infinity` count in a stream line now reads as 0. Such a line
+    used to end the stream while the run kept going.
+  - The client keeps only the end of the run's stderr in memory instead of all
+    of it.
+- MCP client:
+  - Discovery and calls read every `tools/list` page. A server that pages its
+    tools used to show only the first page, and calling a tool from a later
+    page failed with "schema changed".
+  - The SDK's task groups wrap anything raised inside a session, and errors are
+    now classified by the real error inside that wrapping. A refused schema
+    check on a mutating tool used to be reported as "outcome unknown" although
+    nothing had been sent, and a protocol error was retried as a transport
+    failure.
+  - `mcp server authorize` gives up after its timeout if the consent tab never
+    calls back, instead of waiting forever with Ctrl+C blocked.
+- Failure map (the parsed check output the agent reads first):
+  - A check log with one very long line no longer stalls the run. The location
+    scan was quadratic: 16k characters took 1.6 s, and a minified line took
+    minutes.
+  - `go test -v`: each failed test now gets the `t.Errorf` line printed above
+    its verdict. Before, it took the first log line of the next test, so the
+    repair went to the wrong file.
+  - A pytest section whose frame was cut out of the log keeps its `E` line
+    instead of reading "failed".
+  - A cargo panic on a Windows path (`C:\...\lib.rs:42:5`) keeps its place and
+    its assertion.
+- A model response whose tool call has no id, or whose calls share one id, now
+  gets a unique id for each call. Before, a missing id failed the whole reply
+  as malformed. A shared id made the next request carry two results for one
+  call, which the API can reject.
+- Windows: a check whose program is a relative path (`.venv\Scripts\python.exe`)
+  is now looked up in the repository, where it runs. It used to be looked up
+  in the directory KaroX was started from.
+- Repository inspection search:
+  - A ripgrep match on a line that holds a U+2028 or U+2029 character used to
+    be lost, because the JSON event was split in two. It is now kept.
+  - The search fallback and the import index number physical lines, as
+    ripgrep and `read_lines` do. A form feed, U+2028 or a lone `\r` used to
+    push every later match past its real line.
 
 ## 5.0.0 — 2026-11-07
 

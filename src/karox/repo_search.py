@@ -300,7 +300,9 @@ class RepoSearchMixin:
         raw_limit = _raw_match_limit(budget)
         identifier_tokens = _identifier_tokens(tokens)
         per_file_counts: dict[str, int] = {}
-        for line in completed.stdout.splitlines():
+        # ripgrep's JSON keeps U+2028 and U+2029 raw; splitlines() cut such an
+        # event in two and the match vanished. Events end at a newline only.
+        for line in completed.stdout.split("\n"):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -561,7 +563,7 @@ class RepoSearchMixin:
             )
             if completed.returncode in {0, 1}:
                 indexed = True
-                for raw in completed.stdout.splitlines():
+                for raw in completed.stdout.split("\n"):
                     try:
                         event = json.loads(raw)
                     except json.JSONDecodeError:

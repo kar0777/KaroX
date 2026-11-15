@@ -320,3 +320,33 @@ def test_list_files_and_search_work_without_a_git_binary(tmp_path: Path, monkeyp
     assert "top.py" in core._list_files({}, 30)["files"]
     found = core._search({"query": "needle"}, 30)
     assert sorted(m["path"] for m in found["matches"]) == ["src/pkg/a.py", "src/pkg/notes.txt", "top.py"]
+
+
+def test_the_line_reader_numbers_physical_lines(tmp_path: Path) -> None:
+    from karox.repo_support import _read_lines
+
+    source = tmp_path / "old.py"
+    source.write_bytes(b"first\x0csecond\nmid\rstill mid\r\nneedle\n")
+    assert _read_lines(source, 1_000_000) == ["first\x0csecond", "mid\rstill mid", "needle"]
+
+
+def test_the_inspect_search_keeps_a_match_beside_a_unicode_line_separator(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    from karox.repo_search import RepoSearchMixin
+    from karox.repo_support import InspectBudget
+
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    text = "const s = 'a\u2028b'; // needle_token\nother = 1\nneedle_token()\n"
+    core = _runtime(tmp_path, {"app.js": text.encode("utf-8")})
+    class Engine(RepoSearchMixin):
+        def __init__(self, repository: Path) -> None:
+            self.repository = repository
+
+    matches = Engine(core.repository)._ripgrep(
+        ("needle_token",), InspectBudget(40, 200, 20, 3, 1_000_000)
+    )
+    assert sorted(item["line"] for item in matches if item["path"] == "app.js") == [1, 3]
