@@ -138,14 +138,22 @@ class StdioConnection:
 
 
 class HttpConnection:
-    def __init__(self, url: str, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.url = url
         self.headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
             **(headers or {}),
         }
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(CALL_TIMEOUT_S, connect=20.0))
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(CALL_TIMEOUT_S, connect=20.0), transport=transport
+        )
         self.session_id: str | None = None
         self._ids = itertools.count(1)
 

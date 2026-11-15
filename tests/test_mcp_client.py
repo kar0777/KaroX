@@ -118,3 +118,56 @@ def test_helpers():
     assert render_result({"content": []}) == "(no output)"
     text = render_result({"content": [{"type": "resource", "resource": {"text": "body"}}]})
     assert text == "body"
+
+
+def test_http_event_stream_replies_and_errors(ctx):
+    import httpx
+
+    from karox6.mcp.client import HttpConnection, McpServerHandle, McpTool
+
+    seen = []
+
+    def sse(payload):
+        body = "event: message\ndata: " + json.dumps(payload) + "\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    def handler(request):
+        seen.append((request.method, request.headers.get("mcp-session-id")))
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        message = json.loads(request.content)
+        rid, method = message.get("id"), message["method"]
+        if method == "initialize":
+            reply = sse({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "x"}})
+            reply.headers["mcp-session-id"] = "sess-1"
+            return reply
+        if method == "tools/call" and message["params"]["name"] == "fails":
+            return sse({"jsonrpc": "2.0", "id": rid, "error": {"code": -1, "message": "nope"}})
+        if method == "tools/call":
+            result = {"content": [{"type": "text", "text": "bad input"}], "isError": True}
+            # a progress notification first, then the reply
+            note = {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}
+            body = "data: " + json.dumps(note) + "\n\n"
+            body += "data: " + json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+        return httpx.Response(202)
+
+    async def go():
+        conn = HttpConnection("http://mcp.test/mcp", transport=httpx.MockTransport(handler))
+        await conn.request("initialize", {}, 10)
+        assert conn.session_id == "sess-1"
+        handle = McpServerHandle("remote", conn, [])
+        tool = McpTool(handle, {"name": "check", "inputSchema": {"type": "object"}})
+        failing = McpTool(handle, {"name": "fails", "inputSchema": {"type": "object"}})
+        result = await tool.run({}, ctx)
+        assert result.is_error
+        assert result.content == "bad input"
+        error = await failing.run({}, ctx)
+        assert error.is_error
+        assert "nope" in error.content
+        await conn.close()
+
+    asyncio.run(go())
+    assert seen[0] == ("POST", None)
+    assert seen[1] == ("POST", "sess-1")
+    assert seen[-1] == ("DELETE", "sess-1")
