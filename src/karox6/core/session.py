@@ -104,6 +104,7 @@ class SessionConfig:
     system_prompt: str | None = None  # replaces the base prompt (environment is still added)
     system_append: str | None = None  # appended after the base prompt (A/B variants, users)
     subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
+    code_mode: bool = False  # offer `run_code` (M5, off until it wins an A/B)
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
@@ -145,6 +146,10 @@ class Session:
             from karox6.tools.agent import AgentTool
 
             self.tools.append(AgentTool(self._spawn_subagent))
+        if config.code_mode and tools is None:
+            from karox6.tools.code import RunCodeTool
+
+            self.tools.append(RunCodeTool(lambda: self._tool_map))
         self._subagents = 0
         self._tool_map = {t.name: t for t in self.tools}
         self.session_id = session_id or new_session_id()

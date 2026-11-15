@@ -167,6 +167,11 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         action="store_true",
         help="offer the agent tool: delegate investigations to child sessions (experimental)",
     )
+    p.add_argument(
+        "--code-mode",
+        action="store_true",
+        help="offer run_code: one Python program makes several tool calls (experimental)",
+    )
     if settings:
         p.set_defaults(**settings)
 
@@ -339,6 +344,7 @@ def _session_config(
         system_prompt=system_prompt,
         system_append=args.append_system_prompt,
         subagents=args.subagents,
+        code_mode=args.code_mode,
         wrap_up_steps=_positive(args.wrap_up_steps),
     )
 

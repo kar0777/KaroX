@@ -42,6 +42,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "replay_reasoning": (str,),
     "apply_patch": (bool,),
     "subagents": (bool,),
+    "code_mode": (bool,),
 }
 ENV = {"model": "KAROX_MODEL", "provider": "KAROX_PROVIDER", "base_url": "KAROX_BASE_URL"}
 

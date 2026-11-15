@@ -271,3 +271,14 @@ git diff --check
   too; 125 ms, Windows only); wrap-up notices survive a truncated step; negative
   `--max-steps`/`--wrap-up-steps` mean no limit. No issues found in the brief long-poll
   (`since`/`next`, wakeups, memory) or in `job_output`. 613 tests.
+- M5 code mode (`--code-mode`, off by default): a `run_code` tool runs a Python 3 program
+  with the project's interpreter in the workspace; `tools.<name>(...)` inside it calls any
+  other session tool (keywords or positional in required-parameter order) over a loopback
+  socket guarded by a per-program token, so nested calls keep the command guard,
+  approvals, file tracking and output limits. A failing nested call raises `ToolError`;
+  uncaught it fails the program (exit-code marker, no silent truncation - KaroX 5 lessons:
+  full stdlib incl. os/subprocess, real Python booleans). Timeout kills the process tree
+  and abandons nested calls. Nested calls stream as `run_code/<tool>` events. Programs and
+  their logs stay in `<session>/code/`. Live check (CrowLLM grok free, Windows): one
+  program listed the files and ran pytest, the model fixed both bugs, tests passed.
+  619 tests. Goes to a dev-pool A/B after the held-out run.
