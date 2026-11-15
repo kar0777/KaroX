@@ -145,6 +145,11 @@ def _add_session_args(p: argparse.ArgumentParser) -> None:
         help="MCP servers to use as tools (JSON with 'mcpServers'; default <home>/mcp.json)",
     )
     p.add_argument("--no-mcp", action="store_true", help="do not load MCP servers")
+    p.add_argument(
+        "--subagents",
+        action="store_true",
+        help="offer the agent tool: delegate investigations to child sessions (experimental)",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -307,6 +312,7 @@ def _session_config(
         extra_body=extra_body,
         system_prompt=system_prompt,
         system_append=args.append_system_prompt,
+        subagents=args.subagents,
     )
 
 

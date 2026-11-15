@@ -98,7 +98,7 @@ def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
     found: list[tuple[int, str]] = []
     for entry in root.iterdir():
         path = entry / "session.jsonl"
-        if entry.name == exclude or not path.is_file():
+        if entry.name == exclude or ".agent-" in entry.name or not path.is_file():
             continue
         try:
             with path.open("rb") as fh:

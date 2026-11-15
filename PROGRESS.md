@@ -10,7 +10,7 @@ from the first stage that is not **done** below.
 | M2 Bench, first win | in progress | | adapter + replay green; smoke run 43717195476 |
 | M3 TUI | done (pending tag) | | inline chat on prompt_toolkit (extra `tui`), D-027 |
 | M4 MCP server + client | in progress | aafdba6, d768078 | server stdio+HTTP and client done; ChatGPT web check needs a public tunnel (user's call) |
-| M5 Subagents, options | not started | | |
+| M5 Subagents, options | in progress | | `--subagents` built (off by default until an A/B win); code mode not started |
 | M6 Packaging, release | not started | | publishing needs the user's explicit permission |
 
 ## How to work in this repo
@@ -153,3 +153,14 @@ git diff --check
   limit. On the 8 tasks both arms really ran: E1 7/8 vs baseline 5/8, 54 vs 60.5 LLM calls
   per task, input tokens -18%, output +3.5%. Adopted per the rule above (D-028): the two
   sentences are now BASE_PROMPT bullets; version 6.0.0.dev2.
+- Held-out judgment k6h2s started (run 43757315661, Synthetic, 50 tasks, 1 attempt,
+  parallel 3, wheel 6.0.0.dev2 = E1 rules + edit without read on exact match).
+- M5 subagents (`--subagents`, off by default): an `agent` tool runs a child session with a
+  fresh context (bash/read/grep/glob only, no edits, no further subagents, 40 steps /
+  15 min) and returns only its final report; several calls in one step run in parallel;
+  child usage counts in the parent; child tool calls appear in the event stream as
+  `agent-N/<tool>`; child logs live in `<session>.agent-N` and are not offered for resume.
+  Idea to A/B on the dev pool after k6h2s: exploration in a discarded context should cut
+  the quadratic input growth of the main context. Live check (CrowLLM grok-4.7-fast): the
+  child searched 4 calls and reported `tools/danger.py:check_command`; the parent finished
+  in 2 steps.

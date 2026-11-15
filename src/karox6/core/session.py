@@ -43,13 +43,23 @@ from karox6.providers.base import (
     RetryPolicy,
     complete_with_retry,
 )
-from karox6.tools.base import Approver, Tool, ToolArgsError, ToolContext, deny_all, parse_arguments
+from karox6.tools.base import (
+    Approver,
+    Tool,
+    ToolArgsError,
+    ToolContext,
+    ToolResult,
+    deny_all,
+    parse_arguments,
+)
 from karox6.tools.files import FileTracker
 from karox6.tools.jobs import JobManager
 from karox6.tools.registry import build_tools, tool_specs
 from karox6.tools.shell import ShellInfo, detect_shell
 
 GENERIC_TOOL_CAP = 60_000
+SUBAGENT_MAX_STEPS = 40
+SUBAGENT_MAX_SECONDS = 900.0
 CANCELLED_RESULT = "[cancelled by the user before this call finished]"
 TRUNCATION_NOTICE = (
     "Your previous response was cut off at the output token limit before it was complete. "
@@ -82,6 +92,7 @@ class SessionConfig:
     extra_body: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None  # replaces the base prompt (environment is still added)
     system_append: str | None = None  # appended after the base prompt (A/B variants, users)
+    subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def compaction_threshold(self) -> int:
@@ -118,6 +129,11 @@ class Session:
             ),
             *(extra_tools or []),
         ]
+        if config.subagents and tools is None:
+            from karox6.tools.agent import AgentTool
+
+            self.tools.append(AgentTool(self._spawn_subagent))
+        self._subagents = 0
         self._tool_map = {t.name: t for t in self.tools}
         self.session_id = session_id or new_session_id()
         self.store = SessionStore(config.home, self.session_id)
@@ -516,6 +532,72 @@ class Session:
         return approve
 
     # -- context ------------------------------------------------------------------
+
+    async def _spawn_subagent(self, prompt: str, label: str, ctx: ToolContext) -> ToolResult:
+        """Run a child session on ``prompt``; return its final report as a tool result."""
+        from karox6.tools.agent import SUBAGENT_APPEND
+        from karox6.tools.fs import ReadTool
+        from karox6.tools.search import GlobTool, GrepTool
+        from karox6.tools.shell import ShellTool
+
+        self._subagents += 1
+        number = self._subagents
+        cfg = self.config
+        config = replace(
+            cfg,
+            subagents=False,
+            snapshot_on_finish=False,
+            stream_deltas=False,
+            max_steps=min(cfg.max_steps or SUBAGENT_MAX_STEPS, SUBAGENT_MAX_STEPS),
+            max_seconds=min(cfg.max_seconds or SUBAGENT_MAX_SECONDS, SUBAGENT_MAX_SECONDS),
+            max_cost_usd=None,
+            system_append="\n\n".join(p for p in (cfg.system_append, SUBAGENT_APPEND) if p),
+        )
+        child = Session(
+            config,
+            self.provider,
+            shell=self.shell,
+            tools=[ShellTool(self.shell), ReadTool(), GrepTool(), GlobTool()],
+            session_id=f"{self.session_id}.agent-{number}",
+        )
+        tag = f"agent-{number}"
+        final, status, reason, steps = "", "error", "", 0
+        async for event in child.run(prompt):
+            if isinstance(event, ev.ToolStarted | ev.ToolFinished):
+                ctx.emit(
+                    replace(event, call_id=f"{tag}:{event.call_id}", name=f"{tag}/{event.name}")
+                )
+            elif isinstance(event, ev.Retry):
+                ctx.emit(event)
+            elif isinstance(event, ev.RunFinished):
+                final, status, reason, steps = (
+                    event.final_text,
+                    event.status,
+                    event.reason,
+                    event.steps,
+                )
+        self.usage.add(child.usage)
+        self.cost_usd += child.cost_usd
+        with contextlib.suppress(Exception):
+            self.store.append(
+                "usage", step=0, usage=child.usage.to_dict(), cost_usd=child.cost_usd, source=tag
+            )
+        if not final:
+            final = next(
+                (
+                    m.content
+                    for m in reversed(child.messages)
+                    if m.role == "assistant" and m.content
+                ),
+                "",
+            )
+        head = "" if status == "completed" else f"[subagent stopped: {reason or status}]\n"
+        meta = {"subagent": child.session_id, "label": label, "status": status, "steps": steps}
+        return ToolResult(
+            head + (final or "(the subagent produced no report)"),
+            is_error=not final,
+            meta=meta,
+        )
 
     def _close_dangling_calls(self) -> None:
         """Answer the tool calls a cancelled turn left open, so the history stays valid."""
