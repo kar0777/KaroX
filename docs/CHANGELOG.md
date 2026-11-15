@@ -64,6 +64,19 @@
   a package's `__init__.py` runs the tests named after the package.
 - A search's attached definition is "complete" when the block ended inside the
   window, and a cut file read says it was cut.
+- Every model family is read in the engine's words: Anthropic's
+  `end_turn`/`max_tokens`, Gemini's `STOP`/`MAX_TOKENS` and Responses'
+  `completed`/`max_output_tokens` are a finished answer and an output cut, so
+  a prose final answer is accepted and a cut gets the cut nudge on those APIs
+  too (the visual checker reads cuts the same way).
+- Replays the APIs used to refuse with a 400: an empty text block or empty
+  content list to Anthropic, a parameterless call's empty arguments to
+  Anthropic and Gemini (now `{}`, also when the engine parses it), and a tool
+  result whose call failed validation. Anthropic `redacted_thinking` blocks
+  are returned with their tool calls instead of being dropped.
+- A connection that breaks while an Anthropic, Gemini or Responses stream is
+  drained after its final event no longer turns the paid answer into a
+  retried request. Gemini thinking tokens count as output in cost and budget.
 
 ### Changed
 

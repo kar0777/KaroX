@@ -2161,7 +2161,7 @@ class ProviderAdapterTests(unittest.TestCase):
                 None,
                 {
                     "responseId": "gemini-response",
-                    "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3},
+                    "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3, "thoughtsTokenCount": 4},
                     "candidates": [
                         {
                             "content": {
@@ -2183,6 +2183,9 @@ class ProviderAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.content, "done")
         self.assertEqual([item.name for item in result.tool_calls], ["first", "second"])
+        # Thinking bills as output: it is in the completion count that is priced.
+        self.assertEqual(result.usage.get("completion_tokens"), 7)
+        self.assertEqual(result.usage.get("reasoning_tokens"), 4)
         self.assertEqual([item.raw_arguments for item in result.tool_calls], ['{"a":1}', "{}"])
         self.assertNotEqual(result.tool_calls[0].call_id, result.tool_calls[1].call_id)
         self.assertTrue(result.tool_calls[0].call_id.endswith("-0"))

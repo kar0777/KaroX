@@ -16,6 +16,7 @@ from .providers import (
 )
 
 from .provider_adapter_base import (
+    drain_after_end,
     _StreamingAdapter,
     _is_gemini_signature,
     stream_error_kind,
@@ -74,14 +75,17 @@ class AnthropicMessagesProvider(_StreamingAdapter):
             # A block whose stored text no longer matches what was signed is left
             # out rather than sent and rejected.
             for reasoning in message.reasoning_blocks:
-                if not reasoning.replayable or not reasoning.signature:
-                    continue
-                if _is_gemini_signature(reasoning):
+                if not reasoning.replayable:
                     continue
                 if reasoning.kind == "redacted_thinking":
-                    blocks.append(
-                        {"type": "redacted_thinking", "data": reasoning.data}
-                    )
+                    # Encrypted data, no signature: it still comes back.
+                    if reasoning.data:
+                        blocks.append(
+                            {"type": "redacted_thinking", "data": reasoning.data}
+                        )
+                    continue
+                if not reasoning.signature or _is_gemini_signature(reasoning):
+                    continue
                 else:
                     blocks.append(
                         {
@@ -90,17 +94,21 @@ class AnthropicMessagesProvider(_StreamingAdapter):
                             "signature": reasoning.signature,
                         }
                     )
-            if message.content is not None:
+            # The API refuses an empty text block (a stream's leading "" before
+            # its tool calls) and an empty content list.
+            if message.content:
                 blocks.append({"type": "text", "text": message.content})
             blocks.extend(
                 {
                     "type": "tool_use",
                     "id": call.call_id,
                     "name": call.name,
-                    "input": json.loads(call.raw_arguments),
+                    "input": json.loads(call.raw_arguments or "{}"),
                 }
                 for call in message.tool_calls
             )
+            if not blocks:
+                blocks.append({"type": "text", "text": "(no text)"})
             messages.append({"role": role, "content": blocks})
         return "\n\n".join(system), messages
 
@@ -218,7 +226,8 @@ class AnthropicMessagesProvider(_StreamingAdapter):
         # the concatenated reasoning string.
         reasoning_parts: Dict[int, Dict[str, Any]] = {}
         terminal_event: Optional[ModelEvent] = None
-        for event_name, data in self._sse_records(response, deadline):
+        records = drain_after_end(self._sse_records(response, deadline), lambda: terminal_event is not None)
+        for event_name, data in records:
             if terminal_event is not None:
                 continue
             value = self._json_event(data, response.status_code)

@@ -29,6 +29,7 @@ from jinja2 import StrictUndefined, Template
 from .engine.exceptions import FormatError  # noqa: E402
 from .engine_salvage import salvage_fenced_command, salvage_markup_tool_calls
 from .prompt_cache_telemetry import PromptPrefixTracker, tools_digest
+from .provider_types import normalized_finish_reason
 from .providers import (
     ImageAttachment,
     ModelEvent,
@@ -698,13 +699,14 @@ class EngineProviderModel:
             content = entry.get("content")
             text = None if content is None else str(content)
             if role == "assistant":
-                for raw_call in entry.get("tool_calls") or ():
-                    if isinstance(raw_call, Mapping):
-                        call_names[str(raw_call.get("call_id", ""))] = str(raw_call.get("name", ""))
                 calls = tuple(
                     _elide_applied_arguments(call, elided=self._elided_calls)
                     for call in _engine_tool_calls(entry)
                 )
+                # Only calls that survived validation answer a tool result: a
+                # result for a dropped call is a 400 from every gateway.
+                for call in calls:
+                    call_names[call.call_id] = call.name
                 replayed = entry.get("reasoning_content")
                 converted.append(
                     ModelMessage(
@@ -834,7 +836,8 @@ class EngineProviderModel:
                 error = ""
                 arguments: Any = None
                 try:
-                    arguments = json.loads(call.raw_arguments or "")
+                    # A parameterless call streams no argument text at all.
+                    arguments = json.loads(call.raw_arguments or "{}")
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     error = f"Error parsing tool call arguments: {exc}."
                 if call.name not in self._known_names:
@@ -892,7 +895,7 @@ class EngineProviderModel:
             error=error,
             actions=[],
             has_tool_calls=has_calls,
-            finish_reason=response.finish_reason,
+            finish_reason=normalized_finish_reason(response.finish_reason),
         )
         return FormatError(
             {
@@ -927,7 +930,7 @@ class EngineProviderModel:
         return {
             "choices": [
                 {
-                    "finish_reason": response.finish_reason,
+                    "finish_reason": normalized_finish_reason(response.finish_reason),
                     "message": {
                         "role": "assistant",
                         "content": response.content or "",

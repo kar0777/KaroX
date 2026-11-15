@@ -18,6 +18,7 @@ from .providers import (
 )
 
 from .provider_adapter_base import (
+    drain_after_end,
     GEMINI_SIGNATURE_PREFIX,
     _StreamingAdapter,
     _gemini_thinking_level,
@@ -86,7 +87,7 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                 call_part: Dict[str, Any] = {
                     "functionCall": {
                         "name": call.name,
-                        "args": json.loads(call.raw_arguments),
+                        "args": json.loads(call.raw_arguments or "{}"),
                     }
                 }
                 signature = signatures.get("call:" + call.call_id)
@@ -148,7 +149,8 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
         response_id: Optional[str] = None
         call_scope = uuid.uuid4().hex
         next_tool_index = 0
-        for _event_name, data in self._sse_records(response, deadline):
+        records = drain_after_end(self._sse_records(response, deadline), lambda: terminal_event is not None)
+        for _event_name, data in records:
             if terminal_event is not None:
                 continue
             value = self._json_event(data, response.status_code)
@@ -183,6 +185,10 @@ class GeminiGenerateContentProvider(_StreamingAdapter):
                         ProviderErrorKind.MALFORMED_RESPONSE,
                         "Gemini usage is invalid",
                     ) from exc
+                if usage.get("reasoning_tokens") and "completion_tokens" in usage:
+                    # candidatesTokenCount leaves thinking out, but it bills as
+                    # output: priced and budgeted like OpenAI's completion count.
+                    usage["completion_tokens"] += usage["reasoning_tokens"]
                 yield ModelEvent(ModelEventKind.USAGE, usage=usage, response_id=response_id, transport_attempts=attempts)
             candidates = value.get("candidates")
             if not isinstance(candidates, list) or not candidates:

@@ -30,6 +30,29 @@ _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _REASONING_FAMILY = re.compile(r"^(?:o[1-9]\d*|gpt-5)(?:[-._]|$)")
 
+#: Each API's own words for "answered" and "cut at the output limit".
+_STOP_REASONS = frozenset({"stop", "end_turn", "stop_sequence", "completed"})
+_LENGTH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+
+def normalized_finish_reason(reason: Optional[str]) -> Optional[str]:
+    """``stop`` or ``length`` whatever the API called it, else unchanged.
+
+    The engine's prose-answer and output-cut rules read the Chat Completions
+    words; Anthropic says ``end_turn``/``max_tokens``, Gemini ``STOP``/
+    ``MAX_TOKENS``, Responses ``completed``/``max_output_tokens``.
+    """
+
+    if not isinstance(reason, str):
+        return reason
+    folded = reason.lower()
+    if folded in _STOP_REASONS:
+        return "stop"
+    if folded in _LENGTH_REASONS:
+        return "length"
+    return reason
+
+
 def output_token_field(model: str) -> str:
     """Which field this model wants its output ceiling in."""
 

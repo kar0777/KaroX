@@ -16,6 +16,7 @@ from .providers import (
 )
 
 from .provider_adapter_base import (
+    drain_after_end,
     _StreamingAdapter,
     _openai_effort,
     stream_error_kind,
@@ -113,7 +114,8 @@ class OpenAIResponsesProvider(_StreamingAdapter):
         call_output_indexes: set[int] = set()
         next_index = 0
         terminal_event: Optional[ModelEvent] = None
-        for event_name, data in self._sse_records(response, deadline):
+        records = drain_after_end(self._sse_records(response, deadline), lambda: terminal_event is not None)
+        for event_name, data in records:
             if terminal_event is not None:
                 # Protocol completion is known; consume the remaining HTTP body
                 # without interpreting post-terminal frames so the socket can

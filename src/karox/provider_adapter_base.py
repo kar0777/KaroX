@@ -7,7 +7,7 @@ import math
 import threading
 from dataclasses import replace
 import time
-from typing import Any, Dict, Iterator, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, TypeVar
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import httpx
 from .net_config import NetworkConfigError, client_options
@@ -90,6 +90,34 @@ def stream_error_kind(error_body: Any) -> ProviderErrorKind:
     if status in {404, 410} or "not_found" in combined or "model_not_found" in combined:
         return ProviderErrorKind.MODEL_UNAVAILABLE
     return ProviderErrorKind.PROVIDER_INTERNAL
+
+_Record = TypeVar("_Record")
+
+
+def drain_after_end(records: Iterator[_Record], ended: Callable[[], bool]) -> Iterator[_Record]:
+    """A stream's records; once ``ended()``, a broken or late tail just ends it.
+
+    The body after the terminal event is still read, so the connection can go
+    back to the pool, but the answer is complete and paid for: a reset or a
+    deadline while draining must not raise a transport error the caller
+    retries (re-sending and re-billing the request).
+    """
+
+    while True:
+        try:
+            item = next(records)
+        except StopIteration:
+            return
+        except httpx.TransportError:
+            if ended():
+                return
+            raise
+        except ProviderError as exc:
+            if ended() and exc.kind is ProviderErrorKind.TRANSPORT:
+                return
+            raise
+        yield item
+
 
 class _StreamingAdapter:
     """Secret-safe HTTP/SSE transport and normalized response assembly."""

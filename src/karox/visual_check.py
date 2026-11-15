@@ -31,6 +31,7 @@ from .providers import (
     Provider,
     ProviderError,
 )
+from .provider_types import normalized_finish_reason
 from .web_check import observe_page, render_problems
 
 #: How many times one task may ask for a look. The budget is per task, not per
@@ -424,7 +425,7 @@ class VisualChecker:
             unusable = (
                 "the checker's answer was cut off at the output limit before it "
                 "contained a verdict"
-                if str(finish_reason or "").lower() == "length"
+                if normalized_finish_reason(finish_reason) == "length"
                 else "the checker model gave no usable verdict"
                 + (f" ({failure})" if failure else "")
             )
@@ -458,7 +459,7 @@ class VisualChecker:
             reason = (
                 "the checker's answer was cut off at the output limit before it "
                 "contained a verdict"
-                if str(finish_reason or "").lower() == "length"
+                if normalized_finish_reason(finish_reason) == "length"
                 else "the checker model answered without a verdict"
             )
             if issues:
@@ -624,7 +625,7 @@ class VisualChecker:
             if (
                 attempt == 0
                 and not (isinstance(content, str) and content.strip())
-                and response.finish_reason != "length"
+                and normalized_finish_reason(response.finish_reason) != "length"
             ):
                 continue
             return content, response.finish_reason
