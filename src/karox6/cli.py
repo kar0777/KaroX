@@ -30,56 +30,53 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="run one task headless (text or JSON-lines output)")
     run.add_argument("task", nargs="*", help="task text; '-' or nothing reads stdin")
-    run.add_argument("-m", "--model", default=os.environ.get("KAROX_MODEL"))
-    run.add_argument(
-        "--provider",
-        default=os.environ.get("KAROX_PROVIDER", "openai-chat"),
-        help="openai-chat | openai-responses | anthropic | gemini",
-    )
-    run.add_argument("--base-url", default=os.environ.get("KAROX_BASE_URL"))
-    run.add_argument(
-        "--api-key-env",
-        default="KAROX_API_KEY",
-        help="name of the environment variable holding the API key (never pass keys as args)",
-    )
+    _add_session_args(run)
     run.add_argument("--cwd", type=Path, default=None, help="workspace directory")
-    run.add_argument("--home", type=Path, default=None, help="KaroX state dir (sessions)")
     run.add_argument("--json", action="store_true", help="JSON-lines event stream on stdout")
     run.add_argument("--stream", action="store_true", help="include text/reasoning deltas")
     run.add_argument("--resume", default=None, help="session id or 'last'")
-    run.add_argument("--max-steps", type=int, default=None)
-    run.add_argument("--max-seconds", type=float, default=None)
-    run.add_argument("--max-cost", type=float, default=None, help="USD, needs --price-*")
-    run.add_argument("--context-window", type=int, default=128_000)
-    run.add_argument("--max-output-tokens", type=int, default=None)
-    run.add_argument("--compact-at", type=int, default=None, help="tokens")
-    run.add_argument("--reasoning-effort", default=None)
-    run.add_argument("--temperature", type=float, default=None)
-    run.add_argument("--price-input", type=float, default=None, help="USD per 1M tokens")
-    run.add_argument("--price-output", type=float, default=None)
-    run.add_argument("--price-cached", type=float, default=None)
-    run.add_argument("--apply-patch", action="store_true", help="offer the apply_patch tool")
-    run.add_argument(
-        "--no-snapshot",
-        action="store_true",
-        help="do not copy changed files to <session>/submissions at the end of the run",
-    )
-    run.add_argument("--replay-reasoning", choices=["turn", "all", "none"], default="turn")
     run.add_argument(
         "--approve-dangerous",
         choices=["ask", "deny", "allow"],
         default=None,
         help="destructive commands: ask (TTY default), deny (non-interactive default), allow",
     )
-    run.add_argument("--system-prompt-file", type=Path, default=None)
-    run.add_argument(
-        "--append-system-prompt",
-        default=None,
-        help="text added after the built-in system prompt",
+
+    mcp = sub.add_parser(
+        "mcp", help="serve KaroX to MCP clients (stdio, or Streamable HTTP with --http)"
     )
-    run.add_argument("--extra-body", default=None, help="JSON object merged into requests")
-    run.add_argument("--no-sse", action="store_true", help="disable streaming HTTP responses")
-    run.add_argument("--request-timeout", type=float, default=900.0)
+    _add_session_args(mcp)
+    mcp.add_argument(
+        "--http",
+        default=None,
+        metavar="[HOST:]PORT",
+        help="serve Streamable HTTP instead of stdio (host defaults to 127.0.0.1)",
+    )
+    mcp.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="project root: runs work here or below (default: current directory)",
+    )
+    mcp.add_argument("--any-cwd", action="store_true", help="let clients run in any directory")
+    mcp.add_argument(
+        "--token-env",
+        default="KAROX_MCP_TOKEN",
+        help="environment variable with the HTTP access token (random if unset)",
+    )
+    mcp.add_argument(
+        "--allow-origin",
+        action="append",
+        default=[],
+        help="extra browser origin allowed to call the HTTP endpoint",
+    )
+    mcp.add_argument(
+        "--approve-dangerous",
+        choices=["ask", "deny", "allow"],
+        default="ask",
+        help="destructive commands: ask the client (karox_approve), deny, or allow",
+    )
+    mcp.add_argument("--approval-timeout", type=float, default=600.0, help="seconds, then deny")
 
     debug = sub.add_parser("debug", help="diagnostics for developers")
     debug_sub = debug.add_subparsers(dest="debug_command", required=True)
@@ -87,11 +84,57 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_session_args(p: argparse.ArgumentParser) -> None:
+    """Model, provider and session options shared by `run` and `mcp`."""
+    p.add_argument("-m", "--model", default=os.environ.get("KAROX_MODEL"))
+    p.add_argument(
+        "--provider",
+        default=os.environ.get("KAROX_PROVIDER", "openai-chat"),
+        help="openai-chat | openai-responses | anthropic | gemini",
+    )
+    p.add_argument("--base-url", default=os.environ.get("KAROX_BASE_URL"))
+    p.add_argument(
+        "--api-key-env",
+        default="KAROX_API_KEY",
+        help="name of the environment variable holding the API key (never pass keys as args)",
+    )
+    p.add_argument("--home", type=Path, default=None, help="KaroX state dir (sessions)")
+    p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--max-seconds", type=float, default=None)
+    p.add_argument("--max-cost", type=float, default=None, help="USD, needs --price-*")
+    p.add_argument("--context-window", type=int, default=128_000)
+    p.add_argument("--max-output-tokens", type=int, default=None)
+    p.add_argument("--compact-at", type=int, default=None, help="tokens")
+    p.add_argument("--reasoning-effort", default=None)
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--price-input", type=float, default=None, help="USD per 1M tokens")
+    p.add_argument("--price-output", type=float, default=None)
+    p.add_argument("--price-cached", type=float, default=None)
+    p.add_argument("--apply-patch", action="store_true", help="offer the apply_patch tool")
+    p.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="do not copy changed files to <session>/submissions at the end of the run",
+    )
+    p.add_argument("--replay-reasoning", choices=["turn", "all", "none"], default="turn")
+    p.add_argument("--system-prompt-file", type=Path, default=None)
+    p.add_argument(
+        "--append-system-prompt",
+        default=None,
+        help="text added after the built-in system prompt",
+    )
+    p.add_argument("--extra-body", default=None, help="JSON object merged into requests")
+    p.add_argument("--no-sse", action="store_true", help="disable streaming HTTP responses")
+    p.add_argument("--request-timeout", type=float, default=900.0)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(args, parser)
+    if args.command == "mcp":
+        return _mcp(args, parser)
     if args.command == "debug" and args.debug_command == "rss":
         return _debug_rss()
     parser.print_help()
@@ -129,57 +172,15 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 
 async def _run_async(args: argparse.Namespace, task: str) -> int:
-    from karox6.core.messages import Price
-    from karox6.core.session import Session, SessionConfig
+    from karox6.core.session import Session
     from karox6.core.store import SessionStore, default_home
-    from karox6.providers import make_provider
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
-    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-    price = None
-    if args.price_input is not None and args.price_output is not None:
-        price = Price(args.price_input, args.price_output, args.price_cached)
-    extra_body: dict[str, Any] = {}
-    if args.extra_body:
-        loaded = json.loads(args.extra_body)
-        if not isinstance(loaded, dict):
-            raise ValueError("--extra-body must be a JSON object")
-        extra_body = loaded
-    system_prompt = None
-    if args.system_prompt_file:
-        system_prompt = args.system_prompt_file.read_text(encoding="utf-8")
-    config = SessionConfig(
-        model=args.model,
-        provider_name=args.provider,
-        workspace=workspace,
-        home=home,
-        max_steps=args.max_steps,
-        max_seconds=args.max_seconds,
-        max_cost_usd=args.max_cost,
-        max_output_tokens=args.max_output_tokens,
-        context_window=args.context_window,
-        compact_at_tokens=args.compact_at,
-        temperature=args.temperature,
-        reasoning_effort=args.reasoning_effort,
-        price=price,
-        apply_patch=args.apply_patch,
-        replay_reasoning=args.replay_reasoning,
-        snapshot_on_finish=not args.no_snapshot,
-        stream_deltas=args.stream or not args.json,
-        extra_body=extra_body,
-        system_prompt=system_prompt,
-        system_append=args.append_system_prompt,
-    )
-    provider = make_provider(
-        args.provider,
-        base_url=args.base_url,
-        api_key=api_key,
-        timeout_s=args.request_timeout,
-        stream=not args.no_sse,
-    )
+    config = _session_config(args, workspace, home, stream_deltas=args.stream or not args.json)
+    provider = _provider(args)
     approver = _approver(args.approve_dangerous, json_mode=args.json)
     session_kwargs: dict[str, Any] = {}
     if args.resume:
@@ -204,6 +205,125 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
     finally:
         await provider.aclose()
     return EXIT_CODES.get(status, 1)
+
+
+def _session_config(
+    args: argparse.Namespace, workspace: Path, home: Path, *, stream_deltas: bool
+) -> Any:
+    from karox6.core.messages import Price
+    from karox6.core.session import SessionConfig
+
+    price = None
+    if args.price_input is not None and args.price_output is not None:
+        price = Price(args.price_input, args.price_output, args.price_cached)
+    extra_body: dict[str, Any] = {}
+    if args.extra_body:
+        loaded = json.loads(args.extra_body)
+        if not isinstance(loaded, dict):
+            raise ValueError("--extra-body must be a JSON object")
+        extra_body = loaded
+    system_prompt = None
+    if args.system_prompt_file:
+        system_prompt = args.system_prompt_file.read_text(encoding="utf-8")
+    return SessionConfig(
+        model=args.model,
+        provider_name=args.provider,
+        workspace=workspace,
+        home=home,
+        max_steps=args.max_steps,
+        max_seconds=args.max_seconds,
+        max_cost_usd=args.max_cost,
+        max_output_tokens=args.max_output_tokens,
+        context_window=args.context_window,
+        compact_at_tokens=args.compact_at,
+        temperature=args.temperature,
+        reasoning_effort=args.reasoning_effort,
+        price=price,
+        apply_patch=args.apply_patch,
+        replay_reasoning=args.replay_reasoning,
+        snapshot_on_finish=not args.no_snapshot,
+        stream_deltas=stream_deltas,
+        extra_body=extra_body,
+        system_prompt=system_prompt,
+        system_append=args.append_system_prompt,
+    )
+
+
+def _provider(args: argparse.Namespace) -> Any:
+    from karox6.providers import make_provider
+
+    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+    return make_provider(
+        args.provider,
+        base_url=args.base_url,
+        api_key=api_key,
+        timeout_s=args.request_timeout,
+        stream=not args.no_sse,
+    )
+
+
+def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    import asyncio
+
+    if not args.model:
+        parser.error("--model is required (or set KAROX_MODEL)")
+    try:
+        asyncio.run(_mcp_async(args))
+    except KeyboardInterrupt:
+        pass
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"karox mcp: {exc}\n")
+        return 2
+    return 0
+
+
+async def _mcp_async(args: argparse.Namespace) -> None:
+    import asyncio
+    import secrets
+
+    from karox6.core.store import default_home
+    from karox6.mcp.protocol import McpServer
+    from karox6.mcp.runs import RunManager
+    from karox6.mcp.transport import DEFAULT_ORIGINS, HttpMcp, serve_stdio
+
+    home = (args.home or default_home()).expanduser().resolve()
+    root = (args.root or Path.cwd()).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"root {root} is not a directory")
+    provider = _provider(args)
+    runs = RunManager(
+        lambda ws: _session_config(args, ws, home, stream_deltas=False),
+        lambda: provider,
+        root=root,
+        any_workspace=args.any_cwd,
+        approval_mode=args.approve_dangerous,
+        approval_timeout_s=args.approval_timeout,
+    )
+    server = McpServer(runs)
+    try:
+        if args.http is None:
+            await serve_stdio(server)
+            return
+        host, _, port = args.http.rpartition(":")
+        host = host or "127.0.0.1"
+        token = os.environ.get(args.token_env or "") or secrets.token_urlsafe(24)
+        origins = [*DEFAULT_ORIGINS, *args.allow_origin]
+        http = HttpMcp(server, token=token, allowed_origins=origins)
+        listener = await http.start(host, int(port))
+        bound = listener.sockets[0].getsockname()[1]
+        shown = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
+        sys.stderr.write(
+            f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
+            "  URL for clients that only take a URL (ChatGPT connector, behind an HTTPS\n"
+            f"  tunnel): http://{shown}:{bound}/mcp/{token}\n"
+            "  or send 'Authorization: Bearer <token>' to /mcp. Keep the token secret.\n"
+        )
+        sys.stderr.flush()
+        async with listener:
+            await asyncio.Event().wait()
+    finally:
+        await runs.shutdown()
+        await provider.aclose()
 
 
 def _approver(mode: str | None, *, json_mode: bool) -> Any:
