@@ -83,3 +83,8 @@ are marked **[user]** and are not revisited without asking the user.
   RSS): prompt_toolkit 170 ms / +6 MB; prompt_toolkit + rich 320 ms / +12 MB; Textual
   350 ms / +13 MB. Textual's full-screen mode also takes the terminal scrollback away; rich
   adds nothing the chat needs.
+- **D-028** [agent, 2026-11-15] E1 adopted into BASE_PROMPT ("work economically ... fewer,
+  fuller steps" and "do not hunt for a ready-made fix in package caches, other installed
+  copies or unreachable git objects"): on the 8 dev tasks both arms ran, 7/8 vs 5/8 solved
+  with 10% fewer LLM calls and 18% fewer input tokens. H1 (fix the cause everywhere)
+  rejected: no score gain, +31% calls on its first 4 tasks.

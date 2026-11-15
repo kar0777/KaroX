@@ -147,3 +147,9 @@ git diff --check
   11 dev tasks it solves >= 7 (baseline k6d1+k6s1) with <= 56 LLM calls per task, or
   solves >= 9 with <= 62 calls per task; otherwise reject. Cost is compared on calls and
   miss-normalized price (E1 runs on Synthetic, the baseline ran on ReformBoss).
+- E1 verdict (run 43753202223, Synthetic, report `karox6-bench-data/reports/dev-k6e1`): raw
+  7/11 (DSH 7, OpenCode 9). Tasks 68 and 71 were lost to the upstream (Synthetic answered
+  503 to every request for its last ~20 minutes), as the baseline lost 52 to ReformBoss's IP
+  limit. On the 8 tasks both arms really ran: E1 7/8 vs baseline 5/8, 54 vs 60.5 LLM calls
+  per task, input tokens -18%, output +3.5%. Adopted per the rule above (D-028): the two
+  sentences are now BASE_PROMPT bullets; version 6.0.0.dev2.
