@@ -145,8 +145,10 @@ def test_retries_stop_after_the_attempt_limit() -> None:
     with pytest.raises(ProviderError):
         model.query(_conversation())
 
-    assert len(slept) == 6
-    assert len(provider.requests) == 7
+    assert len(slept) == 8
+    assert len(provider.requests) == 9
+    # Enough to outlast a 1-2 minute gateway restart.
+    assert sum(slept) >= 120.0
     assert max(slept) <= 30.0
 
 

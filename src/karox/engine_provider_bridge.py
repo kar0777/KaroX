@@ -67,9 +67,11 @@ _RETRYABLE_PROVIDER_ERRORS = frozenset(
 #: error page into the stream) is usually transient, but unlike a 429 it can
 #: also be a systematic incompatibility. Retry it, briefly: twice at most.
 _MALFORMED_RETRY_ATTEMPTS = 2
-#: Retries per model call. With the delays below a call waits at most about
-#: two minutes in total before the failure is reported.
-_PROVIDER_RETRY_ATTEMPTS = 6
+#: Retries per model call. With the delays below a call waits about 2.5
+#: minutes (up to ~3 with jitter) before the failure is reported: a gateway
+#: restart (ReformBoss 503 gateway_restarting, 2026-11-15) lasts 1-2 minutes,
+#: and six retries (~90 s) could give up just before it came back.
+_PROVIDER_RETRY_ATTEMPTS = 8
 _PROVIDER_RETRY_BASE_SECONDS = 2.0
 _PROVIDER_RETRY_MAX_SECONDS = 30.0
 #: A retry is only worth sending when the call still has this long to run

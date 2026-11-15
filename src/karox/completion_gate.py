@@ -684,6 +684,9 @@ def _is_runtime_entry(core: Any, relative: str) -> bool:
     return bool(_MAIN_GUARD.search(text))
 
 
+_USAGE_FLAGS = frozenset({"--help", "-h", "--version", "-V"})
+
+
 def _inline_probe(argv: Sequence[str]) -> bool:
     """``python -c CODE`` or a shell script carrying its own code in a heredoc.
 
@@ -695,6 +698,12 @@ def _inline_probe(argv: Sequence[str]) -> bool:
     """
     parts = [str(p) for p in argv]
     if len(parts) >= 2 and Path(parts[0]).stem.lower().startswith("python") and parts[1].startswith("/tmp/"):
+        return True
+    if len(parts) >= 2 and parts[-1] in _USAGE_FLAGS:
+        # ``python pkg/mod.py --help``: asking a program how it is called says
+        # nothing about the change. rebench26 v616 nicegui: the module could
+        # not run as a file (relative imports), that red usage probe stayed
+        # owed, and a run whose fix passed the hidden tests ended unverified.
         return True
     if len(parts) < 3:
         return False

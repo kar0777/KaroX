@@ -109,3 +109,7 @@ def test_a_heredoc_shell_probe_is_an_inline_snippet() -> None:
     assert _inline_probe(["python3", "/tmp/p11.py"])
     assert not _inline_probe(["python3", "scripts/check.py"])
     assert not _inline_probe(["bash", "-lc", "cd /app && python3 -m pytest -q"])
+    # Asking a program for its usage is a look, not a check (rebench26 v616 nicegui).
+    assert _inline_probe(["python", "nicegui/elements/xterm/xterm.py", "--help"])
+    assert _inline_probe(["python", "-m", "pkg.cli", "-h"])
+    assert not _inline_probe(["python", "-m", "pkg.cli", "--help-me"])

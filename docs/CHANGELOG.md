@@ -265,6 +265,12 @@
     in the sentence before it.
   - Declaring a new failure superseded no longer passes a check while a test
     the task names still fails.
+- A failed `--help`/`-h`/`--version` run is no longer owed as a failed check.
+  It says how a program is called, not whether the change works, and it
+  left a run whose fix passed the tests unverified.
+- A model call now retries for about 2.5 minutes (8 retries, was 6, about
+  90 seconds) before the run reports a provider failure. A provider gateway
+  restart lasts 1-2 minutes.
 - A resumed run no longer tells the model that a call interrupted without a
   recorded result "did not run and changed nothing". The call may have run
   before the crash, so the model is told to check the state first.
