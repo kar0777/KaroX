@@ -61,3 +61,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then BIN=/tmp/clean/Scripts; else BIN=/tmp/clean/bin; fi
           VIRTUAL_ENV=/tmp/clean uv pip install dist/*.whl
           "$BIN/karox" --version
+          "$BIN/python" scripts/smoke_installed.py "$BIN/karox"
+      - name: Install as a tool with the tui extra
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          uv tool install "${WHEEL}[tui]"
+          python -c "import shutil; print(shutil.which('karox'))"
+          karox --version
+          uv tool run --from "${WHEEL}[tui]" python -c "import prompt_toolkit"

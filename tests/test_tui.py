@@ -280,3 +280,18 @@ def test_cli_chat_needs_model(monkeypatch, capsys):
     assert exc.value.code == 2
     assert cli.main([]) == 0  # not a TTY under pytest: help, not the chat
     assert "chat" in capsys.readouterr().out
+
+
+def test_resume_last_skips_empty_and_current_sessions(tmp_path):
+    from karox6.core.store import SessionStore
+
+    term = FakeTerm(["used", "/quit"])
+    app, _ = make_app(tmp_path, [Turn(text="ok")], term)
+    asyncio.run(app.run())
+    used = app.session.session_id
+    # A newer-looking, never-used session (what every chat start creates).
+    term2 = FakeTerm(["/resume last", "/quit"])
+    app2, _ = make_app(tmp_path, [], term2, session_kwargs={"session_id": "99999999-999999-ffffff"})
+    assert SessionStore.latest(app2.config.home) == used
+    asyncio.run(app2.run())
+    assert app2.session.session_id == used

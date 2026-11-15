@@ -84,12 +84,31 @@ class SessionStore:
         return loaded
 
     @staticmethod
-    def latest(home: Path) -> str | None:
-        root = home / "sessions"
-        if not root.is_dir():
-            return None
-        ids = sorted(p.name for p in root.iterdir() if (p / "session.jsonl").is_file())
-        return ids[-1] if ids else None
+    def latest(home: Path, exclude: str | None = None) -> str | None:
+        """The most recently active session that has messages (not ``exclude``)."""
+        ids = active_sessions(home, exclude=exclude)
+        return ids[0] if ids else None
+
+
+def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
+    """Session ids with at least one message, most recently active first."""
+    root = home / "sessions"
+    if not root.is_dir():
+        return []
+    found: list[tuple[int, str]] = []
+    for entry in root.iterdir():
+        path = entry / "session.jsonl"
+        if entry.name == exclude or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as fh:
+                fh.readline()  # meta
+                if not fh.readline().strip():
+                    continue  # created but never used
+            found.append((path.stat().st_mtime_ns, entry.name))
+        except OSError:
+            continue
+    return [name for _, name in sorted(found, reverse=True)]
 
 
 def drop_dangling_calls(messages: list[Message]) -> list[Message]:
@@ -108,9 +127,9 @@ def drop_dangling_calls(messages: list[Message]) -> list[Message]:
     return out
 
 
-def resume_kwargs(home: Path, ref: str) -> dict[str, Any]:
+def resume_kwargs(home: Path, ref: str, *, exclude: str | None = None) -> dict[str, Any]:
     """Session keyword arguments that continue saved session ``ref`` (an id or 'last')."""
-    session_id = SessionStore.latest(home) if ref == "last" else ref
+    session_id = SessionStore.latest(home, exclude=exclude) if ref == "last" else ref
     if not session_id:
         raise ValueError(f"no session to resume under {home}")
     loaded = SessionStore.load(home, session_id)
@@ -123,13 +142,10 @@ def resume_kwargs(home: Path, ref: str) -> dict[str, Any]:
 
 
 def recent_sessions(home: Path, limit: int = 10) -> list[tuple[str, str]]:
-    """(session id, first line of its first task), newest first."""
+    """(session id, first line of its first task), most recently active first."""
     root = home / "sessions"
-    if not root.is_dir():
-        return []
-    ids = sorted((p.name for p in root.iterdir() if (p / "session.jsonl").is_file()), reverse=True)
     out: list[tuple[str, str]] = []
-    for session_id in ids[:limit]:
+    for session_id in active_sessions(home)[:limit]:
         title = ""
         try:
             with (root / session_id / "session.jsonl").open(encoding="utf-8") as fh:

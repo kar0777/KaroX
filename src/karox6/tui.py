@@ -301,7 +301,9 @@ class ChatApp:
                 self.write(f"{mark} {session_id}  {self.paint('dim', title)}\n")
         elif name == "/resume":
             try:
-                kwargs = resume_kwargs(self.config.home, arg or "last")
+                kwargs = resume_kwargs(
+                    self.config.home, arg or "last", exclude=self.session.session_id
+                )
             except (ValueError, FileNotFoundError) as exc:
                 self.write(self.paint("red", str(exc)) + "\n")
             else:
