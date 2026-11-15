@@ -69,3 +69,10 @@ jobs:
           python -c "import shutil; print(shutil.which('karox'))"
           karox --version
           uv tool run --from "${WHEEL}[tui]" python -c "import prompt_toolkit"
+      - name: Install with pipx
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          PY=$(uv python find 3.12)
+          uvx pipx install --python "$PY" --suffix=-pipx "${WHEEL}"
+          BIN=$(uvx pipx environment --value PIPX_BIN_DIR)
+          "$BIN/karox-pipx" --version
