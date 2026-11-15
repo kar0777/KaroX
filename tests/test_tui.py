@@ -161,7 +161,6 @@ def test_cancel_stops_only_the_turn(tmp_path):
 def test_sigint_under_asyncio_run_stops_only_the_turn(tmp_path):
     """The real Ctrl+C path: asyncio.run turns SIGINT into cancelling the main task."""
     import signal
-    import threading
 
     term = FakeTerm()
     turns = [Turn(calls=[("hang", {})]), Turn(calls=[("hang", {})]), Turn(text="after")]
@@ -183,7 +182,8 @@ def test_sigint_under_asyncio_run_stops_only_the_turn(tmp_path):
             started.clear()
             running = asyncio.ensure_future(app.turn(task))
             await started.wait()
-            threading.Timer(0.05, signal.raise_signal, args=(signal.SIGINT,)).start()
+            # Raised in the main thread, as a terminal's Ctrl+C is delivered to it.
+            loop.call_later(0.05, signal.raise_signal, signal.SIGINT)
             statuses.append(await running)
         statuses.append(await app.turn("three"))
         return statuses

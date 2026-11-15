@@ -404,12 +404,25 @@ def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
     if threading.current_thread() is not threading.main_thread():
         return lambda: None
     loop = asyncio.get_running_loop()
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        # POSIX: the loop's wakeup fd wakes it whichever thread receives the signal.
+        loop.add_signal_handler(signal.SIGINT, worker.cancel)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass  # Windows: no loop signal handlers; a plain handler below
+    else:
+
+        def restore_posix() -> None:
+            loop.remove_signal_handler(signal.SIGINT)
+            signal.signal(signal.SIGINT, previous)
+
+        return restore_posix
 
     def on_sigint(_signum: int, _frame: Any) -> None:
         loop.call_soon_threadsafe(worker.cancel)
 
     try:
-        previous = signal.signal(signal.SIGINT, on_sigint)
+        signal.signal(signal.SIGINT, on_sigint)
     except (ValueError, OSError):
         return lambda: None
 
