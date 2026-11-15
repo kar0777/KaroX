@@ -103,6 +103,14 @@
   script; a malformed field no longer raises in KaroX; and a script flooding
   the channel without a newline is stopped at 32 MB instead of growing
   KaroX's memory.
+- A verified run no longer leaves its probe files in the tree. Measured runs
+  left two to four `_probe_*.py` files on every task. Before the completion
+  gate's last word, KaroX deletes files this turn created whose name has a
+  probe/scratch/tmp/temp part, through Core's own-scratch delete (untracked,
+  inside the repository). It keeps any file a user turn or the final answer
+  names, one whose scratch word a user turn uses ("add a readiness probe"),
+  one another changed file or any tracked file refers to, and everything when
+  Git cannot be searched; files from earlier turns are never touched.
 - Recipes are no longer activated by a word in passing. A trigger counts in
   the task's first 1000 characters, where a task says what it is, or when two
   different triggers of the recipe agree; the three.js recipe answers to

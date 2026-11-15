@@ -329,6 +329,8 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         self._session_id: Optional[str] = None
         self._lease: Optional[MutationLease] = None
         self._environment: Optional[CoreToolEnvironment] = None
+        #: created_files when this run started (None: unknown, sweep nothing).
+        self._created_before_turn: Optional[frozenset[str]] = None
         self._persisted_call_ids: Set[str] = set()
         #: The code_run call whose script is making tool calls right now.
         self._script_parent_call: Optional[str] = None
@@ -432,6 +434,15 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         )
         self._session_id = session_id
         self._lease = lease
+        # The finish sweep only tidies what this turn created: an earlier
+        # turn's files were already handed to the user.
+        try:
+            self._created_before_turn = frozenset(
+                str(item).replace("\\", "/")
+                for item in self.sessions.load(session_id).created_files
+            )
+        except Exception:  # noqa: BLE001 - unknown history: sweep nothing
+            self._created_before_turn = None
         # The visual checker calls the same provider from inside a tool; its
         # tokens belong in this session's usage like every other request. They
         # were dropped before (record_usage was never set), so web runs

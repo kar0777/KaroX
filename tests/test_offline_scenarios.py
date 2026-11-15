@@ -273,6 +273,113 @@ def test_a_read_only_directory_still_lets_writable_files_be_edited(
         atomic_io.atomic_write(tmp_path / "new.py", b"x = 1\n")
 
 
+def test_a_verified_run_leaves_no_probe_files_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v609a: every task left two to four ``_probe_*.py`` files in the tree."""
+
+    repository = _repo(tmp_path)
+    calls = [
+        _tool_call("w1", "repo_write_file", {
+            "path": "_probe_div.py", "content": "from calc import div\nprint(div(6, 3))\n",
+        }),
+        _tool_call("w2", "repo_write_file", {"path": "tmp_values.py", "content": "ZERO = 0\n"}),
+        _tool_call("e1", "repo_edit_file", {
+            "path": "calc.py",
+            "old_string": "    return a / b\n",
+            "new_string": (
+                "    from tmp_values import ZERO\n"
+                "    if b == ZERO:\n"
+                "        raise ZeroDivisionError('b must not be zero')\n"
+                "    return a / b\n"
+            ),
+        }),
+        _tool_call("c1", "checks_run", {"argv": [sys.executable, "_probe_div.py"]}),
+        _probe_call("c2"),
+    ]
+    code, report, _provider = _run(tmp_path, monkeypatch, repository, calls)
+    assert code == 0 and report["verified"] is True, report.get("reason")
+    assert not (repository / "_probe_div.py").exists()
+    # The fix imports it: a scratch name does not make it disposable.
+    assert (repository / "tmp_values.py").exists()
+
+
+def test_scratch_leftovers_keep_what_the_task_or_the_fix_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from karox.engine_kernel_finish import scratch_leftovers
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "T")
+    # Tracked and unchanged, and it already imports a module the task supplies.
+    (tmp_path / "main.py").write_text("import tmp_supplied\n", encoding="utf-8")
+    _git(tmp_path, "add", "main.py")
+    _git(tmp_path, "commit", "-q", "-m", "seed")
+    for name, text in {
+        "_probe_a.py": "print(1)\n",
+        "_probe_named.py": "print(2)\n",
+        "tmp_helpers.py": "X = 1\n",
+        "tmp_supplied.py": "Y = 2\n",
+        "scratch_notes.txt": "notes\n",
+        "debug.html": "<p>diagnostics</p>\n",
+        "_form.html": "<form></form>\n",
+        "app.py": "import tmp_helpers\n",
+        "probe_ready.py": "READY = True\n",
+        "template_probe.py": "print(5)\n",
+    }.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    core = SimpleNamespace(safe_path=lambda relative: tmp_path / relative, repository=tmp_path)
+    created = [
+        "_probe_a.py", "_probe_named.py", "tmp_helpers.py", "tmp_supplied.py",
+        "scratch_notes.txt", "debug.html", "_form.html", "app.py", "gone_probe.py",
+    ]
+    record = SimpleNamespace(
+        task="Fix the parser; _probe_named.py shows the bug.",
+        created_files=created,
+        changed_files=created,
+    )
+    assert scratch_leftovers(core, record, "Kept scratch_notes.txt for review.") == ["_probe_a.py"]
+    # A task about probes may ask for one: its own scratch word protects it,
+    # and only the word itself ("template" is not "temp").
+    probe_task = SimpleNamespace(
+        task="Add a readiness probe for the template server.",
+        created_files=["probe_ready.py", "_tmp_check.py", "template_probe.py"],
+        changed_files=["probe_ready.py"],
+    )
+    (tmp_path / "_tmp_check.py").write_text("print(4)\n", encoding="utf-8")
+    assert scratch_leftovers(core, probe_task, "") == ["_tmp_check.py"]
+    # created_files spans turns: what an earlier turn created was handed over.
+    later_turn = SimpleNamespace(
+        task="Now fix the parser.",
+        task_history=["Write the timings somewhere."],
+        created_files=["tmp_helpers.py", "_probe_a.py"],
+        changed_files=["tmp_helpers.py", "_probe_a.py"],
+    )
+    assert scratch_leftovers(core, later_turn, "", frozenset({"tmp_helpers.py"})) == ["_probe_a.py"]
+    # One reference protects every file sharing the stem it names.
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "tmp_helpers.py").write_text("Z = 3\n", encoding="utf-8")
+    twins = SimpleNamespace(
+        task="Fix it.",
+        created_files=["a/tmp_helpers.py", "b/tmp_helpers.py", "_probe_a.py"],
+        changed_files=["a/tmp_helpers.py", "b/tmp_helpers.py", "_probe_a.py", "app.py"],
+    )
+    assert scratch_leftovers(core, twins, "") == ["_probe_a.py"]
+    # Without Git, references cannot be searched: nothing is swept.
+    outside = tmp_path.parent / f"{tmp_path.name}-nogit"
+    outside.mkdir()
+    # A temp directory inside some checkout must not lend it a repository.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outside.parent))
+    (outside / "_probe_b.py").write_text("print(6)\n", encoding="utf-8")
+    bare = SimpleNamespace(safe_path=lambda relative: outside / relative, repository=outside)
+    loose = SimpleNamespace(task="Fix it.", created_files=["_probe_b.py"], changed_files=["_probe_b.py"])
+    assert scratch_leftovers(bare, loose, "") == []
+
+
 def test_a_briefly_held_target_is_replaced_once_it_frees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

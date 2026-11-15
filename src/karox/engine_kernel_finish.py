@@ -10,7 +10,9 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 logger = logging.getLogger("karox.engine_kernel")
 
 import pathlib
-from typing import Any, Dict, Optional
+import re
+import subprocess
+from typing import Any, Dict, List, Optional
 from .engine_agent import (  # noqa: E402
     _EngineProviderFailure,
 )
@@ -22,9 +24,108 @@ from .agent import (  # noqa: E402
     AgentEventKind,
     AgentReport,
     _is_small_talk_task,
+    provider_alias,
 )
 from .security import redact
+from .session_analysis import HARNESS_REQUESTED_BY
 from .sessions import MutationLease, SessionRecord
+
+#: A name part that marks a file as scratch: web_scripts._SCRATCH_ARTIFACT
+#: without the page rule, under which ``debug.html`` or a ``_form.html``
+#: template partial would count as scratch although either can be the
+#: deliverable.
+_SCRATCH_TOKEN = re.compile(r"^(probe|scratch|tmp|temp)\d*$", re.I)
+_REFERENCE_SCAN_BYTES = 1_000_000
+
+
+def _scratch_tokens(stem: str) -> set[str]:
+    return {
+        found.group(1).lower()
+        for part in re.split(r"[-_. ]", stem)
+        if (found := _SCRATCH_TOKEN.match(part))
+    }
+
+
+def _referenced(core: Any, record: Any, candidates: List[str]) -> Optional[set[str]]:
+    """Candidates some other file names; None when that cannot be known."""
+
+    texts: List[str] = []
+    for raw in record.changed_files:
+        relative = str(raw).replace("\\", "/")
+        if relative in candidates:
+            continue
+        try:
+            path = core.safe_path(relative)
+            if path.is_file():
+                with path.open("rb") as handle:
+                    texts.append(handle.read(_REFERENCE_SCAN_BYTES).decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 - an unreadable file refers to nothing
+            continue
+    blob = "\n".join(texts)
+    # Stems, not paths: a/tmp_helpers.py and b/tmp_helpers.py share one, and
+    # a reference to it protects both.
+    stems = sorted({pathlib.PurePosixPath(item).stem for item in candidates})
+    found_stems = {stem for stem in stems if re.search(rf"\b{re.escape(stem)}\b", blob)}
+    for stem in stems:
+        if stem in found_stems:
+            continue
+        # An unchanged tracked file may already import the module this turn
+        # created (the task was to supply it).
+        try:
+            found = subprocess.run(
+                ["git", "grep", "-q", "-I", "-w", "-F", "-e", stem],
+                cwd=str(core.repository),
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if found.returncode == 0:
+            found_stems.add(stem)
+        elif found.returncode != 1:
+            return None
+    return {item for item in candidates if pathlib.PurePosixPath(item).stem in found_stems}
+
+
+def scratch_leftovers(
+    core: Any, record: SessionRecord, answer: str, earlier: frozenset[str] = frozenset()
+) -> List[str]:
+    """Scratch files this turn created that nothing else needs.
+
+    A file qualifies only if this turn created it (``earlier`` lists what the
+    session had created before; those were handed to the user already) and a
+    part of its name is a scratch word. It stays when any user turn or the
+    final answer names it, when a user turn uses its scratch word ("add a
+    readiness probe"), or when another changed file or any tracked file refers
+    to it by name (a ``tmp_helpers`` module the fix imports). If references
+    cannot be searched, nothing qualifies.
+    """
+
+    task = "\n".join([*(getattr(record, "task_history", None) or []), record.task or ""])
+    named = f"{task}\n{answer}".lower()
+    candidates: List[str] = []
+    for raw in record.created_files:
+        relative = str(raw).replace("\\", "/")
+        if relative in earlier:
+            continue
+        name = pathlib.PurePosixPath(relative).name
+        tokens = _scratch_tokens(pathlib.PurePosixPath(name).stem)
+        if not tokens or name.lower() in named:
+            continue
+        if any(re.search(rf"\b{word}s?\b", task, re.I) for word in tokens):
+            continue
+        try:
+            if not core.safe_path(relative).is_file():
+                continue
+        except Exception:  # noqa: BLE001 - a path Core will not resolve stays
+            continue
+        candidates.append(relative)
+    if not candidates:
+        return []
+    referenced = _referenced(core, record, candidates)
+    if referenced is None:
+        return []
+    return [relative for relative in candidates if relative not in referenced]
 
 
 class EngineFinishMixin:
@@ -157,6 +258,9 @@ class EngineFinishMixin:
         reason: str,
         provider_message: Optional[str] = None,
     ) -> AgentReport:
+        if status == "verified":
+            # Before the gate's last word, so it judges the tidied tree.
+            self._sweep_scratch(session_id, provider_message or "")
         if status == "verified" and completion_gate.floor(
             self.core, self.sessions.load(session_id)
         ):
@@ -202,6 +306,45 @@ class EngineFinishMixin:
         return self._report(
             record, reason=reason, provider_message=provider_message, restored=restore_note
         )
+
+    def _sweep_scratch(self, session_id: str, answer: str) -> None:
+        """Delete the probes this run created before it is reported verified.
+
+        Measured runs left two to four ``_probe_*.py`` files in the user's tree
+        on every task (v609a: all three) and nothing removed them; to pytest a
+        stray ``probe_test.py`` is a test module. The delete goes through Core
+        like the model's own, and a refusal or error leaves the files alone.
+        """
+
+        environment = getattr(self, "_environment", None)
+        earlier = getattr(self, "_created_before_turn", None)
+        if environment is None or earlier is None:
+            return
+        try:
+            record = self.sessions.load(session_id)
+            doomed = scratch_leftovers(self.core, record, answer, earlier)
+        except Exception:  # noqa: BLE001 - tidying never fails a finished run
+            return
+        if not doomed:
+            return
+        action = {
+            "name": provider_alias("repo.command"),
+            "arguments": {"action": "delete", "paths": doomed},
+            "tool_call_id": f"harness-{len(record.provider_history)}-sweep",
+        }
+        try:
+            environment._execute(action, requested_by=HARNESS_REQUESTED_BY)
+        except Exception:  # noqa: BLE001 - the files stay; the run is unaffected
+            return
+        removed = []
+        for relative in doomed:
+            try:
+                if not self.core.safe_path(relative).exists():
+                    removed.append(relative)
+            except Exception:  # noqa: BLE001 - unknown: not reported as removed
+                continue
+        if removed:
+            self._emit(AgentEventKind.WARNING, reason="scratch_removed", detail=", ".join(removed))
 
     def _report(
         self,
