@@ -496,3 +496,33 @@ def test_brief_log_lines():
     assert failed == "✗ read → no such file"
     assert event_line(ev.AssistantMessage(step=1, text="", tool_calls=[{}]), calls) is None
     assert event_line(ev.Notice(kind="wrap_up", text="..."), calls) == "note to the agent: wrap_up"
+
+
+class NapTool:
+    name = "nap"
+    description = "sleeps a little"
+    parameters = {"type": "object", "properties": {}}
+    read_only = True
+
+    async def run(self, args, ctx):
+        await asyncio.sleep(0.3)
+        return ToolResult("rested")
+
+
+def test_brief_status_batches_until_the_run_ends(tmp_path):
+    turns = [Turn(calls=[("nap", {})]), Turn(calls=[("nap", {})]), Turn(text="done")]
+    manager, _ = make_manager(tmp_path, turns, extra_tools=[NapTool()])
+
+    async def go():
+        run, _ = manager.start("rest twice")
+        short = await manager.status(run.run_id, wait_s=0.2, detail="brief")
+        assert short["status"] == "running"  # the wait ran out first
+        started = asyncio.get_running_loop().time()
+        view = await manager.status(run.run_id, since=short["next"], wait_s=10, detail="brief")
+        assert asyncio.get_running_loop().time() - started < 5  # woke when the run ended
+        assert view["status"] == "completed"
+        assert [line for line in view["log"] if line.startswith("✓ nap")]
+        assert view["log"][-1] == "finished: completed"
+        await manager.shutdown()
+
+    asyncio.run(go())

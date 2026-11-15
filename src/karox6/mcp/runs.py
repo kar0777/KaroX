@@ -208,7 +208,18 @@ class RunManager:
         wait_s = float(wait_s)
         wait_s = min(max(wait_s, 0.0), WAIT_CAP_S) if math.isfinite(wait_s) else 0.0
         await asyncio.sleep(0)  # let the run make progress even for a non-waiting poll
-        if wait_s and run.running and self._next(run) <= since:
+        if wait_s and run.running and detail == "brief":
+            # A chat client pays for every poll: collect lines for the whole wait and wake
+            # early only when the run ends or needs an approval.
+            deadline = time.monotonic() + wait_s
+            while run.running and not run.pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                tick = run.tick
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(tick.wait(), timeout=remaining)
+        elif wait_s and run.running and self._next(run) <= since:
             tick = run.tick
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(tick.wait(), timeout=wait_s)

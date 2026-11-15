@@ -47,7 +47,7 @@ enable the connector in a chat and ask, for example: "Use KaroX to fix the faili
 | Tool | What it does |
 |---|---|
 | `karox_run` | start a task in a directory (or continue a session); idempotent per `request_id` |
-| `karox_status` | progress events, final answer, usage and pending approvals (long-poll) |
+| `karox_status` | a short log (one line per action), final answer, usage and pending approvals; the long-poll gathers lines and wakes early only when the run ends or needs approval (`detail: full` gives raw events) |
 | `karox_approve` | approve or deny a pending dangerous command |
 | `karox_cancel` | stop a run |
 | `karox_diff` / `karox_files` | the workspace diff / files the run changed |
