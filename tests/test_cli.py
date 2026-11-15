@@ -42,3 +42,28 @@ def test_append_system_prompt(tmp_path):
     assert build_system_prompt(tmp_path, detect_shell(), append="  ").startswith(
         BASE_PROMPT + "\n\nEnvironment:"
     )
+
+
+def test_python_hint_for_windows_store_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    from karox6.core import prompt
+
+    stub = r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    real = r"C:\Python312\python.exe"
+    monkeypatch.setattr(prompt.platform, "system", lambda: "Windows")
+
+    def which(paths: dict[str, str]):  # type: ignore[no-untyped-def]
+        return paths.get
+
+    monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub, "python": real}))
+    hint = prompt.python_hint()
+    assert hint is not None
+    assert hint.startswith("Python: run it as `python`")
+    monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub}))
+    assert (prompt.python_hint() or "").startswith("Python: not installed")
+    monkeypatch.setattr(prompt.shutil, "which", which({"python3": real, "python": real}))
+    assert prompt.python_hint() is None
+    monkeypatch.setattr(prompt.shutil, "which", which({"python": real}))
+    assert prompt.python_hint() is None  # no python3 at all: "command not found" is clear
+    monkeypatch.setattr(prompt.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub}))
+    assert prompt.python_hint() is None

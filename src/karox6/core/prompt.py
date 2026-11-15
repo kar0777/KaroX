@@ -7,6 +7,7 @@ details live in the tool descriptions, as in DSH.
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -57,7 +58,31 @@ def environment_block(workspace: Path, shell: ShellInfo) -> str:
         f"- Date: {time.strftime('%Y-%m-%d')}",
         f"- {git_summary(workspace)}",
     ]
+    hint = python_hint()
+    if hint:
+        lines.append(f"- {hint}")
     return "\n".join(lines)
+
+
+def python_hint() -> str | None:
+    """On Windows `python3` is often the Microsoft Store placeholder: it prints only
+    "Python" and exits with code 49, which agents misread and retry."""
+    if platform.system() != "Windows":
+        return None
+
+    def kind(name: str) -> str:
+        path = shutil.which(name)
+        if not path:
+            return "missing"
+        return "stub" if "\\windowsapps\\" in path.lower().replace("/", "\\") else "real"
+
+    if kind("python3") != "stub":
+        return None
+    placeholder = "`python3` here is only the Microsoft Store placeholder (exit code 49)"
+    for name in ("python", "py"):
+        if kind(name) == "real":
+            return f"Python: run it as `{name}`; {placeholder}"
+    return f"Python: not installed; {placeholder}"
 
 
 def git_summary(workspace: Path) -> str:

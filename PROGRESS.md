@@ -186,3 +186,11 @@ git diff --check
   Kept as designed: localhost origins stay allowed (the token is still required);
   `karox_approve` stays a client tool marked destructive, docs warn about injected approvals.
   605 tests.
+- Live MCP end-to-end on this PC (own HTTP client like ChatGPT, CrowLLM grok free, token
+  from env): initialize -> karox_run -> long-poll karox_status -> karox_diff -> DELETE,
+  fixed a toy bug in 6 steps / 74 s. A first attempt exposed a Windows trap: `python3` is
+  the Microsoft Store placeholder (prints "Python", exit 49) and a weak model looped on it
+  for 30 steps; the environment block now names the working interpreter when that stub is
+  detected (Windows only, so no bench effect). The same run also committed to the user's
+  repo unasked: candidate prompt rule "do not commit/push unless asked" goes into the next
+  A/B batch (D-021), not straight into BASE_PROMPT.
