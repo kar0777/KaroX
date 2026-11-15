@@ -40,9 +40,13 @@ from .engine_tool_support import (  # noqa: F401
 
 import hashlib
 import json
+import re
 import shlex
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, List, Mapping
 from .agent import AgentEventKind
+from .check_targets import is_test_path
+from .completion_rules import is_doc
+from .web_document import is_scratch_artifact
 from .core import ToolDefinition
 from .engine.environments.local import clip_output
 from .engine_tool_bodies import (  # noqa: E402,F401
@@ -88,6 +92,48 @@ SETTLE_NOTICES = 2
 PROBE_STREAK_AT = (12, 24)
 #: Counts of one exact call at which the repeat notice names the loop.
 REPEAT_NOTICE_AT = (3, 5, 8)
+#: Notices per run for a failing test rewritten while the code stayed unchanged.
+EXPECTATION_NOTICES = 2
+#: pytest's summary (``FAILED path::id``) and verbose (``path::id FAILED``) lines.
+_FAILED_NODE = re.compile(r"^(?:(?:FAILED|ERROR) +(\S+?\.py)::|(\S+?\.py)::\S+ +(?:FAILED|ERROR)\b)", re.M)
+
+
+def _relative(path: str, root: str) -> str:
+    text = str(path).split("::", 1)[0].replace("\\", "/")
+    if root and text.startswith(root + "/"):
+        text = text[len(root) + 1:]
+    return text[2:] if text.startswith("./") else text
+
+
+def _failed_test_files(data: Mapping[str, Any], root: str) -> List[str]:
+    """Test files with a failure in a check result: its failure map, else its output."""
+
+    names: List[str] = []
+    failure_map = data.get("failure_map")
+    for item in (failure_map.get("failures") or []) if isinstance(failure_map, dict) else []:
+        if isinstance(item, dict):
+            names.append(str(item.get("test_id") or item.get("path") or ""))
+    if not names:
+        for match in _FAILED_NODE.finditer(str(data.get("stdout") or data.get("output") or "")):
+            names.append(match.group(1) or match.group(2))
+    found = [_relative(name, root) for name in names]
+    return [path for index, path in enumerate(found) if is_test_path(path) and path not in found[:index]]
+
+
+def _whole_test_files(arguments: Mapping[str, Any], data: Mapping[str, Any], root: str) -> List[str]:
+    """Test files a passing run covered whole: no node id, no ``-k`` selection."""
+
+    raw = arguments.get("argv") or arguments.get("targets") or data.get("targets") or []
+    items = [str(item) for item in raw] if isinstance(raw, list) else []
+    if "-k" in items:
+        return []
+    return [_relative(item, root) for item in items if "::" not in item and is_test_path(_relative(item, root))]
+
+
+def _changed_paths(data: Mapping[str, Any], root: str) -> List[str]:
+    path = data.get("path")
+    paths = [path] if isinstance(path, str) and path else data.get("changed_files")
+    return [_relative(str(item), root) for item in paths] if isinstance(paths, list) else []
 
 
 class EngineGuidanceMixin:
@@ -228,8 +274,17 @@ class EngineGuidanceMixin:
         context. Reads the model already knows it needs belong in one response.
         """
 
+        return self._lone_step_notice(not definition.mutates and int(action.get("batch_size") or 1) <= 1)
+
+    def _lone_step_notice(self, lone: bool) -> str:
+        """Count responses that each made one read; a code_run of one call counts too.
+
+        rebench26 v617rb hermes-webui-1818: 31 responses in a row each ran a
+        code_run script with one call, and no notice fired: only direct calls
+        were counted.
+        """
+
         step = int(getattr(self._kernel, "_step", 0) or 0)
-        lone = not definition.mutates and int(action.get("batch_size") or 1) <= 1
         if not lone:
             self._lone_read_steps = []
             return ""
@@ -352,6 +407,63 @@ class EngineGuidanceMixin:
             "will not change unless something else changes first. Use what you already "
             "have, or try a different approach."
         )
+
+    def _expectation_notice(
+        self, core_name: str, arguments: Mapping[str, Any], data: Mapping[str, Any], ok: bool
+    ) -> str:
+        """Name an edit that rewrites a failing test while the code under test stayed put.
+
+        rebench26 v617rb hermes-webui-1818: the model's own test asserted the
+        slug the task showed, failed, and was rewritten to the slug the code
+        produced; the hidden test asserted the task's value. The edit still
+        runs; the model is only asked where the new expected value comes from.
+        """
+
+        seq = int(getattr(self, "_action_seq", 0) or 0)
+        root = str(getattr(getattr(self, "_core", None), "repository", "") or "").replace("\\", "/").rstrip("/")
+        if core_name in _TEST_TOOLS:
+            self._note_test_result(arguments, data, seq, root)
+            return ""
+        changed = ok and core_name in _MUTATION_TOOLS and data.get("changed") is not False
+        paths = _changed_paths(data, root) if changed else []
+        if any(not is_test_path(p) and not is_scratch_artifact(p) and not is_doc(p) for p in paths):
+            self._source_change_seq = seq
+            # The tests KaroX ran on the edited code count as a run after it.
+            affected = data.get("affected_tests")
+            if isinstance(affected, dict):
+                self._note_test_result({"targets": affected.get("targets")}, affected, seq, root)
+            return ""
+        since = int(getattr(self, "_source_change_seq", 0) or 0)
+        red: Dict[str, int] = getattr(self, "_red_tests", None) or {}
+        hits = [path for path in paths if is_test_path(path) and red.get(path, -1) >= since]
+        sent = int(getattr(self, "_expectation_notices", 0) or 0)
+        if not hits or sent >= EXPECTATION_NOTICES:
+            return ""
+        self._expectation_notices = sent + 1
+        for path in hits:
+            red.pop(path, None)
+        return (
+            f"{hits[0]} failed when you last ran it, and no code under test has changed "
+            "since: this edit changes the test, not the code. If the test itself was broken "
+            "(import, fixture, syntax), that is fine. If it changes an expected value, quote "
+            "the task sentence, task example or existing test that supports the new value; "
+            "without one, the code is what is wrong."
+        )
+
+    def _note_test_result(self, arguments: Mapping[str, Any], data: Mapping[str, Any], seq: int, root: str) -> None:
+        """Mark the test files a run failed; clear the ones a passing run covered whole."""
+
+        exit_code = data.get("exit_code", data.get("returncode"))
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool) or data.get("timed_out"):
+            return
+        red: Dict[str, int] = getattr(self, "_red_tests", None) or {}
+        self._red_tests = red
+        if exit_code:
+            for path in _failed_test_files(data, root):
+                red[path] = seq
+        else:
+            for path in _whole_test_files(arguments, data, root):
+                red.pop(path, None)
 
     def _time_left_notice(self) -> str:
         if self._time_notice_sent:

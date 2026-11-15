@@ -329,6 +329,22 @@ def test_a_script_cannot_finish_the_run(tmp_path: Path, repository: Path) -> Non
     assert report.verified is True, report.reason
 
 
+def test_scripts_of_one_read_each_get_the_batching_nudge(tmp_path: Path, repository: Path) -> None:
+    """rebench26 v617rb hermes-webui-1818: 31 one-call scripts in a row, no nudge."""
+
+    reads = [
+        _response((_code_call(f"c{i}", "print(repo_read_file(path='seed.txt'))"),)) for i in range(6)
+    ]
+    harness = Harness(
+        repository,
+        tmp_path,
+        [*reads, _response((_write_call_hello("w"),)), _response((_finish_call("f", "created hello.txt with hi"),))],
+    )
+    harness.run()
+    tools = [m for m in harness.record().provider_history if m.get("role") == "tool" and not m.get("nested_in")]
+    assert len([m for m in tools if "each made a single read" in str(m.get("content"))]) == 1
+
+
 def _write_call_hello(call_id: str) -> Any:
     return _tool_call(call_id, "repo_write_file", {"path": "hello.txt", "content": "hi"})
 

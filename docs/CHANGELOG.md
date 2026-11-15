@@ -141,6 +141,21 @@
 
 ### Changed
 
+- Expected values come from the task, not from the change. The agent writes
+  down the results the task itself fixes (the outputs, identifiers, messages
+  and config values it shows, and what existing tests assert for sibling
+  cases) before editing; a test or probe that disagrees with the change counts
+  against the change unless a quoted task sentence, example or existing test
+  supports a new expectation; where the task leaves a case open, the reading
+  that changes the least existing behaviour is expected. The self-review and
+  adversarial pass compare output with the task's examples field by field and
+  ask for probes that print expected next to actual and exit non-zero on a
+  mismatch, instead of printed values only.
+- Editing a test that failed at its last run, while no code under test has
+  changed since, adds a notice asking for the source of any new expected value
+  (at most twice per run; the edit still runs).
+- A `code_run` script that makes a single read counts toward the batching
+  notice, like a direct single read.
 - The system prompt, engine contract and self-review were rewritten as general
   engineering guidance; the page/browser paragraphs are sent only when the
   request carries `browser_command`.

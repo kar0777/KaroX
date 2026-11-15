@@ -22,6 +22,9 @@ from .security import redact
 if TYPE_CHECKING:
     from .engine_kernel import EngineKernel
 
+#: Script functions that change the repository; a script of one such call is work, not a lone read.
+_SCRIPT_MUTATORS = frozenset({"repo_edit_file", "repo_write_file", "repo_apply_patch", "repo_command"})
+
 
 class EngineCodeModeMixin:
     """Methods composed into CoreToolEnvironment."""
@@ -123,6 +126,14 @@ class EngineCodeModeMixin:
             line = edit.data.get("affected_tests_line") if isinstance(edit.data, dict) else None
             if isinstance(line, str) and line.strip():
                 notices.append(line.strip())
+        lone = (
+            len(outcome.calls) == 1
+            and outcome.calls[0].name not in _SCRIPT_MUTATORS
+            and int(action.get("batch_size") or 1) <= 1
+        )
+        batching = self._lone_step_notice(lone)  # type: ignore[attr-defined]
+        if batching:
+            notices.append(batching)
         text = code_mode.render(outcome, notices)
         kernel._emit(
             AgentEventKind.TOOL_FINISHED,

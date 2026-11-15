@@ -71,6 +71,50 @@ def test_the_repeat_notice_names_a_loop_at_three_five_and_eight() -> None:
     assert env._repeat_notice("repo.read_file", {"path": "b.py"}) == ""
 
 
+def test_rewriting_a_failing_test_without_a_code_change_asks_for_the_source() -> None:
+    from types import SimpleNamespace
+
+    from karox.engine_guidance import EngineGuidanceMixin
+
+    class _Env(EngineGuidanceMixin):
+        pass
+
+    env = _Env.__new__(_Env)
+    env._core = SimpleNamespace(repository="/testbed")
+
+    def act(core_name, arguments, data, ok=True):
+        env._action_seq = int(getattr(env, "_action_seq", 0)) + 1
+        return env._expectation_notice(core_name, arguments, data, ok)
+
+    def edit(path, **extra):
+        return act("repo.edit_file", {}, {"path": path, "changed": True, **extra})
+
+    run = {"argv": ["python", "-m", "pytest", "-q", "tests/test_slug.py::test_named"]}
+    failed = {"exit_code": 1, "stdout": "FAILED tests/test_slug.py::test_named - assert 'a' == 'custom:a'"}
+    assert act("checks.run", run, failed) == ""
+    assert edit("README.md") == ""  # a doc edit is not code under test
+    notice = edit("tests/test_slug.py")
+    assert "tests/test_slug.py failed" in notice and "quote" in notice
+    # Fixing the code first, then the test, is the normal order: no notice.
+    act("checks.run", run, failed)
+    assert edit("api/config.py") == ""
+    assert edit("tests/test_slug.py") == ""
+    # A passing node id does not clear its file; a whole-file pass does.
+    act("checks.run", {"argv": ["bash", "-lc", "pytest"]}, {"exit_code": 2, "stdout": "tests/test_b.py::t ERROR"})
+    act("checks.run", {"argv": ["pytest", "tests/test_b.py::other"]}, {"exit_code": 0})
+    act("checks.run", {"argv": ["python", "-m", "pytest", "/testbed/tests/test_b.py"]}, {"exit_code": 0})
+    assert edit("tests/test_b.py") == ""
+    # The tests KaroX runs after a code edit count; a scratch probe is not code under test.
+    affected = {"targets": ["tests/test_c.py"], "exit_code": 1,
+                "failure_map": {"failures": [{"test_id": "tests/test_c.py::test_x"}]}}
+    assert edit("pkg/c.py", affected_tests=affected) == ""
+    act("repo.write_file", {}, {"path": "probe_c.py", "changed": True})
+    assert "tests/test_c.py" in edit("./tests/test_c.py")
+    # Two notices per run at most.
+    act("checks.run", {"argv": ["pytest", "tests/test_d.py"]}, {"exit_code": 1, "stdout": "FAILED tests/test_d.py::t"})
+    assert edit("tests/test_d.py") == ""
+
+
 def test_the_environment_block_names_layout_toolchain_and_git(tmp_path) -> None:
     from karox.project_context import render_environment
 
