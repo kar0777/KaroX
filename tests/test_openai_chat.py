@@ -238,3 +238,45 @@ def test_retry(status, succeeds, count):
             await provider.aclose()
 
     asyncio.run(go())
+
+
+def test_rate_limit_retries_until_budget():
+    from karox6.core.messages import Message, Usage
+    from karox6.providers.base import ModelResponse
+
+    class Flaky:
+        name = "flaky"
+
+        def __init__(self, failures, code="rate_limit"):
+            self.failures, self.code, self.calls = failures, code, 0
+
+        async def complete(self, request, on_delta=None):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise ProviderError(self.code, "busy")
+            return ModelResponse(Message("assistant", "ok"), Usage(), "stop", None)
+
+        async def aclose(self):
+            pass
+
+    async def go():
+        fast = RetryPolicy(initial_delay_s=0.001, rate_limit_max_delay_s=0.002)
+        # Far more than max_retries rate limits are waited out within the budget.
+        provider = Flaky(12)
+        assert (await complete_with_retry(provider, request(), policy=fast)).message.content == "ok"
+        assert provider.calls == 13
+        # Other retryable errors still stop after max_retries.
+        provider = Flaky(12, code="server")
+        with pytest.raises(ProviderError):
+            await complete_with_retry(provider, request(), policy=fast)
+        assert provider.calls == fast.max_retries + 1
+        # The waiting budget bounds rate limits.
+        tight = RetryPolicy(
+            initial_delay_s=0.01, rate_limit_max_delay_s=0.01, jitter=0.0, rate_limit_budget_s=0.035
+        )
+        provider = Flaky(100)
+        with pytest.raises(ProviderError):
+            await complete_with_retry(provider, request(), policy=tight)
+        assert provider.calls == 4
+
+    asyncio.run(go())

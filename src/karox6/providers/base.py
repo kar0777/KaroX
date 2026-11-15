@@ -101,7 +101,12 @@ class Provider(Protocol):
 class RetryPolicy:
     """Defaults follow DSH (dsh-llm): 5 retries, 0.5 s doubling to 10 s, +-10% jitter.
 
-    A server ``Retry-After`` is honoured up to ``max_retry_after_s``.
+    A server ``Retry-After`` is honoured up to ``max_retry_after_s``. Rate limits are
+    different: a provider can refuse a key for minutes (e.g. a per-key limit on client
+    addresses in a 10-minute window), so ``rate_limit`` errors are retried until
+    ``rate_limit_budget_s`` of waiting is spent, with delays growing to
+    ``rate_limit_max_delay_s``. A request refused with 429 was not executed, so
+    waiting it out is always safe; the session deadline still bounds it.
     """
 
     max_retries: int = 5
@@ -109,11 +114,14 @@ class RetryPolicy:
     max_delay_s: float = 10.0
     jitter: float = 0.1
     max_retry_after_s: float = 60.0
+    rate_limit_budget_s: float = 900.0
+    rate_limit_max_delay_s: float = 60.0
 
-    def delay(self, attempt: int, retry_after: float | None) -> float:
+    def delay(self, attempt: int, retry_after: float | None, *, rate_limit: bool = False) -> float:
         if retry_after is not None and 0 < retry_after <= self.max_retry_after_s:
             return retry_after
-        base = min(self.initial_delay_s * 2.0 ** (attempt - 1), self.max_delay_s)
+        cap = self.rate_limit_max_delay_s if rate_limit else self.max_delay_s
+        base = min(self.initial_delay_s * 2.0 ** (attempt - 1), cap)
         return base * (1 - self.jitter + 2 * self.jitter * random.random())
 
 
@@ -129,14 +137,23 @@ async def complete_with_retry(
 ) -> ModelResponse:
     policy = policy or RetryPolicy()
     attempt = 0
+    rate_limit_waited = 0.0
     while True:
         try:
             response = await provider.complete(request, on_delta)
         except ProviderError as exc:
             attempt += 1
-            if exc.code not in RETRYABLE or attempt > policy.max_retries:
+            if exc.code not in RETRYABLE:
                 raise
-            delay = policy.delay(attempt, exc.retry_after)
+            if exc.code == "rate_limit":
+                delay = policy.delay(attempt, exc.retry_after, rate_limit=True)
+                if rate_limit_waited + delay > policy.rate_limit_budget_s:
+                    raise
+                rate_limit_waited += delay
+            elif attempt > policy.max_retries:
+                raise
+            else:
+                delay = policy.delay(attempt, exc.retry_after)
             if on_retry is not None:
                 maybe = on_retry(attempt, delay, exc)
                 if maybe is not None:
