@@ -259,6 +259,8 @@ def _pytest(text: str) -> list[dict[str, object]]:
     sections = _pytest_sections(text)
     rows: list[dict[str, object]] = []
     summaries = list(_PYTEST_SUMMARY.finditer(text))
+    # Sections come in summary order: two files' same-named tests take one each.
+    used: set[int] = set()
     for match in summaries:
         node, reason = _split_node_reason(match.group("rest").strip())
         if not node or (".py" not in node and "::" not in node):
@@ -271,8 +273,14 @@ def _pytest(text: str) -> list[dict[str, object]]:
         # same-named test used to share the first class's block.
         qualified = ".".join(node.split("::")[1:]) if "::" in node else ""
         section = (
-            _pytest_section_for(qualified, sections) if "." in qualified else None
-        ) or _pytest_section_for(tail, sections)
+            _pytest_section_for(qualified, sections, used) if "." in qualified else None
+        ) or _pytest_section_for(tail, sections, used)
+        if "::" not in node:
+            # A collection error (a SyntaxError or ImportError after an edit):
+            # its "ERROR collecting <path>" block holds the line that broke.
+            section = _pytest_section_for(f"ERROR collecting {node_path}", sections, used)
+        if section is not None:
+            used.add(id(section))
         # The deepest traceback frame may live in the module under test, not
         # in the test file. Its path and line must travel together: pairing the
         # node's test file with the source file's line sends the repair to a
@@ -345,9 +353,12 @@ def _pytest_sections(
 def _pytest_section_for(
     tail: str,
     sections: Sequence[tuple[str, str, Optional[int], Optional[int], str]],
+    used: Optional[set[int]] = None,
 ) -> Optional[tuple[str, str, Optional[int], Optional[int], str]]:
     if not tail:
         return None
+    if used:
+        sections = [section for section in sections if id(section) not in used] or sections
     # Exact first, then a whole trailing name, then a substring: a bare
     # substring pass let "test_parse" take the section of "test_parse_long".
     for accept in (
@@ -384,12 +395,14 @@ def _split_node_reason(rest: str) -> tuple[str, str]:
             return rest[:index].strip(), rest[index + 3 :].strip()
     return rest.strip(), ""
 
+# A subTest adds " (i=0)" or " [msg] (i=0)" after the qualified name.
 _UNITTEST_HEADER = re.compile(
-    r"^(?P<kind>FAIL|ERROR): (?P<test>\S+) \((?P<qual>[\w.]+)\)$", re.M
+    r"^(?P<kind>FAIL|ERROR): (?P<test>\S+) \((?P<qual>[\w.]+)\)(?: .*)?$", re.M
 )
 
+# "in <module>" / "in <lambda>": an import-time error raises outside a function.
 _UNITTEST_FILE = re.compile(
-    r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\w+)\s*$', re.M
+    r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\S+)\s*$', re.M
 )
 
 _UNITTEST_MESSAGE = re.compile(
@@ -658,7 +671,7 @@ def _node_test(text: str) -> list[dict[str, object]]:
         )
     return rows
 
-_GO_FAILED = re.compile(r"^--- FAIL: (?P<test>\w+) \([\d.]+s\)\s*$")
+_GO_FAILED = re.compile(r"^--- FAIL: (?P<test>\S+) \([\d.]+s\)\s*$")  # TestParse/empty: a subtest
 
 _GO_LOCATION = re.compile(
     r"^\s+(?P<path>[^\s:]+\.go):(?P<line>\d+):(?P<msg>.*)$"
@@ -682,7 +695,7 @@ def _go_test(text: str) -> list[dict[str, object]]:
         path = ""
         line: Optional[int] = None
         message = ""
-        while index < len(lines) and not lines[index].startswith("--- "):
+        while index < len(lines) and not lines[index].strip().startswith("--- "):
             location = _GO_LOCATION.match(lines[index])
             if location is not None and not path:
                 path = location.group("path")
@@ -691,6 +704,9 @@ def _go_test(text: str) -> list[dict[str, object]]:
             elif message and lines[index].strip().startswith("panic:"):
                 message = lines[index].strip()
             index += 1
+        following = _GO_FAILED.match(lines[index].strip()) if index < len(lines) else None
+        if not path and following is not None and following.group("test").startswith(test + "/"):
+            continue  # the parent of failed subtests: each subtest has its own row
         rows.append(
             _row(
                 "go-test",

@@ -24,7 +24,6 @@ import json
 import os
 import pathlib
 import queue
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -100,15 +99,6 @@ def tool_specs(tools: Sequence[ProviderTool]) -> List[Dict[str, Any]]:
         required = schema.get("required") if isinstance(schema.get("required"), list) else []
         specs.append({"name": tool.name, "required": [str(item) for item in required]})
     return specs
-
-
-def normalize_arguments(core_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Forgive the one shape scripts get wrong most: a command as one string."""
-
-    if core_name in {"checks.run", "tests.run"} and isinstance(arguments.get("argv"), str):
-        arguments = dict(arguments)
-        arguments["argv"] = shlex.split(arguments["argv"])
-    return arguments
 
 
 def json_safe(value: Any, budget: int = DATA_CHARS) -> Any:

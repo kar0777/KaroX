@@ -161,7 +161,7 @@ def test_release_gate_and_tree_test_use_one_budget() -> None:
     )
     assert _RELEASE_GATE.PACKAGE == PACKAGE
     assert lines == independent
-    assert _RELEASE_GATE.MAX_PACKAGE_LINES == 96_000  # code mode (2026-11-14), owner-approved growth
+    assert _RELEASE_GATE.MAX_PACKAGE_LINES == 96_500  # v60.4 tool-API leniency (2026-11-15), owner-approved growth
     assert _RELEASE_GATE.MAX_PACKAGE_LINES > lines
     assert _RELEASE_GATE.line_budget_problem(independent) is None
 

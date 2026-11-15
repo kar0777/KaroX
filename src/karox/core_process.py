@@ -700,8 +700,16 @@ class ProcessToolsMixin:
                     and float(result.get("duration_ms") or 0.0)
                     <= check_baseline.SWAP_MAX_CHECK_SECONDS * 1000
                 ):
-                    baseline = self._baseline_on_start_files(plan)
-                    baselines[tuple(plan.argv)] = baseline
+                    from . import git_baseline
+
+                    if not git_baseline.changed_paths():
+                        # Nothing edited yet: this run is the start bytes. It
+                        # is the baseline for the runs after the first edit
+                        # (caching None here left them with none at all).
+                        baselines[tuple(plan.argv)] = current
+                    else:
+                        baseline = self._baseline_on_start_files(plan)
+                        baselines[tuple(plan.argv)] = baseline
         if baseline is not None:
             info = check_baseline.compare(
                 baseline, current, getattr(self, "_task_test_names", frozenset())

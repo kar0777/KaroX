@@ -51,6 +51,7 @@ from .providers import (  # noqa: E402
     ProviderError,
     ProviderErrorKind,
 )
+from .unified_patch import codex_patch_files  # noqa: E402
 
 class _EngineBudgetExceeded(RuntimeError):
     """A provider response crossed a configured budget; tool calls are blocked."""
@@ -90,6 +91,9 @@ def _touched_edit_paths(name: str, arguments: Mapping[str, Any]) -> Tuple[str, .
                     candidate = line[6:].strip()
                     if candidate and candidate != "/dev/null" and candidate not in paths:
                         paths.append(candidate)
+            for _kind, candidate in codex_patch_files(patch_text):
+                if candidate not in paths:
+                    paths.append(candidate)
     return tuple(paths)
 
 

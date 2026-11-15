@@ -1428,7 +1428,7 @@ def test_engine_batch_keeps_valid_calls_when_one_is_malformed(
         for entry in harness.record().provider_history
         if entry.get("role") == "tool" and entry.get("tool_call_id") == "c2"
     ]
-    assert refused, "the rejected call must be visible in the durable transcript"
+    assert len(refused) == 1, "the rejected call is persisted once, not again when synced"
     assert refused[0]["error"]["type"] == "malformed_arguments"
     assert "parsing tool call arguments" in refused[0]["error"]["message"].lower()
     # The next request replays the bad call with valid JSON: a gateway refuses
@@ -3724,6 +3724,24 @@ def test_a_limit_verdict_stops_only_a_run_without_a_current_pass() -> None:
     proven._step = 21
     EngineKernel.note_visual_limit(proven, proven=True)
     assert proven._visual_grace_until == 21
+
+
+def test_a_pass_needs_two_calls_and_a_minute_of_the_engine_clock() -> None:
+    import time
+    from types import SimpleNamespace
+
+    from karox.engine_kernel import _room_for_a_pass
+
+    def agent(calls: int, limit: int, elapsed: float | None) -> SimpleNamespace:
+        config = SimpleNamespace(step_limit=10, wall_time_limit_seconds=limit)
+        start = None if elapsed is None else time.time() - elapsed
+        return SimpleNamespace(config=config, n_calls=calls, _start_time=start)
+
+    assert _room_for_a_pass(agent(5, 600, 100))
+    assert not _room_for_a_pass(agent(9, 600, 100))  # one call left
+    assert not _room_for_a_pass(agent(5, 600, 570))  # inside the finish reserve
+    assert _room_for_a_pass(agent(5, 0, 570))  # no wall limit
+    assert _room_for_a_pass(agent(5, 600, None))  # clock not started
 
 
 def test_a_refused_finish_keeps_room_to_reprobe_and_attest() -> None:

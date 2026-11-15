@@ -210,7 +210,7 @@ def test_an_apply_patch_refusal_keeps_patch_guidance(
         )
 
     message = str(refused.value)
-    assert "apply_patch takes one unified diff" in message
+    assert "apply_patch takes one patch (unified diff" in message
     assert "The only batch shape" not in message
 
 
@@ -744,3 +744,62 @@ def test_libraries_and_unrelated_paths_are_still_fetchable(tmp_path: Path) -> No
     assert core._local_copy_of("https://raw.githubusercontent.com/o/r/main/utils.py") is None
     # A file the repository lacks is exactly what the tool is for.
     assert core._local_copy_of("https://raw.githubusercontent.com/o/r/main/lib/other.py") is None
+
+
+def test_a_codex_format_delete_meets_the_same_deletion_gate(tmp_path: Path) -> None:
+    """*** Delete File: is a deletion to the risk mapper, exactly like +++ /dev/null."""
+
+    from karox.risk_mapping import action_for_command
+
+    codex = "*** Begin Patch\n*** Delete File: seed.txt\n*** Update File: a.py\n@@\n-a\n+b\n*** End Patch\n"
+    action = action_for_command(
+        CoreCommand("repo.apply_patch", {"patch": codex}, "session-1", Origin(OriginKind.NATIVE_AGENT, "t"))
+    )
+    assert action.delete_count == 1 and action.details["deletion_paths"] == ["seed.txt"]
+    assert set(action.paths) == {"seed.txt", "a.py"}
+
+    core, store, origin = _runtime(tmp_path, "build a page")
+    lease = _lease(store)
+    environment = CoreToolEnvironment(
+        core=core,
+        session_id="session-1",
+        origin=origin,
+        lease=lease,
+        kernel=_QuietKernel(
+            {"repo_write_file": "repo.write_file", "repo_apply_patch": "repo.apply_patch"}
+        ),
+        output_char_limit=20_000,
+        command_timeout=30,
+    )
+    try:
+        environment._execute(
+            {
+                "name": "repo_write_file",
+                "arguments": {"path": "probe.html", "content": "<p>x</p>\n"},
+                "tool_call_id": "write-probe",
+            },
+            requested_by="model",
+        )
+        removed = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": "*** Begin Patch\n*** Delete File: probe.html\n*** End Patch\n"},
+                "tool_call_id": "delete-probe",
+            },
+            requested_by="model",
+        )
+        kept = environment._execute(
+            {
+                "name": "repo_apply_patch",
+                "arguments": {"patch": "*** Begin Patch\n*** Delete File: seed.txt\n*** End Patch\n"},
+                "tool_call_id": "delete-seed",
+            },
+            requested_by="model",
+        )
+    finally:
+        store.release(lease)
+
+    assert removed["returncode"] == 0, removed["output"]
+    assert not (core.repository / "probe.html").exists()
+    assert kept["returncode"] != 0
+    assert (core.repository / "seed.txt").read_text(encoding="utf-8") == "seed\n"

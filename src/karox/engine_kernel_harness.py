@@ -449,10 +449,10 @@ class EngineHarnessMixin:
             identity = check_report.fingerprints(report) if isinstance(report, dict) else ()
             seen_sets.append(identity)
             rendered = check_report.render_failure_map(report)
-            if isinstance(report, dict) and report.get("failures"):
-                # Only the latest failing state feeds the rerun hint: an older
-                # failure may describe a file the last edit already fixed.
-                last_report = report
+            # Only the latest failing state feeds the rerun hint: an older
+            # failure may describe a file the last edit already fixed, so a
+            # latest check without a parsed map leaves no hint at all.
+            last_report = report if isinstance(report, dict) and report.get("failures") else None
             if not rendered:
                 output = "\n".join(
                     str(data.get(field) or "") for field in ("stdout", "stderr")

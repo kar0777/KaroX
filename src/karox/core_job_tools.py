@@ -231,8 +231,8 @@ class CoreJobToolsMixin:
                 # model about the batch shape here sent a 3D run into retrying
                 # the wrong form with the wrong guidance.
                 raise InvalidCommand(
-                    f"{exc} apply_patch takes one unified diff in "
-                    'payload.patch; fix the @@ hunk counts instead of changing '
+                    f"{exc} apply_patch takes one patch (unified diff or *** Begin "
+                    'Patch format) in payload.patch; fix its lines instead of changing '
                     'the tool shape. Use action=batch only when you mean '
                     '{"operations": [...]}.'
                 ) from exc

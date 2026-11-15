@@ -104,6 +104,55 @@ class ToolResult(str):
     def exit_code(self) -> object:
         return self.data.get("exit_code", self.data.get("returncode"))
 
+    def _field(self, name: str) -> object:
+        data = self.__dict__.get("data", {})
+        if name in data:
+            return data[name]
+        if name in _TEXT_NAMES:
+            return str(self)
+        if name in _EXIT_NAMES:
+            return self.exit_code
+        if name in _OK_NAMES:
+            return self.__dict__.get("ok", False)
+        return _MISSING
+
+    def get(self, key: str, default: object = None) -> object:
+        """``result.get('matches')``: a field of ``.data``, as on a dict."""
+
+        value = self._field(key) if isinstance(key, str) else _MISSING
+        return default if value is _MISSING else value
+
+    def __getitem__(self, key: object) -> object:  # type: ignore[override]
+        if isinstance(key, str):
+            value = self._field(key)
+            if value is _MISSING:
+                raise KeyError(f"{key!r}: .data has {sorted(self.__dict__.get('data', {}))[:20]}")
+            return value
+        return str.__getitem__(self, key)  # type: ignore[index]
+
+    def __getattr__(self, name: str) -> object:
+        """Names other models give the same things: fields of ``.data`` first.
+
+        A model trained on another tool API writes ``result.output`` or
+        ``result.returncode``; each was an AttributeError that cost a step.
+        """
+
+        if name.startswith("_"):
+            raise AttributeError(name)
+        value = self._field(name)
+        if value is _MISSING:
+            raise AttributeError(
+                f"{name!r}: a tool result is the tool's text (a str) with .ok, .exit_code "
+                f"and .data; .data has {sorted(self.__dict__.get('data', {}))[:20]}"
+            )
+        return value
+
+
+_TEXT_NAMES = frozenset({"output", "text", "content", "result", "stdout", "value", "message", "body"})
+_EXIT_NAMES = frozenset({"returncode", "return_code", "exitcode", "status", "status_code", "code"})
+_OK_NAMES = frozenset({"success", "succeeded", "passed", "is_ok"})
+_MISSING = object()
+
 
 class _Capture:
     """Collects what a script prints, bounded, handed out as increments."""
@@ -270,6 +319,10 @@ def _evaluate(message: dict, frames_allowed: list) -> None:
             error = f"SystemExit({stop.code!r})"
     except BaseException as failure:  # noqa: BLE001 - every failure is reported
         error = _format_error(failure, filename, code.splitlines(), frames_allowed)
+        if isinstance(failure, NameError):
+            # read_file(), bash(), grep(): names from another tool API.
+            tools = sorted(str(item["name"]) for item in message.get("tools") or () if isinstance(item, dict))
+            error += f"\nTool functions here: {', '.join(tools)}" if tools else ""
     finally:
         sys.stdout, sys.stderr, sys.stdin = saved
     _send(
@@ -368,7 +421,7 @@ def _seal() -> list:
             parts = module.split(".")  # type: ignore[union-attr]
             for size in range_of(1, length(parts) + 1):
                 if ".".join(parts[:size]) in denied_imports:
-                    raise import_error(f"{module} is not available in code_run")
+                    raise import_error(f"{module} is not available in code_run. {message}")
             return
         if event == "sys._getframemodulename":
             # namedtuple and enum ask for a module name, never a frame.

@@ -606,9 +606,13 @@ class SearchToolsMixin:
             head = lines[start]
             indent = len(head) - len(head.lstrip())
             body = [head]
+            # Complete when the block ended (a dedent or the file's end) inside
+            # the window, not when it merely fits: a 59-line function was "cut".
+            ended = start + _DEFINITION_LINES >= len(lines)
             for line in lines[start + 1 : start + _DEFINITION_LINES]:
                 stripped = line.strip()
                 if stripped and len(line) - len(line.lstrip()) <= indent and not stripped.startswith((")", "]", "}", "@", "#")):
+                    ended = True
                     break
                 body.append(line)
             while body and not body[-1].strip():
@@ -617,7 +621,7 @@ class SearchToolsMixin:
                 "start": start + 1,
                 "end": start + len(body),
                 "text": "\n".join(body),
-                "complete": len(body) < _DEFINITION_LINES - 1,
+                "complete": ended,
             }
 
     def _search_matches(

@@ -28,6 +28,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from .models import CoreCommand
 from .risk_engine import RiskAction
+from .unified_patch import codex_patch_files
 
 # Core tool name -> risk action kind. The right-hand side is the vocabulary in
 # karox.risk_engine, not a second taxonomy.
@@ -235,6 +236,7 @@ def extract_paths(arguments: Mapping[str, Any]) -> tuple[str, ...]:
                     value = value[2:]
                 if value:
                     found.append(value)
+            found.extend(path for _kind, path in codex_patch_files(patch))
     # Preserve order while removing duplicates so a preview reads naturally.
     return tuple(dict.fromkeys(found))
 
@@ -267,6 +269,9 @@ def _count_operations(arguments: Mapping[str, Any]) -> tuple[int, int, int]:
         if isinstance(patch, str):
             deletes += sum(1 for line in patch.splitlines() if line.strip() == "+++ /dev/null")
             creates += sum(1 for line in patch.splitlines() if line.strip() == "--- /dev/null")
+            kinds = [kind for kind, _path in codex_patch_files(patch)]
+            deletes += kinds.count("delete")
+            creates += kinds.count("add")
     return deletes, creates, modifies
 
 
@@ -314,6 +319,7 @@ def _delete_paths(arguments: Mapping[str, Any]) -> tuple[str, ...]:
                         found.append(previous)
                 if line.startswith("+++ "):
                     previous = None
+            found.extend(path for kind, path in codex_patch_files(patch) if kind == "delete")
     return tuple(dict.fromkeys(item for item in found if item))
 
 

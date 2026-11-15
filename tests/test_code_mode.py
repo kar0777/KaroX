@@ -138,9 +138,61 @@ def test_too_many_calls_stop_the_script(worker: Any) -> None:
 
 
 def test_a_command_string_is_split_for_checks_run() -> None:
-    assert code_mode.normalize_arguments("checks.run", {"argv": "python -m pytest -q 'a b.py'"}) == {
+    from karox.engine_tool_bodies import normalize_tool_arguments as normalize
+
+    assert normalize("checks.run", {"argv": "python -m pytest -q 'a b.py'"}) == {
         "argv": ["python", "-m", "pytest", "-q", "a b.py"]
     }
+    # Shell syntax has no faithful argv: it stays a string and Core refuses it.
+    assert normalize("checks.run", {"command": "cd x && pytest"}) == {"argv": "cd x && pytest"}
+    assert normalize("checks.run", {"cmd": ["pytest", "-q"], "timeout": 60}) == {
+        "argv": ["pytest", "-q"], "timeout_seconds": 60
+    }
+
+
+def test_other_tool_apis_spellings_reach_the_canonical_arguments() -> None:
+    from karox.engine_tool_bodies import normalize_tool_arguments as normalize
+
+    assert normalize("repo.edit_file", {"path": "a.py", "old_str": "x", "new_str": "y"}) == {
+        "path": "a.py", "old_string": "x", "new_string": "y"
+    }
+    assert normalize("repo.edit_file", {"path": "a.py", "old_text": "x", "new_text": ""}) == {
+        "path": "a.py", "old_string": "x", "new_string": ""
+    }
+    # A canonical argument is never overwritten by an alias.
+    assert normalize("repo.edit_file", {"path": "a", "old_string": "x", "new_string": "y", "replace": "z"}) == {
+        "path": "a", "old_string": "x", "new_string": "y", "replace": "z"
+    }
+    assert normalize("repo.read_lines", {"path": "a.py", "offset": 0, "limit": 5}) == {
+        "path": "a.py", "start": 1, "limit": 5
+    }
+    assert normalize("git.diff", {"path": "src/a.py"}) == {"paths": ["src/a.py"]}
+    assert normalize("git.diff", {"files": ["a", "b"]}) == {"paths": ["a", "b"]}
+    assert normalize("repo.search", {"query": "x", "offset": 3}) == {"query": "x", "offset": 3}
+
+
+def test_a_tool_result_answers_the_names_other_apis_use(worker: Any) -> None:
+    def tool(name: str, arguments: Dict[str, Any]) -> Tuple[bool, str, Any, str]:
+        return False, "FAILED 1 test", {"exit_code": 1, "stdout": "raw"}, "FAILED"
+
+    code = (
+        "r = checks_run(argv=['pytest'])\n"
+        "print(r.output == r.text == str(r), r.returncode, r.success, r.stdout, r['exit_code'], r.get('x', 7), r[:6])\n"
+        "try:\n    r.nonsense\nexcept AttributeError as e:\n    print('E', e)\n"
+        "print(getattr(r, 'nonsense', 'dflt'))\n"
+        "print(r['content'] == str(r), r['returncode'], r.get('success'), r.get('nope', 5))\n"
+        "try:\n    r['nonsense']\nexcept KeyError as e:\n    print('K', e)"
+    )
+    outcome = worker.run(code, TOOLS, tool, seconds=60)
+    assert outcome.error is None, outcome.error
+    lines = outcome.output.splitlines()
+    assert lines[0] == "True 1 False raw 1 7 FAILED"
+    assert lines[1].startswith("E 'nonsense': a tool result is the tool's text") and "stdout" in lines[1]
+    assert lines[2] == "dflt"
+    assert lines[3] == "True 1 False 5"
+    assert lines[4].startswith("K ") and "exit_code" in lines[4]
+    named = worker.run("read_file('a.py')", TOOLS, tool, seconds=60)
+    assert "NameError" in str(named.error) and "Tool functions here: checks_run, repo_read_lines" in str(named.error)
 
 
 SCRIPT = """
@@ -174,6 +226,46 @@ def test_a_script_edit_and_check_count_as_real_calls(tmp_path: Path, repository:
     assert "[3 tool calls]" in second
     nested = [entry for entry in harness.record().provider_history if entry.get("nested_in") == "c1"]
     assert [entry.get("core_name") for entry in nested] == ["repo.read_file", "repo.write_file", "checks.run"]
+
+
+def test_a_script_runs_the_affected_tests_once_after_its_edits(
+    tmp_path: Path, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox.engine_attach import EngineAttachMixin, _scratch_only
+
+    calls: List[Tuple[bool, bool, str]] = []
+    original = EngineAttachMixin._attach_affected_tests
+
+    def spy(self: Any, result: Any, action: Any = None, *, run: bool = True) -> None:
+        calls.append((run, action is None, str((result.data or {}).get("path", ""))))
+        original(self, result, action, run=run)
+
+    monkeypatch.setattr(EngineAttachMixin, "_attach_affected_tests", spy)
+    edits = "repo_write_file(path='a.txt', content='1')\nrepo_write_file(path='b.txt', content='2')\nprint('ok')"
+    probed = "repo_write_file(path='c.txt', content='3')\nrepo_write_file(path='probe_c.py', content='1')\nchecks_run(argv=['python', '-c', 'print(1)'])\nprint('ok')"
+    tested = "repo_write_file(path='d.txt', content='4')\nchecks_run(argv=['python', '-m', 'pytest', '-q'])\nprint('ok')"
+    harness = Harness(
+        repository,
+        tmp_path,
+        [
+            _response((_code_call("c1", edits),)),
+            _response((_code_call("c2", probed),)),
+            _response((_code_call("c3", tested),)),
+            _response((_finish_call("c4", "wrote a.txt, b.txt, c.txt and d.txt"),)),
+        ],
+        allow_probes=True,
+    )
+    harness.run()
+    mutations = [call for call in calls if call[2] in {"a.txt", "b.txt", "c.txt", "d.txt"}]
+    # Inside a script an edit only notes its code; one run follows the script,
+    # for its last code edit (a later probe edit or probe check does not hide
+    # it) -- and none when the script ran the tests after it.
+    assert mutations == [
+        (False, False, "a.txt"), (False, False, "b.txt"), (True, True, "b.txt"),
+        (False, False, "c.txt"), (True, True, "c.txt"), (False, False, "d.txt"),
+    ]
+    assert _scratch_only({"path": "probe_parse.py"}) and _scratch_only({"changed_files": ["_scratch_x.py"]})
+    assert not _scratch_only({"path": "src/parse.py"}) and not _scratch_only({"changed_files": ["probe.py", "src/a.py"]})
 
 
 def test_a_script_cannot_finish_the_run(tmp_path: Path, repository: Path) -> None:

@@ -34,11 +34,14 @@ class EngineCodeModeMixin:
     _code_worker: Optional[code_mode.CodeModeWorker] = None
     #: Kernel-clock time the running script must end by; its calls end by it too.
     _script_deadline: Optional[float] = None
+    #: The script's last code edit not yet followed by a check it ran.
+    _script_edit: Any = None
 
     def _script_seconds(self) -> float:
         remaining = float(self._kernel.remaining_seconds())
         reserve = float(getattr(self._kernel, "_finish_reserve_seconds", 0.0) or 0.0)
-        return max(5.0, min(code_mode.MAX_SCRIPT_SECONDS, remaining - reserve - 10.0))
+        # Never past the run's own deadline, however little is left.
+        return min(max(1.0, remaining), max(5.0, min(code_mode.MAX_SCRIPT_SECONDS, remaining - reserve - 10.0)))
 
     def _code_run(self, action: Mapping[str, Any]) -> Dict[str, Any]:
         arguments = action.get("arguments")
@@ -74,9 +77,7 @@ class EngineCodeModeMixin:
                     {},
                     "not callable from a script",
                 )
-            core_name = self._aliases.get(name)
-            if core_name is not None:
-                call_arguments = code_mode.normalize_arguments(core_name, call_arguments)
+            # Argument spellings are normalized in _execute, as for a direct call.
             nested = {
                 "name": name,
                 "arguments": call_arguments,
@@ -96,6 +97,7 @@ class EngineCodeModeMixin:
             return ok, text, data, summary
 
         self._script_notices = notices
+        self._script_edit = None
         kernel._script_parent_call = parent
         seconds = self._script_seconds()
         self._script_deadline = kernel.monotonic() + seconds
@@ -111,6 +113,16 @@ class EngineCodeModeMixin:
             self._script_last = None
             self._script_deadline = None
             kernel._script_parent_call = None
+            edit, self._script_edit = self._script_edit, None
+        if edit is not None:
+            # Once per script, after it: the tests of the code it changed.
+            try:
+                self._attach_affected_tests(edit)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - advisory only
+                pass
+            line = edit.data.get("affected_tests_line") if isinstance(edit.data, dict) else None
+            if isinstance(line, str) and line.strip():
+                notices.append(line.strip())
         text = code_mode.render(outcome, notices)
         kernel._emit(
             AgentEventKind.TOOL_FINISHED,

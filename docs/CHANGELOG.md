@@ -13,6 +13,57 @@
   evidence path and is recorded as nested in its script. It is offered only to
   sessions that may already write files and run an approved check, never in
   plan mode. `KAROX_CODE_MODE=0` turns it off.
+- `repo.apply_patch` also accepts the `*** Begin Patch` / `*** Update File:`
+  format GPT-family models write (`@@ name` anchors, `*** Add File:`,
+  `*** Delete File:`, `*** Move to:`, `*** End of File`), and a unified diff
+  wrapped in `*** Begin/End Patch`. Every hunk is still verified line by line;
+  a `*** Delete File:` is a deletion to the risk engine exactly like
+  `+++ /dev/null`.
+- Argument spellings from other tool APIs reach the canonical argument:
+  `old_str`/`new_str`/`old_text`/`new_text` for `repo.edit_file`,
+  `command`/`cmd` and `timeout` for `checks.run` (a command string without
+  shell syntax is split), `offset` for `repo.read_lines`, `path`/`file(s)` for
+  `git.diff`, in direct calls and in code mode alike.
+- A code-mode tool result answers `.output`, `.text`, `.stdout`,
+  `.returncode`, `.success`, `result["key"]` and `result.get(key)` (the same
+  names by attribute, key or `get`); any other missing name lists the fields it
+  does have, and a script's `NameError` (`read_file()`, `bash()`) lists the
+  tool functions it can call.
+- The completion gate no longer owes a failed check whose own probe script
+  the run deleted when the probe ran inside a shell chain (`cp probe.py sub/
+  && python sub/probe.py`, `cd sub && node probe.js | tail`): the chain may
+  only move, copy, filter output and run scripts, every one of them (and every
+  copy source) must be gone from the directory the chain used, and Git must not
+  know it at HEAD. A chain that also runs anything else (`python -m pytest`,
+  `make`, a tracked script) stays owed. A cleanup chain that removes files and
+  only lists or tests the removed paths, or prints, with no command
+  substitution (`rm -f probe.py && ls probe.py`) is never a failed check.
+- A one-empty-line file created by a patch is `"\n"`, not empty.
+- A code-mode script runs the affected tests once, after the script, for its
+  last code edit (a later probe edit or `python -c` check does not hide it; a
+  test run the script made after it does); an edit of scratch probe files alone
+  runs none. `python -u -c CODE` is an
+  inline probe like `python -c CODE`.
+- A refused tool call is persisted once: the synced observation no longer adds
+  a second tool message for the same call id. The repair summary's rerun hint
+  follows only the latest failed check. A review, unchanged or deep pass is
+  only started with two calls and a minute of the engine's own clock left. A
+  script's time limit never passes the run's deadline, and a second run of one
+  kernel starts with its passes reset.
+- Failure maps keep the right frame in more runner shapes: two files' same-named
+  pytest tests each get their own traceback, a pytest collection error
+  (`ERROR tests/test_x.py`, a SyntaxError or ImportError after an edit) names
+  the line that broke, unittest subTest failures and import-time `<module>`
+  frames are read, and Go subtests get one row each.
+- A failed pytest run is "pre-existing only" only when every failure the final
+  line counts has a parsed node id (nested brackets are read): an unparsed
+  failure could be the new one. A failed run before the first edit is the
+  baseline for the runs after it (it used to leave them with none).
+- The tests run after an edit come from the edited package first
+  (`core/basic.py` runs `core/tests/test_basic.py`, not another package's), and
+  a package's `__init__.py` runs the tests named after the package.
+- A search's attached definition is "complete" when the block ended inside the
+  window, and a cut file read says it was cut.
 
 ### Changed
 

@@ -62,7 +62,9 @@ from .completion_review import (  # noqa: F401
 )
 
 from pathlib import Path
+import posixpath
 import re
+import shlex
 import subprocess
 from typing import Any, Optional, Sequence
 
@@ -333,7 +335,9 @@ def floor(core: Any, record: Any) -> list[str]:
         if name not in {"checks.run", "visual.check"}:
             continue
         if name == "checks.run" and (
-            _is_environment_setup(data.get("argv") or []) or _is_tool_query(data.get("argv") or [])
+            _is_environment_setup(data.get("argv") or [])
+            or _is_tool_query(data.get("argv") or [])
+            or _is_cleanup(data.get("argv") or [])
         ):
             # Installing tools is not a claim about the change. In an offline
             # sandbox it fails by design (swer5-k3 cbi: pip install flake8 ...)
@@ -416,7 +420,7 @@ def floor(core: Any, record: Any) -> list[str]:
         return chosen is not None and pytest_selection.covered(chosen, current_passes)
 
     for argv, (passed, _) in latest.items():
-        if not passed and not discharged(argv):
+        if not passed and not discharged(argv) and not _moot_scratch_check(core, argv):
             reasons.append("active failed check: " + " ".join(argv))
     for argv in failed_ever:
         if argv not in latest and not _moot_scratch_check(core, argv) and not discharged(argv):
@@ -555,6 +559,48 @@ def _is_tool_query(argv: Sequence[str]) -> bool:
     return bool(pieces) and all(_TOOL_QUERY.fullmatch(piece) for piece in pieces)
 
 
+#: What a cleanup chain may do besides removing: look at what is left.
+_CLEANUP_LOOKS = frozenset({"ls", "test", "[", "stat", "echo", "printf", "true", "pwd"})
+
+
+def _is_cleanup(argv: Sequence[str]) -> bool:
+    """`rm -f probe.py && ls probe.py`: removing scratch and looking, not proof.
+
+    rebench26 v602h ramalama: the ``ls`` after the ``rm`` failed because the
+    probe was gone -- the outcome the run wanted -- and the gate owed that
+    "failed check" through two repair turns. A chain counts only when it
+    removes something and otherwise only lists, tests or prints paths, or
+    asks ``git status``; anything that runs code stays a check.
+    """
+    parts = [str(p) for p in argv]
+    if Path(parts[0] if parts else "").name in {"bash", "sh"} and len(parts) == 3 and parts[1] in {"-c", "-lc"}:
+        pieces = [_QUIET_REDIRECT.sub("", piece).strip() for piece in _SHELL_SEGMENTS.split(parts[2])]
+    else:
+        pieces = [" ".join(parts)]
+    if any("$(" in piece or "`" in piece for piece in pieces):
+        return False  # a substitution runs a command of its own
+    removed: set[str] = set()
+    looked: set[str] = set()
+    for piece in pieces:
+        try:
+            tokens = shlex.split(piece)
+        except ValueError:
+            return False
+        if not tokens:
+            continue
+        head = Path(tokens[0]).name
+        operands = {token for token in tokens[1:] if not token.startswith("-") and token not in {"]", "!"}}
+        if head == "rm":
+            removed |= operands
+        elif head == "git" and tokens[1:2] == ["status"]:
+            continue
+        elif head in {"ls", "test", "[", "stat"}:
+            looked |= operands  # only the removed paths: ``test -f output`` is a check
+        elif head not in _CLEANUP_LOOKS:
+            return False
+    return bool(removed) and looked <= removed
+
+
 _MAIN_GUARD = re.compile(r"""^if\s+__name__\s*==\s*['"]__main__['"]\s*:""", re.M)
 
 
@@ -602,8 +648,12 @@ def _inline_probe(argv: Sequence[str]) -> bool:
         return True
     if len(parts) < 3:
         return False
-    if Path(parts[0]).stem.lower().startswith("python") and parts[1] == "-c":
-        return True
+    if Path(parts[0]).stem.lower().startswith("python"):
+        # ``python -u -c CODE`` / ``python -X utf8 -c CODE``: options first.
+        index = 1
+        while index < len(parts) - 1 and parts[index] in {"-u", "-B", "-E", "-I", "-s", "-S", "-O", "-OO", "-W", "-X"}:
+            index += 2 if parts[index] in {"-W", "-X"} else 1
+        return index < len(parts) - 1 and parts[index] == "-c"
     # A script under /tmp is scratch outside the repository (risk-scorer v50:
     # "cd /tmp && python3 p8.py" probes stayed owed until the wall-time limit).
     return (
@@ -624,30 +674,114 @@ def _pytest_ran_nothing(data: dict[str, Any]) -> bool:
     return exe.startswith("python") and len(argv) > 2 and argv[1] == "-m" and argv[2] == "pytest"
 
 
+_SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ".rb")
+_SCRIPT_RUNNERS = re.compile(r"^(?:python(?:3(?:\.\d+)?)?|node|bash|sh|ruby|deno|tsx|ts-node)$")
+_SHELL_SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
+_REDIRECT = re.compile(r"^\d*[<>]")
+
+
+#: Shell-chain segments that only move into place, copy or filter output.
+_CHAIN_PLUMBING = frozenset(
+    {"cd", "cp", "tail", "head", "grep", "egrep", "sed", "awk", "sort", "uniq", "wc",
+     "cat", "echo", "printf", "true"}
+)
+
+
+def _scratch_scripts(argv: Sequence[str]) -> list[str]:
+    """Script files a command runs or copies, each joined to the directory it ran in.
+
+    ``python probe.py``, ``node probe.js``, ``./probe.sh`` and
+    ``bash -lc "cd sub && cp probe.py x/ && python x/probe.py | tail -5"`` all
+    name their script. A command that runs anything else -- ``python -m
+    pytest``, ``make``, an inline ``-c`` -- names none, even beside a probe:
+    its own failure may be the change's, and deleting the probe must not
+    discharge it. ``cd`` moves are followed in order (``cd a && cd b`` runs in
+    ``a/b``); one that cannot be followed names nothing.
+    """
+
+    parts = [str(part) for part in argv]
+    segments = [parts]
+    if len(parts) == 3 and Path(parts[0]).name in {"bash", "sh"} and parts[1] in {"-c", "-lc"}:
+        segments = []
+        for piece in _SHELL_SEGMENTS.split(parts[2]):
+            try:
+                tokens = shlex.split(piece)
+            except ValueError:
+                tokens = piece.split()
+            segments.append(tokens)
+    scripts: list[str] = []
+    cwd = ""
+
+    def placed(script: str) -> str:
+        return script if script.startswith("/") or not cwd else posixpath.join(cwd, script)
+
+    for tokens in segments:
+        tokens = [token for token in tokens if not _REDIRECT.match(token)]
+        while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        head = Path(tokens[0]).name
+        if head == "cd":
+            target = tokens[1] if len(tokens) == 2 else ""
+            if not target or target.startswith(("-", "~")) or "$" in target:
+                return []
+            cwd = target if target.startswith("/") or not cwd else posixpath.join(cwd, target)
+        elif head == "cp":
+            sources = [token for token in tokens[1:-1] if not token.startswith("-")]
+            scripts.extend(placed(token) for token in sources if token.endswith(_SCRIPT_SUFFIXES))
+        elif head in _CHAIN_PLUMBING:
+            continue
+        elif _SCRIPT_RUNNERS.match(Path(head).stem.lower() if head.endswith(".exe") else head):
+            script, ran_inline = "", False
+            for token in tokens[1:]:
+                if token in {"-m", "-c", "-e", "--eval"}:
+                    ran_inline = True
+                    break
+                if not token.startswith("-"):
+                    script = token
+                    break
+            if ran_inline or not script.endswith(_SCRIPT_SUFFIXES):
+                return []
+            scripts.append(placed(script))
+        elif head.endswith(_SCRIPT_SUFFIXES):
+            scripts.append(placed(tokens[0]))
+        else:
+            return []
+    return scripts
+
+
 def _moot_scratch_check(core: Any, argv: Sequence[str]) -> bool:
-    """A failed `python <script>` whose script is gone and was never tracked.
+    """A failed check whose own script is gone and was never tracked.
 
     The run wrote a throwaway probe, ran it while the bug was still there, and
     then deleted it as it was told to. That failure can never be re-run, so
-    keeping it owed only ends a correct change as UNVERIFIED (swer5-k2 ninja).
-    The exemption is deliberately narrow: exactly an interpreter plus one
-    repository-relative .py path, the file must be absent now, and Git must not
-    know it at HEAD -- deleting a tracked test never discharges its failure.
+    keeping it owed only ends a correct change as UNVERIFIED (swer5-k2 ninja),
+    or -- when the probe ran inside a shell chain, ``cp probe.py sub/ &&
+    python sub/probe.py`` -- sent the run into re-creating its deleted probes
+    to satisfy the gate (rebench26 kubeflow, 2026-11-15: 28 steps). The script
+    must be absent from every directory the command could have run it from,
+    and Git must not know it at HEAD: deleting a tracked test never discharges
+    its failure, and a test target is never a script.
     """
-    parts = list(argv)
-    if len(parts) != 2 or not Path(parts[0]).stem.lower().startswith("python"):
-        return False
-    script = parts[1]
-    if not script.endswith(".py") or script.startswith("-"):
-        return False
+    root = Path(core.repository).resolve()
+    scripts = _scratch_scripts(argv)
+    # Every script and copy source must be gone: a deleted probe beside a
+    # tracked check (``python probe.py; python tools/check.py``) is no excuse.
+    return bool(scripts) and all(_gone_scratch(core, root, script) for script in scripts)
+
+
+def _gone_scratch(core: Any, root: Path, script: str) -> bool:
+    """The script is inside the repository, absent now, and unknown to Git at HEAD."""
+    candidate = Path(script) if script.startswith("/") else root / script
     try:
-        path = core.safe_path(script)
+        path = core.safe_path(str(candidate))
+        relative = path.relative_to(root).as_posix()
     except Exception:
         return False
     if path.exists():
         return False
     try:
-        relative = path.relative_to(Path(core.repository).resolve()).as_posix()
         tracked = subprocess.run(
             ["git", "cat-file", "-e", f"HEAD:{relative}"],
             cwd=str(core.repository), stdout=subprocess.DEVNULL,

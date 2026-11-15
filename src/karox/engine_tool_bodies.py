@@ -15,10 +15,12 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 import hashlib
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from . import check_baseline
 from .check_report import render_failure_map
+from .unified_patch import codex_patch_files
 from .test_output import (  # noqa: E402
     CONDENSED_MAX_CHARS_WITH_MAP,
     condense_test_output,
@@ -126,6 +128,11 @@ def _pure_delete_targets(arguments: Mapping[str, Any]) -> List[str]:
         patch = payload.get("patch") if isinstance(payload, Mapping) else None
     if not isinstance(patch, str) or not patch.strip():
         return []
+    sections = codex_patch_files(patch)
+    if sections:
+        if any(kind != "delete" for kind, _path in sections):
+            return []
+        return list(dict.fromkeys(path.replace("\\", "/") for _kind, path in sections))
     lines = patch.splitlines()
     paths: List[str] = []
     index = 0
@@ -213,6 +220,70 @@ def _normalize_edit_file(arguments: Mapping[str, Any]) -> Dict[str, Any]:
         if alias in normalized and canonical not in normalized:
             normalized[canonical] = normalized.pop(alias)
     return normalized
+
+#: Names other tool APIs give the same argument (str_replace_editor's
+#: old_str/new_str, a shell tool's command, a reader's offset). Each was refused
+#: as an unknown argument and cost a step; any model trained on that API sends
+#: them again.
+_EDIT_STRING_ALIASES = (
+    ("old_string", ("old_str", "old_text", "search", "find", "original")),
+    ("new_string", ("new_str", "new_text", "replace", "replacement", "updated")),
+)
+_CHECK_ARGV_ALIASES = ("command", "cmd", "args")
+_DIFF_PATH_ALIASES = ("path", "file", "files")
+#: A command string with shell syntax has no faithful argv; it stays a string
+#: so Core refuses it instead of running "cd" or "&&" as a program.
+_SHELL_SYNTAX = re.compile(r"[|&;<>()$`\n]")
+
+
+def normalize_tool_arguments(core_name: str, arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """Rename an argument another tool API spells differently; nothing else.
+
+    Only a spelling with one reading is renamed, and only when the canonical
+    argument is absent. Core validates the result as if the model sent it.
+    """
+
+    args = dict(arguments)
+    if core_name == "repo.edit_file" and "edits" not in args:
+        args = _normalize_edit_file(args)
+        for canonical, aliases in _EDIT_STRING_ALIASES:
+            if canonical in args:
+                continue
+            for alias in aliases:
+                if isinstance(args.get(alias), str):
+                    args[canonical] = args.pop(alias)
+                    break
+    elif core_name == "checks.run":
+        if "argv" not in args:
+            for alias in _CHECK_ARGV_ALIASES:
+                if isinstance(args.get(alias), (str, list)):
+                    args["argv"] = args.pop(alias)
+                    break
+        argv = args.get("argv")
+        if isinstance(argv, str) and argv.strip() and not _SHELL_SYNTAX.search(argv):
+            try:
+                args["argv"] = shlex.split(argv)
+            except ValueError:
+                pass
+        timeout = args.get("timeout")
+        if "timeout_seconds" not in args and isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            args["timeout_seconds"] = args.pop("timeout")
+    elif core_name == "repo.read_lines" and "start" not in args and "offset" in args:
+        offset = args.pop("offset")
+        # A reader's offset is a line to start from; 0 means the first line.
+        args["start"] = max(1, offset) if isinstance(offset, int) and not isinstance(offset, bool) else offset
+    elif core_name == "git.diff" and "paths" not in args:
+        for alias in _DIFF_PATH_ALIASES:
+            value = args.get(alias)
+            if isinstance(value, str) and value.strip():
+                args.pop(alias)
+                args["paths"] = [value]
+                break
+            if isinstance(value, list):
+                args["paths"] = args.pop(alias)
+                break
+    return args
+
 
 def _normalize_repo_command(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     """Rewrite unambiguous near-miss repo.command shapes into the schema.

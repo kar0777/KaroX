@@ -78,6 +78,19 @@ def test_anything_else_is_not_equivalent(log: str, code: int, timed_out: bool) -
     assert info is None or info["preexisting_only"] is False
 
 
+def test_a_failure_without_a_parsed_id_is_never_preexisting() -> None:
+    base = check_baseline.outcome(LOG_BASE, 1, False)
+    nested = check_baseline.outcome("FAILED tests/test_a.py::test_f[a[0] - b] - assert 0\n1 failed in 1s\n", 1, False)
+    assert nested.failing == {"tests/test_a.py::test_f[a[0] - b]"}
+    # Two failures counted, one id read: the unread one may be the new one.
+    now = check_baseline.outcome(
+        "FAILED tests/test_a.py::test_net - OSError\nFAILED <doctest x>\n2 failed, 5 passed in 1s\n", 1, False
+    )
+    assert now.failed == 2 and len(now.failing) == 1
+    info = check_baseline.compare(base, now)
+    assert info is not None and info["preexisting_only"] is False
+
+
 def test_new_failures_are_named_for_the_model() -> None:
     base = check_baseline.outcome(LOG_BASE, 1, False)
     now = check_baseline.outcome(
@@ -283,6 +296,16 @@ def test_on_demand_baseline_restores_every_byte(repository: Path, tmp_path: Path
     _do(core, origin, "repo.write_file", {"path": "pkg.py", "content": "def value():\n    return 3\n"}, "w3")
     worse = _do(core, origin, "checks.run", {"argv": SUITE}, "c2")
     assert not worse.ok and worse.data["baseline"]["new"] == ["tests/test_pkg.py::test_value"]
+
+
+def test_a_run_before_the_first_edit_is_the_baseline(repository: Path, tmp_path: Path) -> None:
+    core, origin = _wild_runtime(repository, tmp_path)
+    first = _do(core, origin, "checks.run", {"argv": SUITE}, "c0")
+    assert first.data["exit_code"] == 1 and "baseline" not in first.data
+    assert core._check_baselines[tuple(SUITE)].failing == {"tests/test_pkg.py::test_env"}
+    _do(core, origin, "repo.write_file", {"path": "pkg.py", "content": "def value():\n    return 2\n"}, "w1")
+    same = _do(core, origin, "checks.run", {"argv": SUITE}, "c1")
+    assert same.data["preexisting_only"] is True and same.ok
 
 
 def test_a_crashed_swap_is_restored_from_the_journal(tmp_path: Path) -> None:

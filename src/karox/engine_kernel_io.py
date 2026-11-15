@@ -489,6 +489,10 @@ class EngineIoMixin:
                 "kind": "engine_observation",
             }
         self._append_message(session_id, lease, entry)
+        if call_id:
+            # As for a result: the synced observation must not persist a
+            # second tool message for the same call (a resume replayed both).
+            self._persisted_call_ids.add(call_id)
 
     def _record_step_usage(self, event: Mapping[str, Any]) -> None:
         for key, value in event.items():

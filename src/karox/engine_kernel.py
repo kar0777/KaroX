@@ -138,6 +138,29 @@ def _steps_left(agent: Any) -> int:
     return limit - int(getattr(agent, "n_calls", 0) or 0)
 
 
+#: Model time a review, unchanged or deep pass needs before it is worth asking.
+_PASS_MODEL_SECONDS = 60
+
+
+def _room_for_a_pass(agent: Any) -> bool:
+    """Whether the agent can still answer a pass: two calls and a minute of its clock.
+
+    The engine's own wall limit ends ``FINISH_RESERVE_SECONDS`` before the
+    run's deadline. A finish inside that reserve still saw a minute "left" on
+    the run clock, so the review turn started, the engine raised its time
+    limit on the first call, and a submitted run ended on wall_time_limit
+    with the final checks never run.
+    """
+
+    if _steps_left(agent) < 2:
+        return False
+    limit = int(getattr(getattr(agent, "config", None), "wall_time_limit_seconds", 0) or 0)
+    started = getattr(agent, "_start_time", None)
+    if limit <= 0 or not isinstance(started, (int, float)):
+        return True
+    return limit - (time.time() - float(started)) >= _PASS_MODEL_SECONDS
+
+
 def _model_request_deadline(remaining_seconds: float) -> float:
     return min(_MODEL_REQUEST_DEADLINE_SECONDS, max(5.0, remaining_seconds))
 
@@ -396,6 +419,11 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
         self._closing_turn_used = False
         self._step = 0
         self._persisted_call_ids = set()
+        # A second run of this kernel starts with every pass still available.
+        self._visual_budget_hit = False
+        self._visual_grace_until = None
+        self._unchanged_pass_done = False
+        self._deep_pass_done = False
         lease_ttl = min(3600.0, max(5.0, float(self.limits.max_seconds) + 5.0))
         lease = self.sessions.acquire(
             session_id,
@@ -596,7 +624,7 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                 repair_attempts = 0
                 # One maintainer review before KaroX verifies a code change; prose
                 # submissions skip finish, so it lives here, not only in finish.
-                review_due = _steps_left(agent) >= 2 and self._review_turn_due()
+                review_due = _room_for_a_pass(agent) and self._review_turn_due()
                 deep_due = unchanged_due = False
                 while True:
                     if unchanged_due:
@@ -618,10 +646,10 @@ class EngineKernel(EngineHarnessMixin, EngineFinishMixin, EngineIoMixin, EngineC
                     else:
                         self._run_harness_final_calls(session_id, lease, self._deadline)
                         record = self.sessions.load(session_id)
-                        if self._completed(record) and _steps_left(agent) >= 2 and self._unchanged_pass_due(record):
+                        if self._completed(record) and _room_for_a_pass(agent) and self._unchanged_pass_due(record):
                             unchanged_due = True
                             continue
-                        if self._completed(record) and _steps_left(agent) >= 2 and self._deep_pass_due(record):
+                        if self._completed(record) and _room_for_a_pass(agent) and self._deep_pass_due(record):
                             deep_due = True
                             continue
                         if self._completed(record):

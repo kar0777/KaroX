@@ -31,6 +31,8 @@ PREVIEW_LIMIT = 2400
 PLAN_ITEMS = 12
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+#: A file section of the *** Begin Patch format (the UI layer keeps no Core import).
+_CODEX_FILE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$")
 _COMMAND_TOOLS = frozenset(
     {"checks.run", "checks.start", "dev.command", "dev.command_start", "tests.run"}
 )
@@ -119,7 +121,11 @@ def patch_files(patch: Any) -> list[str]:
     files: list[str] = []
     old = ""
     for line in _text(patch).splitlines():
-        if line.startswith("--- "):
+        codex = _CODEX_FILE.match(line.rstrip())
+        if codex is not None:
+            if codex.group(2).strip() not in files:
+                files.append(codex.group(2).strip())
+        elif line.startswith("--- "):
             old = _strip_diff_path(line[4:])
         elif line.startswith("+++ "):
             new = _strip_diff_path(line[4:])

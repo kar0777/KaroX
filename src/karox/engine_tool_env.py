@@ -51,7 +51,7 @@ from .engine_tool_support import (  # noqa: F401
 
 from .engine_finish import EngineFinishMixin
 from .engine_guidance import EngineGuidanceMixin
-from .engine_attach import EngineAttachMixin
+from .engine_attach import EngineAttachMixin, _runs_tests, _scratch_only
 from .engine_code_mode import EngineCodeModeMixin
 from .code_mode import CODE_TOOL_NAME, SCRIPT_REQUESTED_BY
 
@@ -86,6 +86,7 @@ from .engine_tool_bodies import (  # noqa: E402,F401
     _EDIT_ALIASES as _EDIT_ALIASES,
     _normalize_edit_file as _normalize_edit_file,
     _normalize_repo_command as _normalize_repo_command,
+    normalize_tool_arguments as normalize_tool_arguments,
     _batch_tail as _batch_tail,
     _stable_result as _stable_result,
     _progress_key as _progress_key,
@@ -330,6 +331,7 @@ class CoreToolEnvironment(
         arguments = action.get("arguments")
         if not isinstance(arguments, dict):
             return self._refusal(action, "malformed_arguments", "tool arguments must be an object")
+        arguments = normalize_tool_arguments(core_name, arguments)
         definition = self._definitions.get(core_name)
         if definition is None:
             return self._refusal(action, "unknown_tool", f"tool '{name}' is not available")
@@ -386,8 +388,6 @@ class CoreToolEnvironment(
                     arguments["targets"] = derived_targets
         if core_name == "repo.command":
             arguments = _normalize_repo_command(arguments)
-        if core_name == "repo.edit_file":
-            arguments = _normalize_edit_file(arguments)
         display = core_name
         call_id = str(action.get("tool_call_id", "") or "")
         started = self._kernel.monotonic()
@@ -487,7 +487,15 @@ class CoreToolEnvironment(
             for item in result.evidence:
                 item.metadata["completion_identity"] = proof
         self._attach_quick_checks(result)
-        self._attach_affected_tests(result, action)
+        in_script = requested_by == SCRIPT_REQUESTED_BY and self._script_notices is not None
+        self._attach_affected_tests(result, action, run=not in_script)
+        if in_script:
+            # The script's last code edit runs the tests once, after the
+            # script; a check the script ran itself after it already did.
+            if core_name in _TEST_TOOLS and _runs_tests(core_name, arguments):
+                self._script_edit = None
+            elif data.get("changed") is True and core_name in _MUTATION_TOOLS and not _scratch_only(data):
+                self._script_edit = result
         output = self._render_output(core_name, result)
         notices = (
             self._research_notice(definition),

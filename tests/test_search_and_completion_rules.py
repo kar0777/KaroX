@@ -138,6 +138,13 @@ def test_a_definition_lookup_carries_the_body(tmp_path: Path) -> None:
     plain = _runtime(tmp_path / "b", {"core.py": SOURCE})._search({"query": "flag_value"}, 30)
     assert "definition" not in plain["matches"][0]
 
+    # A 59-line function that ends inside the window is whole; a longer one is cut.
+    whole = b"def f():\n" + b"    x = 1\n" * 58 + b"def g():\n    return 2\n"
+    cut = b"def f():\n" + b"    x = 1\n" * 80
+    for name, source, complete in (("w", whole, True), ("c", cut, False)):
+        found = _runtime(tmp_path / name, {"m.py": source})._search({"query": "def f"}, 30)
+        assert found["matches"][0]["definition"]["complete"] is complete, name
+
 
 def test_history_reads_are_one_call(tmp_path: Path) -> None:
     """Benchmark 2026-11-13 (click-3239 v39): 25 python -c git turns to read old code."""
@@ -268,6 +275,22 @@ def test_list_files_outside_a_git_checkout_still_lists_the_project(tmp_path: Pat
     core = _plain_tree(tmp_path, SCOPED)
     assert core._list_files({}, 30)["files"] == ["src/pkg/a.py", "src/pkg/notes.txt", "top.py"]
     assert core._list_files({"pattern": "**/*.py"}, 30)["files"] == ["src/pkg/a.py", "top.py"]
+
+
+def test_related_tests_prefer_the_edited_package(tmp_path: Path) -> None:
+    from karox import task_dossier
+
+    files = {
+        "lib/core/basic.py": b"X = 1\n",
+        "lib/core/__init__.py": b"",
+        "lib/assumptions/tests/test_basic.py": b"def test_a():\n    pass\n",
+        "lib/matrices/tests/test_basic.py": b"def test_b():\n    pass\n",
+        "lib/core/tests/test_basic.py": b"def test_c():\n    pass\n",
+        "lib/core/tests/test_core.py": b"def test_d():\n    pass\n",
+    }
+    core = _plain_tree(tmp_path, files)
+    assert task_dossier.related_tests(core, ["lib/core/basic.py"], limit=1) == ["lib/core/tests/test_basic.py"]
+    assert task_dossier.related_tests(core, ["lib/core/__init__.py"], limit=1) == ["lib/core/tests/test_core.py"]
 
 
 def test_the_dossier_works_outside_a_git_checkout(tmp_path: Path) -> None:

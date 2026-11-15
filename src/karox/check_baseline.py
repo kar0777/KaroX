@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 # Parameters may hold " - " ("t[a - b]"): the node keeps its whole bracket.
-_SUMMARY_ROW = re.compile(r"^(?:FAILED|ERROR) (?P<node>[^\s\[]+(?:\[[^\]]*\])?\S*)(?: - .*)?$", re.M)
+_SUMMARY_ROW = re.compile(r"^(?:FAILED|ERROR) (?P<node>[^\s\[]+(?:\[(?:[^\[\]]|\[[^\]]*\])*\])?\S*)(?: - .*)?$", re.M)
 _COUNT = re.compile(r"(?P<n>\d+) (?P<kind>passed|failed|errors?)\b")
 _FINAL = re.compile(r"^=*\s*\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b.*\bin [\d.]+s", re.M)
 BASELINE_TIMEOUT_SECONDS = 900.0  # a suite slower than this gets no baseline
@@ -31,6 +31,8 @@ class Outcome:
     failing: frozenset[str]
     passed: int
     parsed: bool
+    #: failed + errors from the final line: every one must have a parsed id.
+    failed: int = 0
 
 
 def is_pytest(argv: Sequence[str]) -> bool:
@@ -110,12 +112,12 @@ def outcome(text: str, exit_code: Any, timed_out: Any) -> Outcome:
     text = _ANSI.sub("", text or "")
     nodes = (m.group("node").strip() for m in _SUMMARY_ROW.finditer(text or ""))
     finals = list(_FINAL.finditer(text or ""))
-    passed = sum(
-        int(m.group("n")) for m in _COUNT.finditer(finals[-1].group(0)) if m.group("kind") == "passed"
-    ) if finals else 0
+    counts = [(m.group("kind"), int(m.group("n"))) for m in _COUNT.finditer(finals[-1].group(0))] if finals else []
+    passed = sum(n for kind, n in counts if kind == "passed")
+    failed = sum(n for kind, n in counts if kind != "passed")
     code = int(exit_code) if isinstance(exit_code, int) or str(exit_code).lstrip("-").isdigit() else -1
     failing = frozenset(n for n in nodes if "::" in n or ".py" in n)
-    return Outcome(code, bool(timed_out), failing, passed, bool(finals))
+    return Outcome(code, bool(timed_out), failing, passed, bool(finals), failed)
 
 
 def of_result(result: Mapping[str, Any]) -> Outcome:
@@ -157,6 +159,8 @@ def compare(
         "task_targets_failing": targets,
         "preexisting_only": not new
         and not targets
+        # A failure whose id the summary rows did not yield could be the new one.
+        and len(current.failing) >= current.failed
         and current.exit_code == baseline.exit_code
         # A node-id rerun of failures only passes nothing on either side.
         and (0 < current.passed or baseline.passed == 0)

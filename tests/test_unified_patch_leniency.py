@@ -74,3 +74,71 @@ def test_a_pure_insertion_goes_after_the_stated_line() -> None:
 def test_invalid_hunk_lines_are_still_refused() -> None:
     with pytest.raises(InvalidCommand, match="invalid patch hunk line"):
         parse_unified_patch("--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n*bad\n")
+
+
+def test_the_codex_patch_format_updates_adds_moves_and_deletes() -> None:
+    """GPT-family models write *** Begin Patch; it was refused as "invalid patch hunk line"."""
+
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: f.txt\n"
+        "@@\n line 7\n-line 8\n+LINE 8\n"
+        "@@ line 14\n line 15\n+inserted\n line 16\n"
+        "*** Add File: new.txt\n+first\n+\n+third\n\n"
+        "*** Update File: old.txt\n*** Move to: moved.txt\n"
+        "*** Delete File: gone.txt\n"
+        "*** End Patch\n"
+    )
+    update, added, moved, deleted = parse_unified_patch(patch)
+    assert (update.old_path, update.new_path) == ("f.txt", "f.txt")
+    expected = SOURCE.replace("line 8\n", "LINE 8\n").replace("line 15\n", "line 15\ninserted\n")
+    assert apply_hunks(SOURCE, update.hunks, path="f.txt") == expected
+    assert added.old_path is None and apply_hunks("", added.hunks, path="new.txt") == "first\n\nthird\n"
+    assert (moved.old_path, moved.new_path, moved.hunks) == ("old.txt", "moved.txt", ())
+    (blank,) = parse_unified_patch("*** Begin Patch\n*** Add File: blank.txt\n+\n*** End Patch\n")
+    assert apply_hunks("", blank.hunks, path="blank.txt") == "\n"
+    assert (deleted.old_path, deleted.new_path) == ("gone.txt", None)
+
+
+def test_a_codex_anchor_picks_the_repeated_block_after_it() -> None:
+    source = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x\n"
+    patch = (
+        "*** Begin Patch\n*** Update File: f.py\n"
+        "@@ def b():\n     x = 1\n-    return x\n+    return x + 1\n"
+        "*** End Patch\n"
+    )
+    (file_patch,) = parse_unified_patch(patch)
+    updated = apply_hunks(source, file_patch.hunks, path="f.py")
+    assert updated == "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x + 1\n"
+    unanchored = patch.replace("@@ def b():", "@@")
+    (file_patch,) = parse_unified_patch(unanchored)
+    with pytest.raises(InvalidCommand, match="matches 2 places"):
+        apply_hunks(source, file_patch.hunks, path="f.py")
+
+
+def test_codex_end_of_file_and_bare_additions_after_an_anchor() -> None:
+    patch = "*** Begin Patch\n*** Update File: f.txt\n@@\n+appended\n*** End of File\n*** End Patch\n"
+    (file_patch,) = parse_unified_patch(patch)
+    assert apply_hunks(SOURCE, file_patch.hunks, path="f.txt") == SOURCE + "appended\n"
+    patch = "*** Begin Patch\n*** Update File: f.txt\n@@ line 4\n+after four\n*** End Patch\n"
+    (file_patch,) = parse_unified_patch(patch)
+    assert apply_hunks(SOURCE, file_patch.hunks, path="f.txt") == SOURCE.replace(
+        "line 4\n", "line 4\nafter four\n"
+    )
+
+
+def test_a_unified_diff_inside_the_codex_wrapper_still_applies() -> None:
+    patch = "*** Begin Patch\n--- a/f.txt\n+++ b/f.txt\n@@ -8 +8 @@\n-line 8\n+LINE 8\n*** End Patch\n"
+    assert _apply(patch) == SOURCE.replace("line 8\n", "LINE 8\n")
+
+
+def test_codex_sections_still_verify_every_line() -> None:
+    with pytest.raises(InvalidCommand, match="starts with '\\+'"):
+        parse_unified_patch("*** Begin Patch\n*** Add File: a.txt\nno plus\n*** End Patch\n")
+    with pytest.raises(InvalidCommand, match="no hunks"):
+        parse_unified_patch("*** Begin Patch\n*** Update File: a.txt\n*** End Patch\n")
+    with pytest.raises(InvalidCommand, match="outside a file section"):
+        parse_unified_patch("*** Begin Patch\nstray\n*** Update File: a.txt\n@@\n-a\n+b\n")
+    (file_patch,) = parse_unified_patch("*** Begin Patch\n*** Update File: f.txt\n@@\n-not there\n+x\n")
+    with pytest.raises(InvalidCommand, match="not found"):
+        apply_hunks(SOURCE, file_patch.hunks, path="f.txt")

@@ -327,9 +327,16 @@ def related_tests(core: Any, sources: Sequence[str], hint: str = "", limit: int 
     tracked = _tracked(core, ".py")
     tests = [path for path in tracked if _TEST_PATH.search(path.lower()) and not path.endswith("conftest.py")]
     found: List[str] = []
+    from .check_targets import _closeness
+
     for source in sources:
         stem = source.rsplit("/", 1)[-1][:-3]
-        found += [t for t in tests if t.rsplit("/", 1)[-1] in (f"test_{stem}.py", f"{stem}_test.py", f"test_{stem.lstrip('_')}.py") and t not in found]
+        if stem == "__init__" and "/" in source:
+            stem = source.rsplit("/", 2)[-2]  # a package's tests carry its name
+        named = [t for t in tests if t.rsplit("/", 1)[-1] in (f"test_{stem}.py", f"{stem}_test.py", f"test_{stem.lstrip('_')}.py") and t not in found]
+        # sympy/core/basic.py: core/tests/test_basic.py, not another package's.
+        named.sort(key=lambda t: -_closeness(t, [tuple(source.split("/")[:-1])]))
+        found += named
     texts: Dict[str, str] = {}
     for path in tests[:3000]:
         try:

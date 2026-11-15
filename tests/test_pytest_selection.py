@@ -91,6 +91,21 @@ def test_the_repair_summary_offers_the_plain_run_only_for_a_coverage_failure(tmp
     assert OPTION_FAILURE_HINT not in summary
 
 
+def test_the_rerun_hint_follows_only_the_latest_failed_check(tmp_path: Path) -> None:
+    from karox.engine_kernel_harness import EngineHarnessMixin
+
+    old = {"failures": [{"test_id": "tests/test_old.py::test_a", "path": "tests/test_old.py"}]}
+    first = [PY, "-m", "pytest", "tests/test_old.py", "-q"]
+    second = [PY, "-m", "pytest", "-q"]
+    core, record = _gate_record(tmp_path, [(first, {"exit_code": 1, "failure_map": old}), (second, {"exit_code": 1})])
+    summary = EngineHarnessMixin._failure_summary(SimpleNamespace(core=core), record)  # type: ignore[arg-type]
+    assert "active failed check" in summary and "Targeted rerun" not in summary, summary
+    (tmp_path / "x").mkdir()
+    core, record = _gate_record(tmp_path / "x", [(first, {"exit_code": 1, "failure_map": old})])
+    summary = EngineHarnessMixin._failure_summary(SimpleNamespace(core=core), record)  # type: ignore[arg-type]
+    assert 'targets=["tests/test_old.py::test_a"]' in summary, summary
+
+
 def test_asking_which_tools_exist_is_never_owed(tmp_path: Path) -> None:
     from karox.completion_gate import _is_tool_query
 
@@ -102,3 +117,65 @@ def test_asking_which_tools_exist_is_never_owed(tmp_path: Path) -> None:
     assert not _is_tool_query(["bash", "-lc", "which python && python -m pytest tests -q"])
     core, record = _gate_record(tmp_path, [(query, {"exit_code": 1})])
     assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
+
+
+def test_a_deleted_probe_in_a_shell_chain_is_not_owed(tmp_path: Path) -> None:
+    from karox.completion_gate import _scratch_scripts
+
+    chain = ["bash", "-lc", "cp probe.py sub/probe.py && python sub/probe.py"]
+    inside = ["bash", "-lc", "cd sub && python -u probe_two.py 2>/dev/null | tail -5"]
+    assert _scratch_scripts(chain) == ["probe.py", "sub/probe.py"]
+    assert _scratch_scripts(inside) == ["sub/probe_two.py"]
+    assert _scratch_scripts(["node", "check.mjs"]) == ["check.mjs"]
+    assert _scratch_scripts(["bash", "-lc", "cd a && cd b && python check.py"]) == ["a/b/check.py"]
+    assert _scratch_scripts(["bash", "-lc", "cd $HOME && python check.py"]) == []
+    assert _scratch_scripts([PY, "-m", "pytest", "tests/test_gone.py"]) == []
+    # A probe beside a real check never discharges the check.
+    assert _scratch_scripts(["bash", "-lc", "python probe.py && python -m pytest tests -q"]) == []
+    assert _scratch_scripts(["bash", "-lc", "python probe.py; make test"]) == []
+    (tmp_path / "sub").mkdir()
+    core, record = _gate_record(tmp_path, [(chain, {"exit_code": 1}), (inside, {"exit_code": 1})])
+    assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
+    (tmp_path / "sub" / "probe_two.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+    reasons = completion_gate.floor(core, record)
+    assert any("failed check" in reason and "probe_two.py" in reason for reason in reasons), reasons
+
+
+def test_removing_scratch_and_looking_is_never_owed(tmp_path: Path) -> None:
+    from karox.completion_gate import _is_cleanup
+
+    cleanup = ["bash", "-lc", "rm -f probe_cdi_scratch.py && ls probe_cdi_scratch.py 2>&1"]
+    assert _is_cleanup(cleanup)
+    assert _is_cleanup(["bash", "-lc", "rm -f a.py b.py; git status --porcelain"])
+    assert not _is_cleanup(["bash", "-lc", "ls probe.py"])  # looking without removing
+    assert not _is_cleanup(["bash", "-lc", "rm -f probe.py && python -m pytest tests -q"])
+    assert not _is_cleanup(["bash", "-lc", "rm -rf build && make"])
+    # Looking at anything but what was removed is a check of its own.
+    assert not _is_cleanup(["bash", "-lc", "rm -f probe.py && test -f required-output"])
+    assert not _is_cleanup(["bash", "-lc", 'rm -f probe.py; echo "$(python -m pytest -q)"'])
+    assert _is_cleanup(["bash", "-lc", "rm -f probe.py && [ ! -e probe.py ] && echo gone"])
+    core, record = _gate_record(tmp_path, [(cleanup, {"exit_code": 2})])
+    assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
+
+
+def test_a_tracked_script_or_a_test_target_stays_owed(tmp_path: Path) -> None:
+    import subprocess
+
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "check.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run([*git, "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run([*git, "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    (tmp_path / "tools" / "check.py").unlink()
+    tracked = [PY, "tools/check.py"]
+    gone_test = [PY, "-m", "pytest", "tests/test_gone.py", "-q"]
+    beside = ["bash", "-lc", "python probe_gone.py; python tools/check.py"]
+    core, record = _gate_record(
+        tmp_path, [(tracked, {"exit_code": 1}), (gone_test, {"exit_code": 1}), (beside, {"exit_code": 1})]
+    )
+    reasons = completion_gate.floor(core, record)
+    assert any("tools/check.py" in reason for reason in reasons), reasons
+    assert any("tests/test_gone.py" in reason for reason in reasons), reasons
+    # A deleted probe beside a tracked script excuses nothing.
+    assert any("probe_gone.py" in reason for reason in reasons), reasons

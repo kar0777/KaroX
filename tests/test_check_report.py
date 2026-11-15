@@ -274,6 +274,43 @@ def test_pytest_parametrised_node_id_with_spaces_is_not_cut() -> None:
     assert row["message"] == "AssertionError: 3 != 4"
 
 
+def test_same_named_tests_and_a_collection_error_keep_their_own_frames() -> None:
+    log = (
+        "=================================== FAILURES ===================================\n"
+        "__________________________________ test_basic __________________________________\n"
+        "\n"
+        "    def test_basic():\n"
+        ">       assert 1 == 2\n"
+        "E       assert 1 == 2\n"
+        "\n"
+        "tests/test_a.py:3: AssertionError\n"
+        "__________________________________ test_basic __________________________________\n"
+        "\n"
+        "    def test_basic():\n"
+        ">       assert 3 == 4\n"
+        "E       assert 3 == 4\n"
+        "\n"
+        "tests/test_b.py:7: AssertionError\n"
+        "==================================== ERRORS ====================================\n"
+        "_____________________ ERROR collecting tests/test_c.py ______________________\n"
+        "tests/test_c.py:1: in <module>\n"
+        "    import calc\n"
+        "calc.py:4: in <module>\n"
+        "    def add(a, b)\n"
+        "E   SyntaxError: expected ':'\n"
+        "=========================== short test summary info ============================\n"
+        "FAILED tests/test_a.py::test_basic - assert 1 == 2\n"
+        "FAILED tests/test_b.py::test_basic - assert 3 == 4\n"
+        "ERROR tests/test_c.py\n"
+        "========================= 2 failed, 1 error in 0.12s ==========================\n"
+    )
+    payload = analyze(log)
+    rows = [_failure(payload, index) for index in range(3)]
+    assert [(row["path"], row["line"]) for row in rows] == [
+        ("tests/test_a.py", 3), ("tests/test_b.py", 7), ("calc.py", 4)
+    ]
+
+
 def test_repeated_failure_is_counted_not_listed_twice() -> None:
     payload = analyze(
         "FAILED tests/test_a.py::test_one - AssertionError: 1 != 2\n"
@@ -297,6 +334,36 @@ def test_unittest_names_the_deepest_frame_and_the_assertion() -> None:
     second = _failure(payload, 1)
     assert second["line"] == 9
     assert second["message"] == "AssertionError: 4 != 5 : math is broken"
+
+
+def test_unittest_subtest_and_import_time_errors_keep_their_frames() -> None:
+    log = (
+        "======================================================================\n"
+        "FAIL: test_x (pkg.tests.T.test_x) (i=2)\n"
+        "----------------------------------------------------------------------\n"
+        "Traceback (most recent call last):\n"
+        '  File "pkg/tests.py", line 8, in test_x\n'
+        "    self.assertEqual(i, 0)\n"
+        "AssertionError: 2 != 0\n"
+        "\n"
+        "======================================================================\n"
+        "ERROR: tests (unittest.loader._FailedTest.tests)\n"
+        "----------------------------------------------------------------------\n"
+        "Traceback (most recent call last):\n"
+        '  File "pkg/tests.py", line 1, in <module>\n'
+        "    import calc\n"
+        '  File "calc.py", line 3, in <module>\n'
+        "    def add(a, b)\n"
+        "SyntaxError: expected ':'\n"
+        "\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 2 tests in 0.001s\n"
+        "\n"
+        "FAILED (failures=1, errors=1)\n"
+    )
+    payload = analyze(log)
+    rows = [_failure(payload, index) for index in range(2)]
+    assert [(row["path"], row["line"]) for row in rows] == [("pkg/tests.py", 8), ("calc.py", 3)]
 
 
 def test_ruff_keeps_code_and_position_without_the_fix_marker() -> None:
@@ -389,6 +456,20 @@ def test_go_test_reads_the_failing_line() -> None:
         "TestTotal",
     )
     assert row["message"] == "total = 3, want 4"
+
+
+def test_go_subtests_each_keep_their_line() -> None:
+    log = (
+        "--- FAIL: TestParse (0.00s)\n"
+        "    --- FAIL: TestParse/empty (0.00s)\n"
+        "        parse_test.go:12: got 1, want 0\n"
+        "    --- FAIL: TestParse/space (0.00s)\n"
+        "        parse_test.go:18: got 2, want 0\n"
+        "FAIL\n"
+    )
+    payload = analyze(log)
+    rows = [_failure(payload, index) for index in range(payload["total"])]
+    assert [(row["test_id"], row["line"]) for row in rows] == [("TestParse/empty", 12), ("TestParse/space", 18)]
 
 
 def test_cargo_test_reads_the_panic_location() -> None:

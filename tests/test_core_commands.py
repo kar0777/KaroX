@@ -101,6 +101,9 @@ def test_a_heredoc_shell_probe_is_an_inline_snippet() -> None:
     assert _inline_probe(["bash", "-lc", "cat > /tmp/p.cc <<'EOF'\nint main(){}\nEOF\ng++ /tmp/p.cc"])
     assert not _inline_probe(["bash", "-lc", "make -C /app test"])
     assert _inline_probe(["python", "-c", "print(1)"])
+    assert _inline_probe(["python3", "-u", "-X", "utf8", "-c", "print(1)"])
+    assert not _inline_probe(["python3", "-u", "-m", "pytest", "-c", "setup.cfg"])
+    assert not _inline_probe(["python", "-c"])
     # Scratch scripts under /tmp (risk-scorer v50) are probes, not deliverable checks.
     assert _inline_probe(["bash", "-lc", "cd /tmp && python3 p8.py | grep extra="])
     assert _inline_probe(["python3", "/tmp/p11.py"])

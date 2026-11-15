@@ -39,6 +39,7 @@ from .engine_tool_support import (  # noqa: F401
 
 import hashlib
 import json
+import re
 from typing import Any, Dict, List, Mapping
 from .auto_verify import quick_checks, summarize as summarize_quick_checks
 from .check_report import render_failure_map, rerun_targets
@@ -75,6 +76,30 @@ from .engine_tool_bodies import (  # noqa: E402,F401
     _failed_check_report as _failed_check_report,
 )
 from .models import CoreCommand, CoreResult
+from .web_document import is_scratch_artifact
+
+
+def _scratch_only(data: Mapping[str, Any]) -> bool:
+    """Whether an edit wrote only scratch files (probes), not code under test."""
+
+    path = data.get("path")
+    paths = [path] if isinstance(path, str) and path else data.get("changed_files")
+    if not isinstance(paths, list) or not paths:
+        return False
+    return all(isinstance(item, str) and is_scratch_artifact(item) for item in paths)
+
+
+_TEST_RUNNER = re.compile(r"pytest|unittest|\btox\b|\bnox\b|make\s+(test|check)|\b(npm|yarn|pnpm|cargo|go)\s+test")
+
+
+def _runs_tests(core_name: str, arguments: Mapping[str, Any]) -> bool:
+    """A test run, not a probe: it answers what a pending affected run would."""
+
+    if core_name != "checks.run":
+        return True
+    argv = arguments.get("argv")
+    text = " ".join(str(item) for item in argv) if isinstance(argv, list) else str(argv or "")
+    return bool(_TEST_RUNNER.search(text))
 
 
 class EngineAttachMixin:
@@ -111,7 +136,7 @@ class EngineAttachMixin:
         data["quick_checks_line"] = summarize_quick_checks(checks)
 
     def _attach_affected_tests(
-        self, result: CoreResult, action: Mapping[str, Any] | None = None
+        self, result: CoreResult, action: Mapping[str, Any] | None = None, *, run: bool = True
     ) -> None:
         """Re-run the tests that failed, in the same result as the repair edit.
 
@@ -127,6 +152,11 @@ class EngineAttachMixin:
 
         Everything here fails closed to silence: a missing runtime, a vanished
         test file or an exhausted budget leaves the edit result unchanged.
+
+        ``run=False`` only records the code hint: a script's edits run the
+        tests once, after the script (a five-edit script ran them five
+        times). An edit of scratch files alone (a probe) runs nothing: the
+        code those tests check did not change.
         """
 
         arguments = (action or {}).get("arguments") if isinstance(action, Mapping) else None
@@ -137,12 +167,12 @@ class EngineAttachMixin:
             if text:
                 # The code just written names what its tests use.
                 self._code_hint = (text + "\n" + str(getattr(self, "_code_hint", "")))[:20_000]
-        if not _batch_tail(action):
+        if not run or not _batch_tail(action):
             return
         if "tests.run" not in self._definitions or not isinstance(result.data, dict):
             return
         data = result.data
-        if data.get("changed") is not True:
+        if data.get("changed") is not True or _scratch_only(data):
             return
         try:
             record = self._core.sessions.load(self._session_id)
@@ -275,6 +305,8 @@ class EngineAttachMixin:
                 if isinstance(content, str)
                 else json.dumps(data, ensure_ascii=False, sort_keys=True)
             )
+            if data.get("truncated") and isinstance(data.get("detail"), str):
+                text += f"\n[{data['detail']}]"  # never a silent cut
         elif core_name in _MUTATION_TOOLS:
             text = _mutation_body(core_name, data, result.ok)
         elif core_name == "visual.check":

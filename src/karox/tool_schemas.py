@@ -376,8 +376,9 @@ def additional_tool_definitions(
                     "patch": {
                         "type": "string",
                         "description": (
-                            "Unified diff with ---/+++ file headers and @@ hunks. "
-                            "Keep hunks narrow and include exact current context."
+                            "Unified diff with ---/+++ file headers and @@ hunks, or the "
+                            "*** Begin Patch / *** Update File: format. Keep hunks narrow "
+                            "and include exact current context."
                         ),
                     },
                     "expected_sha256": {
