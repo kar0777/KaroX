@@ -70,5 +70,15 @@ git diff --check
   defect (hypothesis H1, to be A/B-tested), 40 on an unstated API expectation, 52 to the
   upstream key limit (429: more than 3 client IPs in 10 minutes; parallel GitHub runners).
 - 6.0.0.dev1: rate limits are waited out on a 15-minute budget (commit 6fccc09).
-- Held-out judging run k6h1 started (run 43723372988): all 50 held-out tasks, 1 attempt.
-  Bar: DSH 17/50 at $0.046 per trial, OpenCode 15/50 at $0.096 (same report, same prices).
+- Held-out judging run k6h1 on reformboss (run 43723372988) cancelled before any task
+  finished (key IP limit); rerun on Synthetic per D-025: run 43725472165, tag k6h1s, all 50
+  held-out tasks, 1 attempt, parallel 3. Bar: DSH 17/50 at $0.046 per trial, OpenCode 15/50
+  at $0.096 (same report, same prices).
+- Free/cheap upstream search (user asked for free providers): no free source of
+  DSV4.1-Flash-1017; every reseller key on the PC is empty or invalid; CrowLLM free tier is
+  5 requests/min per key and lacks 1017. Benches stay on Synthetic + ReformBoss.
+- H1 A/B started on the dev pool (run 43741239067, tag k6dh1, reformboss, parallel 1 to stay
+  under the key's IP limit): same 11 burned tasks as k6d1+k6s1, with
+  `--append-system-prompt` "When you fix a bug, fix its cause everywhere it applies: check
+  sibling implementations, related code paths and other inputs that hit the same cause, not
+  only the case in the report."
