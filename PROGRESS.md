@@ -168,3 +168,5 @@ git diff --check
   model/provider/base URL/key variable/limits/prices/flags, `[profiles.NAME]` with
   `--profile`; flag > `KAROX_*` env > file > built-in. CI green on Windows/Linux/macOS
   (py3.12/3.13) after fixing the Linux SIGINT-test hang. 574 tests.
+- E1 also removed solution hunting: commands into pip caches / other installed copies / git
+  objects fell from 47 of 780 calls (6%, baseline) to 8 of 677 (1.2%).
