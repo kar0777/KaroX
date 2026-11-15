@@ -220,3 +220,11 @@ git diff --check
   and Streamable HTTP (negotiates 2025-11-25), lists tools, calls them, gets tool errors
   and pings; stdio `initialize` answers 0.21 s after process start (5 of 5 runs). B1 wheel
   passed the free replay in real hard12 images (run 43761878216).
+- KaroX as MCP client against a reference server built with the official SDK 2.3.0
+  (`MCPServer`, stdio and streamable HTTP): tools listed as `mcp__ref__add` etc., results
+  returned, tool errors flagged `is_error`. Both directions of MCP are now checked against
+  the reference implementation.
+- Provider retries: 502/503/529 ("service unavailable", request not processed) are waited
+  out for up to 10 minutes like 429s, instead of 5 quick retries (~15 s) that ended the
+  run; a 20-minute Synthetic 503 storm cost E1 tasks 68 and 71. Plain 500s and timeouts
+  keep the short policy (they may have been processed and billed).
