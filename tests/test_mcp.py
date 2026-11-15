@@ -96,7 +96,14 @@ def test_run_to_completion_and_idempotency(tmp_path):
         status, since, seen = {"status": "running"}, 0, []
         for _ in range(50):
             status = (
-                await tool(server, "karox_status", run_id=run_id, since=since, wait_seconds=2)
+                await tool(
+                    server,
+                    "karox_status",
+                    run_id=run_id,
+                    since=since,
+                    wait_seconds=2,
+                    detail="full",
+                )
             )["structuredContent"]
             seen += status["events"]
             since = status["next"]
@@ -108,7 +115,15 @@ def test_run_to_completion_and_idempotency(tmp_path):
         assert seen[-1]["type"] == "run_finished"
         assert [e["i"] for e in seen] == list(range(len(seen)))
         tail = await tool(server, "karox_status", run_id=run_id, since=status["next"])
-        assert tail["structuredContent"]["events"] == []
+        assert tail["structuredContent"]["log"] == []
+        log = (await tool(server, "karox_status", run_id=run_id))["structuredContent"]["log"]
+        assert log[0].startswith("started (session ")
+        assert log[-2:] == ["says: all done", "finished: completed"]
+        assert (
+            "events" not in (await tool(server, "karox_status", run_id=run_id))["structuredContent"]
+        )
+        bad = await tool(server, "karox_status", run_id=run_id, detail="everything")
+        assert bad["isError"] is True
         runs = (await tool(server, "karox_runs"))["structuredContent"]["runs"]
         assert [r["run_id"] for r in runs] == [run_id]
         await manager.shutdown()
@@ -451,3 +466,33 @@ def test_cli_drops_api_key_from_environment(monkeypatch):
     provider = cli._provider(args)
     assert "TEST_LLM_KEY" not in os.environ  # agent shell commands inherit os.environ
     asyncio.run(provider.aclose())
+
+
+def test_brief_log_lines():
+    from karox6.core import events as ev
+    from karox6.core.digest import event_line
+
+    calls = {}
+    assert (
+        event_line(
+            ev.ToolStarted(call_id="1", name="bash", arguments='{"command": "pytest -q"}'), calls
+        )
+        is None
+    )
+    line = event_line(
+        ev.ToolFinished(
+            call_id="1", name="bash", is_error=False, output="..\n2 passed\n", duration_ms=1500
+        ),
+        calls,
+    )
+    assert line == "✓ bash pytest -q → 2 passed (1.5s)"
+    assert calls == {}
+    failed = event_line(
+        ev.ToolFinished(
+            call_id="9", name="read", is_error=True, output="no such file", duration_ms=3
+        ),
+        calls,
+    )
+    assert failed == "✗ read → no such file"
+    assert event_line(ev.AssistantMessage(step=1, text="", tool_calls=[{}]), calls) is None
+    assert event_line(ev.Notice(kind="wrap_up", text="..."), calls) == "note to the agent: wrap_up"

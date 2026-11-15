@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
@@ -20,6 +19,7 @@ from typing import Any
 
 from karox6 import __version__
 from karox6.core import events as ev
+from karox6.core.digest import brief, outcome
 from karox6.core.session import Session, SessionConfig
 from karox6.core.store import recent_sessions, resume_kwargs
 from karox6.tools.base import ApprovalRequest, Tool
@@ -378,24 +378,6 @@ class ChatApp:
         return line
 
 
-def brief(arguments: str, limit: int = 120) -> str:
-    try:
-        value = json.loads(arguments)
-    except json.JSONDecodeError:
-        value = arguments
-    if isinstance(value, dict):
-        for key in ("command", "file_path", "path", "pattern", "job_id"):
-            if key in value:
-                text = str(value[key])
-                break
-        else:
-            text = json.dumps(value, ensure_ascii=False)
-    else:
-        text = str(value)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
 def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
     """While a turn runs, Ctrl+C cancels that turn only, every time.
 
@@ -434,18 +416,6 @@ def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
         signal.signal(signal.SIGINT, previous)
 
     return restore
-
-
-def outcome(event: ev.ToolFinished, limit: int = 140) -> str:
-    """One line about a finished tool: a shell's last line, a read's size, else line one."""
-    lines = [ln.strip() for ln in event.output.strip().splitlines() if ln.strip()]
-    if not lines:
-        return ""
-    name = event.name.rsplit("/", 1)[-1]  # "agent-1/read" -> "read"
-    if name == "read" and not event.is_error:
-        return f"{len(lines)} lines"
-    pick = lines[-1] if name in ("bash", "shell", "powershell", "job_output") else lines[0]
-    return pick[:limit]
 
 
 def _k(n: int) -> str:

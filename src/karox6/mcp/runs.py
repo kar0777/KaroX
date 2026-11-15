@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from karox6.core.digest import event_line
 from karox6.core.events import Event
 from karox6.core.session import Session, SessionConfig
 from karox6.core.store import SessionStore
@@ -71,6 +72,7 @@ class Run:
     worker: asyncio.Task[None] | None = None
     tick: asyncio.Event = field(default_factory=asyncio.Event)
     approvals: int = 0
+    calls: dict[str, str] = field(default_factory=dict)  # call id -> argument digest
 
     @property
     def running(self) -> bool:
@@ -194,7 +196,13 @@ class RunManager:
             if old.request_id:
                 self.by_request.pop(old.request_id, None)
 
-    async def status(self, run_id: str, *, since: int = 0, wait_s: float = 0.0) -> dict[str, Any]:
+    async def status(
+        self, run_id: str, *, since: int = 0, wait_s: float = 0.0, detail: str = "full"
+    ) -> dict[str, Any]:
+        """Run state and the events after ``since``: full event dicts, or (``brief``) one
+        line per meaningful event, a fraction of the size for clients that read it all."""
+        if detail not in ("brief", "full"):
+            raise RunError("detail must be 'brief' or 'full'")
         run = self.get(run_id)
         since = max(int(since), 0)
         wait_s = float(wait_s)
@@ -207,8 +215,11 @@ class RunManager:
         first = max(since - run.dropped, 0)
         events = run.events[first:]
         view = run.summary()
+        if detail == "brief":
+            view["log"] = [e["line"] for e in events if e.get("line")]
+        else:
+            view["events"] = [{k: v for k, v in e.items() if k != "line"} for e in events]
         view.update(
-            events=events,
             next=self._next(run),
             final_text=run.final_text if not run.running else "",
             reason=run.reason,
@@ -339,6 +350,9 @@ class RunManager:
             return
         data = {k: _shrink(v) for k, v in event.to_dict().items()}
         data["i"] = self._next(run)
+        line = event_line(event, run.calls)
+        if line:
+            data["line"] = line
         run.events.append(data)
         if len(run.events) > MAX_EVENTS:
             excess = len(run.events) - MAX_EVENTS

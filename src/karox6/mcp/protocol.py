@@ -21,13 +21,19 @@ INSTRUCTIONS = (
     "KaroX is a coding agent working in a project directory on the user's machine. "
     "Start work with karox_run (a task in plain words), then call karox_status with "
     "wait_seconds until status is no longer 'running'; pass the returned 'next' as 'since' "
-    "to get only new events. If pending_approvals is not empty, a destructive command is "
-    "waiting: ask the user, then answer with karox_approve. Review the result with "
+    "to get only what is new (a short 'log', one line per action). If pending_approvals "
+    "is not empty, a destructive command is waiting: ask the user, then answer with "
+    "karox_approve. Review the result with "
     "karox_diff. Give karox_run a unique request_id so a retried call never starts the "
     "same work twice."
 )
 
 _RUN_ID = {"type": "string", "description": "run id returned by karox_run"}
+_DETAIL = {
+    "type": "string",
+    "enum": ["brief", "full"],
+    "description": "brief (default): 'log', one line per action; full: raw 'events'",
+}
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
 
 TOOLS: list[dict[str, Any]] = [
@@ -58,6 +64,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "number",
                     "description": "wait up to this long (max 50) for the first events",
                 },
+                "detail": _DETAIL,
             },
             "required": ["task"],
         },
@@ -68,8 +75,9 @@ TOOLS: list[dict[str, Any]] = [
         "title": "Run status and events",
         "description": (
             "State of a run: status (running | completed | error | limit | loop | "
-            "cancelled), events since index 'since', pending approvals, final_text when done. "
-            "wait_seconds (max 50) long-polls until something new happens."
+            "cancelled), what happened since index 'since' (log: one line per action), "
+            "pending approvals, final_text when done. wait_seconds (max 50) long-polls until "
+            "something new happens."
         ),
         "inputSchema": {
             "type": "object",
@@ -77,6 +85,7 @@ TOOLS: list[dict[str, Any]] = [
                 "run_id": _RUN_ID,
                 "since": {"type": "integer", "description": "first event index to return"},
                 "wait_seconds": {"type": "number", "description": "long-poll time, max 50"},
+                "detail": _DETAIL,
             },
             "required": ["run_id"],
         },
@@ -222,13 +231,17 @@ class McpServer:
                 request_id=_opt_str(args, "request_id"),
             )
             wait = float(args.get("wait_seconds") or 0)
-            view = await runs.status(run.run_id, wait_s=wait) if wait else run.summary()
+            detail = str(args.get("detail") or "brief")
+            view = (
+                await runs.status(run.run_id, wait_s=wait, detail=detail) if wait else run.summary()
+            )
             return {**view, "duplicate": duplicate}
         if name == "karox_status":
             return await runs.status(
                 str(args["run_id"]),
                 since=int(args.get("since") or 0),
                 wait_s=float(args.get("wait_seconds") or 0),
+                detail=str(args.get("detail") or "brief"),
             )
         if name == "karox_approve":
             return runs.approve(
