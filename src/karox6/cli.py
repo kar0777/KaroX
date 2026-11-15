@@ -72,6 +72,11 @@ def _parser() -> argparse.ArgumentParser:
         help="destructive commands: ask (TTY default), deny (non-interactive default), allow",
     )
     run.add_argument("--system-prompt-file", type=Path, default=None)
+    run.add_argument(
+        "--append-system-prompt",
+        default=None,
+        help="text added after the built-in system prompt",
+    )
     run.add_argument("--extra-body", default=None, help="JSON object merged into requests")
     run.add_argument("--no-sse", action="store_true", help="disable streaming HTTP responses")
     run.add_argument("--request-timeout", type=float, default=900.0)
@@ -166,6 +171,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
         stream_deltas=args.stream or not args.json,
         extra_body=extra_body,
         system_prompt=system_prompt,
+        system_append=args.append_system_prompt,
     )
     provider = make_provider(
         args.provider,

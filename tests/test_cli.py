@@ -31,3 +31,14 @@ def test_debug_rss_reports_positive_number(capsys: pytest.CaptureFixture[str]) -
 
 def test_rss_mb_is_sane() -> None:
     assert 1 < rss_mb() < 4096
+
+
+def test_append_system_prompt(tmp_path):
+    from karox6.core.prompt import BASE_PROMPT, build_system_prompt
+    from karox6.tools.shell import detect_shell
+
+    text = build_system_prompt(tmp_path, detect_shell(), append="  Extra rule.  ")
+    assert text.startswith(BASE_PROMPT + "\n\nExtra rule.\n\nEnvironment:")
+    assert build_system_prompt(tmp_path, detect_shell(), append="  ").startswith(
+        BASE_PROMPT + "\n\nEnvironment:"
+    )

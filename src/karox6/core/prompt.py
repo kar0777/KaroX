@@ -27,8 +27,13 @@ INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "KAROX.md")
 INSTRUCTIONS_MAX_CHARS = 16_000
 
 
-def build_system_prompt(workspace: Path, shell: ShellInfo, *, base: str | None = None) -> str:
-    parts = [base or BASE_PROMPT, environment_block(workspace, shell)]
+def build_system_prompt(
+    workspace: Path, shell: ShellInfo, *, base: str | None = None, append: str | None = None
+) -> str:
+    parts = [base or BASE_PROMPT]
+    if append and append.strip():
+        parts.append(append.strip())
+    parts.append(environment_block(workspace, shell))
     instructions = project_instructions(workspace)
     if instructions:
         parts.append(instructions)

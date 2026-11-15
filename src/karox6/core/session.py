@@ -80,6 +80,7 @@ class SessionConfig:
     stream_deltas: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None  # replaces the base prompt (environment is still added)
+    system_append: str | None = None  # appended after the base prompt (A/B variants, users)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def compaction_threshold(self) -> int:
@@ -122,7 +123,7 @@ class Session:
         self.guard = LoopGuard(hard_stop=config.loop_hard_stop)
         self.approver = approver
         self.system_prompt = build_system_prompt(
-            self.workspace, self.shell, base=config.system_prompt
+            self.workspace, self.shell, base=config.system_prompt, append=config.system_append
         )
         self._last_input_tokens = 0
         self._chars_since_measure = 0
