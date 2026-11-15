@@ -58,6 +58,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "PT"]
 ignore = [
     "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",  # size/magic-number heuristics
     "PLC0415",  # lazy imports are a design goal (startup time / RSS)
+    "RUF012",  # tool classes declare their JSON schema as a plain class attribute
     "RUF001", "RUF002", "RUF003",  # Russian text in docs/messages is intended
 ]
 
