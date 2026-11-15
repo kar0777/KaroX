@@ -138,7 +138,7 @@ def _coerce(val: Any, spec: dict[str, Any]) -> tuple[Any, bool]:
     kind = spec.get("type")
     if kind is None:
         return val, True
-    expected = _JSON_TYPES.get(kind)
+    expected = _JSON_TYPES.get(kind) if isinstance(kind, str) else None
     if expected is None:
         return val, True
     if kind in ("integer", "number") and isinstance(val, bool):

@@ -126,6 +126,13 @@ def _add_session_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--extra-body", default=None, help="JSON object merged into requests")
     p.add_argument("--no-sse", action="store_true", help="disable streaming HTTP responses")
     p.add_argument("--request-timeout", type=float, default=900.0)
+    p.add_argument(
+        "--mcp-config",
+        type=Path,
+        default=None,
+        help="MCP servers to use as tools (JSON with 'mcpServers'; default <home>/mcp.json)",
+    )
+    p.add_argument("--no-mcp", action="store_true", help="do not load MCP servers")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -180,6 +187,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
     config = _session_config(args, workspace, home, stream_deltas=args.stream or not args.json)
+    mcp_tools, mcp_handles = await _mcp_tools(args, home)
     provider = _provider(args)
     approver = _approver(args.approve_dangerous, json_mode=args.json)
     session_kwargs: dict[str, Any] = {}
@@ -194,7 +202,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
             "usage": loaded.usage,
             "cost_usd": loaded.cost_usd,
         }
-    session = Session(config, provider, approver=approver, **session_kwargs)
+    session = Session(config, provider, approver=approver, extra_tools=mcp_tools, **session_kwargs)
     render = _JsonRenderer() if args.json else _TextRenderer()
     status = "error"
     try:
@@ -204,6 +212,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
                 status = getattr(event, "status", "error")
     finally:
         await provider.aclose()
+        await _close_mcp(mcp_handles)
     return EXIT_CODES.get(status, 1)
 
 
@@ -290,6 +299,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     root = (args.root or Path.cwd()).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"root {root} is not a directory")
+    mcp_tools, mcp_handles = await _mcp_tools(args, home)
     provider = _provider(args)
     runs = RunManager(
         lambda ws: _session_config(args, ws, home, stream_deltas=False),
@@ -298,6 +308,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         any_workspace=args.any_cwd,
         approval_mode=args.approve_dangerous,
         approval_timeout_s=args.approval_timeout,
+        extra_tools=mcp_tools,
     )
     server = McpServer(runs)
     try:
@@ -324,6 +335,27 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     finally:
         await runs.shutdown()
         await provider.aclose()
+        await _close_mcp(mcp_handles)
+
+
+async def _mcp_tools(args: argparse.Namespace, home: Path) -> tuple[list[Any], list[Any]]:
+    """Tools of the configured external MCP servers (none unless a config exists)."""
+    if args.no_mcp:
+        return [], []
+    path = args.mcp_config or home / "mcp.json"
+    if args.mcp_config is None and not path.is_file():
+        return [], []
+    from karox6.mcp.client import load_mcp_tools
+
+    tools, handles = await load_mcp_tools(path)
+    return list(tools), list(handles)
+
+
+async def _close_mcp(handles: list[Any]) -> None:
+    if handles:
+        from karox6.mcp.client import close_all
+
+        await close_all(handles)
 
 
 def _approver(mode: str | None, *, json_mode: bool) -> Any:

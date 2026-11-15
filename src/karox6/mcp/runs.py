@@ -22,7 +22,7 @@ from karox6.core.events import Event
 from karox6.core.session import Session, SessionConfig
 from karox6.core.store import SessionStore
 from karox6.providers.base import Provider
-from karox6.tools.base import ApprovalRequest
+from karox6.tools.base import ApprovalRequest, Tool
 
 MAX_EVENTS = 4000
 FIELD_CAP = 2000
@@ -105,6 +105,7 @@ class RunManager:
         approval_mode: str = "ask",
         approval_timeout_s: float = 600.0,
         home: Path | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> None:
         self.config_factory = config_factory
         self.provider_factory = provider_factory
@@ -113,6 +114,7 @@ class RunManager:
         self.approval_mode = approval_mode
         self.approval_timeout_s = approval_timeout_s
         self.home = home
+        self.extra_tools = list(extra_tools or [])
         self.runs: dict[str, Run] = {}
         self.by_request: dict[str, str] = {}
         self._seq = 0
@@ -162,7 +164,13 @@ class RunManager:
         async def approver(request: ApprovalRequest) -> bool:
             return await self._approve(holder[0], request)
 
-        session = Session(config, self.provider_factory(), approver=approver, **kwargs)
+        session = Session(
+            config,
+            self.provider_factory(),
+            approver=approver,
+            extra_tools=self.extra_tools,
+            **kwargs,
+        )
         run = Run(run_id=run_id, session=session, task=task, request_id=request_id)
         holder.append(run)
         self.runs[run_id] = run

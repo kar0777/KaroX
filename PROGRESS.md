@@ -82,3 +82,33 @@ git diff --check
   `--append-system-prompt` "When you fix a bug, fix its cause everywhere it applies: check
   sibling implementations, related code paths and other inputs that hit the same cause, not
   only the case in the report."
+- Held-out verdict k6h1s (run 43725472165, Synthetic, 50 tasks, 1 attempt; report
+  `karox6-bench-data/reports/heldout-k6h1s`): KaroX 6 17/50, DSH 17/50, OpenCode 15/50.
+  Usage-priced $/trial 0.085 / 0.046 / 0.096; min/trial 11.5 / 4.7 / 7.9. KaroX 6 alone
+  solved 48; lost 60 to one P2P regression (OpenCode too). M2 bar not met: score ties DSH
+  but cost is 1.85x — input tokens 390M vs 192M (uncached 14.4M vs 6.4M), output 2.5M vs
+  1.7M. Next: find the token overhead on the dev pool only (held-out trajectories stay
+  unread), fix it, A/B on the free GLM lane (D-026), then a fresh held-out judgment.
+- GLM lane smoke (run 43746913764, tag g53s1, freeinference): task 28 solved by KaroX 6,
+  DSH and OpenCode (6-10 min each); one 429 retry across three parallel trials.
+- GLM 46-task baseline (run 43751954752, tag g53b1) cancelled on the user's call: too slow
+  to be useful; tuning works from the DeepSeek (Synthetic) trajectories already collected.
+- Token anatomy on the dev pool (`karox6-bench-data/tokstat.py`, `cats.py`, `hunt.py`):
+  the 1.85x cost is more steps (73 vs 45 calls per trial) times larger contexts (106k vs 85k
+  mean input per call); cache-miss rate ~3.3% of calls for every arm (upstream property);
+  compaction never fires in the bench. Extra steps spread over view / run-python / test /
+  search / git, plus solution hunting (47 vs 20 commands into pip caches, other installed
+  copies, git objects, `find /`).
+- E1 A/B started (run 43753202223, tag k6e1, Synthetic, parallel 3, dev pool): appended rule
+  "Work economically: every step re-sends the whole conversation, so prefer fewer, fuller
+  steps. Combine related shell commands in one call, read the whole relevant part of a file
+  at once instead of many small slices, and issue independent reads together. Solve the
+  task from the project code and tests in front of you; do not hunt for a ready-made fix in
+  package caches, other installed copies of the code, or unreachable git objects."
+  Baseline k6d1+k6s1: 7/11, 56 calls per task.
+- M4 part 2, MCP client: `karox6.mcp.client` connects stdio and Streamable HTTP MCP servers
+  from `<home>/mcp.json` or `--mcp-config` (`--no-mcp` turns it off); their tools join the
+  session as `mcp__<server>__<tool>` (readOnlyHint respected, output capped and spilled);
+  a server that fails to start is skipped with a warning. `karox6 mcp` passes the same tools
+  to its runs. Tests: fake stdio server (paged tools/list), our own HTTP server with bearer
+  auth, a scripted session calling an MCP tool. 543 tests pass, ruff + mypy clean.

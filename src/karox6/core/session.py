@@ -99,6 +99,7 @@ class Session:
         approver: Approver = deny_all,
         shell: ShellInfo | None = None,
         tools: list[Tool] | None = None,
+        extra_tools: list[Tool] | None = None,
         session_id: str | None = None,
         messages: list[Message] | None = None,
         usage: Usage | None = None,
@@ -108,9 +109,14 @@ class Session:
         self.provider = provider
         self.workspace = config.workspace.resolve()
         self.shell = shell or detect_shell()
-        self.tools = (
-            tools if tools is not None else build_tools(self.shell, apply_patch=config.apply_patch)
-        )
+        self.tools = [
+            *(
+                tools
+                if tools is not None
+                else build_tools(self.shell, apply_patch=config.apply_patch)
+            ),
+            *(extra_tools or []),
+        ]
         self._tool_map = {t.name: t for t in self.tools}
         self.session_id = session_id or new_session_id()
         self.store = SessionStore(config.home, self.session_id)
