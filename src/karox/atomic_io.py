@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +16,8 @@ from typing import Optional
 #: Sources whose compiled form CPython caches and validates by mtime.
 _BYTECODE_SOURCES = frozenset({".py", ".pyw"})
 _SECOND_NS = 1_000_000_000
+#: Only Windows denies a replace while another process holds the target.
+_RETRY_HELD_REPLACE = os.name == "nt"
 
 
 def new_file_mode() -> int:
@@ -58,7 +61,7 @@ def atomic_write(path: Path, content: bytes, mode: Optional[int] = None) -> None
             if mode is not None and hasattr(os, "fchmod"):
                 os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace(temporary, path)
     finally:
         try:
             os.unlink(temporary)
@@ -66,6 +69,23 @@ def atomic_write(path: Path, content: bytes, mode: Optional[int] = None) -> None
             pass
     if previous_mtime_ns is not None:
         _advance_past_cached_bytecode(path, previous_mtime_ns)
+
+
+def _replace(temporary: str, path: Path) -> None:
+    """``os.replace``, bridging a Windows editor, indexer or antivirus holding ``path``.
+
+    Bounded, so a persistent ACL problem still surfaces within two seconds.
+    """
+
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if not _RETRY_HELD_REPLACE or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _write_in_place(path: Path, content: bytes, mode: Optional[int]) -> None:

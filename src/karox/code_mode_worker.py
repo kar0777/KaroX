@@ -201,6 +201,9 @@ class _Capture:
 
 _capture = _Capture()
 _namespace: dict = {"__name__": "__code_run__", "__builtins__": builtins}
+#: The eval being run; every message names it, so KaroX drops a stale or
+#: forged one left over from an earlier script.
+_eval_id: object = None
 
 
 def _send(message: dict) -> None:
@@ -218,7 +221,7 @@ def _receive() -> dict:
 
 
 def _call(name: str, arguments: dict) -> ToolResult:
-    _send({"t": "call", "name": name, "args": arguments, "out": _capture.take()})
+    _send({"t": "call", "id": _eval_id, "name": name, "args": arguments, "out": _capture.take()})
     reply = _receive()
     if reply.get("t") == "abort":
         raise _Stopped(str(reply.get("reason") or "stopped by KaroX"))
@@ -289,6 +292,8 @@ def _show(value: object) -> str:
 
 
 def _evaluate(message: dict, frames_allowed: list) -> None:
+    global _eval_id
+    _eval_id = message.get("id")
     code = str(message.get("code") or "")
     filename = f"<code_run {message.get('id')}>"
     linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
@@ -328,6 +333,7 @@ def _evaluate(message: dict, frames_allowed: list) -> None:
     _send(
         {
             "t": "done",
+            "id": _eval_id,
             "out": _capture.take(),
             "dropped": _capture.dropped,
             "value": shown,

@@ -98,6 +98,17 @@
   baseline and count as pre-existing instead of being owed. The check result
   names that count (`its progress rows show 10 passed, 0 failed`), so a
   finish can quote it without a verbose re-run.
+- Code mode's channel is sturdier: every worker message names its script, so
+  a stale or forged `done` or `call` is dropped instead of answering the next
+  script; a malformed field no longer raises in KaroX; and a script flooding
+  the channel without a newline is stopped at 32 MB instead of growing
+  KaroX's memory.
+- Session persistence is sturdier: reactivating a saved-bridge session that
+  no longer exists creates it instead of waiting on its own lock (a hang on
+  POSIX, a ten-second failure on Windows); a state file or write target held
+  for a moment by antivirus or an indexer on Windows is retried briefly
+  instead of failing the step; and a token typed into a check's command line
+  is redacted from the checks list reported to clients.
 - The on-demand baseline swap is safer: a process killed mid-swap is undone
   when Core starts and before every check (not only at the next swap); the
   journal records the swap's phase, so a crash while placing or restoring

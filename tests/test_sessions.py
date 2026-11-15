@@ -84,6 +84,46 @@ class SessionStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_reactivating_a_missing_session_creates_it_without_waiting(self) -> None:
+        """create() takes the state lock itself; reactivate used to call it
+        under that lock and hung (POSIX) or failed after ten seconds (Windows)."""
+
+        outcome: dict[str, Any] = {}
+
+        def reactivate() -> None:
+            try:
+                outcome["record"] = self.store.reactivate("fresh", self.repository)
+            except Exception as exc:  # reported below, not swallowed
+                outcome["error"] = exc
+
+        started = time.monotonic()
+        worker = threading.Thread(target=reactivate, daemon=True)
+        worker.start()
+        worker.join(timeout=8)
+        self.assertFalse(worker.is_alive(), "reactivate hung on its own lock")
+        self.assertNotIn("error", outcome)
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(outcome["record"].session_id, "fresh")
+        self.assertEqual(self.store.load("fresh").status, "active")
+
+    def test_a_briefly_held_state_file_is_read_once_it_frees(self) -> None:
+        """Antivirus or an exiting reader holds a file for a moment on Windows."""
+
+        path = self.store.state_path("sample")
+        real_read = Path.read_text
+        refusals: list[int] = []
+
+        def held_twice(self_path: Path, *args: Any, **kwargs: Any) -> str:
+            if self_path == path and len(refusals) < 2:
+                refusals.append(1)
+                raise PermissionError(13, "held by a scanner")
+            return real_read(self_path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", held_twice):
+            record = self.store.load("sample")
+        self.assertEqual(len(refusals), 2)
+        self.assertEqual(record.session_id, "sample")
+
     def test_checksum_corruption_is_rejected(self) -> None:
         path = self.store.state_path("sample")
         payload = json.loads(path.read_text(encoding="utf-8"))

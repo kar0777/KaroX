@@ -58,7 +58,9 @@ class CoreFilesMixin:
             entry = {
                 "correlation_id": command.correlation_id,
                 "ok": result.ok,
-                "argv": result.data.get("argv", []),
+                # Reported to clients and kept in session.json: a token in a
+                # command line must not be (persistence review, 2026-11-15).
+                "argv": redact(result.data.get("argv", [])),
                 "exit_code": result.data.get("exit_code"),
                 "timed_out": result.data.get("timed_out", False),
                 "effective_timeout": result.data.get("effective_timeout"),

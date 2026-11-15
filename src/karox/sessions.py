@@ -389,12 +389,21 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise SessionError(f"session state does not exist: {path}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SessionError(f"cannot read session state {path}: {exc}") from exc
+    # Antivirus or an exiting reader can hold the file for a moment on
+    # Windows; the write side already bridges that window (_replace_with_retry).
+    deadline = time.monotonic() + _ATOMIC_REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except FileNotFoundError as exc:
+            raise SessionError(f"session state does not exist: {path}") from exc
+        except PermissionError as exc:
+            if time.monotonic() >= deadline:
+                raise SessionError(f"cannot read session state {path}: {exc}") from exc
+            time.sleep(_ATOMIC_REPLACE_RETRY_DELAY)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SessionError(f"cannot read session state {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SessionError(f"session state must be an object: {path}")
     return value
@@ -536,9 +545,16 @@ class SessionStore:
         repo = repository.expanduser().resolve(strict=True)
         if not repo.is_dir():
             raise SessionError(f"repository is not a directory: {repo}")
-        with _exclusive_file_lock(self.lock_path(sid)):
-            if not target.exists():
+        if not target.exists():
+            # create() takes the state lock itself; calling it under that lock
+            # deadlocked on POSIX (flock on a second descriptor) and failed
+            # after ten seconds on Windows (persistence review, 2026-11-15).
+            try:
                 return self.create(repo, "reactivated persistent session", access_profile, session_id=sid)
+            except SessionError:
+                if not target.exists():
+                    raise  # not a lost race: a real failure
+        with _exclusive_file_lock(self.lock_path(sid)):
             record = self.load(sid)
             record.repository = str(repo)
             record.repo_fingerprint = repository_fingerprint(repo)

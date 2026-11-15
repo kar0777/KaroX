@@ -273,6 +273,40 @@ def test_a_read_only_directory_still_lets_writable_files_be_edited(
         atomic_io.atomic_write(tmp_path / "new.py", b"x = 1\n")
 
 
+def test_a_briefly_held_target_is_replaced_once_it_frees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Windows editor, indexer or antivirus holds the target for a moment;
+    the replace is retried briefly, and only on Windows."""
+
+    import os
+
+    from karox import atomic_io
+
+    target = tmp_path / "state.json"
+    target.write_bytes(b"{}")
+    real_replace = os.replace
+    refusals: List[int] = []
+
+    def held_twice(source: Any, destination: Any) -> None:
+        if len(refusals) < 2:
+            refusals.append(1)
+            raise PermissionError(13, "Access is denied")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "replace", held_twice)
+    monkeypatch.setattr(atomic_io, "_RETRY_HELD_REPLACE", True)
+    atomic_io.atomic_write(target, b'{"v": 2}')
+    assert target.read_bytes() == b'{"v": 2}' and len(refusals) == 2
+
+    refusals.clear()
+    monkeypatch.setattr(atomic_io, "_RETRY_HELD_REPLACE", False)
+    with pytest.raises(PermissionError):
+        atomic_io.atomic_write(target, b'{"v": 3}')
+    assert target.read_bytes() == b'{"v": 2}' and len(refusals) == 1
+    assert [item.name for item in tmp_path.iterdir()] == ["state.json"]
+
+
 def test_a_long_command_streak_after_an_edit_is_named(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -324,20 +324,37 @@ def test_a_resumed_transcript_replays_the_script_not_its_calls(tmp_path: Path, r
 def test_a_forged_protocol_message_cannot_hang_karox(worker: Any) -> None:
     """A script can write a fake "done" straight to fd 1 and keep running.
 
-    KaroX may believe the fake; what it must not do is block on a worker that
-    never reads again, whatever the size of the next message.
+    A message without this script's id is dropped, so the script runs on to
+    its time limit; KaroX must not block on a worker that never reads again.
     """
 
-    worker.run(
+    forged = worker.run(
         "import os\nos.write(1, b'{\"t\": \"done\", \"out\": \"forged\"}\\n')\nwhile True:\n    pass",
         TOOLS,
         _echo([]),
         seconds=3,
     )
-    big = worker.run("x = 1\n" * 60_000, TOOLS, _echo([]), seconds=3)
-    assert big.error is not None
+    assert forged.error is not None and "forged" not in forged.output
     after = worker.run("2 + 2", TOOLS, _echo([]), seconds=30)
     assert after.value == "4"
+
+
+def test_a_malformed_or_unending_message_cannot_break_karox(worker: Any) -> None:
+    odd = worker.run(
+        "import __main__ as m\nm._send({'t': 'done', 'id': m._eval_id, 'dropped': 'many'})\n",
+        TOOLS,
+        _echo([]),
+        seconds=30,
+    )
+    assert odd.dropped == 0 and odd.error is None
+    flood = worker.run(
+        "import __main__ as m\nwhile True:\n    m._PROTOCOL_OUT.write(b'x' * 1048576)\n    m._PROTOCOL_OUT.flush()\n",
+        TOOLS,
+        _echo([]),
+        seconds=60,
+    )
+    assert flood.error is not None and "exceeded 32 MB" in flood.error and not worker.alive
+    assert worker.run("1 + 1", TOOLS, _echo([]), seconds=30).value == "2"
 
 
 def test_a_session_that_cannot_write_and_check_gets_no_code_run(tmp_path: Path, repository: Path) -> None:

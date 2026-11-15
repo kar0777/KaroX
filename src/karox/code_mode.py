@@ -46,6 +46,8 @@ OUTPUT_CHARS = 12_000
 #: Structured result fields handed to a script, per call.
 DATA_CHARS = 60_000
 _WORKER = pathlib.Path(__file__).with_name("code_mode_worker.py")
+#: The longest message line KaroX reads from a worker (twice the worker's own cap).
+_HOST_LINE_CAP = 32 * 1024 * 1024
 #: Tools a script cannot call: finish ends the run and must be its own call.
 _NOT_FROM_SCRIPTS = frozenset({CODE_TOOL_NAME, "finish"})
 
@@ -159,6 +161,8 @@ class CodeModeWorker:
         self._scratch: Optional[tempfile.TemporaryDirectory[str]] = None
         self._evals = 0
         self._lost_state = False
+        #: Set by the reader when a message exceeded _HOST_LINE_CAP.
+        self._overflow = threading.Event()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -183,13 +187,23 @@ class CodeModeWorker:
             creationflags=flags,
         )
         self._lines = queue.Queue()
+        self._overflow = threading.Event()
         stdout = self._process.stdout
         lines = self._lines
+        overflow = self._overflow
 
         def pump() -> None:
             try:
                 assert stdout is not None
-                for line in iter(stdout.readline, b""):
+                while True:
+                    # Bounded: a script writing to the channel without a newline
+                    # must not grow KaroX's memory until it dies.
+                    line = stdout.readline(_HOST_LINE_CAP)
+                    if not line:
+                        break
+                    if not line.endswith(b"\n") and len(line) >= _HOST_LINE_CAP:
+                        overflow.set()
+                        break
                     lines.put(line)
             except (OSError, ValueError):
                 pass
@@ -309,16 +323,22 @@ class CodeModeWorker:
                 message = self._next(deadline)
                 if message is None:
                     seconds_used = int(max(1.0, min(float(seconds), MAX_SCRIPT_SECONDS)))
-                    reason = (
-                        f"stopped after {seconds_used}s (time limit); variables from earlier scripts are gone"
-                        if self.alive
-                        else "the script's interpreter exited; variables from earlier scripts are gone"
-                    )
+                    if self._overflow.is_set():
+                        reason = (
+                            "stopped: one tool call or output from the script exceeded 32 MB; "
+                            "variables from earlier scripts are gone"
+                        )
+                    elif self.alive:
+                        reason = f"stopped after {seconds_used}s (time limit); variables from earlier scripts are gone"
+                    else:
+                        reason = "the script's interpreter exited; variables from earlier scripts are gone"
                     outcome.error = reason
                     self.close()
                     self._lost_state = False
                     break
                 kind = message.get("t")
+                if message.get("id") != self._evals:
+                    continue  # stale or forged: not this script's message
                 if kind == "call":
                     parts.append(str(message.get("out") or ""))
                     name = str(message.get("name") or "")
@@ -334,7 +354,8 @@ class CodeModeWorker:
                     continue
                 if kind == "done":
                     parts.append(str(message.get("out") or ""))
-                    outcome.dropped = int(message.get("dropped") or 0)
+                    dropped = message.get("dropped")
+                    outcome.dropped = dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else 0
                     value = message.get("value")
                     outcome.value = str(value) if value is not None else None
                     error = message.get("error")

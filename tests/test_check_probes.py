@@ -189,6 +189,22 @@ def test_a_probe_runs_reports_itself_and_is_never_evidence(
     assert [entry.get("probe", False) for entry in record.checks] == [True, True, True, False]
 
 
+def test_a_token_in_a_check_command_line_is_not_persisted(
+    repository: Path, tmp_path: Path
+) -> None:
+    """The checks list is reported to clients; a token typed into a command
+    line must not reach them (persistence review, 2026-11-15). The transcript
+    keeps the model's own arguments by design."""
+
+    core, origin = _runtime(repository, tmp_path, probes=True)
+    token = "ghp_" + "A1b2" * 9
+    _check(core, origin, [PY, "-c", "import sys; print(len(sys.argv))", token], "p1")
+    record = core.sessions.load("session-1")
+    stored = record.checks[-1]["argv"]
+    assert stored[:2] == [PY, "-c"]
+    assert token not in str(stored)
+
+
 def test_inline_remote_action_is_refused_before_a_probe_runs(
     repository: Path, tmp_path: Path
 ) -> None:
