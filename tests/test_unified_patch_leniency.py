@@ -142,3 +142,27 @@ def test_codex_sections_still_verify_every_line() -> None:
     (file_patch,) = parse_unified_patch("*** Begin Patch\n*** Update File: f.txt\n@@\n-not there\n+x\n")
     with pytest.raises(InvalidCommand, match="not found"):
         apply_hunks(SOURCE, file_patch.hunks, path="f.txt")
+
+
+def test_form_feeds_and_vertical_tabs_survive_a_patch() -> None:
+    # splitlines() broke at \f and \v, so they came back as newlines.
+    source = "a\x0bb\nfoo\n\x0c\ndef f():\n    pass\n"
+    patch = "--- a/f.txt\n+++ b/f.txt\n@@ -2 +2 @@\n-foo\n+bar\n"
+    assert _apply(patch, source) == source.replace("foo", "bar")
+
+
+def test_removing_a_line_that_starts_with_two_dashes() -> None:
+    # "--- x" in a hunk removes "-- x" (SQL, Lua); it is no file header.
+    source = "-- comment\nselect 1;\n"
+    patch = "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- comment\n+-- note\n select 1;\n"
+    assert _apply(patch, source) == "-- note\nselect 1;\n"
+    two_files = patch + "--- a/r.sql\n+++ b/r.sql\n@@ -1 +1 @@\n-x\n+y\n"
+    assert [p.new_path for p in parse_unified_patch(two_files)] == ["q.sql", "r.sql"]
+
+
+def test_mixed_line_endings_change_only_the_patched_lines() -> None:
+    source = "a\r\nb\nc\r\nd\n"
+    patch = "--- a/f.txt\n+++ b/f.txt\n@@ -2 +2,2 @@\n-b\n+B\n+B2\n"
+    assert _apply(patch, source) == "a\r\nB\nB2\nc\r\nd\n"
+    insert = "--- a/f.txt\n+++ b/f.txt\n@@ -3 +3,2 @@\n+new\n c\n"
+    assert _apply(insert, source) == "a\r\nb\nnew\r\nc\r\nd\n"

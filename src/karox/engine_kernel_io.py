@@ -142,10 +142,14 @@ class EngineIoMixin:
                 rebuilt.append(
                     {
                         "role": "tool",
+                        # Not "it did not run": a crash after the tool ran and
+                        # before its result was saved leaves the same record.
                         "content": (
                             "<returncode>-1</returncode>\n<output>\nthe run "
-                            "was interrupted before this call executed; it did "
-                            "not run and changed nothing\n</output>"
+                            "was interrupted at this call and no result was "
+                            "recorded; it may or may not have run. Check the "
+                            "file or state it touches before relying on it or "
+                            "repeating it\n</output>"
                         ),
                         "tool_call_id": call_id,
                     }

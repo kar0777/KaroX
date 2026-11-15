@@ -491,6 +491,9 @@ def test_only_declared_new_failures_are_discharged() -> None:
     assert check_baseline.only_superseded({"baseline": {"new": ["tests/t.py::test_old"]}}, names)
     assert not check_baseline.only_superseded({"baseline": {"new": ["tests/t.py::test_old", "tests/t.py::x"]}}, names)
     assert not check_baseline.only_superseded({"exit_code": 1}, names)  # no baseline: stays owed
+    # The task's own target still red: superseding another failure cannot pass it.
+    still_red = {"new": ["tests/t.py::test_old"], "task_targets_failing": ["tests/t.py::test_target"]}
+    assert not check_baseline.only_superseded({"baseline": still_red}, names)
 
 
 def test_gate_accepts_a_declared_superseded_failure_only(tmp_path: Path) -> None:

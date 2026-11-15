@@ -48,6 +48,9 @@ DATA_CHARS = 60_000
 _WORKER = pathlib.Path(__file__).with_name("code_mode_worker.py")
 #: The longest message line KaroX reads from a worker (twice the worker's own cap).
 _HOST_LINE_CAP = 32 * 1024 * 1024
+#: A tool result's text handed to a script; well inside the worker's 16 MB
+#: line cap even when every char is JSON-escaped to six bytes.
+_RET_TEXT_CHARS = 2_000_000
 #: Tools a script cannot call: finish ends the run and must be its own call.
 _NOT_FROM_SCRIPTS = frozenset({CODE_TOOL_NAME, "finish"})
 
@@ -255,7 +258,9 @@ class CodeModeWorker:
         if process is None or process.stdin is None:
             raise BrokenPipeError("worker is not running")
         stdin = process.stdin
-        data = (json.dumps(message, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+        # "replace": a lone surrogate (a non-UTF-8 file name on Linux) used to
+        # raise here, leaving the worker waiting for a reply forever.
+        data = (json.dumps(message, ensure_ascii=False, default=str) + "\n").encode("utf-8", "replace")
         failed: List[BaseException] = []
 
         def write() -> None:
@@ -317,6 +322,10 @@ class CodeModeWorker:
         outcome.restarted, self._lost_state = self._lost_state, False
         self._evals += 1
         parts: List[str] = []
+        # The kept end of an output too long to keep whole, and how much was
+        # dropped before it: from the script's end, or the latest one the
+        # worker sent while running when the script never ends.
+        tail, dropped = "", 0
         try:
             self._send({"t": "eval", "id": self._evals, "code": code, "tools": list(tools)}, deadline)
             while True:
@@ -339,6 +348,11 @@ class CodeModeWorker:
                 kind = message.get("t")
                 if message.get("id") != self._evals:
                     continue  # stale or forged: not this script's message
+                if kind in ("out", "done") and isinstance(message.get("tail"), str):
+                    tail, dropped = message["tail"], _count(message.get("dropped"))
+                if kind == "out":
+                    parts.append(str(message.get("out") or ""))
+                    continue
                 if kind == "call":
                     parts.append(str(message.get("out") or ""))
                     name = str(message.get("name") or "")
@@ -350,12 +364,16 @@ class CodeModeWorker:
                         arguments = {}
                     ok, text, data, summary = call_tool(name, arguments)
                     outcome.calls.append(CallRecord(name, ok, summary))
+                    if len(text) > _RET_TEXT_CHARS:
+                        # Past the worker's line limit the reply arrived cut,
+                        # and its rest was read as the next script's messages.
+                        text = _clip(text, _RET_TEXT_CHARS)
                     self._send({"t": "ret", "ok": ok, "text": text, "data": json_safe(data)}, deadline)
                     continue
                 if kind == "done":
                     parts.append(str(message.get("out") or ""))
-                    dropped = message.get("dropped")
-                    outcome.dropped = dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else 0
+                    if not isinstance(message.get("tail"), str):
+                        dropped = _count(message.get("dropped"))
                     value = message.get("value")
                     outcome.value = str(value) if value is not None else None
                     error = message.get("error")
@@ -364,17 +382,32 @@ class CodeModeWorker:
         except (BrokenPipeError, OSError) as exc:
             outcome.error = f"the script's interpreter stopped ({type(exc).__name__}); variables are gone"
             self.close()
+        except BaseException:
+            # A tool that raised, or a stop, leaves the worker inside its call
+            # waiting for a reply; kept, it made the next script hang.
+            self.close()
+            raise
         outcome.output = "".join(parts)
+        if tail:
+            marker = f"\n... [{dropped} chars of script output dropped] ...\n" if dropped else ""
+            outcome.output += marker + tail
+        outcome.dropped = dropped
         return outcome
 
 
-def _clip(text: str, limit: int) -> str:
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _clip(text: str, limit: int, dropped: int = 0) -> str:
+    """The start and end of ``text``; ``dropped`` chars were already cut from it."""
+
     if len(text) <= limit:
         return text
     head, tail = int(limit * 0.6), int(limit * 0.4)
     return (
-        f"{text[:head]}\n... [{len(text) - head - tail} chars of script output dropped; print less or slice] ...\n"
-        f"{text[-tail:]}"
+        f"{text[:head]}\n... [{len(text) - head - tail + dropped} chars of script output dropped; "
+        f"print less or slice] ...\n{text[-tail:]}"
     )
 
 
@@ -387,10 +420,9 @@ def render(outcome: ScriptOutcome, notices: Sequence[str] = (), *, limit: int = 
     body = outcome.output.rstrip("\n")
     if outcome.value is not None:
         body = f"{body}\n{outcome.value}" if body else outcome.value
-    if outcome.dropped:
-        body += f"\n[{outcome.dropped} more chars were printed and not kept]"
     if body:
-        sections.append(_clip(body, limit))
+        # A dropped middle is marked inside the output; the clip counts it.
+        sections.append(_clip(body, limit, outcome.dropped))
     if outcome.error:
         sections.append(f"Error: {outcome.error}" if not outcome.error.startswith("Traceback") else outcome.error)
     if outcome.calls:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from .core_types import InvalidCommand
+from .text_lines import physical_lines
 from .workspace_transaction import WorkspaceTransaction
 
 
@@ -71,7 +72,7 @@ def codex_patch_files(text: str) -> list[tuple[str, str]]:
     """
 
     found: list[tuple[str, str]] = []
-    for line in text.splitlines():
+    for line in physical_lines(text):
         match = _CODEX_FILE.match(line.rstrip())
         if match is not None:
             found.append((match.group("kind").lower(), match.group("path").strip()))
@@ -81,7 +82,7 @@ def codex_patch_files(text: str) -> list[tuple[str, str]]:
 
 
 def _hunk_body(lines: list[str], index: int, stop: Any) -> tuple[list[str], int, bool, bool, bool]:
-    """Body lines of one hunk from ``index`` until ``stop(line)``.
+    """Body lines of one hunk from ``index`` until ``stop(line, next_line)``.
 
     Returns the body, the next index, the two no-newline markers and whether
     an ``*** End of File`` line closed it. A blank line is a context line whose
@@ -93,7 +94,7 @@ def _hunk_body(lines: list[str], index: int, stop: Any) -> tuple[list[str], int,
     old_no_newline = new_no_newline = at_end = False
     while index < len(lines):
         line = lines[index]
-        if stop(line):
+        if stop(line, lines[index + 1] if index + 1 < len(lines) else ""):
             break
         if line.rstrip() == _CODEX_EOF:
             at_end = True
@@ -203,7 +204,7 @@ def _parse_codex_patch(lines: list[str]) -> tuple[FilePatch, ...]:
                 index += 1
                 continue
             body, index, no_old, no_new, at_end = _hunk_body(
-                lines, index, lambda line: _is_hunk_start(line) or ends_section(line)
+                lines, index, lambda line, _next: _is_hunk_start(line) or ends_section(line)
             )
             hunks.append(_make_hunk(header, body, (no_old, no_new, at_end)))
         if not hunks and new_path == path:
@@ -230,7 +231,7 @@ def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
         raise InvalidCommand("patch must be a non-empty string")
     if len(text.encode("utf-8")) > MAX_PATCH_BYTES:
         raise InvalidCommand(f"patch is larger than {MAX_PATCH_BYTES} bytes")
-    lines = text.splitlines()
+    lines = physical_lines(text)
     if any(_CODEX_FILE.match(line.rstrip()) for line in lines):
         return _parse_codex_patch(lines)
     # A unified diff wrapped in *** Begin/End Patch: the wrapper is not a hunk line.
@@ -262,7 +263,11 @@ def parse_unified_patch(text: str) -> tuple[FilePatch, ...]:
             body, index, no_old, no_new, at_end = _hunk_body(
                 lines,
                 index,
-                lambda line: _is_hunk_start(line) or line.startswith(("--- ", "diff --git ")),
+                # "--- x" is the next file's header only with its "+++" line;
+                # alone it removes a line that starts "-- " (SQL, Lua, Haskell).
+                lambda line, following: _is_hunk_start(line)
+                or line.startswith("diff --git ")
+                or (line.startswith("--- ") and following.startswith("+++ ")),
             )
             hunks.append(_make_hunk(header, body, (no_old, no_new, at_end)))
         if not hunks:
@@ -377,19 +382,31 @@ def _locate_hunk(source: list[str], cursor: int, hunk: PatchHunk, *, path: str) 
 
 def apply_hunks(original: str, hunks: Iterable[PatchHunk], *, path: str) -> str:
     newline = "\r\n" if "\r\n" in original else "\n"
-    had_final_newline = original.endswith(("\n", "\r"))
-    source = original.replace("\r\n", "\n").splitlines()
-    result: list[str] = []
+    had_final_newline = original.endswith("\n")
+    # Physical lines: splitlines() also broke at \f, \v, \x1c-\x1e, \x85 and
+    # U+2028, so patching one line of a file with a form feed rewrote every
+    # form feed in it as a newline.
+    source = physical_lines(original)
+    # Every line keeps its own ending, so in a file with mixed endings the
+    # lines a patch does not touch stay byte for byte; an added line takes the
+    # ending of the line it replaces, else of the line it is inserted before.
+    endings = [
+        "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else newline
+        for line in physical_lines(original, keepends=True)
+    ]
+    result: list[tuple[str, str]] = []
     cursor = 0
     hunk_list = list(hunks)
     for hunk in hunk_list:
         target = _locate_hunk(source, cursor, hunk, path=path)
-        result.extend(source[cursor:target])
+        result.extend(zip(source[cursor:target], endings[cursor:target]))
         cursor = target
+        replaced = ""
         for patch_line in hunk.lines:
             prefix, value = patch_line[0], patch_line[1:]
             if prefix == "+":
-                result.append(value)
+                near = endings[min(cursor, len(endings) - 1)] if endings else newline
+                result.append((value, replaced or near))
                 continue
             if cursor >= len(source) or source[cursor] != value:
                 found = source[cursor] if cursor < len(source) else "<end of file>"
@@ -397,11 +414,15 @@ def apply_hunks(original: str, hunks: Iterable[PatchHunk], *, path: str) -> str:
                     f"patch conflict in {path} at line {cursor + 1}: "
                     f"expected {value!r}, found {found!r}"
                 )
+            replaced = endings[cursor] if prefix == "-" else ""
             if prefix == " ":
-                result.append(value)
+                result.append((value, endings[cursor]))
             cursor += 1
-    result.extend(source[cursor:])
-    updated = newline.join(result)
+    result.extend(zip(source[cursor:], endings[cursor:]))
+    updated = "".join(text + ending for text, ending in result[:-1])
+    if result:
+        updated += result[-1][0]
+        newline = result[-1][1]
     final_newline = had_final_newline
     if not original and result:
         # Added lines in a normal unified diff carry a newline unless an

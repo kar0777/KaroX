@@ -49,6 +49,21 @@ def test_one_line_becoming_several_keeps_crlf() -> None:
     assert failures == [] and text == "a = 1\r\nc = 3\r\nb = 2\r\n"
 
 
+def test_overlapping_matches_are_not_read_as_unique() -> None:
+    # "aa" starts at 0 and at 1 in "aaa"; the first used to be edited unasked.
+    text, failures = apply_edits("aaa\n", [EditOp(old="aa", new="X")])
+    assert text == "aaa\n" and failures and failures[0].reason == "ambiguous"
+    text, failures = apply_edits("aaa\n", [EditOp(old="aa", new="X", occurrence=1)])
+    assert failures == [] and text == "Xa\n"
+
+
+def test_a_reindented_match_still_obeys_its_occurrence_number() -> None:
+    text, failures = apply_edits("  a\n  b\n", [EditOp(old="a\nb", new="x\ny", occurrence=2)])
+    assert text == "  a\n  b\n" and failures and failures[0].reason == "not_found"
+    text, failures = apply_edits("  a\n  b\n", [EditOp(old="a\nb", new="x\ny", occurrence=1)])
+    assert failures == [] and text == "  x\n  y\n"
+
+
 def _core(tmp_path, text: str):
     from karox.core_tools import ExtendedCoreRuntime
     from karox.policy import AccessProfile, CapabilityPolicy

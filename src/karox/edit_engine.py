@@ -149,13 +149,21 @@ def _locate(text: str, index: int, op: EditOp) -> tuple[list[_Span], EditFailure
         ]
         if not spans:
             shifted = _reindented_unique_span(text, op)
-            if shifted is not None:
-                return [shifted], None
-            return [], _not_found_failure(text, index, op)
+            if shifted is None:
+                return [], _not_found_failure(text, index, op)
+            # One match at another indent: occurrence=2 must still fail.
+            spans = [shifted]
     if op.occurrence == ALL:
         return spans, None
     if isinstance(op.occurrence, bool) or not isinstance(op.occurrence, int):
         # Not "all" and not an index: treated as "unique".
+        again = text.find(op.old, spans[0].start + 1) if len(spans) == 1 else -1
+        if again != -1 and spans[0].new_override is None:
+            # "aa" in "aaa" starts at 0 and at 1; the scan for disjoint
+            # matches saw one and would have edited the first unasked.
+            spans = spans + [
+                _Span(start=again, end=again + len(op.old), line=text.count("\n", 0, again) + 1)
+            ]
         if len(spans) == 1:
             return spans, None
         if len(spans) == 0:

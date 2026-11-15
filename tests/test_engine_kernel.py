@@ -2779,7 +2779,9 @@ def test_engine_resume_synthesizes_results_for_interrupted_calls(
         if message.role == "tool" and message.tool_call_id == "c1"
     ]
     assert dangling
-    assert "interrupted before this call executed" in (dangling[0].content or "")
+    # It does not claim the call never ran: a crash after the tool and before
+    # its saved result leaves the same record.
+    assert "no result was recorded; it may or may not have run" in (dangling[0].content or "")
 
 
 # ------------------------------------------------------- CLI-level integration

@@ -62,6 +62,37 @@ def test_the_swe_preamble_keeps_its_test_edit_ban() -> None:
     assert _test_edit_ban(_record(SWE_PREAMBLE))
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Update the implementation so that the existing tests pass.",
+        "Modify the source code so all tests in tests/test_x.py pass.",
+        "Change the cache layer without breaking tests.",
+        "Update the parser and keep the tests green.",
+    ],
+)
+def test_tests_named_as_the_yardstick_are_not_a_request_to_edit_them(task: str) -> None:
+    assert not _explicit_test_change_required(_record(task))
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Add a regression test so that the bug cannot come back.",
+        "Update the function so it parses dates, and add tests for it.",
+        "Add tests without breaking the existing tests.",
+    ],
+)
+def test_a_test_request_beside_a_yardstick_still_counts(task: str) -> None:
+    assert _explicit_test_change_required(_record(task))
+
+
+def test_a_yardstick_sentence_does_not_lift_the_test_ban() -> None:
+    record = _record("Do not modify tests. Update the code based on tests.")
+    assert not _explicit_test_change_required(record)
+    assert _test_edit_ban(record) == "Do not modify tests."
+
+
 def test_a_bug_fix_that_only_touched_docs_is_not_docs_only() -> None:
     assert not docs_only(_record("Fix the TypeError raised by foo() when given None", ["README.md"]))
     assert not docs_only(_record("The app crashes on start", ["README.md"]))

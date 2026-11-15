@@ -59,6 +59,15 @@ _ALREADY_DONE = re.compile(
     r"(?i)\balready\b.{0,40}\b(?:taken care|changed|modified|updated|written|added|done)\b"
     r"|\btaken care of\b"
 )
+#: Words after which the tests are the yardstick, not the object of the verb:
+#: "update the implementation so that the existing tests pass", "update the
+#: code based on tests", "change X without breaking tests". Such a sentence
+#: owed a test edit, and lost the test ban of the sentence before it.
+_TESTS_AS_CRITERION = re.compile(
+    r"\b(?:so|such\s+that|until|based\s+on|according\s+to|against|to\s+make|to\s+get|"
+    r"making|in\s+order\s+to|keep(?:s|ing)?|without)\b",
+    re.I,
+)
 
 _CONDITIONAL_REQUEST = re.compile(
     r"^\s*(?:[-*+]|\d+[.)])?\s*\[[ xX]?\]"
@@ -188,6 +197,13 @@ def _explicit_test_change_required(record: Any) -> bool:
                 if _VERB_AS_NOUN.search(cleaned[: match.start()]):
                     continue
                 if _NOT_A_REQUEST.search(match.group(0)) or _ALREADY_DONE.search(sentence):
+                    continue
+                if _TESTS_AS_CRITERION.search(match.group(0)) and not any(
+                    # "add a test so that ..." and "... so it parses, and add
+                    # tests" still ask for one: some clause holds verb and noun.
+                    _TEST_CHANGE_REQUEST.search(clause)
+                    for clause in _TESTS_AS_CRITERION.split(match.group(0))
+                ):
                     continue
                 return True
     return False

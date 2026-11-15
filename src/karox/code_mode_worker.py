@@ -21,16 +21,23 @@ from __future__ import annotations
 
 import ast
 import builtins
+import collections
 import io
 import json
 import linecache
 import os
 import pprint
 import sys
+import threading
+import time
 import traceback
 
 #: Output kept per script; the host clips again to what the model is shown.
 OUTPUT_CAP = 200_000
+#: Of that, the end of a longer output, kept in a rolling window.
+TAIL_CAP = 20_000
+#: How often a running script's new output is sent to KaroX.
+FLUSH_SECONDS = 0.5
 #: A protocol line longer than this is a broken host, not a message.
 LINE_CAP = 16 * 1024 * 1024
 
@@ -155,25 +162,49 @@ _MISSING = object()
 
 
 class _Capture:
-    """Collects what a script prints, bounded, handed out as increments."""
+    """Collects what a script prints: its start in order, then a rolling end.
+
+    The start (up to OUTPUT_CAP - TAIL_CAP chars) is handed out as increments
+    by a tool call, the flusher thread and the script's end. Past it only the
+    last TAIL_CAP chars are kept, so a long log still shows how it ended; the
+    start alone used to be kept and the end, usually the summary, was lost.
+    """
 
     encoding = "utf-8"
     errors = "replace"
 
     def __init__(self) -> None:
-        self._pending: list[str] = []
+        self.lock = threading.Lock()
+        self._pending: list = []
         self.size = 0
-        self.dropped = 0
+        self.overflow = 0
+        self._tail: collections.deque = collections.deque()
+        self._tail_size = 0
 
     def write(self, text: object) -> int:
         value = str(text)
-        room = OUTPUT_CAP - self.size
-        if room > 0:
-            kept = value[:room]
-            self._pending.append(kept)
-            self.size += len(kept)
-        self.dropped += max(0, len(value) - max(0, room))
-        return len(value)
+        length = len(value)
+        with self.lock:
+            room = OUTPUT_CAP - TAIL_CAP - self.size
+            if room > 0:
+                kept = value[:room]
+                self._pending.append(kept)
+                self.size += len(kept)
+                value = value[len(kept):]
+            if value:
+                self.overflow += len(value)
+                self._tail.append(value)
+                self._tail_size += len(value)
+                while self._tail_size - len(self._tail[0]) >= TAIL_CAP:
+                    self._tail_size -= len(self._tail.popleft())
+        return length
+
+    def tail(self) -> tuple:
+        """The kept end of the output and how many chars before it were dropped."""
+
+        with self.lock:
+            text = "".join(self._tail)[-TAIL_CAP:]
+            return text, self.overflow - len(text)
 
     def writelines(self, lines: object) -> None:
         for line in lines:  # type: ignore[attr-defined]
@@ -189,14 +220,18 @@ class _Capture:
         return True
 
     def take(self) -> str:
-        text = "".join(self._pending)
-        self._pending = []
-        return text
+        with self.lock:
+            text = "".join(self._pending)
+            self._pending = []
+            return text
 
     def reset(self) -> None:
-        self._pending = []
-        self.size = 0
-        self.dropped = 0
+        with self.lock:
+            self._pending = []
+            self.size = 0
+            self.overflow = 0
+            self._tail = collections.deque()
+            self._tail_size = 0
 
 
 _capture = _Capture()
@@ -204,12 +239,41 @@ _namespace: dict = {"__name__": "__code_run__", "__builtins__": builtins}
 #: The eval being run; every message names it, so KaroX drops a stale or
 #: forged one left over from an earlier script.
 _eval_id: object = None
+#: Whether a script is running, so the flusher sends nothing between scripts.
+_running = False
+#: Held from taking output to sending it, so increments arrive in order.
+_send_lock = threading.RLock()
 
 
 def _send(message: dict) -> None:
     line = json.dumps(message, ensure_ascii=False, default=str) + "\n"
-    _PROTOCOL_OUT.write(line.encode("utf-8", "replace"))
-    _PROTOCOL_OUT.flush()
+    with _send_lock:
+        _PROTOCOL_OUT.write(line.encode("utf-8", "replace"))
+        _PROTOCOL_OUT.flush()
+
+
+def _flusher() -> None:
+    """Send a running script's new output every FLUSH_SECONDS.
+
+    Output used to travel only with a tool call or the script's end, so what
+    a script printed before it hung or ran out of time died with the worker.
+    The kept end of a long output is sent too, at most every two seconds.
+    """
+
+    tail_sent: tuple = (None, 0)
+    tail_at = 0.0
+    while True:
+        time.sleep(FLUSH_SECONDS)
+        with _send_lock:
+            if not _running:
+                continue
+            message: dict = {"t": "out", "id": _eval_id, "out": _capture.take()}
+            now = time.monotonic()
+            if (_eval_id, _capture.overflow) != tail_sent and _capture.overflow and now - tail_at >= 2.0:
+                message["tail"], message["dropped"] = _capture.tail()
+                tail_sent, tail_at = (_eval_id, _capture.overflow), now
+            if message["out"] or "tail" in message:
+                _send(message)
 
 
 def _receive() -> dict:
@@ -221,7 +285,8 @@ def _receive() -> dict:
 
 
 def _call(name: str, arguments: dict) -> ToolResult:
-    _send({"t": "call", "id": _eval_id, "name": name, "args": arguments, "out": _capture.take()})
+    with _send_lock:
+        _send({"t": "call", "id": _eval_id, "name": name, "args": arguments, "out": _capture.take()})
     reply = _receive()
     if reply.get("t") == "abort":
         raise _Stopped(str(reply.get("reason") or "stopped by KaroX"))
@@ -292,7 +357,7 @@ def _show(value: object) -> str:
 
 
 def _evaluate(message: dict, frames_allowed: list) -> None:
-    global _eval_id
+    global _eval_id, _running
     _eval_id = message.get("id")
     code = str(message.get("code") or "")
     filename = f"<code_run {message.get('id')}>"
@@ -302,6 +367,7 @@ def _evaluate(message: dict, frames_allowed: list) -> None:
             required = tuple(str(key) for key in item.get("required") or ())
             _namespace[item["name"]] = _tool(item["name"], required)
     _capture.reset()
+    _running = True
     shown = None
     error = None
     saved = sys.stdout, sys.stderr, sys.stdin
@@ -330,16 +396,20 @@ def _evaluate(message: dict, frames_allowed: list) -> None:
             error += f"\nTool functions here: {', '.join(tools)}" if tools else ""
     finally:
         sys.stdout, sys.stderr, sys.stdin = saved
-    _send(
-        {
-            "t": "done",
-            "id": _eval_id,
-            "out": _capture.take(),
-            "dropped": _capture.dropped,
-            "value": shown,
-            "error": error,
-        }
-    )
+    with _send_lock:
+        _running = False
+        tail, dropped = _capture.tail()
+        _send(
+            {
+                "t": "done",
+                "id": _eval_id,
+                "out": _capture.take(),
+                "tail": tail,
+                "dropped": dropped,
+                "value": shown,
+                "error": error,
+            }
+        )
 
 
 def _key(path: str, windows: bool) -> str:
@@ -460,6 +530,8 @@ def main() -> None:
             __import__(name)
         except ImportError:
             pass
+    # Started before the hook, which refuses new threads to scripts.
+    threading.Thread(target=_flusher, name="code-run-flush", daemon=True).start()
     frames_allowed = _seal()
     _send({"t": "ready", "python": sys.version.split()[0]})
     while True:

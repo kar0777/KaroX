@@ -134,8 +134,17 @@ def superseded(record: Any) -> frozenset[str]:
 
 
 def only_superseded(data: Mapping[str, Any], names: frozenset[str]) -> bool:
-    """Every NEW failure versus the start bytes is a declared superseded test (pytest only)."""
-    new = (data.get("baseline") or {}).get("new") if isinstance(data.get("baseline"), Mapping) else None
+    """Every NEW failure versus the start bytes is a declared superseded test (pytest only).
+
+    A test the task names that still fails is unfinished work, whatever the
+    new failures are: declaring an unrelated new failure superseded used to
+    pass a run whose named target was still red.
+    """
+    raw = data.get("baseline")
+    info: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    new = info.get("new") or []
+    if info.get("task_targets_failing"):
+        return False
     return bool(names and new) and all(any(n == d or n.endswith("::" + d) for d in names) for n in new)
 
 

@@ -238,6 +238,36 @@
   - The search fallback and the import index number physical lines, as
     ripgrep and `read_lines` do. A form feed, U+2028 or a lone `\r` used to
     push every later match past its real line.
+- Patches and edits:
+  - Applying a patch no longer turns every form feed or vertical tab in the
+    file into a newline.
+  - In a file with mixed line endings, a patch now changes only the endings of
+    the lines it touches. It used to rewrite every line to CRLF.
+  - A hunk line `--- x`, which removes a line `-- x` (an SQL or Lua comment),
+    is no longer read as the next file's header.
+  - An edit whose `old` text overlaps itself (`aa` in `aaa`) is now reported
+    as ambiguous. It used to edit the first match unasked.
+  - An edit matched at another indent now honours its occurrence number.
+- `code_run`:
+  - What a script printed before it hung or ran out of time is now kept. The
+    worker used to send output only with a tool call or at the script's end.
+  - A script that prints more than 200,000 characters now keeps the end of
+    its output too, usually the summary. Only the start used to be kept.
+  - A tool result with a lone surrogate (a non-UTF-8 file name on Linux) or
+    longer than 2,000,000 characters no longer wedges the interpreter. A tool
+    that raises now restarts it. Each of these used to make the next script
+    hang until its time limit.
+- Completion gate:
+  - A task that names the tests as the yardstick ("update the implementation
+    so that the existing tests pass", "change X without breaking tests") no
+    longer demands a test edit. It used to refuse the finish until a test
+    file changed, and such a sentence also lifted a "do not modify tests" ban
+    in the sentence before it.
+  - Declaring a new failure superseded no longer passes a check while a test
+    the task names still fails.
+- A resumed run no longer tells the model that a call interrupted without a
+  recorded result "did not run and changed nothing". The call may have run
+  before the crash, so the model is told to check the state first.
 
 ## 5.0.0 — 2026-11-07
 

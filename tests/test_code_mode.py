@@ -124,6 +124,51 @@ def test_a_runaway_script_is_stopped_and_the_next_one_says_so(worker: Any) -> No
     assert "variables from earlier scripts are gone" in code_mode.render(after)
 
 
+def test_what_a_script_printed_before_its_time_ran_out_is_kept(worker: Any) -> None:
+    # Output used to travel only with a tool call or the script's end.
+    stuck = worker.run("print('progress: 3 of 7 files')\nwhile True:\n    pass", TOOLS, _echo([]), seconds=3)
+    assert stuck.error is not None and "time limit" in stuck.error
+    assert "progress: 3 of 7 files" in stuck.output
+
+
+def test_a_long_output_keeps_its_end(worker: Any) -> None:
+    outcome = worker.run(
+        "for i in range(30000):\n    print('line', i, 'x' * 20)\nprint('SUMMARY: 2 failed')",
+        TOOLS,
+        _echo([]),
+        seconds=60,
+    )
+    assert outcome.output.startswith("line 0 ") and outcome.output.rstrip().endswith("SUMMARY: 2 failed")
+    shown = code_mode.render(outcome)
+    assert "SUMMARY: 2 failed" in shown and "chars of script output dropped" in shown
+    assert outcome.dropped > 0 and f"[{outcome.dropped} chars" in outcome.output
+    stuck = worker.run("print('y' * 300000)\nprint('LAST WORDS')\nwhile True:\n    pass", TOOLS, _echo([]), seconds=5)
+    assert stuck.error is not None and "LAST WORDS" in stuck.output
+
+
+def test_an_unencodable_or_huge_tool_result_does_not_wedge_the_worker(worker: Any) -> None:
+    def odd(name: str, arguments: Dict[str, Any]) -> Tuple[bool, str, Any, str]:
+        if arguments.get("path") == "big":
+            return True, "z" * 17_000_000 + "END", {}, "ok"
+        return True, "name: bad\udcff.txt", {"names": ["bad\udcff.txt"]}, "ok"
+
+    surrogate = worker.run("r = repo_read_lines('a')\nprint(str(r)[:9], r.data['names'][0][:3])", TOOLS, odd, seconds=30)
+    assert surrogate.error is None and "name: bad" in surrogate.output and "bad" in surrogate.output
+    big = worker.run("r = repo_read_lines('big')\nprint(len(r), r.endswith('END'))", TOOLS, odd, seconds=60)
+    assert big.error is None and "True" in big.output
+    assert worker.run("1 + 1", TOOLS, _echo([]), seconds=30).value == "2"
+
+
+def test_a_tool_that_raises_does_not_leave_the_next_script_hanging(worker: Any) -> None:
+    def broken(name: str, arguments: Dict[str, Any]) -> Tuple[bool, str, Any, str]:
+        raise RuntimeError("tool crashed")
+
+    with pytest.raises(RuntimeError):
+        worker.run("repo_read_lines('a')", TOOLS, broken, seconds=30)
+    after = worker.run("1 + 1", TOOLS, _echo([]), seconds=30)
+    assert after.value == "2" and after.error is None
+
+
 def test_errors_show_the_script_line(worker: Any) -> None:
     outcome = worker.run("a = 1\nb = a / 0", TOOLS, _echo([]), seconds=30)
     assert outcome.error is not None
