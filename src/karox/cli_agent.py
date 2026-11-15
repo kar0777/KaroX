@@ -441,8 +441,47 @@ def _run_agent(args: argparse.Namespace) -> AgentReport:
     return report
 
 
+def _stop_signals_interrupt() -> Any:
+    """Make a client's stop end the run the way Ctrl+C does.
+
+    The terminal client stops a ``--stream-json`` run with CTRL_BREAK on
+    Windows and SIGTERM elsewhere. Their default action ends the process at
+    once, so the turn was never saved as stopped and its running commands were
+    left to whoever found them. As KeyboardInterrupt the kernel cancels its
+    commands and records the stop. Returns the function that puts the previous
+    handlers back.
+    """
+
+    import signal
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous: dict[int, Any] = {}
+    for name in ("SIGBREAK", "SIGTERM"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            previous[signum] = signal.signal(signum, interrupt)
+        except (ValueError, OSError):  # not the main thread: keep the default
+            continue
+
+    def restore() -> None:
+        for signum, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError, TypeError):
+                signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+    return restore
+
+
 def _handle_agent_run(args: argparse.Namespace) -> int:
-    report = _run_agent(args)
+    restore = _stop_signals_interrupt() if args.stream_json else None
+    try:
+        report = _run_agent(args)
+    finally:
+        if restore is not None:
+            restore()
     if args.stream_json:
         _write(json.dumps({"type": "result", "report": report.to_dict()}, ensure_ascii=False) + "\n")
     elif args.json:

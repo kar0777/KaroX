@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 from rich.text import Text
@@ -64,6 +65,7 @@ class AppRunMixin:
         self._reset_turn()
         self._agent_running = True
         self._stopping = False
+        self._run_cancel = threading.Event()
         self.run_state = RunState(state="running", started_at=time.monotonic())
         self._refresh_status()
         # Let the user line finish mounting before the first event can arrive:
@@ -99,6 +101,7 @@ class AppRunMixin:
             effort=None if self.effort == "auto" else self.effort,
             mode=None if self.mode == "build" else self.mode,
             mcp_servers=tuple(sorted(self._pending_mcp.items())),
+            cancel=self._run_cancel,
         )
 
         def on_event(event: Event) -> None:
@@ -320,6 +323,9 @@ class AppRunMixin:
         if stopped:
             self.run_state.state = "stopped"
             self._result_notice(tr(self.language, "notice.stopped"), "warning")
+            # The stopped turn may already be on disk under this id; the next
+            # task continues it (a missing session is simply created).
+            self._continue = True
             self._refresh_checkpoint()
         elif outcome is not None:
             if outcome.session_id:
@@ -336,6 +342,7 @@ class AppRunMixin:
             self.run_state.state = "failed"
             lines = [line for line in stderr.strip().splitlines() if line.strip()]
             detail = lines[-1] if lines else f"exit code {exit_code}"
+            self._continue = True
             self._result_notice(tr(self.language, "notice.backend_error", error=detail), "error")
         self._refresh_status()
         if self._queue:
@@ -452,9 +459,15 @@ class AppRunMixin:
         if not self._agent_running or self._stopping:
             return
         self._stopping = True
+        # Before the backend call: a run whose child is not up yet sees this
+        # instead of starting after the stop already found nothing to stop.
+        self._run_cancel.set()
         self.run_state.state = "stopping"
         self._refresh_status()
-        self.run_worker(self.backend.stop, thread=True, group="stop", name="agent-stop")
+        cancel = self._run_cancel
+        self.run_worker(
+            lambda: self.backend.stop(cancel), thread=True, group="stop", name="agent-stop"
+        )
 
     def action_toggle_verbose(self) -> None:
         """Ctrl+O: every tool line, past and future, shows all it has."""

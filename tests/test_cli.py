@@ -440,3 +440,24 @@ def test_max_cost_across_currencies_still_needs_an_explicit_currency() -> None:
 
     with pytest.raises(ValueError, match="--currency"):
         cli._budget_currency(registry, routes)
+
+
+def test_a_client_stop_signal_ends_a_streamed_run_like_ctrl_c() -> None:
+    import signal
+    import threading
+
+    from karox.cli_agent import _stop_signals_interrupt
+
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signal handlers can only be installed from the main thread")
+    signum = getattr(signal, "SIGBREAK", None) or signal.SIGTERM
+    before = signal.getsignal(signum)
+    restore = _stop_signals_interrupt()
+    try:
+        # Raised only once the handler is in: the default would end the process.
+        assert signal.getsignal(signum) is not before
+        with pytest.raises(KeyboardInterrupt):
+            signal.raise_signal(signum)
+    finally:
+        restore()
+    assert signal.getsignal(signum) == before

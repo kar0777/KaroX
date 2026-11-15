@@ -23,7 +23,7 @@ from karox import cli
 from karox.agent import AgentEvent, AgentEventKind
 from karox.tui import app as app_module
 from karox.tui.app import KaroxApp
-from karox.tui.backend import CLIBackend, StreamResult
+from karox.tui.backend import AgentRequest, CLIBackend, StreamResult
 from karox.tui.i18n import _EN, _RU
 from karox.tui.protocol import (
     PROTOCOL_VERSION,
@@ -272,7 +272,7 @@ class _FakeBackend:
         self.mcp_deselections.append((server_id, session_id))
         return {"status": "deselected"}
 
-    def stop(self) -> None:
+    def stop(self, cancel=None) -> None:
         self.stops += 1
         self._stop_requested.set()
         if self.gate is not None:
@@ -281,6 +281,8 @@ class _FakeBackend:
     def stream_agent(self, request, on_event):
         self.requests.append(request)
         self._stop_requested.clear()
+        if request.cancel is not None and request.cancel.is_set():
+            return StreamResult(outcome=None, exit_code=0, stopped=True)
         if self._fail_stream:
             return StreamResult(outcome=None, exit_code=1, stderr="provider exploded")
         if self._record_after_run is not None:
@@ -499,6 +501,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(decode_line("not json"))
         self.assertIsNone(decode_line('{"type": "other"}'))
         self.assertIsNone(decode_line("[1, 2, 3]"))
+
+    def test_nan_and_infinity_counts_read_as_zero_instead_of_ending_the_stream(self) -> None:
+        decoded = decode_line(
+            '{"type": "event", "kind": "usage", "step": NaN,'
+            ' "usage": {"input_tokens": Infinity, "output_tokens": 5}}'
+        )
+        assert decoded is not None and decoded.event is not None
+        self.assertEqual(decoded.event.step, 0)
+        self.assertEqual(decoded.event.usage, {"input_tokens": 0, "output_tokens": 5})
 
     def test_version_field_is_accepted_and_forward_tolerant(self) -> None:
         self.assertEqual(PROTOCOL_VERSION, 1)
@@ -1029,6 +1040,82 @@ class ViewTests(unittest.TestCase):
             self.assertIn(needle, text)
         empty = views.lines_text(views.session_state_lines(None, "ru")).plain
         self.assertIn("Сохранённой сессии пока нет", empty)
+
+
+class BackendStopTests(unittest.TestCase):
+    def test_a_run_stopped_before_it_starts_never_spawns(self) -> None:
+        backend = CLIBackend(Path("."))
+        cancel = threading.Event()
+        cancel.set()
+        request = AgentRequest(Path("."), "task", "s-1", cancel=cancel)
+        with patch("karox.tui.backend.subprocess.Popen", side_effect=AssertionError):
+            result = backend.stream_agent(request, lambda event: None)
+        self.assertTrue(result.stopped)
+        self.assertIsNone(result.outcome)
+
+    def test_a_late_stop_for_a_finished_run_leaves_the_next_run_alone(self) -> None:
+        from unittest.mock import MagicMock
+
+        backend = CLIBackend(Path("."))
+        current = MagicMock()
+        backend._process = current
+        backend._run = threading.Event()
+        backend.stop(threading.Event())
+        current.poll.assert_not_called()
+        current.send_signal.assert_not_called()
+        current.terminate.assert_not_called()
+        self.assertFalse(backend._stopping)
+
+    def test_stop_takes_down_a_child_that_ignores_it_with_its_children(self) -> None:
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            beat = Path(folder) / "beat"
+            deaf = (
+                "import signal\n"
+                "for name in ('SIGBREAK', 'SIGTERM'):\n"
+                "    if hasattr(signal, name):\n"
+                "        signal.signal(getattr(signal, name), signal.SIG_IGN)\n"
+            )
+            grandchild = deaf + (
+                "import sys, time\n"
+                "while True:\n"
+                "    open(sys.argv[1], 'w').write(repr(time.monotonic()))\n"
+                "    time.sleep(0.05)\n"
+            )
+            child = deaf + (
+                "import subprocess, sys, time\n"
+                "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+                "print('up', flush=True)\n"
+                "time.sleep(60)\n"
+            )
+            backend = CLIBackend(Path("."))
+            argv = [sys.executable, "-c", child, grandchild, str(beat)]
+            seen: list[StreamResult] = []
+            with patch.object(backend, "_argv", return_value=argv), patch(
+                "karox.tui.backend._STOP_GRACE_SECONDS", 0.5
+            ):
+                runner = threading.Thread(
+                    target=lambda: seen.append(
+                        backend.stream_agent(
+                            AgentRequest(Path("."), "task", "s-1"), lambda event: None
+                        )
+                    )
+                )
+                runner.start()
+                deadline = time.monotonic() + 20
+                while not beat.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(beat.exists(), "the grandchild never started")
+                backend.stop()
+                runner.join(20)
+            self.assertFalse(runner.is_alive())
+            self.assertTrue(seen and seen[0].stopped)
+            time.sleep(0.3)
+            before = beat.read_text()
+            time.sleep(0.5)
+            self.assertEqual(beat.read_text(), before, "the grandchild outlived the stop")
 
 
 class BackendCommandLineTests(unittest.TestCase):
@@ -1588,6 +1675,41 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot, app)
             app.action_stop()
             self.assertEqual(backend.stops, 0)
+
+    async def test_a_stop_before_the_child_starts_still_stops_the_run(self) -> None:
+        backend = _FakeBackend(self.repository)
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            # Esc lands between the user line and the launch of the child.
+            app._start_task("long task")
+            app.action_stop()
+            await self.settle(pilot, app)
+            self.assertEqual(len(backend.requests), 1)
+            self.assertTrue(backend.requests[0].cancel.is_set())
+            self.assertEqual(app.run_state.state, "stopped")
+            self.assertFalse(app._agent_running)
+            self.assertFalse(app._stopping)
+
+    async def test_the_task_after_a_stopped_run_continues_its_session(self) -> None:
+        backend = _FakeBackend(self.repository)
+        backend.gate = threading.Event()
+        backend.gate_after = 1
+        app = self.app(backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(pilot, app)
+            await self.type_and_send(pilot, app, "first task")
+            await self.wait_for(pilot, backend.gate_reached.is_set)
+            await pilot.press("escape")
+            await self.settle(pilot, app)
+            self.assertEqual(app.run_state.state, "stopped")
+            backend.gate = None
+            await self.submit(pilot, app, "a different task")
+            self.assertEqual(len(backend.requests), 2)
+            self.assertFalse(backend.requests[0].continue_task)
+            self.assertTrue(backend.requests[1].continue_task)
+            self.assertFalse(backend.requests[1].cancel.is_set())
+            self.assertEqual(app.run_state.state, "done")
 
     async def test_ctrl_c_clears_the_draft_before_it_quits(self) -> None:
         app = self.app()

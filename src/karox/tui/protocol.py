@@ -171,10 +171,15 @@ def decode_line(line: str) -> Decoded | None:
     # The version marker is advisory: an absent, future or malformed "v" never
     # drops a document, because losing progress lines is worse than guessing.
     kind = payload.get("type")
-    if kind == "event":
-        return Decoded("event", event=Event.from_payload(payload))
-    if kind == "result":
-        return Decoded("result", outcome=Outcome.from_report(payload.get("report")))
+    try:
+        if kind == "event":
+            return Decoded("event", event=Event.from_payload(payload))
+        if kind == "result":
+            return Decoded("result", outcome=Outcome.from_report(payload.get("report")))
+    except (ValueError, TypeError, OverflowError, AttributeError):
+        # One odd document must not end the stream: the reader would stop
+        # draining a run that keeps going.
+        return None
     return None
 
 
@@ -393,9 +398,12 @@ def _text(value: Any) -> str:
 
 
 def _int(value: Any) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
-    return int(value) if isinstance(value, (int, float)) else 0
+    try:
+        return int(value)
+    except (ValueError, OverflowError):  # NaN / Infinity are valid JSON to Python
+        return 0
 
 
 def _float(value: Any) -> float:
@@ -416,7 +424,7 @@ def _int_map(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
     return {
-        str(key): int(item)
+        str(key): _int(item)
         for key, item in value.items()
         if isinstance(item, (int, float)) and not isinstance(item, bool)
     }

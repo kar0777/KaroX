@@ -21,9 +21,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from ..detached_process import windowless_flags
+from ..process_tree import _kill_windows_process_tree
 from .protocol import Event, Outcome, decode_line
 
 _STDERR_TAIL = 4000
+#: How long a stopped run gets to save its turn before its tree is killed.
+_STOP_GRACE_SECONDS = 3.0
 
 
 class BackendError(RuntimeError):
@@ -42,6 +45,11 @@ class AgentRequest:
     #: MCP servers to attach to the session before the run: (server, scope)
     #: with scope "all" or "read" -- the user's choice in /mcp.
     mcp_servers: tuple[tuple[str, str], ...] = ()
+    #: Set by the client when the user stops this run. A stop pressed before
+    #: the child exists finds no process to signal; the backend checks this
+    #: under the same lock it publishes the process with, so the run is
+    #: either never started or visible to ``stop``.
+    cancel: threading.Event | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -60,6 +68,8 @@ class CLIBackend:
         self.repository = repository.expanduser().resolve()
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
+        #: The cancel event of the run that owns ``_process``.
+        self._run: threading.Event | None = None
         self._stopping = False
 
     # ------------------------------------------------------------------ calls
@@ -137,6 +147,8 @@ class CLIBackend:
             arguments.extend(("--mcp-server", f"{server_id}={scope}"))
         with self._lock:
             self._stopping = False
+            if request.cancel is not None and request.cancel.is_set():
+                return StreamResult(None, 0, stopped=True)
             try:
                 process = subprocess.Popen(
                     self._argv(arguments),
@@ -153,18 +165,21 @@ class CLIBackend:
             except OSError as exc:
                 return StreamResult(None, -1, f"cannot start KaroX CLI: {exc}")
             self._process = process
-        stderr_chunks: list[str] = []
+            self._run = request.cancel
+        stderr_tail = [""]
 
         def drain() -> None:
-            if process.stderr is None:
+            stream = process.stderr
+            if stream is None:
                 return
-            for chunk in process.stderr:
-                stderr_chunks.append(chunk)
+            # Only the tail is ever shown; a chatty child must not grow the
+            # client's memory for the length of a long run (or one long line).
+            for chunk in iter(lambda: stream.read(_STDERR_TAIL), ""):
+                stderr_tail[0] = (stderr_tail[0] + chunk)[-2 * _STDERR_TAIL:]
 
         watcher = threading.Thread(target=drain, name="karox-tui-stderr", daemon=True)
         watcher.start()
         outcome: Outcome | None = None
-        events: list[Event] = []
         try:
             if process.stdout is not None:
                 for line in process.stdout:
@@ -172,7 +187,6 @@ class CLIBackend:
                     if decoded is None:
                         continue
                     if decoded.kind == "event" and decoded.event is not None:
-                        events.append(decoded.event)
                         on_event(decoded.event)
                     elif decoded.kind == "result" and decoded.outcome is not None:
                         outcome = decoded.outcome
@@ -180,20 +194,38 @@ class CLIBackend:
         finally:
             with self._lock:
                 self._process = None
+                self._run = None
             watcher.join(timeout=2.0)
         return StreamResult(
             outcome=outcome,
             exit_code=int(exit_code),
-            stderr="".join(stderr_chunks).strip()[-_STDERR_TAIL:],
+            stderr=stderr_tail[0].strip()[-_STDERR_TAIL:],
             stopped=self._stopping,
-            events=events,
         )
 
-    def stop(self) -> None:
+    def stop(self, cancel: threading.Event | None = None) -> None:
+        """Ask the run to stop like Ctrl+C, then take its whole tree down.
+
+        The child answers CTRL_BREAK / SIGTERM by finishing the turn as
+        stopped and cancelling its own commands. One that does not answer in
+        time is killed with every process it started: killing only the CLI
+        left its test runners and servers alive, holding files and ports.
+        ``cancel`` names the run the user stopped; a stop that arrives after
+        that run ended must not land on the next one.
+        """
+
         with self._lock:
+            if cancel is not None and cancel is not self._run:
+                return
             process = self._process
             self._stopping = True
-        if process is None or process.poll() is not None:
+        if process is None:
+            return
+        if process.poll() is not None:
+            if os.name != "nt":
+                # The CLI is gone but the stream is still open: something it
+                # started holds the pipe. Its group goes too.
+                _kill_group(process.pid)
             return
         try:
             if os.name == "nt":
@@ -201,17 +233,20 @@ class CLIBackend:
             else:
                 process.terminate()
         except (OSError, ValueError):
-            try:
-                process.terminate()
-            except OSError:
-                pass
+            # No console to deliver the break through: terminating the CLI
+            # alone would orphan its children, so take the tree now.
+            _kill_tree(process)
+            return
         try:
-            process.wait(timeout=3.0)
+            process.wait(timeout=_STOP_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except OSError:
-                pass
+            _kill_tree(process)
+        else:
+            if os.name != "nt":
+                # Whatever the CLI left in its own group goes with it. Linux
+                # does not hand out a PID that is still a live group id, so
+                # this reaches the run's group or nothing.
+                _kill_group(process.pid)
 
     # --------------------------------------------------------------- domains
 
@@ -490,6 +525,31 @@ class CLIBackend:
         if os.name == "nt":
             flags |= subprocess.CREATE_NEW_PROCESS_GROUP
         return flags
+
+
+def _kill_group(pid: int) -> None:
+    """SIGKILL what is left of a POSIX run's own group (its id is the CLI pid)."""
+
+    try:
+        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+    except (OSError, AttributeError):
+        pass
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        # While the CLI is alive its descendants can still be found from it.
+        _kill_windows_process_tree(process.pid)
+    else:
+        _kill_group(process.pid)
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=_STOP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _clean_error(value: str) -> str:

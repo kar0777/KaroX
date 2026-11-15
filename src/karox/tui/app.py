@@ -33,6 +33,7 @@ from .app_run import AppRunMixin
 
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -125,6 +126,7 @@ class KaroxApp(App[int], AppSessionMixin, AppCommandsMixin, AppRunMixin):
         self._tokens = 0
         self._agent_running = False
         self._stopping = False
+        self._run_cancel = threading.Event()
         self.run_state = RunState()
         self.checkpoint: SessionState | None = None
         # Detection is a suggestion shown to the user, never approval: the CLI
