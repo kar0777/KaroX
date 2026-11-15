@@ -95,7 +95,20 @@
 - A pytest run under `-qq` (the project's `addopts = "-q"` plus the run's own
   `-q`) prints no final count line; its counts now come from the progress rows
   (`FFF.....  [100%]`), so failures that were red before any edit get their
-  baseline and count as pre-existing instead of being owed.
+  baseline and count as pre-existing instead of being owed. The check result
+  names that count (`its progress rows show 10 passed, 0 failed`), so a
+  finish can quote it without a verbose re-run.
+- The on-demand baseline swap is safer: a process killed mid-swap is undone
+  when Core starts and before every check (not only at the next swap); the
+  journal records the swap's phase, so a crash while placing or restoring
+  brings every file back while a crash during the rerun leaves a file edited
+  after it as it is, and an unreadable file keeps the journal; one swap runs
+  per repository at a time, a check waits for another process's swap instead
+  of running on start bytes, and a lock whose owner is gone or that is older
+  than any swap is taken over; start bytes come through
+  Git's checkout filters, a symlink, submodule or unreadable start blob means
+  no baseline instead of a deleted file, and a tree that could not be fully
+  placed at start bytes is never measured.
 
 ### Changed
 

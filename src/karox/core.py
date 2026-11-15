@@ -144,6 +144,12 @@ class CoreRuntime(
         self._allow_probes = bool(allow_probes)
         # check_baseline: per-argv outcome on the start bytes (absent = strict gate).
         self._check_baselines: Dict[tuple[str, ...], Any] = {}
+        from . import check_baseline
+
+        try:  # a run killed mid-swap must not leave start bytes for this one
+            check_baseline.recover_pending(self.repository)
+        except Exception:  # noqa: BLE001 - every check retries; the journal stays
+            pass
         self._task_test_names: frozenset[str] = frozenset()
         self._handlers: Mapping[
             str, Callable[[Dict[str, Any], float], Dict[str, Any]]

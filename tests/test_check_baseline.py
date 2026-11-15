@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -212,6 +213,13 @@ def test_checks_body_puts_the_baseline_note_first() -> None:
     assert body.startswith("[karox baseline] All 1 failing tests already failed")
 
 
+def test_a_doubly_quiet_run_is_given_a_count_to_quote() -> None:
+    quiet = {"argv": [PY, "-m", "pytest", "-q", "tests"], "stdout": "..........   [100%]\n", "exit_code": 0}
+    assert _checks_body(quiet).endswith("its progress rows show 10 passed, 0 failed]")
+    assert "progress rows" not in _checks_body({**quiet, "stdout": "....  [100%]\n4 passed in 0.1s\n"})
+    assert "progress rows" not in _checks_body({**quiet, "argv": ["make", "test"]})
+
+
 # -- Core end to end -----------------------------------------------------------------
 
 
@@ -334,6 +342,63 @@ def test_a_crashed_swap_is_restored_from_the_journal(tmp_path: Path) -> None:
     assert check_baseline.recover_swap(journal) is True
     assert target.read_bytes() == b"mine\n" and not Path(str(target) + ".new").exists()
     assert not journal.exists()
+
+
+def test_a_late_recovery_keeps_edits_made_after_the_crash(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    edited, untouched = repo / "a.py", repo / "b.py"
+    journal = check_baseline.swap_journal_path(repo)
+    saved = {str(edited): b"mine a\n", str(untouched): b"mine b\n"}
+    start = {str(edited): b"start a\n", str(untouched): b"start b\n"}
+    check_baseline.write_swap_journal(journal, saved, start, check_baseline.PHASE_RUNNING)
+    check_baseline.place(start)
+    edited.write_bytes(b"newer a\n")  # someone worked on after the crash
+    assert check_baseline.recover_pending(repo) is True
+    assert edited.read_bytes() == b"newer a\n" and untouched.read_bytes() == b"mine b\n"
+    assert not journal.exists()
+    # A crash while placing or restoring left half-written files: all come back.
+    for phase in (check_baseline.PHASE_PLACING, check_baseline.PHASE_RESTORING):
+        check_baseline.write_swap_journal(journal, saved, start, phase)
+        edited.write_bytes(b"sta")
+        assert check_baseline.recover_pending(repo) is True
+        assert edited.read_bytes() == b"mine a\n" and not journal.exists()
+
+
+def test_a_killed_swap_is_undone_before_the_next_check(repository: Path, tmp_path: Path) -> None:
+    core, origin = _wild_runtime(repository, tmp_path)
+    fixed = "def value():\n    return 2\n"
+    _do(core, origin, "repo.write_file", {"path": "pkg.py", "content": fixed}, "w1")
+    target = str(repository / "pkg.py")
+    journal = check_baseline.swap_journal_path(repository)
+    check_baseline.write_swap_journal(journal, {target: fixed.encode()}, {target: b"def value():\n    return 1\n"})
+    check_baseline.place({target: b"def value():\n    return 1\n"})
+    _do(core, origin, "checks.run", {"argv": [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_pkg.py::test_other"]}, "c1")
+    assert (repository / "pkg.py").read_text(encoding="utf-8") == fixed and not journal.exists()
+
+
+def test_a_held_swap_lock_means_no_baseline(tmp_path: Path) -> None:
+    journal = check_baseline.swap_journal_path(tmp_path / "repo")
+    with check_baseline.swap_lock(journal) as first:
+        with check_baseline.swap_lock(journal) as second:
+            assert first is True and second is False
+    lock = journal.with_suffix(".lock")
+    # A lock left by a dead process is taken over.
+    lock.write_text("999999999", encoding="utf-8")
+    with check_baseline.swap_lock(journal) as again:
+        assert again is True
+    assert not lock.exists()
+    # A young lock with no PID yet is being created: held.
+    lock.write_text("", encoding="utf-8")
+    with check_baseline.swap_lock(journal) as young:
+        assert young is False
+    # One older than any swap is stale, even under a live PID.
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    old = time.time() - check_baseline.BASELINE_TIMEOUT_SECONDS - 400
+    os.utime(lock, (old, old))
+    with check_baseline.swap_lock(journal) as stale:
+        assert stale is True
+    assert not lock.exists()
 
 
 def test_one_check_cannot_take_the_whole_run(repository: Path, tmp_path: Path, monkeypatch) -> None:

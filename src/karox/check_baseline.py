@@ -5,15 +5,17 @@ Fail-closed: same argv/exit code, no timeout, >0 and >= passed, no new failing i
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shlex
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 # Parameters may hold " - " ("t[a - b]"): the node keeps its whole bracket.
 _SUMMARY_ROW = re.compile(r"^(?:FAILED|ERROR) (?P<node>[^\s\[]+(?:\[(?:[^\[\]]|\[[^\]]*\])*\])?\S*)(?: - .*)?$", re.M)
@@ -163,6 +165,21 @@ def outcome(text: str, exit_code: Any, timed_out: Any) -> Outcome:
     return Outcome(code, bool(timed_out), failing, passed, bool(finals) or complete, failed)
 
 
+def quiet_count(data: Mapping[str, Any]) -> str:
+    """"N passed, M failed" for a pytest run that printed no count line (-qq), else "".
+
+    The progress rows are all such a run shows; naming the count gives the
+    model a line to quote instead of re-running the tests verbosely.
+    """
+    if not is_pytest([str(p) for p in data.get("argv") or ()]):
+        return ""
+    text = _ANSI.sub("", str(data.get("stdout") or ""))
+    if _FINAL.search(text):
+        return ""
+    found = outcome(text, data.get("exit_code"), data.get("timed_out"))
+    return f"{found.passed} passed, {found.failed} failed" if found.parsed else ""
+
+
 def of_result(result: Mapping[str, Any]) -> Outcome:
     streams = (result.get(k) for k in ("_map_stdout", "stdout", "_map_stderr", "stderr"))
     out, std, err_full, err = (str(v or "") for v in streams)
@@ -245,27 +262,63 @@ def swap_journal_path(repository: Path) -> Path:
     return Path(tempfile.gettempdir()) / "karox-baseline-swap" / f"{digest}.json"
 
 
-def write_swap_journal(journal: Path, saved: Mapping[str, Optional[bytes]]) -> None:
+def _digest(data: Optional[bytes]) -> Optional[str]:
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+#: Swap phases. Only while the check runs on placed start bytes can a path
+#: that no longer holds them be someone's later edit; a crash while placing or
+#: restoring leaves half-written files, and those must get the run's bytes back.
+PHASE_PLACING, PHASE_RUNNING, PHASE_RESTORING = "placing", "running", "restoring"
+#: A swap never outlives its rerun by this much: an older lock is stale even
+#: when its PID now belongs to another live process.
+_LOCK_STALE_SECONDS = BASELINE_TIMEOUT_SECONDS + 300.0
+
+
+def write_swap_journal(
+    journal: Path,
+    saved: Mapping[str, Optional[bytes]],
+    placed: Optional[Mapping[str, Optional[bytes]]] = None,
+    phase: str = PHASE_PLACING,
+) -> None:
+    """Journal the run's bytes (and the swap's phase) before anything moves.
+
+    ``placed`` records what the swap writes, by digest: a recovery after a
+    crash in the running phase restores only the paths still holding exactly
+    that, so a file edited after the crash keeps its newer bytes.
+    """
     journal.parent.mkdir(parents=True, exist_ok=True)
     files = {p: None if d is None else base64.b64encode(d).decode("ascii") for p, d in saved.items()}
+    body: dict[str, Any] = {"version": 2 if placed is not None else 1, "files": files}
+    if placed is not None:
+        body["placed"] = {p: _digest(d) for p, d in placed.items()}
+        body["phase"] = phase
     tmp = journal.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump({"version": 1, "files": files}, handle)
+        json.dump(body, handle)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, journal)
 
 
 def place(files: Mapping[str, Optional[bytes]]) -> None:
-    """Write each path's bytes (None = the file must not exist)."""
+    """Write each path's bytes (None = the file must not exist).
+
+    Every path is attempted even when one fails (a test left a directory where
+    a file was), so one obstacle never leaves the rest at start bytes;
+    ``verify_placed`` reports the outcome.
+    """
     for path, data in files.items():
         target = Path(path)
-        if data is None:
-            if target.is_file() or target.is_symlink():
-                target.unlink()
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+        try:
+            if data is None:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+        except OSError:
+            continue
 
 
 def verify_placed(files: Mapping[str, Optional[bytes]]) -> bool:
@@ -275,14 +328,98 @@ def verify_placed(files: Mapping[str, Optional[bytes]]) -> bool:
     )
 
 
+def _holds(path: str, digest: Optional[str]) -> Optional[bool]:
+    """Whether the path holds exactly these bytes; None when it cannot be read."""
+    target = Path(path)
+    try:
+        if digest is None:
+            return not target.exists()
+        return target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    except OSError:
+        return None
+
+
 def recover_swap(journal: Path) -> bool:
-    """Restore a working tree a crashed baseline run left at start bytes."""
+    """Restore a working tree a crashed baseline run left at start bytes.
+
+    After a crash in the running phase, a path that no longer holds the start
+    bytes the swap placed was changed later and keeps its newer bytes. A crash
+    while placing or restoring restores every path. A path that cannot be read
+    keeps the journal, so no saved byte is ever dropped.
+    """
     if not journal.is_file():
         return False
-    raw = dict(json.loads(journal.read_text(encoding="utf-8")).get("files") or {})
+    body = json.loads(journal.read_text(encoding="utf-8"))
+    raw = dict(body.get("files") or {})
     files = {p: None if d is None else base64.b64decode(d) for p, d in raw.items()}
+    placed = body.get("placed")
+    if isinstance(placed, dict) and body.get("phase") == PHASE_RUNNING:
+        kept: dict[str, Optional[bytes]] = {}
+        for path, data in files.items():
+            holds = _holds(path, placed[path]) if path in placed else True
+            if holds is None:
+                raise RuntimeError(f"KaroX could not read {path}; the journal {journal} keeps its bytes")
+            if holds:
+                kept[path] = data
+        files = kept
     place(files)
     if not verify_placed(files):
         raise RuntimeError(f"KaroX could not restore files from {journal}")
     journal.unlink()
     return True
+
+
+def recover_pending(repository: Path, wait_seconds: float = 0.0) -> bool:
+    """Put back the bytes a process killed mid-swap left at start bytes.
+
+    Called when Core starts and before every check: the swap's own
+    ``finally`` never runs for a killed process (codex review, 2026-11-15).
+    While another process holds the swap, a check waits up to
+    ``wait_seconds`` instead of running on start bytes.
+    """
+    journal = swap_journal_path(repository)
+    lock = journal.with_suffix(".lock")
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while journal.is_file() or lock.exists():
+        with swap_lock(journal) as held:
+            if held:
+                return recover_swap(journal)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return False
+
+
+@contextlib.contextmanager
+def swap_lock(journal: Path) -> Iterator[bool]:
+    """One baseline swap per repository at a time; yields False when another holds it.
+
+    The holder writes its PID. A lock is stale when its owner is gone or it is
+    older than any swap can take; a lock with no PID yet is being created and
+    counts as held while it is young.
+    """
+    from .process_identity import process_is_running
+
+    lock = journal.with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+                owner = int(lock.read_text(encoding="utf-8").strip() or "0")
+            except (OSError, ValueError):
+                age, owner = 0.0, 0
+            if age < _LOCK_STALE_SECONDS and (owner == 0 or process_is_running(owner)):
+                break
+            lock.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        try:
+            yield True
+        finally:
+            lock.unlink(missing_ok=True)
+        return
+    yield False

@@ -623,6 +623,9 @@ def _checks_body(data: Mapping[str, Any]) -> str:
         text = f"{text}\n[stderr]\n{secondary}" if text.strip() else secondary
     if rendered:
         text = f"{rendered}\n{text}" if text.strip() else rendered
+    counted = check_baseline.quiet_count(data)
+    if counted:
+        text = f"{text}\n[pytest printed no count line; its progress rows show {counted}]"
     note = "\n".join(p for p in (check_baseline.render(data), str(data.get("detail") or "")) if p)
     if note:
         text = f"{note}\n{text}" if text.strip() else note

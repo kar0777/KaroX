@@ -650,6 +650,9 @@ class ProcessToolsMixin:
         self, arguments: Dict[str, Any], deadline_seconds: float
     ) -> Dict[str, Any]:
         plan = self._prepare_check(arguments, deadline_seconds)
+        # A process killed mid-swap left the start bytes in place: put the
+        # run's bytes back before anything runs on them.
+        check_baseline.recover_pending(self.repository, wait_seconds=plan.effective_timeout)
         ours = _is_karox_module_command(plan.argv)
         # One random value per run, handed to the child that is supposed to be
         # KaroX's own checker and required back in its verdict. A repository that
@@ -779,7 +782,22 @@ class ProcessToolsMixin:
             return None
         commit = str(start.get("commit"))
         journal = check_baseline.swap_journal_path(self.repository)
-        check_baseline.recover_swap(journal)
+        with check_baseline.swap_lock(journal) as held:
+            if not held:
+                return None  # another check of this repository is mid-swap
+            check_baseline.recover_swap(journal)
+            return self._swap_and_run(plan, commit, changed, journal)
+
+    def _git_bytes(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", *arguments], cwd=str(self.repository),
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            env=child_process_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _swap_and_run(
+        self, plan: CheckPlan, commit: str, changed: Sequence[str], journal: Path
+    ) -> Optional[Any]:
         saved: Dict[str, Optional[bytes]] = {}
         start_bytes: Dict[str, Optional[bytes]] = {}
         for relative in changed:
@@ -787,21 +805,37 @@ class ProcessToolsMixin:
                 path = self.safe_path(relative)
             except Exception:  # noqa: BLE001 - nothing moved yet: no baseline
                 return None
-            current_bytes = path.read_bytes() if path.is_file() else None
-            if path.is_dir() or len(current_bytes or b"") > check_baseline.SWAP_MAX_BYTES:
+            # A link or a directory cannot round-trip through bytes.
+            if path.is_symlink() or path.is_dir():
                 return None
-            shown = subprocess.run(
-                ["git", "show", f"{commit}:{Path(relative).as_posix()}"], cwd=str(self.repository),
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
-                env=child_process_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            current_bytes = path.read_bytes() if path.is_file() else None
+            if len(current_bytes or b"") > check_baseline.SWAP_MAX_BYTES:
+                return None
+            spec = f"{commit}:{Path(relative).as_posix()}"
+            listed = self._git_bytes("ls-tree", commit, "--", Path(relative).as_posix())
+            if listed.returncode != 0:
+                return None
+            entry = listed.stdout.split(b" ", 1)[0]
+            if not listed.stdout.strip():
+                start = None  # absent at the start revision
+            elif entry not in {b"100644", b"100755"}:
+                return None  # a symlink or submodule at the start revision
+            else:
+                # --filters gives the bytes a checkout writes (eol, smudge).
+                shown = self._git_bytes("cat-file", "--filters", spec)
+                if shown.returncode != 0:
+                    return None  # unreadable is not absent
+                start = shown.stdout
             saved[str(path)] = current_bytes
-            start_bytes[str(path)] = shown.stdout if shown.returncode == 0 else None
+            start_bytes[str(path)] = start
         if all(saved[p] == start_bytes[p] for p in saved):
             return None
-        check_baseline.write_swap_journal(journal, saved)
+        check_baseline.write_swap_journal(journal, saved, start_bytes)
         try:
             check_baseline.place(start_bytes)
+            if not check_baseline.verify_placed(start_bytes):
+                raise RuntimeError("start bytes not placed")  # a mixed tree is no baseline
+            check_baseline.write_swap_journal(journal, saved, start_bytes, check_baseline.PHASE_RUNNING)
             result = self._run(
                 plan.argv,
                 min(plan.effective_timeout, check_baseline.BASELINE_TIMEOUT_SECONDS),
@@ -810,6 +844,11 @@ class ProcessToolsMixin:
         except Exception:  # noqa: BLE001 - restore below; no baseline
             result = None
         finally:
+            # Half-written restores must come back in full after a crash here.
+            try:
+                check_baseline.write_swap_journal(journal, saved, start_bytes, check_baseline.PHASE_RESTORING)
+            except OSError:
+                pass  # restoring now matters more than the journal's phase
             check_baseline.place(saved)
             if not check_baseline.verify_placed(saved):
                 raise RuntimeError(
