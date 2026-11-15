@@ -282,3 +282,9 @@ git diff --check
   their logs stay in `<session>/code/`. Live check (CrowLLM grok free, Windows): one
   program listed the files and ran pytest, the model fixed both bugs, tests passed.
   619 tests. Goes to a dev-pool A/B after the held-out run.
+- 6.0.0.dev6 = dev5 + review fixes + code mode (flag, off). Same BASE_PROMPT as dev5.
+- C1 decision rule (code mode on by default), fixed before the run: dev6 with
+  `--code-mode` on the 11 dev tasks, 1 attempt, Synthetic, after the held-out run. Against
+  the same reference as B1 (E1 on its 9 clean tasks, k6d1 on 68/71: 9 solved, 55 LLM
+  calls per task on the 9): adopt if C1 solves >= 9 with <= 55 calls per task on those 9;
+  otherwise code mode stays an opt-in flag.
