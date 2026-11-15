@@ -49,7 +49,10 @@ def test_python_hint_for_windows_store_placeholder(monkeypatch: pytest.MonkeyPat
 
     stub = r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\python3.exe"
     real = r"C:\Python312\python.exe"
+    store = r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\python.exe"
     monkeypatch.setattr(prompt.platform, "system", lambda: "Windows")
+    store_installed = {store}  # WindowsApps entries that answer `--version`
+    monkeypatch.setattr(prompt, "_answers_version", lambda path: path in store_installed)
 
     def which(paths: dict[str, str]):  # type: ignore[no-untyped-def]
         return paths.get
@@ -64,6 +67,11 @@ def test_python_hint_for_windows_store_placeholder(monkeypatch: pytest.MonkeyPat
     assert prompt.python_hint() is None
     monkeypatch.setattr(prompt.shutil, "which", which({"python": real}))
     assert prompt.python_hint() is None  # no python3 at all: "command not found" is clear
+    # A real Store install also lives in WindowsApps: the probe tells it from the stub.
+    monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub, "python": store}))
+    assert (prompt.python_hint() or "").startswith("Python: run it as `python`")
+    store_installed.add(stub)
+    assert prompt.python_hint() is None  # python3 itself works
     monkeypatch.setattr(prompt.platform, "system", lambda: "Linux")
     monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub}))
     assert prompt.python_hint() is None

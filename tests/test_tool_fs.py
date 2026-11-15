@@ -161,6 +161,19 @@ def test_edit_unread_exact_match(ctx):
     assert path.read_text() == "c\nb\n"
 
 
+def test_edit_unread_limits(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("id = 1\nid = 2\n")
+    blind = edit(ctx, "id", "k", replace_all=True)
+    assert blind.is_error
+    assert "2 places" in blind.content
+    assert not edit(ctx, "id = 1", "id = 3").is_error  # exact and unique: fine
+    # One exact edit is not a full picture: replacing the whole file still needs a read.
+    assert "has not been read" in call(WriteTool(), ctx, file_path="file", content="x").content
+    read(ctx)
+    assert not call(WriteTool(), ctx, file_path="file", content="x").is_error
+
+
 def test_edit_unread_needs_exact_match(ctx):
     path = ctx.workspace / "file"
     path.write_text("a  \nb  \n")

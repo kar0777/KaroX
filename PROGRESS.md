@@ -260,3 +260,14 @@ git diff --check
   the consistent part. Candidate for a later A/B with 2 attempts per task.
 - Final held-out run k6h3s started 21:55 UTC (run 43766318734, Synthetic, 50 tasks, 1
   attempt, parallel 3, wheel 6.0.0.dev5).
+- Independent review of tonight's diff (agy Gemini 4 Argon, high; each finding re-checked by
+  hand, all six confirmed and fixed after the dev5 wheel went to the held-out run):
+  `karox_run` validates `detail`/`wait_seconds` before starting (a refused call used to
+  leave a nameless run holding the workspace); retry counts are per failure kind (a long
+  429/503 spell no longer leaves zero retries for a following dropped connection or 500);
+  `edit` on an unread/changed file refuses `replace_all` over several places, and such an
+  edit no longer counts as a read for a later full-file `write`; the Windows Python hint
+  asks a WindowsApps `python3`/`python` for `--version` (a real Store install lives there
+  too; 125 ms, Windows only); wrap-up notices survive a truncated step; negative
+  `--max-steps`/`--wrap-up-steps` mean no limit. No issues found in the brief long-poll
+  (`since`/`next`, wakeups, memory) or in `job_output`. 613 tests.

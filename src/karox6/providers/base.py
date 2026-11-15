@@ -141,36 +141,40 @@ async def complete_with_retry(
     on_retry: RetryCallback | None = None,
 ) -> ModelResponse:
     policy = policy or RetryPolicy()
-    attempt = 0
+    attempt = 0  # all retries, for on_retry
+    # Each kind of failure has its own count: a long 429 or 503 spell must not use up the
+    # few quick retries a dropped connection or a plain 500 gets afterwards.
+    tries = {"rate_limit": 0, "unavailable": 0, "other": 0}
     waited = {"rate_limit": 0.0, "unavailable": 0.0}
     while True:
         try:
             response = await provider.complete(request, on_delta)
         except ProviderError as exc:
-            attempt += 1
             if exc.code not in RETRYABLE:
                 raise
+            attempt += 1
             kind = (
                 "rate_limit"
                 if exc.code == "rate_limit"
                 else "unavailable"
                 if exc.status in UNAVAILABLE_STATUSES
-                else None
+                else "other"
             )
-            if kind is not None:
+            tries[kind] += 1
+            if kind == "other":
+                if tries[kind] > policy.max_retries:
+                    raise
+                delay = policy.delay(tries[kind], exc.retry_after)
+            else:
                 budget = (
                     policy.rate_limit_budget_s
                     if kind == "rate_limit"
                     else policy.unavailable_budget_s
                 )
-                delay = policy.delay(attempt, exc.retry_after, rate_limit=True)
+                delay = policy.delay(tries[kind], exc.retry_after, rate_limit=True)
                 if waited[kind] + delay > budget:
                     raise
                 waited[kind] += delay
-            elif attempt > policy.max_retries:
-                raise
-            else:
-                delay = policy.delay(attempt, exc.retry_after)
             if on_retry is not None:
                 maybe = on_retry(attempt, delay, exc)
                 if maybe is not None:

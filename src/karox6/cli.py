@@ -322,7 +322,7 @@ def _session_config(
         provider_name=args.provider,
         workspace=workspace,
         home=home,
-        max_steps=args.max_steps or None,  # 0: no limit
+        max_steps=_positive(args.max_steps),  # 0 or less: no limit
         max_seconds=args.max_seconds,
         max_cost_usd=args.max_cost,
         max_output_tokens=args.max_output_tokens,
@@ -339,8 +339,12 @@ def _session_config(
         system_prompt=system_prompt,
         system_append=args.append_system_prompt,
         subagents=args.subagents,
-        wrap_up_steps=args.wrap_up_steps or None,
+        wrap_up_steps=_positive(args.wrap_up_steps),
     )
+
+
+def _positive(value: int | None) -> int | None:
+    return value if value is not None and value > 0 else None
 
 
 def _provider(args: argparse.Namespace) -> Any:

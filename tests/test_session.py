@@ -455,3 +455,5 @@ def test_step_limits_by_command(tmp_path):
     assert built("run", "t").wrap_up_steps is None
     assert built("run", "t", "--wrap-up-steps", "120").wrap_up_steps == 120
     assert built("run", "t", "--wrap-up-steps", "0").wrap_up_steps is None
+    assert built("run", "t", "--max-steps", "-1").max_steps is None
+    assert built("run", "t", "--wrap-up-steps", "-5").wrap_up_steps is None

@@ -238,6 +238,12 @@ class EditTool:
                 f"{unsure}. Read it, then retry.",
                 is_error=True,
             )
+        if unsure and count != 1:
+            return ToolResult(
+                f"Error: replace_all would change {count} places in {shown}, which "
+                f"{unsure}. Read it, then retry.",
+                is_error=True,
+            )
         if crlf:
             updated = updated.replace("\n", "\r\n")
         payload = updated.encode("utf-8")
@@ -247,7 +253,7 @@ class EditTool:
             path.write_bytes(payload)
         except OSError as exc:
             return ToolResult(f"Error: cannot write {shown}: {exc}", is_error=True)
-        ctx.files.record_write(path)
+        ctx.files.record_write(path, observe=not unsure)
         note = f" (matched {how})" if how != "exactly" else ""
         plural = "s" if count != 1 else ""
         return ToolResult(

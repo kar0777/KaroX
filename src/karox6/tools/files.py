@@ -42,9 +42,12 @@ class FileTracker:
             return
         self._seen[self._key(path)] = (st.st_mtime_ns, st.st_size)
 
-    def record_write(self, path: Path) -> None:
+    def record_write(self, path: Path, *, observe: bool = True) -> None:
+        """``observe=False``: the tool changed a file it has no full picture of (an edit of
+        an unread or changed file), so a later ``write`` still has to read it first."""
         self._written.add(str(path))
-        self.observe(path)
+        if observe:
+            self.observe(path)
 
     def seen(self, path: Path) -> bool:
         return self._key(path) in self._seen

@@ -225,14 +225,18 @@ class McpServer:
     async def _tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         runs = self.runs
         if name == "karox_run":
+            # Check every argument before starting: a run that starts and then fails on a
+            # bad argument would keep the workspace busy without the client knowing its id.
+            wait = float(args.get("wait_seconds") or 0)
+            detail = str(args.get("detail") or "brief")
+            if detail not in ("brief", "full"):
+                raise RunError("detail must be 'brief' or 'full'")
             run, duplicate = runs.start(
                 str(args["task"]),
                 cwd=_opt_str(args, "cwd"),
                 session_id=_opt_str(args, "session_id"),
                 request_id=_opt_str(args, "request_id"),
             )
-            wait = float(args.get("wait_seconds") or 0)
-            detail = str(args.get("detail") or "brief")
             view = (
                 await runs.status(run.run_id, wait_s=wait, detail=detail) if wait else run.summary()
             )

@@ -230,6 +230,7 @@ class Session:
         self._append(Message("user", prompt))
         steps = 0
         truncations = 0
+        reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         status, reason, final_text = "completed", "", ""
         try:
             while True:
@@ -272,10 +273,12 @@ class Session:
                     status, reason = "loop", stop
                     break
                 wrap = self.config.wrap_up_steps
-                if wrap and steps == wrap:
+                if wrap and reminded == 0 and steps >= wrap:
                     self._notice("wrap_up", WRAP_UP_NOTICE.format(steps=steps), emit)
-                elif wrap and steps == wrap + FINAL_CALL_STEPS:
+                    reminded = 1
+                elif wrap and reminded == 1 and steps >= wrap + FINAL_CALL_STEPS:
                     self._notice("wrap_up", FINAL_NOTICE.format(steps=steps), emit)
+                    reminded = 2
         except ProviderError as exc:
             status, reason = "error", str(exc)
             emit(ev.ErrorEvent(code=exc.code, message=str(exc)))

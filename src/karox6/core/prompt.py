@@ -74,7 +74,10 @@ def python_hint() -> str | None:
         path = shutil.which(name)
         if not path:
             return "missing"
-        return "stub" if "\\windowsapps\\" in path.lower().replace("/", "\\") else "real"
+        if "\\windowsapps\\" not in path.lower().replace("/", "\\"):
+            return "real"
+        # WindowsApps holds both the placeholder and a real Store install: ask it.
+        return "real" if _answers_version(path) else "stub"
 
     if kind("python3") != "stub":
         return None
@@ -83,6 +86,14 @@ def python_hint() -> str | None:
         if kind(name) == "real":
             return f"Python: run it as `{name}`; {placeholder}"
     return f"Python: not installed; {placeholder}"
+
+
+def _answers_version(path: str) -> bool:
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and b"Python 3" in proc.stdout + proc.stderr
 
 
 def git_summary(workspace: Path) -> str:

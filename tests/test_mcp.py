@@ -431,6 +431,10 @@ def test_run_guards(tmp_path, monkeypatch):
         raise AssertionError("run did not finish")
 
     async def go():
+        for bad in ({"detail": "loud"}, {"wait_seconds": "soon"}):
+            refused = await tool(server, "karox_run", task="zero", **bad)
+            assert refused["isError"] is True
+        assert manager.list() == []  # a refused call starts nothing
         first = (await tool(server, "karox_run", task="one", request_id="r1"))["structuredContent"]
         reused = await tool(server, "karox_run", task="two", request_id="r1")
         assert reused["isError"] is True

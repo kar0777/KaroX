@@ -300,4 +300,18 @@ def test_rate_limit_retries_until_budget():
             await complete_with_retry(provider, request(), policy=fast)
         assert provider.calls == fast.max_retries + 1
 
+        # A long 503 spell does not use up the quick retries of a later plain 500.
+        class Mixed(Flaky):
+            async def complete(self, request, on_delta=None):
+                self.calls += 1
+                if self.calls <= 8:
+                    raise ProviderError("server", "unavailable", status=503)
+                if self.calls == 9:
+                    raise ProviderError("server", "oops", status=500)
+                return ModelResponse(Message("assistant", "ok"), Usage(), "stop", None)
+
+        provider = Mixed(0)
+        assert (await complete_with_retry(provider, request(), policy=fast)).message.content == "ok"
+        assert provider.calls == 10
+
     asyncio.run(go())
