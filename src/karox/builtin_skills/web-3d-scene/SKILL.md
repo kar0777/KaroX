@@ -3,7 +3,7 @@ name: web-3d-scene
 version: 1.9.0
 description: Build or fix a three.js scene that runs in the browser.
 when_to_use: 3D, three.js, WebGL, animated scenes, product viewers, particles, models in a page.
-triggers: [three, webgl, canvas, "*.html"]
+triggers: ["three.js", threejs, webgl]
 ---
 # three.js scene recipe
 

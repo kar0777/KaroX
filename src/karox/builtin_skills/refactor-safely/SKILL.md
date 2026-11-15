@@ -3,7 +3,7 @@ name: refactor-safely
 version: 1.0.0
 description: Restructure code without changing behavior.
 when_to_use: rename, extract, move, split a module, remove duplication.
-triggers: [refactor, rename, extract]
+triggers: [refactor, refactoring]
 ---
 # Refactor recipe
 - Confirm there are tests that cover the code; run them first and keep the result as the baseline.

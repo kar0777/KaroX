@@ -181,6 +181,10 @@ class SkillScriptResult:
         )
 
 
+#: Where a task states what kind of task it is (title, first paragraph).
+_TRIGGER_OPENING_CHARS = 1000
+
+
 def _clip(text: str, limit: int) -> str:
     if limit <= 0 or len(text) <= limit:
         return text
@@ -338,7 +342,8 @@ class SkillSession:
         """Deterministic trigger matching: evidence, never a silent guess.
 
         A recipe is a candidate when one of its declared ``triggers`` (or its
-        name) appears as a word in the task text.  ``when_to_use`` is prose for
+        name) appears as a word in the task's opening, or two different ones
+        appear anywhere in the task text.  ``when_to_use`` is prose for
         the model, not matching input, so it never selects a recipe here.
         Disabled and already-active recipes are not candidates.
         """
@@ -349,11 +354,19 @@ class SkillSession:
             if metadata.name in self.disabled or metadata.name in self._active:
                 continue
             matched: List[str] = []
+            opening = False
             for trigger in (*metadata.triggers, metadata.name):
                 pattern = r"\b" + re.escape(trigger) + r"\b"
-                if re.search(pattern, text, flags=re.IGNORECASE):
+                found = re.search(pattern, text, flags=re.IGNORECASE)
+                if found:
                     matched.append(trigger)
-            if matched:
+                    opening = opening or found.start() < _TRIGGER_OPENING_CHARS
+            # A recipe names a kind of task, and a task says what it is near
+            # its start; a long issue body mentions words in passing ("any
+            # refactor of X breaks us"). One trigger counts there, or two
+            # different ones anywhere (v606a: a three.js recipe and a
+            # refactoring recipe rode every request of an install-script task).
+            if matched and (opening or len(set(matched)) >= 2):
                 candidates.append(
                     SkillCandidate(metadata=metadata, matched_triggers=tuple(matched))
                 )

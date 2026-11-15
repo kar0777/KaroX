@@ -57,9 +57,10 @@ _DOMAIN_TOOL_KEYWORDS: Dict[str, tuple[str, ...]] = {
         "prune",
         "temporary files",
     ),
-    # The Safety section of the system prompt teaches the exact
-    # exact `repo_command {"action": "batch", ...}` form for deleting a scratch file,
-    # so the name stays callable while it is not advertised. An argument error
+    # The Safety section of the system prompt teaches the short
+    # `repo_command {"action": "delete", "paths": [...]}` form for deleting a
+    # scratch file (normalized to a batch delete), so the name stays callable
+    # while it is not advertised. An argument error
     # on that rare call is cheaper than 1.3 KB of batch schema on every repair
     # request.
     "repo.command": (

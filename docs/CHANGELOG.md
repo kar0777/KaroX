@@ -103,6 +103,16 @@
   script; a malformed field no longer raises in KaroX; and a script flooding
   the channel without a newline is stopped at 32 MB instead of growing
   KaroX's memory.
+- Recipes are no longer activated by a word in passing. A trigger counts in
+  the task's first 1000 characters, where a task says what it is, or when two
+  different triggers of the recipe agree; the three.js recipe answers to
+  `three.js`, `threejs` and `webgl` (not the number "three", a 2D canvas or
+  any `.html` file) and the refactoring recipe to `refactor`/`refactoring`
+  (not "extract" or "rename"). A measured install-script task had carried
+  10 KB of three.js and refactoring advice on every request.
+- The system prompt shows the short scratch-file delete call
+  (`repo_command {"action": "delete", "paths": [...]}`) that the hidden tool
+  accepts, instead of naming a "batch delete" form it never spelled out.
 - Session persistence is sturdier: reactivating a saved-bridge session that
   no longer exists creates it instead of waiting on its own lock (a hang on
   POSIX, a ten-second failure on Windows); a state file or write target held

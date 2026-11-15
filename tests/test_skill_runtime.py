@@ -196,6 +196,44 @@ def test_automatic_selection_matches_declared_triggers(
     assert "failing test" in record.reason
 
 
+def test_a_word_in_passing_deep_in_a_long_task_selects_no_recipe(
+    repo: Path, tmp_path: Path
+) -> None:
+    """v606a: an install-script issue said "any refactor of the layout breaks
+    us" in its third section and rode a refactoring recipe all run long."""
+
+    write_skill(repo, name="tidy-skill", triggers=["refactor", "rename"])
+    session = make_session(repo, tmp_path)
+    body = "Make the install path work at bake time. " + "Context sentence. " * 80
+    assert len(body) > 1000
+    passing = body + "Any refactor of the layout breaks us silently."
+    assert [c.metadata.name for c in session.automatic_candidates(passing)] == []
+    opening = "Refactor the install path. " + body
+    assert [c.metadata.name for c in session.automatic_candidates(opening)] == ["tidy-skill"]
+    agreeing = body + "Refactor the module, then rename its entry point."
+    assert [c.metadata.name for c in session.automatic_candidates(agreeing)] == ["tidy-skill"]
+
+
+def test_builtin_recipes_ignore_ordinary_words(tmp_path: Path) -> None:
+    """``three`` is a number before it is three.js; ``extract`` and ``rename``
+    are everyday verbs in feature requests."""
+
+    session = SkillSession(
+        SkillCatalog(tmp_path, global_directory=tmp_path / "global"),
+        "sess-1",
+        scratch_root=tmp_path / "scratch",
+    )
+
+    def picked(text: str) -> List[str]:
+        return [c.metadata.name for c in session.automatic_candidates(text)]
+
+    assert picked("This surfaced three friction points; extract the tarball and rename the binary.") == []
+    assert picked("Draw a bar chart on an HTML canvas.") == []
+    assert "web-3d-scene" in picked("Build a 3D page. Use Three.js r160 for all 3D.")
+    assert "web-3d-scene" in picked("Render the scene with WebGL.")
+    assert "refactor-safely" in picked("Refactor the parser module without changing behaviour.")
+
+
 def test_automatic_activation_is_capped(repo: Path, tmp_path: Path) -> None:
     write_skill(repo, name="second-skill", triggers=["pytest"], scripts=["scripts/check.py"])
     session = make_session(repo, tmp_path)
