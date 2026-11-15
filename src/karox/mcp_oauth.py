@@ -26,6 +26,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
 from .credentials import CredentialBackend, CredentialError, KeyringBackend
+from .mcp_types import _unwrapped
 
 _MCP_OAUTH_SERVICE = "KaroX/mcp-oauth"
 
@@ -96,6 +97,27 @@ class McpOAuthStorage:
 class _CallbackState:
     def __init__(self) -> None:
         self.values: queue.Queue[tuple[str, Optional[str]]] = queue.Queue(maxsize=1)
+
+
+async def _await_callback(
+    callback: _CallbackState, timeout_seconds: float
+) -> tuple[str, Optional[str]]:
+    """The consent redirect's values, or a clear refusal once the time is up.
+
+    A closed consent tab never calls back. Without a deadline the command
+    waited forever, and the blocked thread kept even Ctrl+C from ending it.
+    """
+
+    try:
+        return await anyio.to_thread.run_sync(
+            lambda: callback.values.get(timeout=timeout_seconds),
+            abandon_on_cancel=True,
+        )
+    except queue.Empty:
+        raise McpOAuthAuthorizationRequired(
+            f"no authorization arrived within {timeout_seconds:.0f} s; "
+            "run the authorize flow again"
+        ) from None
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -204,7 +226,7 @@ async def _authorize(
         open_authorization_url(url)
 
     async def callback_handler() -> tuple[str, str | None]:
-        return await anyio.to_thread.run_sync(callback.values.get)
+        return await _await_callback(callback, timeout_seconds)
 
     provider = OAuthClientProvider(
         server_url,
@@ -230,6 +252,12 @@ async def _authorize(
                         server_name=str(getattr(initialized.serverInfo, "name", server_id)),
                         tool_names=tuple(tool.name for tool in tools.tools),
                     )
+    except Exception as exc:
+        # The SDK's task groups wrap the real reason; show that, not the group.
+        real = _unwrapped(exc)
+        if real is exc:
+            raise
+        raise real from exc
     finally:
         server.shutdown()
         server.server_close()

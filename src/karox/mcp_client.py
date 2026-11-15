@@ -39,6 +39,7 @@ from .mcp_types import (  # noqa: F401
     _descriptor as _descriptor,
     _resolved_read_only_remote_names as _resolved_read_only_remote_names,
     _normalize_discovered_tools as _normalize_discovered_tools,
+    _unwrapped as _unwrapped,
 )
 from .mcp_registry import (  # noqa: F401
     _atomic_json as _atomic_json,
@@ -67,6 +68,9 @@ from .credentials import CredentialError
 from .models import Capability
 from .security import child_process_environment, redact
 from .sessions import SessionRecord
+
+#: tools/list pages read before a server is treated as listing without end.
+_MAX_TOOL_PAGES = 64
 
 
 
@@ -233,16 +237,42 @@ class McpClient:
         with anyio.fail_after(record.timeout_seconds):
             async with self._session(record, repository, secret) as session:
                 await session.initialize()
-                response = await session.list_tools()
-        self._validate_discovery_size(record, response)
+                listed = await self._listed_tools(record, session)
         return _normalize_discovered_tools(
-            record, (_descriptor(record, item) for item in response.tools)
+            record, (_descriptor(record, item) for item in listed)
+        )
+
+    async def _listed_tools(self, record: McpServerRecord, session: Any) -> list[Any]:
+        """Every tool the server lists, across its ``nextCursor`` pages.
+
+        Only the first page used to be read: tools on later pages could not be
+        selected, and calling one failed as "schema changed".
+        """
+
+        tools: list[Any] = []
+        seen: set[str] = set()
+        cursor: Optional[str] = None
+        for _ in range(_MAX_TOOL_PAGES):
+            response = await (
+                session.list_tools(cursor) if cursor else session.list_tools()
+            )
+            self._validate_discovery_size(record, response)
+            tools.extend(response.tools)
+            cursor = getattr(response, "nextCursor", None) or None
+            if cursor is None:
+                return tools
+            if cursor in seen:
+                raise McpProtocolError("MCP server repeated a tools/list page cursor")
+            seen.add(cursor)
+        raise McpProtocolError(
+            f"MCP server listed more than {_MAX_TOOL_PAGES} pages of tools"
         )
 
     @staticmethod
     def _classified(
         exc: Exception, *, mutation: bool, secrets: tuple[str, ...] = ()
     ) -> McpError:
+        exc = _unwrapped(exc)
         if isinstance(exc, McpError):
             return exc
         from .mcp_oauth import McpOAuthAuthorizationRequired
@@ -319,10 +349,9 @@ class McpClient:
         with anyio.fail_after(record.timeout_seconds):
             async with self._session(record, repository, secret) as session:
                 await session.initialize()
-                listed = await session.list_tools()
-                self._validate_discovery_size(record, listed)
+                listed = await self._listed_tools(record, session)
                 discovered = _normalize_discovered_tools(
-                    record, (_descriptor(record, tool) for tool in listed.tools)
+                    record, (_descriptor(record, tool) for tool in listed)
                 )
                 current = {
                     item.remote_name: item for item in discovered
@@ -339,7 +368,7 @@ class McpClient:
                 # normal KaroX-to-KaroX call. The alias is still accepted by
                 # the server, so this changes only which spelling goes on the
                 # wire, never which tool runs.
-                listed_names = {tool.name for tool in listed.tools}
+                listed_names = {tool.name for tool in listed}
                 call_name = descriptor.remote_name
                 if call_name not in listed_names:
                     wire_spelling = call_name.replace(".", "_")

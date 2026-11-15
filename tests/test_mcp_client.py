@@ -1096,3 +1096,65 @@ def test_error_result_text_is_flat_bounded_and_text_only() -> None:
     assert _error_result_text({"content": []}) == ""
     long = {"content": [{"type": "text", "text": "x" * 5000}]}
     assert len(_error_result_text(long)) == 1200
+
+
+def test_a_changed_schema_on_a_mutating_tool_is_refused_not_unknown(
+    stdio_server: Any,
+) -> None:
+    """The session's task groups wrap the refusal; nothing was sent, so it
+    must read as a refusal, never as a call whose outcome is unknown."""
+
+    from dataclasses import replace
+
+    stale = replace(stdio_server.note, schema_digest="0" * 64)
+    before = stdio_server.calls.read_text() if stdio_server.calls.exists() else ""
+    with pytest.raises(McpAccessDenied, match="schema changed"):
+        stdio_server.client.call_record(
+            stdio_server.record, stale, {"name": "n", "content": "c"}, stdio_server.repo
+        )
+    after = stdio_server.calls.read_text() if stdio_server.calls.exists() else ""
+    assert after == before
+
+
+def test_discovery_reads_every_tools_list_page(tmp_path: Path) -> None:
+    import anyio
+
+    registry, record = _stdio_record(tmp_path)
+    client = McpClient(registry)
+    pages = {None: (["a", "b"], "p2"), "p2": (["c"], "p3"), "p3": (["d"], None)}
+
+    class Paged:
+        def __init__(self, table: dict[Any, Any]) -> None:
+            self.table = table
+
+        async def list_tools(self, cursor: Optional[str] = None) -> Any:
+            names, following = self.table[cursor]
+            return SimpleNamespace(
+                tools=[_tool(name) for name in names],
+                nextCursor=following,
+                model_dump=lambda **_: {"tools": names},
+            )
+
+    listed = anyio.run(client._listed_tools, record, Paged(pages))
+    assert [tool.name for tool in listed] == ["a", "b", "c", "d"]
+    looping = {None: (["a"], "p2"), "p2": (["b"], "p2")}
+    with pytest.raises(McpProtocolError, match="repeated"):
+        anyio.run(client._listed_tools, record, Paged(looping))
+
+
+def test_an_unanswered_consent_ends_the_authorize_wait() -> None:
+    import anyio
+
+    from karox.mcp_oauth import (
+        McpOAuthAuthorizationRequired,
+        _await_callback,
+        _CallbackState,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(McpOAuthAuthorizationRequired, match="no authorization arrived"):
+        anyio.run(_await_callback, _CallbackState(), 0.2)
+    assert time.monotonic() - started < 5
+    answered = _CallbackState()
+    answered.values.put(("code", "state"))
+    assert anyio.run(_await_callback, answered, 5.0) == ("code", "state")

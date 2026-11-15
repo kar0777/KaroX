@@ -178,6 +178,26 @@ class McpCredentialStore:
             self._backend._module()
         return {"status": "ok", "backend": "os-keyring", "scope": "mcp"}
 
+def _unwrapped(exc: Exception) -> Exception:
+    """The one real error inside AnyIO's task-group wrapping.
+
+    The MCP SDK runs every session in task groups, so whatever is raised in a
+    session body arrives inside nested ExceptionGroups. Classified as the
+    wrapper, a refused schema check on a mutating tool (nothing was sent)
+    became "outcome unknown", and a protocol error was retried as transport.
+    A group holding several errors stays as it is.
+    """
+
+    while any(cls.__name__.endswith("ExceptionGroup") for cls in type(exc).__mro__):
+        inner = getattr(exc, "exceptions", None)
+        if not isinstance(inner, (tuple, list)) or len(inner) != 1:
+            break
+        if not isinstance(inner[0], Exception):
+            break
+        exc = inner[0]
+    return exc
+
+
 def _safe_identifier(value: str, label: str) -> str:
     if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
         raise ValueError(f"{label} must contain 1-64 safe characters")
