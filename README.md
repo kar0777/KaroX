@@ -19,6 +19,20 @@ Provider flags: `--provider openai-chat|openai-responses|anthropic|gemini`, `--b
 (or `--mcp-config`) under `mcpServers` (`command`/`args` or `url`).
 `pip install karox6[tui]` adds line editing and history to the chat.
 
+Defaults for these flags live in `~/.karox6/config.toml` (or `$KAROX_HOME/config.toml`);
+flags and `KAROX_MODEL` / `KAROX_PROVIDER` / `KAROX_BASE_URL` override it, and
+`--profile NAME` overlays a `[profiles.NAME]` table:
+
+```toml
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"   # the variable's name, never the key itself
+
+[profiles.local]
+model = "qwen3-coder"
+base_url = "http://127.0.0.1:11434/v1"
+```
+
 ## Development
 
 ```bash

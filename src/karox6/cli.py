@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 EXIT_CODES = {"completed": 0, "error": 1, "limit": 3, "loop": 4, "cancelled": 130}
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     from karox6 import __version__
 
     parser = argparse.ArgumentParser(prog="karox", description="KaroX 6 coding agent")
@@ -30,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="run one task headless (text or JSON-lines output)")
     run.add_argument("task", nargs="*", help="task text; '-' or nothing reads stdin")
-    _add_session_args(run)
+    _add_session_args(run, settings)
     run.add_argument("--cwd", type=Path, default=None, help="workspace directory")
     run.add_argument("--json", action="store_true", help="JSON-lines event stream on stdout")
     run.add_argument("--stream", action="store_true", help="include text/reasoning deltas")
@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     chat = sub.add_parser("chat", help="interactive chat in the terminal (default on a TTY)")
-    _add_session_args(chat)
+    _add_session_args(chat, settings)
     chat.add_argument("--cwd", type=Path, default=None, help="workspace directory")
     chat.add_argument("--resume", default=None, help="session id or 'last'")
     chat.add_argument(
@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     mcp = sub.add_parser(
         "mcp", help="serve KaroX to MCP clients (stdio, or Streamable HTTP with --http)"
     )
-    _add_session_args(mcp)
+    _add_session_args(mcp, settings)
     mcp.add_argument(
         "--http",
         default=None,
@@ -96,8 +96,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_session_args(p: argparse.ArgumentParser) -> None:
-    """Model, provider and session options shared by `run` and `mcp`."""
+def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | None) -> None:
+    """Model, provider and session options shared by `run`, `chat` and `mcp`."""
+    p.add_argument(
+        "--profile",
+        default=None,
+        help="use [profiles.NAME] of the config file (<KAROX_HOME>/config.toml)",
+    )
     p.add_argument("-m", "--model", default=os.environ.get("KAROX_MODEL"))
     p.add_argument(
         "--provider",
@@ -150,11 +155,20 @@ def _add_session_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="offer the agent tool: delegate investigations to child sessions (experimental)",
     )
+    if settings:
+        p.set_defaults(**settings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
+    from karox6.settings import SettingsError, load_settings, requested_profile
+
     argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        settings = load_settings(requested_profile(argv))
+    except SettingsError as exc:
+        sys.stderr.write(f"karox: {exc}\n")
+        return 2
+    parser = _parser(settings)
     if not argv and sys.stdin.isatty() and sys.stdout.isatty():
         argv = ["chat"]
     args = parser.parse_args(argv)

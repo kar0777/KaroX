@@ -164,3 +164,7 @@ git diff --check
   the quadratic input growth of the main context. Live check (CrowLLM grok-4.7-fast): the
   child searched 4 calls and reported `tools/danger.py:check_command`; the parent finished
   in 2 steps.
+- Settings file `<KAROX_HOME>/config.toml` (default `~/.karox6`): validated defaults for
+  model/provider/base URL/key variable/limits/prices/flags, `[profiles.NAME]` with
+  `--profile`; flag > `KAROX_*` env > file > built-in. CI green on Windows/Linux/macOS
+  (py3.12/3.13) after fixing the Linux SIGINT-test hang. 574 tests.
