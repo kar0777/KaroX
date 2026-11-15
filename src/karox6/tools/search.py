@@ -246,7 +246,7 @@ class GrepTool:
         except re.error as exc:
             return ToolResult(f"Error: invalid regular expression: {exc}", is_error=True)
         hits = await asyncio.to_thread(_grep_py, root, regex, include)
-        return _format_hits(hits, root, ctx)
+        return _format_hits(hits, root if root.is_dir() else root.parent, ctx)
 
 
 async def _grep_rg(

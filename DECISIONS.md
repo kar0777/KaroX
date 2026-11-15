@@ -45,6 +45,10 @@ are marked **[user]** and are not revisited without asking the user.
   (Apache-2.0) was considered and rejected: on POSIX it flags every forced `rm`
   (`rm -rf build`), which would block normal autonomous work. Not blocked at start (a user
   decision if wanted later): `git reset --hard`, `git clean -fd`, `git checkout -- path`.
+- **D-013** Every run end copies the changed files to `<session>/submissions/NN/` (files +
+  `manifest.json` with sha256, `null` = deleted; 5 MiB per file, 50 MiB per snapshot). It is
+  for grading a finish later (bench `snapverify`) and never feeds back into the run;
+  `--no-snapshot` turns it off. KaroX's own home is never reported as a changed file.
 
 ## Evaluation hygiene
 
@@ -56,3 +60,10 @@ are marked **[user]** and are not revisited without asking the user.
   change goes through an A/B on the same tasks; a rule without measurable gain is removed.
 - **D-022** Rival baseline (already paid): run `43027228648`, night tasks 13-73,
   OpenCode 24/61, DSH 24/61, KaroX 5 17/61 (Synthetic upstream, same model).
+- **D-023** Development pool (trajectory analysis, A/B of changes): night tasks 1-12 plus the
+  burned tasks of D-020. Held-out runs (13-73 minus burned) are for judging only; reading a
+  held-out failure trajectory to change KaroX burns that task (add it to D-020).
+- **D-024** KaroX 6 bench runs run only the `karox6` arm. The score is computed by one local
+  report over the union of the new KaroX 6 trials and the baseline trials of D-022, because
+  the report's environment-failure rule (a P2P test failing in every trial of a task) must
+  see all arms.
