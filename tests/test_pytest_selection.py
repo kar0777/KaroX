@@ -91,6 +91,18 @@ def test_the_repair_summary_offers_the_plain_run_only_for_a_coverage_failure(tmp
     assert OPTION_FAILURE_HINT not in summary
 
 
+def test_the_repair_summary_says_what_runtime_proof_is(tmp_path: Path, monkeypatch) -> None:
+    from karox.engine_kernel_harness import RUNTIME_PROOF_HINT, EngineHarnessMixin
+
+    core, record = _gate_record(tmp_path, [])
+    monkeypatch.setattr(completion_gate, "floor", lambda *_: ["missing runtime smoke evidence"])
+    summary = EngineHarnessMixin._failure_summary(SimpleNamespace(core=core), record)  # type: ignore[arg-type]
+    assert summary.startswith("missing runtime smoke evidence") and RUNTIME_PROOF_HINT in summary
+    monkeypatch.setattr(completion_gate, "floor", lambda *_: ["missing behavioral evidence"])
+    summary = EngineHarnessMixin._failure_summary(SimpleNamespace(core=core), record)  # type: ignore[arg-type]
+    assert RUNTIME_PROOF_HINT not in summary
+
+
 def test_the_rerun_hint_follows_only_the_latest_failed_check(tmp_path: Path) -> None:
     from karox.engine_kernel_harness import EngineHarnessMixin
 
@@ -141,6 +153,38 @@ def test_a_deleted_probe_in_a_shell_chain_is_not_owed(tmp_path: Path) -> None:
     assert any("failed check" in reason and "probe_two.py" in reason for reason in reasons), reasons
 
 
+def test_a_deleted_pytest_probe_is_not_owed(tmp_path: Path) -> None:
+    from karox.completion_gate import _scratch_scripts
+
+    probe = [PY, "-m", "pytest", "probe_groups.py", "-q", "-s", "-p", "no:randomly"]
+    nested = ["bash", "-lc", "cd lib && pytest pkg/test/zz_probe_x.py::test_a -k explicit 2>&1 | tail -3"]
+    assert _scratch_scripts(probe) == ["probe_groups.py"]
+    assert _scratch_scripts(nested) == ["lib/pkg/test/zz_probe_x.py"]
+    # A real test, a directory, the whole suite or an option's value names none.
+    assert _scratch_scripts([PY, "-m", "pytest", "probe_a.py", "tests/test_real.py"]) == []
+    assert _scratch_scripts([PY, "-m", "pytest", "probe_a.py", "tests"]) == []
+    assert _scratch_scripts(["pytest", "-q"]) == []
+    assert _scratch_scripts(["pytest", "-k", "probe"]) == []
+    assert _scratch_scripts(["pytest", "--runslow", "probe"]) == []
+    # An ini override can add real tests beside the probe.
+    assert _scratch_scripts(["pytest", "probe_a.py", "-o", "addopts=tests/test_real.py"]) == []
+    assert _scratch_scripts(["pytest", "probe_a.py", "-qc", "other.ini"]) == []
+    core, record = _gate_record(tmp_path, [(probe, {"exit_code": 1})])
+    assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
+    (tmp_path / "probe_groups.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
+    reasons = completion_gate.floor(core, record)
+    assert any("failed check" in reason and "probe_groups.py" in reason for reason in reasons), reasons
+
+
+def test_a_test_file_is_never_a_launch_surface() -> None:
+    from karox.completion_gate import _is_runtime_entry
+
+    assert _is_runtime_entry(None, "cli.py")
+    assert _is_runtime_entry(None, "bin/tool")
+    assert not _is_runtime_entry(None, "lib/pkg/test/container/cli.py")
+    assert not _is_runtime_entry(None, "tests/bin/main.py")
+
+
 def test_removing_scratch_and_looking_is_never_owed(tmp_path: Path) -> None:
     from karox.completion_gate import _is_cleanup
 
@@ -155,6 +199,26 @@ def test_removing_scratch_and_looking_is_never_owed(tmp_path: Path) -> None:
     assert not _is_cleanup(["bash", "-lc", 'rm -f probe.py; echo "$(python -m pytest -q)"'])
     assert _is_cleanup(["bash", "-lc", "rm -f probe.py && [ ! -e probe.py ] && echo gone"])
     core, record = _gate_record(tmp_path, [(cleanup, {"exit_code": 2})])
+    assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
+
+
+def test_looking_around_the_file_system_is_never_owed(tmp_path: Path) -> None:
+    from karox.completion_gate import _is_inspection
+
+    look = ["bash", "-lc", "find /root/.cache/uv -iname '*ruff*' 2>/dev/null | head -10; du -sh /root/.cache/uv 2>/dev/null"]
+    assert _is_inspection(look)
+    assert _is_inspection(["ls", "-la", "build"])
+    assert _is_inspection(["bash", "-lc", "cd /app && ls dist | wc -l"])
+    # A content check, a write, a substitution or find's actions stay checks.
+    assert not _is_inspection(["bash", "-lc", "ls dist && grep -q VERSION dist/x"])
+    assert not _is_inspection(["bash", "-lc", "test -f out.txt"])
+    assert not _is_inspection(["bash", "-lc", "ls > files.txt"])
+    assert not _is_inspection(["bash", "-lc", "ls $(python -m pytest -q)"])
+    assert not _is_inspection(["find", ".", "-name", "*.pyc", "-delete"])
+    assert not _is_inspection(["find", ".", "-fprintf", "out.txt", "%p"])
+    assert not _is_inspection(["env", "pytest", "-q"])  # env runs its command
+    assert not _is_inspection(["bash", "-lc", "head -5 out.txt"])  # no look, only a filter
+    core, record = _gate_record(tmp_path, [(look, {"exit_code": 1})])
     assert not any("failed check" in reason for reason in completion_gate.floor(core, record))
 
 

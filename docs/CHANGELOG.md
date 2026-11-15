@@ -77,6 +77,25 @@
 - A connection that breaks while an Anthropic, Gemini or Responses stream is
   drained after its final event no longer turns the paid answer into a
   retried request. Gemini thinking tokens count as output in cost and budget.
+- The completion gate reads a missing tool inside a shell chain (`bash -lc
+  "cd /app && ruff check ."` with `ruff: command not found`) as the
+  environment's gap, like the bare command. A chain that only looks around
+  the file system (`find`, `ls`, `du`, `stat`, filtered through `head`/`wc`,
+  no writes, no substitution, no `find -exec/-delete`) is never a failed
+  check.
+- pytest run only on scratch-named probe files (`python -m pytest
+  probe_x.py -p no:randomly`) counts as a probe: once the run deletes those
+  untracked files, their failure is no longer owed. Pytest on a real test, a
+  directory, the suite, or with an ini override (`-o`, `-c`) stays owed, and
+  so does a chain that echoes a "not found" message itself or runs a command
+  through `env`. A test file named `cli.py` or `main.py`
+  is never a launch surface that owes runtime smoke proof, and a repair turn
+  that owes runtime proof says what counts (one `--help` launch of the
+  changed entry point).
+- A pytest run under `-qq` (the project's `addopts = "-q"` plus the run's own
+  `-q`) prints no final count line; its counts now come from the progress rows
+  (`FFF.....  [100%]`), so failures that were red before any edit get their
+  baseline and count as pre-existing instead of being owed.
 
 ### Changed
 

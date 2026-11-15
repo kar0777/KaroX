@@ -91,6 +91,22 @@ def test_a_failure_without_a_parsed_id_is_never_preexisting() -> None:
     assert info is not None and info["preexisting_only"] is False
 
 
+def test_a_doubly_quiet_run_is_read_from_its_progress_rows() -> None:
+    quiet_base = "FFF.........                [100%]\n" + "".join(
+        f"FAILED tests/test_s.py::test_{n}\n" for n in ("a", "b", "c")
+    )
+    base = check_baseline.outcome(quiet_base, 1, False)
+    assert base.parsed and base.passed == 9 and base.failed == 3 and len(base.failing) == 3
+    now = check_baseline.outcome(quiet_base.replace("FFF....", "FFF.....", 1).replace("[100%]", "[ 90%]\n.  [100%]"), 1, False)
+    info = check_baseline.compare(base, now)
+    assert info is not None and info["preexisting_only"] is True, info
+    # An unfinished progress row, or a failure mark with no id, settles nothing.
+    assert not check_baseline.outcome("FF..   [ 40%]\nFAILED tests/test_s.py::test_a\n", 1, False).parsed
+    two_marks = check_baseline.outcome("FF..  [100%]\nFAILED tests/test_s.py::test_a\n", 1, False)
+    info = check_baseline.compare(check_baseline.outcome("F...  [100%]\nFAILED tests/test_s.py::test_a\n", 1, False), two_marks)
+    assert info is not None and info["preexisting_only"] is False
+
+
 def test_new_failures_are_named_for_the_model() -> None:
     base = check_baseline.outcome(LOG_BASE, 1, False)
     now = check_baseline.outcome(
@@ -357,6 +373,21 @@ def test_missing_tool_is_recognised_only_when_the_tool_itself_is_absent() -> Non
     inner = {"exit_code": 1, "stdout": "E   ModuleNotFoundError: No module named 'numpy'"}
     assert check_baseline.missing_tool([PY, "-m", "pytest", "t.py"], inner) == ""
     assert check_baseline.missing_tool([PY, "-m", "ruff"], {"exit_code": 0, "stderr": "No module named ruff"}) == ""
+
+
+def test_a_missing_tool_is_recognised_inside_a_shell_chain() -> None:
+    chain = "python -m ruff format --check a.py 2>&1; python -m ruff check a.py 2>&1 | tail -5"
+    gone = {"exit_code": 1, "stdout": "/opt/py: No module named ruff\n/opt/py: No module named ruff\n"}
+    assert check_baseline.missing_tool(["bash", "-lc", chain], gone) == "ruff"
+    assert check_baseline.missing_tool(["bash", "-lc", "cd /app && mypy src"], {"exit_code": 127, "stderr": "bash: mypy: command not found"}) == "mypy"
+    # Another command in the chain can still fail on its own: still a check.
+    mixed = "python -m ruff check a.py; python -m pytest -q tests"
+    assert check_baseline.missing_tool(["bash", "-lc", mixed], gone) == ""
+    inner = {"exit_code": 1, "stdout": "E   ModuleNotFoundError: No module named 'numpy'"}
+    assert check_baseline.missing_tool(["bash", "-lc", "python -m pytest -q"], inner) == ""
+    # A chain that prints the message itself proves nothing about the tool.
+    faked = {"exit_code": 1, "stdout": "ruff: command not found\na.py:1:1: F401 unused import"}
+    assert check_baseline.missing_tool(["bash", "-lc", "echo 'ruff: command not found'; ruff check ."], faked) == ""
 
 
 def test_a_missing_tool_check_is_marked_and_not_owed(repository: Path, tmp_path: Path) -> None:

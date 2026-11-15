@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any, Mapping, Optional, Sequence
 _SUMMARY_ROW = re.compile(r"^(?:FAILED|ERROR) (?P<node>[^\s\[]+(?:\[(?:[^\[\]]|\[[^\]]*\])*\])?\S*)(?: - .*)?$", re.M)
 _COUNT = re.compile(r"(?P<n>\d+) (?P<kind>passed|failed|errors?)\b")
 _FINAL = re.compile(r"^=*\s*\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b.*\bin [\d.]+s", re.M)
+#: A pytest progress row: one mark per test, then the running percentage.
+_PROGRESS = re.compile(r"^(?P<marks>[.FEsxX]+)\s*\[\s*(?P<pct>\d+)%\]\s*$", re.M)
 BASELINE_TIMEOUT_SECONDS = 900.0  # a suite slower than this gets no baseline
 SWAP_MAX_CHECK_SECONDS = 300.0  # only checks this fast get an on-demand rerun
 SWAP_MAX_FILES = 50
@@ -43,9 +46,40 @@ def is_pytest(argv: Sequence[str]) -> bool:
     return exe.startswith("python") and parts[1:3] == ["-m", "pytest"]
 
 
+_SEGMENT = re.compile(r"&&|\|\||[;|\n]")
+_QUIET = re.compile(r"\s*(?:[12]?>\s*/dev/null|2>&1)")
+
+
+def _shell_missing_tool(script: str, text: str) -> str:
+    """`bash -lc "python -m ruff format --check a; python -m ruff check a"`: every
+    command of the chain is a tool the output reports missing (rebench26 v604h
+    cpp-linter: two repair turns spent looking for ruff in /root/.cache)."""
+    tools: list[str] = []
+    for piece in (_QUIET.sub("", p).strip() for p in _SEGMENT.split(script)):
+        try:
+            tokens = shlex.split(piece)
+        except ValueError:
+            return ""
+        if tokens and tokens[0] in {"echo", "printf"} and re.search(r"not found|No module named", piece):
+            return ""  # the chain prints the very message itself (codex review)
+        if not tokens or tokens[0] in {"cd", "head", "tail", "grep", "sort", "uniq", "wc", "tee", "echo", "true"}:
+            continue  # moving and filtering output run no tool of their own
+        py_m = Path(tokens[0]).stem.lower().startswith("python") and tokens[1:2] == ["-m"] and len(tokens) > 2
+        tools.append(tokens[2].split(".")[0] if py_m else Path(tokens[0]).name)
+    gone = [
+        tool for tool in tools
+        if re.search(rf"(?:No module named '?{re.escape(tool)}(?![\w.])|\b{re.escape(tool)}: (?:command )?not found)", text)
+    ]
+    return tools[0] if tools and len(gone) == len(tools) else ""
+
+
 def missing_tool(argv: Sequence[str], result: Mapping[str, Any]) -> str:
     """The tool a failed check could not even start (`No module named ruff`, exit 127): no evidence either way."""
     parts, text = [str(p) for p in argv], f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+    if len(parts) == 3 and Path(parts[0]).name in {"bash", "sh"} and parts[1] in {"-c", "-lc"}:
+        if result.get("exit_code") in (0, None) or result.get("timed_out") or len(text) > 4000:
+            return ""
+        return _shell_missing_tool(parts[2], text)
     code, py_m = result.get("exit_code"), Path(parts[0] if parts else "").stem.lower().startswith("python") and parts[1:2] == ["-m"]
     if code in (0, None) or result.get("timed_out") or not parts or len(text) > 4000 or (code != 127 and not (py_m and len(parts) > 2)):
         return ""
@@ -115,9 +149,18 @@ def outcome(text: str, exit_code: Any, timed_out: Any) -> Outcome:
     counts = [(m.group("kind"), int(m.group("n"))) for m in _COUNT.finditer(finals[-1].group(0))] if finals else []
     passed = sum(n for kind, n in counts if kind == "passed")
     failed = sum(n for kind, n in counts if kind != "passed")
+    # Under -qq (a project's ``addopts = "-q"`` plus the run's own -q) pytest
+    # prints no final count line: the progress rows are the only count. Missing
+    # them, rebench26 mtplx (2026-11-15) took no baseline, owed three failures
+    # that were red before any edit, and the model skipped them in a test file.
+    rows = [] if finals else list(_PROGRESS.finditer(text or ""))
+    complete = bool(rows) and rows[-1].group("pct") == "100"
+    if complete:
+        marks = "".join(m.group("marks") for m in rows)
+        passed, failed = marks.count("."), marks.count("F") + marks.count("E")
     code = int(exit_code) if isinstance(exit_code, int) or str(exit_code).lstrip("-").isdigit() else -1
     failing = frozenset(n for n in nodes if "::" in n or ".py" in n)
-    return Outcome(code, bool(timed_out), failing, passed, bool(finals), failed)
+    return Outcome(code, bool(timed_out), failing, passed, bool(finals) or complete, failed)
 
 
 def of_result(result: Mapping[str, Any]) -> Outcome:

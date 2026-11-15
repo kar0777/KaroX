@@ -70,7 +70,7 @@ from typing import Any, Optional, Sequence
 
 from .auto_verify import _select_checks
 from . import check_baseline, git_baseline, pytest_selection, requirement_coverage
-from .web_check import default_pages, default_pictures, is_scratch_page
+from .web_check import default_pages, default_pictures, is_scratch_artifact, is_scratch_page
 
 # Prefix of a floor reason naming an owed proof class Core has no command for.
 # Markdown is only documentation where documentation lives. A .md inside a code
@@ -338,6 +338,7 @@ def floor(core: Any, record: Any) -> list[str]:
             _is_environment_setup(data.get("argv") or [])
             or _is_tool_query(data.get("argv") or [])
             or _is_cleanup(data.get("argv") or [])
+            or _is_inspection(data.get("argv") or [])
         ):
             # Installing tools is not a claim about the change. In an offline
             # sandbox it fails by design (swer5-k3 cbi: pip install flake8 ...)
@@ -559,6 +560,50 @@ def _is_tool_query(argv: Sequence[str]) -> bool:
     return bool(pieces) and all(_TOOL_QUERY.fullmatch(piece) for piece in pieces)
 
 
+#: Read-only looks at the file system and environment, and the filters after them.
+#: ``env`` is absent on purpose: ``env pytest -q`` runs a check (codex review).
+_INSPECT_LOOKS = frozenset({"find", "ls", "du", "df", "stat", "file", "tree", "printenv", "uname"})
+_INSPECT_FILTERS = frozenset({"head", "tail", "wc", "sort", "uniq", "cut", "tr", "echo", "printf", "true", "pwd", "which"})
+
+
+def _is_inspection(argv: Sequence[str]) -> bool:
+    """`find /root/.cache -iname '*ruff*' | head; du -sh ...`: looking around, not proof.
+
+    rebench26 v604h cpp-linter: such a look exited non-zero (a missing cache
+    directory) and stayed owed as a "failed check" through a repair turn. A
+    chain counts only when it lists, sizes or describes files and filters that
+    output; ``grep``, ``test`` and ``cat`` can be real checks and stay owed,
+    and so does anything that writes (``>``, ``find -exec``/``-delete``) or
+    substitutes a command.
+    """
+    parts = [str(p) for p in argv]
+    if Path(parts[0] if parts else "").name in {"bash", "sh"} and len(parts) == 3 and parts[1] in {"-c", "-lc"}:
+        pieces = [_QUIET_REDIRECT.sub("", piece).strip() for piece in _SHELL_SEGMENTS.split(parts[2])]
+    else:
+        pieces = [" ".join(parts)]
+    looks = False
+    for piece in pieces:
+        if "$(" in piece or "`" in piece or ">" in piece:
+            return False
+        try:
+            tokens = shlex.split(piece)
+        except ValueError:
+            return False
+        if not tokens or tokens[0] == "cd":
+            continue
+        head = Path(tokens[0]).name
+        if head == "find" and any(
+            t in {"-exec", "-execdir", "-delete", "-ok", "-okdir"} or t.startswith(("-fprint", "-fls"))
+            for t in tokens
+        ):
+            return False
+        if head in _INSPECT_LOOKS:
+            looks = True
+        elif head not in _INSPECT_FILTERS:
+            return False
+    return looks
+
+
 #: What a cleanup chain may do besides removing: look at what is left.
 _CLEANUP_LOOKS = frozenset({"ls", "test", "[", "stat", "echo", "printf", "true", "pwd"})
 
@@ -612,10 +657,15 @@ def _is_runtime_entry(core: Any, relative: str) -> bool:
     root, or one that carries a ``__main__`` guard, is too. The same name inside an
     importable package without a guard is a library module (``ninja/main.py``
     holds the NinjaAPI class): demanding a launch smoke for it would end a correct,
-    tested change as UNVERIFIED (swer5-k3). Unreadable files fail closed.
+    tested change as UNVERIFIED (swer5-k3). Unreadable files fail closed. A
+    test file is never launched: spack's ``test/container/cli.py`` sits in a
+    directory without ``__init__.py`` and owed a launch smoke nothing could
+    give (rebench26, 2026-11-15).
     """
     path = Path(relative)
     name = path.name
+    if _is_test_path(relative):
+        return False
     if "bin" in path.parts or name in {"__main__.py", "package.json"}:
         return True
     if name not in _RUNTIME:
@@ -692,11 +742,13 @@ def _scratch_scripts(argv: Sequence[str]) -> list[str]:
 
     ``python probe.py``, ``node probe.js``, ``./probe.sh`` and
     ``bash -lc "cd sub && cp probe.py x/ && python x/probe.py | tail -5"`` all
-    name their script. A command that runs anything else -- ``python -m
-    pytest``, ``make``, an inline ``-c`` -- names none, even beside a probe:
-    its own failure may be the change's, and deleting the probe must not
-    discharge it. ``cd`` moves are followed in order (``cd a && cd b`` runs in
-    ``a/b``); one that cannot be followed names nothing.
+    name their script, and so does pytest run on scratch-named probe files
+    only (``python -m pytest probe_x.py -p no:randomly``). A command that runs
+    anything else -- pytest on a real test or the suite, ``make``, an inline
+    ``-c`` -- names none, even beside a probe: its own failure may be the
+    change's, and deleting the probe must not discharge it. ``cd`` moves are
+    followed in order (``cd a && cd b`` runs in ``a/b``); one that cannot be
+    followed names nothing.
     """
 
     parts = [str(part) for part in argv]
@@ -732,6 +784,11 @@ def _scratch_scripts(argv: Sequence[str]) -> list[str]:
             scripts.extend(placed(token) for token in sources if token.endswith(_SCRIPT_SUFFIXES))
         elif head in _CHAIN_PLUMBING:
             continue
+        elif head in {"pytest", "py.test"} or (tokens[1:3] == ["-m", "pytest"] and head.startswith("python")):
+            probes = _scratch_test_files(tokens[1:] if head in {"pytest", "py.test"} else tokens[3:])
+            if not probes:
+                return []
+            scripts.extend(placed(probe) for probe in probes)
         elif _SCRIPT_RUNNERS.match(Path(head).stem.lower() if head.endswith(".exe") else head):
             script, ran_inline = "", False
             for token in tokens[1:]:
@@ -749,6 +806,52 @@ def _scratch_scripts(argv: Sequence[str]) -> list[str]:
         else:
             return []
     return scripts
+
+
+#: pytest options whose value is the next argument when it is not attached.
+_PYTEST_VALUE_SHORT = frozenset("pkmWrn")
+_PYTEST_VALUE_LONG = frozenset(
+    {"--tb", "--deselect", "--ignore", "--ignore-glob", "--rootdir", "--basetemp",
+     "--confcutdir", "--maxfail", "--durations", "--color", "--capture", "--import-mode",
+     "--log-level", "--log-cli-level", "--junitxml", "--timeout", "--cov-report", "--dist"}
+)
+
+
+def _scratch_test_files(arguments: Sequence[str]) -> list[str]:
+    """The probe files a pytest run selected, or [] when it selected anything else.
+
+    rebench26 spack (2026-11-15): the run exercised its change through a
+    scratch ``probe_groups_review.py`` under pytest, deleted it, and the gate
+    still owed that probe's early failure -- so the model re-created the probe
+    only to pass it. Only scratch-named ``.py`` files count: a directory, a
+    real test file, an unknown option's value, or no target at all (the
+    configured suite) names none.
+    """
+    files: list[str] = []
+    index = 0
+    while index < len(arguments):
+        item = arguments[index]
+        index += 1
+        if item.startswith(("--override-ini", "--config-file", "--pyargs")):
+            return []  # an ini override can add real targets beside the probe
+        if item.startswith("--"):
+            name, has_value, _value = item.partition("=")
+            if name in _PYTEST_VALUE_LONG and not has_value:
+                index += 1
+            continue
+        if item.startswith("-") and len(item) > 1:
+            for position, letter in enumerate(item[1:], start=2):
+                if letter in "oc":
+                    return []  # -o addopts=tests/..., -c other.ini
+                if letter in _PYTEST_VALUE_SHORT:
+                    index += 1 if position == len(item) else 0
+                    break
+            continue
+        target = item.split("::", 1)[0]
+        if not target.endswith(".py") or not is_scratch_artifact(target):
+            return []
+        files.append(target)
+    return files
 
 
 def _moot_scratch_check(core: Any, argv: Sequence[str]) -> bool:

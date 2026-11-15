@@ -50,6 +50,13 @@ OPTION_FAILURE_HINT = (
     "the same tests without coverage on the current files settles it. Never change "
     "files outside the repository to make a check pass."
 )
+#: The floor counts only a launch as runtime proof. The bare reason left the
+#: rebench26 spack run re-running the same tests twice and ending unverified.
+RUNTIME_PROOF_HINT = (
+    "Runtime smoke proof is one launch of the changed entry point through checks.run "
+    "with --help (for example `python -m pkg --help` or `bin/tool --help`); a test run "
+    "is not a launch."
+)
 
 
 class EngineHarnessMixin:
@@ -475,6 +482,8 @@ class EngineHarnessMixin:
             for data in failed
         ):
             hint = "\n".join(part for part in (hint, OPTION_FAILURE_HINT) if part)
+        if "missing runtime smoke evidence" in pieces:
+            hint = "\n".join(part for part in (hint, RUNTIME_PROOF_HINT) if part)
         return "\n\n".join(part for part in ("; ".join(p for p in pieces if p), detail, hint) if part)
 
     @staticmethod
