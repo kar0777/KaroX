@@ -75,12 +75,23 @@ class FileTracker:
             except ValueError:
                 out.add(path.as_posix())
         return sorted(
-            p for p in out if not any(p == d or p.startswith(d + "/") for d in self.ignore)
+            p
+            for p in out
+            if not is_generated(p) and not any(p == d or p.startswith(d + "/") for d in self.ignore)
         )
 
     def _was_written(self, rel: str) -> bool:
         target = os.path.normcase(str(self.workspace / rel))
         return any(os.path.normcase(w) == target for w in self._written)
+
+
+GENERATED_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def is_generated(path: str) -> bool:
+    """Interpreter/tool caches: never reported as changes of the session."""
+    parts = path.replace("\\", "/").split("/")
+    return path.endswith((".pyc", ".pyo")) or any(part in GENERATED_DIRS for part in parts)
 
 
 def _git_dirty(workspace: Path) -> set[str] | None:

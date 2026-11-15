@@ -8,8 +8,8 @@ from the first stage that is not **done** below.
 | M0 Skeleton | done | `m0` | repo, MIT, uv, ruff, mypy, pytest, CI Win/Linux/macOS, perf gate |
 | M1 Core + headless CLI | done | `m1` | agent loop, 4 providers, 10 tools, guard, spill, compaction, snapshots; 528 tests |
 | M2 Bench, first win | in progress | | adapter + replay green; smoke run 43717195476 |
-| M3 TUI | not started | | |
-| M4 MCP server + client | not started | | |
+| M3 TUI | done (pending tag) | | inline chat on prompt_toolkit (extra `tui`), D-027 |
+| M4 MCP server + client | in progress | aafdba6, d768078 | server stdio+HTTP and client done; ChatGPT web check needs a public tunnel (user's call) |
 | M5 Subagents, options | not started | | |
 | M6 Packaging, release | not started | | publishing needs the user's explicit permission |
 
@@ -112,3 +112,18 @@ git diff --check
   a server that fails to start is skipped with a warning. `karox6 mcp` passes the same tools
   to its runs. Tests: fake stdio server (paged tools/list), our own HTTP server with bearer
   auth, a scripted session calling an MCP tool. 543 tests pass, ruff + mypy clean.
+- Context anatomy on the dev pool (`karox6-bench-data/growth.py`, `phases.py`): per step
+  KaroX 6 adds less context than DSH (mean 1.6k vs 2.3k tokens) and starts equally small
+  (3.6k vs 3.2k), so its larger mean context is only the quadratic effect of more steps
+  (62 vs 38 LLM calls per task). The extra steps come after the first edit (34 vs 17 per
+  task: many one-off python probes of edge cases, which also won tasks 32/57/59) and from
+  fewer multi-call steps (25% vs 33% of steps). E1 targets exactly this; no new run needed.
+- M3 TUI: `karox chat` (and bare `karox` on a terminal) is an inline chat in the normal
+  scrollback: streaming text, one line per tool call, approvals inline (y / N / a = always),
+  Ctrl+C stops only the running turn (every time: its own SIGINT handler while a turn
+  runs), `/diff /status /new /sessions /resume /approve /reasoning /help /quit`, multi-line
+  input with a trailing backslash, history in `<home>/chat_history`. A turn stopped mid-call
+  leaves no dangling tool calls (answered as cancelled on the next turn). Stack by
+  measurement (D-027). Live check on CrowLLM grok-4.7-fast (free): fixed a bug, `/diff`
+  and `/status` correct, 429s ridden out. Generated caches (`__pycache__`, `*.pyc`, tool
+  caches) no longer count as changed files. 555 tests; `karox --version` ~100 ms.

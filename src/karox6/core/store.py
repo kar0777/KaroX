@@ -106,3 +106,40 @@ def drop_dangling_calls(messages: list[Message]) -> list[Message]:
             break
         out = out[:last_assistant]
     return out
+
+
+def resume_kwargs(home: Path, ref: str) -> dict[str, Any]:
+    """Session keyword arguments that continue saved session ``ref`` (an id or 'last')."""
+    session_id = SessionStore.latest(home) if ref == "last" else ref
+    if not session_id:
+        raise ValueError(f"no session to resume under {home}")
+    loaded = SessionStore.load(home, session_id)
+    return {
+        "session_id": session_id,
+        "messages": loaded.messages,
+        "usage": loaded.usage,
+        "cost_usd": loaded.cost_usd,
+    }
+
+
+def recent_sessions(home: Path, limit: int = 10) -> list[tuple[str, str]]:
+    """(session id, first line of its first task), newest first."""
+    root = home / "sessions"
+    if not root.is_dir():
+        return []
+    ids = sorted((p.name for p in root.iterdir() if (p / "session.jsonl").is_file()), reverse=True)
+    out: list[tuple[str, str]] = []
+    for session_id in ids[:limit]:
+        title = ""
+        try:
+            with (root / session_id / "session.jsonl").open(encoding="utf-8") as fh:
+                for _, line in zip(range(200), fh, strict=False):
+                    record = json.loads(line)
+                    message = record.get("message") or {}
+                    if record.get("kind") == "message" and message.get("role") == "user":
+                        title = str(message.get("content") or "").strip().splitlines()[0][:100]
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        out.append((session_id, title))
+    return out

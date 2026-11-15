@@ -42,6 +42,18 @@ def _parser() -> argparse.ArgumentParser:
         help="destructive commands: ask (TTY default), deny (non-interactive default), allow",
     )
 
+    chat = sub.add_parser("chat", help="interactive chat in the terminal (default on a TTY)")
+    _add_session_args(chat)
+    chat.add_argument("--cwd", type=Path, default=None, help="workspace directory")
+    chat.add_argument("--resume", default=None, help="session id or 'last'")
+    chat.add_argument(
+        "--approve-dangerous",
+        choices=["ask", "deny", "allow"],
+        default="ask",
+        help="destructive commands: ask (default), deny, allow",
+    )
+    chat.add_argument("--no-color", action="store_true", help="plain output without ANSI colors")
+
     mcp = sub.add_parser(
         "mcp", help="serve KaroX to MCP clients (stdio, or Streamable HTTP with --http)"
     )
@@ -137,9 +149,14 @@ def _add_session_args(p: argparse.ArgumentParser) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        argv = ["chat"]
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(args, parser)
+    if args.command == "chat":
+        return _chat(args, parser)
     if args.command == "mcp":
         return _mcp(args, parser)
     if args.command == "debug" and args.debug_command == "rss":
@@ -180,7 +197,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 async def _run_async(args: argparse.Namespace, task: str) -> int:
     from karox6.core.session import Session
-    from karox6.core.store import SessionStore, default_home
+    from karox6.core.store import default_home, resume_kwargs
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
@@ -190,18 +207,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
     mcp_tools, mcp_handles = await _mcp_tools(args, home)
     provider = _provider(args)
     approver = _approver(args.approve_dangerous, json_mode=args.json)
-    session_kwargs: dict[str, Any] = {}
-    if args.resume:
-        session_id = SessionStore.latest(home) if args.resume == "last" else args.resume
-        if not session_id:
-            raise ValueError(f"no session to resume under {home}")
-        loaded = SessionStore.load(home, session_id)
-        session_kwargs = {
-            "session_id": session_id,
-            "messages": loaded.messages,
-            "usage": loaded.usage,
-            "cost_usd": loaded.cost_usd,
-        }
+    session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
     session = Session(config, provider, approver=approver, extra_tools=mcp_tools, **session_kwargs)
     render = _JsonRenderer() if args.json else _TextRenderer()
     status = "error"
@@ -214,6 +220,52 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
         await provider.aclose()
         await _close_mcp(mcp_handles)
     return EXIT_CODES.get(status, 1)
+
+
+def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    import asyncio
+
+    if not args.model:
+        parser.error("--model is required (or set KAROX_MODEL)")
+    try:
+        return asyncio.run(_chat_async(args))
+    except KeyboardInterrupt:
+        return 0
+    except (ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(f"karox: {exc}\n")
+        return 2
+
+
+async def _chat_async(args: argparse.Namespace) -> int:
+    from karox6.core.store import default_home, resume_kwargs
+    from karox6.tui import ChatApp, color_enabled, stdout_write, terminal_io
+
+    home = (args.home or default_home()).expanduser().resolve()
+    workspace = (args.cwd or Path.cwd()).expanduser().resolve()
+    if not workspace.is_dir():
+        raise ValueError(f"workspace {workspace} is not a directory")
+    config = _session_config(args, workspace, home, stream_deltas=True)
+    session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
+    read_line, read_answer = terminal_io(home / "chat_history")
+    mcp_tools, mcp_handles = await _mcp_tools(args, home)
+    provider = _provider(args)
+    try:
+        app = ChatApp(
+            config=config,
+            provider=provider,
+            read_line=read_line,
+            read_answer=read_answer,
+            write=stdout_write,
+            approval_mode=args.approve_dangerous,
+            color=not args.no_color and color_enabled(),
+            encoding=getattr(sys.stdout, "encoding", None),
+            extra_tools=mcp_tools,
+            session_kwargs=session_kwargs,
+        )
+        return await app.run()
+    finally:
+        await provider.aclose()
+        await _close_mcp(mcp_handles)
 
 
 def _session_config(

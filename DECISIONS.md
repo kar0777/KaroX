@@ -77,3 +77,9 @@ are marked **[user]** and are not revisited without asking the user.
   bench `upstream=freeinference`. A different model from D-022: A/B tests and development
   runs may use it, with every rival re-run on GLM for comparison (never scored against the
   DSV4.1-Flash-1017 baseline). The M2 verdict stays on DeepSeek-V4.1-Flash-1017.
+- **D-027** [agent, 2026-11-15] TUI = inline chat on prompt_toolkit alone (extra `tui`,
+  imported only by `karox chat`), own ANSI rendering; plain `input()` when the extra is
+  missing or stdin is piped. Measured on top of the headless stack (warm import / added
+  RSS): prompt_toolkit 170 ms / +6 MB; prompt_toolkit + rich 320 ms / +12 MB; Textual
+  350 ms / +13 MB. Textual's full-screen mode also takes the terminal scrollback away; rich
+  adds nothing the chat needs.

@@ -23,6 +23,7 @@ from karox6.core.session import Session, SessionConfig
 from karox6.core.store import SessionStore
 from karox6.providers.base import Provider
 from karox6.tools.base import ApprovalRequest, Tool
+from karox6.tools.files import is_generated
 
 MAX_EVENTS = 4000
 FIELD_CAP = 2000
@@ -239,7 +240,7 @@ class RunManager:
     async def diff(self, run_id: str, *, max_chars: int = DIFF_CAP) -> dict[str, Any]:
         run = self.get(run_id)
         workspace = run.session.workspace
-        text, untracked = await asyncio.to_thread(_git_diff, workspace)
+        text, untracked = await asyncio.to_thread(git_diff, workspace)
         if text is None:
             changed = await asyncio.to_thread(run.session.files.changed_files)
             return {
@@ -354,7 +355,7 @@ class RunManager:
             run.notify()
 
 
-def _git_diff(workspace: Path) -> tuple[str | None, list[str]]:
+def git_diff(workspace: Path) -> tuple[str | None, list[str]]:
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(workspace), *args],
@@ -376,7 +377,8 @@ def _git_diff(workspace: Path) -> tuple[str | None, list[str]]:
     if diff.returncode != 0:  # no commits yet
         diff = git("diff", "--no-color", "--", ".")
     untracked = git("ls-files", "--others", "--exclude-standard", "--", ".")
-    return diff.stdout, [line for line in untracked.stdout.splitlines() if line][:500]
+    paths = [line for line in untracked.stdout.splitlines() if line and not is_generated(line)]
+    return diff.stdout, paths[:500]
 
 
 def _shrink(value: Any) -> Any:

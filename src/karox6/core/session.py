@@ -50,6 +50,7 @@ from karox6.tools.registry import build_tools, tool_specs
 from karox6.tools.shell import ShellInfo, detect_shell
 
 GENERIC_TOOL_CAP = 60_000
+CANCELLED_RESULT = "[cancelled by the user before this call finished]"
 TRUNCATION_NOTICE = (
     "Your previous response was cut off at the output token limit before it was complete. "
     "Continue from where it stopped. Keep each response shorter: split large file contents "
@@ -197,6 +198,7 @@ class Session:
             )
         )
         self.guard.reset()
+        self._close_dangling_calls()
         self._append(Message("user", prompt))
         steps = 0
         truncations = 0
@@ -514,6 +516,24 @@ class Session:
         return approve
 
     # -- context ------------------------------------------------------------------
+
+    def _close_dangling_calls(self) -> None:
+        """Answer the tool calls a cancelled turn left open, so the history stays valid."""
+        last = max((i for i, m in enumerate(self.messages) if m.role == "assistant"), default=-1)
+        if last < 0 or not self.messages[last].tool_calls:
+            return
+        answered = {m.tool_call_id for m in self.messages[last + 1 :] if m.role == "tool"}
+        for call in self.messages[last].tool_calls:
+            if call.id not in answered:
+                self._append(
+                    Message(
+                        "tool",
+                        CANCELLED_RESULT,
+                        tool_call_id=call.id,
+                        name=call.name,
+                        is_error=True,
+                    )
+                )
 
     def _append(self, message: Message) -> None:
         self.messages.append(message)
