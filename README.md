@@ -2,7 +2,7 @@
 
 A small, fast coding-agent CLI: one agent core shared by a headless CLI (JSON stream), a
 light TUI and an MCP server, with API providers for OpenAI-compatible, Anthropic and Gemini
-models. Runs on Windows, Linux and macOS.
+models. Runs on Windows, Linux and macOS. [По-русски](README.ru.md)
 
 Status: under construction — see [PROGRESS.md](PROGRESS.md) and [DECISIONS.md](DECISIONS.md).
 
@@ -32,6 +32,8 @@ api_key_env = "DEEPSEEK_API_KEY"   # the variable's name, never the key itself
 model = "qwen3-coder"
 base_url = "http://127.0.0.1:11434/v1"
 ```
+
+Using KaroX from ChatGPT on the web: [docs/chatgpt.md](docs/chatgpt.md).
 
 ## Development
 
