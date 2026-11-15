@@ -254,12 +254,19 @@ def test_render_stream_and_events(tmp_path):
             call_id="1", name="bash", is_error=True, output="a\nboom\n", duration_ms=1500
         )
     )
+    app.render(ev.ToolStarted(call_id="a:1", name="agent-1/read", arguments='{"file_path": "x"}'))
+    app.render(
+        ev.ToolFinished(
+            call_id="a:1", name="agent-1/read", is_error=False, output="1: a\n2: b\n", duration_ms=10
+        )
+    )
     app.render(ev.Retry(attempt=2, delay_s=4, error="429"))
     app.render(ev.ErrorEvent(code="x", message="bad"))
     text = term.text
     assert "thinking: hmm\n" in text
     assert "● bash ls -la" in text
     assert "✗ 1.5s boom" in text
+    assert "    ● agent-1/read x\n      ✓ 0.0s 2 lines\n" in text
     assert "retry 2 in 4s: 429" in text
     assert "error: bad" in text
 

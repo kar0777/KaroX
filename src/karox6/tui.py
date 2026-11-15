@@ -195,11 +195,15 @@ class ChatApp:
             return
         self._end_stream()
         if isinstance(event, ev.ToolStarted):
-            self.write(f"{p('cyan', g['tool'])} {p('bold', event.name)} {brief(event.arguments)}\n")
+            pad = "    " if "/" in event.name else ""  # a subagent's call, under its agent line
+            self.write(
+                f"{pad}{p('cyan', g['tool'])} {p('bold', event.name)} {brief(event.arguments)}\n"
+            )
         elif isinstance(event, ev.ToolFinished):
+            pad = "    " if "/" in event.name else ""
             mark = p("red", g["fail"]) if event.is_error else p("green", g["ok"])
             secs = f"{event.duration_ms / 1000:.1f}s"
-            self.write(f"  {mark} {p('dim', secs)} {p('dim', outcome(event))}\n")
+            self.write(f"{pad}  {mark} {p('dim', secs)} {p('dim', outcome(event))}\n")
         elif isinstance(event, ev.Retry):
             self.write(
                 p("dim", f"  retry {event.attempt} in {event.delay_s:.0f}s: {event.error[:120]}")
@@ -437,9 +441,10 @@ def outcome(event: ev.ToolFinished, limit: int = 140) -> str:
     lines = [ln.strip() for ln in event.output.strip().splitlines() if ln.strip()]
     if not lines:
         return ""
-    if event.name == "read" and not event.is_error:
+    name = event.name.rsplit("/", 1)[-1]  # "agent-1/read" -> "read"
+    if name == "read" and not event.is_error:
         return f"{len(lines)} lines"
-    pick = lines[-1] if event.name in ("bash", "shell", "powershell", "job_output") else lines[0]
+    pick = lines[-1] if name in ("bash", "shell", "powershell", "job_output") else lines[0]
     return pick[:limit]
 
 
