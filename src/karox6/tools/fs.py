@@ -177,7 +177,7 @@ class EditTool:
         "Edit an existing UTF-8 text file by replacing literal text. `old_string` must match "
         "exactly one place in the file (include enough surrounding lines to make it unique) "
         "unless `replace_all` is true; do not include the `N: ` line-number prefixes shown by "
-        "read. Read a file before editing it unless you created or edited it in this session."
+        "read."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -206,9 +206,10 @@ class EditTool:
                 "Error: old_string is empty. Quote the text to replace, or use write.",
                 is_error=True,
             )
-        stale = ctx.files.check_fresh(path)
+        stale = ctx.files.check_fresh(path, require_seen=False)
         if stale:
             return ToolResult(f"Error: {stale}", is_error=True)
+        unseen = not ctx.files.seen(path)
         try:
             data = path.read_bytes()
         except OSError as exc:
@@ -227,6 +228,12 @@ class EditTool:
         if isinstance(result, str):
             return ToolResult(f"Error: {result.replace('{path}', shown)}", is_error=True)
         updated, count, how = result
+        if unseen and how != "exactly":
+            return ToolResult(
+                f"Error: old_string matches {shown} only approximately ({how}) and the file "
+                "has not been read in this session. Read it, then retry.",
+                is_error=True,
+            )
         if crlf:
             updated = updated.replace("\n", "\r\n")
         payload = updated.encode("utf-8")

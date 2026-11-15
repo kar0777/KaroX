@@ -153,9 +153,31 @@ def test_invalid_edit(ctx, old, new, message):
     assert message in edit(ctx, old, new).content
 
 
-def test_edit_requires_read(ctx):
-    (ctx.workspace / "file").write_text("a")
-    assert edit(ctx, "a", "b").is_error
+def test_edit_unread_exact_match(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a\nb\n")  # seen through shell output, never through read
+    result = edit(ctx, "a", "c")
+    assert not result.is_error
+    assert path.read_text() == "c\nb\n"
+
+
+def test_edit_unread_needs_exact_match(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a  \nb  \n")
+    result = edit(ctx, "a\nb", "c\nd")  # only a trailing-whitespace match
+    assert result.is_error
+    assert "has not been read" in result.content
+    assert path.read_text() == "a  \nb  \n"
+
+
+def test_edit_stale_after_read(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a")
+    read(ctx)
+    path.write_text("ab")
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    assert "changed on disk" in edit(ctx, "a", "c").content
 
 
 def test_edit_crlf_bom(ctx):

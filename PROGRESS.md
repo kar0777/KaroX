@@ -135,3 +135,11 @@ git diff --check
   KaroX's uncached input on Synthetic and 0% on ReformBoss dev runs. Repricing misses as
   cache hits: KaroX $2.91 vs DSH $2.41 vs OpenCode $4.57 for the 50 tasks (1.21x DSH).
   Cost comparisons from now on report this miss-normalized price next to the raw one.
+- H1 A/B (run 43741239067, ReformBoss) stopped after 4 of 11 tasks to save paid tokens:
+  2/4 solved like the baseline on the same tasks (fixed target 13, still lost target 39,
+  lost 32 that the baseline solved) with 31% more LLM calls (237 vs 181). Rejected: the
+  rule buys no score and costs steps.
+- `edit` no longer demands a prior `read` when `old_string` matches exactly and uniquely
+  (files seen through shell output such as `sed -n`); approximate matches on such files and
+  stale files are still refused, `write` still needs a read. Dev pool: "has not been read"
+  cost an extra read + retry 5 times in k6d1 and 5 times in 4 E1 tasks.

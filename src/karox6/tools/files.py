@@ -1,9 +1,10 @@
 """The one place that knows which files the agent has seen and changed.
 
 * ``observe`` records the on-disk version (mtime, size) after a read or a write by a
-  tool. ``edit``/``write`` refuse to touch an existing file the agent has not seen,
-  or one that changed on disk since (a formatter, a shell command) — the agent would
-  be editing from a stale picture.
+  tool. ``write`` refuses to replace an existing file the agent has not seen; ``write``
+  and ``edit`` refuse one that changed on disk since it was seen (a formatter, a shell
+  command) — the agent would be editing from a stale picture. ``edit`` may change a file
+  never read through ``read`` (seen via shell output) when ``old_string`` matches exactly.
 * ``changed_files`` answers "what did this session change": ``git status`` when the
   workspace is a git repository (covers shell edits too), plus every path a file tool
   wrote. There is no second bookkeeping anywhere else.
@@ -44,12 +45,21 @@ class FileTracker:
         self._written.add(str(path))
         self.observe(path)
 
-    def check_fresh(self, path: Path) -> str | None:
-        """Error text when an existing file must be (re)read before it is changed."""
+    def seen(self, path: Path) -> bool:
+        return self._key(path) in self._seen
+
+    def check_fresh(self, path: Path, *, require_seen: bool = True) -> str | None:
+        """Error text when an existing file must be (re)read before it is changed.
+
+        ``require_seen=False`` (edit) lets a never-read file through: an exact, unique
+        ``old_string`` match already proves the agent knows the text it replaces.
+        """
         if not path.exists():
             return None
         seen = self._seen.get(self._key(path))
         if seen is None:
+            if not require_seen:
+                return None
             return f"{path} has not been read in this session. Read it first, then retry."
         try:
             st = path.stat()
