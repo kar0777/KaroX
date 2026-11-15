@@ -257,7 +257,11 @@ def test_render_stream_and_events(tmp_path):
     app.render(ev.ToolStarted(call_id="a:1", name="agent-1/read", arguments='{"file_path": "x"}'))
     app.render(
         ev.ToolFinished(
-            call_id="a:1", name="agent-1/read", is_error=False, output="1: a\n2: b\n", duration_ms=10
+            call_id="a:1",
+            name="agent-1/read",
+            is_error=False,
+            output="1: a\n2: b\n",
+            duration_ms=10,
         )
     )
     app.render(ev.Retry(attempt=2, delay_s=4, error="429"))
