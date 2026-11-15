@@ -64,6 +64,25 @@ def test_timeout_and_output(ctx):
     asyncio.run(scenario())
 
 
+def test_job_output_timeout_implies_wait(ctx):
+    async def scenario():
+        started = await ShellTool(ctx.shell).run(
+            {
+                "command": python("import time; time.sleep(1); print('done')"),
+                "run_in_background": True,
+            },
+            ctx,
+        )
+        job_id = started.meta["job_id"]
+        peek = await JobOutputTool().run({"job_id": job_id, "timeout": 30000, "wait": False}, ctx)
+        assert "running" in peek.content  # an explicit wait: false still returns at once
+        waited = await JobOutputTool().run({"job_id": job_id, "timeout": 30000}, ctx)
+        assert "done" in waited.content
+        assert "exited with code 0" in waited.content
+
+    asyncio.run(scenario())
+
+
 def test_background_list_kill(ctx):
     async def scenario():
         result = await ShellTool(ctx.shell).run(

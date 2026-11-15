@@ -228,3 +228,8 @@ git diff --check
   out for up to 10 minutes like 429s, instead of 5 quick retries (~15 s) that ended the
   run; a 20-minute Synthetic 503 storm cost E1 tasks 68 and 71. Plain 500s and timeouts
   keep the short policy (they may have been processed and billed).
+- `job_output`: a timeout now means "wait" unless `wait: false` is explicit. In all 87 bench
+  sessions on disk, 56 of 90 `job_output` calls passed a timeout (up to 300000 ms) without
+  `wait: true`, came straight back and were followed by more polls and `/proc` checks (dev
+  task 40: steps 97-124 spent babysitting a full test-suite run). Bug-level fix of the
+  tool contract; its effect is measured with the rest on the held-out run.

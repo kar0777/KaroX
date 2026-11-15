@@ -99,15 +99,19 @@ class JobOutputTool:
     name = "job_output"
     description = (
         "Read a background job's new output since the previous read, plus its status. "
-        "Set wait: true to block until the job finishes or timeout (ms, default 30000, "
-        "max 600000) passes; use it only when you are genuinely blocked on the job."
+        "Set wait: true (or a timeout) to block until the job finishes or the timeout (ms, "
+        "default 30000, max 600000) passes, instead of polling; use it only when you are "
+        "genuinely blocked on the job."
     )
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
             "job_id": {"type": "string", "description": "Id returned when the job started."},
             "wait": {"type": "boolean", "description": "Wait for the job to finish."},
-            "timeout": {"type": "integer", "description": "Wait limit in ms."},
+            "timeout": {
+                "type": "integer",
+                "description": "Wait limit in ms; giving one waits unless wait is false.",
+            },
         },
         "required": ["job_id"],
     }
@@ -117,7 +121,10 @@ class JobOutputTool:
         job = ctx.jobs.get(str(args["job_id"]))
         if job is None:
             return ToolResult(f"Error: no background job {args['job_id']!r}.", is_error=True)
-        if args.get("wait") and job.run.returncode is None:
+        # A timeout means the caller wants to wait: 56 of 90 bench calls passed one without
+        # wait: true and came straight back, then polled again and again.
+        wants_wait = args.get("wait") is not False and bool(args.get("wait") or args.get("timeout"))
+        if wants_wait and job.run.returncode is None:
             timeout_ms = min(max(int(args.get("timeout") or 30_000), 1), 600_000)
             await job.run.wait(timeout_ms / 1000)
         text = await ctx.jobs.read_new(job, ctx.spill_dir)
