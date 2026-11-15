@@ -64,3 +64,11 @@ git diff --check
   39 failed one F2P (camelCase case the issue left open; DSH solved it), 13 not run (runner
   Docker daemon down). Usage-priced $0.019 per trial vs DSH $0.024 / OpenCode $0.023.
 - Scoring: `D:\проекты\karox6-bench-data\compare.py` (union with baseline run, D-024).
+- Dev run k6d1 (run 43718359189, 9 burned tasks) + k6s1: KaroX 6 7/11, DSH 7/11, OpenCode
+  9/11 on the dev pool; usage-priced ~$0.042 / $0.040 / $0.047 per trial. KaroX 6 solved
+  32, 57, 59 where DSH failed; lost 13 and 39 by fixing only the reported instance of a
+  defect (hypothesis H1, to be A/B-tested), 40 on an unstated API expectation, 52 to the
+  upstream key limit (429: more than 3 client IPs in 10 minutes; parallel GitHub runners).
+- 6.0.0.dev1: rate limits are waited out on a 15-minute budget (commit 6fccc09).
+- Held-out judging run k6h1 started (run 43723372988): all 50 held-out tasks, 1 attempt.
+  Bar: DSH 17/50 at $0.046 per trial, OpenCode 15/50 at $0.096 (same report, same prices).
