@@ -292,3 +292,7 @@ git diff --check
   model): a program called bash, write and read and caught a ToolError; a refused nested
   `rm -rf /` failed the program (exit 1, nothing after it ran); an empty program reported
   so. Passed on all three images. C1 is queued to start when k6h3s finishes.
+- Correction: the miss-normalized prices above ("KaroX $2.91 vs DSH $2.41 vs OpenCode
+  $4.57, 1.21x") compared KaroX's 50 held-out tasks with the rivals' whole baseline run
+  (all 61 tasks). On the same 50 held-out tasks (`uncached.py --heldout`, flag added) the
+  k6h1s numbers are KaroX $2.91, DSH $2.04, OpenCode $4.10: KaroX 1.43x DSH, not 1.21x.
