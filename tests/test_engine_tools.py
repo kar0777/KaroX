@@ -906,6 +906,10 @@ def test_read_lines_renders_a_numbered_window_without_the_json_envelope() -> Non
     )["output"]
 
     assert "[repo.read_lines aquarium.html 10-12 of 40]" in text
+    from karox.engine_tool_bodies import READ_LINE_CHARS, _read_lines_body
+
+    bundled = _read_lines_body({"path": "dist/index.js", "start": 1, "lines": ["x" * (READ_LINE_CHARS + 500)]})
+    assert len(bundled) < READ_LINE_CHARS + 200 and "500 more characters on this line" in bundled
     assert "   10|<body>" not in text
     assert "<body>\n  <canvas></canvas>\n</body>" in text
     assert "content_sha256" not in text

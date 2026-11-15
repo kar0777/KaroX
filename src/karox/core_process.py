@@ -830,6 +830,14 @@ class ProcessToolsMixin:
             start_bytes[str(path)] = start
         if all(saved[p] == start_bytes[p] for p in saved):
             return None
+        absent = {
+            Path(relative).as_posix()
+            for relative in changed
+            if start_bytes.get(str(self.safe_path(relative))) is None
+        }
+        argv = check_baseline.argv_without(plan.argv, absent)
+        if argv is None:
+            return None
         check_baseline.write_swap_journal(journal, saved, start_bytes)
         try:
             check_baseline.place(start_bytes)
@@ -837,7 +845,7 @@ class ProcessToolsMixin:
                 raise RuntimeError("start bytes not placed")  # a mixed tree is no baseline
             check_baseline.write_swap_journal(journal, saved, start_bytes, check_baseline.PHASE_RUNNING)
             result = self._run(
-                plan.argv,
+                argv,
                 min(plan.effective_timeout, check_baseline.BASELINE_TIMEOUT_SECONDS),
                 keep_full=True,
             )

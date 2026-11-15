@@ -322,6 +322,23 @@ def test_on_demand_baseline_restores_every_byte(repository: Path, tmp_path: Path
     assert not worse.ok and worse.data["baseline"]["new"] == ["tests/test_pkg.py::test_value"]
 
 
+def test_a_new_test_file_in_the_check_does_not_hide_old_failures(repository: Path, tmp_path: Path) -> None:
+    """rebench26 v617rb hermes-webui-1818: the start revision lacks the new file."""
+
+    core, origin = _wild_runtime(repository, tmp_path)
+    _do(core, origin, "repo.write_file", {"path": "pkg.py", "content": "def value():\n    return 2\n"}, "w1")
+    _do(core, origin, "repo.write_file", {"path": "tests/test_new.py", "content": (
+        "import os, sys\nsys.path.insert(0, os.getcwd())\nimport pkg\n\n"
+        "def test_two():\n    assert pkg.value() == 2\n")}, "w2")
+    argv = [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_new.py", "tests/test_pkg.py"]
+    run = _do(core, origin, "checks.run", {"argv": argv}, "c1")
+    assert run.data["exit_code"] == 1 and run.data["preexisting_only"] is True and run.ok
+    assert (repository / "tests" / "test_new.py").exists()
+    assert check_baseline.argv_without(["pytest", "tests/test_new.py::t"], {"tests/test_new.py"}) is None
+    assert check_baseline.argv_without(["pytest", "./tests/a.py", "tests/b.py"], {"tests/a.py"}) == ["pytest", "tests/b.py"]
+    assert check_baseline.argv_without(["pytest", "tests/b.py"], {"tests/a.py"}) == ["pytest", "tests/b.py"]
+
+
 def test_a_run_before_the_first_edit_is_the_baseline(repository: Path, tmp_path: Path) -> None:
     core, origin = _wild_runtime(repository, tmp_path)
     first = _do(core, origin, "checks.run", {"argv": SUITE}, "c0")

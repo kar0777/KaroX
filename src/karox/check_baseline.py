@@ -207,6 +207,31 @@ def _named(node: str, names: frozenset[str]) -> bool:
     return node.split("::")[-1].split("[")[0] in names
 
 
+def argv_without(argv: Sequence[str], absent: set[str]) -> Optional[list[str]]:
+    """The check's argv for the start bytes: test files the session created are dropped.
+
+    rebench26 v617rb hermes-webui-1818: ``pytest tests/new_test.py tests/old_test.py``
+    could not run at the start revision (file not found, exit 4), so the
+    old file's failures, a missing ``node`` binary, were never seen as
+    pre-existing; 13 repair turns ended with a skip added to that old test.
+    None when nothing named is left: a bare ``pytest`` would run the whole suite.
+    """
+
+    kept: list[str] = []
+    dropped = False
+    for item in argv:
+        text = str(item)
+        path = text.split("::", 1)[0].replace("\\", "/")
+        if (path[2:] if path.startswith("./") else path) in absent:
+            dropped = True
+            continue
+        kept.append(text)
+    if not dropped:
+        return list(argv)
+    named = [item for item in kept[1:] if not item.startswith("-") and ("/" in item or ".py" in item)]
+    return kept if named else None
+
+
 def compare(
     baseline: Optional[Outcome], current: Outcome, task_tests: frozenset[str] = frozenset()
 ) -> Optional[dict[str, Any]]:

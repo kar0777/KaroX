@@ -198,6 +198,15 @@
 
 ### Fixed
 
+- A failed pytest check that also names test files the session created is
+  compared with the start revision without those files. Before, the start
+  revision could not run it (file not found), so failures that were already
+  there, such as a test needing a binary the sandbox lacks, were owed as if
+  the change caused them.
+- `repo.read_lines` shows at most 3,000 characters of one line (the rest is
+  counted); a bundled or minified file no longer puts tens of thousands of
+  characters into every later request. Scripts still get the whole line in
+  `.data`.
 - A resumed transcript no longer sends tool results whose call the model never
   made.
 - A repair turn starts with a fresh repeated-step streak.

@@ -399,6 +399,23 @@ def _pytest_missing(data: Mapping[str, Any]) -> bool:
             return True
     return False
 
+#: Characters of one line shown by repo.read_lines; the durable result keeps the whole line.
+READ_LINE_CHARS = 3_000
+
+
+def _long_line_cut(line: str) -> str:
+    """Cut a minified or generated line instead of sending all of it.
+
+    rebench26 v616rb nicegui-5858: reading a two-line bundled ``dist/index.js``
+    put 50k characters into the context, re-sent with every later request.
+    """
+
+    if len(line) <= READ_LINE_CHARS:
+        return line
+    rest = len(line) - READ_LINE_CHARS
+    return f"{line[:READ_LINE_CHARS]} …[{rest} more characters on this line; repo_search finds text inside it]"
+
+
 def _read_lines_body(data: Mapping[str, Any]) -> str:
     """The window as plain lines, not a JSON envelope around a list.
 
@@ -419,7 +436,7 @@ def _read_lines_body(data: Mapping[str, Any]) -> str:
     if isinstance(total, int) and not isinstance(total, bool):
         header += f" of {total}"
     header += "]"
-    body = "\n".join(str(line) for line in lines)
+    body = "\n".join(_long_line_cut(str(line)) for line in lines)
     text = f"{header}\n{body}" if body else header
     if data.get("has_more"):
         text += "\n…more lines below"
