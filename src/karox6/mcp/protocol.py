@@ -41,9 +41,10 @@ TOOLS: list[dict[str, Any]] = [
         "name": "karox_run",
         "title": "Start a KaroX task",
         "description": (
-            "Start the coding agent on a task in a project directory. Returns at once with "
-            "run_id (the agent keeps working in the background); then poll karox_status. "
-            "Pass session_id to continue an earlier conversation."
+            "Start the coding agent on a task in a project directory. Returns run_id at once, "
+            "or after wait_seconds with the first progress (the agent keeps working in the "
+            "background); then poll karox_status. Pass session_id to continue an earlier "
+            "conversation."
         ),
         "inputSchema": {
             "type": "object",
